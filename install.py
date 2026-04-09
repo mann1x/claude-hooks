@@ -468,13 +468,17 @@ def uninstall(*, dry_run: bool) -> int:
 
 
 def build_command(repo_path: Path) -> str:
-    """Return the literal hook command string for the current OS."""
+    """Return the literal hook command string for the current OS.
+
+    Claude Code runs hooks via /usr/bin/bash on ALL platforms (including
+    Windows), so we always use the extensionless POSIX shim with forward
+    slashes. The .cmd shim is kept for manual use but not wired into hooks.
+    """
     repo_path = repo_path.resolve()
-    if os.name == "nt":
-        # Use the .cmd shim so settings.json reads naturally.
-        return f'"{repo_path / "bin" / "claude-hook.cmd"}"'
-    # POSIX: shim is just an executable shell script.
-    return str(repo_path / "bin" / "claude-hook")
+    cmd = str(repo_path / "bin" / "claude-hook")
+    # Windows paths use backslashes — convert to forward slashes so bash
+    # can parse the path correctly.
+    return cmd.replace("\\", "/")
 
 
 def backup_path(p: Path) -> Path:

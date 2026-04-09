@@ -239,11 +239,11 @@ Python (`$HOME/anaconda3/envs/claude-hooks/bin/python`) when it
 exists, falling back to system `python3` otherwise. This means
 hooks run in the conda env without any activation step.
 
-The user invokes claude-hooks from PowerShell on Windows the same way
-they'd invoke any other Python script — no .ps1 wrappers needed at the
-hook level. The repo *does* ship `bin/claude-hook` and `bin/claude-hook.cmd`
-shims so the entry in `settings.json` looks identical (`claude-hook
-SessionStart`) regardless of OS.
+Claude Code runs hooks via `/usr/bin/bash` on **all platforms** including
+Windows. This means the extensionless POSIX `bin/claude-hook` shim is used
+everywhere, with forward slashes in the path. The `.cmd` shim is kept for
+manual invocation from `cmd.exe` / PowerShell but is **not** wired into
+`settings.json`.
 
 ### settings.json entries written by the installer
 
@@ -269,7 +269,7 @@ Windows:
   "hooks": {
     "UserPromptSubmit": [
       { "hooks": [{ "type": "command",
-                    "command": "C:\\Users\\manni\\dev\\claude-hooks\\bin\\claude-hook.cmd UserPromptSubmit",
+                    "command": "C:/Users/you/claude-hooks/bin/claude-hook UserPromptSubmit",
                     "timeout": 15 }] }
     ],
     ...
