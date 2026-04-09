@@ -4,13 +4,15 @@ Qdrant memory provider.
 Talks to ``mcp-server-qdrant`` (https://github.com/qdrant/mcp-server-qdrant)
 over Streamable HTTP. The two relevant tools are:
 
-- ``qdrant-find(query, collection_name)``  → returns a JSON-encoded list of
+- ``qdrant-find(query)``  → returns a JSON-encoded list of
   ``"<entry><content>...</content><metadata>{...}</metadata></entry>"`` strings
-- ``qdrant-store(information, collection_name, metadata?)``
+- ``qdrant-store(information, metadata?)``
 
-The collection name is *not* server-side configurable in mcp-server-qdrant
-1.27 — every call must pass it. We get it from
-``providers.qdrant.collection`` in ``claude-hooks.json``.
+Newer versions of mcp-server-qdrant configure the collection name
+server-side (via ``QDRANT_COLLECTION_NAME`` env var). Older versions
+require ``collection_name`` per call. The provider handles both
+transparently: it tries with ``collection_name`` first, and if the
+server rejects it (``isError: true``), retries without.
 """
 
 from __future__ import annotations
@@ -78,16 +80,11 @@ class QdrantProvider(Provider):
     def recall(self, query: str, k: int = 5) -> list[Memory]:
         if not query.strip():
             return []
-        collection = self.options.get("collection") or "memory"
         timeout = float(self.options.get("timeout") or 5.0)
         client = self._client(timeout=timeout)
 
-        try:
-            result = client.call_tool(
-                "qdrant-find",
-                {"query": query, "collection_name": collection},
-            )
-        except McpError:
+        result = self._find(client, query)
+        if result is None:
             return []
 
         text = extract_text_content(result)
@@ -120,17 +117,52 @@ class QdrantProvider(Provider):
     def store(self, content: str, metadata: Optional[dict] = None) -> None:
         if not content.strip():
             return
-        collection = self.options.get("collection") or "memory"
         timeout = float(self.options.get("timeout") or 5.0)
         client = self._client(timeout=timeout)
-        args = {"information": content, "collection_name": collection}
+        args: dict = {"information": content}
         if metadata:
             args["metadata"] = metadata
+        self._call_with_collection_fallback(client, "qdrant-store", args)
+
+    # ------------------------------------------------------------------ #
+    # MCP call helpers
+    # ------------------------------------------------------------------ #
+    def _find(self, client, query: str) -> Optional[dict]:
+        """Call qdrant-find, handling collection_name compat transparently."""
+        result = self._call_with_collection_fallback(
+            client, "qdrant-find", {"query": query}
+        )
+        if result is None:
+            return None
+        if result.get("isError"):
+            return None
+        return result
+
+    def _call_with_collection_fallback(
+        self, client, tool: str, args: dict
+    ) -> Optional[dict]:
+        """
+        Try the call with collection_name first (older servers need it).
+        If the server rejects it (isError or McpError), retry without.
+        If no collection is configured, call without it directly.
+        """
+        collection = self.options.get("collection")
+
+        # Try with collection_name first.
+        if collection:
+            full_args = {**args, "collection_name": collection}
+            try:
+                result = client.call_tool(tool, full_args)
+            except McpError:
+                result = None
+            if result is not None and not result.get("isError"):
+                return result
+
+        # Retry / call without collection_name.
         try:
-            client.call_tool("qdrant-store", args)
+            return client.call_tool(tool, args)
         except McpError:
-            # Storage failure should not break the hook — caller logs it.
-            raise
+            return None
 
 
 def _parse_qdrant_entry(raw: str) -> Optional[Memory]:

@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Optional
 
 from claude_hooks.embedders import Embedder, EmbedderError, make_embedder
@@ -50,6 +51,8 @@ from claude_hooks.providers.base import (
     Provider,
     ServerCandidate,
 )
+
+_SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 log = logging.getLogger("claude_hooks.providers.pgvector")
 
@@ -113,7 +116,7 @@ class PgvectorProvider(Provider):
             log.warning("pgvector embed failed: %s", e)
             return []
 
-        table = self.options.get("table") or "claude_hooks_memory"
+        table = _safe_table(self.options.get("table") or "claude_hooks_memory")
         try:
             with self._conn.cursor() as cur:  # type: ignore[union-attr]
                 cur.execute(
@@ -135,7 +138,7 @@ class PgvectorProvider(Provider):
             vec = self._embedder.embed(content)  # type: ignore[union-attr]
         except (ImportError, EmbedderError) as e:
             raise RuntimeError(f"pgvector store failed: {e}")
-        table = self.options.get("table") or "claude_hooks_memory"
+        table = _safe_table(self.options.get("table") or "claude_hooks_memory")
         try:
             with self._conn.cursor() as cur:  # type: ignore[union-attr]
                 cur.execute(
@@ -165,6 +168,13 @@ class PgvectorProvider(Provider):
             if not dsn:
                 raise RuntimeError("pgvector dsn not configured")
             self._conn = psycopg.connect(dsn)
+
+
+def _safe_table(name: str) -> str:
+    """Validate a SQL identifier to prevent injection via config values."""
+    if not _SAFE_IDENT_RE.match(name):
+        raise ValueError(f"unsafe table name: {name!r}")
+    return name
 
 
 CREATE_TABLE_SQL = """

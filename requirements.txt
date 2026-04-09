@@ -1,0 +1,8 @@
+# claude-hooks core: stdlib only — no dependencies needed at runtime.
+# This file lists optional deps for the experimental providers.
+
+# pgvector provider (optional)
+# psycopg[binary]>=3.1
+
+# sqlite-vec provider (optional)
+# sqlite-vec>=0.1.1

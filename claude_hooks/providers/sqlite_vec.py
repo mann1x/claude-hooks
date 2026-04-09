@@ -47,9 +47,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import struct
 from typing import Optional
+
+_SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 from claude_hooks.config import expand_user_path
 from claude_hooks.embedders import Embedder, EmbedderError, make_embedder
@@ -116,7 +119,7 @@ class SqliteVecProvider(Provider):
             log.warning("sqlite_vec unavailable: %s", e)
             return []
 
-        table = self.options.get("table") or "memory"
+        table = _safe_table(self.options.get("table") or "memory")
         vec_blob = _pack_vec(qvec)
         try:
             cur = self._conn.execute(  # type: ignore[union-attr]
@@ -152,7 +155,7 @@ class SqliteVecProvider(Provider):
         except (ImportError, EmbedderError) as e:
             raise RuntimeError(f"sqlite_vec store failed: {e}")
 
-        table = self.options.get("table") or "memory"
+        table = _safe_table(self.options.get("table") or "memory")
         vec_blob = _pack_vec(vec)
         try:
             with self._conn:  # type: ignore[union-attr]
@@ -191,6 +194,13 @@ class SqliteVecProvider(Provider):
             self._conn = sqlite3.connect(str(p))
             self._conn.enable_load_extension(True)
             sqlite_vec.load(self._conn)
+
+
+def _safe_table(name: str) -> str:
+    """Validate a SQL identifier to prevent injection via config values."""
+    if not _SAFE_IDENT_RE.match(name):
+        raise ValueError(f"unsafe table name: {name!r}")
+    return name
 
 
 def _pack_vec(vec: list[float]) -> bytes:

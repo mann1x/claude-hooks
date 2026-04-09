@@ -141,4 +141,4 @@ def iter_mcp_servers(claude_config: dict) -> list[tuple[str, dict, str]]:
 
 def is_http_server(server_config: dict) -> bool:
     """A server is usable by claude-hooks only if it speaks HTTP transport."""
-    return server_config.get("type") in ("http", "sse") and "url" in server_config
+    return server_config.get("type") in ("http", "sse", "streamable-http") and "url" in server_config

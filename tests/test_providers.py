@@ -64,7 +64,7 @@ class TestQdrantProvider(unittest.TestCase):
     def test_recall_parses_entries(self):
         prov = self._make()
         mock_client = MagicMock()
-        mock_client.call_tool.return_value = QDRANT_FIND_RAW
+        mock_client.call_tool.return_value = {**QDRANT_FIND_RAW, "isError": False}
         prov._client = lambda timeout=5.0: mock_client  # type: ignore
         mems = prov.recall("bcache", k=5)
         self.assertEqual(len(mems), 2)
@@ -89,6 +89,8 @@ class TestQdrantProvider(unittest.TestCase):
     def test_store_calls_qdrant_store(self):
         prov = self._make()
         mock_client = MagicMock()
+        # Simulate a server that accepts collection_name (returns isError=False).
+        mock_client.call_tool.return_value = {"isError": False}
         prov._client = lambda timeout=5.0: mock_client  # type: ignore
         prov.store("hello world", metadata={"type": "test"})
         mock_client.call_tool.assert_called_once()
@@ -97,6 +99,24 @@ class TestQdrantProvider(unittest.TestCase):
         self.assertEqual(args[1]["information"], "hello world")
         self.assertEqual(args[1]["collection_name"], "memory")
         self.assertEqual(args[1]["metadata"], {"type": "test"})
+
+    def test_store_without_collection(self):
+        """Servers that reject collection_name get a retry without it."""
+        cand = ServerCandidate(server_key="qdrant", url="http://x/mcp")
+        prov = QdrantProvider(cand, options={"collection": "memory"})
+        mock_client = MagicMock()
+        # First call with collection_name returns isError=True, second without succeeds.
+        mock_client.call_tool.side_effect = [
+            {"isError": True},
+            {"isError": False},
+        ]
+        prov._client = lambda timeout=5.0: mock_client  # type: ignore
+        prov.store("hello world")
+        self.assertEqual(mock_client.call_tool.call_count, 2)
+        # Second call should not have collection_name.
+        second_args = mock_client.call_tool.call_args_list[1][0]
+        self.assertEqual(second_args[0], "qdrant-store")
+        self.assertNotIn("collection_name", second_args[1])
 
     def test_signature_tools(self):
         self.assertEqual(

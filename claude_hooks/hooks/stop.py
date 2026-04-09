@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from claude_hooks.config import expand_user_path
 from claude_hooks.providers import Provider
 
 log = logging.getLogger("claude_hooks.hooks.stop")
@@ -46,6 +47,15 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     if not summary:
         return None
 
+    # Append OpenWolf data (cerebrum learnings, bug fixes) if available.
+    try:
+        from claude_hooks.openwolf import store_content
+        wolf_content = store_content(event.get("cwd", ""))
+        if wolf_content:
+            summary += f"\n\n---\n## OpenWolf context\n{wolf_content}"
+    except Exception as e:
+        log.debug("openwolf store content skipped: %s", e)
+
     metadata = {
         "type": "session_turn",
         "session_id": event.get("session_id", ""),
@@ -53,18 +63,52 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
         "stored_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
 
+    # Classify the observation type for better downstream filtering.
+    if hook_cfg.get("classify_observations", True):
+        metadata["observation_type"] = _classify_observation(summary, transcript)
+
     stored = []
     failed = []
     for provider in providers:
         provider_cfg = ((config.get("providers") or {}).get(provider.name)) or {}
         if (provider_cfg.get("store_mode") or "auto").lower() != "auto":
             continue
+
+        # Dedup check: skip if a near-duplicate already exists.
+        dedup_threshold = float(provider_cfg.get("dedup_threshold", 0.0))
+        if dedup_threshold > 0.0 and len(summary) >= 100:
+            try:
+                from claude_hooks.dedup import should_store as dedup_ok
+                if not dedup_ok(summary, provider, threshold=dedup_threshold):
+                    log.info("skipping store to %s: near-duplicate detected", provider.name)
+                    continue
+            except Exception as e:
+                log.debug("dedup check failed, storing anyway: %s", e)
+
         try:
             provider.store(summary, metadata=metadata)
             stored.append(provider.name)
         except Exception as e:
             failed.append((provider.name, str(e)))
             log.warning("provider %s store failed: %s", provider.name, e)
+
+    # Instinct extraction: detect bug-fix patterns and save as reusable instincts.
+    if hook_cfg.get("extract_instincts"):
+        try:
+            from claude_hooks.instincts import (
+                detect_bug_fix, extract_instinct, merge_if_duplicate, save_instinct,
+            )
+            bug_fix = detect_bug_fix(transcript)
+            if bug_fix:
+                instinct = extract_instinct(bug_fix, summary, event.get("session_id", ""))
+                instincts_dir = expand_user_path(
+                    hook_cfg.get("instincts_dir", "~/.claude/instincts")
+                )
+                merged = merge_if_duplicate(instinct, instincts_dir)
+                if not merged:
+                    save_instinct(instinct, instincts_dir)
+        except Exception as e:
+            log.debug("instinct extraction skipped: %s", e)
 
     if not stored and not failed:
         return None
@@ -101,6 +145,20 @@ def _read_transcript(path: str) -> Optional[list[dict]]:
         return None
 
 
+def _msg_role(msg: dict) -> str:
+    """Extract the role from a transcript message."""
+    return (msg.get("message") or {}).get("role") or msg.get("role") or ""
+
+
+def _find_last_user_idx(transcript: list[dict]) -> int:
+    """Return the index of the last user message, or -1 if none."""
+    for i in range(len(transcript) - 1, -1, -1):
+        msg = transcript[i]
+        if isinstance(msg, dict) and _msg_role(msg) == "user":
+            return i
+    return -1
+
+
 def _is_noteworthy(transcript: Optional[list[dict]]) -> bool:
     """
     Decide whether the most recent turn was worth remembering.
@@ -109,17 +167,7 @@ def _is_noteworthy(transcript: Optional[list[dict]]) -> bool:
     """
     if not transcript:
         return False
-    # Walk backwards to find the most recent user message, then look at
-    # everything after it.
-    last_user_idx = -1
-    for i in range(len(transcript) - 1, -1, -1):
-        msg = transcript[i]
-        if not isinstance(msg, dict):
-            continue
-        role = (msg.get("message") or {}).get("role") or msg.get("role")
-        if role == "user":
-            last_user_idx = i
-            break
+    last_user_idx = _find_last_user_idx(transcript)
     if last_user_idx < 0:
         return False
     tail = transcript[last_user_idx + 1 :]
@@ -154,24 +202,15 @@ def _build_summary(event: dict, transcript: Optional[list[dict]]) -> str:
     commands: list[str] = []
 
     if transcript:
-        last_user_idx = -1
-        for i in range(len(transcript) - 1, -1, -1):
-            msg = transcript[i]
-            if not isinstance(msg, dict):
-                continue
-            role = (msg.get("message") or {}).get("role") or msg.get("role")
-            if role == "user":
-                last_user_idx = i
-                break
+        last_user_idx = _find_last_user_idx(transcript)
         if last_user_idx >= 0:
             user_msg = transcript[last_user_idx]
             user_text = _extract_text(user_msg)
             for msg in transcript[last_user_idx + 1 :]:
                 if not isinstance(msg, dict):
                     continue
-                role = (msg.get("message") or {}).get("role") or msg.get("role")
                 content = (msg.get("message") or {}).get("content") or msg.get("content") or []
-                if role == "assistant":
+                if _msg_role(msg) == "assistant":
                     asst_text = _extract_text(msg) or asst_text
                 if isinstance(content, list):
                     for block in content:
@@ -227,3 +266,75 @@ def _truncate(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[: max_chars - 20].rstrip() + "\n…(truncated)"
+
+
+# ---------------------------------------------------------------------- #
+# Observation classification
+# ---------------------------------------------------------------------- #
+_FIX_KEYWORDS = {
+    "fix", "fixed", "bug", "error", "broken", "issue", "resolved", "patch",
+    "workaround", "hotfix", "regression", "traceback", "exception",
+}
+_PREF_KEYWORDS = {
+    "actually", "prefer", "don't", "always use", "never use",
+    "should be", "not like that", "wrong approach",
+}
+_DECISION_KEYWORDS = {
+    "chose", "decided", "architecture", "approach", "design", "strategy",
+    "trade-off", "switched to", "migrated", "opted for", "went with",
+}
+_GOTCHA_KEYWORDS = {
+    "gotcha", "pitfall", "watch out", "careful", "trap", "surprising",
+    "unexpected", "quirk", "caveat", "heads up", "warning",
+}
+
+
+def _classify_observation(
+    summary: str, transcript: Optional[list[dict]]
+) -> str:
+    """Classify a turn into: fix, preference, decision, gotcha, or general."""
+    lower = summary.lower()
+
+    # Priority 1: fix — transcript shows error followed by edit, or fix keywords
+    if transcript:
+        last_user_idx = _find_last_user_idx(transcript)
+        if last_user_idx >= 0:
+            tail = transcript[last_user_idx + 1:]
+            saw_error = False
+            saw_edit = False
+            for msg in tail:
+                if not isinstance(msg, dict):
+                    continue
+                content = (msg.get("message") or {}).get("content") or msg.get("content") or []
+                if isinstance(content, list):
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get("type") == "tool_result":
+                            text = str(block.get("content", "")).lower()
+                            if "error" in text or "traceback" in text or "failed" in text:
+                                saw_error = True
+                        if block.get("type") == "tool_use":
+                            name = block.get("name", "")
+                            if name in ("Edit", "Write", "MultiEdit") and saw_error:
+                                saw_edit = True
+            if saw_error and saw_edit:
+                return "fix"
+
+    if any(kw in lower for kw in _FIX_KEYWORDS):
+        return "fix"
+
+    # Priority 2: decision (before preference — "instead" is in both but
+    # "decided"/"chose" is a stronger signal)
+    if any(kw in lower for kw in _DECISION_KEYWORDS):
+        return "decision"
+
+    # Priority 3: preference
+    if any(kw in lower for kw in _PREF_KEYWORDS):
+        return "preference"
+
+    # Priority 4: gotcha
+    if any(kw in lower for kw in _GOTCHA_KEYWORDS):
+        return "gotcha"
+
+    return "general"

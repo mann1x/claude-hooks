@@ -45,6 +45,10 @@ def start_server(handler_cls):
 
 class TestMcpClient(unittest.TestCase):
     def setUp(self):
+        # Reset shared state so tests don't poison each other.
+        MockMcpHandler.response_body = b'{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}'
+        MockMcpHandler.response_status = 200
+        MockMcpHandler.response_content_type = "application/json"
         self.server, self.thread = start_server(MockMcpHandler)
         host, port = self.server.server_address
         self.url = f"http://{host}:{port}/mcp"
@@ -92,8 +96,6 @@ class TestMcpClient(unittest.TestCase):
         client = McpClient(self.url, timeout=2.0)
         tools = client.list_tools()
         self.assertEqual(tools[0]["name"], "x")
-        # Reset for other tests
-        MockMcpHandler.response_content_type = "application/json"
 
     def test_http_error_raises_mcperror(self):
         MockMcpHandler.response_body = b"server exploded"
@@ -101,7 +103,6 @@ class TestMcpClient(unittest.TestCase):
         client = McpClient(self.url, timeout=2.0)
         with self.assertRaises(McpError):
             client.list_tools()
-        MockMcpHandler.response_status = 200
 
     def test_extract_text_content_handles_missing(self):
         self.assertEqual(extract_text_content({}), "")

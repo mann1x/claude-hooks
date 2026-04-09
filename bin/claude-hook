@@ -10,13 +10,16 @@
 #
 # This is a thin shim — all logic lives in run.py / claude_hooks/.
 
-set -e
-
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 
-# Pick the python interpreter: prefer python3, fall back to python.
-if command -v python3 >/dev/null 2>&1; then
+# Prefer the conda env's Python if the env exists, then fall back to
+# system python3 / python.  The conda env is installed by setup and
+# contains all optional deps (pytest, psycopg, sqlite-vec, …).
+CONDA_PY="/root/anaconda3/envs/claude-hooks/bin/python"
+if [ -x "$CONDA_PY" ]; then
+    PY="$CONDA_PY"
+elif command -v python3 >/dev/null 2>&1; then
     PY=python3
 elif command -v python >/dev/null 2>&1; then
     PY=python
@@ -25,4 +28,4 @@ else
     exit 0
 fi
 
-exec "$PY" "$REPO/run.py" "$@"
+exec "$PY" "$REPO/run.py" "$@" || exit 0

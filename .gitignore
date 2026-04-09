@@ -19,6 +19,15 @@ venv/
 .DS_Store
 Thumbs.db
 
+# OpenWolf (managed per-project, not committed upstream)
+.wolf/
+
+# claudemem/mnemex index (local, machine-specific)
+.claudemem/
+
+# Environment
+.env
+
 # Editor
 .vscode/
 .idea/

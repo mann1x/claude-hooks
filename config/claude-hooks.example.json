@@ -1,18 +1,19 @@
 {
-  "version": 1,
+  "version": 2,
   "providers": {
     "qdrant": {
       "enabled": true,
-      "mcp_url": "http://192.168.178.2:32775/mcp",
+      "mcp_url": "http://YOUR-HOST:32775/mcp",
       "headers": {},
       "collection": "memory",
       "recall_k": 5,
       "store_mode": "auto",
-      "timeout": 5.0
+      "timeout": 5.0,
+      "dedup_threshold": 0.85
     },
     "memory_kg": {
       "enabled": true,
-      "mcp_url": "http://192.168.178.2:32776/mcp",
+      "mcp_url": "http://YOUR-HOST:32776/mcp",
       "headers": {},
       "recall_k": 5,
       "store_mode": "auto",
@@ -50,15 +51,31 @@
       "enabled": true,
       "min_prompt_chars": 30,
       "include_providers": ["qdrant", "memory_kg"],
-      "max_total_chars": 4000
+      "max_total_chars": 4000,
+      "hyde_enabled": false,
+      "hyde_model": "gemma4:e2b",
+      "hyde_fallback_model": "qwen3:4b",
+      "hyde_url": "http://localhost:11434/api/generate",
+      "hyde_timeout": 3.0,
+      "hyde_max_tokens": 150,
+      "progressive": false,
+      "decay_enabled": false,
+      "decay_file": "~/.claude/claude-hooks-decay.json",
+      "decay_recency_halflife_days": 14,
+      "decay_frequency_cap": 5
     },
     "session_start": {
       "enabled": true,
-      "show_status_line": true
+      "show_status_line": true,
+      "compact_recall": true,
+      "compact_recall_query": "session context, key decisions, and important patterns"
     },
     "stop": {
       "enabled": true,
-      "store_threshold": "noteworthy"
+      "store_threshold": "noteworthy",
+      "classify_observations": true,
+      "extract_instincts": false,
+      "instincts_dir": "~/.claude/instincts"
     },
     "session_end": {
       "enabled": true
@@ -68,6 +85,25 @@
       "warn_on_tools": ["Bash", "Edit", "Write", "MultiEdit"],
       "warn_on_patterns": ["rm ", "DROP TABLE", "git reset --hard", "force-push"]
     }
+  },
+  "reflect": {
+    "enabled": true,
+    "max_memories_to_analyze": 50,
+    "min_pattern_count": 3,
+    "output_path": "~/.claude/CLAUDE.md",
+    "ollama_model": "gemma4:e2b",
+    "ollama_url": "http://localhost:11434/api/generate"
+  },
+  "consolidate": {
+    "enabled": false,
+    "trigger": "manual",
+    "min_sessions_between_runs": 10,
+    "state_file": "~/.claude/claude-hooks-consolidate.json",
+    "max_memories_to_scan": 200,
+    "merge_similarity_threshold": 0.80,
+    "prune_stale_days": 90,
+    "ollama_model": "gemma4:e2b",
+    "ollama_url": "http://localhost:11434/api/generate"
   },
   "logging": {
     "path": "~/.claude/claude-hooks.log",

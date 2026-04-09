@@ -29,6 +29,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 from copy import deepcopy
@@ -55,6 +56,10 @@ from claude_hooks.detect import (
 from claude_hooks.providers import REGISTRY, ServerCandidate
 
 MANAGED_BY = "claude-hooks"
+
+# The conda env Python that bin/claude-hook prefers at runtime.
+CONDA_PY_LINUX = Path("/root/anaconda3/envs/claude-hooks/bin/python")
+CONDA_PY_WIN = Path.home() / "anaconda3" / "envs" / "claude-hooks" / "python.exe"
 
 # Hook entries to install in ~/.claude/settings.json. Each event has its own
 # matcher block; matchers are empty strings (= match everything) for events
@@ -132,6 +137,91 @@ PRE_TOOL_USE_TEMPLATE = {
 }
 
 
+def _find_conda() -> Optional[str]:
+    """Find the conda executable, trying common locations."""
+    # Check if conda is already on PATH (e.g. env is active).
+    if shutil.which("conda"):
+        return "conda"
+    # Try known install locations.
+    for candidate in [
+        Path("/root/anaconda3/condabin/conda"),
+        Path("/root/miniconda3/condabin/conda"),
+        Path("/opt/conda/condabin/conda"),
+        Path.home() / "anaconda3" / "condabin" / "conda",
+        Path.home() / "miniconda3" / "condabin" / "conda",
+    ]:
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _check_conda_env(*, non_interactive: bool, dry_run: bool) -> None:
+    """Check the conda env, offer to create it + install deps if missing."""
+    conda_py = CONDA_PY_WIN if os.name == "nt" else CONDA_PY_LINUX
+    in_conda = os.environ.get("CONDA_DEFAULT_ENV") == "claude-hooks"
+
+    if conda_py.exists():
+        if in_conda:
+            print(f"Conda env:      claude-hooks (active)")
+        else:
+            print(f"Conda env:      claude-hooks (exists, not active)")
+        print(f"Hook runtime:   {conda_py}")
+        return
+
+    # Env doesn't exist — offer to create it.
+    print("Conda env:      NOT FOUND")
+    conda_bin = _find_conda()
+    if not conda_bin:
+        print("  conda not found on this system — skipping env setup.")
+        print("  Hooks will fall back to system python3.\n")
+        print(f"Hook runtime:   system python3")
+        return
+
+    if non_interactive:
+        print("  --non-interactive: skipping env creation.")
+        print(f"Hook runtime:   system python3")
+        return
+
+    ans = input("  Create conda env 'claude-hooks' (Python 3.11) and install deps? [Y/n]: ").strip().lower()
+    if ans not in ("", "y", "yes"):
+        print(f"Hook runtime:   system python3")
+        return
+
+    if dry_run:
+        print("  [dry-run] Would create conda env and install requirements.")
+        print(f"Hook runtime:   system python3")
+        return
+
+    print("  Creating conda env 'claude-hooks'...")
+    rc = subprocess.run(
+        [conda_bin, "create", "-n", "claude-hooks", "python=3.11", "-y"],
+        capture_output=True, text=True,
+    )
+    if rc.returncode != 0:
+        print(f"  conda create failed:\n{rc.stderr[-300:]}")
+        print(f"Hook runtime:   system python3")
+        return
+
+    # Install requirements into the new env.
+    env_pip = str(conda_py.parent / "pip") if os.name != "nt" else str(conda_py.parent / "pip.exe")
+    req_dev = HERE / "requirements-dev.txt"
+    req_main = HERE / "requirements.txt"
+    for req in [req_dev, req_main]:
+        if req.exists():
+            print(f"  Installing {req.name}...")
+            subprocess.run(
+                [env_pip, "install", "-r", str(req)],
+                capture_output=True, text=True,
+            )
+
+    if conda_py.exists():
+        print(f"  Done — conda env ready.")
+        print(f"Hook runtime:   {conda_py}")
+    else:
+        print(f"  Warning: env created but python not found at {conda_py}")
+        print(f"Hook runtime:   system python3")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="install.py", description="claude-hooks installer")
     ap.add_argument("--dry-run", action="store_true", help="don't write any files")
@@ -149,6 +239,8 @@ def main() -> int:
         return uninstall(dry_run=args.dry_run)
 
     print("==> claude-hooks installer\n")
+
+    _check_conda_env(non_interactive=args.non_interactive, dry_run=args.dry_run)
 
     cfg_path = Path(args.config) if args.config else default_config_path()
     print(f"Repo:           {HERE}")
@@ -216,10 +308,12 @@ def main() -> int:
         dry_run=args.dry_run,
     )
 
+    conda_py = CONDA_PY_WIN if os.name == "nt" else CONDA_PY_LINUX
     print("\n==> Done.")
     print("    Open a new Claude Code session and the hooks will fire on the next prompt.")
-    print("    Logs:   ~/.claude/claude-hooks.log")
-    print("    Config: ", cfg_path)
+    print(f"    Runtime: {conda_py if conda_py.exists() else 'system python3'}")
+    print("    Logs:    ~/.claude/claude-hooks.log")
+    print("    Config:  ", cfg_path)
     return 0
 
 

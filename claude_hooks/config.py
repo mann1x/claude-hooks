@@ -22,7 +22,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "headers": {},
             "collection": "memory",
             "recall_k": 5,
-            "store_mode": "auto",        # auto | ask | off
+            "store_mode": "auto",        # auto | off
             "timeout": 5.0,
         },
         "memory_kg": {
@@ -30,7 +30,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "mcp_url": "",
             "headers": {},
             "recall_k": 5,
-            "store_mode": "auto",        # auto | ask | off
+            "store_mode": "auto",        # auto | off
             "timeout": 5.0,
         },
         # --- Experimental scaffolds: disabled by default ---
@@ -67,14 +67,31 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "min_prompt_chars": 30,
             "include_providers": ["qdrant", "memory_kg"],
             "max_total_chars": 4000,
+            # --- v0.2 features ---
+            "hyde_enabled": False,
+            "hyde_model": "gemma4:e2b",
+            "hyde_fallback_model": "qwen3:4b",
+            "hyde_url": "http://localhost:11434/api/generate",
+            "hyde_timeout": 3.0,
+            "hyde_max_tokens": 150,
+            "progressive": False,
+            "decay_enabled": False,
+            "decay_file": "~/.claude/claude-hooks-decay.json",
+            "decay_recency_halflife_days": 14,
+            "decay_frequency_cap": 5,
         },
         "session_start": {
             "enabled": True,
             "show_status_line": True,
+            "compact_recall": True,
+            "compact_recall_query": "session context, key decisions, and important patterns",
         },
         "stop": {
             "enabled": True,
             "store_threshold": "noteworthy",  # noteworthy | always | off
+            "classify_observations": True,
+            "extract_instincts": False,
+            "instincts_dir": "~/.claude/instincts",
         },
         "session_end": {
             "enabled": True,
@@ -84,6 +101,25 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "warn_on_tools": ["Bash", "Edit", "Write"],
             "warn_on_patterns": ["rm ", "DROP TABLE", "git reset --hard"],
         },
+    },
+    "reflect": {
+        "enabled": True,
+        "max_memories_to_analyze": 50,
+        "min_pattern_count": 3,
+        "output_path": "~/.claude/CLAUDE.md",
+        "ollama_model": "gemma4:e2b",
+        "ollama_url": "http://localhost:11434/api/generate",
+    },
+    "consolidate": {
+        "enabled": False,
+        "trigger": "manual",              # manual | session_start
+        "min_sessions_between_runs": 10,
+        "state_file": "~/.claude/claude-hooks-consolidate.json",
+        "max_memories_to_scan": 200,
+        "merge_similarity_threshold": 0.80,
+        "prune_stale_days": 90,
+        "ollama_model": "gemma4:e2b",
+        "ollama_url": "http://localhost:11434/api/generate",
     },
     "logging": {
         "path": "~/.claude/claude-hooks.log",

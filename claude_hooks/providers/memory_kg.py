@@ -20,6 +20,7 @@ sessions into proper named entities by talking to the MCP server directly.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -95,8 +96,7 @@ class MemoryKgProvider(Provider):
             text = extract_text_content(result)
             if text:
                 try:
-                    import json as _json
-                    parsed = _json.loads(text)
+                    parsed = json.loads(text)
                     entities = parsed.get("entities") or []
                     relations = parsed.get("relations") or []
                 except (ValueError, AttributeError):
@@ -166,14 +166,11 @@ class MemoryKgProvider(Provider):
             if "exist" not in str(e).lower():
                 raise
 
-        try:
-            client.call_tool(
-                "add_observations",
-                {
-                    "observations": [
-                        {"entityName": entity_name, "contents": [content]}
-                    ]
-                },
-            )
-        except McpError:
-            raise
+        client.call_tool(
+            "add_observations",
+            {
+                "observations": [
+                    {"entityName": entity_name, "contents": [content]}
+                ]
+            },
+        )
