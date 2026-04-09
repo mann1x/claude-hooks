@@ -128,9 +128,15 @@ def _setup_logging(cfg: dict) -> None:
     handler: logging.Handler
     if path_str:
         try:
+            from logging.handlers import RotatingFileHandler
+
             log_path = expand_user_path(path_str)
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            handler = logging.FileHandler(log_path, encoding="utf-8")
+            max_bytes = int(log_cfg.get("max_bytes", 2 * 1024 * 1024))  # 2 MB
+            backup_count = int(log_cfg.get("backup_count", 3))
+            handler = RotatingFileHandler(
+                log_path, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8"
+            )
         except OSError:
             handler = logging.StreamHandler(sys.stderr)
     else:

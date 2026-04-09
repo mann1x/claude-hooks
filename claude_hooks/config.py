@@ -124,6 +124,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "logging": {
         "path": "~/.claude/claude-hooks.log",
         "level": "info",
+        "max_bytes": 2097152,   # 2 MB per file
+        "backup_count": 3,      # keep 3 rotated files (.log.1, .log.2, .log.3)
     },
     "disable_marker_filename": ".claude-hooks-disable",
 }

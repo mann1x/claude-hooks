@@ -107,7 +107,9 @@
   },
   "logging": {
     "path": "~/.claude/claude-hooks.log",
-    "level": "info"
+    "level": "info",
+    "max_bytes": 2097152,
+    "backup_count": 3
   },
   "disable_marker_filename": ".claude-hooks-disable"
 }
