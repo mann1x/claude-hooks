@@ -134,7 +134,8 @@ def probe_unmatched(
     from claude_hooks.mcp_client import McpClient, McpError
 
     needs_probe: list[type[Provider]] = [
-        cls for cls in REGISTRY if not report.by_provider.get(cls.name)
+        cls for cls in REGISTRY
+        if not report.by_provider.get(cls.name) and cls.signature_tools()
     ]
     if not needs_probe:
         return {}
