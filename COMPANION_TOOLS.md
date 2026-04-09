@@ -219,3 +219,56 @@ http://localhost:3847/tokens     # token budget view
 | **claude-code-organizer** | LOW | `/cco` | `npx @mcpware/claude-code-organizer` |
 
 All tools are optional. claude-hooks works fully without any of them.
+
+---
+
+## Claude Code Plugins
+
+These are installed via the Claude Code marketplace system, not npm.
+
+### code-analysis (MadAppGang)
+
+**Importance: HIGH** -- Adds deep codebase investigation skills that use
+mnemex/claudemem for semantic code search, AST navigation, and multi-agent
+analysis. Without this, you lose the `/code-analysis:*` skill family.
+
+**Requires:** mnemex (for semantic search backend)
+
+**Setup:**
+
+1. Add the marketplace to `~/.claude/settings.json` (the claude-hooks
+   installer does this automatically):
+   ```json
+   {
+     "extraKnownMarketplaces": {
+       "mag-claude-plugins": {
+         "source": {
+           "source": "github",
+           "repo": "MadAppGang/claude-code"
+         }
+       }
+     }
+   }
+   ```
+
+2. In a Claude Code session, install the plugin:
+   ```
+   /plugin install code-analysis@mag-claude-plugins
+   ```
+
+3. Restart Claude Code to load the new skills.
+
+**Skills provided (inside Claude Code):**
+
+| Skill | Description |
+|-------|-------------|
+| `/code-analysis:deep-analysis` | Primary: how does X work, trace flow, find implementations |
+| `/code-analysis:ultrathink-detective` | Comprehensive multi-perspective audit (uses Opus) |
+| `/code-analysis:developer-detective` | Implementation tracing, data flow, symbol usage |
+| `/code-analysis:architect-detective` | Architecture, design patterns, system structure |
+| `/code-analysis:debugger-detective` | Root cause analysis, bug tracing, error investigation |
+| `/code-analysis:tester-detective` | Test coverage, missing tests, edge cases |
+| `/code-analysis:investigate` | Auto-routes to the right detective based on query |
+| `/code-analysis:search` | Semantic code search via claudemem |
+| `/code-analysis:setup` | Add claudemem rules to project CLAUDE.md |
+| `/code-analysis:help` | List all available agents and skills |

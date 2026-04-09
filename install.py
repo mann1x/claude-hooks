@@ -563,7 +563,41 @@ def _detect_companion_tools() -> dict[str, bool]:
         print(f"\n  {len(missing)} tool(s) can be installed via npm:")
         for bin_name, npm_pkg, importance, _ in missing:
             print(f"    npm install -g {npm_pkg}")
+
+    # Check and configure the MadAppGang marketplace for code-analysis plugin.
+    _ensure_marketplace()
+
     return result
+
+
+MARKETPLACE_KEY = "mag-claude-plugins"
+MARKETPLACE_VALUE = {"source": {"source": "github", "repo": "MadAppGang/claude-code"}}
+
+
+def _ensure_marketplace() -> None:
+    """Ensure the MadAppGang plugin marketplace is registered in settings.json."""
+    settings_path = user_settings_path()
+    if not settings_path.exists():
+        return
+    try:
+        with open(settings_path, "r", encoding="utf-8") as f:
+            settings = json.load(f) or {}
+    except (json.JSONDecodeError, OSError):
+        return
+
+    markets = settings.get("extraKnownMarketplaces") or {}
+    if MARKETPLACE_KEY in markets:
+        print(f"\n  [ok] Plugin marketplace: {MARKETPLACE_KEY} (registered)")
+        print(f"       Install code-analysis in Claude Code: /plugin install code-analysis@mag-claude-plugins")
+        return
+
+    print(f"\n  [!!] Plugin marketplace: {MARKETPLACE_KEY} not registered")
+    print(f"       The code-analysis plugin (deep investigation skills) needs this.")
+    markets[MARKETPLACE_KEY] = MARKETPLACE_VALUE
+    settings["extraKnownMarketplaces"] = markets
+    _save_json(settings_path, settings)
+    print(f"  [ok] Registered {MARKETPLACE_KEY} in {settings_path}")
+    print(f"       Install code-analysis in Claude Code: /plugin install code-analysis@mag-claude-plugins")
 
 
 def _install_skills(
