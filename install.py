@@ -341,7 +341,7 @@ def pick_provider(cls, report: DetectionReport, non_interactive: bool) -> Option
         )
     if len(cands) == 1:
         c = cands[0]
-        print(f"  Found: '{c.server_key}' → {c.url}  ({c.notes})")
+        print(f"  Found: '{c.server_key}' -> {c.url}  ({c.notes})")
         if non_interactive:
             return c
         ans = input(f"  Use this? [Y/n]: ").strip().lower()
@@ -350,7 +350,7 @@ def pick_provider(cls, report: DetectionReport, non_interactive: bool) -> Option
         return None
     print(f"  Multiple candidates:")
     for i, c in enumerate(cands, 1):
-        print(f"    [{i}] '{c.server_key}' → {c.url}  ({c.source}, {c.confidence})")
+        print(f"    [{i}] '{c.server_key}' -> {c.url}  ({c.source}, {c.confidence})")
     if non_interactive:
         print(f"  --non-interactive set; picking the first.")
         return cands[0]
@@ -538,7 +538,7 @@ def _detect_companion_tools() -> dict[str, bool]:
     for bin_name, npm_pkg, importance, description in COMPANION_TOOLS:
         found = shutil.which(bin_name) is not None
         status = "installed" if found else "MISSING"
-        marker = "  ✓" if found else "  ✗"
+        marker = "  [ok]" if found else "  [!!]"
         print(f"{marker} {bin_name:24} {status:12} [{importance}] {description}")
         result[bin_name] = found
 
@@ -588,17 +588,17 @@ def _install_skills(
             src_content = (src / "SKILL.md").read_text(encoding="utf-8")
             dst_content = (dst / "SKILL.md").read_text(encoding="utf-8")
             if src_content == dst_content:
-                print(f"  ✓ /{skill_name:20} up to date")
+                print(f"  [ok] /{skill_name:20} up to date")
                 continue
             else:
                 to_install.append(skill_name)
-                print(f"  ↑ /{skill_name:20} will update")
+                print(f"  [up] /{skill_name:20} will update")
         else:
             to_install.append(skill_name)
             print(f"  + /{skill_name:20} will install")
 
     for skill_name, reason in skipped:
-        print(f"  ⊘ /{skill_name:20} skipped ({reason})")
+        print(f"  [--] /{skill_name:20} skipped ({reason})")
 
     if not to_install:
         if not skipped:
@@ -620,7 +620,7 @@ def _install_skills(
         dst = user_skills_dir / skill_name
         dst.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src / "SKILL.md", dst / "SKILL.md")
-        print(f"  ✓ /{skill_name} installed")
+        print(f"  [ok] /{skill_name} installed")
 
 
 if __name__ == "__main__":
