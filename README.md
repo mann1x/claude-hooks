@@ -143,20 +143,54 @@ Default: `gemma4:e2b` with `qwen3:4b` fallback. Any small Ollama model
 works -- it just needs to produce a short hypothetical answer for search
 expansion. If Ollama is down, HyDE degrades gracefully to the raw prompt.
 
-## CLI Commands
+## Commands Reference
+
+### Slash commands (inside Claude Code)
+
+These are available as skills after running the installer. Type the
+command in the Claude Code prompt.
+
+| Command | Requires | Description |
+|---------|----------|-------------|
+| `/reflect` | Ollama | Analyze recent memories for recurring patterns, generate CLAUDE.md rules |
+| `/consolidate` | Ollama | Find duplicate memories, compress old entries, prune stale ones |
+| `/episodic <query>` | episodic-server | Search past Claude Code conversations by semantic query |
+| `/save-learning` | -- | Save a user instruction/preference as a persistent learning |
+| `/find-skills` | caliber | Search the public skill registry for community skills |
+| `/setup-caliber` | caliber | Set up Caliber pre-commit hooks for config drift detection |
+
+### CLI commands (outside Claude Code)
+
+Run these from your terminal in the claude-hooks repo directory.
 
 ```bash
-# Reflect: analyze recent memories for patterns -> CLAUDE.md rules
-python -m claude_hooks.reflect
-python -m claude_hooks.reflect --dry-run
+# Memory analysis
+python -m claude_hooks.reflect              # generate CLAUDE.md rules from memory patterns
+python -m claude_hooks.reflect --dry-run    # preview without writing
 
-# Consolidate: deduplicate and compress old memories
-python -m claude_hooks.consolidate
+python -m claude_hooks.consolidate          # deduplicate and compress old memories
 python -m claude_hooks.consolidate --dry-run
-```
 
-Both commands are also available as `/reflect` and `/consolidate` slash
-commands inside Claude Code if you install the skills (see `CLAUDE.md`).
+# Installer
+python3 install.py                          # interactive install
+python3 install.py --dry-run                # show changes, don't write
+python3 install.py --non-interactive        # CI-friendly, no prompts
+python3 install.py --uninstall              # remove all claude-hooks entries
+python3 install.py --probe                  # force MCP tool-probe detection
+python3 install.py --episodic-server        # configure as episodic-memory server
+python3 install.py --episodic-client URL    # configure as episodic-memory client
+
+# Episodic server (on the server host)
+python3 episodic_server/server.py --host 0.0.0.0 --port 11435
+systemctl status episodic-server            # if installed as systemd service
+journalctl -u episodic-server -f            # follow server logs
+
+# Episodic API (from any host)
+curl "http://SERVER:11435/search?q=bcache&limit=5"   # search conversations
+curl http://SERVER:11435/health                       # health check
+curl http://SERVER:11435/stats                        # index statistics
+curl -X POST http://SERVER:11435/sync                 # trigger re-index
+```
 
 ## Per-project opt-out
 
@@ -188,7 +222,7 @@ are the entire contract.
 
 ```bash
 pip install -r requirements-dev.txt   # just pytest
-python -m pytest tests/ -v            # 42 tests
+python -m pytest tests/ -v            # 58 tests (42 unit + 16 integration)
 ```
 
 ## Recommended Companion Tools
