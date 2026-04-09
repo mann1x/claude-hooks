@@ -308,6 +308,11 @@ def main() -> int:
         dry_run=args.dry_run,
     )
 
+    # Detect companion tools and install skills.
+    print("\n==> Companion tools")
+    installed_tools = _detect_companion_tools()
+    _install_skills(installed_tools, non_interactive=args.non_interactive, dry_run=args.dry_run)
+
     conda_py = CONDA_PY_WIN if os.name == "nt" else CONDA_PY_LINUX
     print("\n==> Done.")
     print("    Open a new Claude Code session and the hooks will fire on the next prompt.")
@@ -502,6 +507,120 @@ def _save_json(path: Path, data: dict) -> None:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
     os.replace(tmp, path)
+
+
+# ---------------------------------------------------------------------- #
+# Companion tool detection + skill installation
+# ---------------------------------------------------------------------- #
+
+# Each companion tool: (binary name, npm package, importance, description)
+COMPANION_TOOLS = [
+    ("mnemex",          "mnemex",                   "HIGH",   "semantic code search (AST-aware, embedding-based)"),
+    ("caliber",         "@rely-ai/caliber",         "MEDIUM", "config quality scoring and drift detection"),
+    ("claudekit",       "claudekit",                "MEDIUM", "git checkpoints and hook profiling"),
+    ("episodic-memory", None,                       "HIGH",   "transcript search across past sessions (build from source)"),
+]
+
+# Skills shipped with the repo and what they require.
+# requirement: None = always install, or a tool binary name.
+SKILLS = [
+    ("reflect",       None),         # built-in: uses claude-hooks reflect module
+    ("consolidate",   None),         # built-in: uses claude-hooks consolidate module
+    ("save-learning", None),         # standalone
+    ("find-skills",   None),         # standalone
+    ("setup-caliber", "caliber"),    # needs caliber installed
+]
+
+
+def _detect_companion_tools() -> dict[str, bool]:
+    """Check which companion tools are installed. Returns {name: bool}."""
+    result: dict[str, bool] = {}
+    for bin_name, npm_pkg, importance, description in COMPANION_TOOLS:
+        found = shutil.which(bin_name) is not None
+        status = "installed" if found else "MISSING"
+        marker = "  ✓" if found else "  ✗"
+        print(f"{marker} {bin_name:24} {status:12} [{importance}] {description}")
+        result[bin_name] = found
+
+    missing = [(n, pkg, imp, desc) for n, pkg, imp, desc in COMPANION_TOOLS
+               if not result[n] and pkg is not None]
+    if missing:
+        print(f"\n  {len(missing)} tool(s) can be installed via npm:")
+        for bin_name, npm_pkg, importance, _ in missing:
+            print(f"    npm install -g {npm_pkg}")
+    return result
+
+
+def _install_skills(
+    installed_tools: dict[str, bool],
+    *,
+    non_interactive: bool,
+    dry_run: bool,
+) -> None:
+    """Copy skills from the repo to ~/.claude/skills/, respecting deps."""
+    user_skills_dir = Path(os.path.expanduser("~/.claude/skills"))
+    repo_skills_dir = HERE / ".claude" / "skills"
+
+    if not repo_skills_dir.exists():
+        return
+
+    print(f"\n==> Skills (target: {user_skills_dir})")
+
+    to_install: list[str] = []
+    skipped: list[tuple[str, str]] = []
+
+    for skill_name, requires_tool in SKILLS:
+        src = repo_skills_dir / skill_name
+        if not src.exists():
+            continue
+        dst = user_skills_dir / skill_name
+        already = dst.exists() and (dst / "SKILL.md").exists()
+
+        if requires_tool and not installed_tools.get(requires_tool, False):
+            if already:
+                skipped.append((skill_name, f"keeping existing, but {requires_tool} not found"))
+            else:
+                skipped.append((skill_name, f"requires {requires_tool}"))
+            continue
+
+        if already:
+            # Check if repo version is newer (compare content).
+            src_content = (src / "SKILL.md").read_text(encoding="utf-8")
+            dst_content = (dst / "SKILL.md").read_text(encoding="utf-8")
+            if src_content == dst_content:
+                print(f"  ✓ /{skill_name:20} up to date")
+                continue
+            else:
+                to_install.append(skill_name)
+                print(f"  ↑ /{skill_name:20} will update")
+        else:
+            to_install.append(skill_name)
+            print(f"  + /{skill_name:20} will install")
+
+    for skill_name, reason in skipped:
+        print(f"  ⊘ /{skill_name:20} skipped ({reason})")
+
+    if not to_install:
+        if not skipped:
+            print("  All skills up to date.")
+        return
+
+    if not non_interactive:
+        ans = input(f"\n  Install/update {len(to_install)} skill(s)? [Y/n]: ").strip().lower()
+        if ans not in ("", "y", "yes"):
+            print("  Skipped.")
+            return
+
+    if dry_run:
+        print(f"  [dry-run] Would install: {', '.join(to_install)}")
+        return
+
+    for skill_name in to_install:
+        src = repo_skills_dir / skill_name
+        dst = user_skills_dir / skill_name
+        dst.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src / "SKILL.md", dst / "SKILL.md")
+        print(f"  ✓ /{skill_name} installed")
 
 
 if __name__ == "__main__":
