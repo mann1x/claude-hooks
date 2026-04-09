@@ -419,7 +419,8 @@ def install_hooks(
     settings.setdefault("hooks", {})
     for event, blocks in template.items():
         existing = settings["hooks"].get(event) or []
-        # Drop our own previous entries (anything tagged _managedBy).
+        # Drop ALL previous claude-hooks entries — by _managedBy tag OR
+        # by command containing "claude-hook" (catches manually installed ones).
         cleaned: list[dict] = []
         for blk in existing:
             if not isinstance(blk, dict):
@@ -427,7 +428,7 @@ def install_hooks(
             kept_hooks = [
                 h
                 for h in (blk.get("hooks") or [])
-                if not (isinstance(h, dict) and h.get("_managedBy") == MANAGED_BY)
+                if not _is_our_hook(h)
             ]
             if kept_hooks:
                 blk = dict(blk)
@@ -464,7 +465,7 @@ def uninstall(*, dry_run: bool) -> int:
             kept = [
                 h
                 for h in (blk.get("hooks") or [])
-                if not (isinstance(h, dict) and h.get("_managedBy") == MANAGED_BY)
+                if not _is_our_hook(h)
             ]
             removed += len(blk.get("hooks") or []) - len(kept)
             if kept:
@@ -484,6 +485,16 @@ def uninstall(*, dry_run: bool) -> int:
     print(f"  Backup written: {backup}")
     _save_json(settings_path, settings)
     return 0
+
+
+def _is_our_hook(h: dict) -> bool:
+    """Check if a hook entry belongs to claude-hooks (by tag or command pattern)."""
+    if not isinstance(h, dict):
+        return False
+    if h.get("_managedBy") == MANAGED_BY:
+        return True
+    cmd = h.get("command", "")
+    return "claude-hook" in cmd and ("claude-hook " in cmd or "claude-hook.cmd" in cmd)
 
 
 def build_command(repo_path: Path) -> str:
