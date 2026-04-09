@@ -124,6 +124,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "episodic": {
         "mode": "off",                  # off | server | client
         "server_url": "",               # client: URL of the episodic-server
+        "server_host": "0.0.0.0",       # server: bind address
         "server_port": 11435,           # server: port to listen on
         "binary": "episodic-memory",    # server: path to episodic-memory binary
         "timeout": 10.0,               # client: push timeout in seconds

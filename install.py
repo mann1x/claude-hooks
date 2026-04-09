@@ -651,16 +651,32 @@ def _setup_episodic(cfg: dict, cfg_path: Path, args, *, dry_run: bool) -> None:
             print("       cd episodic-memory && npm install && npm link")
             return
         ep_cfg["mode"] = "server"
-        port = int(ep_cfg.get("server_port", 11435))
+
+        # Ask for bind address and port.
+        default_host = ep_cfg.get("server_host", "0.0.0.0")
+        default_port = int(ep_cfg.get("server_port", 11435))
+        if not args.non_interactive:
+            host_input = input(f"  Bind address [{default_host}]: ").strip()
+            port_input = input(f"  Port [{default_port}]: ").strip()
+            if host_input:
+                default_host = host_input
+            if port_input:
+                default_port = int(port_input)
+        ep_cfg["server_host"] = default_host
+        ep_cfg["server_port"] = default_port
+
         print(f"  Mode:   server")
-        print(f"  Port:   {port}")
+        print(f"  Bind:   {default_host}:{default_port}")
         print(f"  Binary: {shutil.which('episodic-memory')}")
         if not dry_run:
             save_config(cfg, cfg_path)
             print(f"  Config updated: episodic.mode = server")
         # Offer systemd service install (Linux only).
         if os.name != "nt":
-            _install_episodic_systemd(port, non_interactive=args.non_interactive, dry_run=dry_run)
+            _install_episodic_systemd(
+                default_host, default_port,
+                non_interactive=args.non_interactive, dry_run=dry_run,
+            )
 
     elif args.episodic_client:
         print("\n==> Episodic memory: CLIENT mode")
@@ -701,7 +717,7 @@ SYSTEMD_UNIT = "episodic-server.service"
 SYSTEMD_PATH = Path("/etc/systemd/system") / SYSTEMD_UNIT
 
 
-def _install_episodic_systemd(port: int, *, non_interactive: bool, dry_run: bool) -> None:
+def _install_episodic_systemd(host: str, port: int, *, non_interactive: bool, dry_run: bool) -> None:
     """Install the episodic-server as a systemd service."""
     template_path = HERE / "episodic_server" / "episodic-server.service"
     if not template_path.exists():
@@ -733,7 +749,7 @@ def _install_episodic_systemd(port: int, *, non_interactive: bool, dry_run: bool
     print(f"    - Logs via journalctl -u {SYSTEMD_UNIT}")
     if non_interactive:
         print("  --non-interactive: skipping service install.")
-        print(f"  To start manually: python3 {HERE}/episodic_server/server.py --port {port}")
+        print(f"  To start manually: python3 {HERE}/episodic_server/server.py --host {host} --port {port}")
         return
 
     ans = input("  Install systemd service? [Y/n]: ").strip().lower()
@@ -748,6 +764,7 @@ def _install_episodic_systemd(port: int, *, non_interactive: bool, dry_run: bool
     # Read template, substitute placeholders.
     content = template_path.read_text(encoding="utf-8")
     content = content.replace("__REPO_PATH__", str(HERE.resolve()))
+    content = content.replace("__HOST__", host)
     content = content.replace("__PORT__", str(port))
 
     # Expand ReadWritePaths for the actual user.
