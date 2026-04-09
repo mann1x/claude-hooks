@@ -233,6 +233,17 @@ def main() -> int:
     ap.add_argument("--uninstall", action="store_true", help="remove claude-hooks from settings.json")
     ap.add_argument("--probe", action="store_true", help="force tool-probe detection")
     ap.add_argument("--config", type=str, default=None, help="alternate claude-hooks.json path")
+    ap.add_argument(
+        "--episodic-server",
+        action="store_true",
+        help="configure this host as episodic-memory server (runs the HTTP API)",
+    )
+    ap.add_argument(
+        "--episodic-client",
+        type=str,
+        metavar="URL",
+        help="configure as episodic client, pushing transcripts to URL (e.g. http://192.168.178.2:11435)",
+    )
     args = ap.parse_args()
 
     if args.uninstall:
@@ -312,6 +323,9 @@ def main() -> int:
     print("\n==> Companion tools")
     installed_tools = _detect_companion_tools()
     _install_skills(installed_tools, non_interactive=args.non_interactive, dry_run=args.dry_run)
+
+    # Episodic memory setup.
+    _setup_episodic(cfg, cfg_path, args, dry_run=args.dry_run)
 
     conda_py = CONDA_PY_WIN if os.name == "nt" else CONDA_PY_LINUX
     print("\n==> Done.")
@@ -529,6 +543,7 @@ SKILLS = [
     ("save-learning", None),         # standalone
     ("find-skills",   None),         # standalone
     ("setup-caliber", "caliber"),    # needs caliber installed
+    ("episodic",      None),         # queries remote episodic-server API
 ]
 
 
@@ -621,6 +636,67 @@ def _install_skills(
         dst.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src / "SKILL.md", dst / "SKILL.md")
         print(f"  [ok] /{skill_name} installed")
+
+
+def _setup_episodic(cfg: dict, cfg_path: Path, args, *, dry_run: bool) -> None:
+    """Configure episodic memory server or client mode."""
+    ep_cfg = cfg.setdefault("episodic", {})
+    current_mode = ep_cfg.get("mode", "off")
+
+    if args.episodic_server:
+        print("\n==> Episodic memory: SERVER mode")
+        if not shutil.which("episodic-memory"):
+            print("  [!!] episodic-memory not found. Install it first:")
+            print("       git clone https://github.com/obra/episodic-memory")
+            print("       cd episodic-memory && npm install && npm link")
+            return
+        ep_cfg["mode"] = "server"
+        port = int(ep_cfg.get("server_port", 11435))
+        print(f"  Mode:   server")
+        print(f"  Port:   {port}")
+        print(f"  Binary: {shutil.which('episodic-memory')}")
+        print(f"  SessionEnd hook will trigger 'episodic-memory sync' after each session.")
+        print(f"\n  To start the HTTP API server:")
+        print(f"    python3 {HERE / 'episodic_server' / 'server.py'} --port {port}")
+        print(f"  Or with Docker:")
+        print(f"    cd {HERE / 'episodic_server'} && docker compose up -d")
+        if not dry_run:
+            save_config(cfg, cfg_path)
+            print(f"  Config updated: episodic.mode = server")
+
+    elif args.episodic_client:
+        print("\n==> Episodic memory: CLIENT mode")
+        server_url = args.episodic_client.rstrip("/")
+        ep_cfg["mode"] = "client"
+        ep_cfg["server_url"] = server_url
+        print(f"  Mode:       client")
+        print(f"  Server URL: {server_url}")
+        # Test connectivity.
+        print(f"  Testing connection...", end=" ")
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                f"{server_url}/health",
+                headers={"Connection": "close"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read())
+                print(f"OK (archive: {data.get('archive', '?')})")
+        except Exception as e:
+            print(f"UNREACHABLE ({e})")
+            print(f"  Warning: server not reachable. Transcripts will be pushed when it's up.")
+        print(f"  SessionEnd hook will push transcripts to {server_url}/ingest")
+        if not dry_run:
+            save_config(cfg, cfg_path)
+            print(f"  Config updated: episodic.mode = client")
+
+    elif current_mode != "off":
+        print(f"\n==> Episodic memory: {current_mode.upper()} mode (already configured)")
+        if current_mode == "client":
+            print(f"  Server URL: {ep_cfg.get('server_url', '?')}")
+    else:
+        # Not configured — mention availability.
+        print(f"\n  Episodic memory: not configured (use --episodic-server or --episodic-client URL)")
 
 
 if __name__ == "__main__":

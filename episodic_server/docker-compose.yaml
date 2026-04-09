@@ -1,0 +1,12 @@
+services:
+  episodic-server:
+    build: .
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ${HOME}/.config/superpowers/conversation-archive:/archive
+      - ${HOME}/.claude/projects:/claude-projects:ro
+    environment:
+      - EPISODIC_ARCHIVE=/archive
+    labels:
+      - com.centurylinklabs.watchtower.enable=false

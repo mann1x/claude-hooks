@@ -121,6 +121,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "ollama_model": "gemma4:e2b",
         "ollama_url": "http://localhost:11434/api/generate",
     },
+    "episodic": {
+        "mode": "off",                  # off | server | client
+        "server_url": "",               # client: URL of the episodic-server
+        "server_port": 11435,           # server: port to listen on
+        "binary": "episodic-memory",    # server: path to episodic-memory binary
+        "timeout": 10.0,               # client: push timeout in seconds
+    },
     "logging": {
         "path": "~/.claude/claude-hooks.log",
         "level": "info",
