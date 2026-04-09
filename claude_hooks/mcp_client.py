@@ -32,7 +32,7 @@ class McpClient:
     Tiny JSON-RPC 2.0 client over MCP Streamable HTTP.
 
     Usage:
-        client = McpClient("http://192.168.178.2:32775/mcp")
+        client = McpClient("http://localhost:32775/mcp")
         tools = client.list_tools()
         result = client.call_tool("qdrant-find", {"query": "bcache", "collection_name": "memory"})
     """

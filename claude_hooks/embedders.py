@@ -75,7 +75,7 @@ class OllamaEmbedder(Embedder):
         req = urllib.request.Request(
             self.url,
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "Connection": "close"},
             method="POST",
         )
         try:
@@ -117,7 +117,7 @@ class OpenAiCompatibleEmbedder(Embedder):
         if not text:
             raise EmbedderError("cannot embed empty string")
         body = json.dumps({"model": self.model, "input": text}).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", "Connection": "close"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         req = urllib.request.Request(self.url, data=body, headers=headers, method="POST")

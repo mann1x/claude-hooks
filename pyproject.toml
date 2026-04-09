@@ -1,0 +1,33 @@
+[project]
+name = "claude-hooks"
+version = "0.3.0"
+description = "Cross-platform Claude Code hooks for deterministic memory recall and storage"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    { name = "mann1x" }
+]
+keywords = ["claude", "hooks", "memory", "qdrant", "mcp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Repository = "https://github.com/mann1x/claude-hooks"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+pgvector = ["psycopg[binary]"]
+sqlite-vec = ["sqlite-vec"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -36,6 +36,7 @@ Thumbs.db
 # Caliber (local state)
 .caliber/
 
-# Claude Code skills (installed per-machine)
+# Claude Code skills and project hooks (installed per-machine)
 .claude/skills/
 .claude/hooks/
+.claude/settings.json

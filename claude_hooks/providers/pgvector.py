@@ -1,7 +1,10 @@
 """
-Postgres + pgvector provider — *experimental scaffold*.
+Postgres + pgvector provider.
 
-Disabled in DEFAULT_CONFIG. To use:
+Stores memories as embeddings in a Postgres database with the pgvector
+extension for vector similarity search.
+
+To use:
 
 1. Install Postgres and create a database. Run ``CREATE EXTENSION vector;``
 2. Install the optional Python deps: ``pip install psycopg[binary]``
@@ -18,7 +21,8 @@ Disabled in DEFAULT_CONFIG. To use:
          "embedder_options": {"model": "nomic-embed-text"}
        }
 
-5. Run ``python install.py --init-pgvector`` to create the table + index.
+5. Tables are created automatically on first use (requires the pgvector
+   extension to already be installed in the database).
 
 The schema is simple — one table per collection:
 
@@ -65,6 +69,7 @@ class PgvectorProvider(Provider):
         super().__init__(server, options)
         self._embedder: Optional[Embedder] = None
         self._conn = None
+        self._table_created = False
 
     # ------------------------------------------------------------------ #
     # Detection — there is no MCP server, so this is always empty.
@@ -120,15 +125,20 @@ class PgvectorProvider(Provider):
         try:
             with self._conn.cursor() as cur:  # type: ignore[union-attr]
                 cur.execute(
-                    f"SELECT content, metadata FROM {table} "
-                    f"ORDER BY embedding <=> %s LIMIT %s",
-                    (qvec, k),
+                    f"SELECT content, metadata, embedding <=> %s AS distance "
+                    f"FROM {table} ORDER BY distance LIMIT %s",
+                    (str(qvec), k),
                 )
                 rows = cur.fetchall()
         except Exception as e:
             log.warning("pgvector query failed: %s", e)
             return []
-        return [Memory(text=row[0], metadata=row[1] or {}) for row in rows]
+        result: list[Memory] = []
+        for content, meta, distance in rows:
+            meta = meta or {}
+            meta["_distance"] = distance
+            result.append(Memory(text=content, metadata=meta))
+        return result
 
     def store(self, content: str, metadata: Optional[dict] = None) -> None:
         if not content.strip():
@@ -143,12 +153,24 @@ class PgvectorProvider(Provider):
             with self._conn.cursor() as cur:  # type: ignore[union-attr]
                 cur.execute(
                     f"INSERT INTO {table} (content, metadata, embedding) VALUES (%s, %s, %s)",
-                    (content, json.dumps(metadata or {}), vec),
+                    (content, json.dumps(metadata or {}), str(vec)),
                 )
                 self._conn.commit()  # type: ignore[union-attr]
         except Exception as e:
             log.warning("pgvector insert failed: %s", e)
             raise
+
+    def count(self) -> int:
+        """Return the number of stored memories."""
+        if self._conn is None:
+            return 0
+        table = _safe_table(self.options.get("table") or "claude_hooks_memory")
+        try:
+            with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                cur.execute(f"SELECT COUNT(*) FROM {table}")
+                return cur.fetchone()[0]
+        except Exception:
+            return 0
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -168,6 +190,51 @@ class PgvectorProvider(Provider):
             if not dsn:
                 raise RuntimeError("pgvector dsn not configured")
             self._conn = psycopg.connect(dsn)
+        if not self._table_created:
+            self._create_table()
+
+    def _create_table(self) -> None:
+        """Create the memory table + HNSW index if they don't exist."""
+        table = _safe_table(self.options.get("table") or "claude_hooks_memory")
+        dim = self._embedder.dim if self._embedder and self._embedder.dim else 0  # type: ignore[union-attr]
+
+        # Check if table already exists.
+        with self._conn.cursor() as cur:  # type: ignore[union-attr]
+            cur.execute(
+                "SELECT 1 FROM information_schema.tables WHERE table_name = %s",
+                (table,),
+            )
+            if cur.fetchone():
+                self._table_created = True
+                return
+
+        # Need the embedding dimension. Probe if unknown.
+        if dim == 0:
+            try:
+                probe = self._embedder.embed("dimension probe")  # type: ignore[union-attr]
+                dim = len(probe)
+            except EmbedderError as e:
+                raise RuntimeError(
+                    f"cannot create table: need embedding dimension but embedder failed: {e}"
+                )
+
+        with self._conn.cursor() as cur:  # type: ignore[union-attr]
+            cur.execute(
+                f"""CREATE TABLE IF NOT EXISTS {table} (
+                    id          BIGSERIAL PRIMARY KEY,
+                    content     TEXT NOT NULL,
+                    metadata    JSONB,
+                    embedding   vector({dim}),
+                    created_at  TIMESTAMPTZ DEFAULT now()
+                )"""
+            )
+            cur.execute(
+                f"""CREATE INDEX IF NOT EXISTS {table}_embedding_hnsw
+                    ON {table} USING hnsw (embedding vector_cosine_ops)"""
+            )
+        self._conn.commit()  # type: ignore[union-attr]
+        self._table_created = True
+        log.info("created pgvector table: %s (dim=%d)", table, dim)
 
 
 def _safe_table(name: str) -> str:
@@ -175,19 +242,3 @@ def _safe_table(name: str) -> str:
     if not _SAFE_IDENT_RE.match(name):
         raise ValueError(f"unsafe table name: {name!r}")
     return name
-
-
-CREATE_TABLE_SQL = """
-CREATE EXTENSION IF NOT EXISTS vector;
-
-CREATE TABLE IF NOT EXISTS {table} (
-    id          BIGSERIAL PRIMARY KEY,
-    content     TEXT NOT NULL,
-    metadata    JSONB,
-    embedding   vector({dim}),
-    created_at  TIMESTAMPTZ DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS {table}_embedding_hnsw
-    ON {table} USING hnsw (embedding vector_cosine_ops);
-"""

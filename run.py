@@ -4,8 +4,8 @@ Cross-platform entry point for claude-hooks.
 
 Invoked from settings.json hook commands as:
 
-    python3 /shared/dev/claude-hooks/run.py <EventName>
-    python  C:\\path\\claude-hooks\\run.py <EventName>
+    python3 /path/to/claude-hooks/run.py <EventName>
+    python  C:\\path\\to\\claude-hooks\\run.py <EventName>
 
 Reads the event JSON from stdin, dispatches to the matching handler, and
 writes any hook output to stdout.

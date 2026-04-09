@@ -58,7 +58,7 @@ from claude_hooks.providers import REGISTRY, ServerCandidate
 MANAGED_BY = "claude-hooks"
 
 # The conda env Python that bin/claude-hook prefers at runtime.
-CONDA_PY_LINUX = Path("/root/anaconda3/envs/claude-hooks/bin/python")
+CONDA_PY_LINUX = Path.home() / "anaconda3" / "envs" / "claude-hooks" / "bin" / "python"
 CONDA_PY_WIN = Path.home() / "anaconda3" / "envs" / "claude-hooks" / "python.exe"
 
 # Hook entries to install in ~/.claude/settings.json. Each event has its own
@@ -144,8 +144,8 @@ def _find_conda() -> Optional[str]:
         return "conda"
     # Try known install locations.
     for candidate in [
-        Path("/root/anaconda3/condabin/conda"),
-        Path("/root/miniconda3/condabin/conda"),
+        Path.home() / "anaconda3" / "condabin" / "conda",
+        Path.home() / "miniconda3" / "condabin" / "conda",
         Path("/opt/conda/condabin/conda"),
         Path.home() / "anaconda3" / "condabin" / "conda",
         Path.home() / "miniconda3" / "condabin" / "conda",

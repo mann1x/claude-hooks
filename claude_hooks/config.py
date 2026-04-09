@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "version": 1,
+    "version": 2,
     "providers": {
         "qdrant": {
             "enabled": True,

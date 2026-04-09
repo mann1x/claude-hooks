@@ -15,9 +15,9 @@ from claude_hooks.providers import MemoryKgProvider, QdrantProvider
 
 SAMPLE_CONFIG = {
     "mcpServers": {
-        "qdrant": {"type": "http", "url": "http://192.168.178.2:32775/mcp"},
-        "memory": {"type": "http", "url": "http://192.168.178.2:32776/mcp"},
-        "github-mcp": {"type": "http", "url": "http://192.168.178.2:32773/mcp"},
+        "qdrant": {"type": "http", "url": "http://test-host:32775/mcp"},
+        "memory": {"type": "http", "url": "http://test-host:32776/mcp"},
+        "github-mcp": {"type": "http", "url": "http://test-host:32773/mcp"},
         "context7": {
             "type": "http",
             "url": "https://mcp.context7.com/mcp",
@@ -42,14 +42,14 @@ class TestDetect(unittest.TestCase):
         cands = report.candidates_for(QdrantProvider.name)
         # Both 'qdrant' and 'qdrant-secondary' should match
         urls = {c.url for c in cands}
-        self.assertIn("http://192.168.178.2:32775/mcp", urls)
+        self.assertIn("http://test-host:32775/mcp", urls)
         self.assertIn("http://other:32775/mcp", urls)
 
     def test_memory_name_match(self):
         report = detect_all(SAMPLE_CONFIG)
         cands = report.candidates_for(MemoryKgProvider.name)
         self.assertEqual(len(cands), 1)
-        self.assertEqual(cands[0].url, "http://192.168.178.2:32776/mcp")
+        self.assertEqual(cands[0].url, "http://test-host:32776/mcp")
 
     def test_stdio_servers_excluded(self):
         report = detect_all(SAMPLE_CONFIG)

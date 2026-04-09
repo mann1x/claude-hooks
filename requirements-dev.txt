@@ -1,4 +1,3 @@
 # Development / testing dependencies for claude-hooks.
 # Install into the conda env:  pip install -r requirements-dev.txt
 pytest>=8.0
-pytest-asyncio>=1.0

@@ -1,9 +1,12 @@
 """
-SQLite + sqlite-vec provider — *experimental scaffold*.
+SQLite + sqlite-vec provider.
 
-Disabled in DEFAULT_CONFIG. To use:
+Stores memories as embeddings in a local SQLite database with sqlite-vec
+for vector similarity search. Zero infrastructure — just a .db file.
 
-1. Install the optional deps: ``pip install sqlite-vec``
+To use:
+
+1. Install the optional dep: ``pip install sqlite-vec``
 2. Pull an embedding model into Ollama: ``ollama pull nomic-embed-text``
 3. Edit ``config/claude-hooks.json``:
 
@@ -17,7 +20,7 @@ Disabled in DEFAULT_CONFIG. To use:
          "embedder_options": {"model": "nomic-embed-text"}
        }
 
-4. Run ``python install.py --init-sqlite-vec`` to create the schema.
+4. Tables are created automatically on first use.
 
 Schema (one virtual table per collection, plus a metadata sidecar):
 
@@ -38,8 +41,8 @@ Schema (one virtual table per collection, plus a metadata sidecar):
 
 This shape lets us do filtered KNN with a simple JOIN.
 
-Detection: there is no MCP server here either — :meth:`detect` returns
-empty. The installer prompts for the db_path if the user wants to enable.
+Detection: there is no MCP server here — :meth:`detect` returns empty.
+The installer prompts for the db_path if the user wants to enable.
 """
 
 from __future__ import annotations
@@ -73,6 +76,7 @@ class SqliteVecProvider(Provider):
         super().__init__(server, options)
         self._embedder: Optional[Embedder] = None
         self._conn: Optional[sqlite3.Connection] = None
+        self._tables_created = False
 
     # ------------------------------------------------------------------ #
     # Detection — no MCP server.
@@ -124,12 +128,12 @@ class SqliteVecProvider(Provider):
         try:
             cur = self._conn.execute(  # type: ignore[union-attr]
                 f"""
-                SELECT m.content, m.metadata
+                SELECT m.content, m.metadata, v.distance
                 FROM {table}_vec v
                 JOIN {table} m ON m.rowid = v.rowid
                 WHERE v.embedding MATCH ?
+                  AND k = ?
                 ORDER BY v.distance
-                LIMIT ?
                 """,
                 (vec_blob, k),
             )
@@ -138,11 +142,12 @@ class SqliteVecProvider(Provider):
             log.warning("sqlite_vec query failed: %s", e)
             return []
         result: list[Memory] = []
-        for content, meta_json in rows:
+        for content, meta_json, distance in rows:
             try:
                 meta = json.loads(meta_json) if meta_json else {}
             except json.JSONDecodeError:
                 meta = {}
+            meta["_distance"] = distance
             result.append(Memory(text=content, metadata=meta))
         return result
 
@@ -172,6 +177,17 @@ class SqliteVecProvider(Provider):
             log.warning("sqlite_vec insert failed: %s", e)
             raise
 
+    def count(self) -> int:
+        """Return the number of stored memories."""
+        if self._conn is None:
+            return 0
+        table = _safe_table(self.options.get("table") or "memory")
+        try:
+            cur = self._conn.execute(f"SELECT COUNT(*) FROM {table}")
+            return cur.fetchone()[0]
+        except sqlite3.Error:
+            return 0
+
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
@@ -194,6 +210,48 @@ class SqliteVecProvider(Provider):
             self._conn = sqlite3.connect(str(p))
             self._conn.enable_load_extension(True)
             sqlite_vec.load(self._conn)
+        if not self._tables_created:
+            self._create_tables()
+
+    def _create_tables(self) -> None:
+        """Create the content + vec tables if they don't exist."""
+        table = _safe_table(self.options.get("table") or "memory")
+        dim = self._embedder.dim if self._embedder and self._embedder.dim else 0  # type: ignore[union-attr]
+
+        # Check if tables already exist.
+        cur = self._conn.execute(  # type: ignore[union-attr]
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        )
+        if cur.fetchone():
+            self._tables_created = True
+            return
+
+        # Need the embedding dimension. If the embedder hasn't set it yet,
+        # do a probe embed to discover it.
+        if dim == 0:
+            try:
+                probe = self._embedder.embed("dimension probe")  # type: ignore[union-attr]
+                dim = len(probe)
+            except EmbedderError as e:
+                raise RuntimeError(
+                    f"cannot create tables: need embedding dimension but embedder failed: {e}"
+                )
+
+        self._conn.execute(  # type: ignore[union-attr]
+            f"""CREATE TABLE IF NOT EXISTS {table} (
+                rowid       INTEGER PRIMARY KEY,
+                content     TEXT NOT NULL,
+                metadata    TEXT,
+                created_at  TEXT DEFAULT (datetime('now'))
+            )"""
+        )
+        self._conn.execute(  # type: ignore[union-attr]
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS {table}_vec USING vec0(embedding float[{dim}])"
+        )
+        self._conn.commit()  # type: ignore[union-attr]
+        self._tables_created = True
+        log.info("created sqlite_vec tables: %s, %s_vec (dim=%d)", table, table, dim)
 
 
 def _safe_table(name: str) -> str:
