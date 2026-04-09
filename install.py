@@ -622,6 +622,10 @@ def _ensure_marketplace() -> None:
             print(f"  [ok] Plugin: {plugin_id} (already enabled)")
     if changed:
         _save_json(settings_path, settings)
+
+    # Fix stale plugin install paths (e.g. Linux paths on Windows or vice versa).
+    _fix_plugin_paths()
+
     print(f"\n       To add marketplace in Claude Code: /plugin marketplace add MadAppGang/claude-code")
 
 
@@ -770,6 +774,46 @@ def _setup_episodic(cfg: dict, cfg_path: Path, args, *, dry_run: bool) -> None:
     else:
         # Not configured — mention availability.
         print(f"\n  Episodic memory: not configured (use --episodic-server or --episodic-client URL)")
+
+
+def _fix_plugin_paths() -> None:
+    """Fix stale installPath entries in installed_plugins.json.
+
+    If the file was copied from another machine (e.g. Linux paths on Windows),
+    rewrite paths to use the local plugins cache directory.
+    """
+    plugins_json = Path(os.path.expanduser("~/.claude/plugins/installed_plugins.json"))
+    if not plugins_json.exists():
+        return
+    try:
+        with open(plugins_json, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+    except (json.JSONDecodeError, OSError):
+        return
+
+    cache_dir = str(plugins_json.parent / "cache")
+    fixed = 0
+    for plugin_id, entries in data.get("plugins", {}).items():
+        for entry in entries:
+            old_path = entry.get("installPath", "")
+            if not old_path:
+                continue
+            # Check if the path actually exists on this machine.
+            if Path(old_path).exists():
+                continue
+            # Extract the relative path after "cache/" and rebuild.
+            for sep in ["/cache/", "\\cache\\"]:
+                if sep in old_path:
+                    rel = old_path.split(sep, 1)[1]
+                    new_path = os.path.join(cache_dir, rel).replace("\\", "/")
+                    if Path(new_path).exists():
+                        entry["installPath"] = new_path
+                        fixed += 1
+                    break
+
+    if fixed:
+        _save_json(plugins_json, data)
+        print(f"  [ok] Fixed {fixed} stale plugin path(s) in installed_plugins.json")
 
 
 SYSTEMD_UNIT = "episodic-server.service"
