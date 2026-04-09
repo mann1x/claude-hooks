@@ -234,29 +234,42 @@ analysis. Without this, you lose the `/code-analysis:*` skill family.
 
 **Requires:** mnemex (for semantic search backend)
 
-**Setup:**
+**Setup (inside Claude Code):**
 
-1. Add the marketplace to `~/.claude/settings.json` (the claude-hooks
-   installer does this automatically):
-   ```json
-   {
-     "extraKnownMarketplaces": {
-       "mag-claude-plugins": {
-         "source": {
-           "source": "github",
-           "repo": "MadAppGang/claude-code"
-         }
-       }
-     }
-   }
-   ```
+```
+/plugin marketplace add MadAppGang/claude-code
+```
 
-2. In a Claude Code session, install the plugin:
-   ```
-   /plugin install code-analysis@mag-claude-plugins
-   ```
+Then enable in your project's `.claude/settings.json`:
+```json
+{
+  "enabledPlugins": {
+    "code-analysis@mag-claude-plugins": true
+  }
+}
+```
 
-3. Restart Claude Code to load the new skills.
+### frontend-design (official)
+
+**Importance: MEDIUM** -- Generates distinctive, production-grade frontend
+interfaces. Available from the official Claude plugins marketplace.
+
+**Setup (inside Claude Code):**
+
+The official marketplace is registered by default. Just enable:
+```json
+{
+  "enabledPlugins": {
+    "frontend-design@claude-plugins-official": true
+  }
+}
+```
+
+**Skills provided:**
+
+| Skill | Description |
+|-------|-------------|
+| `/frontend-design:frontend-design` | Create polished web components, pages, and apps |
 
 **Skills provided (inside Claude Code):**
 

@@ -586,18 +586,32 @@ def _ensure_marketplace() -> None:
         return
 
     markets = settings.get("extraKnownMarketplaces") or {}
-    if MARKETPLACE_KEY in markets:
+    if MARKETPLACE_KEY not in markets:
+        print(f"\n  [!!] Plugin marketplace: {MARKETPLACE_KEY} not registered")
+        markets[MARKETPLACE_KEY] = MARKETPLACE_VALUE
+        settings["extraKnownMarketplaces"] = markets
+        _save_json(settings_path, settings)
+        print(f"  [ok] Registered {MARKETPLACE_KEY} in {settings_path}")
+    else:
         print(f"\n  [ok] Plugin marketplace: {MARKETPLACE_KEY} (registered)")
-        print(f"       Install code-analysis in Claude Code: /plugin install code-analysis@mag-claude-plugins")
-        return
 
-    print(f"\n  [!!] Plugin marketplace: {MARKETPLACE_KEY} not registered")
-    print(f"       The code-analysis plugin (deep investigation skills) needs this.")
-    markets[MARKETPLACE_KEY] = MARKETPLACE_VALUE
-    settings["extraKnownMarketplaces"] = markets
-    _save_json(settings_path, settings)
-    print(f"  [ok] Registered {MARKETPLACE_KEY} in {settings_path}")
-    print(f"       Install code-analysis in Claude Code: /plugin install code-analysis@mag-claude-plugins")
+    # Enable recommended plugins.
+    enabled = settings.setdefault("enabledPlugins", {})
+    recommended = {
+        "code-analysis@mag-claude-plugins": "deep codebase investigation (needs mnemex)",
+        "frontend-design@claude-plugins-official": "production-grade frontend UI generation",
+    }
+    changed = False
+    for plugin_id, desc in recommended.items():
+        if plugin_id not in enabled:
+            enabled[plugin_id] = True
+            print(f"  [ok] Enabled plugin: {plugin_id} ({desc})")
+            changed = True
+        else:
+            print(f"  [ok] Plugin: {plugin_id} (already enabled)")
+    if changed:
+        _save_json(settings_path, settings)
+    print(f"\n       To add marketplace in Claude Code: /plugin marketplace add MadAppGang/claude-code")
 
 
 def _install_skills(
