@@ -32,3 +32,10 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Caliber (local state)
+.caliber/
+
+# Claude Code skills (installed per-machine)
+.claude/skills/
+.claude/hooks/

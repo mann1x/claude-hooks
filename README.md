@@ -144,17 +144,82 @@ python -m claude_hooks.consolidate
 python -m claude_hooks.consolidate --dry-run
 ```
 
+## Companion Tools
+
+These are installed separately and complement claude-hooks:
+
+### mnemex/claudemem (semantic code search)
+
+```bash
+npm install -g mnemex
+mnemex setup                    # interactive: pick Ollama + snowflake-arctic-embed2
+```
+
+**Known bug** ([MadAppGang/mnemex#4](https://github.com/MadAppGang/mnemex/issues/4)):
+add `"openrouterApiKey": "dummy"` to `~/.claudemem/config.json` — the
+tool checks for this key before reading the embedding provider config.
+
+```bash
+mnemex index .                  # index a project
+mnemex search "how does X work" # semantic search
+```
+
+### claudekit (git checkpoints + hook profiling)
+
+```bash
+npm install -g claudekit
+```
+
+Use `/checkpoint:create` and `/checkpoint:restore` in Claude Code sessions.
+Profile hook performance with `claudekit-hooks profile`.
+
+### caliber (config drift detection)
+
+```bash
+npm install -g @rely-ai/caliber
+caliber hooks --install         # pre-commit hook for auto-sync
+caliber score                   # check config quality (aim for 85+)
+caliber learn install           # enable session learning
+```
+
+### claude-code-organizer (security scanner + token budget)
+
+```bash
+npx @mcpware/claude-code-organizer   # launches dashboard at http://localhost:3847
+```
+
+### episodic-memory (transcript search)
+
+```bash
+# Build from source (requires Node 22+)
+git clone https://github.com/obra/episodic-memory /shared/dev/episodic-memory
+cd /shared/dev/episodic-memory && npm install && npm link
+
+episodic-memory sync            # index past conversations
+episodic-memory search "query"  # search across all sessions
+```
+
 ## Per-project opt-out
 
 ```bash
 touch /srv/sensitive-project/.claude-hooks-disable
 ```
 
+## Uninstall
+
+```bash
+python install.py --uninstall   # removes hooks from ~/.claude/settings.json
+```
+
+This only removes the 4 hook entries tagged `_managedBy: "claude-hooks"`.
+Your other hooks and settings are left intact. The config file and repo
+can be deleted manually if you want a full cleanup.
+
 ## Tests
 
 ```bash
 conda activate claude-hooks
-python -m pytest tests/ -v
+python -m pytest tests/ -v      # 42 tests
 ```
 
 ## License
@@ -169,3 +234,6 @@ python -m pytest tests/ -v
 - [claude-cognitive](https://github.com/GMaN1911/claude-cognitive) — attention decay
 - [everything-claude-code](https://github.com/affaan-m/everything-claude-code) — instincts
 - [claude-diary](https://github.com/rlancemartin/claude-diary) — /reflect synthesis
+- [mnemex](https://github.com/MadAppGang/mnemex) — semantic code search
+- [caliber](https://github.com/caliber-ai-org/ai-setup) — config drift detection
+- [episodic-memory](https://github.com/obra/episodic-memory) — transcript search
