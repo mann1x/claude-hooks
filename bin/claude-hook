@@ -1,0 +1,28 @@
+#!/usr/bin/env sh
+# claude-hook — POSIX entry point for claude-hooks
+#
+# Usage:
+#     claude-hook <EventName>
+#
+# Reads the hook event JSON from stdin, dispatches to the matching handler,
+# and writes any response to stdout. Exits 0 on every code path so a broken
+# hook never blocks Claude Code.
+#
+# This is a thin shim — all logic lives in run.py / claude_hooks/.
+
+set -e
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+
+# Pick the python interpreter: prefer python3, fall back to python.
+if command -v python3 >/dev/null 2>&1; then
+    PY=python3
+elif command -v python >/dev/null 2>&1; then
+    PY=python
+else
+    # No python — exit silently (cannot run hook).
+    exit 0
+fi
+
+exec "$PY" "$REPO/run.py" "$@"

@@ -9,9 +9,9 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **design / proposal**. The repo currently contains only this design
-> doc and the bare skeleton. After review, the implementation lands under
-> `claude_hooks/` and `bin/`.
+> Status: **implemented**, smoke-tested against the live Qdrant + Memory KG
+> MCP servers on solidPC. 32 unit tests pass. Installer is functional and
+> idempotent. See `tests/` and `install.py`.
 
 ---
 
@@ -373,22 +373,30 @@ The 4 methods a provider must implement (`detect`, `verify`, `recall`,
 
 ---
 
-## Open questions for review
+## Decisions made (post-review)
 
-1. **`store_mode` default** — should `Stop` auto-store noteworthy turns
-   silently, or always ask? Auto is more useful but noisier on the model
-   side (one extra system message per turn). Suggesting `auto` for qdrant
-   and `ask` for memory_kg.
+1. **`store_mode` default**: `auto` for both qdrant and memory_kg. The
+   `Stop` hook writes a one-paragraph turn summary to every provider
+   whose `store_mode` is `auto`, gated by a "noteworthy" heuristic
+   (assistant called Bash/Edit/Write/MultiEdit). Override per-provider
+   in config.
 
-2. **Per-project vs user-global hooks** — current plan installs to
-   `~/.claude/settings.json` (user-global, applies to every project). The
-   alternative is `.claude/settings.json` per project. Recommending global
-   so memories are project-agnostic, but easy to switch.
+2. **Per-project vs user-global**: **user-global**.
+   `~/.claude/settings.json` is the install target. Per-project opt-out
+   via a `.claude-hooks-disable` marker file in the project root.
 
-3. **Recall format** — markdown block vs JSON-in-fence vs plain prose.
-   Going with markdown headings + bullet lists; the model parses those
-   reliably.
+3. **Recall format**: markdown headings + bullet lists, exactly the
+   shape that openwolf and CLAUDE.md inject. Models parse it reliably.
 
-4. **Should `pre_tool_use` ship enabled?** It's the most "magical" hook —
-   warns about past mistakes before risky tools run. Useful but adds
-   latency to every Bash/Edit call. Default off, opt-in via config.
+4. **`pre_tool_use` enabled by default?** **Off**. It's opt-in via
+   `hooks.pre_tool_use.enabled: true` in config. Ships disabled so
+   first-run latency stays predictable.
+
+5. **Experimental DB-backed scaffolds**: `pgvector` and `sqlite_vec`
+   providers exist as scaffolds (registered in REGISTRY but disabled
+   by default). They depend on optional packages (`psycopg`, `sqlite_vec`)
+   imported lazily so the core stays stdlib-only. They also need an
+   embedder — see `claude_hooks/embedders.py` for `OllamaEmbedder` and
+   `OpenAiCompatibleEmbedder`. Not yet integration-tested against a
+   live Postgres or sqlite-vec install. Useful as a starting point if
+   you ever want to drop Qdrant or split memory across stores.

@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "providers": {
+    "qdrant": {
+      "enabled": true,
+      "mcp_url": "http://192.168.178.2:32775/mcp",
+      "headers": {},
+      "collection": "memory",
+      "recall_k": 5,
+      "store_mode": "auto",
+      "timeout": 5.0
+    },
+    "memory_kg": {
+      "enabled": true,
+      "mcp_url": "http://192.168.178.2:32776/mcp",
+      "headers": {},
+      "recall_k": 5,
+      "store_mode": "auto",
+      "timeout": 5.0
+    },
+    "pgvector": {
+      "enabled": false,
+      "dsn": "postgresql://user:password@localhost:5432/memory",
+      "table": "claude_hooks_memory",
+      "embedder": "ollama",
+      "embedder_options": {
+        "url": "http://localhost:11434/api/embeddings",
+        "model": "nomic-embed-text"
+      },
+      "recall_k": 5,
+      "store_mode": "auto",
+      "timeout": 10.0
+    },
+    "sqlite_vec": {
+      "enabled": false,
+      "db_path": "~/.claude/claude-hooks-memory.db",
+      "table": "memory",
+      "embedder": "ollama",
+      "embedder_options": {
+        "url": "http://localhost:11434/api/embeddings",
+        "model": "nomic-embed-text"
+      },
+      "recall_k": 5,
+      "store_mode": "auto",
+      "timeout": 10.0
+    }
+  },
+  "hooks": {
+    "user_prompt_submit": {
+      "enabled": true,
+      "min_prompt_chars": 30,
+      "include_providers": ["qdrant", "memory_kg"],
+      "max_total_chars": 4000
+    },
+    "session_start": {
+      "enabled": true,
+      "show_status_line": true
+    },
+    "stop": {
+      "enabled": true,
+      "store_threshold": "noteworthy"
+    },
+    "session_end": {
+      "enabled": true
+    },
+    "pre_tool_use": {
+      "enabled": false,
+      "warn_on_tools": ["Bash", "Edit", "Write", "MultiEdit"],
+      "warn_on_patterns": ["rm ", "DROP TABLE", "git reset --hard", "force-push"]
+    }
+  },
+  "logging": {
+    "path": "~/.claude/claude-hooks.log",
+    "level": "info"
+  },
+  "disable_marker_filename": ".claude-hooks-disable"
+}
