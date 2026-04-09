@@ -655,14 +655,12 @@ def _setup_episodic(cfg: dict, cfg_path: Path, args, *, dry_run: bool) -> None:
         print(f"  Mode:   server")
         print(f"  Port:   {port}")
         print(f"  Binary: {shutil.which('episodic-memory')}")
-        print(f"  SessionEnd hook will trigger 'episodic-memory sync' after each session.")
-        print(f"\n  To start the HTTP API server:")
-        print(f"    python3 {HERE / 'episodic_server' / 'server.py'} --port {port}")
-        print(f"  Or with Docker:")
-        print(f"    cd {HERE / 'episodic_server'} && docker compose up -d")
         if not dry_run:
             save_config(cfg, cfg_path)
             print(f"  Config updated: episodic.mode = server")
+        # Offer systemd service install (Linux only).
+        if os.name != "nt":
+            _install_episodic_systemd(port, non_interactive=args.non_interactive, dry_run=dry_run)
 
     elif args.episodic_client:
         print("\n==> Episodic memory: CLIENT mode")
@@ -697,6 +695,84 @@ def _setup_episodic(cfg: dict, cfg_path: Path, args, *, dry_run: bool) -> None:
     else:
         # Not configured — mention availability.
         print(f"\n  Episodic memory: not configured (use --episodic-server or --episodic-client URL)")
+
+
+SYSTEMD_UNIT = "episodic-server.service"
+SYSTEMD_PATH = Path("/etc/systemd/system") / SYSTEMD_UNIT
+
+
+def _install_episodic_systemd(port: int, *, non_interactive: bool, dry_run: bool) -> None:
+    """Install the episodic-server as a systemd service."""
+    template_path = HERE / "episodic_server" / "episodic-server.service"
+    if not template_path.exists():
+        print("  [!!] Service template not found")
+        return
+
+    already_installed = SYSTEMD_PATH.exists()
+    if already_installed:
+        # Check if it's running.
+        rc = subprocess.run(
+            ["systemctl", "is-active", "--quiet", SYSTEMD_UNIT],
+            capture_output=True,
+        )
+        status = "running" if rc.returncode == 0 else "stopped"
+        print(f"  Systemd service: already installed ({status})")
+        if status == "running":
+            return
+        # Offer to start it.
+        if not non_interactive:
+            ans = input("  Start the service now? [Y/n]: ").strip().lower()
+            if ans in ("", "y", "yes") and not dry_run:
+                subprocess.run(["systemctl", "start", SYSTEMD_UNIT])
+                print(f"  Service started.")
+        return
+
+    print(f"\n  Install as systemd service?")
+    print(f"    - Starts on boot (after network)")
+    print(f"    - Restarts on failure (30s delay, max 5 in 5min)")
+    print(f"    - Logs via journalctl -u {SYSTEMD_UNIT}")
+    if non_interactive:
+        print("  --non-interactive: skipping service install.")
+        print(f"  To start manually: python3 {HERE}/episodic_server/server.py --port {port}")
+        return
+
+    ans = input("  Install systemd service? [Y/n]: ").strip().lower()
+    if ans not in ("", "y", "yes"):
+        print(f"  Skipped. Start manually: python3 {HERE}/episodic_server/server.py --port {port}")
+        return
+
+    if dry_run:
+        print(f"  [dry-run] Would install {SYSTEMD_PATH}")
+        return
+
+    # Read template, substitute placeholders.
+    content = template_path.read_text(encoding="utf-8")
+    content = content.replace("__REPO_PATH__", str(HERE.resolve()))
+    content = content.replace("__PORT__", str(port))
+
+    # Expand ReadWritePaths for the actual user.
+    home = str(Path.home())
+    content = content.replace("/root/.config/superpowers", f"{home}/.config/superpowers")
+    content = content.replace("/root/.claude", f"{home}/.claude")
+
+    SYSTEMD_PATH.write_text(content, encoding="utf-8")
+    print(f"  Installed: {SYSTEMD_PATH}")
+
+    subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
+    subprocess.run(["systemctl", "enable", SYSTEMD_UNIT], capture_output=True)
+    print(f"  Enabled at boot.")
+
+    subprocess.run(["systemctl", "start", SYSTEMD_UNIT], capture_output=True)
+    time.sleep(1)
+    rc = subprocess.run(
+        ["systemctl", "is-active", "--quiet", SYSTEMD_UNIT],
+        capture_output=True,
+    )
+    if rc.returncode == 0:
+        print(f"  Service started successfully.")
+        print(f"  Logs: journalctl -u {SYSTEMD_UNIT} -f")
+    else:
+        print(f"  [!!] Service failed to start. Check: journalctl -u {SYSTEMD_UNIT}")
 
 
 if __name__ == "__main__":
