@@ -46,9 +46,15 @@ mnemex context <name>           # full context around a symbol
 
 **Commands -- inside Claude Code:**
 
-mnemex is used automatically by the `code-analysis` plugin skills
-(`/code-analysis:search`, `/code-analysis:deep-analysis`, etc.) if installed.
-No manual slash command needed.
+mnemex is used on-demand via the code-analysis skills
+(`/code-analysis--search`, `/code-analysis--deep-analysis`, etc.) if installed.
+
+> **Important:** The `code-analysis@mag-claude-plugins` plugin injects
+> claudemem context on every `PreToolUse` event (Grep, Glob, Bash, Read),
+> which rapidly consumes context and causes premature compaction. We
+> recommend extracting the plugin's skills as standalone and disabling
+> the plugin's hooks. Run `python3 extract_plugin.py` from the claude-hooks
+> repo to do this automatically. See the README for details.
 
 ---
 
@@ -212,11 +218,12 @@ http://localhost:3847/tokens     # token budget view
 
 | Tool | Importance | Slash commands | Terminal commands |
 |------|-----------|---------------|-------------------|
-| **mnemex** | HIGH | (via code-analysis plugin) | `mnemex search/index/map/symbol/callers` |
+| **mnemex** | HIGH | `/code-analysis--claudemem-search` | `mnemex search/index/map/symbol/callers` |
 | **episodic-memory** | HIGH | `/episodic <query>` | `episodic-memory search/sync/show/stats` |
 | **caliber** | MEDIUM | `/setup-caliber`, `/find-skills` | `caliber score/hooks/learn/refresh/skills` |
 | **claudekit** | MEDIUM | `/checkpoint:create/restore/list` | `claudekit-hooks profile` |
 | **claude-code-organizer** | LOW | `/cco` | `npx @mcpware/claude-code-organizer` |
+| **code-analysis** | HIGH (extract!) | `/code-analysis--*` | `python3 extract_plugin.py` |
 
 All tools are optional. claude-hooks works fully without any of them.
 
@@ -228,31 +235,59 @@ These are installed via the Claude Code marketplace system, not npm.
 
 ### code-analysis (MadAppGang)
 
-**Importance: HIGH** -- Adds deep codebase investigation skills that use
-mnemex/claudemem for semantic code search, AST navigation, and multi-agent
-analysis. Without this, you lose the `/code-analysis:*` skill family.
+**Importance: HIGH (skills) / HARMFUL (hooks)** -- The plugin provides
+excellent investigation skills (deep-analysis, detective agents, claudemem
+search). However, its hooks are problematic:
+
+**Problems with the plugin's hooks:**
+
+1. **Context bloat** -- `PreToolUse` hooks on `Grep|Bash|Glob|Read|Task`
+   inject claudemem `additionalContext` on every single tool call. In a
+   session with 50+ tool calls, this adds hundreds of KB of accumulated
+   context, causing premature compaction even on the 1M context window.
+
+2. **Windows cmd.exe flash** -- `PostToolUse` hooks on `Write|Edit` spawn
+   `claudemem index` via the `.cmd` wrapper, which opens a visible console
+   window on every file edit. The `windowsHide: true` flag has no effect on
+   `.cmd`/`.bat` files. ([MadAppGang/claude-code#14](https://github.com/MadAppGang/claude-code/issues/14))
+
+3. **No per-hook control** -- Claude Code's plugin system is all-or-nothing:
+   `enabledPlugins` only supports `true`/`false`, with no way to selectively
+   disable specific hooks while keeping skills.
+
+**Recommended setup:** Extract skills as standalone, disable the plugin:
+
+```bash
+# From the claude-hooks repo:
+python3 extract_plugin.py
+```
+
+This copies all 13 skills, agents, and commands to `~/.claude/skills/`,
+`~/.claude/agents/`, and `~/.claude/commands/` as standalone files, then
+sets `"code-analysis@mag-claude-plugins": false` in settings.json. Skills
+are available as `/code-analysis--deep-analysis`, etc. Re-run after plugin
+updates to pick up new skills.
 
 **Requires:** mnemex (for semantic search backend)
 
-**Setup (inside Claude Code):**
+**Skills provided (after extraction):**
 
-```
-/plugin marketplace add MadAppGang/claude-code
-```
-
-Then enable in your project's `.claude/settings.json`:
-```json
-{
-  "enabledPlugins": {
-    "code-analysis@mag-claude-plugins": true
-  }
-}
-```
+| Skill | Description |
+|-------|-------------|
+| `/code-analysis--deep-analysis` | Primary: how does X work, trace flow, find implementations |
+| `/code-analysis--ultrathink-detective` | Comprehensive multi-perspective audit (uses Opus) |
+| `/code-analysis--developer-detective` | Implementation tracing, data flow, symbol usage |
+| `/code-analysis--architect-detective` | Architecture, design patterns, system structure |
+| `/code-analysis--debugger-detective` | Root cause analysis, bug tracing, error investigation |
+| `/code-analysis--tester-detective` | Test coverage, missing tests, edge cases |
+| `/code-analysis--investigate` | Auto-routes to the right detective based on query |
+| `/code-analysis--claudemem-search` | Semantic code search via claudemem |
 
 ### frontend-design (official)
 
 **Importance: MEDIUM** -- Generates distinctive, production-grade frontend
-interfaces. Available from the official Claude plugins marketplace.
+interfaces. Available from the official Claude plugins marketplace. No
+problematic hooks.
 
 **Setup (inside Claude Code):**
 
@@ -265,23 +300,6 @@ The official marketplace is registered by default. Just enable:
 }
 ```
 
-**Skills provided:**
-
 | Skill | Description |
 |-------|-------------|
 | `/frontend-design:frontend-design` | Create polished web components, pages, and apps |
-
-**Skills provided (inside Claude Code):**
-
-| Skill | Description |
-|-------|-------------|
-| `/code-analysis:deep-analysis` | Primary: how does X work, trace flow, find implementations |
-| `/code-analysis:ultrathink-detective` | Comprehensive multi-perspective audit (uses Opus) |
-| `/code-analysis:developer-detective` | Implementation tracing, data flow, symbol usage |
-| `/code-analysis:architect-detective` | Architecture, design patterns, system structure |
-| `/code-analysis:debugger-detective` | Root cause analysis, bug tracing, error investigation |
-| `/code-analysis:tester-detective` | Test coverage, missing tests, edge cases |
-| `/code-analysis:investigate` | Auto-routes to the right detective based on query |
-| `/code-analysis:search` | Semantic code search via claudemem |
-| `/code-analysis:setup` | Add claudemem rules to project CLAUDE.md |
-| `/code-analysis:help` | List all available agents and skills |

@@ -5,7 +5,8 @@ on every prompt and write findings back at the end of the turn.
 
 Install once at the **user level** and every Claude Code session gets
 deterministic memory recall + storage — no per-project init, no model
-forgetting.
+forgetting. v0.4.0 adds episodic-memory sync, cross-platform plugin
+management, and plugin extraction utilities.
 
 ---
 
@@ -217,6 +218,25 @@ This removes the 4 hook entries tagged `_managedBy: "claude-hooks"` from
 
 The 4 methods a provider implements (`detect`, `verify`, `recall`, `store`)
 are the entire contract.
+
+## Plugin Extraction
+
+Some Claude Code plugins inject `additionalContext` on every `PreToolUse`
+event, which accumulates context rapidly and can cause premature compaction.
+The `extract_plugin.py` utility extracts the useful parts (skills, agents,
+commands) as standalone files and disables the plugin's hooks:
+
+```bash
+python3 extract_plugin.py
+```
+
+This currently targets `code-analysis@mag-claude-plugins`, which intercepts
+every Grep, Glob, Bash, Read, and Task call with claudemem enrichment.
+After extraction, all skills (`/code-analysis--investigate`,
+`/code-analysis--deep-analysis`, etc.) remain available on-demand — only the
+automatic per-tool-call injection is removed.
+
+Re-run after a plugin version bump to pick up new skills.
 
 ## Tests
 

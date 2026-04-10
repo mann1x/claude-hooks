@@ -16,8 +16,9 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v0.2.0** — 42 unit tests pass. Installer is functional and
-> idempotent. See `tests/` and `install.py`.
+> Status: **v0.4.0** — 58 tests pass (42 unit + 16 integration). Installer is
+> functional and idempotent. Episodic-memory sync and cross-platform plugin
+> management included. See `tests/` and `install.py`.
 
 ---
 
@@ -392,3 +393,20 @@ The 4 methods a provider must implement (`detect`, `verify`, `recall`,
    `OpenAiCompatibleEmbedder`. Not yet integration-tested against a
    live Postgres or sqlite-vec install. Useful as a starting point if
    you ever want to drop Qdrant or split memory across stores.
+
+---
+
+## Utilities
+
+- **`extract_plugin.py`** — extracts skills/agents/commands from an installed
+  Claude Code plugin into standalone `~/.claude/skills/` etc., then disables
+  the plugin. Useful when a plugin has useful skills but its hooks consume
+  too much context (e.g. `code-analysis@mag-claude-plugins` injects
+  `additionalContext` on every `PreToolUse` event). Cross-platform.
+
+  ```bash
+  python3 extract_plugin.py   # extracts code-analysis, disables plugin
+  ```
+
+  The extracted skills survive plugin updates. Re-run after a plugin version
+  bump to pick up new skills.
