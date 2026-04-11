@@ -238,6 +238,24 @@ automatic per-tool-call injection is removed.
 
 Re-run after a plugin version bump to pick up new skills.
 
+## Vendored MCP servers
+
+### `vendor/mcp-qdrant` — patched `mcp-server-qdrant` with score threshold
+
+Upstream [`mcp-server-qdrant`](https://github.com/qdrant/mcp-server-qdrant)
+always returns `QDRANT_SEARCH_LIMIT` results on every `qdrant-find` call, no
+matter how weak the cosine similarity. On a realistic memory store this
+injects low-confidence noise into your prompt context on every turn.
+
+`vendor/mcp-qdrant/` contains a Dockerfile + idempotent build-time patch that
+adds a `QDRANT_SCORE_THRESHOLD` env var, forwarding Qdrant's native
+`score_threshold` into the MCP server. Set it to e.g. `0.40` and anything
+below that similarity is dropped before reaching `claude-hooks`.
+
+Same image, same endpoints as upstream — just one extra env var. See
+[`vendor/mcp-qdrant/README.md`](vendor/mcp-qdrant/README.md) for the full
+build/run instructions and how to pick a threshold for your embedding model.
+
 ## Scripts
 
 ### `scripts/openwolfstatus` — OpenWolf dashboard status

@@ -1,0 +1,32 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    network_mode: host
+    volumes:
+      - ./data:/qdrant/storage
+    restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.enable=false
+    # Qdrant vector DB on port 6333/6334
+
+  mcp-qdrant:
+    build: .
+    image: mcp-qdrant-proxy:latest
+    network_mode: host
+    environment:
+      - QDRANT_URL=http://127.0.0.1:6333
+      - COLLECTION_NAME=memory
+      # Fastembed is CPU-local (no daemon required). Default model is
+      # sentence-transformers/all-MiniLM-L6-v2 (384-dim). Override with
+      # EMBEDDING_MODEL if your collection was embedded with a different one.
+      - EMBEDDING_PROVIDER=fastembed
+      # Score threshold — drops any qdrant-find result below this cosine
+      # similarity. Unset = upstream behaviour (return top-k regardless).
+      # See README.md § "Picking a threshold" for how to tune this for
+      # your own embedding model + memory store.
+      - QDRANT_SCORE_THRESHOLD=0.40
+    depends_on:
+      - qdrant
+    restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.enable=false
