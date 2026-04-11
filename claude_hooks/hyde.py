@@ -29,11 +29,12 @@ _SYSTEM_PROMPT = (
 def expand_query(
     prompt: str,
     *,
-    model: str = "gemma4:e2b",
-    fallback_model: str = "qwen3:4b",
+    model: str = "qwen3.5:2b",
+    fallback_model: str = "gemma4:e2b",
     url: str = "http://localhost:11434/api/generate",
-    timeout: float = 3.0,
+    timeout: float = 30.0,
     max_tokens: int = 150,
+    keep_alive: str = "15m",
 ) -> str:
     """
     Generate a hypothetical answer to use as a vector search query.
@@ -44,7 +45,7 @@ def expand_query(
 
     # Try primary model first, then fallback.
     for m in [model, fallback_model]:
-        result = _call_ollama(prompt, model=m, url=url, timeout=timeout, max_tokens=max_tokens)
+        result = _call_ollama(prompt, model=m, url=url, timeout=timeout, max_tokens=max_tokens, keep_alive=keep_alive)
         if result:
             log.debug("hyde expanded with %s: %s", m, result[:80])
             return result
@@ -60,14 +61,20 @@ def _call_ollama(
     url: str,
     timeout: float,
     max_tokens: int,
+    keep_alive: str = "-1",
 ) -> str:
-    """Call Ollama generate API. Returns the response text or empty string on failure."""
+    """Call Ollama generate API. Returns the response text or empty string on failure.
+
+    keep_alive: how long Ollama should keep the model resident after this call.
+    "15m" = stays loaded for 15 minutes after last use. "-1" = never unload.
+    """
     body = json.dumps({
         "model": model,
         "system": _SYSTEM_PROMPT,
         "prompt": prompt,
         "stream": False,
         "think": False,
+        "keep_alive": keep_alive,
         "options": {"num_predict": max_tokens},
     }).encode("utf-8")
 

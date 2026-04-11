@@ -238,6 +238,53 @@ automatic per-tool-call injection is removed.
 
 Re-run after a plugin version bump to pick up new skills.
 
+## Scripts
+
+### `scripts/openwolfstatus` — OpenWolf dashboard status
+
+Shows all registered OpenWolf projects, their dashboard/daemon port
+assignments, and PM2 process status. Warns if the PM2 state hasn't been
+saved (i.e. new daemons won't survive a reboot).
+
+```bash
+# Linux
+./scripts/openwolfstatus.sh
+
+# Windows
+scripts\openwolfstatus.bat
+```
+
+### PM2 auto-start on boot
+
+OpenWolf daemons run under PM2. After starting or changing daemons, run
+`pm2 save` to persist the process list. Then set up auto-start:
+
+**Linux (systemd):**
+
+```bash
+pm2 startup          # generates and enables a systemd service (pm2-<user>)
+pm2 save             # saves current process list for resurrection
+```
+
+This creates `/etc/systemd/system/pm2-<user>.service` which runs
+`pm2 resurrect` on boot.
+
+**Windows:**
+
+```bash
+npm install -g pm2-windows-startup
+pm2-startup install  # adds a registry entry for auto-start on login
+pm2 save             # saves current process list
+```
+
+This adds a `PM2` entry under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` that launches
+`pm2 resurrect` at login.
+
+> **Important:** Every time you add or remove an OpenWolf daemon, run
+> `pm2 save` again. Without it, the new daemon won't be restored after
+> a reboot.
+
 ## Tests
 
 ```bash
