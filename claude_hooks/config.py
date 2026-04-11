@@ -69,6 +69,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "max_total_chars": 4000,
             # --- v0.2 features ---
             "hyde_enabled": False,
+            "hyde_grounded": True,
+            "hyde_ground_k": 3,
+            "hyde_ground_max_chars": 1500,
             "hyde_model": "qwen3.5:2b",
             "hyde_fallback_model": "gemma4:e2b",
             "hyde_url": "http://localhost:11434/api/generate",
