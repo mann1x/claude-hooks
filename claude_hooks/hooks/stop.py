@@ -234,7 +234,16 @@ def _build_summary(event: dict, transcript: Optional[list[dict]]) -> str:
     if cwd:
         parts.append(f"cwd: {cwd}")
     if user_text:
-        parts.append(f"\n## Prompt\n{_truncate(user_text, 600)}")
+        # Skip storing meta/system prompts (e.g. Caliber learning extraction,
+        # session analysis) — they pollute Qdrant recall on context resume.
+        _meta_markers = (
+            "extract reusable operational lessons",
+            "analyze raw tool call events",
+            "You are an expert developer experience engineer",
+            "claudeMdLearnedSection",
+        )
+        if not any(m in user_text[:500] for m in _meta_markers):
+            parts.append(f"\n## Prompt\n{_truncate(user_text, 600)}")
     if asst_text:
         parts.append(f"\n## Result\n{_truncate(asst_text, 1200)}")
     if files_touched:
