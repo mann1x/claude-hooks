@@ -1,0 +1,12 @@
+# Caliber Learnings
+
+Accumulated patterns and anti-patterns from development sessions.
+Auto-managed by [caliber](https://github.com/caliber-ai-org/ai-setup) — do not edit manually.
+
+- **[gotcha]** `CLAUDE_CODE_SIMPLE=1` env var breaks OAuth authentication in `claude -p` — causes "Not logged in" even when `claude auth status` reports logged in. Caliber's `spawnClaude` sets this var, which is the root cause of `caliber learn finalize` failures with claude-cli provider. Fix: patch `/usr/local/lib/node_modules/@rely-ai/caliber/dist/bin.js` to `delete env.CLAUDE_CODE_SIMPLE` instead of setting it to "1". This patch must be re-applied after every `npm install -g @rely-ai/caliber` upgrade.
+- **[gotcha]** Caliber session state (`/.caliber/learning/state.json` and `current-session.jsonl`) can accumulate stale events across sessions. If `eventCount` grows large without `lastAnalysisTimestamp` advancing, reset both files manually: write `{"sessionId":null,"eventCount":0,"lastAnalysisTimestamp":null,"lastAnalysisEventCount":0}` to state.json and truncate the jsonl.
+- **[env]** Caliber error diagnostics live in multiple files: `.caliber/learning/last-error.json` (learn finalize errors), `.caliber/last-refresh-error.json` (refresh errors), `.caliber/error-log.md` (generation errors with raw LLM output). Check all three when debugging.
+- **[gotcha]** `CLAUDE_CODE_SIMPLE=1` env var breaks OAuth authentication when running `claude -p`. Claude CLI returns "Not logged in · Please run /login" even though `claude auth status` reports `loggedIn: true`. Any tool that spawns `claude -p` (e.g. Caliber) must NOT set this env var. Workaround: `delete env.CLAUDE_CODE_SIMPLE` before spawning, or use `env -u CLAUDE_CODE_SIMPLE claude -p`.
+- **[gotcha]** Caliber's `finalize.lock` at `.caliber/learning/finalize.lock` can get stuck after a failed finalize run. If `caliber learn finalize` reports "another finalize is in progress" but nothing is actually running, manually delete the lock file.
+- **[pattern]** When Caliber's `claude-cli` provider fails with auth errors, the root cause is usually an env var conflict — not missing credentials. Check the spawned process environment before assuming the OAuth token is invalid.
+- **[env]** Caliber stores its LLM provider config at `~/.caliber/config.json` (global) and `.caliber/config.json` (project). The `provider: "claude-cli"` setting means it shells out to `claude -p` — no API key needed, but the CLI must be logged in and the spawn environment must be clean.
