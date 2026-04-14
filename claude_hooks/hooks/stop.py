@@ -34,6 +34,20 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     transcript_path = event.get("transcript_path")
     transcript = _read_transcript(transcript_path) if transcript_path else None
 
+    # Claudemem reindex: if the turn touched files and the project has
+    # a claudemem index, spawn a background reindex. Runs detached so
+    # it never adds latency to the hook itself.
+    reindex_cfg = (config.get("hooks") or {}).get("claudemem_reindex") or {}
+    if reindex_cfg.get("enabled", True) and _turn_modified_files(transcript):
+        try:
+            from claude_hooks.claudemem_reindex import reindex_if_dirty_async
+            reindex_if_dirty_async(
+                cwd=event.get("cwd", ""),
+                turn_modified=True,
+            )
+        except Exception as e:
+            log.debug("claudemem reindex skipped: %s", e)
+
     # Stop-phrase guard: if the assistant is about to stop with an
     # ownership-dodging or session-quitting phrase, block the stop and
     # feed back a correction. Skip if the hook already fired this turn
@@ -171,6 +185,26 @@ def _find_last_user_idx(transcript: list[dict]) -> int:
         if isinstance(msg, dict) and _msg_role(msg) == "user":
             return i
     return -1
+
+
+def _turn_modified_files(transcript: Optional[list[dict]]) -> bool:
+    """Return True if the most recent turn called Edit/Write/MultiEdit."""
+    if not transcript:
+        return False
+    last_user_idx = _find_last_user_idx(transcript)
+    if last_user_idx < 0:
+        return False
+    modifying_tools = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+    for msg in transcript[last_user_idx + 1 :]:
+        if not isinstance(msg, dict):
+            continue
+        content = (msg.get("message") or {}).get("content") or msg.get("content") or []
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    if block.get("name") in modifying_tools:
+                        return True
+    return False
 
 
 def _is_noteworthy(transcript: Optional[list[dict]]) -> bool:

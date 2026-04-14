@@ -118,6 +118,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "session_end": {
             "enabled": True,
         },
+        "claudemem_reindex": {
+            # Auto-reindex the claudemem semantic index when the project
+            # has been modified. Runs detached (no per-turn latency) and
+            # silently no-ops if the claudemem binary is missing or the
+            # project has no .claudemem directory. Complements claudemem's
+            # own post-commit git hook (`claudemem hooks install`) by
+            # covering mid-session edits and out-of-Claude-Code changes.
+            "enabled": True,
+            # Stop-event: reindex if any Edit/Write/MultiEdit ran this turn.
+            "check_on_stop": True,
+            # SessionStart: if the index trails the newest source mtime by
+            # more than this many minutes, reindex.
+            "check_on_session_start": True,
+            "staleness_minutes": 10,
+        },
         "pre_tool_use": {
             # Memory-warn stage (advisory additionalContext from provider recall).
             "enabled": False,

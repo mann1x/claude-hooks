@@ -20,6 +20,21 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     hook_cfg = (config.get("hooks") or {}).get("session_start") or {}
     if not hook_cfg.get("enabled", True):
         return None
+
+    # Claudemem freshness: if the index is stale compared to the newest
+    # source file, kick off a detached reindex. Silent no-op if claudemem
+    # is not installed or the project has no .claudemem directory.
+    reindex_cfg = (config.get("hooks") or {}).get("claudemem_reindex") or {}
+    if reindex_cfg.get("enabled", True) and reindex_cfg.get("check_on_session_start", True):
+        try:
+            from claude_hooks.claudemem_reindex import reindex_if_stale_async
+            reindex_if_stale_async(
+                cwd=event.get("cwd", ""),
+                staleness_minutes=int(reindex_cfg.get("staleness_minutes", 10)),
+            )
+        except Exception as e:
+            log.debug("claudemem stale-check skipped: %s", e)
+
     if not providers:
         return None
 
