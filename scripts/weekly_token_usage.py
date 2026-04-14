@@ -643,15 +643,43 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--current-usage-pct", type=float, default=None, metavar="PCT",
         help="Anthropic's reported weekly-limit percentage (0-100). When "
              "set, adds a %%Limit column showing each day's share of the "
-             "limit, derived as (day_tokens / week_tokens) * PCT. The "
-             "absolute token limit for the subscription is not published "
-             "anywhere and not exposed by Claude Code programmatically — "
-             "the UI percentage is server-side only, so you have to read "
-             "it off the UI manually and pass it here.",
+             "limit. Normally server-side only — but if you run the "
+             "claude-hooks proxy (docs/proxy.md) it auto-populates this "
+             "from the rate-limit headers and this flag becomes optional.",
+    )
+    ap.add_argument(
+        "--proxy-state", type=Path, default=None, metavar="PATH",
+        help="path to the proxy's ratelimit-state.json. Default looks "
+             "under ~/.claude/claude-hooks-proxy/. Only used when "
+             "--current-usage-pct is not provided.",
     )
     args = ap.parse_args(argv)
 
     display_tz_name = args.display_tz or args.reset_tz
+
+    # P1 hand-off: if the user didn't pass --current-usage-pct, try to
+    # pick it up from the proxy's rolling state file.
+    current_usage_pct = args.current_usage_pct
+    proxy_state_info: Optional[dict] = None
+    if current_usage_pct is None:
+        state_path = (
+            args.proxy_state
+            or Path.home() / ".claude" / "claude-hooks-proxy" / "ratelimit-state.json"
+        )
+        if state_path.exists():
+            try:
+                with open(state_path, "r", encoding="utf-8") as f:
+                    proxy_state_info = json.load(f)
+                claim = (proxy_state_info or {}).get("representative_claim")
+                # Prefer the binding claim; fall back to 5h.
+                if claim == "seven_day":
+                    util = proxy_state_info.get("seven_day_utilization")
+                else:
+                    util = proxy_state_info.get("five_hour_utilization")
+                if isinstance(util, (int, float)):
+                    current_usage_pct = float(util) * 100.0
+            except (OSError, json.JSONDecodeError):
+                proxy_state_info = None
 
     now_utc = datetime.now(timezone.utc)
     week_start_utc = most_recent_reset(
@@ -682,19 +710,26 @@ def main(argv: Optional[list[str]] = None) -> int:
             week_start_utc=week_start_utc,
             week_end_utc=week_end_utc,
             display_tz_name=display_tz_name,
-            current_usage_pct=args.current_usage_pct,
+            current_usage_pct=current_usage_pct,
         ))
     else:
         display_tz = _zone(display_tz_name)
-        print(render_text(
+        out = render_text(
             buckets,
             week_start_local=week_start_utc.astimezone(display_tz),
             week_end_local=week_end_utc.astimezone(display_tz),
             display_tz_name=display_tz_name,
             show_by_model=args.by_model,
             show_sidechain=args.show_sidechain,
-            current_usage_pct=args.current_usage_pct,
-        ))
+            current_usage_pct=current_usage_pct,
+        )
+        if proxy_state_info and args.current_usage_pct is None:
+            out += (
+                f"\n\nLimit % auto-populated from claude-hooks proxy "
+                f"(claim={proxy_state_info.get('representative_claim','?')}"
+                f", updated={proxy_state_info.get('last_updated','?')})."
+            )
+        print(out)
     return 0
 
 

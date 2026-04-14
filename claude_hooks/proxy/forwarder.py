@@ -49,6 +49,12 @@ class UpstreamResult:
     body_iter: Iterable[bytes]            # the remaining bytes to stream to client
     bytes_read: int = 0                   # populated progressively by body_iter
     stats: dict = field(default_factory=dict)
+    # SSE tail — populated as chunks flow past. After the stream is
+    # fully drained, ``sse_tail.final_usage`` has the canonical
+    # usage block (message_delta is the billing truth), and
+    # ``sse_tail.stop_reason`` is e.g. 'end_turn' / 'tool_use' /
+    # 'max_tokens'. None when the response wasn't SSE.
+    sse_tail: "Optional[object]" = None
 
 
 def forward(
@@ -100,6 +106,20 @@ def forward(
 
     stats = {"bytes_read": len(first_chunk)}
 
+    # SSE responses stream the final ``usage`` block in a trailing
+    # ``message_delta``. We attach a tailer that parses events as they
+    # flow past and populates ``stats['final_usage']`` / ``stop_reason``
+    # for the JSONL log. The bytes going to the client are verbatim.
+    from claude_hooks.proxy.sse import SseTail
+    content_type = response_headers.get("Content-Type", "").lower()
+    is_sse = "text/event-stream" in content_type
+    tail: Optional[SseTail] = SseTail() if is_sse else None
+
+    # Seed the tailer with the first chunk so message_start lands in
+    # final_usage even if the caller never iterates further.
+    if tail is not None and first_chunk:
+        tail._feed(first_chunk)
+
     def _drain() -> Iterable[bytes]:
         try:
             while True:
@@ -107,8 +127,13 @@ def forward(
                 if not chunk:
                     break
                 stats["bytes_read"] += len(chunk)
+                if tail is not None:
+                    tail._feed(chunk)
                 yield chunk
         finally:
+            if tail is not None and tail._buffer:
+                tail._parse_event(tail._buffer)
+                tail._buffer = b""
             try:
                 conn.close()
             except Exception:
@@ -121,4 +146,5 @@ def forward(
         first_chunk=first_chunk,
         body_iter=_drain(),
         stats=stats,
+        sse_tail=tail,
     )

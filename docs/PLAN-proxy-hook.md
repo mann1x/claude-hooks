@@ -149,14 +149,18 @@ And the user's shell / settings.json needs:
   under `log_dir`.
 - Systemd unit / Windows service installer (opt-in).
 
-### Phase P1 — observability (est. 2 d)
-- Parse response streams (SSE) to extract model + usage blocks
-  without buffering the whole body.
-- Record rate-limit headers into a rolling file that the
-  `weekly_token_usage.py` script can read — finally gives us the
-  "weekly %" number that is currently UI-only.
-- Emit `ProxyResponse` + `ProxyModelSubst` events to the
-  dispatcher.
+### Phase P1 — observability (DONE)
+
+- [x] SSE tail (`claude_hooks/proxy/sse.py`) parses `message_start`
+      + `message_delta` as bytes flow past without buffering the whole
+      body. Final usage and `stop_reason` land in the JSONL log.
+- [x] Rolling rate-limit state file
+      (`claude_hooks/proxy/ratelimit_state.py`) — atomic-replace write
+      keyed on `anthropic-ratelimit-unified-*` headers.
+- [x] `scripts/weekly_token_usage.py` auto-reads the state file and
+      auto-fills `--current-usage-pct` when the flag is absent.
+- [ ] `ProxyResponse` / `ProxyModelSubst` hook fan-out — deferred to
+      P2 (no handlers need it yet in claude-hooks).
 
 ### Phase P2 — selective intervention (est. 2 d)
 - `block_warmup: true` short-circuits requests whose body content

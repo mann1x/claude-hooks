@@ -1,4 +1,4 @@
-# claude-hooks proxy (Phase P0) — setup
+# claude-hooks proxy (Phases P0 + P1) — setup
 
 Opt-in local HTTP proxy in front of `api.anthropic.com`. Hooks can't
 see the raw HTTPS traffic; the proxy can. P0 is **observability
@@ -98,9 +98,27 @@ Design + phased roadmap: [PLAN-proxy-hook.md](./PLAN-proxy-hook.md).
   stop the proxy process. Claude Code goes back to hitting the API
   directly on the next session.
 
-## Not yet (P1..P4)
+## What's new in P1
 
-- P1 — rate-limit log → auto-populate `--current-usage-pct`
+- **SSE tail** captures the final `usage` block from the trailing
+  `message_delta` event (the canonical billing numbers) instead of
+  the estimate from `message_start`. Falls back to `message_start`
+  when no `message_delta` arrives.
+- **`stop_reason`** captured from `message_delta.delta.stop_reason`
+  (`end_turn` / `tool_use` / `max_tokens` / …).
+- **Rolling rate-limit state file** at
+  `<log_dir>/ratelimit-state.json`. Atomic-replace write on every
+  response that carries `anthropic-ratelimit-unified-*` headers.
+- **`scripts/weekly_token_usage.py` auto-populates `--current-usage-pct`**
+  from that state file. If the proxy is running and Claude Code has
+  hit the API at least once this window, the `%Limit` column appears
+  without any manual input. Footer notes when the value came from the
+  proxy (with source timestamp) so you know it's live, not stale.
+- **`--proxy-state PATH`** new CLI flag to point the script at a
+  non-default state file (testing / multi-host setups).
+
+## Not yet (P2..P4)
+
 - P2 — `/events` endpoint emitting `ProxyResponse` / `ProxyModelSubst`
 - P3 — `block_warmup: true` to short-circuit the Warmup drain
   without the all-or-nothing side-effects of

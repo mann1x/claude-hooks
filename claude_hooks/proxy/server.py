@@ -29,6 +29,7 @@ from claude_hooks.config import expand_user_path, load_config
 from claude_hooks.proxy.forwarder import UpstreamResult, forward
 from claude_hooks.proxy.logger import JsonlLogger
 from claude_hooks.proxy.metadata import extract_request_info, extract_response_info
+from claude_hooks.proxy.ratelimit_state import update_state_file
 
 log = logging.getLogger("claude_hooks.proxy.server")
 
@@ -43,6 +44,7 @@ class _Handler(BaseHTTPRequestHandler):
     # Class-level state injected by ``build_server``.
     proxy_cfg: dict = {}
     jsonl_logger: Optional[JsonlLogger] = None
+    ratelimit_state_path: Optional[Path] = None
 
     # Silence default access log — we have our own.
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
@@ -156,11 +158,41 @@ class _Handler(BaseHTTPRequestHandler):
         req_bytes: int = 0, resp_bytes: int = 0,
         extra: Optional[dict] = None,
     ) -> None:
+        # Prefer the SSE-tail's final usage (message_delta) over the
+        # first-chunk usage (message_start). The delta carries the
+        # canonical billing output_tokens.
+        final_usage = resp_meta.get("usage")
+        stop_reason = None
+        if result is not None and result.sse_tail is not None:
+            tail = result.sse_tail
+            # Merge: start for input/cache, delta for output.
+            merged = dict(resp_meta.get("usage") or {})
+            if tail.final_usage:
+                merged.update(tail.final_usage)
+            if merged:
+                final_usage = merged
+            stop_reason = tail.stop_reason
+
+        rate_limit = resp_meta.get("rate_limit")
+        req_ts = _now_iso()
+
+        # P1 — update rolling rate-limit state file so downstream
+        # scripts (weekly_token_usage.py) can read the real %.
+        if (
+            self.ratelimit_state_path is not None
+            and self.proxy_cfg.get("record_rate_limit_headers", True)
+        ):
+            update_state_file(
+                self.ratelimit_state_path,
+                rate_limit_headers=rate_limit,
+                request_ts=req_ts,
+            )
+
         if self.jsonl_logger is None or not self.proxy_cfg.get("log_requests", True):
             return
         path, _, query = self.path.partition("?")
         record = {
-            "ts": _now_iso(),
+            "ts": req_ts,
             "method": self.command,
             "path": path,
             "query": query,
@@ -171,8 +203,9 @@ class _Handler(BaseHTTPRequestHandler):
             "resp_bytes": resp_bytes,
             "model_requested": req_meta.get("model_requested"),
             "model_delivered": resp_meta.get("model_delivered"),
-            "usage": resp_meta.get("usage"),
-            "rate_limit": resp_meta.get("rate_limit"),
+            "usage": final_usage,
+            "stop_reason": stop_reason,
+            "rate_limit": rate_limit,
             "is_warmup": req_meta.get("is_warmup", False),
             "synthetic": resp_meta.get("synthetic", False),
             "session_id": req_meta.get("session_id"),
@@ -198,10 +231,12 @@ def build_server(cfg: Optional[dict] = None) -> tuple[ThreadingHTTPServer, Jsonl
     retention = int(pcfg.get("log_retention_days", 14))
 
     jsonl_logger = JsonlLogger(Path(log_dir), retention_days=retention)
+    ratelimit_state_path = Path(log_dir) / "ratelimit-state.json"
 
     class _HandlerBound(_Handler):
         proxy_cfg = pcfg
     _HandlerBound.jsonl_logger = jsonl_logger
+    _HandlerBound.ratelimit_state_path = ratelimit_state_path
 
     server = ThreadingHTTPServer((host, port), _HandlerBound)
     server.daemon_threads = True
