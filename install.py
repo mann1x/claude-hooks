@@ -327,6 +327,13 @@ def main() -> int:
     # Episodic memory setup.
     _setup_episodic(cfg, cfg_path, args, dry_run=args.dry_run)
 
+    # Optional: Claude Code env-var recommendations.
+    _prompt_env_vars(
+        settings_path,
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
+
     conda_py = CONDA_PY_WIN if os.name == "nt" else CONDA_PY_LINUX
     print("\n==> Done.")
     print("    Open a new Claude Code session and the hooks will fire on the next prompt.")
@@ -924,6 +931,96 @@ def _install_episodic_systemd(host: str, port: int, *, non_interactive: bool, dr
         print(f"  Logs: journalctl -u {SYSTEMD_UNIT} -f")
     else:
         print(f"  [!!] Service failed to start. Check: journalctl -u {SYSTEMD_UNIT}")
+
+
+def _prompt_env_vars(
+    settings_path: Path,
+    *,
+    non_interactive: bool,
+    dry_run: bool,
+) -> None:
+    """Offer to inject opt-in Claude Code env-var recommendations into
+    ~/.claude/settings.json. Defaults to No — nothing is applied without
+    explicit user consent.
+
+    Covers:
+      - CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1  (kills subagent Warmup
+        drain; see docs/issue-warmup-token-drain.md + #47922).
+      - The "bcherny stack" (DISABLE_ADAPTIVE_THINKING +
+        MAX_THINKING_TOKENS + AUTO_COMPACT_WINDOW +
+        AUTOCOMPACT_PCT_OVERRIDE). Default No — per our field test it
+        introduced more trivial mistakes on this project. Presented so
+        users can opt in if they saw it recommended elsewhere.
+
+    See docs/env-vars.md for the per-var verdict.
+    """
+    print("\n==> Optional Claude Code env-var recommendations")
+    print("    (See docs/env-vars.md for full rationale and verdicts.)")
+
+    if non_interactive:
+        print("  --non-interactive: skipping (nothing applied).")
+        return
+
+    ans = input(
+        "  Apply CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 to stop the\n"
+        "  subagent Warmup token drain (issue #47922)?\n"
+        "  Side-effect: also disables Ctrl+B and Bash run_in_background.\n"
+        "  [y/N]: "
+    ).strip().lower()
+    warmup_fix = ans == "y"
+
+    ans = input(
+        "\n  Apply the bcherny stack (DISABLE_ADAPTIVE_THINKING=1,\n"
+        "  MAX_THINKING_TOKENS=63999, AUTO_COMPACT_WINDOW=400000,\n"
+        "  AUTOCOMPACT_PCT_OVERRIDE=75)?\n"
+        "  NOTE: our field test found this INCREASED trivial mistakes\n"
+        "  on heavy-refactor workflows. Recommended only if you already\n"
+        "  tested it successfully. [y/N]: "
+    ).strip().lower()
+    bcherny_stack = ans == "y"
+
+    if not (warmup_fix or bcherny_stack):
+        print("  Nothing to apply.")
+        return
+
+    to_set: dict[str, str] = {}
+    if warmup_fix:
+        to_set["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
+    if bcherny_stack:
+        to_set["CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING"] = "1"
+        to_set["MAX_THINKING_TOKENS"] = "63999"
+        to_set["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "400000"
+        to_set["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = "75"
+
+    if dry_run:
+        print(f"  [dry-run] would set in {settings_path}:")
+        for k, v in to_set.items():
+            print(f"    {k}={v}")
+        return
+
+    # Load / create settings.json, merge env block, back up first.
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings = _load_json(settings_path) if settings_path.exists() else {}
+
+    bak = backup_path(settings_path)
+    if settings_path.exists():
+        try:
+            shutil.copy(settings_path, bak)
+            print(f"  Backup: {bak}")
+        except OSError as e:
+            print(f"  [!!] Could not back up {settings_path}: {e}")
+            return
+
+    env = settings.setdefault("env", {})
+    if not isinstance(env, dict):
+        print(f"  [!!] Existing settings.json 'env' is not an object — aborting.")
+        return
+    for k, v in to_set.items():
+        env[k] = v
+    _save_json(settings_path, settings)
+    print(f"  Updated: {settings_path}")
+    for k, v in to_set.items():
+        print(f"    {k}={v}")
 
 
 if __name__ == "__main__":
