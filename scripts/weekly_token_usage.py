@@ -333,6 +333,7 @@ def render_text(
     week_end_local: datetime,
     display_tz_name: str,
     show_by_model: bool,
+    weekly_limit_tokens: Optional[int] = None,
 ) -> str:
     lines: list[str] = []
     lines.append(
@@ -344,14 +345,23 @@ def render_text(
     )
     lines.append("")
 
+    week_total = sum(b.total for b in buckets)
+
+    pct_col_label = "%Limit" if weekly_limit_tokens else "%Week"
     header = (
         f"{'Day':<14}{'Input':>12}{'Output':>12}"
         f"{'CacheCr':>12}{'CacheRd':>14}{'Total':>14}"
-        f"{'Msgs':>8}{'Tools':>8}"
+        f"{pct_col_label:>8}{'Msgs':>8}{'Tools':>8}"
     )
     sep = "-" * len(header)
     lines.append(header)
     lines.append(sep)
+
+    def _pct(n: int) -> str:
+        denom = weekly_limit_tokens if weekly_limit_tokens else week_total
+        if not denom:
+            return "   —"
+        return f"{100.0 * n / denom:7.2f}"
 
     tot = DayBucket(date_str="TOTAL", weekday_label="")
     for b in buckets:
@@ -362,6 +372,7 @@ def render_text(
             f"{_fmt_int(b.cache_creation_input_tokens):>12}"
             f"{_fmt_int(b.cache_read_input_tokens):>14}"
             f"{_fmt_int(b.total):>14}"
+            f"{_pct(b.total):>8}"
             f"{b.message_count:>8}"
             f"{b.tool_call_count:>8}"
         )
@@ -379,9 +390,19 @@ def render_text(
         f"{_fmt_int(tot.cache_creation_input_tokens):>12}"
         f"{_fmt_int(tot.cache_read_input_tokens):>14}"
         f"{_fmt_int(tot.total):>14}"
+        f"{_pct(tot.total):>8}"
         f"{tot.message_count:>8}"
         f"{tot.tool_call_count:>8}"
     )
+    if weekly_limit_tokens:
+        remaining = weekly_limit_tokens - tot.total
+        pct_used = 100.0 * tot.total / weekly_limit_tokens if weekly_limit_tokens else 0
+        lines.append("")
+        lines.append(
+            f"Weekly limit: {_fmt_int(weekly_limit_tokens)} tokens"
+            f"  |  used: {pct_used:.2f}%"
+            f"  |  remaining: {_fmt_int(max(0, remaining))}"
+        )
 
     if show_by_model:
         lines.append("")
@@ -425,13 +446,24 @@ def render_json(
     week_start_utc: datetime,
     week_end_utc: datetime,
     display_tz_name: str,
+    weekly_limit_tokens: Optional[int] = None,
 ) -> str:
+    week_total = sum(b.total for b in buckets)
+    denom = weekly_limit_tokens or week_total
+
+    def _pct(n: int) -> Optional[float]:
+        if not denom:
+            return None
+        return round(100.0 * n / denom, 4)
+
     payload = {
         "window": {
             "start_utc": week_start_utc.isoformat(),
             "end_utc": week_end_utc.isoformat(),
             "display_tz": display_tz_name,
         },
+        "weekly_limit_tokens": weekly_limit_tokens,
+        "percentage_basis": "limit" if weekly_limit_tokens else "week_total",
         "days": [
             {
                 "date": b.date_str,
@@ -441,6 +473,7 @@ def render_json(
                 "cache_creation_input_tokens": b.cache_creation_input_tokens,
                 "cache_read_input_tokens": b.cache_read_input_tokens,
                 "total": b.total,
+                "percentage": _pct(b.total),
                 "message_count": b.message_count,
                 "tool_call_count": b.tool_call_count,
                 "by_model": b.by_model,
@@ -508,6 +541,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--json", action="store_true",
         help="emit JSON instead of a human-readable table",
     )
+    ap.add_argument(
+        "--weekly-limit", type=int, default=None, metavar="TOKENS",
+        help="absolute weekly token limit. When set, the %%-column reports "
+             "each day's share of the limit and the total line shows the "
+             "remaining budget. Anthropic does not publish exact weekly "
+             "subscription limits, so this is manual — set it from your "
+             "plan's published token number if you have one, otherwise "
+             "leave unset to see each day's share of the week's own total.",
+    )
     args = ap.parse_args(argv)
 
     display_tz_name = args.display_tz or args.reset_tz
@@ -541,6 +583,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             week_start_utc=week_start_utc,
             week_end_utc=week_end_utc,
             display_tz_name=display_tz_name,
+            weekly_limit_tokens=args.weekly_limit,
         ))
     else:
         display_tz = _zone(display_tz_name)
@@ -550,6 +593,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             week_end_local=week_end_utc.astimezone(display_tz),
             display_tz_name=display_tz_name,
             show_by_model=args.by_model,
+            weekly_limit_tokens=args.weekly_limit,
         ))
     return 0
 
