@@ -39,15 +39,26 @@ Usage
     # Break out Opus / Sonnet / Haiku separately
     python3 scripts/weekly_token_usage.py --by-model
 
+    # Map day-by-day contribution onto Anthropic's reported weekly %
+    # (read off the Claude Code UI — nothing local reports it)
+    python3 scripts/weekly_token_usage.py --current-usage-pct 65
+
 Notes
 -----
 
 - Claude Code's ``/cost`` slash command is session-scoped only and
   can't be queried non-interactively for a weekly total (``claude -p
-  /cost`` prints "You are currently using your subscription"). This
-  script reads the transcripts directly, which is what
-  `ccusage <https://github.com/ryoppippi/ccusage>`_ does too.
-- For a cross-reference with USD pricing and model breakdown, try::
+  /cost`` prints "You are currently using your subscription"). The
+  ``/status`` and ``/stats`` skills don't exist. The UI's "you are at
+  X % of your weekly limit" number is computed server-side and is
+  **not** written to any file under ``~/.claude/``. The only way to
+  use it is to read it off the UI and pass ``--current-usage-pct X``.
+- Anthropic does not publish the absolute token count of the weekly
+  subscription limit for any plan. Only the reported percentage is
+  ground truth — everything else is a ratio of observed tokens.
+- This script reads transcripts directly, which is also what
+  `ccusage <https://github.com/ryoppippi/ccusage>`_ does. For a USD
+  cross-reference with model breakdown::
 
       npx -y ccusage@latest daily -z Europe/Berlin --since 20260410 --breakdown
 
@@ -333,7 +344,7 @@ def render_text(
     week_end_local: datetime,
     display_tz_name: str,
     show_by_model: bool,
-    weekly_limit_tokens: Optional[int] = None,
+    current_usage_pct: Optional[float] = None,
 ) -> str:
     lines: list[str] = []
     lines.append(
@@ -347,35 +358,51 @@ def render_text(
 
     week_total = sum(b.total for b in buckets)
 
-    pct_col_label = "%Limit" if weekly_limit_tokens else "%Week"
-    header = (
+    # Two percentage views:
+    #   %Week   — each day's share of the week's own observed total (always
+    #             computable, sums to 100).
+    #   %Limit  — when the user passes --current-usage-pct, each day's
+    #             share of the weekly *limit*, computed as
+    #             (day.total / week_total) * current_usage_pct. This maps
+    #             the relative split onto the one authoritative number
+    #             Anthropic exposes — the percentage reported in the CLI.
+    header_cols = (
         f"{'Day':<14}{'Input':>12}{'Output':>12}"
         f"{'CacheCr':>12}{'CacheRd':>14}{'Total':>14}"
-        f"{pct_col_label:>8}{'Msgs':>8}{'Tools':>8}"
+        f"{'%Week':>8}"
     )
-    sep = "-" * len(header)
-    lines.append(header)
+    if current_usage_pct is not None:
+        header_cols += f"{'%Limit':>8}"
+    header_cols += f"{'Msgs':>8}{'Tools':>8}"
+    sep = "-" * len(header_cols)
+    lines.append(header_cols)
     lines.append(sep)
 
-    def _pct(n: int) -> str:
-        denom = weekly_limit_tokens if weekly_limit_tokens else week_total
-        if not denom:
+    def _pct_of_week(n: int) -> str:
+        if not week_total:
             return "   —"
-        return f"{100.0 * n / denom:7.2f}"
+        return f"{100.0 * n / week_total:7.2f}"
+
+    def _pct_of_limit(n: int) -> str:
+        if not week_total or current_usage_pct is None:
+            return "   —"
+        return f"{(100.0 * n / week_total) * (current_usage_pct / 100.0):7.2f}"
 
     tot = DayBucket(date_str="TOTAL", weekday_label="")
     for b in buckets:
-        lines.append(
+        row = (
             f"{b.weekday_label} {b.date_str:<9}"
             f"{_fmt_int(b.input_tokens):>12}"
             f"{_fmt_int(b.output_tokens):>12}"
             f"{_fmt_int(b.cache_creation_input_tokens):>12}"
             f"{_fmt_int(b.cache_read_input_tokens):>14}"
             f"{_fmt_int(b.total):>14}"
-            f"{_pct(b.total):>8}"
-            f"{b.message_count:>8}"
-            f"{b.tool_call_count:>8}"
+            f"{_pct_of_week(b.total):>8}"
         )
+        if current_usage_pct is not None:
+            row += f"{_pct_of_limit(b.total):>8}"
+        row += f"{b.message_count:>8}{b.tool_call_count:>8}"
+        lines.append(row)
         tot.input_tokens += b.input_tokens
         tot.output_tokens += b.output_tokens
         tot.cache_creation_input_tokens += b.cache_creation_input_tokens
@@ -383,25 +410,29 @@ def render_text(
         tot.message_count += b.message_count
         tot.tool_call_count += b.tool_call_count
     lines.append(sep)
-    lines.append(
+    tot_row = (
         f"{'TOTAL':<14}"
         f"{_fmt_int(tot.input_tokens):>12}"
         f"{_fmt_int(tot.output_tokens):>12}"
         f"{_fmt_int(tot.cache_creation_input_tokens):>12}"
         f"{_fmt_int(tot.cache_read_input_tokens):>14}"
         f"{_fmt_int(tot.total):>14}"
-        f"{_pct(tot.total):>8}"
-        f"{tot.message_count:>8}"
-        f"{tot.tool_call_count:>8}"
+        f"{_pct_of_week(tot.total):>8}"
     )
-    if weekly_limit_tokens:
-        remaining = weekly_limit_tokens - tot.total
-        pct_used = 100.0 * tot.total / weekly_limit_tokens if weekly_limit_tokens else 0
+    if current_usage_pct is not None:
+        tot_row += f"{current_usage_pct:7.2f}"
+    tot_row += f"{tot.message_count:>8}{tot.tool_call_count:>8}"
+    lines.append(tot_row)
+    if current_usage_pct is not None:
+        remaining = max(0.0, 100.0 - current_usage_pct)
         lines.append("")
         lines.append(
-            f"Weekly limit: {_fmt_int(weekly_limit_tokens)} tokens"
-            f"  |  used: {pct_used:.2f}%"
-            f"  |  remaining: {_fmt_int(max(0, remaining))}"
+            f"Weekly limit (reported by Claude Code): used {current_usage_pct:.2f}%"
+            f"  |  remaining {remaining:.2f}%"
+        )
+        lines.append(
+            "  '%Limit' = each day's share of the total limit, derived as"
+            " (day_tokens / week_tokens) × reported_pct."
         )
 
     if show_by_model:
@@ -446,15 +477,21 @@ def render_json(
     week_start_utc: datetime,
     week_end_utc: datetime,
     display_tz_name: str,
-    weekly_limit_tokens: Optional[int] = None,
+    current_usage_pct: Optional[float] = None,
 ) -> str:
     week_total = sum(b.total for b in buckets)
-    denom = weekly_limit_tokens or week_total
 
-    def _pct(n: int) -> Optional[float]:
-        if not denom:
+    def _pct_of_week(n: int) -> Optional[float]:
+        if not week_total:
             return None
-        return round(100.0 * n / denom, 4)
+        return round(100.0 * n / week_total, 4)
+
+    def _pct_of_limit(n: int) -> Optional[float]:
+        if not week_total or current_usage_pct is None:
+            return None
+        return round(
+            (100.0 * n / week_total) * (current_usage_pct / 100.0), 4
+        )
 
     payload = {
         "window": {
@@ -462,8 +499,7 @@ def render_json(
             "end_utc": week_end_utc.isoformat(),
             "display_tz": display_tz_name,
         },
-        "weekly_limit_tokens": weekly_limit_tokens,
-        "percentage_basis": "limit" if weekly_limit_tokens else "week_total",
+        "current_usage_pct": current_usage_pct,
         "days": [
             {
                 "date": b.date_str,
@@ -473,7 +509,8 @@ def render_json(
                 "cache_creation_input_tokens": b.cache_creation_input_tokens,
                 "cache_read_input_tokens": b.cache_read_input_tokens,
                 "total": b.total,
-                "percentage": _pct(b.total),
+                "percentage_of_week": _pct_of_week(b.total),
+                "percentage_of_limit": _pct_of_limit(b.total),
                 "message_count": b.message_count,
                 "tool_call_count": b.tool_call_count,
                 "by_model": b.by_model,
@@ -542,13 +579,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="emit JSON instead of a human-readable table",
     )
     ap.add_argument(
-        "--weekly-limit", type=int, default=None, metavar="TOKENS",
-        help="absolute weekly token limit. When set, the %%-column reports "
-             "each day's share of the limit and the total line shows the "
-             "remaining budget. Anthropic does not publish exact weekly "
-             "subscription limits, so this is manual — set it from your "
-             "plan's published token number if you have one, otherwise "
-             "leave unset to see each day's share of the week's own total.",
+        "--current-usage-pct", type=float, default=None, metavar="PCT",
+        help="Anthropic's reported weekly-limit percentage (0-100). When "
+             "set, adds a %%Limit column showing each day's share of the "
+             "limit, derived as (day_tokens / week_tokens) * PCT. The "
+             "absolute token limit for the subscription is not published "
+             "anywhere and not exposed by Claude Code programmatically — "
+             "the UI percentage is server-side only, so you have to read "
+             "it off the UI manually and pass it here.",
     )
     args = ap.parse_args(argv)
 
@@ -583,7 +621,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             week_start_utc=week_start_utc,
             week_end_utc=week_end_utc,
             display_tz_name=display_tz_name,
-            weekly_limit_tokens=args.weekly_limit,
+            current_usage_pct=args.current_usage_pct,
         ))
     else:
         display_tz = _zone(display_tz_name)
@@ -593,7 +631,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             week_end_local=week_end_utc.astimezone(display_tz),
             display_tz_name=display_tz_name,
             show_by_model=args.by_model,
-            weekly_limit_tokens=args.weekly_limit,
+            current_usage_pct=args.current_usage_pct,
         ))
     return 0
 
