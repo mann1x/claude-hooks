@@ -330,6 +330,10 @@ Opt-in PreToolUse extensions live under `hooks.pre_tool_use`:
 logs to `~/.claude/permission-scanner/`) and `rtk_rewrite_enabled`
 (shells out to the `rtk` binary >= `rtk_min_version`). When both are on,
 `rtk_rewrite` runs first and the safety scanner runs on the rewritten command.
+When only `rtk_rewrite_enabled` is on, the safety scanner still runs on
+rtk-rewritten commands by default (`rtk_scan_rewrites: true`) to preserve
+the settings.json allow-list that rtk's `allow` decision would otherwise
+bypass; set `rtk_scan_rewrites: false` to opt out.
 
 ---
 
