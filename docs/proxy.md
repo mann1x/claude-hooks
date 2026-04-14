@@ -117,10 +117,31 @@ Design + phased roadmap: [PLAN-proxy-hook.md](./PLAN-proxy-hook.md).
 - **`--proxy-state PATH`** new CLI flag to point the script at a
   non-default state file (testing / multi-host setups).
 
-## Not yet (P2..P4)
+## What's new in P3 (block_warmup)
 
-- P2 — `/events` endpoint emitting `ProxyResponse` / `ProxyModelSubst`
-- P3 — `block_warmup: true` to short-circuit the Warmup drain
-  without the all-or-nothing side-effects of
-  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`
+- **`block_warmup: true`** short-circuits Warmup requests at the
+  proxy. Upstream is never called. Returns a minimal
+  Anthropic-compatible reply:
+  - Non-streaming → JSON `{"type": "message", "stop_reason": "end_turn", "usage": {zeros}}`
+  - Streaming → valid SSE (`message_start` → `content_block_*` →
+    `message_delta` → `message_stop`)
+- **Log line gains `warmup_blocked: true`** so you can count savings.
+- **Header marker** `X-Claude-Hooks-Proxy: warmup-blocked` on every
+  blocked reply for quick `curl` verification.
+
+Enable in `config/claude-hooks.json`:
+
+```json
+"proxy": {
+  "enabled": true,
+  "block_warmup": true
+}
+```
+
+Then you can drop `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` from
+`~/.claude/settings.json` and get Ctrl+B + Bash `run_in_background`
+back, because the proxy is killing Warmup on its own.
+
+## Not yet (P4)
+
 - P4 — statusline integration showing the live weekly %

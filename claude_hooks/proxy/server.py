@@ -30,6 +30,7 @@ from claude_hooks.proxy.forwarder import UpstreamResult, forward
 from claude_hooks.proxy.logger import JsonlLogger
 from claude_hooks.proxy.metadata import extract_request_info, extract_response_info
 from claude_hooks.proxy.ratelimit_state import update_state_file
+from claude_hooks.proxy.stub import build_non_streaming, build_streaming
 
 log = logging.getLogger("claude_hooks.proxy.server")
 
@@ -79,6 +80,11 @@ class _Handler(BaseHTTPRequestHandler):
         req_meta = extract_request_info(
             body, {k: v for k, v in self.headers.items()}
         )
+
+        # --- P3: short-circuit Warmup when block_warmup is enabled
+        if req_meta.get("is_warmup") and cfg.get("block_warmup", False):
+            self._send_warmup_stub(req_meta, started, len(body))
+            return
 
         # --- Forward upstream
         try:
@@ -132,6 +138,42 @@ class _Handler(BaseHTTPRequestHandler):
         )
 
     # -------------------------------------------------------------- #
+    def _send_warmup_stub(
+        self, req_meta: dict, started: float, req_bytes: int,
+    ) -> None:
+        """Short-circuit a blocked Warmup request without touching upstream.
+
+        P3 feature. Returns an Anthropic-compatible minimal reply
+        (JSON or SSE depending on ``req_meta['stream']``) so Claude
+        Code's warmup priming succeeds with 0 upstream tokens charged.
+        """
+        import uuid
+        msg_id = f"msg_warmup_{uuid.uuid4().hex[:16]}"
+        streaming = bool(req_meta.get("stream"))
+        model = req_meta.get("model_requested")
+        if streaming:
+            status, hdrs, body = build_streaming(model, msg_id)
+        else:
+            status, hdrs, body = build_non_streaming(model, msg_id)
+        try:
+            self.send_response(status)
+            for k, v in hdrs.items():
+                self.send_header(k, v)
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            log.debug("client dropped during warmup stub")
+        # Log with blocked=True so the dashboard can count savings.
+        self._log_line(
+            started, req_meta,
+            {"model_delivered": model, "usage": None,
+             "rate_limit": None, "synthetic": False},
+            None,
+            req_bytes=req_bytes, resp_bytes=len(body),
+            extra={"status": status, "warmup_blocked": True,
+                   "stub_kind": "sse" if streaming else "json"},
+        )
+
     def _send_bad_gateway(
         self, msg: str, started: float, req_meta: dict, req_bytes: int,
     ) -> None:

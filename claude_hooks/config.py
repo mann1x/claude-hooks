@@ -183,6 +183,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "enabled": False,
             "warn_on_tools": ["Bash", "Edit", "Write"],
             "warn_on_patterns": ["rm ", "DROP TABLE", "git reset --hard"],
+            # Port 5 from thedotmack/claude-mem. When true, Read / Edit /
+            # MultiEdit on a file with prior memories always emit
+            # additionalContext (bypassing warn_on_patterns). Advisory
+            # only — never blocks the tool call.
+            "file_read_gate": False,
+            "file_read_gate_tools": ["Read", "Edit", "MultiEdit"],
             # Safety-scan stage (content-based pattern match, independent of
             # the memory-warn stage above). Emits permissionDecision:"ask"
             # for dangerous Bash commands even when chained/piped. See

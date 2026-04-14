@@ -25,11 +25,15 @@ def extract_request_info(
     body: bytes,
     headers: dict[str, str],
 ) -> dict[str, Any]:
-    """Return ``{'model_requested', 'is_warmup', 'session_id'}`` from a JSON body."""
+    """Return key fields from a request JSON body, including a
+    ``stream`` flag that P3's stub needs to decide between SSE and
+    non-streaming replies.
+    """
     out: dict[str, Any] = {
         "model_requested": None,
         "is_warmup": False,
         "session_id": None,
+        "stream": False,
     }
     if not body:
         return out
@@ -40,6 +44,7 @@ def extract_request_info(
     if not isinstance(data, dict):
         return out
     out["model_requested"] = data.get("model")
+    out["stream"] = bool(data.get("stream"))
     # Warmup detection: per our analysis of #17457 / #47922, warmup
     # subagent calls open with a user message whose only text block is
     # exactly "Warmup". Detect by the literal content.

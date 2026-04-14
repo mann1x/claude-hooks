@@ -287,3 +287,95 @@ class TestMetadataFilter:
             [m], {"max_age_days": 1}, cwd="/p",
         )
         assert len(out) == 1
+
+
+# ================================================================ #
+# Port 5 — PreToolUse file-read gate
+# ================================================================ #
+class TestFileReadGate:
+    def _cfg(self, **overrides):
+        from copy import deepcopy
+        from claude_hooks.config import DEFAULT_CONFIG
+        cfg = deepcopy(DEFAULT_CONFIG)
+        cfg["hooks"]["pre_tool_use"]["safety_log_enabled"] = False
+        cfg["hooks"]["pre_tool_use"]["safety_scan_enabled"] = False
+        cfg["hooks"]["pre_tool_use"]["rtk_rewrite_enabled"] = False
+        cfg["hooks"]["pre_tool_use"]["enabled"] = True
+        for k, v in overrides.items():
+            cfg["hooks"]["pre_tool_use"][k] = v
+        return cfg
+
+    def test_gate_off_keeps_pattern_filter(self, fake_provider):
+        from claude_hooks.hooks.pre_tool_use import handle
+        from claude_hooks.providers.base import Memory
+        cfg = self._cfg(
+            warn_on_tools=["Read", "Edit"],
+            warn_on_patterns=["DROP TABLE"],
+            file_read_gate=False,
+        )
+        p = fake_provider(name="qdrant",
+                          recall_returns=[Memory(text="prior note about a.py")])
+        # Read on a file that doesn't match the pattern -> no output.
+        r = handle(
+            event={"tool_name": "Read",
+                   "tool_input": {"file_path": "/proj/a.py"}},
+            config=cfg, providers=[p],
+        )
+        assert r is None
+
+    def test_gate_on_bypasses_pattern_for_read(self, fake_provider):
+        from claude_hooks.hooks.pre_tool_use import handle
+        from claude_hooks.providers.base import Memory
+        cfg = self._cfg(
+            warn_on_tools=["Read", "Edit"],
+            warn_on_patterns=["DROP TABLE"],
+            file_read_gate=True,
+            file_read_gate_tools=["Read", "Edit", "MultiEdit"],
+        )
+        p = fake_provider(name="qdrant",
+                          recall_returns=[Memory(text="prior note about a.py")])
+        r = handle(
+            event={"tool_name": "Read",
+                   "tool_input": {"file_path": "/proj/a.py"}},
+            config=cfg, providers=[p],
+        )
+        assert r is not None
+        assert "prior note about a.py" in r["hookSpecificOutput"]["additionalContext"]
+
+    def test_gate_does_not_bypass_patterns_for_bash(self, fake_provider):
+        from claude_hooks.hooks.pre_tool_use import handle
+        from claude_hooks.providers.base import Memory
+        cfg = self._cfg(
+            warn_on_tools=["Bash", "Read"],
+            warn_on_patterns=["DROP TABLE"],
+            file_read_gate=True,
+        )
+        p = fake_provider(name="qdrant",
+                          recall_returns=[Memory(text="prior bash note")])
+        r = handle(
+            event={"tool_name": "Bash",
+                   "tool_input": {"command": "ls"}},
+            config=cfg, providers=[p],
+        )
+        # Bash never bypasses patterns even with the gate on.
+        assert r is None
+
+    def test_gate_skips_unknown_tool(self, fake_provider):
+        from claude_hooks.hooks.pre_tool_use import handle
+        from claude_hooks.providers.base import Memory
+        cfg = self._cfg(
+            warn_on_tools=["Read", "Glob"],
+            warn_on_patterns=["DROP TABLE"],
+            file_read_gate=True,
+            file_read_gate_tools=["Read"],
+        )
+        p = fake_provider(name="qdrant",
+                          recall_returns=[Memory(text="note")])
+        r = handle(
+            event={"tool_name": "Glob",
+                   "tool_input": {"pattern": "*.py"}},
+            config=cfg, providers=[p],
+        )
+        # Glob isn't in the gate list, so pattern filter still applies
+        # and rejects (no "DROP TABLE" in the pattern).
+        assert r is None

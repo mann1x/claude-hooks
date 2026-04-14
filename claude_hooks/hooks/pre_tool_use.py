@@ -121,8 +121,23 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     if not probe:
         return None
 
+    # Port 5 from thedotmack/claude-mem — file-read gate. For Read /
+    # Edit / MultiEdit on a file we already have memories about, skip
+    # the pattern filter and always emit additionalContext so the
+    # model sees prior observations before opening the file. Claude-
+    # mem's original version uses permissionDecision:deny; we emit
+    # advisory context (never block) — same safety net, less friction.
+    file_read_gate = bool(hook_cfg.get("file_read_gate", False))
+    gate_tools = set(hook_cfg.get("file_read_gate_tools")
+                     or ["Read", "Edit", "MultiEdit"])
+    gate_bypasses_patterns = (
+        file_read_gate and tool_name in gate_tools
+        and tool_name != "Bash"  # never skip patterns on Bash
+    )
+
     patterns = hook_cfg.get("warn_on_patterns") or []
-    if patterns and not any(p.lower() in probe.lower() for p in patterns):
+    if patterns and not gate_bypasses_patterns \
+       and not any(p.lower() in probe.lower() for p in patterns):
         return None
 
     snippets: list[str] = []

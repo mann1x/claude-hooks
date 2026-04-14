@@ -162,12 +162,16 @@ And the user's shell / settings.json needs:
 - [ ] `ProxyResponse` / `ProxyModelSubst` hook fan-out — deferred to
       P2 (no handlers need it yet in claude-hooks).
 
-### Phase P2 — selective intervention (est. 2 d)
-- `block_warmup: true` short-circuits requests whose body content
-  matches `"Warmup"` — returns a minimal stub response so CC
-  doesn't error.
-- `ProxyWarmupBlocked` event.
-- Tests using a fake upstream HTTP server.
+### Phase P2 — selective intervention (partially done)
+- [x] `block_warmup: true` short-circuits requests whose body content
+      opens with `"Warmup"` — returns a minimal Anthropic-compatible
+      stub (JSON or SSE based on `stream` flag) so CC doesn't error.
+      Upstream is NEVER called. Log line gets `warmup_blocked: true`.
+- [ ] `ProxyWarmupBlocked` / `ProxyModelSubst` dispatcher events —
+      deferred (no consumer hooks need them in claude-hooks yet).
+- [x] Tests — 7 in `tests/test_proxy_p3.py` covering stub builders,
+      block behaviour, SSE streaming stub, non-warmup pass-through,
+      disable-switch.
 
 ### Phase P3 — integrations (est. 1 d)
 - `scripts/weekly_token_usage.py` reads the proxy's rate-limit
