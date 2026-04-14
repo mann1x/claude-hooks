@@ -344,10 +344,15 @@ Kit" crate also named `rtk` on crates.io — uninstall it first
 `rewrite` subcommand). Source:
 [`claude_hooks/rtk_rewrite.py`](claude_hooks/rtk_rewrite.py).
 
-When `rtk_rewrite_enabled` and `safety_scan_enabled` are both on, rtk
-runs first and the safety scanner runs on the **rewritten** command —
-so dangerous content hidden behind chained commands
-(`rtk ls && rm -rf`) is still caught before the rewrite is approved.
+**Safety interaction with rtk** — when rtk produces a rewrite, the
+hook emits `permissionDecision: "allow"`, which **bypasses** the
+prefix allow-list in `~/.claude/settings.json`. To keep that safety
+net, `rtk_scan_rewrites: true` (default) runs the scanner on
+rtk-rewritten commands even when `safety_scan_enabled: false`:
+
+- `rtk_rewrite_enabled=true, safety_scan_enabled=false, rtk_scan_rewrites=true` (default): rtk rewrites `ls && rm -rf /tmp` → scanner catches `rm -rf` → "ask".
+- `rtk_rewrite_enabled=true, safety_scan_enabled=false, rtk_scan_rewrites=false`: same input → "allow" (user opted out of the safety net).
+- `rtk_rewrite_enabled=true, safety_scan_enabled=true`: scanner runs on every Bash command, rewritten or not.
 
 ## Other configurable features
 

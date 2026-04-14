@@ -171,6 +171,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "rtk_min_version": "0.23.0",
             "rtk_timeout": 3.0,
             "rtk_log_rewrites": False,
+            # When rtk_rewrite produces a rewrite, the hook emits
+            # permissionDecision (allow/ask) which bypasses the user's
+            # settings.json allow-list. To preserve the safety net,
+            # safety_scan patterns are checked on rewritten commands
+            # REGARDLESS of safety_scan_enabled. Set to false to opt out
+            # and accept that rtk rewrites auto-approve unconditionally.
+            "rtk_scan_rewrites": True,
         },
     },
     "reflect": {

@@ -122,7 +122,8 @@
       "rtk_rewrite_enabled": false,
       "rtk_min_version": "0.23.0",
       "rtk_timeout": 3.0,
-      "rtk_log_rewrites": false
+      "rtk_log_rewrites": false,
+      "rtk_scan_rewrites": true
     }
   },
   "reflect": {

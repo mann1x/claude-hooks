@@ -9,12 +9,13 @@ Order of operations:
      terser equivalents. Emits ``updatedInput`` so subsequent stages
      see the rewritten command too.
 
-  2. safety_scan (opt-in — but always runs on rtk-rewritten commands):
-     content-based pattern match on the (possibly rewritten) command.
-     On match → emit ``permissionDecision: "ask"`` with reason and the
-     rewritten command shown in ``updatedInput``. We never auto-deny.
-     Auto-runs after any rtk rewrite because the rtk ``allow`` decision
-     would otherwise bypass the settings.json allow-list.
+  2. safety_scan (opt-in — defaults to running on rtk-rewritten
+     commands): content-based pattern match on the (possibly rewritten)
+     command. On match → emit ``permissionDecision: "ask"`` with reason
+     and the rewritten command shown in ``updatedInput``. We never
+     auto-deny. Defaults to auto-running after any rtk rewrite because
+     the rtk ``allow`` decision would otherwise bypass the settings.json
+     allow-list; users can opt out with ``rtk_scan_rewrites: false``.
 
   3. memory warn (opt-in): query the configured providers for past
      mistakes and inject them as ``additionalContext``. Advisory only.
@@ -67,12 +68,18 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
                 rewritten_input["command"] = rewrite
 
         # Safety scan applies when:
-        #   (a) user explicitly enabled it, OR
-        #   (b) rtk rewrote the command — to prevent the allow-list bypass
-        #       described above.
+        #   (a) user explicitly enabled safety_scan, OR
+        #   (b) rtk rewrote the command AND ``rtk_scan_rewrites`` is true
+        #       (the default) — to prevent the allow-list bypass described
+        #       above. Users who want rtk rewrites WITHOUT the safety
+        #       scanner (accepting that rtk's allow overrides their
+        #       settings.json rules) can set ``rtk_scan_rewrites: false``.
         run_scan = (
             hook_cfg.get("safety_scan_enabled", False)
-            or rewritten_input is not None
+            or (
+                rewritten_input is not None
+                and hook_cfg.get("rtk_scan_rewrites", True)
+            )
         )
         if run_scan and effective_cmd:
             scan = _run_safety_scan_raw(effective_cmd, hook_cfg)

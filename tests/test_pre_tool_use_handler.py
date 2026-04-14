@@ -100,6 +100,27 @@ class PreToolUseOrderingTests(unittest.TestCase):
             r["hookSpecificOutput"]["updatedInput"]["command"], dangerous_rewrite
         )
 
+    def test_rtk_scan_rewrites_false_disables_safety_on_rewrite(self):
+        """Opt-out: rtk_scan_rewrites=false lets dangerous rewrites through."""
+        cfg = _fresh_config()
+        cfg["hooks"]["pre_tool_use"]["rtk_rewrite_enabled"] = True
+        cfg["hooks"]["pre_tool_use"]["safety_scan_enabled"] = False
+        cfg["hooks"]["pre_tool_use"]["rtk_scan_rewrites"] = False
+        with patch(
+            "claude_hooks.hooks.pre_tool_use._run_rtk_rewrite_raw",
+            return_value="rtk ls && rm -rf /tmp/foo",
+        ):
+            r = handle(
+                event={
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "ls && rm -rf /tmp/foo"},
+                },
+                config=cfg,
+                providers=[],
+            )
+        # User explicitly opted out — rewrite is auto-approved.
+        self.assertEqual(r["hookSpecificOutput"]["permissionDecision"], "allow")
+
     def test_rtk_alone_allows_safe_rewrite(self):
         cfg = _fresh_config()
         cfg["hooks"]["pre_tool_use"]["rtk_rewrite_enabled"] = True
