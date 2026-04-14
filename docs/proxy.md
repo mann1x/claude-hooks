@@ -1,5 +1,29 @@
 # claude-hooks proxy (Phases P0 + P1) — setup
 
+> **⚠ KNOWN ISSUE — keep the proxy disabled until fixed (2026-04-14).**
+>
+> The forwarder (`claude_hooks/proxy/forwarder.py`) opens a **fresh
+> HTTP/1.1 connection** to `api.anthropic.com` for every request, with
+> no keep-alive and no HTTP/2 multiplexing. Native Claude Code uses a
+> single persistent **HTTP/2** connection that streams all requests
+> over it.
+>
+> Anthropic's edge appears to rate-limit the per-request-connection
+> pattern with **real 429s** even when the 5h / 7d budgets show
+> `"allowed"`. Observed live on 2026-04-14: 4 × 429 in 58 s on
+> single non-overlapping ~2 MB requests, all clearing immediately
+> after the proxy was bypassed. The proxy itself doesn't generate
+> the 429s — it relays them — but the *connection profile it
+> presents to Anthropic* is what trips the gate.
+>
+> **Until this is fixed** (connection pooling / HTTP/2 in the
+> forwarder), the proxy is shipped with `proxy.enabled: false`. Do
+> not flip it back on, and remove `ANTHROPIC_BASE_URL` from
+> `~/.claude/settings.json` if you previously set it.
+>
+> Tracking: see the "Connection-pattern fix" section at the bottom
+> of this doc for the planned remediation.
+
 Opt-in local HTTP proxy in front of `api.anthropic.com`. Hooks can't
 see the raw HTTPS traffic; the proxy can. P0 is **observability
 only** — pure pass-through, one JSONL record per upstream request.
@@ -177,3 +201,83 @@ printf "%s%s" "$other_parts" "$usage_part"
 
 All four proxy phases (P0 / P1 / P2-block / P4) shipped. See
 `docs/PLAN-proxy-hook.md` for per-phase checklists.
+
+## Connection-pattern fix (blocker for re-enabling)
+
+The warning at the top of this doc explains why the proxy is
+currently shipped with `proxy.enabled: false`. The forwarder needs
+to stop opening one HTTPS connection per request before we can
+recommend it again.
+
+### Diagnosis (2026-04-14)
+
+Live traffic on solidPC, 16:20–16:22 UTC:
+
+| timestamp | status | dur | size | concurrent |
+|---|---|---:|---:|---:|
+| 16:20:55 | 200 | 23 s (stream) | 1856 KB | — |
+| 16:20:59 | **429** | 1.3 s | 1858 KB | 1 |
+| 16:21:00 | 200 | 2.0 s | 1860 KB | — |
+| 16:21:01 | **429** | 1.2 s | 1860 KB | **0** |
+| 16:21:04 | 200 | 1.4 s | 2011 KB | — |
+| 16:21:05 | **429** | 1.6 s | 2011 KB | **0** |
+| 16:21:57 | **429** | 1.6 s | 1950 KB | **0** |
+
+429s with `concurrent=0` (no overlap) and on requests *smaller* than
+ones that succeeded → not request-rate, not request-size, not
+overlap. The differentiator is **connection profile**.
+
+`anthropic-ratelimit-unified-status` = `"allowed"` on every adjacent
+200, so it's not the 5h / 7d budget either. The 429s carry no
+unified-rate-limit headers at all — they come from a separate edge
+gate.
+
+### Root cause
+
+`claude_hooks/proxy/forwarder.py` does, per request:
+
+```python
+conn = http.client.HTTPSConnection(host, port, ...)
+conn.request(method, path, body=body, headers=...)
+resp = conn.getresponse()
+# ... stream body ...
+conn.close()  # in _drain()'s finally
+```
+
+That's a fresh TCP handshake + TLS 1.3 handshake **per request**
+to `api.anthropic.com`. Native Claude Code (Node `undici`) opens
+**one HTTP/2 connection** and multiplexes all `/v1/messages`
+streams over it — Anthropic sees one well-behaved client.
+
+Our pattern (HTTP/1.1, no keep-alive, no pooling) trips an
+edge-level connection-establishment-rate gate that's distinct
+from the published unified-rate-limit budgets.
+
+### Fix options (pick later)
+
+Listed cheapest → biggest:
+
+1. **Stdlib keep-alive + per-thread pool.** Hold an
+   `HTTPSConnection` instance per worker thread; reuse it for
+   subsequent requests on the same thread. Still HTTP/1.1, but
+   one TCP+TLS per worker instead of per request. Estimated risk:
+   medium — `http.client` is finicky about connection state and
+   doesn't recover well from upstream-side closes.
+2. **Optional `urllib3` dep, scoped to the proxy module.**
+   `urllib3.PoolManager` gives connection pooling + retry
+   handling for free. Still HTTP/1.1. Breaks the stdlib-only
+   promise but only inside `claude_hooks/proxy/`.
+3. **`httpx[http2]` (with `h2`).** Full HTTP/2 — matches what
+   native CC does. Heaviest dep, most disruptive change, almost
+   certainly fixes the 429 issue.
+
+Option 2 is the likely landing spot. Option 1 is worth trying
+first only if we want to defend the stdlib-only constraint.
+
+### Until then
+
+- Keep `proxy.enabled: false`.
+- Don't set `ANTHROPIC_BASE_URL=http://...:38080` in
+  `~/.claude/settings.json` on any host.
+- The proxy code stays in the tree — it's not abandoned, just
+  parked behind the connection-pattern bug.
