@@ -283,6 +283,14 @@ golden rules). Override with your own
 `patterns: [{"pattern": "regex", "correction": "message"}, ...]` in
 config. Source: [`claude_hooks/stop_guard.py`](claude_hooks/stop_guard.py).
 
+**Meta-context escape**: by default the guard skips its check when the
+match is only inside a quoted span (`"…"`, `'…'`, `` `…` ``) or the
+message contains a meta-marker phrase like "trigger phrase",
+"would trigger", "stop_guard", "testing the hook", etc. This avoids
+false positives when the assistant is documenting, testing, or quoting
+the guard's rules. Turn off with `skip_meta_context: false`, or
+extend the marker list via `meta_markers: ["…", …]`.
+
 ### `safety_scan` — ask-before-running on dangerous commands
 
 PreToolUse scanner that matches dangerous patterns **anywhere** in a

@@ -129,15 +129,94 @@ def load_patterns(cfg_patterns: list) -> list[tuple[re.Pattern, str]]:
     return compiled
 
 
+# Phrases that, when present in the message, signal the assistant is
+# DISCUSSING the guard's patterns (documentation, examples, testing)
+# rather than actually dodging ownership / asking to stop. Matching one
+# of these makes us skip the guard entirely for this message.
+DEFAULT_META_MARKERS: tuple[str, ...] = (
+    "example of what would trigger",
+    "would trigger the hook",
+    "should trigger the hook",
+    "triggers the hook",
+    "stop_guard",          # direct module mention = meta discussion
+    "stop-phrase-guard",
+    "trigger phrase",
+    "trigger phrases",
+    "example trigger",
+    "meta-context escape",
+    "test the hook",
+    "testing the hook",
+)
+
+
+def _strip_quoted_spans(message: str) -> str:
+    """Remove text inside matched quote pairs ("…", '…', `…`, `…`).
+
+    Patterns quoted by the assistant (e.g. documenting a trigger phrase)
+    aren't really the assistant dodging — they're discussing the rule.
+    We check the de-quoted version first; only a match OUTSIDE quotes
+    counts as a real violation.
+    """
+    # Non-greedy match between identical quote characters, including
+    # Markdown-style backtick code spans. Does not handle nested quotes
+    # or unmatched quotes — that's OK; in those cases we just fall
+    # through to the raw-match check.
+    patterns = [
+        r'"[^"\n]{0,400}"',
+        r"'[^'\n]{0,400}'",
+        r"`[^`\n]{0,400}`",
+        r"“[^”\n]{0,400}”",
+        r"‘[^’\n]{0,400}’",
+    ]
+    out = message
+    for p in patterns:
+        out = re.sub(p, " ", out)
+    return out
+
+
+def _contains_meta_marker(message: str, markers: tuple[str, ...]) -> bool:
+    lower = message.lower()
+    return any(m.lower() in lower for m in markers)
+
+
 def check_message(
     message: str,
     patterns: Optional[list[tuple[re.Pattern, str]]] = None,
+    *,
+    skip_meta_context: bool = True,
+    meta_markers: Optional[tuple[str, ...]] = None,
 ) -> Optional[str]:
-    """Return the correction string for the first matching pattern, or None."""
+    """Return the correction string for the first matching pattern, or None.
+
+    If ``skip_meta_context`` is True (default), the check is short-circuited
+    when the message looks like meta-discussion of the guard itself:
+      * a match only occurs inside quoted spans ("…", '…', `…`); OR
+      * the message contains a meta-marker phrase like "trigger phrase"
+        or "stop_guard".
+    """
     if not message:
         return None
     compiled = patterns if patterns is not None else load_patterns([])
+
+    # First pass: find any candidate match on the raw message.
+    first_match: Optional[tuple[re.Pattern, str]] = None
     for regex, correction in compiled:
         if regex.search(message):
-            return correction
-    return None
+            first_match = (regex, correction)
+            break
+    if first_match is None:
+        return None
+
+    if skip_meta_context:
+        markers = meta_markers if meta_markers is not None else DEFAULT_META_MARKERS
+        if _contains_meta_marker(message, markers):
+            return None
+        # Re-run the matched pattern against the de-quoted message. If the
+        # match disappears when quotes are stripped, it was a quoted
+        # example — not a real violation.
+        dequoted = _strip_quoted_spans(message)
+        regex, _ = first_match
+        if not regex.search(dequoted):
+            return None
+
+    return first_match[1]

@@ -387,7 +387,15 @@ def _run_stop_guard(
     try:
         from claude_hooks.stop_guard import check_message, load_patterns
         patterns = load_patterns(guard_cfg.get("patterns") or [])
-        return check_message(last_text, patterns=patterns)
+        skip_meta = bool(guard_cfg.get("skip_meta_context", True))
+        user_markers = guard_cfg.get("meta_markers") or []
+        meta_markers = tuple(str(m) for m in user_markers) or None
+        return check_message(
+            last_text,
+            patterns=patterns,
+            skip_meta_context=skip_meta,
+            meta_markers=meta_markers,
+        )
     except Exception as e:
         log.debug("stop_guard check failed: %s", e)
         return None

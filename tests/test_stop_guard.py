@@ -86,5 +86,50 @@ class StopGuardTests(unittest.TestCase):
         self.assertIsNotNone(check_message("Pre-Existing Issue", patterns))
 
 
+class MetaContextEscapeTests(unittest.TestCase):
+    """Option B — skip the check when the message is meta-discussion."""
+
+    def setUp(self):
+        self.patterns = load_patterns([])
+
+    def test_match_only_in_double_quotes_is_skipped(self):
+        msg = 'For example, "This is a pre-existing issue" would trigger the block.'
+        self.assertIsNone(check_message(msg, self.patterns))
+
+    def test_match_in_single_quotes_is_skipped(self):
+        msg = "An example phrase 'pre-existing issue' shows the trigger phrase rule."
+        self.assertIsNone(check_message(msg, self.patterns))
+
+    def test_match_in_backticks_is_skipped(self):
+        msg = "The guard fires on `pre-existing` as a trigger phrase."
+        self.assertIsNone(check_message(msg, self.patterns))
+
+    def test_real_match_outside_quotes_still_triggers(self):
+        msg = ('We saw "some example" but honestly the test failure is a '
+               'pre-existing issue not from my changes.')
+        self.assertIsNotNone(check_message(msg, self.patterns))
+
+    def test_meta_marker_alone_skips_even_unquoted(self):
+        msg = "Testing the hook — pre-existing fires the stop_guard rule."
+        self.assertIsNone(check_message(msg, self.patterns))
+
+    def test_skip_meta_context_disabled_restores_raw(self):
+        msg = 'For example, "pre-existing issue" would trigger.'
+        self.assertIsNotNone(
+            check_message(msg, self.patterns, skip_meta_context=False)
+        )
+
+    def test_custom_meta_markers(self):
+        msg = "pre-existing issue — this is a DEMO phrase."
+        self.assertIsNotNone(check_message(msg, self.patterns))
+        self.assertIsNone(
+            check_message(
+                msg,
+                self.patterns,
+                meta_markers=("DEMO phrase",),
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -105,6 +105,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
             # Empty list = use claude_hooks.stop_guard.DEFAULT_PATTERNS.
             # Provide [{"pattern": "regex", "correction": "msg"}] to override.
             "patterns": [],
+            # Meta-context escape: skip the check when the match is only
+            # inside quoted spans OR the message contains a meta-marker
+            # phrase ("trigger phrase", "stop_guard", ...). Prevents false
+            # positives when the assistant is documenting / testing / quoting
+            # the guard's rules. Turn off to get the raw regex behaviour.
+            "skip_meta_context": True,
+            # Empty list = use claude_hooks.stop_guard.DEFAULT_META_MARKERS.
+            # Provide ["marker phrase", ...] to override.
+            "meta_markers": [],
         },
         "session_end": {
             "enabled": True,
