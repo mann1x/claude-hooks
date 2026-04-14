@@ -1,9 +1,9 @@
 # Plan: close the test-coverage gaps from the 2026-04-14 audit
 
 **Audited commit:** `220e18b`
-**Status as of 2026-04-14:** **PLAN COMPLETE.** 292 passed, 16 skipped
-(up from 113 at plan start). Branch coverage **81.3 %** on
-`claude_hooks/` (target ≥ 80 %).
+**Status as of 2026-04-14:** **PLAN COMPLETE.** 412 passed, 16 skipped
+(up from 113 at plan start). Branch coverage **91.8 %** on
+`claude_hooks/` (target ≥ 80 %; final pass overshot to ~92 %).
 
 **Completed commits (all on `origin/main`):**
 
@@ -11,7 +11,8 @@
 - `ce794f1` — Phase 2 (hyde, recall, 38 tests)
 - `49f9f6a` — Phase 3 (4 hook handlers, 28 tests)
 - `841ef6e` — Phase 4 instincts + Phase 7 (stop_guard escape, /wrapup skill)
-- this commit — Phase 4 reflect/consolidate + Phase 5 coverage gate + Phase 6 README
+- `9cc357f` — Phase 4 reflect/consolidate + Phase 5 coverage gate + Phase 6 README
+- this commit — Phase 8 (low-coverage modules; +120 tests, 81.3 % → 91.8 %)
 
 **Phase status:**
 
@@ -25,6 +26,7 @@
 | 5 — coverage gate (≥ 80 % branch) | done | — |
 | 6 — README test-section refresh | done | — |
 | 7 — stop_guard user-intent escape + /wrapup skill | done | 7 |
+| 8 — lift low-coverage modules to ≥ 90 % overall | done | 120 |
 
 ---
 
@@ -524,3 +526,23 @@ user says "compact the context" / "save state" / "wrap up" / etc.
 **Phase 6 — README test-section refresh**: done
 - [x] Test count updated, full file map added, coverage workflow
       documented under `## Tests`
+
+### Phase 8 — coverage push to ≥ 90 %
+
+Added `tests/test_coverage_phase8.py` (120 tests) targeting the lowest
+modules from the Phase 5 baseline. Per-module gains:
+
+| Module | Before | After |
+|--------|--------|-------|
+| `hooks/pre_tool_use.py` | 46.1 % | **99.3 %** |
+| `dispatcher.py` | 59.8 % | **95.5 %** |
+| `hooks/stop.py` | 70.9 % | **87.2 %** |
+| `providers/memory_kg.py` | 72.2 % | **97.2 %** |
+| `claudemem_reindex.py` | 78.3 % | **89 %** (more branch coverage) |
+| `recall.py` | 83.0 % | **97.0 %** |
+| `safety_scan.py` | 81.7 % | **92.5 %** |
+| `providers/__init__.py` | 50.0 % | **100 %** |
+| `providers/base.py` | 80.2 % | **93.8 %** |
+| `providers/qdrant.py` | 84.1 % | **93.5 %** |
+
+Total: **81.3 % → 91.8 %** branch coverage.

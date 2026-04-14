@@ -515,7 +515,7 @@ This adds a `PM2` entry under
 
 ```bash
 pip install -r requirements-dev.txt   # pytest + coverage
-python -m pytest tests/ -q            # 292 passed, 16 skipped (≈1.6 s)
+python -m pytest tests/ -q            # 412 passed, 16 skipped (≈3 s)
 ```
 
 Branch coverage gate (target ≥ 80 %):
@@ -523,7 +523,7 @@ Branch coverage gate (target ≥ 80 %):
 ```bash
 coverage run -m pytest tests/
 coverage report
-# Last measured: 81.3 % branch coverage on claude_hooks/
+# Last measured: 91.8 % branch coverage on claude_hooks/
 ```
 
 ### Test-file map
@@ -555,6 +555,7 @@ coverage report
 | `tests/test_providers.py` | provider registry | 9 | Qdrant / Memory KG signatures |
 | `tests/test_pgvector_integration.py` | `providers/pgvector.py` | 8 (skipped w/o psycopg) | live Postgres |
 | `tests/test_sqlite_vec_integration.py` | `providers/sqlite_vec.py` | 8 (skipped w/o sqlite-vec) | live sqlite-vec |
+| `tests/test_coverage_phase8.py` | dispatcher / pre_tool_use / stop / providers / recall / safety_scan / claudemem_reindex | 120 | Phase 8 — error paths, edge cases, module-import failures (lifts coverage from 81 % → 92 %) |
 
 > Before merging: run `python -m pytest tests/` (0 failures) and
 > `coverage report` (≥ 80 %). Both are part of the conda-env workflow
