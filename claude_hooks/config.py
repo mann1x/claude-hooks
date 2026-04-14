@@ -114,6 +114,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
             # Empty list = use claude_hooks.stop_guard.DEFAULT_META_MARKERS.
             # Provide ["marker phrase", ...] to override.
             "meta_markers": [],
+            # User-wrap-up escape (most important): if the LAST USER
+            # message contains a wrap-up marker ("compact the context",
+            # "wrap up", "save state", "/wrapup", ...), the guard is
+            # bypassed entirely. Ensures the assistant can comply with
+            # explicit user instructions to end/summarise the session
+            # without being blocked.
+            "skip_on_user_wrap_up": True,
+            # Empty list = use claude_hooks.stop_guard.DEFAULT_USER_WRAP_UP_MARKERS.
+            "user_wrap_up_markers": [],
         },
         "session_end": {
             "enabled": True,

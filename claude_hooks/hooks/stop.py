@@ -423,17 +423,33 @@ def _run_stop_guard(
                 break
     if not last_text:
         return None
+    # Find the last user message text (excluding tool_result blocks) so
+    # the guard can honour explicit user wrap-up requests.
+    last_user_text = ""
+    for msg in reversed(transcript):
+        if isinstance(msg, dict) and _msg_role(msg) == "user":
+            t = _extract_text(msg)
+            if t:
+                last_user_text = t
+                break
+
     try:
         from claude_hooks.stop_guard import check_message, load_patterns
         patterns = load_patterns(guard_cfg.get("patterns") or [])
         skip_meta = bool(guard_cfg.get("skip_meta_context", True))
-        user_markers = guard_cfg.get("meta_markers") or []
-        meta_markers = tuple(str(m) for m in user_markers) or None
+        meta_cfg = guard_cfg.get("meta_markers") or []
+        meta_markers = tuple(str(m) for m in meta_cfg) or None
+        skip_wrapup = bool(guard_cfg.get("skip_on_user_wrap_up", True))
+        wrapup_cfg = guard_cfg.get("user_wrap_up_markers") or []
+        wrapup_markers = tuple(str(m) for m in wrapup_cfg) or None
         return check_message(
             last_text,
             patterns=patterns,
             skip_meta_context=skip_meta,
             meta_markers=meta_markers,
+            last_user_message=last_user_text,
+            skip_on_user_wrap_up=skip_wrapup,
+            user_wrap_up_markers=wrapup_markers,
         )
     except Exception as e:
         log.debug("stop_guard check failed: %s", e)

@@ -87,7 +87,9 @@
       "enabled": false,
       "patterns": [],
       "skip_meta_context": true,
-      "meta_markers": []
+      "meta_markers": [],
+      "skip_on_user_wrap_up": true,
+      "user_wrap_up_markers": []
     },
     "session_end": {
       "enabled": true

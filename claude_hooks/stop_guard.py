@@ -168,6 +168,79 @@ DEFAULT_META_MARKERS: tuple[str, ...] = (
 )
 
 
+# Phrases from the USER that signal they explicitly asked the assistant
+# to wrap up / pause / compact context / end the session. When the last
+# user message matches one of these, the guard is bypassed: the
+# assistant isn't dodging ownership, it's complying with an explicit
+# instruction.
+#
+# These are checked case-insensitively as substrings against the most
+# recent user message (not the assistant's response). Override via
+# ``user_wrap_up_markers`` in config.
+DEFAULT_USER_WRAP_UP_MARKERS: tuple[str, ...] = (
+    # Context / compaction
+    "compact the context",
+    "compact context",
+    "context is running low",
+    "context running low",
+    "running out of context",
+    "low on context",
+    "need to compact",
+    "prepare for compact",
+    "prepare to compact",
+    # Session lifecycle
+    "close the session",
+    "close this session",
+    "end the session",
+    "end this session",
+    "end of session",
+    "wrap up the session",
+    "wrap up this session",
+    "wrap up for now",
+    "wrap up now",
+    "wrap it up",
+    "let's wrap up",
+    "lets wrap up",
+    # State summary / save
+    "state summary",
+    "session summary",
+    "summarize the session",
+    "save state",
+    "save the state",
+    "save session",
+    "save progress",
+    "save our progress",
+    # Continue later
+    "continue another time",
+    "continue later",
+    "pick this up another time",
+    "pick this up later",
+    "come back to this later",
+    "we'll continue",
+    "we will continue",
+    # Out-of-band user stops
+    "i need to go",
+    "i have to go",
+    "i need to stop",
+    "need to stop",
+    "let's stop",
+    "lets stop",
+    "let's pause",
+    "lets pause",
+    "time to stop",
+    # Explicit /wrapup invocation
+    "/wrapup",
+)
+
+
+def _contains_user_wrap_up(message: str, markers: tuple[str, ...]) -> bool:
+    """True if the user's message matches any wrap-up marker (case-insensitive)."""
+    if not message:
+        return False
+    lower = message.lower()
+    return any(m.lower() in lower for m in markers)
+
+
 def _strip_quoted_spans(message: str) -> str:
     """Remove text inside matched quote pairs ("…", '…', `…`, `…`).
 
@@ -204,6 +277,9 @@ def check_message(
     *,
     skip_meta_context: bool = True,
     meta_markers: Optional[tuple[str, ...]] = None,
+    last_user_message: Optional[str] = None,
+    skip_on_user_wrap_up: bool = True,
+    user_wrap_up_markers: Optional[tuple[str, ...]] = None,
 ) -> Optional[str]:
     """Return the correction string for the first matching pattern, or None.
 
@@ -212,9 +288,29 @@ def check_message(
       * a match only occurs inside quoted spans ("…", '…', `…`); OR
       * the message contains a meta-marker phrase like "trigger phrase"
         or "stop_guard".
+
+    If ``skip_on_user_wrap_up`` is True (default) AND ``last_user_message``
+    contains a wrap-up marker ("compact the context", "wrap up", "save
+    state", "/wrapup", …), the guard is bypassed entirely. This is the
+    single most important escape: when the USER explicitly asks the
+    assistant to stop / summarise / compact, the assistant is complying
+    with an instruction, not dodging ownership, and must be allowed to
+    finish. Override markers via ``user_wrap_up_markers``.
     """
     if not message:
         return None
+
+    # USER wrap-up intent beats everything else. If the user explicitly
+    # asked to end/compact/summarise, the hook MUST NOT block the stop.
+    if skip_on_user_wrap_up and last_user_message:
+        markers = (
+            user_wrap_up_markers
+            if user_wrap_up_markers is not None
+            else DEFAULT_USER_WRAP_UP_MARKERS
+        )
+        if _contains_user_wrap_up(last_user_message, markers):
+            return None
+
     compiled = patterns if patterns is not None else load_patterns([])
 
     # First pass: find any candidate match on the raw message.

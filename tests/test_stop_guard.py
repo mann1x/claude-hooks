@@ -86,6 +86,82 @@ class StopGuardTests(unittest.TestCase):
         self.assertIsNotNone(check_message("Pre-Existing Issue", patterns))
 
 
+class UserWrapUpEscapeTests(unittest.TestCase):
+    """User-intent escape — the single most important guard exception."""
+
+    def setUp(self):
+        self.patterns = load_patterns([])
+
+    def test_user_compact_request_bypasses(self):
+        out = check_message(
+            "Good stopping point — I'll continue in the next session.",
+            self.patterns,
+            last_user_message="I need to compact the context",
+        )
+        self.assertIsNone(out)
+
+    def test_user_wrapup_command_bypasses(self):
+        for phrase in ["/wrapup", "wrap up for now", "let's close this session",
+                        "we'll continue another time", "save state"]:
+            out = check_message(
+                "This session has gotten long — good stopping point.",
+                self.patterns,
+                last_user_message=phrase,
+            )
+            self.assertIsNone(out, f"wrapup phrase should bypass: {phrase!r}")
+
+    def test_guard_fires_without_user_wrapup(self):
+        out = check_message(
+            "Good stopping point — continue in the next session.",
+            self.patterns,
+            last_user_message="please keep going",
+        )
+        self.assertIsNotNone(out)
+
+    def test_skip_disabled_still_fires(self):
+        out = check_message(
+            "This is a pre-existing issue.",
+            self.patterns,
+            last_user_message="let's wrap up",
+            skip_on_user_wrap_up=False,
+        )
+        self.assertIsNotNone(out)
+
+    def test_custom_user_markers(self):
+        out = check_message(
+            "pre-existing issue.",
+            self.patterns,
+            last_user_message="ABORT NOW please",
+            user_wrap_up_markers=("ABORT NOW",),
+        )
+        self.assertIsNone(out)
+        # Without the override the default marker list doesn't include
+        # "ABORT NOW", so the guard fires normally.
+        out2 = check_message(
+            "pre-existing issue.",
+            self.patterns,
+            last_user_message="ABORT NOW please",
+        )
+        self.assertIsNotNone(out2)
+
+    def test_no_user_message_falls_through(self):
+        # Without a user message the guard still checks the assistant text.
+        out = check_message(
+            "pre-existing issue.",
+            self.patterns,
+            last_user_message=None,
+        )
+        self.assertIsNotNone(out)
+
+    def test_case_insensitive_match(self):
+        out = check_message(
+            "good stopping point",
+            self.patterns,
+            last_user_message="I Need To Compact The Context",
+        )
+        self.assertIsNone(out)
+
+
 class MetaContextEscapeTests(unittest.TestCase):
     """Option B — skip the check when the message is meta-discussion."""
 

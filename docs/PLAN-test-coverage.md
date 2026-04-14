@@ -1,16 +1,24 @@
 # Plan: close the test-coverage gaps from the 2026-04-14 audit
 
 **Audited commit:** `220e18b`
-**Current coverage:** 113 passed, 16 skipped. All new code (stop_guard,
-safety_scan, rtk_rewrite, claudemem_reindex, handler wiring for
-pre_tool_use) has unit + handler-level tests. The older core surface
-— HyDE, the shared recall pipeline, per-module memory helpers, and
-three of the four hook handlers — is essentially untested.
+**Status as of 2026-04-14 wrap-up:** 257 passed, 16 skipped (up from
+113 at plan start). Phases 0, 1, 2, 3 complete and pushed. Phase 4
+partially complete (instincts done, reflect / consolidate pending).
+Phases 5 and 6 not started.
 
-This plan adds ~130 tests across 11 new test files, bringing handler
-+ library coverage to the whole public surface without touching
-integration-heavy code (MCP, Qdrant, Ollama real-network) which the
-existing `test_*_integration.py` tests already guard.
+**Completed commits (all on `origin/main`):**
+
+- `7940e6e` — Phase 0 fixtures + Phase 1 (dedup, decay, embedders, 65 tests)
+- `ce794f1` — Phase 2 (hyde, recall, 38 tests)
+- `49f9f6a` — Phase 3 (4 hook handlers, 28 tests)
+- Phase 4 partial: `test_instincts.py` (13 tests) staged locally
+
+**Remaining:**
+- Phase 4: `test_reflect.py` (~8 tests), `test_consolidate.py` (~8)
+- Phase 5: coverage.py gate
+- Phase 6: README refresh
+- **NEW: Phase 7 — `/wrapup` skill polish + stop_guard user-intent
+  escape tests** (see bottom of this doc)
 
 ---
 
@@ -408,3 +416,101 @@ phase, each self-contained.
   test development** — they don't run tests themselves but they
   will reindex and log after each commit. No action needed, just
   expected.
+
+---
+
+## Phase 7 — stop_guard user-intent escape + `/wrapup` skill (NEW)
+
+### Background
+
+The original `stop_guard` (commit `24f69b7`) had two escapes:
+quoted-span stripping and meta-marker phrases. Both triggered on the
+*assistant's* message content. A third failure mode emerged in
+practice: when the **USER** explicitly asks to wrap up ("compact the
+context", "save state", "we'll continue another time"), the assistant's
+compliant response often contains phrases that match the guard's
+own pattern list ("next session", "continue later", "wrap up"),
+blocking the legitimate stop.
+
+Example incident (2026-04-14):
+
+```
+USER: I need to compact the context
+
+ASSISTANT: ... When you start the next session ...
+
+→ stop_guard FIRES: "There is no 'next session.' Sessions are
+  unlimited. Continue working."
+```
+
+The assistant was following orders; the guard was wrong.
+
+### Fix (already landed locally, pending commit)
+
+Added to `claude_hooks/stop_guard.py`:
+
+- `DEFAULT_USER_WRAP_UP_MARKERS` — substring list (case-insensitive)
+  covering "compact the context", "wrap up", "save state",
+  "/wrapup", "let's close this session", "continue later" and ~25
+  more formulations.
+- `check_message(..., last_user_message, skip_on_user_wrap_up,
+  user_wrap_up_markers)` — NEW kwargs. If the last user message
+  matches a wrap-up marker, the whole check short-circuits before
+  any pattern scanning. This is the strongest escape: user intent
+  beats all pattern matches.
+
+Wired into `claude_hooks/hooks/stop.py`: `_run_stop_guard` now
+extracts the last user-role text from the transcript and threads
+it through `check_message`.
+
+Config keys added:
+- `hooks.stop_guard.skip_on_user_wrap_up` (default `true`)
+- `hooks.stop_guard.user_wrap_up_markers` (default `[]` → built-in list)
+
+Tests added: 7 new cases in `tests/test_stop_guard.py`
+(`UserWrapUpEscapeTests` class). Suite at 264 passed / 16 skipped
+locally.
+
+### `/wrapup` skill (landed at `.claude/skills/wrapup/SKILL.md`)
+
+The skill instructs the assistant to produce a complete restore-ready
+state summary with 8 required sections:
+
+1. Session snapshot (one paragraph)
+2. Session achievements (commits, tests, files)
+3. Open items (in-progress, unresolved, pending-user)
+4. Next items (commands / edits / questions)
+5. Plans in use or referenced
+6. Active monitorings to re-establish (bg tasks, wakeups, crons)
+7. Pods / remote hosts status
+8. Restore checklist (copy-paste commands)
+
+Explicit user-argument support: `/wrapup <extra text>` treats the
+extra text as filter / emphasis instructions.
+
+The skill description (the trigger for auto-invocation) enumerates
+wrap-up phrases so Claude Code activates it automatically when the
+user says "compact the context" / "save state" / "wrap up" / etc.
+
+### What's left for Phase 7
+
+- [ ] Commit the stop_guard changes + `/wrapup` skill + this plan update.
+- [ ] Push to remote.
+- [ ] Deploy to pandorum (`git pull` after push).
+- [ ] Enable `/wrapup` auto-invocation end-to-end test in a real
+      session (the user will observe whether the stop_guard false
+      positive from 2026-04-14 recurs when the same test phrase is
+      uttered).
+
+### Remaining original plan (Phases 4-6)
+
+**Phase 4 — maintenance modules** (partial):
+- [x] `tests/test_instincts.py` (13 tests, green locally)
+- [ ] `tests/test_reflect.py` (~8 tests — attempt was deleted unverified)
+- [ ] `tests/test_consolidate.py` (~8 tests — not started)
+
+**Phase 5 — coverage gate**: not started.
+
+**Phase 6 — README test-section refresh**: not started.
+
+These can be picked up after Phase 7 in any order.
