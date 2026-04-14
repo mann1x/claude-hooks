@@ -142,6 +142,38 @@ Then you can drop `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` from
 `~/.claude/settings.json` and get Ctrl+B + Bash `run_in_background`
 back, because the proxy is killing Warmup on its own.
 
-## Not yet (P4)
+## What's new in P4 (statusline segment)
 
-- P4 — statusline integration showing the live weekly %
+A compact segment script at `scripts/statusline_usage.py` reads the
+proxy's `ratelimit-state.json` and prints one short line suitable
+for embedding in a custom `statusLine`:
+
+```bash
+python3 scripts/statusline_usage.py            # emoji format (default)
+python3 scripts/statusline_usage.py --format plain
+python3 scripts/statusline_usage.py --format ascii
+python3 scripts/statusline_usage.py --state-file /custom/path.json
+```
+
+Output:
+- `5h 42%` — only 5h window known
+- `5h 42% · 7d 18%` — both windows present
+- `5h 65% ⚠` — ≥ 50% on the binding window
+- `5h 85% 🔴` — ≥ 80%
+- empty string on stale / missing / broken state (never crashes)
+
+Exit code is always 0 — the script is safe to call from any
+statusline runner.
+
+### Wiring example (bash statusline)
+
+```bash
+usage_seg=$(python3 /path/to/claude-hooks/scripts/statusline_usage.py 2>/dev/null)
+[ -n "$usage_seg" ] && usage_part=" | ${usage_seg}"
+printf "%s%s" "$other_parts" "$usage_part"
+```
+
+## Plan status
+
+All four proxy phases (P0 / P1 / P2-block / P4) shipped. See
+`docs/PLAN-proxy-hook.md` for per-phase checklists.

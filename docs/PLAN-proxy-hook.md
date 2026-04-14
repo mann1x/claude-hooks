@@ -173,11 +173,15 @@ And the user's shell / settings.json needs:
       block behaviour, SSE streaming stub, non-warmup pass-through,
       disable-switch.
 
-### Phase P3 — integrations (est. 1 d)
-- `scripts/weekly_token_usage.py` reads the proxy's rate-limit
-  log and augments the table with the **real** weekly %.
-- `statusline-command.sh` gains a `proxy` mode that shows current
-  weekly % from the same log.
+### Phase P3 — integrations (DONE, split across P1/P4)
+- [x] `scripts/weekly_token_usage.py` auto-reads the proxy's
+      rate-limit state file (P1).
+- [x] `scripts/statusline_usage.py` — compact statusline segment
+      (P4). Outputs `5h 42% · 7d 18%` or `5h 85% 🔴` depending on
+      format. Never crashes the statusline caller; returns empty
+      string on stale / missing state. Shell wrapper wiring in
+      `~/.claude/statusline-command.sh` appends
+      ``| 5h 42%`` when the proxy is live.
 
 ### Phase P4 — docs & install UX (est. 0.5 d)
 - `docs/proxy.md` — setup, troubleshooting, security stance.
