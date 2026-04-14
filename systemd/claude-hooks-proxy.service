@@ -1,0 +1,25 @@
+[Unit]
+Description=claude-hooks proxy — local HTTP proxy in front of api.anthropic.com
+Documentation=https://github.com/mann1x/claude-hooks/blob/main/docs/proxy.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust User / WorkingDirectory / CLAUDE_HOOKS_REPO for your setup.
+User=root
+WorkingDirectory=/srv/dev-disk-by-label-opt/dev/claude-hooks
+Environment=CLAUDE_HOOKS_REPO=/srv/dev-disk-by-label-opt/dev/claude-hooks
+ExecStart=/srv/dev-disk-by-label-opt/dev/claude-hooks/bin/claude-hooks-proxy
+Restart=on-failure
+RestartSec=5s
+
+# Reasonable hardening — the proxy doesn't need privilege.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/root/.claude
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

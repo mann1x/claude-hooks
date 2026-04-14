@@ -33,11 +33,23 @@ class TestMemoryHash:
         b = Memory(text="hello")
         assert memory_hash(a) == memory_hash(b)
 
-    def test_first_200_chars_matter(self):
-        # Divergence after char 200 → same hash.
-        a = Memory(text="x" * 200 + "A")
-        b = Memory(text="x" * 200 + "B")
-        assert memory_hash(a) == memory_hash(b)
+    def test_divergence_after_200_chars_detected(self):
+        # Post-port: the composite key (prefix + length + suffix)
+        # distinguishes memories that share a 200-char prefix but
+        # differ in tail. Ported from thedotmack/claude-mem's
+        # null-byte-delimited dedup key pattern.
+        a = Memory(text="x" * 200 + "A" * 100)
+        b = Memory(text="x" * 200 + "B" * 100)
+        assert memory_hash(a) != memory_hash(b)
+
+    def test_length_difference_detected(self):
+        # Two texts with identical first 200 + identical last 50 but
+        # different length must still hash differently.
+        a = Memory(text="x" * 200 + "y" * 50 + "tail" + "z" * 50)
+        b = Memory(text="x" * 200 + "y" * 50 + "tail" + "z" * 50 + "EXTRA")
+        # Tail differs slightly after truncation to last-50; length
+        # differs; composite key catches both.
+        assert memory_hash(a) != memory_hash(b)
 
 
 class TestRecencyBoost:

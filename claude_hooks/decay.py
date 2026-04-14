@@ -29,8 +29,18 @@ _MAX_HISTORY_AGE_DAYS = 90
 
 
 def memory_hash(mem: Memory) -> str:
-    """Deterministic hash of a memory's text (first 200 chars)."""
-    key = mem.text[:200].strip()
+    """Deterministic hash of a memory's text.
+
+    Uses a composite key — ``first-200 || 0x00 || length || 0x00 ||
+    last-50`` — so memories sharing the first 200 chars but differing
+    later still hash differently. Ported from thedotmack/claude-mem's
+    null-byte-delimited dedup key pattern. The 16-char hex suffix keeps
+    the hash small enough to fit in provider metadata.
+    """
+    text = mem.text.strip()
+    prefix = text[:200]
+    suffix = text[-50:] if len(text) > 200 else ""
+    key = f"{prefix}\x00{len(text)}\x00{suffix}"
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 

@@ -76,7 +76,8 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
             log.debug("turn not noteworthy — skipping store")
             return None
 
-    summary = _build_summary(event, transcript)
+    summary_format = str(hook_cfg.get("summary_format", "markdown")).lower()
+    summary = _build_summary(event, transcript, fmt=summary_format)
     if not summary:
         return None
 
@@ -243,15 +244,27 @@ def _is_noteworthy(transcript: Optional[list[dict]]) -> bool:
     return False
 
 
-def _build_summary(event: dict, transcript: Optional[list[dict]]) -> str:
-    """
-    Build a one-paragraph summary of the most recent turn for storage.
-    Includes the user's prompt (truncated), the assistant's last text reply
-    (truncated), and a list of files touched.
+def _build_summary(
+    event: dict,
+    transcript: Optional[list[dict]],
+    *,
+    fmt: str = "markdown",
+) -> str:
+    """Build a stored summary of the most recent turn.
+
+    ``fmt`` selects the output shape:
+
+    - ``"markdown"`` (default, back-compat) — the original human-readable
+      sectioned layout with ``## Prompt`` / ``## Result`` / etc.
+    - ``"xml"`` — a structured ``<observation>`` block (ported from
+      thedotmack/claude-mem). Better for downstream grep / recall
+      because every field is addressable and the type/title/subtitle
+      tuple lets handlers dispatch without parsing prose.
     """
     user_text = ""
     asst_text = ""
-    files_touched: set[str] = set()
+    files_modified: set[str] = set()
+    files_read: set[str] = set()
     commands: list[str] = []
 
     if transcript:
@@ -273,54 +286,248 @@ def _build_summary(event: dict, transcript: Optional[list[dict]]) -> str:
                             continue
                         name = block.get("name", "")
                         inp = block.get("input") or {}
-                        if name in ("Edit", "Write", "MultiEdit", "Read"):
+                        if name in ("Edit", "Write", "MultiEdit"):
                             fp = inp.get("file_path")
                             if fp:
-                                files_touched.add(fp)
+                                files_modified.add(fp)
+                        elif name == "Read":
+                            fp = inp.get("file_path")
+                            if fp:
+                                files_read.add(fp)
                         elif name == "Bash":
                             cmd = inp.get("command")
                             if cmd:
                                 commands.append(cmd[:200])
 
+    # Meta-prompt filter applies to both formats — drop the user_text
+    # entirely if it looks like a Caliber / session-analysis prompt.
+    _meta_markers = (
+        "extract reusable operational lessons",
+        "analyze raw tool call events",
+        "You are an expert developer experience engineer",
+        "claudeMdLearnedSection",
+    )
+    if user_text and any(m in user_text[:500] for m in _meta_markers):
+        user_text = ""
+
+    if fmt == "xml":
+        return _build_summary_xml(
+            event, user_text, asst_text,
+            files_modified, files_read, commands,
+        )
+    return _build_summary_markdown(
+        event, user_text, asst_text,
+        files_modified, files_read, commands,
+    )
+
+
+# ------------------------------------------------------------------ #
+# Formatters
+# ------------------------------------------------------------------ #
+def _build_summary_markdown(
+    event: dict, user_text: str, asst_text: str,
+    files_modified: set[str], files_read: set[str], commands: list[str],
+) -> str:
     cwd = event.get("cwd", "")
     parts = [f"# Turn @ {datetime.now(timezone.utc).isoformat(timespec='seconds')}"]
     if cwd:
         parts.append(f"cwd: {cwd}")
     if user_text:
-        # Skip storing meta/system prompts (e.g. Caliber learning extraction,
-        # session analysis) — they pollute Qdrant recall on context resume.
-        _meta_markers = (
-            "extract reusable operational lessons",
-            "analyze raw tool call events",
-            "You are an expert developer experience engineer",
-            "claudeMdLearnedSection",
-        )
-        if not any(m in user_text[:500] for m in _meta_markers):
-            parts.append(f"\n## Prompt\n{_truncate(user_text, 600)}")
+        parts.append(f"\n## Prompt\n{_truncate(user_text, 600)}")
     if asst_text:
         parts.append(f"\n## Result\n{_truncate(asst_text, 1200)}")
+    # Back-compat: read + modified go under the same "Files touched" heading.
+    files_touched = sorted(files_modified | files_read)[:20]
     if files_touched:
-        parts.append(f"\n## Files touched\n" + "\n".join(f"- {f}" for f in sorted(files_touched)[:20]))
+        parts.append(f"\n## Files touched\n" + "\n".join(f"- {f}" for f in files_touched))
     if commands:
         parts.append(f"\n## Commands\n" + "\n".join(f"- `{c}`" for c in commands[:10]))
     return "\n".join(parts)
 
 
+def _build_summary_xml(
+    event: dict, user_text: str, asst_text: str,
+    files_modified: set[str], files_read: set[str], commands: list[str],
+) -> str:
+    """Structured observation layout (ported from thedotmack/claude-mem).
+
+    Every field is independently addressable so downstream recall /
+    consolidation handlers can filter on ``<type>`` or ``<files_modified>``
+    without prose parsing.
+    """
+    import html as _html
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    cwd = event.get("cwd", "")
+    obs_type = _classify_turn_type(
+        user_text, asst_text, files_modified, files_read, commands,
+    )
+    title = _derive_title(asst_text, files_modified, commands) or "(no summary)"
+    subtitle = cwd or ""
+
+    def esc(s: str) -> str:
+        return _html.escape(s or "", quote=False)
+
+    lines = [f'<observation ts="{ts}">']
+    lines.append(f"  <type>{obs_type}</type>")
+    lines.append(f"  <title>{esc(title)}</title>")
+    if subtitle:
+        lines.append(f"  <subtitle>{esc(subtitle)}</subtitle>")
+    if cwd:
+        lines.append(f"  <cwd>{esc(cwd)}</cwd>")
+    if user_text:
+        lines.append(f"  <prompt>{esc(_truncate(user_text, 600))}</prompt>")
+    if asst_text:
+        lines.append(f"  <result>{esc(_truncate(asst_text, 1200))}</result>")
+    if files_modified:
+        lines.append("  <files_modified>")
+        for f in sorted(files_modified)[:20]:
+            lines.append(f"    <file>{esc(f)}</file>")
+        lines.append("  </files_modified>")
+    if files_read:
+        lines.append("  <files_read>")
+        for f in sorted(files_read)[:20]:
+            lines.append(f"    <file>{esc(f)}</file>")
+        lines.append("  </files_read>")
+    if commands:
+        lines.append("  <commands>")
+        for c in commands[:10]:
+            lines.append(f"    <command>{esc(c)}</command>")
+        lines.append("  </commands>")
+    lines.append("</observation>")
+    return "\n".join(lines)
+
+
+_TYPE_KEYWORDS = (
+    ("fix", ("fix", "bug", "broken", "traceback", "regression", "failed", "hotfix")),
+    ("refactor", ("refactor", "rename", "cleanup", "simplify", "extract", "dedup")),
+    ("feature", ("add", "new", "implement", "introduce", "create", "feature")),
+    ("investigation", ("investigate", "why", "analysis", "audit", "scan", "mine")),
+    ("docs", ("document", "docs", "readme", "comment", "changelog")),
+    ("build", ("build", "install", "package", "deploy", "release")),
+    ("test", ("test", "coverage", "pytest")),
+)
+
+
+def _classify_turn_type(
+    user_text: str, asst_text: str,
+    files_modified: set[str], files_read: set[str], commands: list[str],
+) -> str:
+    """Very lightweight classifier for the XML ``<type>`` field."""
+    blob = (user_text + "\n" + asst_text).lower()
+    for label, words in _TYPE_KEYWORDS:
+        if any(w in blob for w in words):
+            return label
+    if files_modified:
+        return "edit"
+    if commands:
+        return "shell"
+    if files_read:
+        return "read"
+    return "general"
+
+
+def _derive_title(
+    asst_text: str, files_modified: set[str], commands: list[str],
+) -> str:
+    """Pick the most informative single-line title for the observation."""
+    if asst_text:
+        # First non-empty line of the assistant's reply, truncated.
+        for line in asst_text.splitlines():
+            line = line.strip()
+            if line:
+                return line[:120]
+    if files_modified:
+        return f"edit {', '.join(sorted(files_modified)[:3])}"
+    if commands:
+        return commands[0][:120]
+    return ""
+
+
 def _extract_text(message: dict) -> str:
-    """Extract plain text from a transcript message regardless of shape."""
+    """Extract plain text from a transcript message regardless of shape.
+
+    Also strips Claude Code system-injected tags so they don't pollute
+    Qdrant recall. Stolen from thedotmack/claude-mem's summariser —
+    these tags are boilerplate that the model sees on every turn.
+    """
     inner = message.get("message") if isinstance(message.get("message"), dict) else message
     content = inner.get("content")
+    text = ""
     if isinstance(content, str):
-        return content
-    if isinstance(content, list):
+        text = content
+    elif isinstance(content, list):
         parts: list[str] = []
         for b in content:
             if isinstance(b, dict) and b.get("type") == "text":
                 t = b.get("text")
                 if isinstance(t, str):
                     parts.append(t)
-        return "\n".join(parts)
-    return ""
+        text = "\n".join(parts)
+    return _strip_system_tags(text) if text else text
+
+
+# ----------------------------------------------------------------- #
+# Tag stripping — ported from thedotmack/claude-mem
+# ----------------------------------------------------------------- #
+_SYSTEM_TAG_PATTERN = None  # lazy-compiled below
+
+
+def _strip_system_tags(text: str) -> str:
+    """Remove ``<system-reminder>…</system-reminder>`` and similar
+    Claude-Code-injected blocks. These are boilerplate that recur on
+    every turn and drown real content in Qdrant recall.
+
+    Tags stripped (case-insensitive, greedy across newlines):
+
+    - ``<system-reminder>`` — reminders injected after every
+      UserPromptSubmit hook run
+    - ``<persisted-output>`` — cached tool output injected by Claude Code
+    - ``<command-name>`` / ``<command-message>`` / ``<command-args>`` —
+      slash-command preambles
+    - ``<system-prompt>`` — only the literal outer tag; the body stays
+      because that's the canonical system prompt, not noise
+    - ``<local-command-stdout>`` / ``<local-command-caveat>`` — bash-
+      prefix shell execution artefacts
+
+    The stripping is outer-tag-first; nested tags of the same type are
+    handled by the greedy-across-newlines ``.*?`` in each pattern.
+    """
+    global _SYSTEM_TAG_PATTERN
+    if not text or "<" not in text:
+        return text
+    import re as _re
+    if _SYSTEM_TAG_PATTERN is None:
+        tags = (
+            "system-reminder",
+            "persisted-output",
+            "command-name",
+            "command-message",
+            "command-args",
+            "local-command-stdout",
+            "local-command-caveat",
+        )
+        _SYSTEM_TAG_PATTERN = _re.compile(
+            r"<(" + "|".join(tags) + r")\b[^>]*>.*?</\1>",
+            _re.IGNORECASE | _re.DOTALL,
+        )
+    # Loop until stable — the regex is non-greedy, so nested tags of
+    # the same name need multiple passes. Bound at 5 passes to avoid
+    # pathological inputs. After paired-tag removal, a second regex
+    # sweeps any stray opening / closing tags left behind by nested
+    # input (doesn't happen in practice but keeps the output clean).
+    cleaned = text
+    for _ in range(5):
+        new = _SYSTEM_TAG_PATTERN.sub("", cleaned)
+        if new == cleaned:
+            break
+        cleaned = new
+    tags_re = r"(system-reminder|persisted-output|command-name|command-message|command-args|local-command-stdout|local-command-caveat)"
+    cleaned = _re.sub(
+        rf"</?{tags_re}\b[^>]*>", "", cleaned, flags=_re.IGNORECASE,
+    )
+    # Collapse the 3+ blank lines the substitution tends to leave behind.
+    cleaned = _re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned
 
 
 def _truncate(text: str, max_chars: int) -> str:

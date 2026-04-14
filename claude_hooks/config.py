@@ -83,6 +83,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "decay_file": "~/.claude/claude-hooks-decay.json",
             "decay_recency_halflife_days": 14,
             "decay_frequency_cap": 5,
+            # Port 2 from thedotmack/claude-mem: filter candidates by
+            # metadata before vector rerank. Default off (back-compat).
+            "metadata_filter": {
+                "enabled": False,
+                # Over-fetch ratio so the filter has a bigger pool to
+                # survive from. `recall_k * over_fetch_factor` candidates
+                # per provider; survivors capped back to recall_k after
+                # filtering. 4 is a sane default — raise when filters
+                # are strict (cwd + type + age).
+                "over_fetch_factor": 4,
+                "require_cwd_match": False,
+                "require_observation_type": None,
+                "max_age_days": None,
+                "require_tags": [],
+            },
         },
         "session_start": {
             "enabled": True,
@@ -96,6 +111,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "classify_observations": True,
             "extract_instincts": False,
             "instincts_dir": "~/.claude/instincts",
+            # "markdown" (default, back-compat) or "xml" — the XML format
+            # is the structured <observation> layout ported from
+            # thedotmack/claude-mem. Every field (type/title/subtitle/
+            # files_modified/...) is addressable, which helps downstream
+            # recall filtering. Not default yet because existing Qdrant
+            # corpora were written in markdown and search would mix them.
+            "summary_format": "markdown",
         },
         "stop_guard": {
             # Disabled by default: the default patterns are opinionated

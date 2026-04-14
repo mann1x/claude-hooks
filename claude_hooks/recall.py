@@ -67,18 +67,33 @@ def run_recall(
     hyde_grounded = bool(hook_cfg.get("hyde_grounded", True))
 
     # --- Step 1: Raw recall (with raw query) ---
+    # Port 2 from thedotmack/claude-mem: metadata-gated rerank.
+    # When metadata_filter is enabled we ask each provider for a bigger
+    # candidate set (k * over_fetch_factor), then keep only the memories
+    # whose metadata matches the current context (cwd / type / age),
+    # then let HyDE / decay rerank only the survivors. This cuts noise
+    # from irrelevant projects without losing recall depth.
+    filter_cfg = hook_cfg.get("metadata_filter") or {}
+    filter_enabled = bool(filter_cfg.get("enabled", False))
+    over_fetch = int(filter_cfg.get("over_fetch_factor", 4)) if filter_enabled else 1
+
     raw_hits_by_provider: dict[str, list[Memory]] = {}
     for provider in active:
         pcfg = (config.get("providers") or {}).get(provider.name) or {}
         k = int(pcfg.get("recall_k", 5))
+        fetch_k = k * over_fetch
         try:
-            mems = provider.recall(query, k=k)
+            mems = provider.recall(query, k=fetch_k)
         except Exception as e:
             log.warning("provider %s recall failed: %s", provider.name, e)
             continue
         for m in mems or []:
             m.source_provider = provider.name
-        raw_hits_by_provider[provider.name] = list(mems or [])
+        filtered = _apply_metadata_filter(
+            list(mems or []), filter_cfg, cwd=cwd,
+        ) if filter_enabled else list(mems or [])
+        # Cap back to k after filter so downstream sees the usual count.
+        raw_hits_by_provider[provider.name] = filtered[:k]
 
     total_raw = sum(len(v) for v in raw_hits_by_provider.values())
 
@@ -242,3 +257,78 @@ def _truncate(text: str, max_chars: int) -> str:
     if max_chars <= 0 or len(text) <= max_chars:
         return text
     return text[: max_chars - 100].rstrip() + "\n\n…(truncated)"
+
+
+# ------------------------------------------------------------------ #
+# Metadata filter — port 2 from thedotmack/claude-mem
+# ------------------------------------------------------------------ #
+def _apply_metadata_filter(
+    memories: list[Memory],
+    filter_cfg: dict,
+    *,
+    cwd: str = "",
+) -> list[Memory]:
+    """Drop memories that don't match the filter criteria.
+
+    Empty / missing metadata fields on a memory never cause a reject —
+    we only filter when we have a positive signal, to stay recall-
+    friendly. Known keys:
+
+    - ``require_cwd_match: true`` — keep only memories whose
+      ``metadata.cwd`` equals the current cwd. When the memory has no
+      ``cwd`` at all, it passes (legacy memories aren't penalised).
+    - ``require_observation_type: "fix" | "decision" | …`` — keep only
+      memories whose ``metadata.observation_type`` matches.
+    - ``max_age_days: N`` — drop memories whose ``metadata.stored_at``
+      parses to > N days ago. No ``stored_at`` = pass.
+    - ``require_tags: [...]`` — keep only memories whose
+      ``metadata.tags`` contains at least one of the required tags.
+    """
+    if not memories:
+        return memories
+
+    require_cwd = bool(filter_cfg.get("require_cwd_match"))
+    req_type = filter_cfg.get("require_observation_type") or None
+    max_age_days = filter_cfg.get("max_age_days")
+    req_tags = set(filter_cfg.get("require_tags") or [])
+
+    import datetime as _dt
+    cutoff = None
+    if isinstance(max_age_days, (int, float)) and max_age_days > 0:
+        cutoff = _dt.datetime.utcnow() - _dt.timedelta(days=float(max_age_days))
+
+    out: list[Memory] = []
+    for m in memories:
+        meta = m.metadata or {}
+        # cwd gate — only applies when the memory records a cwd.
+        if require_cwd and cwd:
+            mcwd = meta.get("cwd")
+            if mcwd and mcwd != cwd:
+                continue
+        # observation_type gate
+        if req_type:
+            obs_type = meta.get("observation_type")
+            if obs_type and obs_type != req_type:
+                continue
+        # age gate
+        if cutoff is not None:
+            stored_at = meta.get("stored_at") or meta.get("timestamp")
+            if stored_at:
+                try:
+                    raw = stored_at
+                    if isinstance(raw, str) and raw.endswith("Z"):
+                        raw = raw[:-1] + "+00:00"
+                    ts = _dt.datetime.fromisoformat(raw)
+                    if ts.tzinfo is not None:
+                        ts = ts.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+                    if ts < cutoff:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+        # tag gate
+        if req_tags:
+            mtags = set(meta.get("tags") or [])
+            if mtags and not (req_tags & mtags):
+                continue
+        out.append(m)
+    return out
