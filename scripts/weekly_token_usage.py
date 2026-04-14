@@ -282,6 +282,62 @@ def iter_usage_records(
 
 
 # ------------------------------------------------------------------ #
+# Proxy JSONL log — P4 hand-off (read warmup-blocked savings)
+# ------------------------------------------------------------------ #
+@dataclass
+class ProxyStats:
+    warmups_blocked: int = 0
+    warmups_passed_through: int = 0
+    synthetic_rate_limits: int = 0
+    total_requests: int = 0
+
+
+def read_proxy_log(
+    log_dir: Path,
+    *,
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+) -> ProxyStats:
+    """Walk the proxy's daily JSONL files and tally warmup / synthetic
+    stats within the given window. Returns zeros on missing dir /
+    broken files — the script must never crash for lack of proxy data.
+    """
+    stats = ProxyStats()
+    if not log_dir.exists():
+        return stats
+    for p in sorted(log_dir.glob("*.jsonl")):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    ts = _parse_ts(rec.get("ts") or "")
+                    if ts is None:
+                        continue
+                    if since is not None and ts < since:
+                        continue
+                    if until is not None and ts >= until:
+                        continue
+                    stats.total_requests += 1
+                    if rec.get("warmup_blocked"):
+                        stats.warmups_blocked += 1
+                    elif rec.get("is_warmup"):
+                        stats.warmups_passed_through += 1
+                    if rec.get("synthetic"):
+                        stats.synthetic_rate_limits += 1
+        except OSError:
+            continue
+    return stats
+
+
+# ------------------------------------------------------------------ #
 # Aggregation
 # ------------------------------------------------------------------ #
 @dataclass
@@ -529,6 +585,7 @@ def render_json(
     week_end_utc: datetime,
     display_tz_name: str,
     current_usage_pct: Optional[float] = None,
+    proxy_stats: Optional["ProxyStats"] = None,
 ) -> str:
     week_total = sum(b.total for b in buckets)
 
@@ -583,6 +640,13 @@ def render_json(
             "tool_call_count": sum(b.tool_call_count for b in buckets),
         },
     }
+    if proxy_stats is not None:
+        payload["proxy"] = {
+            "total_requests": proxy_stats.total_requests,
+            "warmups_blocked": proxy_stats.warmups_blocked,
+            "warmups_passed_through": proxy_stats.warmups_passed_through,
+            "synthetic_rate_limits": proxy_stats.synthetic_rate_limits,
+        }
     return json.dumps(payload, indent=2)
 
 
@@ -653,6 +717,13 @@ def main(argv: Optional[list[str]] = None) -> int:
              "under ~/.claude/claude-hooks-proxy/. Only used when "
              "--current-usage-pct is not provided.",
     )
+    ap.add_argument(
+        "--proxy-log-dir", type=Path, default=None, metavar="PATH",
+        help="path to the proxy's JSONL log directory (for warmup-"
+             "blocked / synthetic-rate-limit stats). Default looks "
+             "under ~/.claude/claude-hooks-proxy/. Stats are printed "
+             "as a footer line when any are present in the week.",
+    )
     args = ap.parse_args(argv)
 
     display_tz_name = args.display_tz or args.reset_tz
@@ -704,6 +775,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         display_tz_name=display_tz_name,
     )
 
+    # Proxy-log stats (warmup-blocked savings, synthetic RL detection).
+    proxy_log_dir = (
+        args.proxy_log_dir
+        or Path.home() / ".claude" / "claude-hooks-proxy"
+    )
+    proxy_stats = read_proxy_log(
+        proxy_log_dir, since=week_start_utc, until=week_end_utc,
+    )
+
     if args.json:
         print(render_json(
             buckets,
@@ -711,6 +791,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             week_end_utc=week_end_utc,
             display_tz_name=display_tz_name,
             current_usage_pct=current_usage_pct,
+            proxy_stats=proxy_stats,
         ))
     else:
         display_tz = _zone(display_tz_name)
@@ -728,6 +809,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                 f"\n\nLimit % auto-populated from claude-hooks proxy "
                 f"(claim={proxy_state_info.get('representative_claim','?')}"
                 f", updated={proxy_state_info.get('last_updated','?')})."
+            )
+        if proxy_stats.total_requests > 0:
+            out += (
+                f"\n\nProxy this week: {proxy_stats.total_requests} requests, "
+                f"{proxy_stats.warmups_blocked} Warmup(s) BLOCKED, "
+                f"{proxy_stats.warmups_passed_through} Warmup(s) passed, "
+                f"{proxy_stats.synthetic_rate_limits} synthetic rate-limit(s)."
             )
         print(out)
     return 0

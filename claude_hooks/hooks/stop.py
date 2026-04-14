@@ -98,8 +98,17 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     }
 
     # Classify the observation type for better downstream filtering.
+    # When summary_format=xml, prefer the <type> value embedded in the
+    # summary itself — it was classified from the same data but at the
+    # same time, so it stays in sync with the stored text. Falls back
+    # to the dedicated _classify_observation when unavailable.
     if hook_cfg.get("classify_observations", True):
-        metadata["observation_type"] = _classify_observation(summary, transcript)
+        xml_type = _extract_xml_observation_type(summary) if summary_format == "xml" else None
+        metadata["observation_type"] = (
+            xml_type or _classify_observation(summary, transcript)
+        )
+    # Tag with the summary format so consumers know how to parse.
+    metadata["summary_format"] = summary_format
 
     stored = []
     failed = []
@@ -395,6 +404,24 @@ def _build_summary_xml(
         lines.append("  </commands>")
     lines.append("</observation>")
     return "\n".join(lines)
+
+
+def _extract_xml_observation_type(summary: str) -> Optional[str]:
+    """Parse ``<type>…</type>`` from an XML observation summary.
+
+    Returns None when the summary isn't XML or the tag is missing. Does
+    not use an XML parser — the content is tiny and we already escape
+    user text when emitting it, so a simple regex is sufficient and
+    never raises on malformed input.
+    """
+    if not summary or "<observation" not in summary:
+        return None
+    import re as _re
+    m = _re.search(r"<type>([^<]+)</type>", summary)
+    if not m:
+        return None
+    val = m.group(1).strip()
+    return val or None
 
 
 _TYPE_KEYWORDS = (

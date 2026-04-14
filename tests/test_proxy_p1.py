@@ -342,6 +342,53 @@ class TestWeeklyScriptAutoPopulate:
         # %Limit column present (since we auto-filled current_usage_pct)
         assert "%Limit" in out.stdout
 
+    def test_proxy_log_warmup_stats_in_output(self, tmp_path):
+        # Create a proxy log with a mix of warmup_blocked, warmup
+        # passed through, synthetic RL, and ordinary requests.
+        import datetime as _dt
+        proxy_log = tmp_path / "proxy-log"
+        proxy_log.mkdir()
+        today = _dt.datetime.utcnow().strftime("%Y-%m-%d")
+        now_iso = _dt.datetime.utcnow().isoformat() + "Z"
+        lines = [
+            {"ts": now_iso, "method": "POST", "path": "/v1/messages",
+             "status": 200, "warmup_blocked": True, "is_warmup": True},
+            {"ts": now_iso, "method": "POST", "path": "/v1/messages",
+             "status": 200, "warmup_blocked": True, "is_warmup": True},
+            {"ts": now_iso, "method": "POST", "path": "/v1/messages",
+             "status": 200, "is_warmup": True},                  # passed through
+            {"ts": now_iso, "method": "POST", "path": "/v1/messages",
+             "status": 200, "synthetic": True},
+            {"ts": now_iso, "method": "POST", "path": "/v1/messages",
+             "status": 200},
+        ]
+        (proxy_log / f"{today}.jsonl").write_text(
+            "\n".join(json.dumps(l) for l in lines) + "\n"
+        )
+        script = Path(__file__).resolve().parent.parent / "scripts" / "weekly_token_usage.py"
+        out = subprocess.run(
+            [sys.executable, str(script),
+             "--proxy-log-dir", str(proxy_log),
+             "--projects-dir", str(tmp_path / "empty")],
+            capture_output=True, text=True, timeout=15,
+        )
+        assert out.returncode == 0
+        assert "Proxy this week" in out.stdout
+        assert "2 Warmup(s) BLOCKED" in out.stdout
+        assert "1 Warmup(s) passed" in out.stdout
+        assert "1 synthetic rate-limit" in out.stdout
+
+    def test_proxy_log_missing_dir_no_footer(self, tmp_path):
+        script = Path(__file__).resolve().parent.parent / "scripts" / "weekly_token_usage.py"
+        out = subprocess.run(
+            [sys.executable, str(script),
+             "--proxy-log-dir", str(tmp_path / "nope"),
+             "--projects-dir", str(tmp_path / "empty")],
+            capture_output=True, text=True, timeout=15,
+        )
+        assert out.returncode == 0
+        assert "Proxy this week" not in out.stdout
+
     def test_no_autopopulate_when_flag_passed(self, tmp_path):
         state_file = tmp_path / "ratelimit-state.json"
         state_file.write_text(json.dumps({

@@ -177,6 +177,23 @@ class TestXmlSummary:
         assert md.startswith("# Turn")
         assert xml.startswith("<observation")
 
+    def test_extract_xml_observation_type(self):
+        from claude_hooks.hooks.stop import _extract_xml_observation_type
+        xml = _build_summary_xml(
+            {"cwd": "/p"}, user_text="fix the bug",
+            asst_text="Fixed the traceback", files_modified={"a.py"},
+            files_read=set(), commands=[],
+        )
+        assert _extract_xml_observation_type(xml) == "fix"
+
+    def test_extract_xml_observation_type_none_for_markdown(self):
+        from claude_hooks.hooks.stop import _extract_xml_observation_type
+        assert _extract_xml_observation_type("# Turn @ 2026\ncwd: /p") is None
+
+    def test_extract_xml_observation_type_none_for_empty(self):
+        from claude_hooks.hooks.stop import _extract_xml_observation_type
+        assert _extract_xml_observation_type("") is None
+
     def test_build_summary_markdown_still_groups_files(self):
         # Back-compat: read + modified land under one "Files touched" heading.
         event = {"cwd": "/p"}
