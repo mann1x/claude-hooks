@@ -1,0 +1,30 @@
+#!/usr/bin/env sh
+# claude-hooks-proxy — POSIX entry point for the local HTTP proxy.
+#
+# Usage (foreground — blocks until SIGINT/SIGTERM):
+#     claude-hooks-proxy
+#
+# Configure in config/claude-hooks.json under ``proxy``; default is
+# disabled. After enabling + starting this process, set
+#     ANTHROPIC_BASE_URL=http://127.0.0.1:<port>
+# in ~/.claude/settings.json under ``env`` to route Claude Code
+# through it.
+#
+# See docs/PLAN-proxy-hook.md for the full design.
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+
+CONDA_PY="$HOME/anaconda3/envs/claude-hooks/bin/python"
+if [ -x "$CONDA_PY" ]; then
+    PY="$CONDA_PY"
+elif command -v python3 >/dev/null 2>&1; then
+    PY=python3
+elif command -v python >/dev/null 2>&1; then
+    PY=python
+else
+    echo "claude-hooks-proxy: no python found" >&2
+    exit 1
+fi
+
+exec "$PY" -m claude_hooks.proxy "$@"

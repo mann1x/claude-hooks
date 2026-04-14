@@ -216,6 +216,31 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "binary": "episodic-memory",    # server: path to episodic-memory binary
         "timeout": 10.0,               # client: push timeout in seconds
     },
+    "proxy": {
+        # Optional local HTTP proxy sitting in front of api.anthropic.com.
+        # Fixes the blind spots hooks can't reach: real weekly-limit %,
+        # Warmup detection, rate-limit-header capture, synthetic-RL detection.
+        # Default OFF — the proxy must be a deliberate opt-in. To activate:
+        #   1. set enabled=true here
+        #   2. run ``python -m claude_hooks.proxy`` (or the bin/claude-hooks-proxy
+        #      shim) as a long-running process
+        #   3. set ANTHROPIC_BASE_URL=http://127.0.0.1:<listen_port> in
+        #      ~/.claude/settings.json under "env"
+        # See docs/PLAN-proxy-hook.md for design + phased roadmap.
+        "enabled": False,
+        "listen_host": "127.0.0.1",
+        "listen_port": 38080,
+        "upstream": "https://api.anthropic.com",
+        "timeout": 120.0,
+        "log_requests": True,
+        "log_dir": "~/.claude/claude-hooks-proxy",
+        "log_retention_days": 14,
+        # P1 (not yet): capture rate-limit headers into a rolling file that
+        # scripts/weekly_token_usage.py can read to fill --current-usage-pct.
+        "record_rate_limit_headers": True,
+        # P3 (not yet): short-circuit Warmup requests. Leave false in P0.
+        "block_warmup": False,
+    },
     "logging": {
         "path": "~/.claude/claude-hooks.log",
         "level": "info",
