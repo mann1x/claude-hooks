@@ -1,5 +1,17 @@
-# claude-hooks core: stdlib only — no dependencies needed at runtime.
-# This file lists optional deps for the experimental providers.
+# claude-hooks runtime deps.
+#
+# The core framework (hooks, MCP client, recall/store) is stdlib-only.
+# The proxy module requires httpx + h2 so the forwarder can present an
+# HTTP/2 connection profile to api.anthropic.com — stdlib http.client
+# (HTTP/1.1-per-request) trips Anthropic's edge 429 gate.
+#
+# install.py pip-installs this file into the conda env when creating
+# it, and re-installs when proxy.enabled is true and the deps are
+# missing (see _ensure_proxy_deps in install.py).
+
+httpx[http2]>=0.27
+
+# Optional providers — uncomment only if you enable them in config.
 
 # pgvector provider (optional)
 # psycopg[binary]>=3.1

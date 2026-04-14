@@ -1,13 +1,20 @@
 """
-Upstream HTTPS forwarder using ``http.client``.
+Upstream forwarder using ``httpx`` with HTTP/2 + connection pooling.
 
-Stdlib only. Handles:
+Rationale: Anthropic's edge enforces a per-request-connection gate on
+HTTP/1.1-per-request clients. Native Claude Code uses a single
+HTTP/2 connection and multiplexes streams over it. We match that
+profile with a module-level ``httpx.Client(http2=True)`` so the
+proxy presents one well-behaved client to upstream, regardless of
+how many requests Claude Code sends through us.
+
+Handles:
 
 - streaming response bodies (SSE + chunked), so extended thinking
   completes without buffering
-- drop ``Host`` / ``Content-Length`` from inbound headers (we set them
-  ourselves based on the upstream URL + body we forward)
-- propagate ``x-api-key`` / ``authorization`` / ``anthropic-*`` headers
+- strip ``Host`` / ``Content-Length`` from inbound headers — httpx
+  sets its own transport-level headers (``:authority`` in h2)
+- propagate ``x-api-key`` / ``authorization`` / ``anthropic-*``
   verbatim — we never touch auth
 - return a tuple so the handler can log metadata + mirror the body
   back to Claude Code
@@ -15,16 +22,27 @@ Stdlib only. Handles:
 
 from __future__ import annotations
 
-import http.client
+import atexit
 import logging
 import ssl
+import threading
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
 from urllib.parse import urlparse
 
+try:
+    import httpx
+except ImportError as e:  # pragma: no cover - guarded at install time
+    raise ImportError(
+        "claude-hooks proxy requires httpx[http2]. Install with:\n"
+        "    pip install 'httpx[http2]>=0.27'\n"
+        "or re-run install.py with proxy.enabled=true to auto-install."
+    ) from e
+
 log = logging.getLogger("claude_hooks.proxy.forwarder")
 
-# Headers we strip from the inbound request before forwarding.
+# Headers we strip from the inbound request before forwarding. httpx
+# (and HTTP/2) set their own transport-level equivalents.
 _STRIP_REQUEST_HEADERS = frozenset({
     "host", "content-length", "connection", "transfer-encoding",
     "keep-alive", "proxy-authorization", "proxy-connection",
@@ -38,6 +56,54 @@ _STRIP_RESPONSE_HEADERS = frozenset({
     "connection", "transfer-encoding", "keep-alive",
     "proxy-authorization", "te", "trailer", "upgrade",
 })
+
+# Module-level pooled client. Lazily constructed on first forward().
+# Thread-safe: httpx.Client is documented as safe for concurrent use.
+_CLIENT_LOCK = threading.Lock()
+_CLIENT: Optional[httpx.Client] = None
+_CLIENT_TIMEOUT: Optional[float] = None
+
+
+def _build_client(timeout: float) -> httpx.Client:
+    return httpx.Client(
+        http2=True,
+        timeout=httpx.Timeout(timeout, connect=10.0),
+        limits=httpx.Limits(
+            max_keepalive_connections=10,
+            max_connections=20,
+            keepalive_expiry=300.0,
+        ),
+        follow_redirects=False,
+        # Do NOT read HTTPS_PROXY / NO_PROXY from env — we *are* the
+        # proxy. If the host has those set pointing at us, trusting
+        # env would cause infinite loops.
+        trust_env=False,
+    )
+
+
+def _get_client(timeout: float) -> httpx.Client:
+    global _CLIENT, _CLIENT_TIMEOUT
+    with _CLIENT_LOCK:
+        if _CLIENT is None:
+            _CLIENT = _build_client(timeout)
+            _CLIENT_TIMEOUT = timeout
+        return _CLIENT
+
+
+def _reset_client() -> None:
+    """Close and drop the pooled client. Test-only / shutdown hook."""
+    global _CLIENT, _CLIENT_TIMEOUT
+    with _CLIENT_LOCK:
+        if _CLIENT is not None:
+            try:
+                _CLIENT.close()
+            except Exception:
+                pass
+            _CLIENT = None
+            _CLIENT_TIMEOUT = None
+
+
+atexit.register(_reset_client)
 
 
 @dataclass
@@ -64,68 +130,81 @@ def forward(
     headers: dict[str, str],
     body: bytes,
     timeout: float,
-    ssl_ctx: Optional[ssl.SSLContext] = None,
+    ssl_ctx: Optional[ssl.SSLContext] = None,  # retained for API compat; httpx uses certifi
 ) -> UpstreamResult:
     """Forward one request upstream and return headers + a streaming body.
 
     The caller is responsible for consuming ``body_iter`` completely so the
-    underlying connection closes cleanly.
+    underlying stream is released back to the pool.
     """
     u = urlparse(upstream_url)
-    host = u.hostname
-    port = u.port or (443 if u.scheme == "https" else 80)
-    if host is None:
+    if not u.scheme or not u.hostname:
         raise ValueError(f"upstream missing host: {upstream_url}")
+    if u.scheme not in ("http", "https"):
+        raise ValueError(f"unsupported scheme: {u.scheme}")
 
-    if u.scheme == "https":
-        ctx = ssl_ctx or ssl.create_default_context()
-        conn = http.client.HTTPSConnection(host, port, timeout=timeout, context=ctx)
-    else:
-        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+    url = f"{u.scheme}://{u.netloc}{path_with_query}"
 
     out_headers = {
         k: v for k, v in headers.items() if k.lower() not in _STRIP_REQUEST_HEADERS
     }
-    out_headers["Host"] = host
-    if body:
-        out_headers["Content-Length"] = str(len(body))
+    # httpx sets Host / :authority from URL automatically; no need
+    # to pass it explicitly and it can confuse HTTP/2 negotiation.
 
-    conn.request(method, path_with_query, body=body or None, headers=out_headers)
-    resp = conn.getresponse()
+    client = _get_client(timeout)
 
-    # Read enough to parse metadata (headers + first chunk). For SSE the
-    # first 4 KB is plenty for ``message_start``; for JSON responses we
-    # still stream the rest lazily so we don't buffer giant bodies.
-    first_chunk = resp.read(4096)
+    req = client.build_request(
+        method, url, headers=out_headers, content=body if body else None,
+    )
+    resp = client.send(req, stream=True)
+
+    chunks_iter = resp.iter_raw(chunk_size=65536)
+
+    # Pull up to 4 KB for metadata extraction. SSE's ``message_start``
+    # fits well under that; JSON bodies are still streamed lazily.
+    first_chunk = b""
+    try:
+        while len(first_chunk) < 4096:
+            try:
+                chunk = next(chunks_iter)
+            except StopIteration:
+                break
+            if not chunk:
+                continue
+            first_chunk += chunk
+    except Exception:
+        try:
+            resp.close()
+        except Exception:
+            pass
+        raise
 
     response_headers: dict[str, str] = {}
-    for k, v in resp.getheaders():
+    for k, v in resp.headers.items():
         if k.lower() in _STRIP_RESPONSE_HEADERS:
             continue
         response_headers[k] = v
 
-    stats = {"bytes_read": len(first_chunk)}
+    stats = {"bytes_read": len(first_chunk), "http_version": resp.http_version}
 
     # SSE responses stream the final ``usage`` block in a trailing
     # ``message_delta``. We attach a tailer that parses events as they
-    # flow past and populates ``stats['final_usage']`` / ``stop_reason``
-    # for the JSONL log. The bytes going to the client are verbatim.
+    # flow past. Bytes going to the client are verbatim.
     from claude_hooks.proxy.sse import SseTail
-    content_type = response_headers.get("Content-Type", "").lower()
+    # httpx.Headers.get is case-insensitive; response_headers dict may
+    # have been rekeyed to lowercase (HTTP/2 normalizes).
+    content_type = (resp.headers.get("content-type") or "").lower()
     is_sse = "text/event-stream" in content_type
     tail: Optional[SseTail] = SseTail() if is_sse else None
 
-    # Seed the tailer with the first chunk so message_start lands in
-    # final_usage even if the caller never iterates further.
     if tail is not None and first_chunk:
         tail._feed(first_chunk)
 
     def _drain() -> Iterable[bytes]:
         try:
-            while True:
-                chunk = resp.read(65536)
+            for chunk in chunks_iter:
                 if not chunk:
-                    break
+                    continue
                 stats["bytes_read"] += len(chunk)
                 if tail is not None:
                     tail._feed(chunk)
@@ -135,13 +214,13 @@ def forward(
                 tail._parse_event(tail._buffer)
                 tail._buffer = b""
             try:
-                conn.close()
+                resp.close()
             except Exception:
                 pass
 
     return UpstreamResult(
-        status=resp.status,
-        reason=resp.reason or "",
+        status=resp.status_code,
+        reason=resp.reason_phrase or "",
         headers=response_headers,
         first_chunk=first_chunk,
         body_iter=_drain(),

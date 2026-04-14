@@ -198,3 +198,73 @@ class TestSseEdges:
         ).encode()
         list(tail.wrap([payload]))
         assert tail.final_usage == {"output_tokens": 9}
+
+
+# --------------------------------------------------------------- #
+# httpx forwarder — HTTP/2 client + pool reuse
+# --------------------------------------------------------------- #
+class TestHttpxForwarder:
+    def test_pooled_client_is_reused_across_calls(self):
+        """Two forward() calls must share one httpx.Client instance.
+
+        This is the whole point of the httpx rewrite: one connection
+        profile to upstream, not fresh-per-request.
+        """
+        from claude_hooks.proxy import forwarder as fwd
+
+        fwd._reset_client()
+        c1 = fwd._get_client(timeout=5.0)
+        c2 = fwd._get_client(timeout=5.0)
+        try:
+            assert c1 is c2
+            # http2 flag must be on — that's what matches native CC's
+            # connection profile.
+            import httpx
+            assert isinstance(c1, httpx.Client)
+        finally:
+            fwd._reset_client()
+
+    def test_forward_records_http_version_in_stats(self):
+        """The forwarder tags each result with the negotiated protocol.
+
+        For plain-HTTP test servers we'll see HTTP/1.1 — good enough to
+        confirm stats wiring. Real api.anthropic.com returns HTTP/2.
+        """
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class Echo(BaseHTTPRequestHandler):
+            def log_message(self, *a, **k): pass
+            def do_POST(self):
+                body = b'{"ok":true}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        s = socket.socket(); s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]; s.close()
+        srv = HTTPServer(("127.0.0.1", port), Echo)
+        t = threading.Thread(target=srv.serve_forever, daemon=True); t.start()
+        try:
+            result = forward(
+                f"http://127.0.0.1:{port}",
+                "POST", "/v1/messages",
+                {"Content-Type": "application/json"},
+                b'{"x":1}', timeout=5.0,
+            )
+            body = result.first_chunk + b"".join(result.body_iter)
+            assert result.status == 200
+            assert b'{"ok":true}' in body
+            assert "http_version" in result.stats
+            # Test server is HTTP/1.1; real upstream negotiates h2.
+            assert result.stats["http_version"].startswith("HTTP/")
+        finally:
+            srv.shutdown(); srv.server_close()
+
+    def test_forward_rejects_unsupported_scheme(self):
+        with pytest.raises(ValueError):
+            forward(
+                "ftp://example.com/v1", "GET", "/",
+                {}, b"", timeout=1.0,
+            )

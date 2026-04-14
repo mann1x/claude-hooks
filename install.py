@@ -155,6 +155,60 @@ def _find_conda() -> Optional[str]:
     return None
 
 
+def _ensure_proxy_deps(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
+    """Verify httpx + h2 are available when the proxy is enabled.
+
+    The proxy forwarder requires HTTP/2 (via httpx[http2]) to match
+    native Claude Code's connection profile. HTTP/1.1-per-request
+    trips Anthropic's edge 429 gate.
+
+    Runs after save_config so it sees the just-written state. No-op
+    when proxy.enabled is false.
+    """
+    proxy_cfg = (cfg.get("proxy") or {})
+    if not proxy_cfg.get("enabled", False):
+        return
+
+    conda_py = CONDA_PY_WIN if os.name == "nt" else CONDA_PY_LINUX
+    # Use conda env's python when available, else system python.
+    py = str(conda_py) if conda_py.exists() else sys.executable
+
+    probe = subprocess.run(
+        [py, "-c", "import httpx, h2; print(httpx.__version__, h2.__version__)"],
+        capture_output=True, text=True,
+    )
+    if probe.returncode == 0:
+        print(f"\nProxy deps:     httpx + h2 OK ({probe.stdout.strip()})")
+        return
+
+    print("\nProxy deps:     httpx / h2 MISSING")
+    print("  The proxy forwarder needs httpx[http2] to pass Anthropic's")
+    print("  HTTP/2 edge gate. Without it the proxy will import-error.")
+
+    if dry_run:
+        print(f"  [dry-run] Would: {py} -m pip install 'httpx[http2]>=0.27'")
+        return
+
+    if non_interactive:
+        print("  --non-interactive: installing httpx[http2]…")
+    else:
+        ans = input("  Install httpx[http2] now? [Y/n]: ").strip().lower()
+        if ans not in ("", "y", "yes"):
+            print("  Skipped. Proxy will fail to start until installed manually:")
+            print(f"    {py} -m pip install 'httpx[http2]>=0.27'")
+            return
+
+    pip_bin = str(Path(py).parent / ("pip.exe" if os.name == "nt" else "pip"))
+    pip_cmd = [pip_bin, "install", "httpx[http2]>=0.27"] if Path(pip_bin).exists() \
+        else [py, "-m", "pip", "install", "httpx[http2]>=0.27"]
+    rc = subprocess.run(pip_cmd, capture_output=True, text=True)
+    if rc.returncode == 0:
+        print("  Installed.")
+    else:
+        print(f"  pip install failed:\n{rc.stderr[-500:]}")
+        print(f"  Run manually: {' '.join(pip_cmd)}")
+
+
 def _check_conda_env(*, non_interactive: bool, dry_run: bool) -> None:
     """Check the conda env, offer to create it + install deps if missing."""
     conda_py = CONDA_PY_WIN if os.name == "nt" else CONDA_PY_LINUX
@@ -308,6 +362,11 @@ def main() -> int:
     else:
         save_config(cfg, cfg_path)
         print(f"\nConfig written: {cfg_path}")
+
+    # Ensure proxy deps (httpx + h2) are installed when the proxy
+    # is enabled. The httpx[http2] profile is what lets the proxy
+    # pass Anthropic's edge gate that 429s HTTP/1.1-per-request.
+    _ensure_proxy_deps(cfg, non_interactive=args.non_interactive, dry_run=args.dry_run)
 
     # Merge hooks into settings.json.
     settings_path = user_settings_path()
