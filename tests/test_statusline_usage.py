@@ -150,6 +150,61 @@ class TestCliEntryPoint:
         assert out.returncode == 0
         assert out.stdout == "5h 42%"
 
+    def test_show_blocked_appends_segment(self, tmp_path, mod):
+        import datetime as _dt
+        p = tmp_path / "state.json"
+        p.write_text(json.dumps({
+            "last_updated": _dt.datetime.utcnow().isoformat() + "Z",
+            "five_hour_utilization": 0.42,
+            "representative_claim": "five_hour",
+        }))
+        today = _dt.datetime.utcnow().strftime("%Y-%m-%d")
+        (tmp_path / f"{today}.jsonl").write_text(
+            "\n".join(json.dumps({"ts": _dt.datetime.utcnow().isoformat() + "Z",
+                                  "warmup_blocked": True})
+                     for _ in range(3)) + "\n"
+        )
+        out = subprocess.run(
+            [sys.executable, str(SCRIPT),
+             "--state-file", str(p), "--format", "plain",
+             "--show-blocked"],
+            capture_output=True, text=True, timeout=5,
+        )
+        assert out.returncode == 0
+        assert "blk=3" in out.stdout
+
+    def test_show_blocked_zero_hides_segment(self, tmp_path):
+        import datetime as _dt
+        p = tmp_path / "state.json"
+        p.write_text(json.dumps({
+            "last_updated": _dt.datetime.utcnow().isoformat() + "Z",
+            "five_hour_utilization": 0.42,
+            "representative_claim": "five_hour",
+        }))
+        # No JSONL file — blocked=0 → no blk= segment
+        out = subprocess.run(
+            [sys.executable, str(SCRIPT),
+             "--state-file", str(p), "--format", "plain",
+             "--show-blocked"],
+            capture_output=True, text=True, timeout=5,
+        )
+        assert out.returncode == 0
+        assert "blk=" not in out.stdout
+
+    def test_count_blocked_unit(self, mod, tmp_path):
+        import datetime as _dt
+        today = _dt.datetime.utcnow().strftime("%Y-%m-%d")
+        (tmp_path / f"{today}.jsonl").write_text(
+            "\n".join(json.dumps({"ts": _dt.datetime.utcnow().isoformat() + "Z",
+                                  "warmup_blocked": v})
+                     for v in (True, True, False, True)) + "\n"
+            + "garbage line\n"
+        )
+        assert mod.count_blocked_today(tmp_path) == 3
+
+    def test_count_blocked_missing_file(self, mod, tmp_path):
+        assert mod.count_blocked_today(tmp_path) == 0
+
     def test_exit_zero_on_corrupt_file(self, tmp_path):
         p = tmp_path / "state.json"
         p.write_text("not json")

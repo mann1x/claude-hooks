@@ -61,9 +61,14 @@ def format_segment(
     fmt: str = "emoji",
     stale_seconds: int = DEFAULT_STALE_SECONDS,
     now: Optional[_dt.datetime] = None,
+    blocked_today: Optional[int] = None,
 ) -> str:
     """Render one state dict into a compact segment. Returns "" on
     stale / empty / broken inputs.
+
+    ``blocked_today`` is an optional count of Warmups blocked today
+    (passed in from the proxy's JSONL log). When > 0, appends a
+    compact ``· blk=N`` segment so the savings are visible inline.
     """
     if not state:
         return ""
@@ -89,6 +94,8 @@ def format_segment(
         parts.append(f"7d {pct(seven)}")
     if not parts:
         return ""
+    if blocked_today and blocked_today > 0:
+        parts.append(f"blk={blocked_today}")
     base = " · ".join(parts)
 
     # Pick the binding window for the warning glyph.
@@ -101,6 +108,33 @@ def format_segment(
             glyph = " ⚠" if fmt == "emoji" else " !"
 
     return base + glyph
+
+
+def count_blocked_today(log_dir: Path) -> int:
+    """Count ``warmup_blocked: true`` entries in today's proxy log.
+
+    Returns 0 on any error — the statusline caller must never crash.
+    """
+    today = _dt.datetime.utcnow().strftime("%Y-%m-%d")
+    p = log_dir / f"{today}.jsonl"
+    if not p.exists():
+        return 0
+    n = 0
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(rec, dict) and rec.get("warmup_blocked"):
+                    n += 1
+    except OSError:
+        pass
+    return n
 
 
 def read_state(path: Path) -> dict:
@@ -127,11 +161,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         help=f"treat state older than N seconds as absent "
              f"(default: {DEFAULT_STALE_SECONDS})",
     )
+    ap.add_argument(
+        "--show-blocked", action="store_true",
+        help="append ' · blk=N' when today's proxy log has N Warmup-"
+             "blocked events. Reads the same directory as --state-file.",
+    )
     try:
         args = ap.parse_args(argv)
         state = read_state(args.state_file)
+        blocked = None
+        if args.show_blocked:
+            blocked = count_blocked_today(args.state_file.parent)
         segment = format_segment(
             state, fmt=args.format, stale_seconds=args.stale_seconds,
+            blocked_today=blocked,
         )
         if segment:
             sys.stdout.write(segment)
