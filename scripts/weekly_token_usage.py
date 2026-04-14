@@ -164,6 +164,7 @@ class UsageRecord:
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
     tool_call_count: int = 0         # number of tool_use blocks in this turn
+    is_sidechain: bool = False       # True for subagent / Task-tool turns
 
     @property
     def total(self) -> int:
@@ -198,9 +199,17 @@ def iter_usage_records(
 ) -> Iterable[UsageRecord]:
     """Yield one ``UsageRecord`` per assistant turn whose timestamp falls in
     ``[since, until)``. Silent about malformed lines and missing files.
+
+    Claude Code replays assistant messages into every transcript that
+    forks or resumes from the originating session — the same turn can
+    appear in 10-30 files. We dedup using the same key ccusage uses:
+    ``message.id + model + requestId`` (with a text-hash fallback when
+    a transcript predates those fields). Missing dedup would inflate
+    token counts by 2-3×.
     """
     if not projects_dir.exists():
         return
+    seen_keys: set[str] = set()
     for path in projects_dir.rglob("*.jsonl"):
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as fh:
@@ -225,6 +234,25 @@ def iter_usage_records(
                     usage = msg.get("usage") or {}
                     if not usage:
                         continue
+                    # Dedup — see docstring above.
+                    mid = msg.get("id") or ""
+                    model = msg.get("model") or ""
+                    rid = entry.get("requestId") or ""
+                    if mid and rid:
+                        dedup_key = f"{mid}|{model}|{rid}"
+                    elif mid:
+                        dedup_key = f"id:{mid}|{model}"
+                    else:
+                        # Fallback: timestamp + token counts (coarse but
+                        # stable enough for transcripts without IDs).
+                        dedup_key = (
+                            f"{ts.isoformat()}|{model}|"
+                            f"{usage.get('input_tokens')}|"
+                            f"{usage.get('output_tokens')}"
+                        )
+                    if dedup_key in seen_keys:
+                        continue
+                    seen_keys.add(dedup_key)
                     # Count tool_use blocks inside this assistant message.
                     content = msg.get("content") or []
                     tool_count = 0
@@ -247,6 +275,7 @@ def iter_usage_records(
                             usage.get("cache_read_input_tokens", 0) or 0
                         ),
                         tool_call_count=tool_count,
+                        is_sidechain=bool(entry.get("isSidechain", False)),
                     )
         except OSError:
             continue
@@ -266,6 +295,9 @@ class DayBucket:
     by_model: dict = field(default_factory=dict)
     message_count: int = 0
     tool_call_count: int = 0
+    sidechain_input_tokens: int = 0
+    sidechain_total_tokens: int = 0
+    sidechain_message_count: int = 0
 
     @property
     def total(self) -> int:
@@ -312,6 +344,10 @@ def build_weekly_buckets(
         b.cache_read_input_tokens += r.cache_read_input_tokens
         b.message_count += 1
         b.tool_call_count += r.tool_call_count
+        if r.is_sidechain:
+            b.sidechain_input_tokens += r.input_tokens
+            b.sidechain_total_tokens += r.total
+            b.sidechain_message_count += 1
         if r.model:
             mm = b.by_model.setdefault(r.model, {
                 "input_tokens": 0,
@@ -344,6 +380,7 @@ def render_text(
     week_end_local: datetime,
     display_tz_name: str,
     show_by_model: bool,
+    show_sidechain: bool = False,
     current_usage_pct: Optional[float] = None,
 ) -> str:
     lines: list[str] = []
@@ -374,6 +411,8 @@ def render_text(
     if current_usage_pct is not None:
         header_cols += f"{'%Limit':>8}"
     header_cols += f"{'Msgs':>8}{'Tools':>8}"
+    if show_sidechain:
+        header_cols += f"{'Sub%Inp':>8}{'Subs':>6}"
     sep = "-" * len(header_cols)
     lines.append(header_cols)
     lines.append(sep)
@@ -402,6 +441,12 @@ def render_text(
         if current_usage_pct is not None:
             row += f"{_pct_of_limit(b.total):>8}"
         row += f"{b.message_count:>8}{b.tool_call_count:>8}"
+        if show_sidechain:
+            sub_pct = (
+                f"{100.0 * b.sidechain_input_tokens / b.input_tokens:7.1f}"
+                if b.input_tokens else "   —"
+            )
+            row += f"{sub_pct:>8}{b.sidechain_message_count:>6}"
         lines.append(row)
         tot.input_tokens += b.input_tokens
         tot.output_tokens += b.output_tokens
@@ -422,6 +467,12 @@ def render_text(
     if current_usage_pct is not None:
         tot_row += f"{current_usage_pct:7.2f}"
     tot_row += f"{tot.message_count:>8}{tot.tool_call_count:>8}"
+    if show_sidechain:
+        tot_sub = sum(b.sidechain_input_tokens for b in buckets)
+        tot_in = sum(b.input_tokens for b in buckets)
+        tot_sub_msgs = sum(b.sidechain_message_count for b in buckets)
+        sub_pct = f"{100.0 * tot_sub / tot_in:7.1f}" if tot_in else "   —"
+        tot_row += f"{sub_pct:>8}{tot_sub_msgs:>6}"
     lines.append(tot_row)
     if current_usage_pct is not None:
         remaining = max(0.0, 100.0 - current_usage_pct)
@@ -513,6 +564,9 @@ def render_json(
                 "percentage_of_limit": _pct_of_limit(b.total),
                 "message_count": b.message_count,
                 "tool_call_count": b.tool_call_count,
+                "sidechain_input_tokens": b.sidechain_input_tokens,
+                "sidechain_total_tokens": b.sidechain_total_tokens,
+                "sidechain_message_count": b.sidechain_message_count,
                 "by_model": b.by_model,
             }
             for b in buckets
@@ -575,6 +629,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="include a per-model breakdown per day in the text output",
     )
     ap.add_argument(
+        "--show-sidechain", action="store_true",
+        help="add a Sidechain-% column that reports how much of each "
+             "day's input came from subagent (Task-tool / sidechain) "
+             "turns. Claude Code pre-warms every registered agent at "
+             "session start, so heavy plugin use spikes this number.",
+    )
+    ap.add_argument(
         "--json", action="store_true",
         help="emit JSON instead of a human-readable table",
     )
@@ -631,6 +692,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             week_end_local=week_end_utc.astimezone(display_tz),
             display_tz_name=display_tz_name,
             show_by_model=args.by_model,
+            show_sidechain=args.show_sidechain,
             current_usage_pct=args.current_usage_pct,
         ))
     return 0
