@@ -13,6 +13,11 @@ Environment=CLAUDE_HOOKS_REPO=/srv/dev-disk-by-label-opt/dev/claude-hooks
 ExecStart=/srv/dev-disk-by-label-opt/dev/claude-hooks/bin/claude-hooks-proxy
 Restart=on-failure
 RestartSec=5s
+# SIGTERM then SIGKILL — bounded stop even if a rogue SSE stream
+# holds the server thread.
+KillSignal=SIGTERM
+TimeoutStopSec=10s
+SendSIGKILL=yes
 
 # Reasonable hardening — the proxy doesn't need privilege.
 NoNewPrivileges=yes
