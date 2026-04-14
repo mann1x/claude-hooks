@@ -25,9 +25,29 @@ classifiers = [
 Repository = "https://github.com/mann1x/claude-hooks"
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "coverage>=7.0"]
 pgvector = ["psycopg[binary]"]
 sqlite-vec = ["sqlite-vec"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["claude_hooks"]
+branch = true
+omit = [
+    "claude_hooks/providers/pgvector.py",
+    "claude_hooks/providers/sqlite_vec.py",
+    "claude_hooks/detect.py",
+]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

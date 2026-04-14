@@ -155,6 +155,7 @@ command in the Claude Code prompt.
 |---------|----------|-------------|
 | `/reflect` | Ollama | Analyze recent memories for recurring patterns, generate CLAUDE.md rules |
 | `/consolidate` | Ollama | Find duplicate memories, compress old entries, prune stale ones |
+| `/wrapup` | -- | Produce a restore-ready session state summary before compacting / pausing |
 | `/episodic <query>` | episodic-server | Search past Claude Code conversations by semantic query |
 | `/save-learning` | -- | Save a user instruction/preference as a persistent learning |
 | `/find-skills` | caliber | Search the public skill registry for community skills |
@@ -269,8 +270,8 @@ each one.
 
 Scans the last assistant message on `Stop` events for
 ownership-dodging phrases ("pre-existing issue", "known limitation"),
-session-quitting phrases ("good stopping point", "continue in the next
-session"), and permission-seeking mid-task ("should I continue?").
+session-quitting phrases ("good stopping point", "continue in the
+next session"), and permission-seeking mid-task ("should I continue?").
 If matched, returns `decision: block` with a correction so the
 assistant resumes working instead of stopping. Respects
 `stop_hook_active` to avoid infinite loops.
@@ -285,6 +286,14 @@ Patterns are opinionated defaults (derived from rtfpessoa's CLAUDE.md
 golden rules). Override with your own
 `patterns: [{"pattern": "regex", "correction": "message"}, ...]` in
 config. Source: [`claude_hooks/stop_guard.py`](claude_hooks/stop_guard.py).
+
+**User-intent wrap-up escape**: by default the guard skips its check
+when the last user message contains a wrap-up marker (e.g. "wrap up",
+"compact the context", "save state", "continue another time",
+"/wrapup"). This lets `/wrapup` and similar explicit hand-off requests
+finish cleanly without being blocked. Disable with
+`skip_on_user_wrap_up: false`, or extend the marker list via
+`user_wrap_up_markers: ["…", …]`.
 
 **Meta-context escape**: by default the guard skips its check when the
 match is only inside a quoted span (`"…"`, `'…'`, `` `…` ``) or the
@@ -505,9 +514,51 @@ This adds a `PM2` entry under
 ## Tests
 
 ```bash
-pip install -r requirements-dev.txt   # just pytest
-python -m pytest tests/ -v            # 58 tests (42 unit + 16 integration)
+pip install -r requirements-dev.txt   # pytest + coverage
+python -m pytest tests/ -q            # 292 passed, 16 skipped (≈1.6 s)
 ```
+
+Branch coverage gate (target ≥ 80 %):
+
+```bash
+coverage run -m pytest tests/
+coverage report
+# Last measured: 81.3 % branch coverage on claude_hooks/
+```
+
+### Test-file map
+
+| File | Module under test | Tests | Notes |
+|------|-------------------|-------|-------|
+| `tests/conftest.py` | shared fixtures | — | `fake_provider`, `base_config`, `fake_transcript`, `transcript_file`, `tmp_claude_home` |
+| `tests/mocks/ollama.py` | Ollama HTTP stubs | — | `mock_ollama_generate`, `mock_ollama_embeddings` |
+| `tests/test_fixtures.py` | fixture smoke tests | 17 | Sanity-checks every fixture and mock |
+| `tests/test_config.py` | `config.py` | 6 | merge, paths, project-disabled marker |
+| `tests/test_dedup.py` | `dedup.py` | 11 | similarity, should_store, dedup w/ failing provider |
+| `tests/test_decay.py` | `decay.py` | 23 | hash, recency / frequency boost, prune, atomic state I/O |
+| `tests/test_embedders.py` | `embedders.py` | 14 | factory, Ollama / OpenAI clients, error paths |
+| `tests/test_hyde.py` | `hyde.py` | 18 | grounded expansion, fallback model, `_format_context` cap |
+| `tests/test_recall.py` | `recall.py` | 20 | full pipeline, dedup, OpenWolf injection, HyDE skip |
+| `tests/test_handlers.py` | hook handlers | 28 | UserPromptSubmit / SessionStart / SessionEnd / Stop store half |
+| `tests/test_pre_tool_use_handler.py` | `hooks/pre_tool_use.py` | 11 | safety + rtk integration |
+| `tests/test_safety_scan.py` | `safety_scan.py` | 17 | dangerous-command detection, allow-list |
+| `tests/test_rtk_rewrite.py` | `rtk_rewrite.py` | 12 | rewrite, version probe, opt-in policy |
+| `tests/test_stop_guard.py` | `stop_guard.py` | 23 | default patterns, meta-context escape, **user-intent wrap-up escape** |
+| `tests/test_instincts.py` | `instincts.py` | 13 | bug-fix detection, save / merge w/ frontmatter |
+| `tests/test_reflect.py` | `reflect.py` | 12 | guards, Ollama failure, dedup across providers, append idempotency |
+| `tests/test_consolidate.py` | `consolidate.py` | 16 | merge candidates, compress, state file, `should_run` cooldown |
+| `tests/test_claudemem_reindex.py` | `claudemem_reindex.py` | 15 | lock cooldown, staleness scan, async spawn |
+| `tests/test_openwolf.py` | `openwolf.py` | 9 | wolf-dir detection, anatomy / cerebrum read |
+| `tests/test_dispatcher.py` | `dispatcher.py` | 6 | event routing |
+| `tests/test_detect.py` | `detect.py` | 6 | MCP server discovery in `~/.claude.json` |
+| `tests/test_mcp_client.py` | `mcp_client.py` | 6 | initialize → tools/call round-trip |
+| `tests/test_providers.py` | provider registry | 9 | Qdrant / Memory KG signatures |
+| `tests/test_pgvector_integration.py` | `providers/pgvector.py` | 8 (skipped w/o psycopg) | live Postgres |
+| `tests/test_sqlite_vec_integration.py` | `providers/sqlite_vec.py` | 8 (skipped w/o sqlite-vec) | live sqlite-vec |
+
+> Before merging: run `python -m pytest tests/` (0 failures) and
+> `coverage report` (≥ 80 %). Both are part of the conda-env workflow
+> documented at the top of this section.
 
 ## Recommended Companion Tools
 

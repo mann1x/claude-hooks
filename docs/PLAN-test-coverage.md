@@ -1,24 +1,30 @@
 # Plan: close the test-coverage gaps from the 2026-04-14 audit
 
 **Audited commit:** `220e18b`
-**Status as of 2026-04-14 wrap-up:** 257 passed, 16 skipped (up from
-113 at plan start). Phases 0, 1, 2, 3 complete and pushed. Phase 4
-partially complete (instincts done, reflect / consolidate pending).
-Phases 5 and 6 not started.
+**Status as of 2026-04-14:** **PLAN COMPLETE.** 292 passed, 16 skipped
+(up from 113 at plan start). Branch coverage **81.3 %** on
+`claude_hooks/` (target ≥ 80 %).
 
 **Completed commits (all on `origin/main`):**
 
 - `7940e6e` — Phase 0 fixtures + Phase 1 (dedup, decay, embedders, 65 tests)
 - `ce794f1` — Phase 2 (hyde, recall, 38 tests)
 - `49f9f6a` — Phase 3 (4 hook handlers, 28 tests)
-- Phase 4 partial: `test_instincts.py` (13 tests) staged locally
+- `841ef6e` — Phase 4 instincts + Phase 7 (stop_guard escape, /wrapup skill)
+- this commit — Phase 4 reflect/consolidate + Phase 5 coverage gate + Phase 6 README
 
-**Remaining:**
-- Phase 4: `test_reflect.py` (~8 tests), `test_consolidate.py` (~8)
-- Phase 5: coverage.py gate
-- Phase 6: README refresh
-- **NEW: Phase 7 — `/wrapup` skill polish + stop_guard user-intent
-  escape tests** (see bottom of this doc)
+**Phase status:**
+
+| Phase | Status | Tests added |
+|-------|--------|-------------|
+| 0 — fixtures & mocks | done | — |
+| 1 — dedup / decay / embedders | done | 48 |
+| 2 — hyde / recall | done | 38 |
+| 3 — hook handlers | done | 28 |
+| 4 — reflect / consolidate / instincts | done | 41 |
+| 5 — coverage gate (≥ 80 % branch) | done | — |
+| 6 — README test-section refresh | done | — |
+| 7 — stop_guard user-intent escape + /wrapup skill | done | 7 |
 
 ---
 
@@ -502,15 +508,19 @@ user says "compact the context" / "save state" / "wrap up" / etc.
       positive from 2026-04-14 recurs when the same test phrase is
       uttered).
 
-### Remaining original plan (Phases 4-6)
+### Remaining original plan (Phases 4-6) — COMPLETE
 
-**Phase 4 — maintenance modules** (partial):
-- [x] `tests/test_instincts.py` (13 tests, green locally)
-- [ ] `tests/test_reflect.py` (~8 tests — attempt was deleted unverified)
-- [ ] `tests/test_consolidate.py` (~8 tests — not started)
+**Phase 4 — maintenance modules**: done
+- [x] `tests/test_instincts.py` (13 tests)
+- [x] `tests/test_reflect.py` (12 tests)
+- [x] `tests/test_consolidate.py` (16 tests)
 
-**Phase 5 — coverage gate**: not started.
+**Phase 5 — coverage gate**: done
+- [x] `coverage>=7.0` added to `requirements-dev.txt` and
+      `[project.optional-dependencies].dev`
+- [x] `[tool.coverage.run]` and `[tool.coverage.report]` in `pyproject.toml`
+- [x] Measured 81.3 % branch coverage (≥ 80 % target)
 
-**Phase 6 — README test-section refresh**: not started.
-
-These can be picked up after Phase 7 in any order.
+**Phase 6 — README test-section refresh**: done
+- [x] Test count updated, full file map added, coverage workflow
+      documented under `## Tests`
