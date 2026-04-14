@@ -20,6 +20,7 @@ import logging
 import signal
 import socket
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -317,18 +318,35 @@ def run(cfg: Optional[dict] = None) -> int:
         file=sys.stderr,
     )
 
+    # Run serve_forever in a background thread so the main thread can
+    # receive signals and call server.shutdown() without deadlocking
+    # on its own serve loop (which happens when shutdown() is invoked
+    # from inside the signal handler on the same thread).
+    serve_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    serve_thread.start()
+
+    stop_flag = threading.Event()
+
     def _stop(_sig: int, _frame) -> None:
         print("\nshutting down…", file=sys.stderr)
-        server.shutdown()
+        stop_flag.set()
 
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
 
     try:
-        server.serve_forever()
+        while not stop_flag.is_set():
+            # Wake up periodically so SIGINT / SIGTERM delivery can be
+            # observed without polling tight.
+            stop_flag.wait(timeout=1.0)
     finally:
+        try:
+            server.shutdown()
+        except Exception:
+            pass
         try:
             server.server_close()
         except Exception:
             pass
+        # Daemon threads exit with the process; no need to join.
     return 0
