@@ -159,6 +159,9 @@ recommendation after months of field testing:
 ## 8. Monitoring
 
 ```bash
+# One-screen dashboard (recommended default)
+python3 scripts/status.py
+
 # Short: is the proxy still healthy?
 systemctl is-active claude-hooks-proxy
 
@@ -168,7 +171,8 @@ python3 scripts/proxy_stats.py --days 7 --by-model
 # Custom-weekly view (Fri 10:00 CEST reset)
 python3 scripts/weekly_token_usage.py --show-sidechain
 
-# Both — pipe into jq for dashboarding
+# All of them — pipe into jq for dashboarding
+python3 scripts/status.py --json | jq .
 python3 scripts/proxy_stats.py --days 7 --json | jq .
 python3 scripts/weekly_token_usage.py --json | jq .
 ```

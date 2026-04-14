@@ -107,6 +107,7 @@ Claude responds (knowing the prior context, deterministically)
 
 | Script | What |
 |---|---|
+| `scripts/status.py` | At-a-glance dashboard: systemd state, current rate-limit %, today's Warmup-blocked count. `--json` for scripting. |
 | `scripts/weekly_token_usage.py` | Per-day token breakdown against a custom weekly-reset window (default Fri 10:00 CEST). Auto-populates `%Limit` from the proxy. `--show-sidechain` reveals the Warmup share. |
 | `scripts/proxy_stats.py` | Ad-hoc proxy-log summaries (per-day requests, Warmup-blocked savings, synthetic-rate-limit detection, per-model counts). `--json` for scripting. |
 | `scripts/statusline_usage.py` | Compact statusline segment showing live 5h / 7d %. Safe-by-design (never crashes the caller). |
