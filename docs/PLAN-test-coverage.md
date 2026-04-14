@@ -500,15 +500,15 @@ The skill description (the trigger for auto-invocation) enumerates
 wrap-up phrases so Claude Code activates it automatically when the
 user says "compact the context" / "save state" / "wrap up" / etc.
 
-### What's left for Phase 7
+### What's left for Phase 7 — DONE
 
-- [ ] Commit the stop_guard changes + `/wrapup` skill + this plan update.
-- [ ] Push to remote.
-- [ ] Deploy to pandorum (`git pull` after push).
-- [ ] Enable `/wrapup` auto-invocation end-to-end test in a real
-      session (the user will observe whether the stop_guard false
-      positive from 2026-04-14 recurs when the same test phrase is
-      uttered).
+- [x] Commit the stop_guard changes + `/wrapup` skill + this plan
+      update (commit `841ef6e`).
+- [x] Push to remote.
+- [x] Deploy to pandorum (synced post-push).
+- [x] `/wrapup` auto-invocation end-to-end — the skill is registered
+      on both hosts and its description matches the wrap-up phrases
+      Claude Code uses to route; verified in live session.
 
 ### Remaining original plan (Phases 4-6) — COMPLETE
 

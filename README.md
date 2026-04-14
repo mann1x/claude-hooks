@@ -26,6 +26,9 @@ you'll see:
 
 Check `~/.claude/claude-hooks.log` to confirm hooks are firing.
 
+For the full playbook — LAN-shared proxy setup, systemd unit, statusline
+wiring, monitoring, uninstall — see [`docs/deployment.md`](docs/deployment.md).
+
 ---
 
 ## What it does
