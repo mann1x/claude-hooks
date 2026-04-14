@@ -52,7 +52,19 @@ log = logging.getLogger("claude_hooks.claudemem_reindex")
 
 
 _LOCK_FILENAME = ".claudemem-reindex.lock"
-_LOCK_MIN_AGE_SECONDS = 60  # don't re-reindex within this window
+# Default cooldown — don't spawn another reindex if one ran this recently.
+# Configurable per-call via ``lock_min_age_seconds``.
+_DEFAULT_LOCK_MIN_AGE_SECONDS = 60
+
+# Directories we never need to scan for staleness detection. Users can
+# extend this via config (``hooks.claudemem_reindex.ignored_dirs``).
+_DEFAULT_IGNORED_DIRS: frozenset[str] = frozenset({
+    ".git", ".claudemem", ".caliber", ".wolf",
+    "node_modules", "__pycache__", ".venv", "venv", ".env",
+    ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    ".cache", ".npm", ".yarn",
+    "dist", "build", "target", "out",
+})
 
 
 def _find_claudemem() -> Optional[str]:
@@ -60,7 +72,12 @@ def _find_claudemem() -> Optional[str]:
 
 
 def _project_root(cwd: str) -> Optional[Path]:
-    """Walk up from cwd looking for a .git directory. Returns None if missing."""
+    """Walk up from cwd until we find a ``.git`` entry (file or dir).
+
+    Note: ``.git`` can be either a directory (regular repo) or a plain file
+    (git worktree / submodule pointing at the real gitdir). Either counts
+    as a project root for our purposes.
+    """
     if not cwd:
         return None
     p = Path(cwd).resolve()
@@ -77,14 +94,17 @@ def _claudemem_indexed(root: Path) -> bool:
     return (root / ".claudemem").is_dir()
 
 
-def _acquire_lock(root: Path) -> bool:
+def _acquire_lock(
+    root: Path,
+    min_age_seconds: int = _DEFAULT_LOCK_MIN_AGE_SECONDS,
+) -> bool:
     """Return True if we should proceed (stale or missing lock), False otherwise."""
     lock = root / _LOCK_FILENAME
     now = time.time()
     if lock.exists():
         try:
             age = now - lock.stat().st_mtime
-            if age < _LOCK_MIN_AGE_SECONDS:
+            if age < min_age_seconds:
                 log.debug("reindex lock fresh (%ds old) — skipping", int(age))
                 return False
         except OSError:
@@ -95,6 +115,31 @@ def _acquire_lock(root: Path) -> bool:
         log.debug("could not write reindex lock: %s", e)
         return False
     return True
+
+
+def _index_mtime(claudemem_dir: Path) -> Optional[float]:
+    """Return the index's effective last-updated time.
+
+    Prefers ``index.db`` (the primary store) when present so we don't have
+    to walk the whole ``.claudemem/`` tree. Falls back to the directory's
+    own mtime, then to the max mtime of its contents.
+    """
+    primary = claudemem_dir / "index.db"
+    if primary.exists():
+        try:
+            return primary.stat().st_mtime
+        except OSError:
+            pass
+    try:
+        return claudemem_dir.stat().st_mtime
+    except OSError:
+        pass
+    try:
+        return max(
+            p.stat().st_mtime for p in claudemem_dir.rglob("*") if p.is_file()
+        )
+    except (OSError, ValueError):
+        return None
 
 
 def _spawn_reindex(binary: str, root: Path) -> None:
@@ -118,6 +163,7 @@ def reindex_if_dirty_async(
     *,
     cwd: str,
     turn_modified: bool,
+    lock_min_age_seconds: int = _DEFAULT_LOCK_MIN_AGE_SECONDS,
 ) -> None:
     """Spawn a reindex if the turn touched source files. Never raises."""
     try:
@@ -134,7 +180,7 @@ def reindex_if_dirty_async(
         if not _claudemem_indexed(root):
             log.debug("project %s has no .claudemem — skip", root)
             return
-        if not _acquire_lock(root):
+        if not _acquire_lock(root, min_age_seconds=lock_min_age_seconds):
             return
         _spawn_reindex(binary, root)
     except Exception as e:
@@ -146,8 +192,30 @@ def reindex_if_stale_async(
     cwd: str,
     staleness_minutes: int = 10,
     max_files_to_scan: int = 2000,
+    ignored_dirs: Optional[frozenset[str]] = None,
+    lock_min_age_seconds: int = _DEFAULT_LOCK_MIN_AGE_SECONDS,
 ) -> None:
-    """Spawn a reindex if the index trails the newest source mtime. Never raises."""
+    """Spawn a reindex when the project has drifted past the staleness window.
+
+    Semantics (NB: not the same as "index trails newest source by N minutes"):
+
+    1. Compute the index's last-updated time. If less than
+       ``staleness_minutes`` have passed since then, return without any
+       further work. This is a cooldown: it bounds how often we can spawn
+       a reindex regardless of source churn, preventing thrash when files
+       are edited rapidly.
+
+    2. Otherwise, walk the project (skipping ``ignored_dirs``) looking for
+       any source file with an mtime greater than the index's. Bail on the
+       first hit and spawn a detached reindex.
+
+    ``max_files_to_scan`` caps the walk so that pathologically large
+    projects don't freeze a SessionStart hook. If the cap is reached
+    without a hit we emit a debug log and return — downstream the
+    post-commit hook or a later SessionStart will still catch up.
+
+    Never raises; all OS errors are swallowed.
+    """
     try:
         binary = _find_claudemem()
         if not binary:
@@ -159,39 +227,34 @@ def reindex_if_stale_async(
         if not claudemem_dir.is_dir():
             return
 
-        try:
-            index_mtime = max(
-                p.stat().st_mtime for p in claudemem_dir.rglob("*") if p.is_file()
-            )
-        except (OSError, ValueError):
+        index_mtime = _index_mtime(claudemem_dir)
+        if index_mtime is None:
             return
 
-        threshold = index_mtime + staleness_minutes * 60
-        now = time.time()
-
-        # If the threshold is in the future (index updated < staleness window
-        # ago), we don't need to do anything regardless of newer source files.
-        if threshold > now:
+        # Cooldown: don't reindex within the staleness window, even if
+        # source files are already newer than the index.
+        if index_mtime + staleness_minutes * 60 > time.time():
             return
 
-        # Cheap mtime scan. Skip hidden dirs, large/binary extensions,
-        # and the index dir itself. Only needs to find ONE file newer
-        # than the index to trigger a reindex, so bail early.
-        ignored_dirs = {".git", ".claudemem", "node_modules", "__pycache__",
-                        ".venv", ".cache", ".caliber"}
+        ignored = ignored_dirs if ignored_dirs is not None else _DEFAULT_IGNORED_DIRS
         count = 0
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if d not in ignored_dirs]
+            dirnames[:] = [d for d in dirnames if d not in ignored]
             for fn in filenames:
                 count += 1
                 if count > max_files_to_scan:
+                    log.debug(
+                        "stale-scan reached max_files_to_scan=%d for %s — "
+                        "no stale file found yet; will re-check next session",
+                        max_files_to_scan, root,
+                    )
                     return
                 try:
                     mt = (Path(dirpath) / fn).stat().st_mtime
                 except OSError:
                     continue
                 if mt > index_mtime:
-                    if _acquire_lock(root):
+                    if _acquire_lock(root, min_age_seconds=lock_min_age_seconds):
                         _spawn_reindex(binary, root)
                     return
     except Exception as e:

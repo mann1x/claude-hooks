@@ -38,12 +38,17 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     # a claudemem index, spawn a background reindex. Runs detached so
     # it never adds latency to the hook itself.
     reindex_cfg = (config.get("hooks") or {}).get("claudemem_reindex") or {}
-    if reindex_cfg.get("enabled", True) and _turn_modified_files(transcript):
+    if (
+        reindex_cfg.get("enabled", True)
+        and reindex_cfg.get("check_on_stop", True)
+        and _turn_modified_files(transcript)
+    ):
         try:
             from claude_hooks.claudemem_reindex import reindex_if_dirty_async
             reindex_if_dirty_async(
                 cwd=event.get("cwd", ""),
                 turn_modified=True,
+                lock_min_age_seconds=int(reindex_cfg.get("lock_min_age_seconds", 60)),
             )
         except Exception as e:
             log.debug("claudemem reindex skipped: %s", e)

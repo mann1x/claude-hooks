@@ -27,10 +27,21 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     reindex_cfg = (config.get("hooks") or {}).get("claudemem_reindex") or {}
     if reindex_cfg.get("enabled", True) and reindex_cfg.get("check_on_session_start", True):
         try:
-            from claude_hooks.claudemem_reindex import reindex_if_stale_async
+            from claude_hooks.claudemem_reindex import (
+                _DEFAULT_IGNORED_DIRS,
+                reindex_if_stale_async,
+            )
+            extra_ignored = reindex_cfg.get("ignored_dirs") or []
+            if extra_ignored:
+                ignored = frozenset(_DEFAULT_IGNORED_DIRS | set(extra_ignored))
+            else:
+                ignored = _DEFAULT_IGNORED_DIRS
             reindex_if_stale_async(
                 cwd=event.get("cwd", ""),
                 staleness_minutes=int(reindex_cfg.get("staleness_minutes", 10)),
+                max_files_to_scan=int(reindex_cfg.get("max_files_to_scan", 2000)),
+                ignored_dirs=ignored,
+                lock_min_age_seconds=int(reindex_cfg.get("lock_min_age_seconds", 60)),
             )
         except Exception as e:
             log.debug("claudemem stale-check skipped: %s", e)

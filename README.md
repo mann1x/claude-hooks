@@ -200,6 +200,9 @@ touch your-project/.claude-hooks-disable
 ```
 
 Any directory with this marker file (or any ancestor) will skip all hooks.
+The filename can be changed via the top-level `disable_marker_filename`
+config key (default `.claude-hooks-disable`) if you need a different
+sentinel name for your organisation.
 
 ## Uninstall
 
@@ -345,6 +348,91 @@ When `rtk_rewrite_enabled` and `safety_scan_enabled` are both on, rtk
 runs first and the safety scanner runs on the **rewritten** command —
 so dangerous content hidden behind chained commands
 (`rtk ls && rm -rf`) is still caught before the rewrite is approved.
+
+## Other configurable features
+
+### HyDE query expansion (UserPromptSubmit recall)
+
+HyDE (Hypothetical Document Embeddings) rewrites your prompt into a
+hypothetical answer before vector search, which usually lands better in
+"answer space" than the raw question. Enabled via
+`hooks.user_prompt_submit.hyde_enabled: true`. Tunables:
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `hyde_model` | `qwen3.5:2b` | Primary Ollama model |
+| `hyde_fallback_model` | `gemma4:e2b` | Fallback if primary fails |
+| `hyde_url` | `http://localhost:11434/api/generate` | Ollama endpoint |
+| `hyde_timeout` | `30.0` | Per-call timeout (seconds) |
+| `hyde_max_tokens` | `150` | Output length cap for the hypothetical answer |
+| `hyde_keep_alive` | `"15m"` | Ollama `keep_alive` — keeps the model resident between calls so cold-start doesn't hit every prompt |
+| `hyde_grounded` | `true` | Two-phase grounded pipeline: query Qdrant raw first, then feed top hits to the LLM as grounding before generating the expansion. Prevents hallucinated domain terms poisoning the search. |
+| `hyde_ground_k` | `3` | How many raw hits to use as grounding context |
+| `hyde_ground_max_chars` | `1500` | Cap on the grounding context size |
+
+If raw recall finds nothing (garbage query), grounded mode short-circuits
+and skips HyDE entirely — cheaper than an ungrounded hallucinated
+expansion.
+
+### Per-provider `dedup_threshold`
+
+On `Stop`, providers that expose cosine similarity (qdrant, pgvector,
+sqlite_vec) can skip storing a turn summary if an existing entry is
+above the given cosine threshold. Set on the provider entry:
+
+```json
+"providers": {
+  "qdrant": { "dedup_threshold": 0.85 }
+}
+```
+
+`0.0` disables (the default for most providers). `0.85` is a sensible
+floor for "don't bother, we already have this." Higher = stricter.
+
+### `classify_observations` and instincts extraction (Stop hook)
+
+The Stop hook tags each stored memory with an `observation_type`
+(`fix`, `decision`, `preference`, `gotcha`, `general`) so downstream
+tooling can filter. Toggle with `hooks.stop.classify_observations`.
+
+`hooks.stop.extract_instincts` (opt-in) additionally runs a lightweight
+heuristic to pull persistent rules from the assistant's message and
+write them to `hooks.stop.instincts_dir` (default `~/.claude/instincts`)
+as a sidecar you can promote to CLAUDE.md manually. Experimental.
+
+### Claudemem auto-reindex
+
+[`claudemem`](https://github.com/MadAppGang/claudemem) is a semantic
+code-search tool with its own AST-aware index. Upstream ships a git
+post-commit hook (`claudemem hooks install`), but that doesn't cover
+**uncommitted mid-session edits**. This hook plugs the gap:
+
+- **Stop event**: if the turn ran any `Edit`/`Write`/`MultiEdit`/
+  `NotebookEdit`, spawn `claudemem index --quiet` detached so the
+  hook adds no latency.
+- **SessionStart event**: if the index is older than `staleness_minutes`
+  AND any source file is newer than the index, reindex.
+
+All triggers silently no-op if `claudemem` isn't on PATH or the project
+has no `.claudemem/` directory — safe to leave enabled on partially-
+configured fleets.
+
+Config (`hooks.claudemem_reindex`):
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `enabled` | `true` | Master toggle |
+| `check_on_stop` | `true` | Reindex on turns that touched files |
+| `check_on_session_start` | `true` | Staleness check when a new session opens |
+| `staleness_minutes` | `10` | Cooldown — reindex at most every N min |
+| `max_files_to_scan` | `2000` | Cap on the stale-scan walk (set higher for monorepos) |
+| `ignored_dirs` | `[]` | Extra dir names to skip (appended to built-in: `.git`, `.claudemem`, `node_modules`, `.venv`, `__pycache__`, `.wolf`, `.caliber`, `dist`, `build`, …) |
+| `lock_min_age_seconds` | `60` | Cooldown on the `.claudemem-reindex.lock` file to prevent pile-ups |
+
+For **commit-time** reindexing on every project, run:
+```bash
+claudemem hooks install   # in each git repo
+```
 
 ## Credits
 

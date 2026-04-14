@@ -2,21 +2,24 @@
 PreToolUse handler — runs the safety scanner and the memory-warning
 recall on every Bash/Edit/Write tool call.
 
-Order of operations (each stage is independent and opt-in):
+Order of operations:
 
-  1. rtk_rewrite: if ``rtk`` (rtk-ai/rtk) is installed, substitute
-     verbose ``find``/``grep``/``git log`` commands with their terser
-     equivalents. Emits ``updatedInput`` so subsequent stages see the
-     rewritten command too.
-  2. safety_scan: content-based pattern match on the full Bash command
-     (potentially already rewritten). On match → emit
-     ``permissionDecision: "ask"`` and stop. The user always makes the
-     final call; we never auto-deny.
-  3. memory warn: query the configured providers for past-mistake
-     snippets related to the command and inject them as
-     ``additionalContext``. Advisory only.
+  1. rtk_rewrite (opt-in): if ``rtk`` (rtk-ai/rtk) is installed,
+     substitute verbose ``find``/``grep``/``git log`` commands with
+     terser equivalents. Emits ``updatedInput`` so subsequent stages
+     see the rewritten command too.
 
-Both stages are disabled by default and enabled independently in
+  2. safety_scan (opt-in — but always runs on rtk-rewritten commands):
+     content-based pattern match on the (possibly rewritten) command.
+     On match → emit ``permissionDecision: "ask"`` with reason and the
+     rewritten command shown in ``updatedInput``. We never auto-deny.
+     Auto-runs after any rtk rewrite because the rtk ``allow`` decision
+     would otherwise bypass the settings.json allow-list.
+
+  3. memory warn (opt-in): query the configured providers for past
+     mistakes and inject them as ``additionalContext``. Advisory only.
+
+All stages are disabled by default and enabled independently in
 ``config/claude-hooks.json`` under ``hooks.pre_tool_use``.
 
 Safety-scan patterns are ported from rtfpessoa/code-factory's
@@ -39,10 +42,18 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     tool_input = event.get("tool_input") or {}
 
     # Stages 1+2: rtk rewriter + safety scanner (Bash only).
+    #
     # Order matters: rtk first, then safety_scan on the *rewritten* command.
-    # If safety_scan matches a rewritten command, we emit an "ask" decision
-    # with the rewritten command in updatedInput so the user sees what will
-    # actually run.
+    #
+    # IMPORTANT SAFETY INVARIANT: when rtk produces a rewrite we WILL emit
+    # ``permissionDecision`` — either "ask" (if safety_scan matched) or
+    # "allow" (if clean). Either decision BYPASSES the ``~/.claude/
+    # settings.json`` allow-list because Claude Code honours explicit
+    # hook decisions. To keep the user-configured safety net intact, we
+    # therefore run safety_scan on rtk-rewritten commands REGARDLESS of
+    # the ``safety_scan_enabled`` flag. The flag still gates standalone
+    # scanning (when rtk didn't rewrite) so users who only want rtk
+    # don't get scanner prompts on the unchanged command paths.
     if tool_name == "Bash":
         cmd = (tool_input.get("command", "") or "").strip()
         effective_cmd = cmd
@@ -55,10 +66,18 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
                 rewritten_input = dict(tool_input)
                 rewritten_input["command"] = rewrite
 
-        if hook_cfg.get("safety_scan_enabled", False) and effective_cmd:
+        # Safety scan applies when:
+        #   (a) user explicitly enabled it, OR
+        #   (b) rtk rewrote the command — to prevent the allow-list bypass
+        #       described above.
+        run_scan = (
+            hook_cfg.get("safety_scan_enabled", False)
+            or rewritten_input is not None
+        )
+        if run_scan and effective_cmd:
             scan = _run_safety_scan_raw(effective_cmd, hook_cfg)
             if scan is not None:
-                name, reason = scan
+                _name, reason = scan
                 response = {
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
@@ -71,7 +90,7 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
                 return response
 
         if rewritten_input is not None:
-            # Safe after scan (or scan disabled) — auto-approve the rewrite.
+            # Safe after scan — auto-approve the rewrite.
             if hook_cfg.get("rtk_log_rewrites", False):
                 log.info("rtk rewrote: %s -> %s", cmd[:120], effective_cmd[:120])
             return {

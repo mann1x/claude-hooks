@@ -128,10 +128,24 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "enabled": True,
             # Stop-event: reindex if any Edit/Write/MultiEdit ran this turn.
             "check_on_stop": True,
-            # SessionStart: if the index trails the newest source mtime by
-            # more than this many minutes, reindex.
+            # SessionStart: if the index is older than staleness_minutes AND
+            # any source file is newer than the index, reindex. The
+            # staleness window is a cooldown — reindex at most every N min.
             "check_on_session_start": True,
             "staleness_minutes": 10,
+            # Max files walked per stale-check before bailing. Large
+            # monorepos should bump this; pathological sizes should set it
+            # low to keep SessionStart responsive.
+            "max_files_to_scan": 2000,
+            # Extra directory names to skip during the stale-scan walk.
+            # Appended to the built-in default ignore set (.git,
+            # .claudemem, .caliber, .wolf, node_modules, __pycache__,
+            # .venv, .mypy_cache, .pytest_cache, .ruff_cache, dist,
+            # build, target, out, etc.)
+            "ignored_dirs": [],
+            # Minimum age of the reindex lock before a new reindex may
+            # run. Prevents spawn pileup when many Edit tools fire rapidly.
+            "lock_min_age_seconds": 60,
         },
         "pre_tool_use": {
             # Memory-warn stage (advisory additionalContext from provider recall).

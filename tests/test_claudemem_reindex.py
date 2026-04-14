@@ -42,7 +42,7 @@ class LockTests(unittest.TestCase):
             lock = root / claudemem_reindex._LOCK_FILENAME
             lock.write_text("x")
             # Backdate the lock well past the threshold.
-            old = time.time() - claudemem_reindex._LOCK_MIN_AGE_SECONDS - 30
+            old = time.time() - claudemem_reindex._DEFAULT_LOCK_MIN_AGE_SECONDS - 30
             os.utime(lock, (old, old))
             self.assertTrue(claudemem_reindex._acquire_lock(root))
 
@@ -129,7 +129,7 @@ class ReindexIfStaleTests(unittest.TestCase):
         (root / ".git").mkdir()
         claudemem_dir = root / ".claudemem"
         claudemem_dir.mkdir()
-        (claudemem_dir / "index.bin").write_text("x")
+        (claudemem_dir / "index.db").write_text("x")
         return root
 
     def test_skip_when_no_source_newer(self):
@@ -139,7 +139,7 @@ class ReindexIfStaleTests(unittest.TestCase):
             src = root / "main.py"
             src.write_text("x")
             os.utime(src, (time.time() - 3600, time.time() - 3600))
-            idx = root / ".claudemem" / "index.bin"
+            idx = root / ".claudemem" / "index.db"
             os.utime(idx, (time.time(), time.time()))
             with patch("claude_hooks.claudemem_reindex.shutil.which", return_value="/usr/bin/claudemem"), \
                  patch("claude_hooks.claudemem_reindex._spawn_reindex") as spawn:
@@ -152,7 +152,7 @@ class ReindexIfStaleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = self._make_indexed_project(tmp)
             # Backdate the index.
-            idx = root / ".claudemem" / "index.bin"
+            idx = root / ".claudemem" / "index.db"
             old = time.time() - 3600
             os.utime(idx, (old, old))
             # New source file
@@ -168,7 +168,7 @@ class ReindexIfStaleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = self._make_indexed_project(tmp)
             # Index updated 2 minutes ago.
-            idx = root / ".claudemem" / "index.bin"
+            idx = root / ".claudemem" / "index.db"
             two_min_ago = time.time() - 120
             os.utime(idx, (two_min_ago, two_min_ago))
             (root / "main.py").write_text("x")

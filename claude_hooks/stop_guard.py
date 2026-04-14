@@ -102,12 +102,24 @@ DEFAULT_PATTERNS: list[tuple[str, str]] = [
 ]
 
 
+# Cache keyed by the raw tuple so identical config hits compile once.
+_PATTERN_CACHE: dict[tuple, list[tuple[re.Pattern, str]]] = {}
+
+
+def reset_pattern_cache() -> None:
+    """Clear the compiled-pattern cache. For tests."""
+    _PATTERN_CACHE.clear()
+
+
 def load_patterns(cfg_patterns: list) -> list[tuple[re.Pattern, str]]:
     """Compile user-provided or default patterns for matching.
 
     cfg_patterns: list of [{"pattern": "...", "correction": "..."}] dicts, OR
                   an empty list to use DEFAULT_PATTERNS, OR
                   None to use DEFAULT_PATTERNS.
+
+    Compiled results are cached — repeat calls with the same config hit
+    the cache instead of recompiling every regex on every Stop event.
     """
     raw: list[tuple[str, str]]
     if cfg_patterns:
@@ -117,7 +129,12 @@ def load_patterns(cfg_patterns: list) -> list[tuple[re.Pattern, str]]:
             if isinstance(item, dict) and item.get("pattern")
         ]
     else:
-        raw = DEFAULT_PATTERNS
+        raw = list(DEFAULT_PATTERNS)
+
+    key = tuple(raw)
+    cached = _PATTERN_CACHE.get(key)
+    if cached is not None:
+        return cached
 
     compiled: list[tuple[re.Pattern, str]] = []
     for pattern, correction in raw:
@@ -126,6 +143,8 @@ def load_patterns(cfg_patterns: list) -> list[tuple[re.Pattern, str]]:
         except re.error:
             # Bad regex — skip silently rather than breaking the hook.
             continue
+
+    _PATTERN_CACHE[key] = compiled
     return compiled
 
 

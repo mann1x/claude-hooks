@@ -18,9 +18,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 
-# Ollama URL — use the proxy if available, else localhost.
+# Ollama embeddings URL. Override with OLLAMA_EMBEDDINGS_URL env var to
+# point at a remote Ollama (CI often runs one on a LAN host). Default
+# assumes a local Ollama on the stdlib port.
 OLLAMA_URL = os.environ.get(
-    "OLLAMA_EMBEDDINGS_URL", "http://192.168.178.2:11433/api/embeddings"
+    "OLLAMA_EMBEDDINGS_URL", "http://localhost:11434/api/embeddings"
 )
 
 

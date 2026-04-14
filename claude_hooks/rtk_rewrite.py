@@ -35,9 +35,11 @@ from typing import Optional
 
 log = logging.getLogger("claude_hooks.rtk_rewrite")
 
-# Module-level cache for the version probe so we don't re-invoke rtk
-# every single tool call. Reset by tests via reset_rtk_cache().
-_CACHED_STATE: dict = {}
+# Cache the version probe keyed by binary path (and resolved fullpath) so we
+# don't re-invoke ``rtk --version`` on every tool call. Keyed-by-binary so
+# differing ``rtk_bin`` configs across projects don't pollute each other.
+# Reset by tests via :func:`reset_rtk_cache`.
+_CACHED_STATE: dict[str, dict] = {}
 _MIN_VERSION = (0, 23, 0)
 
 
@@ -97,19 +99,23 @@ def _probe_rtk(
 ) -> dict:
     """Return cached {'usable': bool, 'path': str, 'version': (maj,min,pat)}.
 
-    Runs ``rtk --version`` once per process and caches the result.
+    Runs ``rtk --version`` once per (binary, min_version) pair and caches
+    the result. Cache key includes min_version so a stricter config can't
+    inherit a "usable" verdict from a looser one.
     """
-    if _CACHED_STATE:
-        return _CACHED_STATE
+    cache_key = f"{rtk_bin}@{'.'.join(map(str, min_version))}"
+    cached = _CACHED_STATE.get(cache_key)
+    if cached is not None:
+        return cached
 
     state: dict = {"usable": False, "path": "", "version": None, "reason": ""}
 
     path = shutil.which(rtk_bin)
     if not path:
         state["reason"] = "not found on PATH"
-        _CACHED_STATE.update(state)
+        _CACHED_STATE[cache_key] = state
         log.debug("rtk not on PATH — hook will pass through silently")
-        return _CACHED_STATE
+        return state
 
     state["path"] = path
     try:
@@ -122,24 +128,24 @@ def _probe_rtk(
         )
     except (subprocess.TimeoutExpired, OSError) as e:
         state["reason"] = f"version probe failed: {e}"
-        _CACHED_STATE.update(state)
-        return _CACHED_STATE
+        _CACHED_STATE[cache_key] = state
+        return state
 
     version = _parse_version(result.stdout or result.stderr or "")
     state["version"] = version
 
     if version is None:
         state["reason"] = "could not parse rtk --version output"
-        _CACHED_STATE.update(state)
+        _CACHED_STATE[cache_key] = state
         log.warning("rtk at %s: could not parse version — hook disabled", path)
-        return _CACHED_STATE
+        return state
 
     if version < min_version:
         state["reason"] = (
             f"rtk {'.'.join(map(str, version))} is older than required "
             f"{'.'.join(map(str, min_version))} (need 'rtk rewrite' subcommand)"
         )
-        _CACHED_STATE.update(state)
+        _CACHED_STATE[cache_key] = state
         log.warning(
             "rtk %s at %s is too old (need >= %s); hook disabled. Upgrade or "
             "remove unrelated 'rtk' binaries (see docs).",
@@ -147,12 +153,12 @@ def _probe_rtk(
             path,
             ".".join(map(str, min_version)),
         )
-        return _CACHED_STATE
+        return state
 
     state["usable"] = True
-    _CACHED_STATE.update(state)
+    _CACHED_STATE[cache_key] = state
     log.info("rtk %s usable at %s", ".".join(map(str, version)), path)
-    return _CACHED_STATE
+    return state
 
 
 def _parse_version(text: str) -> Optional[tuple[int, int, int]]:

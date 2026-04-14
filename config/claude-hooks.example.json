@@ -8,8 +8,7 @@
       "collection": "memory",
       "recall_k": 5,
       "store_mode": "auto",
-      "timeout": 5.0,
-      "dedup_threshold": 0.85
+      "timeout": 5.0
     },
     "memory_kg": {
       "enabled": true,
@@ -50,14 +49,21 @@
     "user_prompt_submit": {
       "enabled": true,
       "min_prompt_chars": 30,
-      "include_providers": ["qdrant", "memory_kg"],
+      "include_providers": [
+        "qdrant",
+        "memory_kg"
+      ],
       "max_total_chars": 4000,
       "hyde_enabled": false,
-      "hyde_model": "gemma4:e2b",
-      "hyde_fallback_model": "qwen3:4b",
+      "hyde_grounded": true,
+      "hyde_ground_k": 3,
+      "hyde_ground_max_chars": 1500,
+      "hyde_model": "qwen3.5:2b",
+      "hyde_fallback_model": "gemma4:e2b",
       "hyde_url": "http://localhost:11434/api/generate",
-      "hyde_timeout": 3.0,
+      "hyde_timeout": 30.0,
       "hyde_max_tokens": 150,
+      "hyde_keep_alive": "15m",
       "progressive": false,
       "decay_enabled": false,
       "decay_file": "~/.claude/claude-hooks-decay.json",
@@ -77,13 +83,46 @@
       "extract_instincts": false,
       "instincts_dir": "~/.claude/instincts"
     },
+    "stop_guard": {
+      "enabled": false,
+      "patterns": [],
+      "skip_meta_context": true,
+      "meta_markers": []
+    },
     "session_end": {
       "enabled": true
     },
+    "claudemem_reindex": {
+      "enabled": true,
+      "check_on_stop": true,
+      "check_on_session_start": true,
+      "staleness_minutes": 10,
+      "max_files_to_scan": 2000,
+      "ignored_dirs": [],
+      "lock_min_age_seconds": 60
+    },
     "pre_tool_use": {
       "enabled": false,
-      "warn_on_tools": ["Bash", "Edit", "Write", "MultiEdit"],
-      "warn_on_patterns": ["rm ", "DROP TABLE", "git reset --hard", "force-push"]
+      "warn_on_tools": [
+        "Bash",
+        "Edit",
+        "Write"
+      ],
+      "warn_on_patterns": [
+        "rm ",
+        "DROP TABLE",
+        "git reset --hard"
+      ],
+      "safety_scan_enabled": false,
+      "safety_use_defaults": true,
+      "safety_extra_patterns": [],
+      "safety_log_enabled": true,
+      "safety_log_dir": "~/.claude/permission-scanner",
+      "safety_log_retention_days": 90,
+      "rtk_rewrite_enabled": false,
+      "rtk_min_version": "0.23.0",
+      "rtk_timeout": 3.0,
+      "rtk_log_rewrites": false
     }
   },
   "reflect": {
@@ -100,10 +139,18 @@
     "min_sessions_between_runs": 10,
     "state_file": "~/.claude/claude-hooks-consolidate.json",
     "max_memories_to_scan": 200,
-    "merge_similarity_threshold": 0.80,
+    "merge_similarity_threshold": 0.8,
     "prune_stale_days": 90,
     "ollama_model": "gemma4:e2b",
     "ollama_url": "http://localhost:11434/api/generate"
+  },
+  "episodic": {
+    "mode": "off",
+    "server_url": "",
+    "server_host": "0.0.0.0",
+    "server_port": 11435,
+    "binary": "episodic-memory",
+    "timeout": 10.0
   },
   "logging": {
     "path": "~/.claude/claude-hooks.log",

@@ -25,7 +25,7 @@ PGVECTOR_DSN = os.environ.get(
     "PGVECTOR_DSN", "postgresql://claude:hooks@localhost:5433/memory"
 )
 OLLAMA_URL = os.environ.get(
-    "OLLAMA_EMBEDDINGS_URL", "http://192.168.178.2:11433/api/embeddings"
+    "OLLAMA_EMBEDDINGS_URL", "http://localhost:11434/api/embeddings"
 )
 
 # Use a unique table name per test run to avoid collisions.

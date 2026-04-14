@@ -31,24 +31,48 @@ from claude_hooks.safety_patterns import DEFAULT_PATTERNS
 log = logging.getLogger("claude_hooks.safety_scan")
 
 
+# Compiled-pattern cache keyed by (use_defaults, extras_tuple). The PreToolUse
+# hook fires on every Bash/Edit/Write, so recompiling ~40 regexes each call
+# is wasteful. Typical session sees a single cache entry.
+_PATTERN_CACHE: dict[tuple, list[tuple[re.Pattern, str, str]]] = {}
+
+
+def _extras_key(extra: Optional[list]) -> tuple:
+    """Hashable canonical form for the `extra` argument."""
+    if not extra:
+        return ()
+    out: list[tuple[str, str, str]] = []
+    for entry in extra:
+        if not isinstance(entry, dict):
+            continue
+        pattern = str(entry.get("pattern", ""))
+        if not pattern:
+            continue
+        name = str(entry.get("name", pattern[:32]))
+        reason = str(entry.get("reason", f"matches '{pattern}'"))
+        out.append((pattern, name, reason))
+    return tuple(out)
+
+
 def compile_patterns(
     extra: Optional[list] = None,
     use_defaults: bool = True,
 ) -> list[tuple[re.Pattern, str, str]]:
-    """Build the (regex, short_name, reason) list from defaults + extras."""
+    """Build the (regex, short_name, reason) list from defaults + extras.
+
+    Result is cached keyed by (use_defaults, extras_tuple) so repeated calls
+    with the same configuration return in O(1).
+    """
+    extras_key = _extras_key(extra)
+    cache_key = (use_defaults, extras_key)
+    cached = _PATTERN_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
     raw: list[tuple[str, str, str]] = []
     if use_defaults:
         raw.extend(DEFAULT_PATTERNS)
-    if extra:
-        for entry in extra:
-            if not isinstance(entry, dict):
-                continue
-            pattern = str(entry.get("pattern", ""))
-            if not pattern:
-                continue
-            name = str(entry.get("name", pattern[:32]))
-            reason = str(entry.get("reason", f"matches '{pattern}'"))
-            raw.append((pattern, name, reason))
+    raw.extend(extras_key)
 
     compiled: list[tuple[re.Pattern, str, str]] = []
     for pattern, name, reason in raw:
@@ -56,7 +80,14 @@ def compile_patterns(
             compiled.append((re.compile(pattern, re.IGNORECASE), name, reason))
         except re.error as e:
             log.warning("safety_scan: bad pattern %r skipped: %s", pattern, e)
+
+    _PATTERN_CACHE[cache_key] = compiled
     return compiled
+
+
+def reset_pattern_cache() -> None:
+    """Clear the compiled-pattern cache. For tests."""
+    _PATTERN_CACHE.clear()
 
 
 def scan_command(
