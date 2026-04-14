@@ -283,6 +283,29 @@ updates to pick up new skills.
 | `/code-analysis--investigate` | Auto-routes to the right detective based on query |
 | `/code-analysis--claudemem-search` | Semantic code search via claudemem |
 
+### ccusage — USD cost cross-reference
+
+**Importance: LOW / useful** — Third-party CLI that walks the same
+transcripts `scripts/weekly_token_usage.py` does and reports USD cost
+per day, per model, per session. Useful for sanity-checking our numbers
+and for seeing `$` figures (Anthropic subscription tokens are opaque
+but the equivalent API price is knowable). Doesn't honour our
+Fri-10:00-CEST weekly-reset window — ccusage groups by calendar day
+only — so the two tools are complementary.
+
+```bash
+npx -y ccusage@latest daily -z Europe/Berlin --since 20260410 --breakdown
+npx -y ccusage@latest weekly
+npx -y ccusage@latest blocks --active
+```
+
+Repo: https://github.com/ryoppippi/ccusage. claude-hooks'
+`weekly_token_usage.py` dedups transcript replays using the same
+composite key ccusage uses (`message.id + model + requestId`) so the
+two agree within the timezone-window delta.
+
+---
+
 ### frontend-design (official)
 
 **Importance: MEDIUM** -- Generates distinctive, production-grade frontend

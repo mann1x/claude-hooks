@@ -62,7 +62,7 @@
     },
     "pgvector": {
       "enabled": false,
-      "dsn": "postgresql://user:password@localhost:5432/memory",
+      "dsn": "",
       "table": "claude_hooks_memory",
       "embedder": "ollama",
       "embedder_options": {
@@ -110,7 +110,15 @@
       "decay_enabled": false,
       "decay_file": "~/.claude/claude-hooks-decay.json",
       "decay_recency_halflife_days": 14,
-      "decay_frequency_cap": 5
+      "decay_frequency_cap": 5,
+      "metadata_filter": {
+        "enabled": false,
+        "over_fetch_factor": 4,
+        "require_cwd_match": false,
+        "require_observation_type": null,
+        "max_age_days": null,
+        "require_tags": []
+      }
     },
     "session_start": {
       "enabled": true,
@@ -123,7 +131,8 @@
       "store_threshold": "noteworthy",
       "classify_observations": true,
       "extract_instincts": false,
-      "instincts_dir": "~/.claude/instincts"
+      "instincts_dir": "~/.claude/instincts",
+      "summary_format": "markdown"
     },
     "stop_guard": {
       "enabled": false,
@@ -156,6 +165,12 @@
         "rm ",
         "DROP TABLE",
         "git reset --hard"
+      ],
+      "file_read_gate": false,
+      "file_read_gate_tools": [
+        "Read",
+        "Edit",
+        "MultiEdit"
       ],
       "safety_scan_enabled": false,
       "safety_use_defaults": true,
@@ -196,6 +211,18 @@
     "server_port": 11435,
     "binary": "episodic-memory",
     "timeout": 10.0
+  },
+  "proxy": {
+    "enabled": false,
+    "listen_host": "127.0.0.1",
+    "listen_port": 38080,
+    "upstream": "https://api.anthropic.com",
+    "timeout": 120.0,
+    "log_requests": true,
+    "log_dir": "~/.claude/claude-hooks-proxy",
+    "log_retention_days": 14,
+    "record_rate_limit_headers": true,
+    "block_warmup": false
   },
   "logging": {
     "path": "~/.claude/claude-hooks.log",
