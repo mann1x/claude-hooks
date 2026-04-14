@@ -256,6 +256,104 @@ Same image, same endpoints as upstream — just one extra env var. See
 [`vendor/mcp-qdrant/README.md`](vendor/mcp-qdrant/README.md) for the full
 build/run instructions and how to pick a threshold for your embedding model.
 
+## Optional PreToolUse / Stop hooks (opt-in)
+
+Three optional hooks are bundled but disabled by default. Enable them
+individually in `config/claude-hooks.json` after reading the doc for
+each one.
+
+### `stop_guard` — force the assistant to keep working
+
+Scans the last assistant message on `Stop` events for
+ownership-dodging phrases ("pre-existing issue", "known limitation"),
+session-quitting phrases ("good stopping point", "continue in the next
+session"), and permission-seeking mid-task ("should I continue?").
+If matched, returns `decision: block` with a correction so the
+assistant resumes working instead of stopping. Respects
+`stop_hook_active` to avoid infinite loops.
+
+```json
+"hooks": {
+  "stop_guard": { "enabled": true }
+}
+```
+
+Patterns are opinionated defaults (derived from rtfpessoa's CLAUDE.md
+golden rules). Override with your own
+`patterns: [{"pattern": "regex", "correction": "message"}, ...]` in
+config. Source: [`claude_hooks/stop_guard.py`](claude_hooks/stop_guard.py).
+
+### `safety_scan` — ask-before-running on dangerous commands
+
+PreToolUse scanner that matches dangerous patterns **anywhere** in a
+Bash command (after pipes, chains, `find -exec`, subshells), not just
+as a prefix. Emits `permissionDecision: "ask"` on match so the user
+always makes the call; never auto-denies. Complements the
+prefix-based allow-list in `~/.claude/settings.json`.
+
+```json
+"hooks": {
+  "pre_tool_use": {
+    "safety_scan_enabled": true,
+    "safety_log_retention_days": 90
+  }
+}
+```
+
+Default pattern list covers `sudo`, `rm -rf`, `mkfs`, `dd`,
+`curl | sh`, destructive git operations, `npm install -g`,
+`DROP TABLE`, and more. See
+[`claude_hooks/safety_patterns.py`](claude_hooks/safety_patterns.py).
+Matches are logged as JSONL under `~/.claude/permission-scanner/`
+with daily rotation (90-day retention by default).
+
+### `rtk_rewrite` — transparent command rewrite for token savings
+
+PreToolUse hook that shells out to [`rtk`](https://github.com/rtk-ai/rtk)
+(a Rust CLI) to rewrite verbose `find` / `grep` / `git log` / `du`
+style commands into terser rtk equivalents. rtk-ai claims 60-90%
+token savings on matching commands.
+
+```json
+"hooks": {
+  "pre_tool_use": {
+    "rtk_rewrite_enabled": true,
+    "rtk_min_version": "0.23.0"
+  }
+}
+```
+
+Requires the `rtk` binary (>= 0.23.0) on `PATH`. Install from
+https://github.com/rtk-ai/rtk (Homebrew, curl installer, or download
+the Windows zip). If `rtk` is missing or too old, the hook silently
+passes the command through — safe to enable on partially-deployed
+fleets. **Name collision warning**: there's an unrelated "Rust Type
+Kit" crate also named `rtk` on crates.io — uninstall it first
+(`rm $(which rtk)` if `rtk --version` shows `0.1.x` without a
+`rewrite` subcommand). Source:
+[`claude_hooks/rtk_rewrite.py`](claude_hooks/rtk_rewrite.py).
+
+When `rtk_rewrite_enabled` and `safety_scan_enabled` are both on, rtk
+runs first and the safety scanner runs on the **rewritten** command —
+so dangerous content hidden behind chained commands
+(`rtk ls && rm -rf`) is still caught before the rewrite is approved.
+
+## Credits
+
+The three optional hooks above are Python ports of the Bash hooks in
+[rtfpessoa/code-factory](https://github.com/rtfpessoa/code-factory):
+
+- `stop_guard` ← [`hooks/stop-phrase-guard.sh`](https://github.com/rtfpessoa/code-factory/blob/main/hooks/stop-phrase-guard.sh)
+- `safety_scan` ← [`hooks/command-safety-scanner.sh`](https://github.com/rtfpessoa/code-factory/blob/main/hooks/command-safety-scanner.sh)
+- `rtk_rewrite` ← [`hooks/rtk-rewrite.sh`](https://github.com/rtfpessoa/code-factory/blob/main/hooks/rtk-rewrite.sh)
+
+Design changes for claude-hooks: pure-Python implementation (no bash /
+jq dependency), pattern lists surfaced as config, integration between
+`rtk_rewrite` and `safety_scan` so rewrites are still scanned before
+auto-approval. See
+[`docs/PLAN-code-factory-integration.md`](docs/PLAN-code-factory-integration.md)
+for the full integration plan.
+
 ## Scripts
 
 ### `scripts/openwolfstatus` — OpenWolf dashboard status

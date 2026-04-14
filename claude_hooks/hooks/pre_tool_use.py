@@ -1,14 +1,26 @@
 """
-PreToolUse handler — *opt-in*. Off by default.
+PreToolUse handler — runs the safety scanner and the memory-warning
+recall on every Bash/Edit/Write tool call.
 
-Matches risky tool calls (Bash, Edit, Write by default) against patterns
-the user marks as historically dangerous. For each match, queries the
-configured providers for past mistakes and injects a warning so the model
-can second-guess itself before running the call.
+Order of operations (each stage is independent and opt-in):
 
-This hook NEVER denies the call — it only warns via ``additionalContext``
-on the tool use. Denying would block legitimate operations and is hard
-to get right; surfacing context is enough.
+  1. rtk_rewrite: if ``rtk`` (rtk-ai/rtk) is installed, substitute
+     verbose ``find``/``grep``/``git log`` commands with their terser
+     equivalents. Emits ``updatedInput`` so subsequent stages see the
+     rewritten command too.
+  2. safety_scan: content-based pattern match on the full Bash command
+     (potentially already rewritten). On match → emit
+     ``permissionDecision: "ask"`` and stop. The user always makes the
+     final call; we never auto-deny.
+  3. memory warn: query the configured providers for past-mistake
+     snippets related to the command and inject them as
+     ``additionalContext``. Advisory only.
+
+Both stages are disabled by default and enabled independently in
+``config/claude-hooks.json`` under ``hooks.pre_tool_use``.
+
+Safety-scan patterns are ported from rtfpessoa/code-factory's
+``hooks/command-safety-scanner.sh``.
 """
 
 from __future__ import annotations
@@ -23,18 +35,62 @@ log = logging.getLogger("claude_hooks.hooks.pre_tool_use")
 
 def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[dict]:
     hook_cfg = (config.get("hooks") or {}).get("pre_tool_use") or {}
-    if not hook_cfg.get("enabled", False):
-        return None
-
     tool_name = event.get("tool_name", "")
     tool_input = event.get("tool_input") or {}
+
+    # Stages 1+2: rtk rewriter + safety scanner (Bash only).
+    # Order matters: rtk first, then safety_scan on the *rewritten* command.
+    # If safety_scan matches a rewritten command, we emit an "ask" decision
+    # with the rewritten command in updatedInput so the user sees what will
+    # actually run.
+    if tool_name == "Bash":
+        cmd = (tool_input.get("command", "") or "").strip()
+        effective_cmd = cmd
+        rewritten_input: Optional[dict] = None
+
+        if hook_cfg.get("rtk_rewrite_enabled", False) and cmd:
+            rewrite = _run_rtk_rewrite_raw(cmd, hook_cfg)
+            if rewrite:
+                effective_cmd = rewrite
+                rewritten_input = dict(tool_input)
+                rewritten_input["command"] = rewrite
+
+        if hook_cfg.get("safety_scan_enabled", False) and effective_cmd:
+            scan = _run_safety_scan_raw(effective_cmd, hook_cfg)
+            if scan is not None:
+                name, reason = scan
+                response = {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "ask",
+                        "permissionDecisionReason": reason,
+                    }
+                }
+                if rewritten_input is not None:
+                    response["hookSpecificOutput"]["updatedInput"] = rewritten_input
+                return response
+
+        if rewritten_input is not None:
+            # Safe after scan (or scan disabled) — auto-approve the rewrite.
+            if hook_cfg.get("rtk_log_rewrites", False):
+                log.info("rtk rewrote: %s -> %s", cmd[:120], effective_cmd[:120])
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": "RTK auto-rewrite (token savings)",
+                    "updatedInput": rewritten_input,
+                }
+            }
+
+    # Stage 2: memory-warn recall — only runs if the master toggle is on.
+    if not hook_cfg.get("enabled", False):
+        return None
 
     warn_tools = set(hook_cfg.get("warn_on_tools") or [])
     if warn_tools and tool_name not in warn_tools:
         return None
 
-    # Build a probe string from the tool's input — use whichever field is
-    # most distinctive for that tool.
     probe = _probe_string(tool_name, tool_input)
     if not probe:
         return None
@@ -43,7 +99,6 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     if patterns and not any(p.lower() in probe.lower() for p in patterns):
         return None
 
-    # Query providers for past mistakes related to this command.
     snippets: list[str] = []
     for provider in providers:
         try:
@@ -68,6 +123,67 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
             ),
         }
     }
+
+
+def _run_rtk_rewrite_raw(cmd: str, hook_cfg: dict) -> Optional[str]:
+    """Attempt rtk rewrite on a Bash command. Returns the rewritten string or None."""
+    try:
+        from claude_hooks.rtk_rewrite import rewrite_command
+    except Exception as e:
+        log.debug("rtk_rewrite module import failed: %s", e)
+        return None
+
+    timeout = float(hook_cfg.get("rtk_timeout", 3.0))
+    min_ver_cfg = hook_cfg.get("rtk_min_version") or "0.23.0"
+    try:
+        parts = tuple(int(p) for p in str(min_ver_cfg).split(".")[:3])
+        if len(parts) < 3:
+            parts = parts + (0,) * (3 - len(parts))
+        min_version = parts  # type: ignore[assignment]
+    except (ValueError, TypeError):
+        min_version = (0, 23, 0)
+
+    return rewrite_command(cmd, timeout=timeout, min_version=min_version)
+
+
+def _run_safety_scan_raw(cmd: str, hook_cfg: dict) -> Optional[tuple[str, str]]:
+    """Scan a Bash command. Returns (pattern_name, reason) on match, else None."""
+    try:
+        from claude_hooks.safety_scan import (
+            compile_patterns,
+            default_log_dir,
+            log_match,
+            scan_command,
+        )
+    except Exception as e:
+        log.debug("safety_scan module import failed: %s", e)
+        return None
+
+    patterns = compile_patterns(
+        extra=hook_cfg.get("safety_extra_patterns") or [],
+        use_defaults=hook_cfg.get("safety_use_defaults", True),
+    )
+    match = scan_command(cmd, patterns)
+    if not match:
+        return None
+
+    pattern_name, reason = match
+    log.info("safety_scan matched %s on command: %s", pattern_name, cmd[:200])
+
+    if hook_cfg.get("safety_log_enabled", True):
+        log_dir_cfg = hook_cfg.get("safety_log_dir")
+        from claude_hooks.config import expand_user_path
+        log_dir = expand_user_path(log_dir_cfg) if log_dir_cfg else default_log_dir()
+        retention = int(hook_cfg.get("safety_log_retention_days", 90))
+        log_match(
+            log_dir=log_dir,
+            pattern_name=pattern_name,
+            reason=reason,
+            command=cmd,
+            retention_days=retention,
+        )
+
+    return pattern_name, reason
 
 
 def _probe_string(tool_name: str, tool_input: dict) -> str:

@@ -97,13 +97,42 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "extract_instincts": False,
             "instincts_dir": "~/.claude/instincts",
         },
+        "stop_guard": {
+            # Disabled by default: the default patterns are opinionated
+            # ("nothing is pre-existing", "sessions are unlimited"). Enable
+            # only if you want that behaviour. Patterns are user-overridable.
+            "enabled": False,
+            # Empty list = use claude_hooks.stop_guard.DEFAULT_PATTERNS.
+            # Provide [{"pattern": "regex", "correction": "msg"}] to override.
+            "patterns": [],
+        },
         "session_end": {
             "enabled": True,
         },
         "pre_tool_use": {
+            # Memory-warn stage (advisory additionalContext from provider recall).
             "enabled": False,
             "warn_on_tools": ["Bash", "Edit", "Write"],
             "warn_on_patterns": ["rm ", "DROP TABLE", "git reset --hard"],
+            # Safety-scan stage (content-based pattern match, independent of
+            # the memory-warn stage above). Emits permissionDecision:"ask"
+            # for dangerous Bash commands even when chained/piped. See
+            # claude_hooks/safety_patterns.py for the default list.
+            "safety_scan_enabled": False,
+            "safety_use_defaults": True,
+            "safety_extra_patterns": [],  # [{"pattern", "name", "reason"}]
+            "safety_log_enabled": True,
+            "safety_log_dir": "~/.claude/permission-scanner",
+            "safety_log_retention_days": 90,
+            # rtk rewriter: transparently rewrite verbose find/grep/git log
+            # commands to rtk equivalents for token savings. Requires the
+            # external rtk binary (https://github.com/rtk-ai/rtk, NOT the
+            # Rust Type Kit crate of the same name). If rtk is missing or
+            # too old, the hook silently passes the command through.
+            "rtk_rewrite_enabled": False,
+            "rtk_min_version": "0.23.0",
+            "rtk_timeout": 3.0,
+            "rtk_log_rewrites": False,
         },
     },
     "reflect": {

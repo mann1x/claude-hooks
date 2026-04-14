@@ -31,12 +31,26 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     if not hook_cfg.get("enabled", True):
         return None
 
+    transcript_path = event.get("transcript_path")
+    transcript = _read_transcript(transcript_path) if transcript_path else None
+
+    # Stop-phrase guard: if the assistant is about to stop with an
+    # ownership-dodging or session-quitting phrase, block the stop and
+    # feed back a correction. Skip if the hook already fired this turn
+    # (stop_hook_active) to avoid infinite loops.
+    guard_cfg = (config.get("hooks") or {}).get("stop_guard") or {}
+    if guard_cfg.get("enabled", False) and not event.get("stop_hook_active", False):
+        correction = _run_stop_guard(transcript, guard_cfg)
+        if correction:
+            log.info("stop_guard blocked stop: %s", correction[:80])
+            return {
+                "decision": "block",
+                "reason": f"STOP HOOK VIOLATION: {correction}",
+            }
+
     threshold = (hook_cfg.get("store_threshold") or "noteworthy").lower()
     if threshold == "off":
         return None
-
-    transcript_path = event.get("transcript_path")
-    transcript = _read_transcript(transcript_path) if transcript_path else None
 
     if threshold == "noteworthy":
         if not _is_noteworthy(transcript):
@@ -347,3 +361,33 @@ def _classify_observation(
         return "gotcha"
 
     return "general"
+
+
+def _run_stop_guard(
+    transcript: Optional[list[dict]],
+    guard_cfg: dict,
+) -> Optional[str]:
+    """Return the stop-guard correction for the last assistant message, or None.
+
+    Inspired by rtfpessoa/code-factory's stop-phrase-guard.sh:
+    https://github.com/rtfpessoa/code-factory/blob/main/hooks/stop-phrase-guard.sh
+    """
+    if not transcript:
+        return None
+    # Find the last assistant text block.
+    last_text = ""
+    for msg in reversed(transcript):
+        if isinstance(msg, dict) and _msg_role(msg) == "assistant":
+            text = _extract_text(msg)
+            if text:
+                last_text = text
+                break
+    if not last_text:
+        return None
+    try:
+        from claude_hooks.stop_guard import check_message, load_patterns
+        patterns = load_patterns(guard_cfg.get("patterns") or [])
+        return check_message(last_text, patterns=patterns)
+    except Exception as e:
+        log.debug("stop_guard check failed: %s", e)
+        return None
