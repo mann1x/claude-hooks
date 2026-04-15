@@ -225,6 +225,10 @@
     "block_warmup": false,
     "stats_db_path": "~/.claude/claude-hooks-proxy/stats.db"
   },
+  "proxy_dashboard": {
+    "listen_host": "127.0.0.1",
+    "listen_port": 38081
+  },
   "logging": {
     "path": "~/.claude/claude-hooks.log",
     "level": "info",

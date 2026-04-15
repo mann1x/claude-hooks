@@ -37,8 +37,10 @@ All three default to `enabled: false` and no-op silently when their binary or pa
 - `claude_hooks/proxy/sse.py` — SSE stream parser: extracts usage, stop_reason, and S3 thinking-depth metrics (signature bytes, delta count, output tokens, content-block/delta type histograms)
 - `claude_hooks/proxy/forwarder.py` — httpx[http2] forwarder; strips `accept-encoding` and pins `identity` so SSE bytes arrive uncompressed for `SseTail` parsing
 - `claude_hooks/proxy/stats_db.py` — SQLite rollup for proxy JSONL logs (schema v3: S2 columns + `agent_rollup` table + S3 thinking-metric totals on `daily_rollup`)
+- `claude_hooks/proxy/dashboard.py` — read-only stats dashboard on port `38081`; stdlib-only `ThreadingHTTPServer` with JSON API + embedded HTML view
 - `scripts/proxy_rollup.py` — CLI to ingest JSONL into `stats.db` and rebuild rollups
 - `systemd/claude-hooks-rollup.timer` — runs rollup every 5 min via systemd
+- `systemd/claude-hooks-dashboard.service` — runs the stats dashboard as a systemd service
 
 ## Key Conventions
 

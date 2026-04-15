@@ -1,0 +1,28 @@
+[Unit]
+Description=claude-hooks proxy dashboard — read-only stats view
+Documentation=https://github.com/mann1x/claude-hooks/blob/main/docs/proxy.md
+After=claude-hooks-proxy.service
+Wants=claude-hooks-proxy.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/srv/dev-disk-by-label-opt/dev/claude-hooks
+Environment=CLAUDE_HOOKS_REPO=/srv/dev-disk-by-label-opt/dev/claude-hooks
+ExecStart=/srv/dev-disk-by-label-opt/dev/claude-hooks/bin/claude-hooks-dashboard
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=10s
+SendSIGKILL=yes
+
+# Same hardening posture as the proxy unit. Dashboard only reads
+# stats.db + ratelimit-state.json; no network out.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/root/.claude
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

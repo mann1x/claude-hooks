@@ -190,7 +190,9 @@ printf "%s%s" "$other_parts" "$usage_part"
 
 All four proxy phases (P0 / P1 / P2-block / P4) shipped. See
 `docs/PLAN-proxy-hook.md` for per-phase checklists. Stats roadmap
-(S1–S5) in `docs/PLAN-stats-sqlite.md`; S1 (SQLite rollup) shipped.
+(S1–S5) in `docs/PLAN-stats-sqlite.md`; S1 (SQLite rollup), S2
+(body-parser + agent rollup), S3 (thinking-depth metrics), and S4
+(dashboard) are live.
 
 ## Stats rollup (S1)
 
@@ -218,6 +220,48 @@ python3 scripts/proxy_rollup.py --dry-run     # show pending lines, write nothin
 python3 scripts/proxy_rollup.py --since 2026-04-14
 python3 scripts/proxy_rollup.py --json        # machine output
 ```
+
+### Dashboard (S4)
+
+`claude_hooks/proxy/dashboard.py` serves a read-only single-page
+view of the rollups on port `38081` (override via
+`proxy_dashboard.listen_port`). Stdlib-only, no external assets —
+the HTML is embedded in the module.
+
+Routes:
+
+| Path | Returns |
+|---|---|
+| `GET /` | HTML dashboard (auto-refresh 60 s) |
+| `GET /api/summary.json` | today + last-7d totals + rate-limit burn projection |
+| `GET /api/daily.json?days=14` | per-day rollup series |
+| `GET /api/agents.json?date=YYYY-MM-DD` | per-agent breakdown (default: today UTC) |
+| `GET /api/models.json?date=YYYY-MM-DD` | per-model breakdown |
+| `GET /api/betas.json` | distinct `anthropic-beta` tokens observed, with first/last-seen ts |
+| `GET /api/ratelimit.json` | latest `ratelimit-state.json` + 5h/7d burn projection |
+| `GET /healthz` | `OK` (liveness probe) |
+
+Manual:
+
+```bash
+python3 -m claude_hooks.proxy.dashboard          # foreground
+bin/claude-hooks-dashboard                       # POSIX shim
+curl -s http://127.0.0.1:38081/api/summary.json | jq .
+```
+
+systemd:
+
+```bash
+sudo cp systemd/claude-hooks-dashboard.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now claude-hooks-dashboard
+```
+
+Burn projection is pure math on the latest unified-ratelimit
+snapshot: given the observed utilization, reset unix-ts, and the
+fixed window length (5 h or 7 d), we compute burn rate per hour and
+ETA to exhaustion. `will_exhaust_before_reset: true` is the canary
+flag the HTML view highlights.
 
 ### systemd timer (recommended)
 
