@@ -28,7 +28,7 @@ from typing import Iterable, Optional
 
 log = logging.getLogger("claude_hooks.proxy.stats_db")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _schema_ddl() -> list[str]:
@@ -181,9 +181,60 @@ def _migrate(conn: sqlite3.Connection) -> None:
     current = conn.execute("PRAGMA user_version").fetchone()[0]
     if current >= SCHEMA_VERSION:
         return
-    for stmt in _schema_ddl():
-        conn.execute(stmt)
+    # v0 -> v1: full schema (IF NOT EXISTS so re-running is safe on
+    # partially created DBs).
+    if current < 1:
+        for stmt in _schema_ddl():
+            conn.execute(stmt)
+    # v1 -> v2: S2 columns + agent_rollup.
+    if current < 2:
+        _migrate_v2(conn)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
+def _migrate_v2(conn: sqlite3.Connection) -> None:
+    """Add S2 columns to ``requests`` and create ``agent_rollup``.
+
+    Columns are added with ``ALTER TABLE`` because ``ADD COLUMN`` is
+    SQLite-safe (no rewrite); existing rows get NULL.
+    """
+    existing = {
+        r[1] for r in conn.execute("PRAGMA table_info(requests)").fetchall()
+    }
+    additions = [
+        ("account_uuid", "TEXT"),
+        ("cc_version", "TEXT"),
+        ("cc_entrypoint", "TEXT"),
+        ("effort", "TEXT"),
+        ("thinking_type", "TEXT"),
+        ("max_tokens", "INTEGER"),
+        ("num_tools", "INTEGER"),
+        ("num_messages", "INTEGER"),
+        ("agent_type", "TEXT"),
+        ("agent_name", "TEXT"),
+        ("beta_features", "TEXT"),
+    ]
+    for col, typ in additions:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE requests ADD COLUMN {col} {typ}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_agent "
+                 "ON requests(date, agent_name)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_class "
+                 "ON requests(date, request_class)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agent_rollup (
+            date                         TEXT NOT NULL,
+            agent_name                   TEXT NOT NULL,
+            agent_type                   TEXT,
+            request_count                INTEGER NOT NULL DEFAULT 0,
+            warmup_blocked_count         INTEGER NOT NULL DEFAULT 0,
+            input_tokens                 INTEGER NOT NULL DEFAULT 0,
+            output_tokens                INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens        INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens            INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (date, agent_name)
+        )
+    """)
 
 
 # ------------------------------------------------------------------ #
@@ -289,6 +340,12 @@ def _row_from_record(
     model_del = rec.get("model_delivered")
     model_eff = model_del or model_req
 
+    beta_features = rec.get("beta_features")
+    if isinstance(beta_features, list):
+        beta_features = ",".join(beta_features)
+    elif not isinstance(beta_features, (str, type(None))):
+        beta_features = None
+
     return (
         ts, date, source_file, source_line,
         rec.get("session_id"),
@@ -314,9 +371,9 @@ def _row_from_record(
         1 if rec.get("synthetic") else 0,
         rec.get("http_version"),
         rec.get("error"),
-        # S2 placeholders — pass through if present, else None.
+        # S2 placeholders — is_sidechain now populated from agent_type.
         _bool_or_none(rec.get("is_sidechain")),
-        rec.get("agent_id"),
+        rec.get("agent_id") or rec.get("agent_name"),
         rec.get("parent_session_id"),
         _bool_or_none(rec.get("is_meta")),
         rec.get("request_class"),
@@ -324,6 +381,18 @@ def _row_from_record(
         rec.get("thinking_delta_count"),
         rec.get("thinking_signature_bytes"),
         rec.get("thinking_output_tokens"),
+        # S2 additions.
+        rec.get("account_uuid"),
+        rec.get("cc_version"),
+        rec.get("cc_entrypoint"),
+        rec.get("effort"),
+        rec.get("thinking_type"),
+        rec.get("max_tokens"),
+        rec.get("num_tools"),
+        rec.get("num_messages"),
+        rec.get("agent_type"),
+        rec.get("agent_name"),
+        beta_features,
     )
 
 
@@ -346,10 +415,14 @@ _INSERT_SQL = """
         is_warmup, warmup_blocked, synthetic,
         http_version, error,
         is_sidechain, agent_id, parent_session_id, is_meta, request_class,
-        thinking_delta_count, thinking_signature_bytes, thinking_output_tokens
+        thinking_delta_count, thinking_signature_bytes, thinking_output_tokens,
+        account_uuid, cc_version, cc_entrypoint, effort, thinking_type,
+        max_tokens, num_tools, num_messages, agent_type, agent_name,
+        beta_features
     ) VALUES (?, ?, ?, ?,  ?, ?, ?, ?, ?,  ?, ?,  ?, ?, ?,
               ?, ?,  ?, ?,  ?, ?,  ?, ?,  ?, ?, ?,  ?, ?,
-              ?, ?, ?, ?, ?,  ?, ?, ?)
+              ?, ?, ?, ?, ?,  ?, ?, ?,
+              ?, ?, ?, ?, ?,  ?, ?, ?, ?, ?,  ?)
 """
 
 
@@ -562,6 +635,34 @@ def rebuild_rollups(conn: sqlite3.Connection, *, dates: Optional[Iterable[str]] 
             FROM requests
             WHERE date = ?
             GROUP BY date, model_effective
+            """,
+            (d,),
+        )
+
+        # Agent rollup — S2. Rows keyed by agent_name, skipping rows
+        # where the parser couldn't classify (pre-S2 JSONL).
+        conn.execute("DELETE FROM agent_rollup WHERE date = ?", (d,))
+        conn.execute(
+            """
+            INSERT INTO agent_rollup(
+                date, agent_name, agent_type, request_count,
+                warmup_blocked_count,
+                input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens
+            )
+            SELECT
+                date,
+                agent_name,
+                MAX(agent_type),
+                COUNT(*),
+                COALESCE(SUM(warmup_blocked), 0),
+                COALESCE(SUM(input_tokens), 0),
+                COALESCE(SUM(output_tokens), 0),
+                COALESCE(SUM(cache_creation_input_tokens), 0),
+                COALESCE(SUM(cache_read_input_tokens), 0)
+            FROM requests
+            WHERE date = ? AND agent_name IS NOT NULL
+            GROUP BY date, agent_name
             """,
             (d,),
         )

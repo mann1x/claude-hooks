@@ -430,3 +430,153 @@ class TestRebuildRollups:
             assert rc == 1
         finally:
             conn.close()
+
+
+# ============================================================ #
+# S2 — agent_rollup + S2 column population
+# ============================================================ #
+class TestS2Ingest:
+    def _mk_s2_record(self, **kw):
+        base = _mk_record(**kw)
+        base.setdefault("agent_type", "main")
+        base.setdefault("agent_name", "main")
+        base.setdefault("request_class", "main")
+        base.setdefault("is_sidechain", False)
+        base.setdefault("cc_version", "2.1.107.616")
+        base.setdefault("effort", "medium")
+        base.setdefault("thinking_type", "adaptive")
+        base.setdefault("account_uuid", "acc-uuid")
+        base.setdefault("num_tools", 127)
+        base.setdefault("num_messages", 10)
+        base.setdefault("beta_features", ["context-management-2025-06-27"])
+        return base
+
+    def test_s2_columns_written(self, tmp_path):
+        log_dir = tmp_path / "logs"; log_dir.mkdir()
+        _write_jsonl(log_dir / "2026-04-15.jsonl", [self._mk_s2_record()])
+        db = tmp_path / "s.db"
+        ingest_dir(db, log_dir)
+        import sqlite3
+        conn = sqlite3.connect(db)
+        try:
+            row = conn.execute(
+                "SELECT cc_version, effort, thinking_type, account_uuid, "
+                "num_tools, num_messages, beta_features, agent_type, "
+                "agent_name, is_sidechain FROM requests LIMIT 1"
+            ).fetchone()
+            assert row == (
+                "2.1.107.616", "medium", "adaptive", "acc-uuid",
+                127, 10, "context-management-2025-06-27", "main",
+                "main", 0,
+            )
+        finally:
+            conn.close()
+
+    def test_agent_rollup_groups_by_agent_name(self, tmp_path):
+        log_dir = tmp_path / "logs"; log_dir.mkdir()
+        recs = [
+            self._mk_s2_record(agent_name="main", agent_type="main"),
+            self._mk_s2_record(ts="2026-04-15T11:00:00Z",
+                               agent_name="code reviewer",
+                               agent_type="subagent",
+                               is_sidechain=True),
+            self._mk_s2_record(ts="2026-04-15T12:00:00Z",
+                               agent_name="code reviewer",
+                               agent_type="subagent",
+                               is_sidechain=True),
+            self._mk_s2_record(ts="2026-04-15T13:00:00Z",
+                               agent_name="warmup",
+                               agent_type="warmup",
+                               is_warmup=True, warmup_blocked=True),
+        ]
+        for r in recs:
+            r["ts"] = r["ts"].replace("2026-04-14", "2026-04-15")
+        # Normalise date for all records.
+        recs[0]["ts"] = "2026-04-15T10:00:00Z"
+        _write_jsonl(log_dir / "2026-04-15.jsonl", recs)
+        db = tmp_path / "s.db"
+        ingest_dir(db, log_dir)
+        import sqlite3
+        conn = sqlite3.connect(db)
+        try:
+            rows = dict(conn.execute(
+                "SELECT agent_name, request_count FROM agent_rollup "
+                "WHERE date='2026-04-15'"
+            ).fetchall())
+            assert rows == {"main": 1, "code reviewer": 2, "warmup": 1}
+            # Warmup row should also have warmup_blocked_count = 1
+            wmb = conn.execute(
+                "SELECT warmup_blocked_count FROM agent_rollup "
+                "WHERE date='2026-04-15' AND agent_name='warmup'"
+            ).fetchone()[0]
+            assert wmb == 1
+        finally:
+            conn.close()
+
+    def test_beta_features_serialised_as_csv(self, tmp_path):
+        log_dir = tmp_path / "logs"; log_dir.mkdir()
+        rec = self._mk_s2_record(
+            beta_features=["feat-a", "feat-b", "feat-c"],
+        )
+        _write_jsonl(log_dir / "2026-04-15.jsonl", [rec])
+        db = tmp_path / "s.db"
+        ingest_dir(db, log_dir)
+        import sqlite3
+        conn = sqlite3.connect(db)
+        try:
+            v = conn.execute(
+                "SELECT beta_features FROM requests LIMIT 1"
+            ).fetchone()[0]
+            assert v == "feat-a,feat-b,feat-c"
+        finally:
+            conn.close()
+
+
+class TestS2Migration:
+    def test_v1_database_migrates_forward(self, tmp_path):
+        """A database from schema v1 gains S2 columns on next connect,
+        preserving existing rows.
+        """
+        import sqlite3
+        from claude_hooks.proxy import stats_db
+
+        db = tmp_path / "s.db"
+        # Build v1 explicitly — apply v1 DDL, set user_version=1.
+        conn = sqlite3.connect(db, isolation_level=None)
+        for stmt in stats_db._schema_ddl():
+            conn.execute(stmt)
+        conn.execute("PRAGMA user_version = 1")
+        # Drop a v1-shape row into requests.
+        conn.execute("""
+            INSERT INTO requests(
+                ts, date, source_file, source_line, session_id, method,
+                path, status, duration_ms, req_bytes, resp_bytes,
+                model_requested, model_delivered, model_effective,
+                input_tokens, output_tokens,
+                cache_creation_input_tokens, cache_read_input_tokens,
+                is_warmup, warmup_blocked, synthetic
+            ) VALUES (
+                '2026-04-14T10:00:00Z', '2026-04-14', 'old.jsonl', 1,
+                'sess', 'POST', '/v1/messages', 200, 1234, 500, 2000,
+                'claude-opus-4-6', 'claude-opus-4-6', 'claude-opus-4-6',
+                10, 50, 100, 900,
+                0, 0, 0
+            )
+        """)
+        conn.close()
+
+        # Reconnect via the real API — migration should kick in.
+        conn2 = stats_db.connect(db)
+        try:
+            v = conn2.execute("PRAGMA user_version").fetchone()[0]
+            assert v == stats_db.SCHEMA_VERSION
+            # S2 columns exist and default to NULL for the old row.
+            row = conn2.execute(
+                "SELECT cc_version, effort, agent_type FROM requests "
+                "WHERE source_line = 1"
+            ).fetchone()
+            assert row == (None, None, None)
+            # agent_rollup table exists.
+            conn2.execute("SELECT COUNT(*) FROM agent_rollup").fetchone()
+        finally:
+            conn2.close()

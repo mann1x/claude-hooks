@@ -42,6 +42,43 @@ def _now_iso() -> str:
     return n.strftime("%Y-%m-%dT%H:%M:%S.") + f"{n.microsecond // 1000:03d}Z"
 
 
+# ---------------------------------------------------------------------- #
+# Debug: one-shot request-body dumper.
+# ---------------------------------------------------------------------- #
+# Set CLAUDE_HOOKS_PROXY_DUMP_DIR=/some/path to capture the next
+# CLAUDE_HOOKS_PROXY_DUMP_COUNT (default 3) POST /v1/messages bodies
+# to that directory as {ts}-{session}.json. Used when designing S2
+# (request-body parser extensions) without guessing the schema.
+# After the quota is hit further requests are ignored.
+import os
+import threading
+_DUMP_LOCK = threading.Lock()
+_DUMP_REMAINING = int(os.environ.get("CLAUDE_HOOKS_PROXY_DUMP_COUNT", "3"))
+
+
+def _maybe_dump_request(handler, body: bytes, req_meta: dict) -> None:
+    dump_dir = os.environ.get("CLAUDE_HOOKS_PROXY_DUMP_DIR")
+    if not dump_dir or not body:
+        return
+    path_only = handler.path.split("?", 1)[0]
+    if path_only != "/v1/messages":
+        return
+    global _DUMP_REMAINING
+    with _DUMP_LOCK:
+        if _DUMP_REMAINING <= 0:
+            return
+        _DUMP_REMAINING -= 1
+    try:
+        Path(dump_dir).mkdir(parents=True, exist_ok=True)
+        ts = _now_iso().replace(":", "-")
+        name = f"{ts}-{'warmup' if req_meta.get('is_warmup') else 'main'}.json"
+        Path(dump_dir, name).write_bytes(body)
+        log.info("dumped request body to %s/%s (%d bytes)",
+                 dump_dir, name, len(body))
+    except OSError as e:
+        log.debug("dump failed: %s", e)
+
+
 class _Handler(BaseHTTPRequestHandler):
     # Class-level state injected by ``build_server``.
     proxy_cfg: dict = {}
@@ -81,6 +118,11 @@ class _Handler(BaseHTTPRequestHandler):
         req_meta = extract_request_info(
             body, {k: v for k, v in self.headers.items()}
         )
+
+        # --- Debug: dump the next N request bodies, then disable.
+        # Controlled by CLAUDE_HOOKS_PROXY_DUMP_DIR. Bounded via a
+        # class-level counter so we never dump more than N per process.
+        _maybe_dump_request(self, body, req_meta)
 
         # --- P3: short-circuit Warmup when block_warmup is enabled
         if req_meta.get("is_warmup") and cfg.get("block_warmup", False):
@@ -252,6 +294,23 @@ class _Handler(BaseHTTPRequestHandler):
             "is_warmup": req_meta.get("is_warmup", False),
             "synthetic": resp_meta.get("synthetic", False),
             "session_id": req_meta.get("session_id"),
+            # S2 additions — only emitted when non-null to keep lines slim.
+            "account_uuid": req_meta.get("account_uuid"),
+            "cc_version": req_meta.get("cc_version"),
+            "cc_entrypoint": req_meta.get("cc_entrypoint"),
+            "effort": req_meta.get("effort"),
+            "thinking_type": req_meta.get("thinking_type"),
+            "max_tokens": req_meta.get("max_tokens"),
+            "num_tools": req_meta.get("num_tools"),
+            "num_messages": req_meta.get("num_messages"),
+            "agent_type": req_meta.get("agent_type"),
+            "agent_name": req_meta.get("agent_name"),
+            "request_class": req_meta.get("request_class"),
+            "beta_features": req_meta.get("beta_features"),
+            "is_sidechain": (
+                None if req_meta.get("agent_type") is None
+                else req_meta.get("agent_type") != "main"
+            ),
         }
         if extra:
             record.update(extra)

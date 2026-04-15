@@ -33,7 +33,8 @@ All three default to `enabled: false` and no-op silently when their binary or pa
 ## Proxy / Stats
 
 - `claude_hooks/proxy/` — local HTTP proxy + observability (see `docs/proxy.md`)
-- `claude_hooks/proxy/stats_db.py` — SQLite rollup for proxy JSONL logs (S1 phase)
+- `claude_hooks/proxy/metadata.py` — request-body parser: model, session, warmup detection, plus S2 extensions (agent classification, CC version, effort, thinking type, beta features, account UUID)
+- `claude_hooks/proxy/stats_db.py` — SQLite rollup for proxy JSONL logs (schema v2: S2 columns + `agent_rollup` table)
 - `scripts/proxy_rollup.py` — CLI to ingest JSONL into `stats.db` and rebuild rollups
 - `systemd/claude-hooks-rollup.timer` — runs rollup every 5 min via systemd
 
@@ -64,10 +65,10 @@ grep -q "caliber" .git/hooks/pre-commit 2>/dev/null && echo "hook-active" || ech
 - If **hook-active**: the hook handles sync automatically — just commit normally. Tell the user: "Caliber will sync your agent configs automatically via the pre-commit hook."
 - If **no-hook**: run Caliber manually before committing:
   1. Tell the user: "Caliber: Syncing agent configs with your latest changes..."
-  2. Run: `caliber refresh && git add CLAUDE.md .claude/ .cursor/ .cursorrules .github/copilot-instructions.md .github/instructions/ AGENTS.md CALIBER_LEARNINGS.md .agents/ .opencode/ 2>/dev/null`
+  2. Run: `/usr/local/bin/caliber refresh && git add CLAUDE.md .claude/ .cursor/ .cursorrules .github/copilot-instructions.md .github/instructions/ AGENTS.md CALIBER_LEARNINGS.md .agents/ .opencode/ 2>/dev/null`
   3. After it completes, briefly tell the user what Caliber updated. Then proceed with the commit.
 
-If `caliber` is not found, read `.agents/skills/setup-caliber/SKILL.md` and follow its instructions to install Caliber.
+If `/usr/local/bin/caliber` is not found, read `.agents/skills/setup-caliber/SKILL.md` and follow its instructions to install Caliber.
 <!-- /caliber:managed:pre-commit -->
 
 <!-- caliber:managed:learnings -->
@@ -81,6 +82,6 @@ These are auto-extracted from real tool usage — treat them as project-specific
 ## Context Sync
 
 This project uses [Caliber](https://github.com/caliber-ai-org/ai-setup) to keep AI agent configs in sync across Claude Code, Cursor, Copilot, and Codex.
-Configs update automatically before each commit via `caliber refresh`.
+Configs update automatically before each commit via `/usr/local/bin/caliber refresh`.
 If the pre-commit hook is not set up, read `.agents/skills/setup-caliber/SKILL.md` and follow the setup instructions.
 <!-- /caliber:managed:sync -->
