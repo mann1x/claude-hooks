@@ -248,6 +248,9 @@ class _Handler(BaseHTTPRequestHandler):
         # canonical billing output_tokens.
         final_usage = resp_meta.get("usage")
         stop_reason = None
+        thinking_delta_count = None
+        thinking_signature_bytes = None
+        thinking_output_tokens = None
         if result is not None and result.sse_tail is not None:
             tail = result.sse_tail
             # Merge: start for input/cache, delta for output.
@@ -257,6 +260,14 @@ class _Handler(BaseHTTPRequestHandler):
             if merged:
                 final_usage = merged
             stop_reason = tail.stop_reason
+            # S3 — thinking metrics. Emit only when a thinking block
+            # actually showed up so JSONL lines stay small for
+            # thinking-free turns.
+            if tail.thinking_delta_count or tail.thinking_signature_bytes:
+                thinking_delta_count = tail.thinking_delta_count
+                thinking_signature_bytes = tail.thinking_signature_bytes
+            if tail.thinking_output_tokens is not None:
+                thinking_output_tokens = tail.thinking_output_tokens
 
         rate_limit = resp_meta.get("rate_limit")
         req_ts = _now_iso()
@@ -310,6 +321,29 @@ class _Handler(BaseHTTPRequestHandler):
             "is_sidechain": (
                 None if req_meta.get("agent_type") is None
                 else req_meta.get("agent_type") != "main"
+            ),
+            # S3 — thinking-depth proxy. Null when the response had no
+            # thinking blocks (keeps JSONL lines compact).
+            "thinking_delta_count": thinking_delta_count,
+            "thinking_signature_bytes": thinking_signature_bytes,
+            "thinking_output_tokens": thinking_output_tokens,
+            # Debug: expose the SSE event type histogram so we can see
+            # which events actually arrived in the live stream. Cheap
+            # (one small dict per response). Can drop later.
+            "sse_event_counts": (
+                dict(result.sse_tail.event_counts)
+                if result is not None and result.sse_tail is not None
+                else None
+            ),
+            "content_block_types": (
+                dict(result.sse_tail.content_block_types)
+                if result is not None and result.sse_tail is not None
+                else None
+            ),
+            "delta_types": (
+                dict(result.sse_tail.delta_types)
+                if result is not None and result.sse_tail is not None
+                else None
             ),
         }
         if extra:

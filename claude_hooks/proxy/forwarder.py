@@ -49,6 +49,13 @@ _STRIP_REQUEST_HEADERS = frozenset({
     "host", "content-length", "connection", "transfer-encoding",
     "keep-alive", "proxy-authorization", "proxy-connection",
     "te", "trailer", "upgrade",
+    # Strip ``accept-encoding`` so upstream returns uncompressed
+    # bytes — ``iter_raw`` can't decode gzip / br in the SseTail and
+    # we'd lose all stream metrics (thinking, stop_reason, usage
+    # deltas). Over localhost the bandwidth cost is trivial; Claude
+    # Code never sees the encoding difference because our response
+    # headers match the (uncompressed) body.
+    "accept-encoding",
 })
 
 # Headers we strip from the upstream response before mirroring to the
@@ -167,6 +174,10 @@ def forward(
     out_headers = {
         k: v for k, v in headers.items() if k.lower() not in _STRIP_REQUEST_HEADERS
     }
+    # Pin Accept-Encoding to identity so httpx doesn't re-add a
+    # gzip / br offer of its own; SseTail relies on reading the raw
+    # SSE bytes and can't decode compressed streams.
+    out_headers["Accept-Encoding"] = "identity"
     # httpx sets Host / :authority from URL automatically; no need
     # to pass it explicitly and it can confuse HTTP/2 negotiation.
 

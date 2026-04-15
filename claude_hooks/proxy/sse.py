@@ -42,6 +42,30 @@ class SseTail:
         self.final_usage: Optional[dict] = None
         self.stop_reason: Optional[str] = None
         self.event_counts: dict[str, int] = {}
+        # S3 — thinking-block metrics.
+        #
+        # stellaraccident's analysis of issue #42796 showed the SSE
+        # ``signature`` field on thinking blocks has a 0.971 Pearson
+        # correlation with thinking content length. Even when the
+        # ``redact-thinking-*`` beta hides the text, signature-byte
+        # length still lets us estimate reasoning depth.
+        #
+        # ``thinking_delta_count``   — count of thinking_delta events
+        # ``thinking_signature_bytes`` — sum of signature-field byte
+        #   lengths across all thinking content blocks in this stream
+        # ``thinking_output_tokens`` — populated if Anthropic ever
+        #   breaks thinking out in usage (stellaraccident's explicit
+        #   ask in #42796); seeded from message_delta.usage if a
+        #   ``thinking_output_tokens`` key appears there.
+        self.thinking_delta_count: int = 0
+        self.thinking_signature_bytes: int = 0
+        self.thinking_output_tokens: Optional[int] = None
+        # Diagnostic: track content_block types + delta types seen.
+        # Lets us learn the actual wire vocabulary (e.g. whether
+        # "extended_thinking" or "redacted_thinking" appears instead
+        # of plain "thinking") without dumping response bodies.
+        self.content_block_types: dict[str, int] = {}
+        self.delta_types: dict[str, int] = {}
 
     def wrap(self, body_iter: Iterable[bytes]) -> Iterator[bytes]:
         """Yield chunks verbatim while parsing SSE events side-effect-only."""
@@ -116,6 +140,11 @@ class SseTail:
                 # the last message_delta before message_stop carries the
                 # final total.
                 self.final_usage = dict(usage)
+                # If Anthropic ever ships thinking_output_tokens in the
+                # usage block (stellaraccident's ask), capture it.
+                tot = usage.get("thinking_output_tokens")
+                if isinstance(tot, int):
+                    self.thinking_output_tokens = tot
             delta = payload.get("delta")
             if isinstance(delta, dict):
                 sr = delta.get("stop_reason")
@@ -129,6 +158,38 @@ class SseTail:
                 # yet — gives us input_tokens / cache_* which message_delta
                 # doesn't repeat.
                 self.final_usage = dict(usage)
+        elif etype == "content_block_start":
+            block = payload.get("content_block") or {}
+            if isinstance(block, dict):
+                bt = block.get("type") or "<unknown>"
+                self.content_block_types[bt] = self.content_block_types.get(bt, 0) + 1
+                # S3: thinking blocks expose a ``signature`` field
+                # whose byte length correlates with thinking content
+                # length even when the text is redacted (0.971 Pearson
+                # per #42796). Match any "thinking" variant
+                # (``thinking``, ``extended_thinking``,
+                # ``redacted_thinking``) since the exact label has
+                # evolved between API versions.
+                if "thinking" in bt:
+                    sig = block.get("signature")
+                    if isinstance(sig, (str, bytes)):
+                        self.thinking_signature_bytes += len(sig)
+        elif etype == "content_block_delta":
+            delta = payload.get("delta") or {}
+            if isinstance(delta, dict):
+                dt = delta.get("type") or "<unknown>"
+                self.delta_types[dt] = self.delta_types.get(dt, 0) + 1
+                # The thinking stream on Claude Opus 4.6 actually
+                # arrives as ``signature_delta`` events (observed live
+                # 2026-04-15). Accumulate the signature bytes and
+                # count events as thinking-deltas regardless of label.
+                # ``thinking_delta`` remains a valid variant for
+                # non-redacted responses that carry text chunks.
+                if dt == "signature_delta" or "thinking" in dt:
+                    self.thinking_delta_count += 1
+                    sig = delta.get("signature")
+                    if isinstance(sig, str):
+                        self.thinking_signature_bytes += len(sig)
         elif etype == "message_stop":
             # Nothing more to parse — the stream is done.
             pass

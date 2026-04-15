@@ -28,7 +28,7 @@ from typing import Iterable, Optional
 
 log = logging.getLogger("claude_hooks.proxy.stats_db")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _schema_ddl() -> list[str]:
@@ -189,6 +189,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # v1 -> v2: S2 columns + agent_rollup.
     if current < 2:
         _migrate_v2(conn)
+    # v2 -> v3: S3 thinking-metric totals on daily_rollup.
+    if current < 3:
+        _migrate_v3(conn)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
@@ -235,6 +238,28 @@ def _migrate_v2(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (date, agent_name)
         )
     """)
+
+
+def _migrate_v3(conn: sqlite3.Connection) -> None:
+    """Add S3 thinking-metric totals to ``daily_rollup``.
+
+    ``requests`` already has the per-row S3 columns (carved out in v1
+    as nullable placeholders), so nothing changes there — we only
+    need daily totals so dashboards can chart reasoning-depth trend
+    without scanning every row.
+    """
+    existing = {
+        r[1] for r in conn.execute("PRAGMA table_info(daily_rollup)").fetchall()
+    }
+    additions = [
+        ("thinking_request_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("total_thinking_delta_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("total_thinking_signature_bytes", "INTEGER NOT NULL DEFAULT 0"),
+        ("total_thinking_output_tokens", "INTEGER NOT NULL DEFAULT 0"),
+    ]
+    for col, typ in additions:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE daily_rollup ADD COLUMN {col} {typ}")
 
 
 # ------------------------------------------------------------------ #
@@ -542,7 +567,14 @@ def rebuild_rollups(conn: sqlite3.Connection, *, dates: Optional[Iterable[str]] 
                 COALESCE(SUM(cache_read_input_tokens), 0),
                 COALESCE(SUM(req_bytes), 0),
                 COALESCE(SUM(resp_bytes), 0),
-                COALESCE(SUM(duration_ms), 0)
+                COALESCE(SUM(duration_ms), 0),
+                COALESCE(SUM(CASE
+                    WHEN thinking_delta_count IS NOT NULL
+                      OR thinking_signature_bytes IS NOT NULL
+                    THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(thinking_delta_count), 0),
+                COALESCE(SUM(thinking_signature_bytes), 0),
+                COALESCE(SUM(thinking_output_tokens), 0)
             FROM requests WHERE date = ?
             """,
             (d,),
@@ -550,6 +582,7 @@ def rebuild_rollups(conn: sqlite3.Connection, *, dates: Optional[Iterable[str]] 
         (
             rc, wm, wmb, syn, s2, s4, s5, s429, div,
             inp, out, cc, cr, rb, rsb, dur,
+            thrc, thdc, thsb, thot,
         ) = agg
         denom = (cc or 0) + (cr or 0)
         hit_rate = ((cr or 0) / denom) if denom > 0 else None
@@ -562,8 +595,11 @@ def rebuild_rollups(conn: sqlite3.Connection, *, dates: Optional[Iterable[str]] 
                 total_input_tokens, total_output_tokens,
                 total_cache_creation_tokens, total_cache_read_tokens,
                 cache_hit_rate, total_req_bytes, total_resp_bytes,
-                total_duration_ms, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                total_duration_ms, updated_at,
+                thinking_request_count, total_thinking_delta_count,
+                total_thinking_signature_bytes, total_thinking_output_tokens
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?)
             ON CONFLICT(date) DO UPDATE SET
                 request_count=excluded.request_count,
                 warmup_count=excluded.warmup_count,
@@ -582,10 +618,15 @@ def rebuild_rollups(conn: sqlite3.Connection, *, dates: Optional[Iterable[str]] 
                 total_req_bytes=excluded.total_req_bytes,
                 total_resp_bytes=excluded.total_resp_bytes,
                 total_duration_ms=excluded.total_duration_ms,
-                updated_at=excluded.updated_at
+                updated_at=excluded.updated_at,
+                thinking_request_count=excluded.thinking_request_count,
+                total_thinking_delta_count=excluded.total_thinking_delta_count,
+                total_thinking_signature_bytes=excluded.total_thinking_signature_bytes,
+                total_thinking_output_tokens=excluded.total_thinking_output_tokens
             """,
             (d, rc, wm, wmb, syn, s2, s4, s5, s429, div,
-             inp, out, cc, cr, hit_rate, rb, rsb, dur, now),
+             inp, out, cc, cr, hit_rate, rb, rsb, dur, now,
+             thrc, thdc, thsb, thot),
         )
 
         # Session rollup — rebuild for the date.
