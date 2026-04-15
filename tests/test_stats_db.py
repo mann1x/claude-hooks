@@ -346,6 +346,51 @@ class TestRollupMath:
         finally:
             conn.close()
 
+    def test_model_rollup_excludes_non_messages_paths(self, tmp_path):
+        """Telemetry / health-probe requests don't carry a ``model``
+        field and would otherwise pile up as ``<unknown>``. model_rollup
+        must only cover ``/v1/messages`` traffic; daily totals still
+        include everything.
+        """
+        log_dir = tmp_path / "logs"; log_dir.mkdir()
+        _write_jsonl(log_dir / "2026-04-14.jsonl", [
+            _mk_record(model_delivered="claude-opus-4-6"),
+            _mk_record(
+                ts="2026-04-14T11:00:00Z",
+                path="/api/event_logging/batch",
+                model_requested=None, model_delivered=None,
+            ),
+            _mk_record(
+                ts="2026-04-14T12:00:00Z",
+                method="HEAD", path="/",
+                model_requested=None, model_delivered=None,
+                status=404,
+            ),
+            _mk_record(
+                ts="2026-04-14T13:00:00Z",
+                path="/api/event_logging/batch",
+                model_requested=None, model_delivered=None,
+            ),
+        ])
+        db = tmp_path / "s.db"
+        ingest_dir(db, log_dir)
+        conn = sqlite3.connect(db)
+        try:
+            # Only the /v1/messages row shows up in model_rollup.
+            rows = dict(conn.execute(
+                "SELECT model, request_count FROM model_rollup WHERE date=?",
+                ("2026-04-14",),
+            ).fetchall())
+            assert rows == {"claude-opus-4-6": 1}
+            # But the daily total still counts every upstream hit.
+            total = conn.execute(
+                "SELECT request_count FROM daily_rollup WHERE date=?",
+                ("2026-04-14",),
+            ).fetchone()[0]
+            assert total == 4
+        finally:
+            conn.close()
+
 
 # ============================================================ #
 # Ratelimit snapshots

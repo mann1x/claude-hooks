@@ -802,7 +802,11 @@ def rebuild_rollups(conn: sqlite3.Connection, *, dates: Optional[Iterable[str]] 
             (d,),
         )
 
-        # Model rollup — rebuild for the date.
+        # Model rollup — /v1/messages only. Telemetry endpoints
+        # (``/api/event_logging/batch``) and health probes (``HEAD /``)
+        # legitimately have no model; including them produced a
+        # confusing ``<unknown>`` bucket with hundreds of rows and
+        # zero tokens.
         conn.execute("DELETE FROM model_rollup WHERE date = ?", (d,))
         conn.execute(
             """
@@ -820,7 +824,7 @@ def rebuild_rollups(conn: sqlite3.Connection, *, dates: Optional[Iterable[str]] 
                 COALESCE(SUM(cache_creation_input_tokens), 0),
                 COALESCE(SUM(cache_read_input_tokens), 0)
             FROM requests
-            WHERE date = ?
+            WHERE date = ? AND path = '/v1/messages'
             GROUP BY date, model_effective
             """,
             (d,),
