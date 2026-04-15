@@ -189,7 +189,51 @@ printf "%s%s" "$other_parts" "$usage_part"
 ## Plan status
 
 All four proxy phases (P0 / P1 / P2-block / P4) shipped. See
-`docs/PLAN-proxy-hook.md` for per-phase checklists.
+`docs/PLAN-proxy-hook.md` for per-phase checklists. Stats roadmap
+(S1–S5) in `docs/PLAN-stats-sqlite.md`; S1 (SQLite rollup) shipped.
+
+## Stats rollup (S1)
+
+`scripts/proxy_rollup.py` ingests the daily JSONL files into a
+persistent SQLite database at `proxy.stats_db_path` (default
+`~/.claude/claude-hooks-proxy/stats.db`). Tables:
+
+- `requests` — one row per proxied request, with S2/S3 columns as
+  nullable placeholders so future phases don't need a migration.
+- `daily_rollup` — per-day counts (requests, Warmups, Warmup blocks,
+  status buckets including 429, model-divergence count, token totals,
+  cache hit rate, byte totals, duration totals).
+- `session_rollup`, `model_rollup` — groupings of the same data for
+  drill-down.
+- `ratelimit_windows` — time series of `anthropic-ratelimit-unified-*`
+  snapshots (5h + 7d utilization, representative claim, reset unix ts).
+- `ingestion_state` — per-file cursor so re-runs are cheap and
+  idempotent.
+
+### Manual
+
+```bash
+python3 scripts/proxy_rollup.py               # ingest + rebuild rollups
+python3 scripts/proxy_rollup.py --dry-run     # show pending lines, write nothing
+python3 scripts/proxy_rollup.py --since 2026-04-14
+python3 scripts/proxy_rollup.py --json        # machine output
+```
+
+### systemd timer (recommended)
+
+Install both unit files from `systemd/`:
+
+```bash
+sudo cp systemd/claude-hooks-rollup.service /etc/systemd/system/
+sudo cp systemd/claude-hooks-rollup.timer   /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now claude-hooks-rollup.timer
+systemctl list-timers claude-hooks-rollup.timer
+```
+
+Runs every 5 min after boot (with `Persistent=true` so a missed tick
+on wake fires once). The rollup is idempotent; skipping or overrunning
+a tick is harmless.
 
 ## Forwarder: httpx + HTTP/2
 

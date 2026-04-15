@@ -30,6 +30,13 @@ on every prompt and stores noteworthy turns back.
 
 All three default to `enabled: false` and no-op silently when their binary or pattern is missing.
 
+## Proxy / Stats
+
+- `claude_hooks/proxy/` — local HTTP proxy + observability (see `docs/proxy.md`)
+- `claude_hooks/proxy/stats_db.py` — SQLite rollup for proxy JSONL logs (S1 phase)
+- `scripts/proxy_rollup.py` — CLI to ingest JSONL into `stats.db` and rebuild rollups
+- `systemd/claude-hooks-rollup.timer` — runs rollup every 5 min via systemd
+
 ## Key Conventions
 
 - **Stdlib only** for core — no pip dependencies. Ollama calls use `urllib.request`.

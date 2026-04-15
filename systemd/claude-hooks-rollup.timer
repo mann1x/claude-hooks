@@ -1,0 +1,14 @@
+[Unit]
+Description=claude-hooks proxy rollup — every 5 min while proxy is running
+Documentation=https://github.com/mann1x/claude-hooks/blob/main/docs/PLAN-stats-sqlite.md
+
+[Timer]
+# Run 1 min after boot, then every 5 min. Persistent=true so a missed
+# tick (laptop sleep) triggers once on wake.
+OnBootSec=1min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=claude-hooks-rollup.service
+
+[Install]
+WantedBy=timers.target
