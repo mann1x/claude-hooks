@@ -37,6 +37,32 @@ Design + phased roadmap: [PLAN-proxy-hook.md](./PLAN-proxy-hook.md).
   P1 will feed these into `scripts/weekly_token_usage.py` to
   auto-populate `--current-usage-pct`.
 
+## Install via `install.py` (recommended)
+
+`python3 install.py` handles the whole stack when `proxy.enabled`
+is `true` in your config. Specifically it:
+
+1. Checks that `httpx[http2]>=0.27` is importable in the conda env
+   (or system python) and offers to pip-install it if not.
+2. On Linux hosts with `/etc/systemd/system` present, offers to
+   install four systemd units:
+   - `claude-hooks-proxy.service` — the forwarder
+   - `claude-hooks-rollup.service` + `claude-hooks-rollup.timer` —
+     5-minute stats ingester into `stats.db`
+   - `claude-hooks-dashboard.service` — read-only stats view on
+     port 38081
+3. Template substitution replaces `__REPO_PATH__` and `__HOME__`
+   in the unit files with this checkout's location and the current
+   user's home, then `daemon-reload` + `enable --now`.
+
+Idempotent: re-running skips units already installed. `--dry-run`
+prints the plan without writing anything. `--non-interactive`
+auto-accepts the prompts.
+
+Windows / macOS / hosts without systemd: the installer detects
+this and skips the systemd step cleanly; run the proxy manually
+with `bin/claude-hooks-proxy` or the `.cmd` shim.
+
 ## Enable
 
 1. Edit `config/claude-hooks.json` (copy the `proxy` block from

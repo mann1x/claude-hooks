@@ -155,6 +155,95 @@ def _find_conda() -> Optional[str]:
     return None
 
 
+_PROXY_STACK_UNITS = (
+    # (src_file_under_systemd, install_name, is_timer)
+    ("claude-hooks-proxy.service", "claude-hooks-proxy.service", False),
+    ("claude-hooks-rollup.service", "claude-hooks-rollup.service", False),
+    ("claude-hooks-rollup.timer", "claude-hooks-rollup.timer", True),
+    ("claude-hooks-dashboard.service", "claude-hooks-dashboard.service", False),
+)
+
+
+def _install_proxy_stack_systemd(
+    cfg: dict, *, non_interactive: bool, dry_run: bool,
+) -> None:
+    """Install the proxy + rollup-timer + dashboard systemd units
+    when ``proxy.enabled`` is true.
+
+    Linux-only (systemd). Idempotent — skips units that already
+    exist. Substitutes ``__REPO_PATH__`` / ``__HOME__`` into the
+    template files under ``systemd/`` before writing to
+    ``/etc/systemd/system/``.
+    """
+    if os.name == "nt":
+        return
+    if not Path("/etc/systemd/system").is_dir():
+        return
+    proxy_cfg = (cfg.get("proxy") or {})
+    if not proxy_cfg.get("enabled", False):
+        return
+
+    print("\n==> Proxy systemd units")
+    src_dir = HERE / "systemd"
+    missing = [
+        name for (_, name, _) in _PROXY_STACK_UNITS
+        if not (Path("/etc/systemd/system") / name).exists()
+    ]
+    if not missing:
+        print("  All units already installed.")
+        return
+
+    print(f"  Missing: {', '.join(missing)}")
+    print(f"  Will install to /etc/systemd/system/ with __REPO_PATH__ = {HERE}")
+    if dry_run:
+        print("  [dry-run] skipping write.")
+        return
+    if non_interactive:
+        print("  --non-interactive: proceeding.")
+    else:
+        ans = input("  Install these systemd units? [Y/n]: ").strip().lower()
+        if ans not in ("", "y", "yes"):
+            print("  Skipped.")
+            return
+
+    repo_path = str(HERE.resolve())
+    home_path = str(Path.home())
+    wrote: list[str] = []
+    for src_name, install_name, is_timer in _PROXY_STACK_UNITS:
+        dest = Path("/etc/systemd/system") / install_name
+        if dest.exists():
+            print(f"  · {install_name} already installed — leaving as-is")
+            continue
+        src = src_dir / src_name
+        if not src.exists():
+            print(f"  [!!] {src} missing — skipping")
+            continue
+        content = src.read_text(encoding="utf-8")
+        content = content.replace("__REPO_PATH__", repo_path)
+        content = content.replace("__HOME__", home_path)
+        try:
+            dest.write_text(content, encoding="utf-8")
+        except OSError as e:
+            print(f"  [!!] Failed to write {dest}: {e}")
+            continue
+        wrote.append(install_name)
+        print(f"  + wrote {install_name}")
+
+    if not wrote:
+        return
+
+    subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
+    for name in wrote:
+        rc = subprocess.run(
+            ["systemctl", "enable", "--now", name],
+            capture_output=True, text=True,
+        )
+        if rc.returncode == 0:
+            print(f"  · enabled + started {name}")
+        else:
+            print(f"  [!!] {name} enable failed:\n{rc.stderr.strip()[-300:]}")
+
+
 def _ensure_proxy_deps(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
     """Verify httpx + h2 are available when the proxy is enabled.
 
@@ -367,6 +456,14 @@ def main() -> int:
     # is enabled. The httpx[http2] profile is what lets the proxy
     # pass Anthropic's edge gate that 429s HTTP/1.1-per-request.
     _ensure_proxy_deps(cfg, non_interactive=args.non_interactive, dry_run=args.dry_run)
+
+    # Offer to install the proxy + rollup-timer + dashboard systemd
+    # units (Linux only; idempotent — skips units already installed).
+    _install_proxy_stack_systemd(
+        cfg,
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
 
     # Merge hooks into settings.json.
     settings_path = user_settings_path()

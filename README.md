@@ -134,6 +134,13 @@ The installer will:
 3. Verify each server with a real MCP call
 4. Write `config/claude-hooks.json` with your server URLs
 5. Merge hook entries into `~/.claude/settings.json` (idempotent, tagged `_managedBy`)
+6. If `proxy.enabled: true`:
+   - pip-install `httpx[http2]>=0.27` into the chosen Python env
+   - On Linux with systemd, offer to install four units:
+     `claude-hooks-proxy.service`, `claude-hooks-rollup.service` +
+     `.timer`, and `claude-hooks-dashboard.service`. Templates
+     under `systemd/` are substituted with this checkout's path.
+   - Idempotent: already-installed units are left alone.
 
 ### Installer flags
 

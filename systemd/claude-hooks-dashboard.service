@@ -7,9 +7,9 @@ Wants=claude-hooks-proxy.service
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/srv/dev-disk-by-label-opt/dev/claude-hooks
-Environment=CLAUDE_HOOKS_REPO=/srv/dev-disk-by-label-opt/dev/claude-hooks
-ExecStart=/srv/dev-disk-by-label-opt/dev/claude-hooks/bin/claude-hooks-dashboard
+WorkingDirectory=__REPO_PATH__
+Environment=CLAUDE_HOOKS_REPO=__REPO_PATH__
+ExecStart=__REPO_PATH__/bin/claude-hooks-dashboard
 Restart=on-failure
 RestartSec=5s
 KillSignal=SIGTERM
@@ -21,7 +21,7 @@ SendSIGKILL=yes
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/root/.claude
+ReadWritePaths=__HOME__/.claude
 PrivateTmp=yes
 
 [Install]

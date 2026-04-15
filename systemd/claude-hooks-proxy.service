@@ -6,11 +6,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Adjust User / WorkingDirectory / CLAUDE_HOOKS_REPO for your setup.
+# install.py substitutes __REPO_PATH__ and __HOME__ on install; edit
+# here only if you manage the unit yourself.
 User=root
-WorkingDirectory=/srv/dev-disk-by-label-opt/dev/claude-hooks
-Environment=CLAUDE_HOOKS_REPO=/srv/dev-disk-by-label-opt/dev/claude-hooks
-ExecStart=/srv/dev-disk-by-label-opt/dev/claude-hooks/bin/claude-hooks-proxy
+WorkingDirectory=__REPO_PATH__
+Environment=CLAUDE_HOOKS_REPO=__REPO_PATH__
+ExecStart=__REPO_PATH__/bin/claude-hooks-proxy
 Restart=on-failure
 RestartSec=5s
 # SIGTERM then SIGKILL — bounded stop even if a rogue SSE stream
@@ -23,7 +24,7 @@ SendSIGKILL=yes
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/root/.claude
+ReadWritePaths=__HOME__/.claude
 PrivateTmp=yes
 
 [Install]

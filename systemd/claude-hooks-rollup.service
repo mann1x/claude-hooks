@@ -6,13 +6,15 @@ After=claude-hooks-proxy.service
 [Service]
 Type=oneshot
 User=root
-WorkingDirectory=/srv/dev-disk-by-label-opt/dev/claude-hooks
-Environment=CLAUDE_HOOKS_REPO=/srv/dev-disk-by-label-opt/dev/claude-hooks
-ExecStart=/root/anaconda3/envs/claude-hooks/bin/python scripts/proxy_rollup.py
+WorkingDirectory=__REPO_PATH__
+Environment=CLAUDE_HOOKS_REPO=__REPO_PATH__
+# Use the shim so the rollup picks up the conda env's python if
+# present, system python3 otherwise.
+ExecStart=__REPO_PATH__/bin/claude-hooks-rollup
 
 # Reasonable hardening — rollup only reads JSONL + writes stats.db.
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/root/.claude
+ReadWritePaths=__HOME__/.claude
 PrivateTmp=yes
