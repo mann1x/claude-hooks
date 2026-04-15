@@ -268,3 +268,92 @@ class TestHttpxForwarder:
                 "ftp://example.com/v1", "GET", "/",
                 {}, b"", timeout=1.0,
             )
+
+
+# --------------------------------------------------------------- #
+# Retry on RemoteProtocolError ("Server disconnected")
+# --------------------------------------------------------------- #
+class TestForwarderRetry:
+    def test_remote_protocol_error_triggers_retry_then_succeeds(self, monkeypatch):
+        """First attempt raises RemoteProtocolError, second returns 200.
+
+        Simulates Anthropic's edge dropping a stale HTTP/2 connection —
+        the retry lands on a fresh one and the caller never sees the
+        failure.
+        """
+        import httpx
+        from claude_hooks.proxy import forwarder as fwd
+
+        fwd._reset_client()
+
+        calls = {"n": 0}
+        real_client = fwd._get_client(timeout=5.0)
+
+        original_send = real_client.send
+
+        def fake_send(req, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise httpx.RemoteProtocolError("Server disconnected")
+            return original_send(req, *args, **kwargs)
+
+        monkeypatch.setattr(real_client, "send", fake_send)
+
+        # Use a real local server so the second (real) attempt works.
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class OK(BaseHTTPRequestHandler):
+            def log_message(self, *a, **k): pass
+            def do_POST(self):
+                body = b'{"ok":true}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        s = socket.socket(); s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]; s.close()
+        srv = HTTPServer(("127.0.0.1", port), OK)
+        t = threading.Thread(target=srv.serve_forever, daemon=True); t.start()
+        try:
+            result = forward(
+                f"http://127.0.0.1:{port}", "POST", "/v1/messages",
+                {"Content-Type": "application/json"},
+                b'{"x":1}', timeout=5.0,
+            )
+            body = result.first_chunk + b"".join(result.body_iter)
+            assert result.status == 200
+            assert b'{"ok":true}' in body
+            assert calls["n"] == 2      # first failed, second succeeded
+        finally:
+            srv.shutdown(); srv.server_close()
+            fwd._reset_client()
+
+    def test_retries_exhausted_reraises(self, monkeypatch):
+        """If every attempt raises, the last exception propagates."""
+        import httpx
+        from claude_hooks.proxy import forwarder as fwd
+
+        fwd._reset_client()
+        client = fwd._get_client(timeout=5.0)
+
+        calls = {"n": 0}
+
+        def always_fail(req, *args, **kwargs):
+            calls["n"] += 1
+            raise httpx.RemoteProtocolError("Server disconnected")
+
+        monkeypatch.setattr(client, "send", always_fail)
+        # Collapse backoff for speed.
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
+
+        with pytest.raises(httpx.RemoteProtocolError):
+            forward(
+                "http://127.0.0.1:1", "POST", "/v1/messages",
+                {"Content-Type": "application/json"},
+                b'{"x":1}', timeout=5.0,
+            )
+        # 1 initial + _UPSTREAM_RETRIES retries
+        assert calls["n"] == fwd._UPSTREAM_RETRIES + 1
+        fwd._reset_client()

@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import atexit
 import logging
+import os
 import ssl
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
 from urllib.parse import urlparse
@@ -64,6 +66,17 @@ _CLIENT: Optional[httpx.Client] = None
 _CLIENT_TIMEOUT: Optional[float] = None
 
 
+# Upstream (Anthropic / other Claude endpoints) can silently drop
+# idle HTTP/2 connections well before our pool's keepalive_expiry
+# would have retired them, surfacing as ``httpx.RemoteProtocolError``
+# ("Server disconnected"). Shorter keepalive + in-forwarder retry
+# papers over those drops without asking Claude Code to redo the
+# whole request.
+_KEEPALIVE_EXPIRY = float(os.environ.get("CLAUDE_HOOKS_PROXY_KEEPALIVE_SEC", "60"))
+_UPSTREAM_RETRIES = int(os.environ.get("CLAUDE_HOOKS_PROXY_RETRIES", "2"))
+_RETRY_BACKOFF_BASE = float(os.environ.get("CLAUDE_HOOKS_PROXY_RETRY_BACKOFF", "0.15"))
+
+
 def _build_client(timeout: float) -> httpx.Client:
     return httpx.Client(
         http2=True,
@@ -71,7 +84,7 @@ def _build_client(timeout: float) -> httpx.Client:
         limits=httpx.Limits(
             max_keepalive_connections=10,
             max_connections=20,
-            keepalive_expiry=300.0,
+            keepalive_expiry=_KEEPALIVE_EXPIRY,
         ),
         follow_redirects=False,
         # Do NOT read HTTPS_PROXY / NO_PROXY from env — we *are* the
@@ -136,6 +149,12 @@ def forward(
 
     The caller is responsible for consuming ``body_iter`` completely so the
     underlying stream is released back to the pool.
+
+    Transparently retries on ``httpx.RemoteProtocolError`` ("Server
+    disconnected") — upstream sometimes drops pooled connections
+    before we notice, and the failure is safe to retry as long as no
+    bytes have reached our client yet (the retry happens strictly
+    *before* ``UpstreamResult`` is returned).
     """
     u = urlparse(upstream_url)
     if not u.scheme or not u.hostname:
@@ -153,6 +172,42 @@ def forward(
 
     client = _get_client(timeout)
 
+    last_exc: Optional[Exception] = None
+    for attempt in range(_UPSTREAM_RETRIES + 1):
+        try:
+            return _forward_attempt(client, method, url, out_headers, body)
+        except httpx.RemoteProtocolError as e:
+            last_exc = e
+            if attempt >= _UPSTREAM_RETRIES:
+                break
+            # Back off briefly so we don't hammer a server that's
+            # actively closing connections. Pool naturally drops the
+            # dead connection, so the retry will open a fresh one.
+            time.sleep(_RETRY_BACKOFF_BASE * (attempt + 1))
+            log.debug("retry %d after RemoteProtocolError: %s", attempt + 1, e)
+        except httpx.ConnectError as e:
+            # Rare but identical failure mode — transient connect
+            # failure on a fresh connection. Retry once.
+            last_exc = e
+            if attempt >= _UPSTREAM_RETRIES:
+                break
+            time.sleep(_RETRY_BACKOFF_BASE * (attempt + 1))
+            log.debug("retry %d after ConnectError: %s", attempt + 1, e)
+    assert last_exc is not None  # loop only exits via return or break
+    raise last_exc
+
+
+def _forward_attempt(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    out_headers: dict[str, str],
+    body: bytes,
+) -> UpstreamResult:
+    """One upstream attempt. Raises ``httpx.RemoteProtocolError`` /
+    ``httpx.ConnectError`` on connection-level failures so ``forward``
+    can retry; other exceptions propagate unchanged.
+    """
     req = client.build_request(
         method, url, headers=out_headers, content=body if body else None,
     )
