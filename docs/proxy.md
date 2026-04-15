@@ -305,6 +305,35 @@ Runs every 5 min after boot (with `Persistent=true` so a missed tick
 on wake fires once). The rollup is idempotent; skipping or overrunning
 a tick is harmless.
 
+## Stop-phrase behaviour canaries (S5)
+
+Opt-in pattern matcher that scans the assistant's `text_delta` output
+for the stop-phrase categories from stellaraccident's #42796 analysis
+(ownership dodging, permission seeking, premature stopping, known-
+limitation labeling, session-length excuses, simplest-fix, reasoning
+reversal, self-admitted errors).
+
+Enable in config:
+
+```json
+"proxy": {
+  "scan_stop_phrases": true,
+  "stop_phrases_file": null            // null = repo default
+}
+```
+
+The phrase catalog lives at `config/stop_phrases.yaml` — case-
+insensitive regexes grouped by category. Add or tweak phrases there
+without touching code. Off by default; the localhost dashboard is
+the only consumer.
+
+Runtime: one `StopPhraseScanner` per response, fed `text_delta`
+text as bytes stream through the proxy. Counts land in the JSONL
+line as `stop_phrase_counts: {category: n, ...}` (null on turns that
+match nothing, keeping the log compact). Daily rollup gains per-
+category totals; dashboard renders the "behavior canaries" card with
+rate per 1K tool calls.
+
 ## Forwarder: httpx + HTTP/2
 
 The proxy forwards via a module-level `httpx.Client(http2=True)`

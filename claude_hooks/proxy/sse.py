@@ -29,15 +29,44 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Iterable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 log = logging.getLogger("claude_hooks.proxy.sse")
+
+
+# Module-level scanner factory — wired up by server.build_server when
+# ``proxy.scan_stop_phrases`` is true. ``None`` = feature disabled
+# (the default). Kept as a factory because ``StopPhraseScanner``
+# holds per-response state and must be per-SseTail, not shared.
+_STOP_SCANNER_FACTORY: Optional[Callable[[], object]] = None
+
+
+def set_stop_scanner_factory(factory: Optional[Callable[[], object]]) -> None:
+    """Install (or clear) the stop-phrase scanner factory globally.
+
+    Called once from ``server.build_server``. Each new ``SseTail``
+    pulls the factory lazily so the feature can be toggled without
+    restarting the forwarder (for tests at least).
+    """
+    global _STOP_SCANNER_FACTORY
+    _STOP_SCANNER_FACTORY = factory
 
 
 class SseTail:
     """Incrementally parse SSE events without buffering the whole stream."""
 
-    def __init__(self) -> None:
+    def __init__(self, stop_scanner: Optional["object"] = None) -> None:
+        # Optional StopPhraseScanner — opt-in via
+        # proxy.scan_stop_phrases config flag. Fed with the text from
+        # text_delta events only; thinking / signature / tool_use
+        # blocks are ignored by the scanner.
+        if stop_scanner is None and _STOP_SCANNER_FACTORY is not None:
+            try:
+                stop_scanner = _STOP_SCANNER_FACTORY()
+            except Exception as e:
+                log.debug("stop scanner factory failed: %s", e)
+                stop_scanner = None
+        self.stop_scanner = stop_scanner
         self._buffer = b""
         self.final_usage: Optional[dict] = None
         self.stop_reason: Optional[str] = None
@@ -222,6 +251,16 @@ class SseTail:
                     sig = delta.get("signature")
                     if isinstance(sig, str):
                         self.thinking_signature_bytes += len(sig)
+                elif dt == "text_delta" and self.stop_scanner is not None:
+                    # Feed the visible assistant text into the
+                    # stop-phrase scanner so stellaraccident-style
+                    # behaviour canaries get updated as bytes flow.
+                    text = delta.get("text")
+                    if isinstance(text, str) and text:
+                        try:
+                            self.stop_scanner.feed(text)
+                        except Exception as e:
+                            log.debug("stop scanner feed failed: %s", e)
         elif etype == "message_stop":
             # Nothing more to parse — the stream is done.
             pass

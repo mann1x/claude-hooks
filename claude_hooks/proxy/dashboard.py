@@ -81,7 +81,15 @@ def _query_summary(conn: sqlite3.Connection) -> dict[str, Any]:
              SUM(total_tool_edit_count) as tool_edit,
              SUM(total_tool_research_count) as tool_research,
              SUM(total_tool_mutation_count) as tool_mutation,
-             SUM(total_tool_total_count) as tool_total
+             SUM(total_tool_total_count) as tool_total,
+             SUM(total_sp_ownership_dodging) as sp_ownership_dodging,
+             SUM(total_sp_permission_seeking) as sp_permission_seeking,
+             SUM(total_sp_premature_stopping) as sp_premature_stopping,
+             SUM(total_sp_known_limitation_labeling) as sp_known_limitation_labeling,
+             SUM(total_sp_session_length_excuses) as sp_session_length_excuses,
+             SUM(total_sp_simplest_fix) as sp_simplest_fix,
+             SUM(total_sp_reasoning_reversal) as sp_reasoning_reversal,
+             SUM(total_sp_self_admitted_error) as sp_self_admitted_error
            FROM daily_rollup
            WHERE date >= date(?, '-6 days')""",
         (today,),
@@ -459,6 +467,7 @@ _HTML = r"""<!doctype html>
 <div class="grid" style="margin-top:12px">
   <div class="card"><h2>thinking (today)</h2><div id="thinking-card">loading…</div></div>
   <div class="card"><h2>tool-use canaries (today)</h2><div id="tools-card">loading…</div></div>
+  <div class="card"><h2>behavior canaries (today)</h2><div id="behavior-card">loading…</div></div>
 </div>
 
 <div class="card" style="margin-top:12px"><h2>per day (last 14)</h2><div id="daily-table">…</div></div>
@@ -571,6 +580,52 @@ function renderToolsCard(d) {
     </dl>${TOOL_LEGEND}
   `;
 }
+function renderBehaviorCard(d) {
+  if (!d) return "<div class='muted'>no data yet</div>";
+  const cats = [
+    ["sp_ownership_dodging",        "ownership dodging"],
+    ["sp_permission_seeking",       "permission seeking"],
+    ["sp_premature_stopping",       "premature stopping"],
+    ["sp_known_limitation_labeling","known-limitation"],
+    ["sp_session_length_excuses",   "session-length excuses"],
+    ["sp_simplest_fix",             "simplest-fix"],
+    ["sp_reasoning_reversal",       "reasoning reversal"],
+    ["sp_self_admitted_error",      "self-admitted errors"],
+  ];
+  const total = cats.reduce((acc, [k]) => acc + (d[k] || 0), 0);
+  if (total === 0) {
+    return `<div class='muted'>nothing matched today</div>${BEHAVIOR_LEGEND_OFF}`;
+  }
+  const toolTotal = d.total_tool_total_count || 0;
+  const rateLabel = toolTotal > 0 ? "per 1k tool calls" : "raw counts";
+  const rate = (n) => toolTotal > 0
+    ? ((n || 0) * 1000 / toolTotal).toFixed(1)
+    : fmt(n || 0);
+  const rows = cats.map(([k, label]) => `
+    <dt>${label}</dt><dd>${fmt(d[k])}${toolTotal > 0 ? ` <span class="muted">(${rate(d[k])})</span>` : ""}</dd>
+  `).join("");
+  return `
+    <dl class="kv">${rows}
+      <dt>total hits</dt><dd>${fmt(total)} <span class="muted">${rateLabel}</span></dd>
+    </dl>${BEHAVIOR_LEGEND}
+  `;
+}
+const BEHAVIOR_LEGEND = `
+  <div class="legend">
+    stellaraccident stop-phrase canaries (#42796). Phrases in
+    <code>config/stop_phrases.yaml</code>. Rates per 1k tool calls
+    let you compare across days with different workload intensity.
+    Enable via <code>proxy.scan_stop_phrases: true</code>.
+  </div>
+`;
+const BEHAVIOR_LEGEND_OFF = `
+  <div class="legend">
+    No matches today. Either the feature is off
+    (<code>proxy.scan_stop_phrases: false</code>, default) or the model
+    genuinely wasn't exhibiting these patterns — check
+    <code>today.sp_*</code> in <code>/api/summary.json</code>.
+  </div>
+`;
 const TOOL_LEGEND = `
   <div class="legend">
     stellaraccident / #42796 canary: Read:Edit dropped 6.6 → 2.0 during the
@@ -713,6 +768,7 @@ async function load() {
     document.getElementById("ratelimit-card").innerHTML = renderRateLimit(summary.ratelimit, summary.burn);
     document.getElementById("thinking-card").innerHTML = renderThinkingCard(summary.today);
     document.getElementById("tools-card").innerHTML = renderToolsCard(summary.today);
+    document.getElementById("behavior-card").innerHTML = renderBehaviorCard(summary.today);
     document.getElementById("daily-table").innerHTML = renderDailyTable(daily);
     document.getElementById("agents-table").innerHTML = renderAgentsTable(agents);
     document.getElementById("models-table").innerHTML = renderModelsTable(models);

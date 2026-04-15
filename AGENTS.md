@@ -34,10 +34,11 @@ All three default to `enabled: false` and no-op silently when their binary or pa
 
 - `claude_hooks/proxy/` — local HTTP proxy + observability (see `docs/proxy.md`)
 - `claude_hooks/proxy/metadata.py` — request-body parser: model, session, warmup detection, plus S2 extensions (agent classification, CC version, effort, thinking type, beta features, account UUID)
-- `claude_hooks/proxy/sse.py` — SSE stream parser: extracts usage, stop_reason, S3 thinking-depth metrics (signature bytes, delta count, output tokens, content-block/delta type histograms), S4 visible/redacted thinking split, and per-tool-name call counts for stellaraccident-style canary ratios
+- `claude_hooks/proxy/sse.py` — SSE stream parser: extracts usage, stop_reason, S3 thinking-depth metrics (signature bytes, delta count, output tokens, content-block/delta type histograms), S4 visible/redacted thinking split, per-tool-name call counts for stellaraccident-style canary ratios, and opt-in stop-phrase behaviour scanning
 - `claude_hooks/proxy/forwarder.py` — httpx[http2] forwarder; strips `accept-encoding` and pins `identity` so SSE bytes arrive uncompressed for `SseTail` parsing
-- `claude_hooks/proxy/stats_db.py` — SQLite rollup for proxy JSONL logs (schema v4: S2 columns + `agent_rollup` table + S3 thinking-metric totals + S4 visible/redacted thinking split and tool-use aggregate columns on `daily_rollup`)
-- `claude_hooks/proxy/dashboard.py` — read-only stats dashboard on port `38081`; stdlib-only `ThreadingHTTPServer` with JSON API + embedded HTML view (includes thinking and tool-use canary cards)
+- `claude_hooks/proxy/stats_db.py` — SQLite rollup for proxy JSONL logs (schema v5: S2 columns + `agent_rollup` table + S3 thinking-metric totals + S4 visible/redacted thinking split + tool-use aggregate columns + S5 per-category stop-phrase behaviour canary totals on `daily_rollup`)
+- `claude_hooks/proxy/stop_phrase_guard.py` — in-stream stop-phrase scanner (stellaraccident #42796): 8 behaviour categories, regex patterns from `config/stop_phrases.yaml`, stdlib-only YAML loader
+- `claude_hooks/proxy/dashboard.py` — read-only stats dashboard on port `38081`; stdlib-only `ThreadingHTTPServer` with JSON API + embedded HTML view (includes thinking, tool-use, and behavior canary cards)
 - `scripts/proxy_rollup.py` — CLI to ingest JSONL into `stats.db` and rebuild rollups
 - `bin/claude-hooks-rollup` — POSIX shim for `scripts/proxy_rollup.py` (prefers conda env python)
 - `systemd/claude-hooks-rollup.timer` — runs rollup every 5 min via systemd

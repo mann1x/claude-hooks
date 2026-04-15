@@ -28,7 +28,7 @@ from typing import Iterable, Optional
 
 log = logging.getLogger("claude_hooks.proxy.stats_db")
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def _schema_ddl() -> list[str]:
@@ -195,6 +195,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # v3 -> v4: visible/redacted thinking split + tool-use aggregates.
     if current < 4:
         _migrate_v4(conn)
+    # v4 -> v5: stop-phrase behaviour canaries.
+    if current < 5:
+        _migrate_v5(conn)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
@@ -435,6 +438,16 @@ def _row_from_record(
         else None
     )
 
+    # Stop-phrase behaviour canaries (v5).
+    sp = rec.get("stop_phrase_counts")
+    sp_json = (
+        json.dumps(sp) if isinstance(sp, dict) and sp else None
+    )
+    sp_vals = [
+        (sp.get(cat) if isinstance(sp, dict) else None)
+        for cat in _STOP_PHRASE_CATEGORIES
+    ]
+
     return (
         ts, date, source_file, source_line,
         rec.get("session_id"),
@@ -493,6 +506,9 @@ def _row_from_record(
         cats["bash"] or None,
         cats["task"] or None,
         cats["total"] or None,
+        # v5 — stop-phrase behaviour canaries.
+        sp_json,
+        *sp_vals,
     )
 
 
@@ -506,6 +522,43 @@ def _bool_or_none(v) -> Optional[int]:
 # not listed here falls into ``other`` (counted only in tool_total).
 _TOOLS_RESEARCH = {"Read", "Grep", "Glob", "WebFetch", "WebSearch"}
 _TOOLS_MUTATION = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+
+
+_STOP_PHRASE_CATEGORIES = (
+    "ownership_dodging",
+    "permission_seeking",
+    "premature_stopping",
+    "known_limitation_labeling",
+    "session_length_excuses",
+    "simplest_fix",
+    "reasoning_reversal",
+    "self_admitted_error",
+)
+
+
+def _migrate_v5(conn: sqlite3.Connection) -> None:
+    """Add stop-phrase behaviour-canary columns."""
+    req_cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(requests)").fetchall()
+    }
+    if "stop_phrase_counts" not in req_cols:
+        conn.execute("ALTER TABLE requests ADD COLUMN stop_phrase_counts TEXT")
+    # Per-category per-request column for cheap rollup SUMs.
+    for cat in _STOP_PHRASE_CATEGORIES:
+        col = f"sp_{cat}"
+        if col not in req_cols:
+            conn.execute(f"ALTER TABLE requests ADD COLUMN {col} INTEGER")
+
+    daily_cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(daily_rollup)").fetchall()
+    }
+    for cat in _STOP_PHRASE_CATEGORIES:
+        col = f"total_sp_{cat}"
+        if col not in daily_cols:
+            conn.execute(
+                f"ALTER TABLE daily_rollup ADD COLUMN {col} "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
 
 
 def _categorise_tools(counts: Optional[dict]) -> dict[str, int]:
@@ -558,12 +611,17 @@ _INSERT_SQL = """
         thinking_visible_delta_count, thinking_redacted_delta_count,
         tool_use_counts,
         tool_read_count, tool_edit_count, tool_research_count,
-        tool_mutation_count, tool_bash_count, tool_task_count, tool_total_count
+        tool_mutation_count, tool_bash_count, tool_task_count, tool_total_count,
+        stop_phrase_counts,
+        sp_ownership_dodging, sp_permission_seeking, sp_premature_stopping,
+        sp_known_limitation_labeling, sp_session_length_excuses,
+        sp_simplest_fix, sp_reasoning_reversal, sp_self_admitted_error
     ) VALUES (?, ?, ?, ?,  ?, ?, ?, ?, ?,  ?, ?,  ?, ?, ?,
               ?, ?,  ?, ?,  ?, ?,  ?, ?,  ?, ?, ?,  ?, ?,
               ?, ?, ?, ?, ?,  ?, ?, ?,
               ?, ?, ?, ?, ?,  ?, ?, ?, ?, ?,  ?,
-              ?, ?,  ?,  ?, ?, ?, ?, ?, ?, ?)
+              ?, ?,  ?,  ?, ?, ?, ?, ?, ?, ?,
+              ?,  ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -699,7 +757,15 @@ def rebuild_rollups(conn: sqlite3.Connection, *, dates: Optional[Iterable[str]] 
                 COALESCE(SUM(tool_mutation_count), 0),
                 COALESCE(SUM(tool_bash_count), 0),
                 COALESCE(SUM(tool_task_count), 0),
-                COALESCE(SUM(tool_total_count), 0)
+                COALESCE(SUM(tool_total_count), 0),
+                COALESCE(SUM(sp_ownership_dodging), 0),
+                COALESCE(SUM(sp_permission_seeking), 0),
+                COALESCE(SUM(sp_premature_stopping), 0),
+                COALESCE(SUM(sp_known_limitation_labeling), 0),
+                COALESCE(SUM(sp_session_length_excuses), 0),
+                COALESCE(SUM(sp_simplest_fix), 0),
+                COALESCE(SUM(sp_reasoning_reversal), 0),
+                COALESCE(SUM(sp_self_admitted_error), 0)
             FROM requests WHERE date = ?
             """,
             (d,),
@@ -710,6 +776,7 @@ def rebuild_rollups(conn: sqlite3.Connection, *, dates: Optional[Iterable[str]] 
             thrc, thdc, thsb, thot,
             thvis, thred,
             tr, te, tres, tmut, tbash, ttask, ttotal,
+            sp_od, sp_ps, sp_pst, sp_kll, sp_sle, sp_sf, sp_rr, sp_sae,
         ) = agg
         denom = (cc or 0) + (cr or 0)
         hit_rate = ((cr or 0) / denom) if denom > 0 else None
@@ -730,11 +797,16 @@ def rebuild_rollups(conn: sqlite3.Connection, *, dates: Optional[Iterable[str]] 
                 total_tool_read_count, total_tool_edit_count,
                 total_tool_research_count, total_tool_mutation_count,
                 total_tool_bash_count, total_tool_task_count,
-                total_tool_total_count
+                total_tool_total_count,
+                total_sp_ownership_dodging, total_sp_permission_seeking,
+                total_sp_premature_stopping, total_sp_known_limitation_labeling,
+                total_sp_session_length_excuses, total_sp_simplest_fix,
+                total_sp_reasoning_reversal, total_sp_self_admitted_error
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                       ?, ?, ?, ?,
                       ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?)
+                      ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(date) DO UPDATE SET
                 request_count=excluded.request_count,
                 warmup_count=excluded.warmup_count,
@@ -766,13 +838,22 @@ def rebuild_rollups(conn: sqlite3.Connection, *, dates: Optional[Iterable[str]] 
                 total_tool_mutation_count=excluded.total_tool_mutation_count,
                 total_tool_bash_count=excluded.total_tool_bash_count,
                 total_tool_task_count=excluded.total_tool_task_count,
-                total_tool_total_count=excluded.total_tool_total_count
+                total_tool_total_count=excluded.total_tool_total_count,
+                total_sp_ownership_dodging=excluded.total_sp_ownership_dodging,
+                total_sp_permission_seeking=excluded.total_sp_permission_seeking,
+                total_sp_premature_stopping=excluded.total_sp_premature_stopping,
+                total_sp_known_limitation_labeling=excluded.total_sp_known_limitation_labeling,
+                total_sp_session_length_excuses=excluded.total_sp_session_length_excuses,
+                total_sp_simplest_fix=excluded.total_sp_simplest_fix,
+                total_sp_reasoning_reversal=excluded.total_sp_reasoning_reversal,
+                total_sp_self_admitted_error=excluded.total_sp_self_admitted_error
             """,
             (d, rc, wm, wmb, syn, s2, s4, s5, s429, div,
              inp, out, cc, cr, hit_rate, rb, rsb, dur, now,
              thrc, thdc, thsb, thot,
              thvis, thred,
-             tr, te, tres, tmut, tbash, ttask, ttotal),
+             tr, te, tres, tmut, tbash, ttask, ttotal,
+             sp_od, sp_ps, sp_pst, sp_kll, sp_sle, sp_sf, sp_rr, sp_sae),
         )
 
         # Session rollup — rebuild for the date.

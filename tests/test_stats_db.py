@@ -807,3 +807,90 @@ class TestS4Migration:
                 assert needed in daily_cols
         finally:
             conn2.close()
+
+
+# ============================================================ #
+# S5 — stop-phrase canaries on requests + daily_rollup
+# ============================================================ #
+class TestS5Ingest:
+    def test_stop_phrase_counts_rolled_up(self, tmp_path):
+        log_dir = tmp_path / "logs"; log_dir.mkdir()
+        _write_jsonl(log_dir / "2026-04-15.jsonl", [
+            _mk_record(
+                ts="2026-04-15T10:00:00Z",
+                stop_phrase_counts={
+                    "ownership_dodging": 2,
+                    "simplest_fix": 1,
+                },
+            ),
+            _mk_record(
+                ts="2026-04-15T11:00:00Z",
+                stop_phrase_counts={"ownership_dodging": 3,
+                                    "reasoning_reversal": 5},
+            ),
+            _mk_record(ts="2026-04-15T12:00:00Z"),   # no sp at all
+        ])
+        db = tmp_path / "s.db"
+        ingest_dir(db, log_dir)
+        import sqlite3
+        conn = sqlite3.connect(db)
+        try:
+            row = conn.execute(
+                "SELECT total_sp_ownership_dodging, total_sp_simplest_fix, "
+                "total_sp_reasoning_reversal, total_sp_permission_seeking "
+                "FROM daily_rollup WHERE date=?", ("2026-04-15",),
+            ).fetchone()
+            assert row == (5, 1, 5, 0)
+            # Per-request columns also populated.
+            per_req = conn.execute(
+                "SELECT sp_ownership_dodging, sp_simplest_fix, sp_reasoning_reversal "
+                "FROM requests WHERE date='2026-04-15' ORDER BY ts"
+            ).fetchall()
+            assert per_req == [(2, 1, None), (3, None, 5), (None, None, None)]
+            # stop_phrase_counts JSON blob preserved for the rich rows.
+            blobs = [
+                r[0] for r in conn.execute(
+                    "SELECT stop_phrase_counts FROM requests "
+                    "WHERE date='2026-04-15' ORDER BY ts"
+                ).fetchall()
+            ]
+            assert blobs[0] is not None
+            assert blobs[2] is None          # empty row stays null
+        finally:
+            conn.close()
+
+
+class TestS5Migration:
+    def test_v4_database_migrates_to_v5(self, tmp_path):
+        import sqlite3
+        from claude_hooks.proxy import stats_db
+
+        db = tmp_path / "s.db"
+        conn = sqlite3.connect(db, isolation_level=None)
+        for stmt in stats_db._schema_ddl():
+            conn.execute(stmt)
+        stats_db._migrate_v2(conn)
+        stats_db._migrate_v3(conn)
+        stats_db._migrate_v4(conn)
+        conn.execute("PRAGMA user_version = 4")
+        conn.close()
+
+        conn2 = stats_db.connect(db)
+        try:
+            v = conn2.execute("PRAGMA user_version").fetchone()[0]
+            assert v == stats_db.SCHEMA_VERSION
+            daily_cols = {
+                r[1] for r in conn2.execute(
+                    "PRAGMA table_info(daily_rollup)").fetchall()
+            }
+            for cat in stats_db._STOP_PHRASE_CATEGORIES:
+                assert f"total_sp_{cat}" in daily_cols
+            req_cols = {
+                r[1] for r in conn2.execute(
+                    "PRAGMA table_info(requests)").fetchall()
+            }
+            assert "stop_phrase_counts" in req_cols
+            for cat in stats_db._STOP_PHRASE_CATEGORIES:
+                assert f"sp_{cat}" in req_cols
+        finally:
+            conn2.close()

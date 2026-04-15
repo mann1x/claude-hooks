@@ -223,7 +223,9 @@
     "log_retention_days": 14,
     "record_rate_limit_headers": true,
     "block_warmup": false,
-    "stats_db_path": "~/.claude/claude-hooks-proxy/stats.db"
+    "stats_db_path": "~/.claude/claude-hooks-proxy/stats.db",
+    "scan_stop_phrases": false,
+    "stop_phrases_file": null
   },
   "proxy_dashboard": {
     "listen_host": "127.0.0.1",

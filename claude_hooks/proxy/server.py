@@ -340,6 +340,17 @@ class _Handler(BaseHTTPRequestHandler):
             "thinking_redacted_delta_count": thinking_redacted_delta_count,
             # Tool-use per response — map of tool name → call count.
             "tool_use_counts": tool_use_counts,
+            # Stop-phrase behaviour canaries (stellaraccident #42796).
+            # Only present when proxy.scan_stop_phrases is enabled AND
+            # the response text actually matched a phrase — null
+            # otherwise so JSONL lines stay compact for most turns.
+            "stop_phrase_counts": (
+                {k: v for k, v in result.sse_tail.stop_scanner.category_counts.items() if v > 0}
+                or None
+                if (result is not None and result.sse_tail is not None
+                    and result.sse_tail.stop_scanner is not None)
+                else None
+            ),
             # Debug: expose the SSE event type histogram so we can see
             # which events actually arrived in the live stream. Cheap
             # (one small dict per response). Can drop later.
@@ -381,6 +392,23 @@ def build_server(cfg: Optional[dict] = None) -> tuple[ThreadingHTTPServer, Jsonl
 
     jsonl_logger = JsonlLogger(Path(log_dir), retention_days=retention)
     ratelimit_state_path = Path(log_dir) / "ratelimit-state.json"
+
+    # Opt-in stop-phrase scanner (stellaraccident's behaviour
+    # canaries). Wires a factory into the SseTail module so each new
+    # tail constructs its own scanner instance.
+    from claude_hooks.proxy import sse as _sse
+    if pcfg.get("scan_stop_phrases", False):
+        from claude_hooks.proxy.stop_phrase_guard import (
+            StopPhraseScanner, DEFAULT_PHRASES_PATH,
+        )
+        phrases_path = Path(expand_user_path(pcfg.get(
+            "stop_phrases_file", str(DEFAULT_PHRASES_PATH))))
+        _sse.set_stop_scanner_factory(
+            lambda: StopPhraseScanner.from_file(phrases_path)
+        )
+        log.info("stop-phrase scanner enabled, phrases=%s", phrases_path)
+    else:
+        _sse.set_stop_scanner_factory(None)
 
     class _HandlerBound(_Handler):
         proxy_cfg = pcfg

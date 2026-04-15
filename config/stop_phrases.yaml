@@ -1,0 +1,83 @@
+# Stop-phrase catalog for claude_hooks.proxy.stop_phrase_guard.
+#
+# Derived from stellaraccident's stop-phrase-guard.sh in their
+# analysis on anthropics/claude-code#42796 — phrases the model
+# produces when reasoning depth drops, which mark undesirable
+# behaviour the user typically has to correct manually.
+#
+# Structure: one top-level key per category. Each category's value
+# is a list of case-insensitive regex fragments. A match at any
+# word boundary within the assistant's text output increments that
+# category's counter for the current response.
+#
+# Tune as you observe false positives — the loader lives at
+# claude_hooks/proxy/stop_phrase_guard.py and is a tiny stdlib-only
+# YAML subset (no pyyaml dep).
+
+ownership_dodging:
+  - "not caused by my changes"
+  - "pre-?existing (issue|problem|bug)"
+  - "pre-existing"
+  - "existing issue"
+  - "nothing to do with (my|the) changes"
+  - "(was|is) already (broken|failing)"
+  - "that's your change"
+  - "(not|didn't) (my|cause)"
+
+permission_seeking:
+  - "should i (continue|keep going|proceed)\\??"
+  - "(do you )?want me to (continue|keep going|proceed|also)"
+  - "shall i (continue|proceed)"
+  - "let me know if (you want|i should)"
+  - "would you like me to"
+  - "happy to (continue|keep|proceed) if"
+
+premature_stopping:
+  - "good stopping point"
+  - "natural (stopping )?(point|checkpoint)"
+  - "good checkpoint"
+  - "reasonable place to stop"
+  - "let's stop here"
+  - "i'll stop here"
+
+known_limitation_labeling:
+  - "known limitation"
+  - "future work"
+  - "out of scope"
+  - "beyond the scope"
+  - "as a future (enhancement|improvement)"
+  - "could be addressed in a follow-?up"
+
+session_length_excuses:
+  - "continue in a new session"
+  - "(getting|this is|becoming) (quite )?long"
+  - "token (budget|limit) (is )?getting"
+  - "context (is )?(getting|filling up)"
+  - "hit.*context (window|limit)"
+
+simplest_fix:
+  # "simplest" is stellaraccident's #1 frustration signal — it
+  # correlates with the model picking the low-effort path over the
+  # correct one.
+  - "simplest (fix|approach|solution|thing)"
+  - "the simplest way"
+  - "let me just (do|use) the simplest"
+
+reasoning_reversal:
+  # When deep thinking is unavailable, reversals surface in the
+  # output as self-corrections. Match at the start of a sentence.
+  - "\\boh wait\\b"
+  - "\\bactually,"
+  - "\\blet me reconsider\\b"
+  - "\\bhmm,? actually\\b"
+  - "\\bno wait\\b"
+  - "\\bon second thought\\b"
+
+self_admitted_error:
+  # The model recognising its own poor output — useful as a signal
+  # that previous turn was degraded.
+  - "that was lazy"
+  - "i was being sloppy"
+  - "i rushed this"
+  - "you('re| are) right.*(sloppy|lazy|wrong)"
+  - "i cut corners"
