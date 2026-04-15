@@ -28,7 +28,7 @@ from typing import Iterable, Optional
 
 log = logging.getLogger("claude_hooks.proxy.stats_db")
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def _schema_ddl() -> list[str]:
@@ -192,6 +192,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # v2 -> v3: S3 thinking-metric totals on daily_rollup.
     if current < 3:
         _migrate_v3(conn)
+    # v3 -> v4: visible/redacted thinking split + tool-use aggregates.
+    if current < 4:
+        _migrate_v4(conn)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
@@ -259,6 +262,59 @@ def _migrate_v3(conn: sqlite3.Connection) -> None:
     ]
     for col, typ in additions:
         if col not in existing:
+            conn.execute(f"ALTER TABLE daily_rollup ADD COLUMN {col} {typ}")
+
+
+def _migrate_v4(conn: sqlite3.Connection) -> None:
+    """Visible/redacted thinking split on ``requests`` + tool-use
+    aggregate columns on both ``requests`` and ``daily_rollup``.
+
+    Tool categories follow stellaraccident's catalog in #42796:
+
+      research  = Read, Grep, Glob, WebFetch, WebSearch
+      mutation  = Edit, Write, MultiEdit, NotebookEdit
+      bash, task (subagent spawn), other = rest
+
+    ``tool_use_counts`` stays as a JSON blob on requests so we keep
+    the full picture (incl. MCP / new tools we haven't categorised
+    yet); the categorised columns are pre-aggregated for fast daily
+    rollups.
+    """
+    req_cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(requests)").fetchall()
+    }
+    req_adds = [
+        ("thinking_visible_delta_count", "INTEGER"),
+        ("thinking_redacted_delta_count", "INTEGER"),
+        ("tool_use_counts", "TEXT"),               # JSON map
+        ("tool_read_count", "INTEGER"),
+        ("tool_edit_count", "INTEGER"),
+        ("tool_research_count", "INTEGER"),
+        ("tool_mutation_count", "INTEGER"),
+        ("tool_bash_count", "INTEGER"),
+        ("tool_task_count", "INTEGER"),
+        ("tool_total_count", "INTEGER"),
+    ]
+    for col, typ in req_adds:
+        if col not in req_cols:
+            conn.execute(f"ALTER TABLE requests ADD COLUMN {col} {typ}")
+
+    daily_cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(daily_rollup)").fetchall()
+    }
+    daily_adds = [
+        ("total_thinking_visible_delta_count",  "INTEGER NOT NULL DEFAULT 0"),
+        ("total_thinking_redacted_delta_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("total_tool_read_count",     "INTEGER NOT NULL DEFAULT 0"),
+        ("total_tool_edit_count",     "INTEGER NOT NULL DEFAULT 0"),
+        ("total_tool_research_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("total_tool_mutation_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("total_tool_bash_count",     "INTEGER NOT NULL DEFAULT 0"),
+        ("total_tool_task_count",     "INTEGER NOT NULL DEFAULT 0"),
+        ("total_tool_total_count",    "INTEGER NOT NULL DEFAULT 0"),
+    ]
+    for col, typ in daily_adds:
+        if col not in daily_cols:
             conn.execute(f"ALTER TABLE daily_rollup ADD COLUMN {col} {typ}")
 
 
@@ -371,6 +427,14 @@ def _row_from_record(
     elif not isinstance(beta_features, (str, type(None))):
         beta_features = None
 
+    # Tool-use aggregation (S4 / stellaraccident metrics).
+    tool_counts = rec.get("tool_use_counts")
+    cats = _categorise_tools(tool_counts if isinstance(tool_counts, dict) else None)
+    tool_counts_json = (
+        json.dumps(tool_counts) if isinstance(tool_counts, dict) and tool_counts
+        else None
+    )
+
     return (
         ts, date, source_file, source_line,
         rec.get("session_id"),
@@ -418,6 +482,17 @@ def _row_from_record(
         rec.get("agent_type"),
         rec.get("agent_name"),
         beta_features,
+        # S4 additions — visible/redacted thinking + tool-use aggregates.
+        rec.get("thinking_visible_delta_count"),
+        rec.get("thinking_redacted_delta_count"),
+        tool_counts_json,
+        cats["read"] or None,
+        cats["edit"] or None,
+        cats["research"] or None,
+        cats["mutation"] or None,
+        cats["bash"] or None,
+        cats["task"] or None,
+        cats["total"] or None,
     )
 
 
@@ -425,6 +500,42 @@ def _bool_or_none(v) -> Optional[int]:
     if v is None:
         return None
     return 1 if v else 0
+
+
+# Tool categorisation per stellaraccident's #42796 catalog. Anything
+# not listed here falls into ``other`` (counted only in tool_total).
+_TOOLS_RESEARCH = {"Read", "Grep", "Glob", "WebFetch", "WebSearch"}
+_TOOLS_MUTATION = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+
+
+def _categorise_tools(counts: Optional[dict]) -> dict[str, int]:
+    """Return per-category totals for a ``tool_use_counts`` dict.
+
+    Returns all-zero entries even when ``counts`` is None/empty so the
+    ingestion path always writes integers (not NULL) to the columns.
+    Keys: read, edit, research, mutation, bash, task, total.
+    """
+    out = {"read": 0, "edit": 0, "research": 0, "mutation": 0,
+           "bash": 0, "task": 0, "total": 0}
+    if not isinstance(counts, dict):
+        return out
+    for name, n in counts.items():
+        if not isinstance(n, int) or n <= 0:
+            continue
+        out["total"] += n
+        if name == "Read":
+            out["read"] += n
+        elif name == "Edit":
+            out["edit"] += n
+        if name in _TOOLS_RESEARCH:
+            out["research"] += n
+        elif name in _TOOLS_MUTATION:
+            out["mutation"] += n
+        elif name == "Bash":
+            out["bash"] += n
+        elif name == "Task":
+            out["task"] += n
+    return out
 
 
 _INSERT_SQL = """
@@ -443,11 +554,16 @@ _INSERT_SQL = """
         thinking_delta_count, thinking_signature_bytes, thinking_output_tokens,
         account_uuid, cc_version, cc_entrypoint, effort, thinking_type,
         max_tokens, num_tools, num_messages, agent_type, agent_name,
-        beta_features
+        beta_features,
+        thinking_visible_delta_count, thinking_redacted_delta_count,
+        tool_use_counts,
+        tool_read_count, tool_edit_count, tool_research_count,
+        tool_mutation_count, tool_bash_count, tool_task_count, tool_total_count
     ) VALUES (?, ?, ?, ?,  ?, ?, ?, ?, ?,  ?, ?,  ?, ?, ?,
               ?, ?,  ?, ?,  ?, ?,  ?, ?,  ?, ?, ?,  ?, ?,
               ?, ?, ?, ?, ?,  ?, ?, ?,
-              ?, ?, ?, ?, ?,  ?, ?, ?, ?, ?,  ?)
+              ?, ?, ?, ?, ?,  ?, ?, ?, ?, ?,  ?,
+              ?, ?,  ?,  ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -574,7 +690,16 @@ def rebuild_rollups(conn: sqlite3.Connection, *, dates: Optional[Iterable[str]] 
                     THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(thinking_delta_count), 0),
                 COALESCE(SUM(thinking_signature_bytes), 0),
-                COALESCE(SUM(thinking_output_tokens), 0)
+                COALESCE(SUM(thinking_output_tokens), 0),
+                COALESCE(SUM(thinking_visible_delta_count), 0),
+                COALESCE(SUM(thinking_redacted_delta_count), 0),
+                COALESCE(SUM(tool_read_count), 0),
+                COALESCE(SUM(tool_edit_count), 0),
+                COALESCE(SUM(tool_research_count), 0),
+                COALESCE(SUM(tool_mutation_count), 0),
+                COALESCE(SUM(tool_bash_count), 0),
+                COALESCE(SUM(tool_task_count), 0),
+                COALESCE(SUM(tool_total_count), 0)
             FROM requests WHERE date = ?
             """,
             (d,),
@@ -583,6 +708,8 @@ def rebuild_rollups(conn: sqlite3.Connection, *, dates: Optional[Iterable[str]] 
             rc, wm, wmb, syn, s2, s4, s5, s429, div,
             inp, out, cc, cr, rb, rsb, dur,
             thrc, thdc, thsb, thot,
+            thvis, thred,
+            tr, te, tres, tmut, tbash, ttask, ttotal,
         ) = agg
         denom = (cc or 0) + (cr or 0)
         hit_rate = ((cr or 0) / denom) if denom > 0 else None
@@ -597,9 +724,17 @@ def rebuild_rollups(conn: sqlite3.Connection, *, dates: Optional[Iterable[str]] 
                 cache_hit_rate, total_req_bytes, total_resp_bytes,
                 total_duration_ms, updated_at,
                 thinking_request_count, total_thinking_delta_count,
-                total_thinking_signature_bytes, total_thinking_output_tokens
+                total_thinking_signature_bytes, total_thinking_output_tokens,
+                total_thinking_visible_delta_count,
+                total_thinking_redacted_delta_count,
+                total_tool_read_count, total_tool_edit_count,
+                total_tool_research_count, total_tool_mutation_count,
+                total_tool_bash_count, total_tool_task_count,
+                total_tool_total_count
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?)
+                      ?, ?, ?, ?,
+                      ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(date) DO UPDATE SET
                 request_count=excluded.request_count,
                 warmup_count=excluded.warmup_count,
@@ -622,11 +757,22 @@ def rebuild_rollups(conn: sqlite3.Connection, *, dates: Optional[Iterable[str]] 
                 thinking_request_count=excluded.thinking_request_count,
                 total_thinking_delta_count=excluded.total_thinking_delta_count,
                 total_thinking_signature_bytes=excluded.total_thinking_signature_bytes,
-                total_thinking_output_tokens=excluded.total_thinking_output_tokens
+                total_thinking_output_tokens=excluded.total_thinking_output_tokens,
+                total_thinking_visible_delta_count=excluded.total_thinking_visible_delta_count,
+                total_thinking_redacted_delta_count=excluded.total_thinking_redacted_delta_count,
+                total_tool_read_count=excluded.total_tool_read_count,
+                total_tool_edit_count=excluded.total_tool_edit_count,
+                total_tool_research_count=excluded.total_tool_research_count,
+                total_tool_mutation_count=excluded.total_tool_mutation_count,
+                total_tool_bash_count=excluded.total_tool_bash_count,
+                total_tool_task_count=excluded.total_tool_task_count,
+                total_tool_total_count=excluded.total_tool_total_count
             """,
             (d, rc, wm, wmb, syn, s2, s4, s5, s429, div,
              inp, out, cc, cr, hit_rate, rb, rsb, dur, now,
-             thrc, thdc, thsb, thot),
+             thrc, thdc, thsb, thot,
+             thvis, thred,
+             tr, te, tres, tmut, tbash, ttask, ttotal),
         )
 
         # Session rollup — rebuild for the date.

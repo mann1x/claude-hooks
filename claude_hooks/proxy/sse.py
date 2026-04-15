@@ -60,6 +60,20 @@ class SseTail:
         self.thinking_delta_count: int = 0
         self.thinking_signature_bytes: int = 0
         self.thinking_output_tokens: Optional[int] = None
+        # Visible vs redacted thinking split — stellaraccident's
+        # analysis hinges on knowing whether thinking text is
+        # accessible at all.
+        #   visible  = ``thinking_delta`` events with non-empty text
+        #              (pre redact-thinking-* or when the beta is off)
+        #   redacted = ``signature_delta`` events only (the current
+        #              Opus 4.6 + redact-thinking-2026-02-12 path)
+        self.thinking_visible_delta_count: int = 0
+        self.thinking_redacted_delta_count: int = 0
+        # Tool-use tallying — enables Read:Edit / Research:Mutation /
+        # Read% / Edit% metrics per stellaraccident's #42796 canary
+        # catalog. Populated from ``content_block_start`` events with
+        # type=tool_use, keyed by tool name.
+        self.tool_use_counts: dict[str, int] = {}
         # Diagnostic: track content_block types + delta types seen.
         # Lets us learn the actual wire vocabulary (e.g. whether
         # "extended_thinking" or "redacted_thinking" appears instead
@@ -174,19 +188,37 @@ class SseTail:
                     sig = block.get("signature")
                     if isinstance(sig, (str, bytes)):
                         self.thinking_signature_bytes += len(sig)
+                elif bt == "tool_use":
+                    # Count the *tool* by name, not the block position.
+                    # One content block = one tool call.
+                    name = block.get("name") or "<unknown>"
+                    self.tool_use_counts[name] = (
+                        self.tool_use_counts.get(name, 0) + 1
+                    )
         elif etype == "content_block_delta":
             delta = payload.get("delta") or {}
             if isinstance(delta, dict):
                 dt = delta.get("type") or "<unknown>"
                 self.delta_types[dt] = self.delta_types.get(dt, 0) + 1
-                # The thinking stream on Claude Opus 4.6 actually
-                # arrives as ``signature_delta`` events (observed live
-                # 2026-04-15). Accumulate the signature bytes and
-                # count events as thinking-deltas regardless of label.
-                # ``thinking_delta`` remains a valid variant for
-                # non-redacted responses that carry text chunks.
-                if dt == "signature_delta" or "thinking" in dt:
+                # Thinking-stream accounting. On Claude Opus 4.6
+                # under redact-thinking-2026-02-12 the wire events are
+                # ``signature_delta`` — signature bytes only, no text.
+                # Without that beta, ``thinking_delta`` carries the
+                # actual reasoning text. We count both toward the
+                # aggregate ``thinking_delta_count`` and also track
+                # them separately so the dashboard can show the
+                # visible/redacted ratio.
+                if dt == "signature_delta":
                     self.thinking_delta_count += 1
+                    self.thinking_redacted_delta_count += 1
+                    sig = delta.get("signature")
+                    if isinstance(sig, str):
+                        self.thinking_signature_bytes += len(sig)
+                elif "thinking" in dt:
+                    self.thinking_delta_count += 1
+                    text = delta.get("thinking")
+                    if isinstance(text, str) and text:
+                        self.thinking_visible_delta_count += 1
                     sig = delta.get("signature")
                     if isinstance(sig, str):
                         self.thinking_signature_bytes += len(sig)

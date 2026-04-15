@@ -251,6 +251,9 @@ class _Handler(BaseHTTPRequestHandler):
         thinking_delta_count = None
         thinking_signature_bytes = None
         thinking_output_tokens = None
+        thinking_visible_delta_count = None
+        thinking_redacted_delta_count = None
+        tool_use_counts = None
         if result is not None and result.sse_tail is not None:
             tail = result.sse_tail
             # Merge: start for input/cache, delta for output.
@@ -266,8 +269,14 @@ class _Handler(BaseHTTPRequestHandler):
             if tail.thinking_delta_count or tail.thinking_signature_bytes:
                 thinking_delta_count = tail.thinking_delta_count
                 thinking_signature_bytes = tail.thinking_signature_bytes
+                thinking_visible_delta_count = tail.thinking_visible_delta_count
+                thinking_redacted_delta_count = tail.thinking_redacted_delta_count
             if tail.thinking_output_tokens is not None:
                 thinking_output_tokens = tail.thinking_output_tokens
+            # stellaraccident-style tool-use telemetry — one entry per
+            # tool the model actually invoked in this response.
+            if tail.tool_use_counts:
+                tool_use_counts = dict(tail.tool_use_counts)
 
         rate_limit = resp_meta.get("rate_limit")
         req_ts = _now_iso()
@@ -327,6 +336,10 @@ class _Handler(BaseHTTPRequestHandler):
             "thinking_delta_count": thinking_delta_count,
             "thinking_signature_bytes": thinking_signature_bytes,
             "thinking_output_tokens": thinking_output_tokens,
+            "thinking_visible_delta_count": thinking_visible_delta_count,
+            "thinking_redacted_delta_count": thinking_redacted_delta_count,
+            # Tool-use per response — map of tool name → call count.
+            "tool_use_counts": tool_use_counts,
             # Debug: expose the SSE event type histogram so we can see
             # which events actually arrived in the live stream. Cheap
             # (one small dict per response). Can drop later.

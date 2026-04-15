@@ -201,3 +201,158 @@ class TestThinkingBlockParsing:
         assert tail.thinking_delta_count == 0
         assert tail.thinking_signature_bytes == 0
         assert tail.thinking_output_tokens is None
+
+
+# ============================================================ #
+# S4 — visible/redacted thinking split + tool-use counting
+# ============================================================ #
+class TestThinkingVisibleRedactedSplit:
+    def test_signature_delta_counts_as_redacted(self):
+        events = [
+            ("content_block_start", {
+                "type": "content_block_start", "index": 0,
+                "content_block": {"type": "thinking", "signature": ""},
+            }),
+            ("content_block_delta", {
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "signature_delta", "signature": "x" * 100},
+            }),
+            ("content_block_delta", {
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "signature_delta", "signature": "y" * 100},
+            }),
+        ]
+        tail = SseTail()
+        list(tail.wrap([_sse(events)]))
+        assert tail.thinking_redacted_delta_count == 2
+        assert tail.thinking_visible_delta_count == 0
+        assert tail.thinking_delta_count == 2
+
+    def test_thinking_delta_with_text_counts_as_visible(self):
+        events = [
+            ("content_block_start", {
+                "type": "content_block_start", "index": 0,
+                "content_block": {"type": "thinking"},
+            }),
+            ("content_block_delta", {
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "thinking_delta",
+                          "thinking": "Let me think step by step…"},
+            }),
+            ("content_block_delta", {
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "thinking_delta",
+                          "thinking": "The answer is 42."},
+            }),
+        ]
+        tail = SseTail()
+        list(tail.wrap([_sse(events)]))
+        assert tail.thinking_visible_delta_count == 2
+        assert tail.thinking_redacted_delta_count == 0
+
+    def test_mixed_visible_and_redacted(self):
+        """Same stream can carry both — e.g. some chunks redacted and
+        later chunks visible. Count each type independently.
+        """
+        events = [
+            ("content_block_delta", {
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "signature_delta", "signature": "a" * 50},
+            }),
+            ("content_block_delta", {
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "thinking_delta",
+                          "thinking": "visible text"},
+            }),
+        ]
+        tail = SseTail()
+        list(tail.wrap([_sse(events)]))
+        assert tail.thinking_redacted_delta_count == 1
+        assert tail.thinking_visible_delta_count == 1
+        assert tail.thinking_delta_count == 2
+
+    def test_empty_thinking_delta_not_counted_as_visible(self):
+        """``thinking_delta`` events with empty/missing text shouldn't
+        falsely inflate the visible count.
+        """
+        events = [
+            ("content_block_delta", {
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "thinking_delta"},
+            }),
+            ("content_block_delta", {
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": ""},
+            }),
+        ]
+        tail = SseTail()
+        list(tail.wrap([_sse(events)]))
+        assert tail.thinking_visible_delta_count == 0
+        # They still count toward the aggregate though.
+        assert tail.thinking_delta_count == 2
+
+
+class TestToolUseCounts:
+    def test_single_tool_call(self):
+        events = [
+            ("content_block_start", {
+                "type": "content_block_start", "index": 0,
+                "content_block": {"type": "tool_use", "name": "Read"},
+            }),
+        ]
+        tail = SseTail()
+        list(tail.wrap([_sse(events)]))
+        assert tail.tool_use_counts == {"Read": 1}
+
+    def test_multiple_tools_in_one_response(self):
+        events = [
+            ("content_block_start", {
+                "type": "content_block_start", "index": 0,
+                "content_block": {"type": "tool_use", "name": "Read"},
+            }),
+            ("content_block_start", {
+                "type": "content_block_start", "index": 1,
+                "content_block": {"type": "tool_use", "name": "Read"},
+            }),
+            ("content_block_start", {
+                "type": "content_block_start", "index": 2,
+                "content_block": {"type": "tool_use", "name": "Edit"},
+            }),
+            ("content_block_start", {
+                "type": "content_block_start", "index": 3,
+                "content_block": {"type": "tool_use", "name": "Bash"},
+            }),
+        ]
+        tail = SseTail()
+        list(tail.wrap([_sse(events)]))
+        assert tail.tool_use_counts == {"Read": 2, "Edit": 1, "Bash": 1}
+
+    def test_thinking_and_text_blocks_dont_affect_tool_counts(self):
+        events = [
+            ("content_block_start", {
+                "type": "content_block_start", "index": 0,
+                "content_block": {"type": "thinking", "signature": ""},
+            }),
+            ("content_block_start", {
+                "type": "content_block_start", "index": 1,
+                "content_block": {"type": "text"},
+            }),
+            ("content_block_start", {
+                "type": "content_block_start", "index": 2,
+                "content_block": {"type": "tool_use", "name": "Grep"},
+            }),
+        ]
+        tail = SseTail()
+        list(tail.wrap([_sse(events)]))
+        assert tail.tool_use_counts == {"Grep": 1}
+
+    def test_missing_name_recorded_as_unknown(self):
+        events = [
+            ("content_block_start", {
+                "type": "content_block_start", "index": 0,
+                "content_block": {"type": "tool_use"},   # no name
+            }),
+        ]
+        tail = SseTail()
+        list(tail.wrap([_sse(events)]))
+        assert tail.tool_use_counts == {"<unknown>": 1}

@@ -644,3 +644,121 @@ class TestS3Migration:
                 assert added in cols, f"missing {added}"
         finally:
             conn2.close()
+
+
+# ============================================================ #
+# S4 — tool-use categorisation + thinking visible/redacted aggregates
+# ============================================================ #
+class TestS4Categorisation:
+    def test_categorise_tools_buckets(self):
+        from claude_hooks.proxy.stats_db import _categorise_tools
+        counts = {"Read": 6, "Edit": 2, "Grep": 3, "Bash": 1, "Task": 1,
+                  "Write": 1, "WebFetch": 1, "SomeMCP__foo": 4}
+        cats = _categorise_tools(counts)
+        assert cats["read"] == 6
+        assert cats["edit"] == 2
+        assert cats["research"] == 6 + 3 + 1       # Read + Grep + WebFetch
+        assert cats["mutation"] == 2 + 1           # Edit + Write
+        assert cats["bash"] == 1
+        assert cats["task"] == 1
+        assert cats["total"] == sum(counts.values())
+
+    def test_categorise_tools_empty(self):
+        from claude_hooks.proxy.stats_db import _categorise_tools
+        cats = _categorise_tools(None)
+        for v in cats.values():
+            assert v == 0
+
+
+class TestS4Rollup:
+    def _rec(self, ts, tools):
+        return _mk_record(
+            ts=ts,
+            tool_use_counts=tools,
+            thinking_visible_delta_count=1,
+            thinking_redacted_delta_count=2,
+            thinking_delta_count=3,
+            thinking_signature_bytes=200,
+        )
+
+    def test_daily_rollup_aggregates_tool_categories(self, tmp_path):
+        log_dir = tmp_path / "logs"; log_dir.mkdir()
+        _write_jsonl(log_dir / "2026-04-15.jsonl", [
+            self._rec("2026-04-15T10:00:00Z", {"Read": 5, "Edit": 1}),
+            self._rec("2026-04-15T11:00:00Z", {"Read": 3, "Grep": 2, "Bash": 1}),
+            self._rec("2026-04-15T12:00:00Z", {"Write": 1, "Task": 1}),
+        ])
+        db = tmp_path / "s.db"
+        ingest_dir(db, log_dir)
+        import sqlite3
+        conn = sqlite3.connect(db)
+        try:
+            row = conn.execute(
+                "SELECT total_tool_read_count, total_tool_edit_count, "
+                "total_tool_research_count, total_tool_mutation_count, "
+                "total_tool_bash_count, total_tool_task_count, "
+                "total_tool_total_count, "
+                "total_thinking_visible_delta_count, "
+                "total_thinking_redacted_delta_count "
+                "FROM daily_rollup WHERE date=?", ("2026-04-15",),
+            ).fetchone()
+            (read, edit, research, mutation, bash, task, total,
+             visible, redacted) = row
+            assert read == 8
+            assert edit == 1
+            assert research == 8 + 2    # Read*8 + Grep*2
+            assert mutation == 1 + 1    # Edit + Write
+            assert bash == 1
+            assert task == 1
+            assert total == 5 + 1 + 3 + 2 + 1 + 1 + 1   # 14
+            assert visible == 3
+            assert redacted == 6
+        finally:
+            conn.close()
+
+
+class TestS4Migration:
+    def test_v3_database_migrates_to_v4(self, tmp_path):
+        """v3 DB gains S4 columns on next connect — existing data stays."""
+        import sqlite3
+        from claude_hooks.proxy import stats_db
+
+        db = tmp_path / "s.db"
+        conn = sqlite3.connect(db, isolation_level=None)
+        for stmt in stats_db._schema_ddl():
+            conn.execute(stmt)
+        stats_db._migrate_v2(conn)
+        stats_db._migrate_v3(conn)
+        conn.execute("PRAGMA user_version = 3")
+        conn.close()
+
+        conn2 = stats_db.connect(db)
+        try:
+            v = conn2.execute("PRAGMA user_version").fetchone()[0]
+            assert v == stats_db.SCHEMA_VERSION
+            req_cols = {
+                r[1] for r in conn2.execute(
+                    "PRAGMA table_info(requests)").fetchall()
+            }
+            for needed in ("thinking_visible_delta_count",
+                           "thinking_redacted_delta_count",
+                           "tool_use_counts",
+                           "tool_read_count", "tool_edit_count",
+                           "tool_research_count", "tool_mutation_count",
+                           "tool_bash_count", "tool_task_count",
+                           "tool_total_count"):
+                assert needed in req_cols
+            daily_cols = {
+                r[1] for r in conn2.execute(
+                    "PRAGMA table_info(daily_rollup)").fetchall()
+            }
+            for needed in ("total_thinking_visible_delta_count",
+                           "total_thinking_redacted_delta_count",
+                           "total_tool_read_count",
+                           "total_tool_edit_count",
+                           "total_tool_research_count",
+                           "total_tool_mutation_count",
+                           "total_tool_total_count"):
+                assert needed in daily_cols
+        finally:
+            conn2.close()

@@ -74,15 +74,54 @@ def _query_summary(conn: sqlite3.Connection) -> dict[str, Any]:
              SUM(status_429) as status_429,
              SUM(status_5xx) as status_5xx,
              SUM(thinking_request_count) as thinking_requests,
-             SUM(total_thinking_signature_bytes) as thinking_sig_bytes
+             SUM(total_thinking_signature_bytes) as thinking_sig_bytes,
+             SUM(total_thinking_visible_delta_count) as thinking_visible,
+             SUM(total_thinking_redacted_delta_count) as thinking_redacted,
+             SUM(total_tool_read_count) as tool_read,
+             SUM(total_tool_edit_count) as tool_edit,
+             SUM(total_tool_research_count) as tool_research,
+             SUM(total_tool_mutation_count) as tool_mutation,
+             SUM(total_tool_total_count) as tool_total
            FROM daily_rollup
            WHERE date >= date(?, '-6 days')""",
         (today,),
     ).fetchone()
+    today_d = _row_to_dict(today_row)
+    seven_d = _row_to_dict(seven)
     return {
-        "today": _row_to_dict(today_row),
-        "last_7d": _row_to_dict(seven),
+        "today": _add_tool_ratios(today_d),
+        "last_7d": _add_tool_ratios(seven_d, keys=("tool_read", "tool_edit",
+                                                    "tool_research", "tool_mutation",
+                                                    "tool_total")),
     }
+
+
+def _add_tool_ratios(
+    row: Optional[dict[str, Any]],
+    *,
+    keys: tuple = ("total_tool_read_count", "total_tool_edit_count",
+                   "total_tool_research_count", "total_tool_mutation_count",
+                   "total_tool_total_count"),
+) -> Optional[dict[str, Any]]:
+    """Attach stellaraccident-style ratios to a rollup dict.
+
+    keys = (read, edit, research, mutation, total) — same semantics
+    either way; just different column names in daily vs 7d rollups.
+    """
+    if row is None:
+        return None
+    r_read = row.get(keys[0]) or 0
+    r_edit = row.get(keys[1]) or 0
+    r_research = row.get(keys[2]) or 0
+    r_mutation = row.get(keys[3]) or 0
+    r_total = row.get(keys[4]) or 0
+    row["read_edit_ratio"] = (r_read / r_edit) if r_edit > 0 else None
+    row["research_mutation_ratio"] = (
+        r_research / r_mutation if r_mutation > 0 else None
+    )
+    row["read_pct"] = (r_read / r_total) if r_total > 0 else None
+    row["edit_pct"] = (r_edit / r_total) if r_total > 0 else None
+    return row
 
 
 def _query_daily(conn: sqlite3.Connection, days: int = 14) -> list[dict[str, Any]]:
@@ -244,6 +283,8 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/":
                 self._send_html()
+            elif parsed.path == "/favicon.ico" or parsed.path == "/favicon.svg":
+                self._send_favicon()
             elif parsed.path == "/healthz":
                 self._send_text("OK\n")
             elif parsed.path == "/api/summary.json":
@@ -312,6 +353,29 @@ class _Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def _send_favicon(self) -> None:
+        """Serve an inline SVG with the text ``CC`` so the browser tab
+        is findable next to other localhost dashboards.
+        """
+        svg = (
+            b'<?xml version="1.0" encoding="UTF-8"?>'
+            b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+            b'<rect width="64" height="64" rx="12" fill="#58a6ff"/>'
+            b'<text x="50%" y="50%" dy=".1em" text-anchor="middle" '
+            b'dominant-baseline="middle" font-family="SF Mono, Menlo, Consolas, '
+            b'monospace" font-size="28" font-weight="700" fill="#0d1117">CC</text>'
+            b'</svg>'
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", "image/svg+xml")
+        self.send_header("Content-Length", str(len(svg)))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        try:
+            self.wfile.write(svg)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     def _send_html(self) -> None:
         body = _render_html().encode("utf-8")
         self.send_response(200)
@@ -333,6 +397,7 @@ _HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>claude-hooks proxy dashboard</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
   :root {
     --bg: #0d1117; --fg: #e6edf3; --muted: #8b949e;
@@ -350,11 +415,18 @@ _HTML = r"""<!doctype html>
   .subtitle { color: var(--muted); font-size: 11px; margin-bottom: 20px; }
   .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; table-layout: auto; }
+  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
   th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; }
   tr:last-child td { border-bottom: none; }
-  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  /* Right-align numeric columns at both header and cell level so
+     labels line up over their data. */
+  th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .legend {
+    margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border);
+    color: var(--muted); font-size: 10.5px; line-height: 1.6;
+  }
+  .legend code { background: var(--bg); padding: 0 4px; margin-right: 2px; color: var(--fg); }
   .pct { display: inline-block; padding: 1px 6px; border-radius: 3px; background: var(--border); color: var(--fg); font-size: 11px; }
   .pct-ok { background: #18381f; color: var(--ok); }
   .pct-warn { background: #3d2d07; color: var(--warn); }
@@ -382,6 +454,11 @@ _HTML = r"""<!doctype html>
   <div class="card"><h2>today</h2><div id="today-card">loading…</div></div>
   <div class="card"><h2>rate limits</h2><div id="ratelimit-card">loading…</div></div>
   <div class="card"><h2>last 7 days</h2><div id="seven-card">loading…</div></div>
+</div>
+
+<div class="grid" style="margin-top:12px">
+  <div class="card"><h2>thinking (today)</h2><div id="thinking-card">loading…</div></div>
+  <div class="card"><h2>tool-use canaries (today)</h2><div id="tools-card">loading…</div></div>
 </div>
 
 <div class="card" style="margin-top:12px"><h2>per day (last 14)</h2><div id="daily-table">…</div></div>
@@ -445,11 +522,63 @@ function renderToday(d) {
       <dt>cache tokens (r/w)</dt><dd>${fmt(d.total_cache_read_tokens)} / ${fmt(d.total_cache_creation_tokens)}</dd>
       <dt>model divergences</dt><dd>${fmt(d.model_divergence_count)}</dd>
       <dt>status 2xx/4xx/5xx/429</dt><dd>${d.status_2xx}/${d.status_4xx}/${d.status_5xx}/${d.status_429}</dd>
-      <dt>thinking reqs</dt><dd>${fmt(d.thinking_request_count)}</dd>
-      <dt>thinking sig bytes</dt><dd>${fmt(d.total_thinking_signature_bytes)}</dd>
     </dl>
   `;
 }
+function renderThinkingCard(d) {
+  if (!d) return "<div class='muted'>no data yet</div>";
+  const thrc = d.thinking_request_count || 0;
+  const thvis = d.total_thinking_visible_delta_count || 0;
+  const thred = d.total_thinking_redacted_delta_count || 0;
+  const thDelta = thvis + thred;
+  const visPct = thDelta > 0 ? thvis / thDelta : null;
+  const avgSig = thrc > 0 ? (d.total_thinking_signature_bytes || 0) / thrc : null;
+  return `
+    <dl class="kv">
+      <dt>thinking reqs</dt><dd>${fmt(thrc)} / ${fmt(d.request_count)}</dd>
+      <dt>Σ signature bytes</dt><dd>${fmt(d.total_thinking_signature_bytes)}</dd>
+      <dt>avg sig / req</dt><dd>${avgSig == null ? "—" : fmt(Math.round(avgSig))}</dd>
+      <dt>visible deltas</dt><dd>${fmt(thvis)}</dd>
+      <dt>redacted deltas</dt><dd>${fmt(thred)}</dd>
+      <dt>visible %</dt><dd>${visPct == null ? "—" : (visPct*100).toFixed(1) + "%"}</dd>
+    </dl>
+    <div class="legend">
+      Depth proxy — <code>signature bytes</code> correlate 0.971 with
+      thinking content length (stellaraccident, #42796). Under
+      <code>redact-thinking-2026-02-12</code> visible deltas stay at 0;
+      depth only measurable via signature.
+    </div>
+  `;
+}
+function renderToolsCard(d) {
+  if (!d) return "<div class='muted'>no data yet</div>";
+  const total = d.total_tool_total_count || 0;
+  if (total === 0) return "<div class='muted'>no tool-use data yet</div>" + TOOL_LEGEND;
+  const re = d.read_edit_ratio;
+  const rm = d.research_mutation_ratio;
+  const readPct = d.read_pct;
+  const editPct = d.edit_pct;
+  return `
+    <dl class="kv">
+      <dt>total tool calls</dt><dd>${fmt(total)}</dd>
+      <dt>Read : Edit</dt><dd>${re == null ? "—" : re.toFixed(2)}</dd>
+      <dt>Research : Mutation</dt><dd>${rm == null ? "—" : rm.toFixed(2)}</dd>
+      <dt>Read %</dt><dd>${readPct == null ? "—" : (readPct*100).toFixed(1) + "%"}</dd>
+      <dt>Edit %</dt><dd>${editPct == null ? "—" : (editPct*100).toFixed(1) + "%"}</dd>
+      <dt>Read / Edit</dt><dd>${fmt(d.total_tool_read_count)} / ${fmt(d.total_tool_edit_count)}</dd>
+      <dt>Research / Mutation</dt><dd>${fmt(d.total_tool_research_count)} / ${fmt(d.total_tool_mutation_count)}</dd>
+      <dt>Bash / Task</dt><dd>${fmt(d.total_tool_bash_count)} / ${fmt(d.total_tool_task_count)}</dd>
+    </dl>${TOOL_LEGEND}
+  `;
+}
+const TOOL_LEGEND = `
+  <div class="legend">
+    stellaraccident / #42796 canary: Read:Edit dropped 6.6 → 2.0 during the
+    Mar regression. Read % &lt; 30 + Research:Mutation &lt; 3 signals
+    "edit-first" behavior. Research = Read+Grep+Glob+WebFetch+WebSearch;
+    Mutation = Edit+Write+MultiEdit+NotebookEdit.
+  </div>
+`;
 function renderSeven(s) {
   if (!s) return "<div class='muted'>no data</div>";
   return `
@@ -483,24 +612,49 @@ function renderRateLimit(rl, burn) {
     </dl>
   `;
 }
+const LEGEND_DAILY = `
+  <div class="legend">
+    <code>REQS</code> total upstream requests ·
+    <code>WMB</code> Warmup requests blocked (upstream never called) ·
+    <code>2XX / 5XX / 429</code> response status buckets ·
+    <code>HIT</code> cache-read / (cache-read + cache-creation) ratio ·
+    <code>IN / OUT</code> input vs output tokens ·
+    <code>CR</code> cache-read tokens ·
+    <code>THK</code> requests that emitted a thinking content block.
+  </div>
+`;
+const LEGEND_AGENTS = `
+  <div class="legend">
+    <code>AGENT</code> parsed from the request's persona block ·
+    <code>TYPE</code> <code>main</code> / <code>subagent</code> / <code>warmup</code> ·
+    <code>REQS</code> count · <code>WMB</code> Warmups blocked ·
+    <code>IN / OUT</code> tokens · <code>CR</code> cache-read tokens.
+  </div>
+`;
+const LEGEND_MODELS = `
+  <div class="legend">
+    <code>MODEL</code> delivered (falls back to requested on errors) ·
+    <code>REQS / IN / OUT / CR</code> as above.
+  </div>
+`;
 function renderDailyTable(rows) {
-  if (!rows || !rows.length) return "<div class='muted'>no data</div>";
+  if (!rows || !rows.length) return "<div class='muted'>no data</div>" + LEGEND_DAILY;
   const keys = [
-    ["date", "date"],
-    ["request_count", "reqs"],
-    ["warmup_blocked_count", "wmb"],
-    ["status_2xx", "2xx"],
-    ["status_5xx", "5xx"],
-    ["status_429", "429"],
-    ["cache_hit_rate", "hit"],
-    ["total_input_tokens", "in"],
-    ["total_output_tokens", "out"],
-    ["total_cache_read_tokens", "cr"],
-    ["thinking_request_count", "thk"],
+    ["date", "date", false],
+    ["request_count", "reqs", true],
+    ["warmup_blocked_count", "wmb", true],
+    ["status_2xx", "2xx", true],
+    ["status_5xx", "5xx", true],
+    ["status_429", "429", true],
+    ["cache_hit_rate", "hit", true],
+    ["total_input_tokens", "in", true],
+    ["total_output_tokens", "out", true],
+    ["total_cache_read_tokens", "cr", true],
+    ["thinking_request_count", "thk", true],
   ];
-  const th = keys.map(([_, l]) => `<th>${l}</th>`).join("");
+  const th = keys.map(([_, l, n]) => `<th${n ? ' class="num"' : ""}>${l}</th>`).join("");
   const trs = rows.map(r => {
-    const cells = keys.map(([k, _]) => {
+    const cells = keys.map(([k, _, n]) => {
       const v = r[k];
       if (k === "date") return `<td>${v}</td>`;
       if (k === "cache_hit_rate") return `<td class="num">${v == null ? "—" : (v*100).toFixed(1) + "%"}</td>`;
@@ -508,10 +662,10 @@ function renderDailyTable(rows) {
     }).join("");
     return `<tr>${cells}</tr>`;
   }).join("");
-  return `<table><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table>`;
+  return `<table><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table>` + LEGEND_DAILY;
 }
 function renderAgentsTable(rows) {
-  if (!rows || !rows.length) return "<div class='muted'>no S2 data yet today</div>";
+  if (!rows || !rows.length) return "<div class='muted'>no S2 data yet today</div>" + LEGEND_AGENTS;
   const trs = rows.map(r => `
     <tr>
       <td>${r.agent_name || "—"}</td>
@@ -522,10 +676,11 @@ function renderAgentsTable(rows) {
       <td class="num">${fmt(r.output_tokens)}</td>
       <td class="num">${fmt(r.cache_read_tokens)}</td>
     </tr>`).join("");
-  return `<table><thead><tr><th>agent</th><th>type</th><th>reqs</th><th>wmb</th><th>in</th><th>out</th><th>cr</th></tr></thead><tbody>${trs}</tbody></table>`;
+  const th = `<tr><th>agent</th><th>type</th><th class="num">reqs</th><th class="num">wmb</th><th class="num">in</th><th class="num">out</th><th class="num">cr</th></tr>`;
+  return `<table><thead>${th}</thead><tbody>${trs}</tbody></table>` + LEGEND_AGENTS;
 }
 function renderModelsTable(rows) {
-  if (!rows || !rows.length) return "<div class='muted'>no data</div>";
+  if (!rows || !rows.length) return "<div class='muted'>no data</div>" + LEGEND_MODELS;
   const trs = rows.map(r => `
     <tr>
       <td>${r.model}</td>
@@ -534,7 +689,8 @@ function renderModelsTable(rows) {
       <td class="num">${fmt(r.output_tokens)}</td>
       <td class="num">${fmt(r.cache_read_tokens)}</td>
     </tr>`).join("");
-  return `<table><thead><tr><th>model</th><th>reqs</th><th>in</th><th>out</th><th>cr</th></tr></thead><tbody>${trs}</tbody></table>`;
+  const th = `<tr><th>model</th><th class="num">reqs</th><th class="num">in</th><th class="num">out</th><th class="num">cr</th></tr>`;
+  return `<table><thead>${th}</thead><tbody>${trs}</tbody></table>` + LEGEND_MODELS;
 }
 function renderBetas(rows) {
   if (!rows || !rows.length) return "<div class='muted'>no beta features seen yet</div>";
@@ -555,6 +711,8 @@ async function load() {
     document.getElementById("today-card").innerHTML = renderToday(summary.today);
     document.getElementById("seven-card").innerHTML = renderSeven(summary.last_7d);
     document.getElementById("ratelimit-card").innerHTML = renderRateLimit(summary.ratelimit, summary.burn);
+    document.getElementById("thinking-card").innerHTML = renderThinkingCard(summary.today);
+    document.getElementById("tools-card").innerHTML = renderToolsCard(summary.today);
     document.getElementById("daily-table").innerHTML = renderDailyTable(daily);
     document.getElementById("agents-table").innerHTML = renderAgentsTable(agents);
     document.getElementById("models-table").innerHTML = renderModelsTable(models);
