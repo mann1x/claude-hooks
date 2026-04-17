@@ -35,7 +35,7 @@ All three default to `enabled: false` and no-op silently when their binary or pa
 - `claude_hooks/proxy/` — local HTTP proxy + observability (see `docs/proxy.md`)
 - `claude_hooks/proxy/metadata.py` — request-body parser: model, session, warmup detection, plus S2 extensions (agent classification, CC version, effort, thinking type, beta features, account UUID)
 - `claude_hooks/proxy/sse.py` — SSE stream parser: extracts usage, stop_reason, S3 thinking-depth metrics (signature bytes, delta count, output tokens, content-block/delta type histograms), S4 visible/redacted thinking split, per-tool-name call counts for stellaraccident-style canary ratios, and opt-in stop-phrase behaviour scanning
-- `claude_hooks/proxy/forwarder.py` — httpx[http2] forwarder; strips `accept-encoding` and pins `identity` so SSE bytes arrive uncompressed for `SseTail` parsing
+- `claude_hooks/proxy/forwarder.py` — httpx[http2] forwarder; strips `accept-encoding` and pins `identity` so SSE bytes arrive uncompressed for `SseTail` parsing. Transparently retries upstream 5xx responses (default 10 attempts) via an internal `_RetryableStatus` exception that buffers the authentic upstream response so exhausted retries surface the real error rather than a proxy-synthesized `502`.
 - `claude_hooks/proxy/stats_db.py` — SQLite rollup for proxy JSONL logs (schema v5: S2 columns + `agent_rollup` table + S3 thinking-metric totals + S4 visible/redacted thinking split + tool-use aggregate columns + S5 per-category stop-phrase behaviour canary totals on `daily_rollup`)
 - `claude_hooks/proxy/stop_phrase_guard.py` — in-stream stop-phrase scanner (stellaraccident #42796): 8 behaviour categories, regex patterns from `config/stop_phrases.yaml`, stdlib-only YAML loader
 - `claude_hooks/proxy/dashboard.py` — read-only stats dashboard on port `38081`; stdlib-only `ThreadingHTTPServer` with JSON API + embedded HTML view (includes thinking, tool-use, and behavior canary cards)
@@ -84,6 +84,15 @@ If `/usr/local/bin/caliber` is not found, read `.agents/skills/setup-caliber/SKI
 Read `CALIBER_LEARNINGS.md` for patterns and anti-patterns learned from previous sessions.
 These are auto-extracted from real tool usage — treat them as project-specific rules.
 <!-- /caliber:managed:learnings -->
+
+<!-- caliber:managed:model-config -->
+## Model Configuration
+
+Recommended default: `claude-sonnet-4-6` with high effort (stronger reasoning; higher cost and latency than smaller models).
+Smaller/faster models trade quality for speed and cost — pick what fits the task.
+Pin your choice (`/model` in Claude Code, or `CALIBER_MODEL` when using Caliber with an API provider) so upstream default changes do not silently change behavior.
+
+<!-- /caliber:managed:model-config -->
 
 <!-- caliber:managed:sync -->
 ## Context Sync
