@@ -1,0 +1,37 @@
+#!/usr/bin/env sh
+# caliber-grounding-proxy — run the local OpenAI-compat proxy that
+# grounds Ollama responses against the project filesystem so caliber
+# gets path:line references instead of hallucinated paths.
+#
+# Binds 127.0.0.1:38090 by default (local-only — another host can't
+# see these project files anyway). Configurable via env:
+#
+#   CALIBER_GROUNDING_HOST       default 127.0.0.1
+#   CALIBER_GROUNDING_PORT       default 38090
+#   CALIBER_GROUNDING_UPSTREAM   default http://192.168.178.2:11433/v1
+#   CALIBER_GROUNDING_MAX_ITER   default 35
+#   CALIBER_GROUNDING_CWD        default $(pwd) — the project to ground
+#                                    against; MUST be set to the
+#                                    caliber-invocation directory if you
+#                                    run the proxy from a different dir
+#   CALIBER_GROUNDING_LOG_LEVEL  default INFO
+#
+# This is a thin shim — logic lives in claude_hooks/caliber_proxy/.
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+
+CONDA_PY="$HOME/anaconda3/envs/claude-hooks/bin/python"
+if [ -x "$CONDA_PY" ]; then
+    PY="$CONDA_PY"
+elif command -v python3 >/dev/null 2>&1; then
+    PY=python3
+elif command -v python >/dev/null 2>&1; then
+    PY=python
+else
+    echo "caliber-grounding-proxy: no python interpreter found" >&2
+    exit 1
+fi
+
+cd "$REPO" || exit 1
+exec "$PY" -m claude_hooks.caliber_proxy "$@"

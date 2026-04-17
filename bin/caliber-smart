@@ -1,0 +1,59 @@
+#!/usr/bin/env sh
+# caliber-smart — dispatcher that prefers Ollama + grounding proxy for
+# caliber commands, and falls back to claude-cli when either is down.
+#
+# Usage: drop-in replacement for `caliber`:
+#
+#     caliber-smart refresh
+#     caliber-smart init --dry-run --auto-approve --agent claude
+#     caliber-smart learn finalize
+#
+# Env knobs (all optional):
+#
+#   OLLAMA_HEALTH_URL          default http://192.168.178.2:11433/api/tags
+#   CALIBER_GROUNDING_URL      default http://127.0.0.1:38090/v1
+#   CALIBER_MODEL              default gemma4-98e:cd-q6k-256k
+#   CALIBER_FAST_MODEL         default gemma4-98e:cd-q6k-256k
+#   CALIBER_CLAUDE_CLI_TIMEOUT_MS         default 1800000
+#   CALIBER_GENERATION_TIMEOUT_MS         default 1800000
+#   CALIBER_STREAM_INACTIVITY_TIMEOUT_MS  default 600000
+#   CALIBER_SMART_QUIET=1                 suppress the "using X" line
+#
+# Exit: runs caliber and forwards its exit code. Never modifies the
+# user's ~/.caliber/config.json — the dispatcher is pure env injection.
+
+: "${OLLAMA_HEALTH_URL:=http://192.168.178.2:11433/api/tags}"
+: "${CALIBER_GROUNDING_URL:=http://127.0.0.1:38090/v1}"
+: "${CALIBER_MODEL:=gemma4-98e:cd-q6k-256k}"
+: "${CALIBER_FAST_MODEL:=gemma4-98e:cd-q6k-256k}"
+: "${CALIBER_CLAUDE_CLI_TIMEOUT_MS:=1800000}"
+: "${CALIBER_GENERATION_TIMEOUT_MS:=1800000}"
+: "${CALIBER_STREAM_INACTIVITY_TIMEOUT_MS:=600000}"
+
+_log() {
+    [ -z "$CALIBER_SMART_QUIET" ] && echo "caliber-smart: $1" >&2
+    return 0
+}
+
+# Strip trailing /v1 to derive the proxy health URL.
+proxy_base="${CALIBER_GROUNDING_URL%/v1}"
+proxy_health="${proxy_base}/health"
+
+if curl -sf -o /dev/null --max-time 2 "$OLLAMA_HEALTH_URL" \
+   && curl -sf -o /dev/null --max-time 1 "$proxy_health"; then
+    export OPENAI_API_KEY=ollama
+    export OPENAI_BASE_URL="$CALIBER_GROUNDING_URL"
+    export CALIBER_MODEL CALIBER_FAST_MODEL
+    export CALIBER_CLAUDE_CLI_TIMEOUT_MS CALIBER_GENERATION_TIMEOUT_MS CALIBER_STREAM_INACTIVITY_TIMEOUT_MS
+    _log "using Ollama+grounding ($CALIBER_MODEL) at $CALIBER_GROUNDING_URL"
+else
+    export CALIBER_USE_CLAUDE_CLI=1
+    export CALIBER_CLAUDE_CLI_TIMEOUT_MS CALIBER_GENERATION_TIMEOUT_MS CALIBER_STREAM_INACTIVITY_TIMEOUT_MS
+    if ! curl -sf -o /dev/null --max-time 2 "$OLLAMA_HEALTH_URL"; then
+        _log "Ollama unreachable at $OLLAMA_HEALTH_URL — using claude-cli"
+    else
+        _log "grounding proxy down at $proxy_base — using claude-cli (start it with: bin/caliber-grounding-proxy)"
+    fi
+fi
+
+exec caliber "$@"

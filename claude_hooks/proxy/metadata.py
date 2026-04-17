@@ -105,27 +105,55 @@ def extract_request_info(
     if isinstance(msgs, list):
         out["num_messages"] = len(msgs)
 
-    # Warmup detection via first user message == "Warmup".
+    # Warmup detection:
+    #   1. Claude Code CLI warmup — first user text == "Warmup" literal.
+    #   2. Claude Agent SDK subagent priming — single-message subagent
+    #      requests from cc_entrypoint=sdk-cli that fire on every
+    #      ``Agent(...)`` spawn to prime the subagent's KV cache.
+    #      These don't carry the "Warmup" literal but ARE priming
+    #      requests that should be short-circuited. The heuristic:
+    #      subagent + sdk-cli entrypoint + exactly one message.
     first_user_text = _first_user_text(msgs)
-    is_warmup = first_user_text.strip() == "Warmup"
-    out["is_warmup"] = is_warmup
+    is_cli_warmup = first_user_text.strip() == "Warmup"
 
-    # Agent classification from system block layout.
-    agent_type, agent_name = _classify_agent(data.get("system"), is_warmup)
-    out["agent_type"] = agent_type
-    out["agent_name"] = agent_name
-    out["request_class"] = agent_type
-
-    # CC version / entrypoint from the first system block's billing tag.
+    # Need cc_entrypoint + agent_type first to evaluate SDK priming.
     cc_v, cc_e = _extract_cc_billing(data.get("system"))
     out["cc_version"] = cc_v
     out["cc_entrypoint"] = cc_e
 
-    # Session / account identifiers.
+    # Provisional classify with cli-warmup only; re-classify below if
+    # we detect sdk priming so agent_type flips to "warmup".
+    agent_type, agent_name = _classify_agent(data.get("system"), is_cli_warmup)
+
+    is_sdk_priming = (
+        agent_type == "subagent"
+        and cc_e == "sdk-cli"
+        and out.get("num_messages") == 1
+    )
+    is_warmup = is_cli_warmup or is_sdk_priming
+
+    if is_sdk_priming and not is_cli_warmup:
+        # Flip the classification so downstream (stats, dashboard,
+        # stub renderer) treats this as a warmup rather than a real
+        # subagent turn.
+        agent_type, agent_name = "warmup", "warmup"
+
+    out["is_warmup"] = is_warmup
+    out["agent_type"] = agent_type
+    out["agent_name"] = agent_name
+    out["request_class"] = agent_type
+
+    # Session / account identifiers. The request's metadata.user_id
+    # is sometimes a raw JSON envelope
+    # (``{"device_id":"...","account_uuid":"...","session_id":"..."}``)
+    # rather than the canonical ``user_<dev>_account_<uuid>_session_<sess>``
+    # string — happens for Agent SDK subagents. Extract the inner
+    # session_id so the dashboard shows a real UUID instead of the
+    # whole blob.
     md = data.get("metadata")
     if isinstance(md, dict):
         raw = md.get("user_id") or md.get("session_id")
-        out["session_id"] = raw
+        out["session_id"] = _extract_session_id(raw)
         out["account_uuid"] = _extract_account_uuid(raw)
 
     return out
@@ -253,6 +281,34 @@ def _extract_cc_billing(system: Any) -> tuple[Optional[str], Optional[str]]:
         return (m_v.group(1) if m_v else None,
                 m_e.group(1) if m_e else None)
     return None, None
+
+
+def _extract_session_id(user_id: Any) -> Optional[str]:
+    """Parse the real session_id out of ``metadata.user_id``.
+
+    Two observed formats:
+      * JSON envelope: ``{"device_id":"...","account_uuid":"...","session_id":"..."}``
+      * Legacy:        ``user_<dev>_account_<uuid>_session_<sess>``
+
+    Returns the session_id string if parseable; falls back to the raw
+    user_id otherwise so we don't lose the value entirely.
+    """
+    if not isinstance(user_id, str):
+        return None
+    if user_id.startswith("{"):
+        try:
+            j = json.loads(user_id)
+        except json.JSONDecodeError:
+            j = None
+        if isinstance(j, dict):
+            v = j.get("session_id")
+            if isinstance(v, str):
+                return v
+        # Bad JSON: don't pollute with the raw envelope.
+        return None
+    # Legacy form — return as-is; callers already treat it as the
+    # session identifier.
+    return user_id
 
 
 def _extract_account_uuid(user_id: Any) -> Optional[str]:

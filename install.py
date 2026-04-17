@@ -718,6 +718,7 @@ SKILLS = [
     ("find-skills",   None),         # standalone
     ("setup-caliber", "caliber"),    # needs caliber installed
     ("episodic",      None),         # queries remote episodic-server API
+    ("wrapup",        None),         # session state summary for hand-off / compact
 ]
 
 
