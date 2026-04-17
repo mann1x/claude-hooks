@@ -78,10 +78,54 @@ _CLIENT_TIMEOUT: Optional[float] = None
 # would have retired them, surfacing as ``httpx.RemoteProtocolError``
 # ("Server disconnected"). Shorter keepalive + in-forwarder retry
 # papers over those drops without asking Claude Code to redo the
-# whole request.
+# whole request. We also retry a short list of upstream 5xx status
+# codes that Anthropic's edge emits on transient overload or
+# connection recycling, so the client never sees a spurious 502 the
+# way it did when we only retried connection-level exceptions.
 _KEEPALIVE_EXPIRY = float(os.environ.get("CLAUDE_HOOKS_PROXY_KEEPALIVE_SEC", "60"))
-_UPSTREAM_RETRIES = int(os.environ.get("CLAUDE_HOOKS_PROXY_RETRIES", "2"))
+_UPSTREAM_RETRIES = int(os.environ.get("CLAUDE_HOOKS_PROXY_RETRIES", "10"))
 _RETRY_BACKOFF_BASE = float(os.environ.get("CLAUDE_HOOKS_PROXY_RETRY_BACKOFF", "0.15"))
+_RETRY_BACKOFF_MAX = float(os.environ.get("CLAUDE_HOOKS_PROXY_RETRY_BACKOFF_MAX", "0.5"))
+
+# Default 5xx codes we treat as retryable. Excludes 501 (Not Implemented)
+# and 505-511 (protocol / semantic errors that won't change on retry).
+_DEFAULT_RETRY_STATUS = frozenset({
+    500, 502, 503, 504,
+    520, 521, 522, 523, 524, 525, 526, 527, 529,
+})
+
+
+def _parse_status_set(raw: Optional[str]) -> frozenset:
+    if not raw:
+        return _DEFAULT_RETRY_STATUS
+    out = set()
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if tok.isdigit():
+            out.add(int(tok))
+    return frozenset(out) if out else _DEFAULT_RETRY_STATUS
+
+
+_RETRY_ON_STATUS = _parse_status_set(
+    os.environ.get("CLAUDE_HOOKS_PROXY_RETRY_STATUS")
+)
+
+
+class _RetryableStatus(Exception):
+    """Raised by ``_forward_attempt`` when the upstream returned an HTTP
+    status we treat as transient. Carries the buffered response so the
+    top-level ``forward`` can either retry or synthesize an
+    ``UpstreamResult`` that passes the authentic upstream error
+    (headers + body) through to the client if all retries are exhausted.
+    """
+
+    def __init__(self, status: int, reason: str, body: bytes,
+                 headers: dict) -> None:
+        super().__init__(f"upstream returned retryable {status}")
+        self.status = status
+        self.reason = reason
+        self.body = body
+        self.headers = headers
 
 
 def _build_client(timeout: float) -> httpx.Client:
@@ -187,25 +231,48 @@ def forward(
     for attempt in range(_UPSTREAM_RETRIES + 1):
         try:
             return _forward_attempt(client, method, url, out_headers, body)
-        except httpx.RemoteProtocolError as e:
+        except (httpx.RemoteProtocolError, httpx.ConnectError,
+                _RetryableStatus) as e:
             last_exc = e
             if attempt >= _UPSTREAM_RETRIES:
                 break
             # Back off briefly so we don't hammer a server that's
-            # actively closing connections. Pool naturally drops the
-            # dead connection, so the retry will open a fresh one.
-            time.sleep(_RETRY_BACKOFF_BASE * (attempt + 1))
-            log.debug("retry %d after RemoteProtocolError: %s", attempt + 1, e)
-        except httpx.ConnectError as e:
-            # Rare but identical failure mode — transient connect
-            # failure on a fresh connection. Retry once.
-            last_exc = e
-            if attempt >= _UPSTREAM_RETRIES:
-                break
-            time.sleep(_RETRY_BACKOFF_BASE * (attempt + 1))
-            log.debug("retry %d after ConnectError: %s", attempt + 1, e)
+            # actively closing connections or overloaded. Pool naturally
+            # drops the dead connection so the retry will open a fresh
+            # one.
+            wait = min(_RETRY_BACKOFF_BASE * (attempt + 1),
+                       _RETRY_BACKOFF_MAX)
+            time.sleep(wait)
+            log.debug("retry %d after %s: %s",
+                      attempt + 1, type(e).__name__, e)
+
     assert last_exc is not None  # loop only exits via return or break
+    # If the last failure was a retryable upstream status, hand the
+    # authentic upstream response through to the client rather than
+    # masking it with our own ``proxy_error`` 502. Connection-level
+    # exceptions still propagate — the caller turns those into 502.
+    if isinstance(last_exc, _RetryableStatus):
+        return _synthesize_result(last_exc)
     raise last_exc
+
+
+def _synthesize_result(exc: _RetryableStatus) -> "UpstreamResult":
+    """Construct an ``UpstreamResult`` from a buffered retryable-status
+    response. Used after retries are exhausted to pass the upstream
+    error through verbatim."""
+    body = exc.body or b""
+    first = body[:4096]
+    rest = body[4096:]
+    body_iter: Iterable[bytes] = iter([rest]) if rest else iter([])
+    return UpstreamResult(
+        status=exc.status,
+        reason=exc.reason,
+        headers=dict(exc.headers),
+        first_chunk=first,
+        body_iter=body_iter,
+        stats={"bytes_read": len(body), "http_version": "HTTP/buffered"},
+        sse_tail=None,
+    )
 
 
 def _forward_attempt(
@@ -216,13 +283,41 @@ def _forward_attempt(
     body: bytes,
 ) -> UpstreamResult:
     """One upstream attempt. Raises ``httpx.RemoteProtocolError`` /
-    ``httpx.ConnectError`` on connection-level failures so ``forward``
-    can retry; other exceptions propagate unchanged.
+    ``httpx.ConnectError`` on connection-level failures, or
+    ``_RetryableStatus`` on upstream HTTP 5xx codes in
+    ``_RETRY_ON_STATUS``, so ``forward`` can retry. Other exceptions
+    propagate unchanged.
     """
     req = client.build_request(
         method, url, headers=out_headers, content=body if body else None,
     )
     resp = client.send(req, stream=True)
+
+    # Retryable upstream error: buffer the (usually small) error body
+    # and release the connection before raising so the retry lands on
+    # a fresh stream. We keep the original headers + body so the caller
+    # can mirror them verbatim if retries are exhausted.
+    if resp.status_code in _RETRY_ON_STATUS:
+        try:
+            body_bytes = resp.read()
+        except Exception:
+            body_bytes = b""
+        kept_headers = {
+            k: v for k, v in resp.headers.items()
+            if k.lower() not in _STRIP_RESPONSE_HEADERS
+        }
+        status = resp.status_code
+        reason = resp.reason_phrase or ""
+        try:
+            resp.close()
+        except Exception:
+            pass
+        raise _RetryableStatus(
+            status=status,
+            reason=reason,
+            body=body_bytes,
+            headers=kept_headers,
+        )
 
     chunks_iter = resp.iter_raw(chunk_size=65536)
 

@@ -357,3 +357,209 @@ class TestForwarderRetry:
         # 1 initial + _UPSTREAM_RETRIES retries
         assert calls["n"] == fwd._UPSTREAM_RETRIES + 1
         fwd._reset_client()
+
+
+# --------------------------------------------------------------- #
+# Retry on upstream HTTP 5xx — the proxy masks transient Anthropic
+# edge errors so Claude Code doesn't see a spurious 502 for every
+# blip.
+# --------------------------------------------------------------- #
+class TestForwarderStatusRetry:
+    """Upstream 5xx responses in ``_RETRY_ON_STATUS`` must be retried
+    transparently. The client sees either the eventual success or the
+    authentic upstream error after all retries are exhausted — never
+    our own ``proxy_error`` wrapper."""
+
+    def _build_flaky_server(self, responses):
+        """Start a local HTTPServer that returns each ``(status, body)``
+        tuple in ``responses`` in order, then 200 ``{"ok":true}`` for
+        any request beyond the list.
+        """
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        calls = {"n": 0}
+        state = {"i": 0}
+        responses = list(responses)
+
+        class Flaky(BaseHTTPRequestHandler):
+            def log_message(self, *a, **k): pass
+
+            def do_POST(self):
+                calls["n"] += 1
+                if state["i"] < len(responses):
+                    status, body = responses[state["i"]]
+                    state["i"] += 1
+                else:
+                    status, body = 200, b'{"ok":true}'
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        s = socket.socket(); s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]; s.close()
+        srv = HTTPServer(("127.0.0.1", port), Flaky)
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        return srv, port, calls
+
+    def test_502_then_200_retries_transparently(self, monkeypatch):
+        """Upstream returns 502 once, then 200. Forwarder should retry
+        and the caller receives the 200 — never sees the transient 502.
+        """
+        from claude_hooks.proxy import forwarder as fwd
+        fwd._reset_client()
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
+
+        srv, port, calls = self._build_flaky_server([
+            (502, b'{"error":{"type":"overloaded_error"}}'),
+        ])
+        try:
+            result = forward(
+                f"http://127.0.0.1:{port}", "POST", "/v1/messages",
+                {"Content-Type": "application/json"},
+                b'{"x":1}', timeout=5.0,
+            )
+            body = result.first_chunk + b"".join(result.body_iter)
+            assert result.status == 200
+            assert b'{"ok":true}' in body
+            assert calls["n"] == 2          # 1 retry then success
+        finally:
+            srv.shutdown(); srv.server_close()
+            fwd._reset_client()
+
+    def test_default_retry_count_is_ten(self):
+        """The default retry count documented for the 'quick 10 retries'
+        behaviour must actually be 10 unless overridden via env."""
+        from claude_hooks.proxy import forwarder as fwd
+        assert fwd._UPSTREAM_RETRIES == 10
+
+    def test_ten_502s_then_success(self, monkeypatch):
+        """Ten consecutive 502 responses must not surface to the
+        client: the 11th attempt (1 initial + 10 retries) succeeds."""
+        from claude_hooks.proxy import forwarder as fwd
+        fwd._reset_client()
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
+
+        flakes = [(502, b'{"err":"overloaded"}')] * 10
+        srv, port, calls = self._build_flaky_server(flakes)
+        try:
+            result = forward(
+                f"http://127.0.0.1:{port}", "POST", "/v1/messages",
+                {"Content-Type": "application/json"},
+                b'{"x":1}', timeout=5.0,
+            )
+            body = result.first_chunk + b"".join(result.body_iter)
+            assert result.status == 200, (
+                f"expected 200 after 10 flakes, got {result.status}"
+            )
+            assert b'{"ok":true}' in body
+            # 10 failing + 1 successful = 11 total requests.
+            assert calls["n"] == 11
+        finally:
+            srv.shutdown(); srv.server_close()
+            fwd._reset_client()
+
+    def test_retries_exhausted_returns_upstream_response(self, monkeypatch):
+        """If every attempt returns 502, the caller receives the
+        *authentic* upstream 502 response (not our proxy-synthesized
+        bad-gateway wrapper). The server-level handler mirrors this
+        verbatim to Claude Code.
+        """
+        from claude_hooks.proxy import forwarder as fwd
+        fwd._reset_client()
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
+        # Shrink retry budget so the test doesn't fight the default.
+        monkeypatch.setattr(fwd, "_UPSTREAM_RETRIES", 3)
+
+        upstream_body = b'{"error":{"type":"overloaded_error","message":"try later"}}'
+        # N+1 flaky responses so even the final attempt fails.
+        flakes = [(502, upstream_body)] * 20
+        srv, port, calls = self._build_flaky_server(flakes)
+        try:
+            result = forward(
+                f"http://127.0.0.1:{port}", "POST", "/v1/messages",
+                {"Content-Type": "application/json"},
+                b'{"x":1}', timeout=5.0,
+            )
+            body = result.first_chunk + b"".join(result.body_iter)
+            # Authentic upstream response passed through.
+            assert result.status == 502
+            assert body == upstream_body
+            # 1 initial + 3 retries = 4 attempts total.
+            assert calls["n"] == 4
+        finally:
+            srv.shutdown(); srv.server_close()
+            fwd._reset_client()
+
+    def test_non_retryable_4xx_not_retried(self, monkeypatch):
+        """A 400 (client error) must flow through untouched — no retry
+        loop, since retrying a bad request won't help."""
+        from claude_hooks.proxy import forwarder as fwd
+        fwd._reset_client()
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
+
+        srv, port, calls = self._build_flaky_server([
+            (400, b'{"error":"bad_request"}'),
+        ])
+        try:
+            result = forward(
+                f"http://127.0.0.1:{port}", "POST", "/v1/messages",
+                {"Content-Type": "application/json"},
+                b'{"x":1}', timeout=5.0,
+            )
+            body = result.first_chunk + b"".join(result.body_iter)
+            assert result.status == 400
+            assert b'bad_request' in body
+            assert calls["n"] == 1          # no retry
+        finally:
+            srv.shutdown(); srv.server_close()
+            fwd._reset_client()
+
+    def test_retry_status_env_override(self, monkeypatch):
+        """Overriding ``_RETRY_ON_STATUS`` (what the env var drives)
+        lets callers include / exclude codes. Verify a non-default
+        code (418) becomes retryable when added to the set."""
+        from claude_hooks.proxy import forwarder as fwd
+        fwd._reset_client()
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
+        monkeypatch.setattr(fwd, "_RETRY_ON_STATUS", frozenset({418}))
+
+        srv, port, calls = self._build_flaky_server([
+            (418, b'{"error":"teapot"}'),
+        ])
+        try:
+            result = forward(
+                f"http://127.0.0.1:{port}", "POST", "/v1/messages",
+                {"Content-Type": "application/json"},
+                b'{"x":1}', timeout=5.0,
+            )
+            body = result.first_chunk + b"".join(result.body_iter)
+            assert result.status == 200     # retry succeeded
+            assert b'{"ok":true}' in body
+            assert calls["n"] == 2
+        finally:
+            srv.shutdown(); srv.server_close()
+            fwd._reset_client()
+
+    def test_parse_status_set_from_env_string(self):
+        """``_parse_status_set`` must honour a comma-separated list and
+        gracefully fall back to the default on empty / malformed input."""
+        from claude_hooks.proxy import forwarder as fwd
+        assert fwd._parse_status_set("502,503,529") == frozenset(
+            {502, 503, 529}
+        )
+        assert fwd._parse_status_set("") == fwd._DEFAULT_RETRY_STATUS
+        assert fwd._parse_status_set(None) == fwd._DEFAULT_RETRY_STATUS
+        # Garbage tokens ignored; if nothing parses, default wins.
+        assert fwd._parse_status_set("abc,,xyz") == fwd._DEFAULT_RETRY_STATUS
+        # Mixed — valid tokens extracted.
+        assert fwd._parse_status_set("502, foo, 504") == frozenset(
+            {502, 504}
+        )

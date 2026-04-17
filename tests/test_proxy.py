@@ -165,8 +165,15 @@ class TestProxyPassthrough:
         lc = {k.lower(): v for k, v in cap["headers"].items()}
         assert lc.get("x-api-key") == "sk-secret"
 
-    def test_upstream_failure_yields_502(self, tmp_path):
+    def test_upstream_failure_yields_502(self, tmp_path, monkeypatch):
         # Point proxy at a TCP port nobody is listening on.
+        # Shrink the forwarder retry budget so the 11-attempt default
+        # doesn't exceed the client-side urllib timeout.
+        from claude_hooks.proxy import forwarder as fwd
+        monkeypatch.setattr(fwd, "_UPSTREAM_RETRIES", 1)
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
+        fwd._reset_client()
         dead_port = _find_free_port()
         cfg = {
             "proxy": {
@@ -191,7 +198,7 @@ class TestProxyPassthrough:
             import urllib.error
             try:
                 urllib.request.urlopen(
-                    f"http://{host}:{port}/v1/ping", timeout=3,
+                    f"http://{host}:{port}/v1/ping", timeout=15,
                 )
                 assert False, "expected 502"
             except urllib.error.HTTPError as e:
@@ -199,6 +206,7 @@ class TestProxyPassthrough:
         finally:
             server.shutdown()
             server.server_close()
+            fwd._reset_client()
 
 
 class TestProxyLogging:
