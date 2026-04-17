@@ -509,6 +509,37 @@ for the full integration plan.
 
 ## Scripts
 
+### `scripts/install-caliber-hook.sh` — fast caliber pre-commit hook
+
+Caliber's default pre-commit hook runs `caliber refresh` and
+`caliber learn finalize` synchronously — each calls an LLM, and on
+event-heavy sessions the combined wait can block `git commit` for
+**20 minutes or more**. This installer replaces that hook with a
+portable non-blocking version:
+
+- backgrounds `caliber refresh` so commits return instantly (refreshed
+  docs land in the next commit)
+- drops `caliber learn finalize` (the SessionEnd Claude Code hook
+  already runs the `--auto` version, and 240-event LLM passes on the
+  commit path were hitting caliber's internal 600 s timeout)
+- bounds the inner Claude CLI call at 60 s via
+  `CALIBER_CLAUDE_CLI_TIMEOUT_MS`
+- wraps the refresh in GNU `timeout 30` when available (skipped on
+  Windows Git Bash, where `timeout.exe` is a `sleep` with different
+  semantics)
+
+Measured on a 240-event session: `~20 min` → `~0.7 s` per commit.
+
+```bash
+sh scripts/install-caliber-hook.sh         # install / update
+sh scripts/install-caliber-hook.sh --dry   # preview
+```
+
+Existing `.git/hooks/pre-commit` is backed up to
+`.git/hooks/pre-commit.bak-<timestamp>` before being replaced. Re-run
+on every machine that clones the repo — git doesn't version-control
+`.git/hooks/` so the install can't be automatic.
+
 ### `scripts/openwolfstatus` — OpenWolf dashboard status
 
 Shows all registered OpenWolf projects, their dashboard/daemon port
