@@ -90,7 +90,18 @@ Claude responds (knowing the prior context, deterministically)
   subagent-Warmup token drain ([`anthropics/claude-code#47922`](https://github.com/anthropics/claude-code/issues/47922))
   without the all-or-nothing side-effects of
   `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`. Returns a spec-compliant stub
-  (JSON or SSE) so CC never sees an error.
+  (JSON or SSE) so CC never sees an error. The proxy recognises **two
+  distinct drain patterns** and blocks both under the same flag:
+
+  | Pattern | Signature (`claude_hooks/proxy/metadata.py`) | What it is |
+  |---|---|---|
+  | **CLI "Warmup"** | `first_user_text == "Warmup"` | The keepalive Claude Code sends every few turns to keep the context hot. Cheap per-request but runs thousands of times per day. Classic token drain. |
+  | **SDK-CLI subagent priming** | `cc_entrypoint == "sdk-cli"` AND `agent_type == "subagent"` AND `num_messages == 1` | The Agent SDK's priming message when a subagent boots. Single user turn, no "Warmup" literal, so it looks like a real prompt to a naïve filter — but it's the same "init the context" intent, just from the SDK-CLI entrypoint. Historically slipped past the old `first_user_text` check and amplified 300M+ cache reads/day on subagent-heavy workflows. |
+
+  Both map to `is_warmup=True` in request metadata and are blocked
+  identically when `block_warmup` is on. The dashboard's
+  *warmups_blocked* counter aggregates them; `scripts/proxy_stats.py
+  --show-sidechain` breaks them out.
 - **Live weekly-limit %** — proxy captures Anthropic's
   `anthropic-ratelimit-unified-*` headers into a rolling state file;
   `scripts/statusline_usage.py` reads it for a compact statusline
