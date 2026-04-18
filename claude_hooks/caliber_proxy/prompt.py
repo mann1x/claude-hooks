@@ -80,43 +80,30 @@ JSON OUTPUT RULES — when your response contains a JSON object:
   it otherwise and all your work is lost.
 
 CONFIG QUALITY RUBRIC — when generating CLAUDE.md, AGENTS.md,
-.cursorrules, or skill bodies (markdown content that caliber scores):
-A deterministic grader will re-run on your output and deduct points per
-rule broken. Passing the rubric on the first shot avoids an expensive
-refinement round-trip. Target:
-- **Project grounding** (12 pts): mention ≥50% of the project's real
-  top-level directories and notable files by their actual names in
-  backticks. Call `list_files .` at the project root first and pull
-  concrete dir names from there. Generic prose about "your backend"
-  or "your tests" scores 0 here.
+.cursorrules, or skill bodies, a deterministic grader re-scores your output.
+The PROJECT STRUCTURE MAP system message lists the real directories and
+files you can cite; pulling from it is the single biggest grounding lever.
+- **Project grounding** (12 pts): mention ≥50% of the dirs and notable
+  files shown in the PROJECT STRUCTURE MAP by their actual names in
+  backticks. Generic prose about "your backend" scores 0 here.
 - **Reference density** (8 pts): ≥40% of non-empty lines must contain
   a backtick reference (`path/`, `file.ext`, command, or identifier).
-  Prefer inline refs over prose: "Routes in `src/api/` · models in
-  `src/models/` · tests in `tests/`".
+  Prefer inline refs: "Routes in `src/api/` · models in `src/models/`".
 - **Executable content** (8 pts): include ≥3 fenced code blocks
-  (```bash / ```python / etc.) containing actual project commands
-  (build, test, lint, run). Placeholder commands like `npm test`
-  without context do not count — ground in the project's real
-  tooling (look at pyproject.toml, package.json, Makefile, etc.).
-- **References valid** (8 pts): every backtick path you emit must
-  exist on disk — verify with `list_files` / `read_file` first.
-  Inventing paths costs points per invalid ref.
+  (```bash / ```python / etc.) with this project's real build/test/run
+  commands drawn from the pre-loaded manifest files.
+- **References valid** (8 pts): every backtick path must exist in the
+  structure map or the anchor files. Invented paths cost points per ref.
 - **Concreteness** (4 pts): ≥70% of non-empty, non-code lines must
   reference specific project elements (paths, commands, symbols).
-  Abstract prose ("write clean code", "follow best practices")
-  costs points.
-- **Structure** (2 pts): ≥3 `## H2` sections and ≥3 bullet-list
-  items in each generated markdown file.
-- **Token budget** (6 pts): CLAUDE.md + AGENTS.md combined must
-  stay under ~5000 tokens (~20 KB) for full points. Be concise;
-  prefer dense backtick refs over narrative paragraphs.
-- **No directory tree listings** (3 pts): do NOT use box-drawing
-  characters (├ └ │ ─ ┬) in code blocks. Reference directories
-  inline with backticks instead.
-- **No duplicate content** (2 pts): if you generate BOTH CLAUDE.md
-  and .cursorrules, their bodies must be meaningfully different
-  — .cursorrules should hold only Cursor-specific settings, not
-  copy the Claude instructions verbatim.
+- **Structure** (2 pts): ≥3 `## H2` sections and ≥3 bullet-list items
+  in each generated markdown file.
+- **Token budget** (6 pts): CLAUDE.md + AGENTS.md combined should stay
+  under ~5000 tokens (~20 KB). Prefer dense backtick refs over prose.
+- **No directory tree listings** (3 pts): do NOT use box-drawing chars
+  (├ └ │ ─ ┬) in code blocks. Reference dirs inline with backticks.
+- **No duplicate content** (2 pts): if both CLAUDE.md and .cursorrules
+  are emitted, their bodies must be meaningfully different.
 """
 
 
@@ -154,21 +141,20 @@ JSON OUTPUT RULES — when your response contains a JSON object:
   it otherwise and all your work is lost.
 
 CONFIG QUALITY RUBRIC — when generating CLAUDE.md, AGENTS.md,
-.cursorrules, or skill bodies (markdown content that caliber scores):
-A deterministic grader will re-run on your output and deduct points per
-rule broken. Pulling the project's real directories and files from the
-pre-loaded source blocks is the single biggest lever.
-- **Project grounding** (12 pts): mention ≥50% of the directories and
-  notable files visible in the pre-stuffed material, by their actual
-  names in backticks. Generic prose about "your backend" scores 0 here.
+.cursorrules, or skill bodies, a deterministic grader re-scores your output.
+The PROJECT STRUCTURE MAP system message lists the real directories and
+files you can cite; pulling from it is the single biggest grounding lever.
+- **Project grounding** (12 pts): mention ≥50% of the dirs and notable
+  files shown in the PROJECT STRUCTURE MAP by their actual names in
+  backticks. Generic prose about "your backend" scores 0 here.
 - **Reference density** (8 pts): ≥40% of non-empty lines must contain
   a backtick reference (`path/`, `file.ext`, command, or identifier).
   Prefer inline refs: "Routes in `src/api/` · models in `src/models/`".
 - **Executable content** (8 pts): include ≥3 fenced code blocks
   (```bash / ```python / etc.) with this project's real build/test/run
   commands drawn from the pre-loaded manifest files.
-- **References valid** (8 pts): every backtick path must appear in the
-  pre-loaded material. Invented paths cost points per invalid ref.
+- **References valid** (8 pts): every backtick path must exist in the
+  structure map or the anchor files. Invented paths cost points per ref.
 - **Concreteness** (4 pts): ≥70% of non-empty, non-code lines must
   reference specific project elements (paths, commands, symbols).
 - **Structure** (2 pts): ≥3 `## H2` sections and ≥3 bullet-list items
@@ -231,6 +217,106 @@ _WALK_SKIP_DIRS = {
     ".claude", ".caliber", ".wolf", "dist", "build", ".cache",
     "target", "vendor", ".mypy_cache", ".pytest_cache",
 }
+
+
+def _default_structure_map_bytes() -> int:
+    try:
+        return int(os.environ.get(
+            "CALIBER_GROUNDING_STRUCTURE_MAX_BYTES", "4000",
+        ))
+    except ValueError:
+        return 4000
+
+
+# Files we highlight individually in the structure map if present. Drives
+# caliber's "notable files" grounding check — the model needs to see these
+# names verbatim so it can mention them in backticks.
+_NOTABLE_FILE_NAMES = {
+    "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
+    "Pipfile", "package.json", "tsconfig.json", "pnpm-lock.yaml",
+    "go.mod", "Cargo.toml", "Makefile", "CMakeLists.txt",
+    "Dockerfile", "docker-compose.yml", "docker-compose.yaml",
+    ".gitignore", "LICENSE", "README.md", "CHANGELOG.md",
+    "CLAUDE.md", "AGENTS.md", ".cursorrules", "AGENTS.md",
+    "conftest.py", "pytest.ini", "tox.ini", ".pre-commit-config.yaml",
+}
+
+
+def read_project_structure_map(cwd: str,
+                                max_bytes: Optional[int] = None,
+                                ) -> str:
+    """Walk the top 2 directory levels and emit a compact map of dirs
+    and notable files. The model gets real project paths for free —
+    critical for caliber's Project-Grounding and References-Valid checks
+    without burning agent-loop turns on ``list_files`` calls.
+
+    Format:
+        ./
+        src/           [12 files, 3 dirs]
+        src/api/       [5 files]
+        tests/         [8 files]
+        <notable files at root>
+    """
+    if max_bytes is None:
+        max_bytes = _default_structure_map_bytes()
+    cwd_real = os.path.realpath(cwd)
+    lines: list[str] = ["./"]
+    root_files: list[str] = []
+    # 1st level
+    try:
+        for name in sorted(os.listdir(cwd_real)):
+            if name in _WALK_SKIP_DIRS or name.startswith("."):
+                if name not in (".github", ".claude", ".cursor", ".agents"):
+                    continue
+            full = os.path.join(cwd_real, name)
+            if os.path.isdir(full):
+                sub_file_count = 0
+                sub_dir_count = 0
+                try:
+                    for inner in os.listdir(full):
+                        if inner.startswith(".") or inner in _WALK_SKIP_DIRS:
+                            continue
+                        if os.path.isdir(os.path.join(full, inner)):
+                            sub_dir_count += 1
+                        else:
+                            sub_file_count += 1
+                except OSError:
+                    pass
+                lines.append(
+                    f"{name}/  [{sub_file_count} files, {sub_dir_count} dirs]"
+                )
+                # Descend one level for interesting dirs
+                try:
+                    for inner in sorted(os.listdir(full)):
+                        if inner.startswith(".") or inner in _WALK_SKIP_DIRS:
+                            continue
+                        inner_full = os.path.join(full, inner)
+                        if os.path.isdir(inner_full):
+                            try:
+                                n = len([
+                                    x for x in os.listdir(inner_full)
+                                    if not x.startswith(".")
+                                ])
+                            except OSError:
+                                n = 0
+                            lines.append(f"{name}/{inner}/  [{n} entries]")
+                except OSError:
+                    pass
+            elif name in _NOTABLE_FILE_NAMES:
+                root_files.append(name)
+    except OSError:
+        return ""
+    if root_files:
+        lines.append("")
+        lines.append("Notable files at project root: " + ", ".join(root_files))
+    # Skip the map if there's nothing useful beyond the "./" header — keeps
+    # the empty-project case clean and doesn't drag a useless system message.
+    if len(lines) <= 1:
+        return ""
+    out = "\n".join(lines)
+    if len(out) > max_bytes:
+        out = out[:max_bytes] + "\n[truncated]"
+    return out
 
 
 def _default_extended_bytes() -> int:
@@ -330,6 +416,17 @@ def build_grounding_messages(cwd: str,
     messages: list[dict[str, str]] = [
         {"role": "system", "content": addendum},
     ]
+    structure_map = read_project_structure_map(cwd)
+    if structure_map:
+        messages.append({
+            "role": "system",
+            "content": (
+                "PROJECT STRUCTURE MAP — real directories and files in this "
+                "project. Cite these by name in backticks to satisfy caliber's "
+                "grounding rubric; do not invent paths outside this map.\n\n"
+                "```\n" + structure_map + "\n```"
+            ),
+        })
     anchors = read_anchor_files(cwd, max_anchor_bytes)
     if anchors:
         body_parts = [

@@ -144,8 +144,10 @@ class TestPromptBuilder:
         (tmp_path / "CLAUDE.md").write_text("# project rules")
         (tmp_path / "pyproject.toml").write_text("[project]\nname='x'")
         msgs = prompt.build_grounding_messages(str(tmp_path))
-        assert len(msgs) == 2  # addendum + anchor block
-        body = msgs[1]["content"]
+        # addendum + structure map + anchor block (map always emitted
+        # when cwd has anything non-trivial — drives grounding check).
+        assert len(msgs) == 3
+        body = msgs[2]["content"]
         assert "### CLAUDE.md" in body
         assert "# project rules" in body
         assert "### pyproject.toml" in body
@@ -162,7 +164,8 @@ class TestPromptBuilder:
         # Only one anchor; ensure others don't cause errors
         (tmp_path / "README.md").write_text("readme")
         msgs = prompt.build_grounding_messages(str(tmp_path))
-        assert "### README.md" in msgs[1]["content"]
+        # With the structure-map injection, anchor block moved to msgs[-1].
+        assert "### README.md" in msgs[-1]["content"]
 
     def test_no_tools_addendum_used_when_disabled(self, tmp_path: Path):
         msgs = prompt.build_grounding_messages(
@@ -181,14 +184,17 @@ class TestPromptBuilder:
     def test_rubric_present_with_tools(self, tmp_path: Path):
         msgs = prompt.build_grounding_messages(str(tmp_path))
         addendum = msgs[0]["content"]
-        # Rubric section and the four biggest point sinks must survive
-        # any future prompt edits — refactors that drop them will regress
-        # caliber's scoring round-trips back to what this PR fixed.
+        # Slim rubric: four numbered rules targeting top-point sinks in
+        # caliber's scoreAndRefine (grounding 12, density 8, code 8, tree 3).
+        # The addendum references the structure map by name — dropping
+        # that reference decouples the rubric from the auto-injected map
+        # and regresses the grounding lift this design relies on.
         assert "CONFIG QUALITY RUBRIC" in addendum
-        assert "Project grounding" in addendum
-        assert "Reference density" in addendum
-        assert "Executable content" in addendum
-        assert "References valid" in addendum
+        # Rubric cross-refs the map — word may wrap, so normalize whitespace.
+        assert "STRUCTURE MAP" in " ".join(addendum.split())
+        assert "backtick ref" in addendum
+        assert "fenced code blocks" in addendum
+        assert "box-drawing" in addendum
 
     def test_rubric_present_without_tools(self, tmp_path: Path):
         msgs = prompt.build_grounding_messages(
@@ -196,10 +202,36 @@ class TestPromptBuilder:
         )
         addendum = msgs[0]["content"]
         assert "CONFIG QUALITY RUBRIC" in addendum
-        assert "pre-loaded material" in addendum
+        assert "STRUCTURE MAP" in " ".join(addendum.split())
         # No-tools variant should NOT tell the model to call list_files
         # to discover structure — the material is already inlined.
         assert "Call `list_files" not in addendum
+
+    def test_structure_map_emitted(self, tmp_path: Path):
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "api").mkdir()
+        (tmp_path / "src" / "api" / "h.py").write_text("x=1")
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "t.py").write_text("x=1")
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='x'")
+        msgs = prompt.build_grounding_messages(str(tmp_path))
+        # Map lands between the addendum and the anchor block.
+        joined = "\n".join(m["content"] for m in msgs)
+        assert "PROJECT STRUCTURE MAP" in joined
+        assert "src/" in joined
+        assert "tests/" in joined
+        assert "src/api/" in joined
+        assert "pyproject.toml" in joined
+
+    def test_structure_map_skips_noise_dirs(self, tmp_path: Path):
+        (tmp_path / "node_modules").mkdir()
+        (tmp_path / "__pycache__").mkdir()
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "m.py").write_text("x=1")
+        m = prompt.read_project_structure_map(str(tmp_path))
+        assert "src/" in m
+        assert "node_modules" not in m
+        assert "__pycache__" not in m
 
     def test_extended_sources_included(self, tmp_path: Path):
         (tmp_path / "pkg").mkdir()
@@ -415,11 +447,16 @@ class TestAgentLoop:
                 max_iterations=1,
             )
         msgs = captured["payload"]["messages"]
-        # addendum system + anchor system + user
+        # addendum + structure-map + anchor block + user
         assert msgs[0]["role"] == "system"
         assert "GROUNDING PROTOCOL" in msgs[0]["content"]
-        assert msgs[1]["role"] == "system"
-        assert "### CLAUDE.md" in msgs[1]["content"]
+        # The anchor block is the last system message (map is inserted
+        # between addendum and anchors).
+        anchor_idx = next(
+            i for i, m in enumerate(msgs)
+            if m["role"] == "system" and "### CLAUDE.md" in m["content"]
+        )
+        assert anchor_idx >= 1
         assert msgs[-1]["role"] == "user"
 
     def test_tools_injected(self, tmp_path: Path):
