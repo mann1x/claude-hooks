@@ -78,6 +78,45 @@ JSON OUTPUT RULES — when your response contains a JSON object:
 - Do not wrap the JSON in a markdown fence (no ```json / ``` around it).
 - The JSON MUST be valid per RFC 8259 — a downstream parser will reject
   it otherwise and all your work is lost.
+
+CONFIG QUALITY RUBRIC — when generating CLAUDE.md, AGENTS.md,
+.cursorrules, or skill bodies (markdown content that caliber scores):
+A deterministic grader will re-run on your output and deduct points per
+rule broken. Passing the rubric on the first shot avoids an expensive
+refinement round-trip. Target:
+- **Project grounding** (12 pts): mention ≥50% of the project's real
+  top-level directories and notable files by their actual names in
+  backticks. Call `list_files .` at the project root first and pull
+  concrete dir names from there. Generic prose about "your backend"
+  or "your tests" scores 0 here.
+- **Reference density** (8 pts): ≥40% of non-empty lines must contain
+  a backtick reference (`path/`, `file.ext`, command, or identifier).
+  Prefer inline refs over prose: "Routes in `src/api/` · models in
+  `src/models/` · tests in `tests/`".
+- **Executable content** (8 pts): include ≥3 fenced code blocks
+  (```bash / ```python / etc.) containing actual project commands
+  (build, test, lint, run). Placeholder commands like `npm test`
+  without context do not count — ground in the project's real
+  tooling (look at pyproject.toml, package.json, Makefile, etc.).
+- **References valid** (8 pts): every backtick path you emit must
+  exist on disk — verify with `list_files` / `read_file` first.
+  Inventing paths costs points per invalid ref.
+- **Concreteness** (4 pts): ≥70% of non-empty, non-code lines must
+  reference specific project elements (paths, commands, symbols).
+  Abstract prose ("write clean code", "follow best practices")
+  costs points.
+- **Structure** (2 pts): ≥3 `## H2` sections and ≥3 bullet-list
+  items in each generated markdown file.
+- **Token budget** (6 pts): CLAUDE.md + AGENTS.md combined must
+  stay under ~5000 tokens (~20 KB) for full points. Be concise;
+  prefer dense backtick refs over narrative paragraphs.
+- **No directory tree listings** (3 pts): do NOT use box-drawing
+  characters (├ └ │ ─ ┬) in code blocks. Reference directories
+  inline with backticks instead.
+- **No duplicate content** (2 pts): if you generate BOTH CLAUDE.md
+  and .cursorrules, their bodies must be meaningfully different
+  — .cursorrules should hold only Cursor-specific settings, not
+  copy the Claude instructions verbatim.
 """
 
 
@@ -113,6 +152,33 @@ JSON OUTPUT RULES — when your response contains a JSON object:
 - Do not wrap the JSON in a markdown fence (no ```json / ``` around it).
 - The JSON MUST be valid per RFC 8259 — a downstream parser will reject
   it otherwise and all your work is lost.
+
+CONFIG QUALITY RUBRIC — when generating CLAUDE.md, AGENTS.md,
+.cursorrules, or skill bodies (markdown content that caliber scores):
+A deterministic grader will re-run on your output and deduct points per
+rule broken. Pulling the project's real directories and files from the
+pre-loaded source blocks is the single biggest lever.
+- **Project grounding** (12 pts): mention ≥50% of the directories and
+  notable files visible in the pre-stuffed material, by their actual
+  names in backticks. Generic prose about "your backend" scores 0 here.
+- **Reference density** (8 pts): ≥40% of non-empty lines must contain
+  a backtick reference (`path/`, `file.ext`, command, or identifier).
+  Prefer inline refs: "Routes in `src/api/` · models in `src/models/`".
+- **Executable content** (8 pts): include ≥3 fenced code blocks
+  (```bash / ```python / etc.) with this project's real build/test/run
+  commands drawn from the pre-loaded manifest files.
+- **References valid** (8 pts): every backtick path must appear in the
+  pre-loaded material. Invented paths cost points per invalid ref.
+- **Concreteness** (4 pts): ≥70% of non-empty, non-code lines must
+  reference specific project elements (paths, commands, symbols).
+- **Structure** (2 pts): ≥3 `## H2` sections and ≥3 bullet-list items
+  in each generated markdown file.
+- **Token budget** (6 pts): CLAUDE.md + AGENTS.md combined should stay
+  under ~5000 tokens (~20 KB). Prefer dense backtick refs over prose.
+- **No directory tree listings** (3 pts): do NOT use box-drawing chars
+  (├ └ │ ─ ┬) in code blocks. Reference dirs inline with backticks.
+- **No duplicate content** (2 pts): if both CLAUDE.md and .cursorrules
+  are emitted, their bodies must be meaningfully different.
 """
 
 

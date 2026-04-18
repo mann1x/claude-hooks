@@ -178,6 +178,29 @@ class TestPromptBuilder:
         addendum = msgs[0]["content"]
         assert "list_files, read_file, glob, grep" in addendum
 
+    def test_rubric_present_with_tools(self, tmp_path: Path):
+        msgs = prompt.build_grounding_messages(str(tmp_path))
+        addendum = msgs[0]["content"]
+        # Rubric section and the four biggest point sinks must survive
+        # any future prompt edits — refactors that drop them will regress
+        # caliber's scoring round-trips back to what this PR fixed.
+        assert "CONFIG QUALITY RUBRIC" in addendum
+        assert "Project grounding" in addendum
+        assert "Reference density" in addendum
+        assert "Executable content" in addendum
+        assert "References valid" in addendum
+
+    def test_rubric_present_without_tools(self, tmp_path: Path):
+        msgs = prompt.build_grounding_messages(
+            str(tmp_path), tools_available=False,
+        )
+        addendum = msgs[0]["content"]
+        assert "CONFIG QUALITY RUBRIC" in addendum
+        assert "pre-loaded material" in addendum
+        # No-tools variant should NOT tell the model to call list_files
+        # to discover structure — the material is already inlined.
+        assert "Call `list_files" not in addendum
+
     def test_extended_sources_included(self, tmp_path: Path):
         (tmp_path / "pkg").mkdir()
         (tmp_path / "pkg" / "m.py").write_text("def hello():\n    pass\n")
