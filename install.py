@@ -244,6 +244,68 @@ def _install_proxy_stack_systemd(
             print(f"  [!!] {name} enable failed:\n{rc.stderr.strip()[-300:]}")
 
 
+_CALIBER_PROXY_UNIT = "caliber-grounding-proxy.service"
+
+
+def _install_caliber_proxy_systemd(
+    cfg: dict, *, non_interactive: bool, dry_run: bool,
+) -> None:
+    """Install the caliber-grounding-proxy systemd unit when
+    ``caliber_proxy.enabled`` is true in config. Linux-only;
+    idempotent — skips if the unit is already installed.
+
+    The proxy binds 127.0.0.1:38090 by default and routes caliber's
+    OpenAI-compatible calls to a local Ollama upstream, injecting
+    project grounding and tools along the way.
+    """
+    if os.name == "nt":
+        return
+    if not Path("/etc/systemd/system").is_dir():
+        return
+    proxy_cfg = (cfg.get("caliber_proxy") or {})
+    if not proxy_cfg.get("enabled", False):
+        return
+
+    src = HERE / "systemd" / _CALIBER_PROXY_UNIT
+    dest = Path("/etc/systemd/system") / _CALIBER_PROXY_UNIT
+    if dest.exists():
+        return  # idempotent — leave existing unit alone
+
+    print("\n==> caliber-grounding-proxy systemd unit")
+    if not src.exists():
+        print(f"  [!!] {src} missing — skipping")
+        return
+    print(f"  Will install to {dest} with __REPO_PATH__ = {HERE}")
+    if dry_run:
+        print("  [dry-run] skipping write.")
+        return
+    if non_interactive:
+        print("  --non-interactive: proceeding.")
+    else:
+        ans = input("  Install caliber-grounding-proxy unit? [Y/n]: ").strip().lower()
+        if ans not in ("", "y", "yes"):
+            print("  Skipped.")
+            return
+
+    content = src.read_text(encoding="utf-8")
+    content = content.replace("__REPO_PATH__", str(HERE.resolve()))
+    try:
+        dest.write_text(content, encoding="utf-8")
+    except OSError as e:
+        print(f"  [!!] Failed to write {dest}: {e}")
+        return
+    print(f"  + wrote {_CALIBER_PROXY_UNIT}")
+    subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
+    rc = subprocess.run(
+        ["systemctl", "enable", "--now", _CALIBER_PROXY_UNIT],
+        capture_output=True, text=True,
+    )
+    if rc.returncode == 0:
+        print(f"  · enabled + started {_CALIBER_PROXY_UNIT}")
+    else:
+        print(f"  [!!] enable failed:\n{rc.stderr.strip()[-300:]}")
+
+
 def _ensure_proxy_deps(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
     """Verify httpx + h2 are available when the proxy is enabled.
 
@@ -460,6 +522,15 @@ def main() -> int:
     # Offer to install the proxy + rollup-timer + dashboard systemd
     # units (Linux only; idempotent — skips units already installed).
     _install_proxy_stack_systemd(
+        cfg,
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
+    # Offer to install the caliber grounding proxy systemd unit (opt-in
+    # under caliber_proxy.enabled in config). Runs a local OpenAI-
+    # compat proxy that adds project grounding + tools to caliber calls
+    # routed at Ollama. See claude_hooks/caliber_proxy/.
+    _install_caliber_proxy_systemd(
         cfg,
         non_interactive=args.non_interactive,
         dry_run=args.dry_run,

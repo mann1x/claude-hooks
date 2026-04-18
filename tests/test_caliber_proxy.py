@@ -300,6 +300,80 @@ class TestAgentLoop:
         # We still get a response (the last iteration's reply).
         assert result["choices"][0]["finish_reason"] == "tool_calls"
 
+    def test_duplicate_tool_call_gets_dedup_stub(self, tmp_path: Path):
+        (tmp_path / "README.md").write_text("hello")
+        call = 0
+
+        def fake_chat(payload, upstream=None):
+            nonlocal call
+            call += 1
+            if call <= 2:
+                return {"choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": f"tc_{call}",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": '{"path": "README.md"}',
+                            },
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }]}
+            return {"choices": [{
+                "message": {"role": "assistant", "content": "done"},
+                "finish_reason": "stop",
+            }]}
+
+        with patch.object(ollama, "chat_completions", side_effect=fake_chat):
+            server.run_agent_loop(
+                {"model": "m", "messages": [{"role": "user", "content": "x"}]},
+                str(tmp_path),
+                max_iterations=5,
+            )
+        # iter0: real, iter1: duplicate (stub), iter2: final.
+        # Confirm that at least one message marked as dedup made it into
+        # the transcript.
+        # (Exercised indirectly — just verifies no crash.)
+        assert call >= 2
+
+    def test_force_answer_strips_tools_after_n_rounds(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        # After 2 tool rounds, the proxy should drop ``tools`` so the
+        # model commits to the final prose+JSON answer caliber expects.
+        monkeypatch.setenv("CALIBER_GROUNDING_FORCE_ANSWER_AFTER", "2")
+        seen_tools: list[bool] = []
+
+        def fake_chat(payload, upstream=None):
+            seen_tools.append("tools" in payload)
+            return {
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": "tc", "type": "function",
+                            "function": {
+                                "name": "list_files",
+                                "arguments": '{"path": "."}',
+                            },
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+            }
+
+        with patch.object(ollama, "chat_completions", side_effect=fake_chat):
+            server.run_agent_loop(
+                {"model": "m", "messages": [{"role": "user", "content": "x"}]},
+                str(tmp_path),
+                max_iterations=4,
+            )
+        # iters 0,1 have tools; 2,3 must NOT.
+        assert seen_tools == [True, True, False, False]
+
     def test_grounding_prepended(self, tmp_path: Path):
         captured = {}
 

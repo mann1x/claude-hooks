@@ -66,6 +66,18 @@ Non-negotiable rules:
 If the task is deterministic (e.g. checking whether docs need refresh)
 and the current prompt already contains enough information to answer,
 you may answer directly without calling tools.
+
+JSON OUTPUT RULES — when your response contains a JSON object:
+- Every backslash inside a JSON string value MUST be doubled. Write
+  `\\w`, `\\s`, `\\d`, `\\.`, `\\\\`, not `\w`, `\s`, `\d`, `\.`, `\\`.
+  This applies to regex patterns, Windows paths, and literal backslashes
+  of any kind inside `"..."` strings.
+- Newlines inside JSON string values MUST be written as the 2-char
+  escape `\\n`, not as actual line breaks.
+- Double-quotes inside strings MUST be escaped as `\\"`.
+- Do not wrap the JSON in a markdown fence (no ```json / ``` around it).
+- The JSON MUST be valid per RFC 8259 — a downstream parser will reject
+  it otherwise and all your work is lost.
 """
 
 
@@ -90,6 +102,17 @@ Non-negotiable rules:
 4. Do not list files in your output that do not appear in the pre-
    stuffed material. The project may use conda, not venv; pytest-
    asyncio, not trio; etc. — follow what the pre-loaded files show.
+
+JSON OUTPUT RULES — when your response contains a JSON object:
+- Every backslash inside a JSON string value MUST be doubled. Write
+  `\\w`, `\\s`, `\\d`, `\\.`, `\\\\`, not `\w`, `\s`, `\d`, `\.`, `\\`.
+  This applies to regex patterns, Windows paths, and literal backslashes
+  of any kind inside `"..."` strings.
+- Newlines inside JSON string values MUST be written as `\\n`, not as
+  actual line breaks. Double-quotes inside strings MUST be escaped as `\\"`.
+- Do not wrap the JSON in a markdown fence (no ```json / ``` around it).
+- The JSON MUST be valid per RFC 8259 — a downstream parser will reject
+  it otherwise and all your work is lost.
 """
 
 

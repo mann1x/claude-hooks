@@ -231,6 +231,12 @@
     "listen_host": "127.0.0.1",
     "listen_port": 38081
   },
+  "caliber_proxy": {
+    "enabled": false,
+    "_doc": "Opt-in local OpenAI-compat proxy that routes caliber (https://github.com/caliber-ai-org/ai-setup) to a local Ollama model with project grounding + tool-use. When enabled, install.py writes a systemd unit (caliber-grounding-proxy.service) bound to 127.0.0.1:38090. Point caliber at it with OPENAI_BASE_URL=http://127.0.0.1:38090/v1. Env knobs (override in systemd drop-in): CALIBER_GROUNDING_UPSTREAM, CALIBER_GROUNDING_MODEL_OVERRIDE, CALIBER_GROUNDING_THINK, CALIBER_GROUNDING_FORCE_ANSWER_AFTER, CALIBER_GROUNDING_MAX_TOOL_CALLS_PER_TURN. See claude_hooks/caliber_proxy/ and docs/gemma4-tool-use-notes.md.",
+    "listen_host": "127.0.0.1",
+    "listen_port": 38090
+  },
   "logging": {
     "path": "~/.claude/claude-hooks.log",
     "level": "info",

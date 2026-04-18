@@ -1,0 +1,35 @@
+[Unit]
+Description=caliber-grounding-proxy — local OpenAI-compat proxy that adds project grounding + tools for caliber via Ollama
+Documentation=https://github.com/mann1x/claude-hooks/blob/main/claude_hooks/caliber_proxy/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# install.py substitutes __REPO_PATH__ on install; edit here only if
+# you manage the unit yourself. Override defaults in a drop-in file
+# under /etc/systemd/system/caliber-grounding-proxy.service.d/*.conf
+User=root
+WorkingDirectory=__REPO_PATH__
+Environment=CALIBER_GROUNDING_CWD=__REPO_PATH__
+Environment=CALIBER_GROUNDING_HOST=127.0.0.1
+Environment=CALIBER_GROUNDING_PORT=38090
+Environment=CALIBER_GROUNDING_UPSTREAM=http://127.0.0.1:11434/v1
+Environment=CALIBER_GROUNDING_HTTP_TIMEOUT=1800
+Environment=CALIBER_GROUNDING_THINK=medium
+Environment=CALIBER_GROUNDING_LOG_LEVEL=INFO
+ExecStart=__REPO_PATH__/bin/caliber-grounding-proxy
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=10s
+SendSIGKILL=yes
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__REPO_PATH__
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

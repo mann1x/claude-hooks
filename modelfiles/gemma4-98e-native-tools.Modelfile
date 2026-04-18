@@ -1,0 +1,60 @@
+# gemma4-98e native-tools Modelfile
+#
+# Gemma 4 NATIVE tool-call template (NOT qwen3-style). Tokens per
+# https://ai.google.dev/gemma/docs/core/prompt-formatting-gemma4:
+#   <|tool>declaration:NAME{SCHEMA}<tool|>             tool decl
+#   <|tool_call>call:NAME{ARGS}<tool_call|>            tool call
+#   <|tool_response>response:NAME{...}<tool_response|> tool response
+#   <|"|>VALUE<|"|>                                    string delimiter
+#
+# Benchmark (2026-04-18): 25.4s total on caliber-like grounding task,
+# 3 clean tool rounds, zero template leaks (see docs/gemma4-tool-use-notes.md).
+# Use via:
+#   ollama create gemma4-98e:native-tools -f modelfiles/gemma4-98e-native-tools.Modelfile
+
+FROM gemma4-98e:cd-q6k-256k
+
+TEMPLATE """{{- if or .System .Tools }}<bos><|turn>system
+{{ if .System }}{{ .System }}
+{{ end }}{{- if .Tools }}
+You may call one or more functions to assist the user. Available functions:
+{{- range .Tools }}
+<|tool>declaration:{{ .Function.Name }}{{ .Function.Parameters }}<tool|>
+{{- end }}
+
+To call a function, emit:
+<|tool_call>call:FUNCTION_NAME{arg_name:<|"|>string_value<|"|>,other_arg:number}<tool_call|>
+
+All string values MUST be wrapped in <|"|>...<|"|> delimiters. Numbers and booleans are raw.
+{{- end }}<turn|>
+{{ end -}}
+{{- range $i, $msg := .Messages }}
+{{- $last := eq (len (slice $.Messages $i)) 1 -}}
+{{- if eq $msg.Role "system" }}
+{{- if gt $i 0 }}<|turn>system
+{{ $msg.Content }}<turn|>
+{{ end }}
+{{- else if eq $msg.Role "user" }}<|turn>user
+{{ $msg.Content }}<turn|>
+{{ else if eq $msg.Role "assistant" }}<|turn>model
+{{- if $msg.Content }}
+{{ $msg.Content }}
+{{- end }}
+{{- range $msg.ToolCalls }}
+<|tool_call>call:{{ .Function.Name }}{{ .Function.Arguments }}<tool_call|>
+{{- end }}{{ if not $last }}<turn|>
+{{ end }}
+{{- else if eq $msg.Role "tool" }}<|turn>user
+<|tool_response>response:{{ $msg.Name }}{ {{ $msg.Content }} }<tool_response|><turn|>
+{{ end }}
+{{- if and (ne $msg.Role "assistant") $last }}<|turn>model
+{{ end }}
+{{- end }}"""
+
+PARAMETER num_ctx 256000
+PARAMETER stop "<turn|>"
+PARAMETER stop "<|tool_response>"
+PARAMETER repeat_penalty 1.15
+PARAMETER repeat_last_n 256
+PARAMETER temperature 0.6
+PARAMETER top_p 0.95
