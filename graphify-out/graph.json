@@ -3,18 +3,18 @@
   "multigraph": false,
   "graph": {
     "generated_by": "claude-hooks",
-    "generated_at": "2026-04-26T08:57:46Z",
+    "generated_at": "2026-04-26T09:15:33Z",
     "stats": {
-      "files_parsed": 120,
+      "files_parsed": 125,
       "files_cached": 0,
-      "nodes": 1908,
-      "edges": 4070,
-      "calls_resolved": 1996,
-      "calls_external": 5961,
-      "calls_ambiguous": 644,
-      "imports_external": 777,
+      "nodes": 1977,
+      "edges": 4284,
+      "calls_resolved": 2107,
+      "calls_external": 6235,
+      "calls_ambiguous": 661,
+      "imports_external": 810,
       "by_language": {
-        ".py": 120
+        ".py": 125
       },
       "parse_errors": 0
     }
@@ -4402,6 +4402,112 @@
       "is_async": false
     },
     {
+      "id": "module:claude_hooks.code_graph.clustering",
+      "type": "module",
+      "name": "claude_hooks.code_graph.clustering",
+      "file": "claude_hooks/code_graph/clustering.py",
+      "line": 1,
+      "tag": "EXTRACTED"
+    },
+    {
+      "id": "func:claude_hooks.code_graph.clustering.is_louvain_available",
+      "type": "function",
+      "name": "is_louvain_available",
+      "qualname": "claude_hooks.code_graph.clustering.is_louvain_available",
+      "file": "claude_hooks/code_graph/clustering.py",
+      "line": 36,
+      "tag": "EXTRACTED",
+      "doc": "True iff python-louvain + networkx import cleanly.",
+      "is_async": false
+    },
+    {
+      "id": "class:claude_hooks.code_graph.clustering.ClusterSummary",
+      "type": "class",
+      "name": "ClusterSummary",
+      "qualname": "claude_hooks.code_graph.clustering.ClusterSummary",
+      "file": "claude_hooks/code_graph/clustering.py",
+      "line": 57,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:claude_hooks.code_graph.clustering.ClusterSummary.size",
+      "type": "method",
+      "name": "size",
+      "qualname": "claude_hooks.code_graph.clustering.ClusterSummary.size",
+      "file": "claude_hooks/code_graph/clustering.py",
+      "line": 65,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.clustering.compute_clusters",
+      "type": "function",
+      "name": "compute_clusters",
+      "qualname": "claude_hooks.code_graph.clustering.compute_clusters",
+      "file": "claude_hooks/code_graph/clustering.py",
+      "line": 73,
+      "tag": "EXTRACTED",
+      "doc": "Return ``{node_id: cluster_id}`` for every function/method/class.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.clustering._louvain_clusters",
+      "type": "function",
+      "name": "_louvain_clusters",
+      "qualname": "claude_hooks.code_graph.clustering._louvain_clusters",
+      "file": "claude_hooks/code_graph/clustering.py",
+      "line": 95,
+      "tag": "EXTRACTED",
+      "doc": "Build an undirected NetworkX graph from calls + contains edges,",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.clustering._file_clusters",
+      "type": "function",
+      "name": "_file_clusters",
+      "qualname": "claude_hooks.code_graph.clustering._file_clusters",
+      "file": "claude_hooks/code_graph/clustering.py",
+      "line": 121,
+      "tag": "EXTRACTED",
+      "doc": "One cluster per source file. Stable ordering for reproducibility.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.clustering.cluster_summary",
+      "type": "function",
+      "name": "cluster_summary",
+      "qualname": "claude_hooks.code_graph.clustering.cluster_summary",
+      "file": "claude_hooks/code_graph/clustering.py",
+      "line": 137,
+      "tag": "EXTRACTED",
+      "doc": "Build summaries \u2014 members, dominant file label, cohesion score.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.clustering._most_common_label",
+      "type": "function",
+      "name": "_most_common_label",
+      "qualname": "claude_hooks.code_graph.clustering._most_common_label",
+      "file": "claude_hooks/code_graph/clustering.py",
+      "line": 187,
+      "tag": "EXTRACTED",
+      "doc": "Pick a representative label from a set of files.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.clustering.format_cluster_report",
+      "type": "function",
+      "name": "format_cluster_report",
+      "qualname": "claude_hooks.code_graph.clustering.format_cluster_report",
+      "file": "claude_hooks/code_graph/clustering.py",
+      "line": 212,
+      "tag": "EXTRACTED",
+      "doc": "Markdown summary of the top-N largest clusters.",
+      "is_async": false
+    },
+    {
       "id": "module:claude_hooks.code_graph.impact",
       "type": "module",
       "name": "claude_hooks.code_graph.impact",
@@ -4728,6 +4834,80 @@
       "is_async": false
     },
     {
+      "id": "module:claude_hooks.code_graph.mermaid",
+      "type": "module",
+      "name": "claude_hooks.code_graph.mermaid",
+      "file": "claude_hooks/code_graph/mermaid.py",
+      "line": 1,
+      "tag": "EXTRACTED"
+    },
+    {
+      "id": "func:claude_hooks.code_graph.mermaid._safe_id",
+      "type": "function",
+      "name": "_safe_id",
+      "qualname": "claude_hooks.code_graph.mermaid._safe_id",
+      "file": "claude_hooks/code_graph/mermaid.py",
+      "line": 33,
+      "tag": "EXTRACTED",
+      "doc": "Make a Mermaid-legal id. Length capped to keep diagrams readable.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.mermaid._quote_label",
+      "type": "function",
+      "name": "_quote_label",
+      "qualname": "claude_hooks.code_graph.mermaid._quote_label",
+      "file": "claude_hooks/code_graph/mermaid.py",
+      "line": 41,
+      "tag": "EXTRACTED",
+      "doc": "Mermaid label \u2014 quoted, escape inner quotes.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.mermaid.render_module_map",
+      "type": "function",
+      "name": "render_module_map",
+      "qualname": "claude_hooks.code_graph.mermaid.render_module_map",
+      "file": "claude_hooks/code_graph/mermaid.py",
+      "line": 50,
+      "tag": "EXTRACTED",
+      "doc": "Top-N modules + the imports edges between them.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.mermaid.render_module_map._score",
+      "type": "function",
+      "name": "_score",
+      "qualname": "claude_hooks.code_graph.mermaid.render_module_map._score",
+      "file": "claude_hooks/code_graph/mermaid.py",
+      "line": 84,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.mermaid.render_subgraph",
+      "type": "function",
+      "name": "render_subgraph",
+      "qualname": "claude_hooks.code_graph.mermaid.render_subgraph",
+      "file": "claude_hooks/code_graph/mermaid.py",
+      "line": 127,
+      "tag": "EXTRACTED",
+      "doc": "Local Mermaid view: ``root_id`` + everything reachable within ``depth``",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.mermaid._empty_diagram",
+      "type": "function",
+      "name": "_empty_diagram",
+      "qualname": "claude_hooks.code_graph.mermaid._empty_diagram",
+      "file": "claude_hooks/code_graph/mermaid.py",
+      "line": 186,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
       "id": "module:claude_hooks.code_graph.inject",
       "type": "module",
       "name": "claude_hooks.code_graph.inject",
@@ -5018,6 +5198,113 @@
       "is_async": false
     },
     {
+      "id": "module:claude_hooks.code_graph.mcp_server",
+      "type": "module",
+      "name": "claude_hooks.code_graph.mcp_server",
+      "file": "claude_hooks/code_graph/mcp_server.py",
+      "line": 1,
+      "tag": "EXTRACTED"
+    },
+    {
+      "id": "func:claude_hooks.code_graph.mcp_server._resolve_root",
+      "type": "function",
+      "name": "_resolve_root",
+      "qualname": "claude_hooks.code_graph.mcp_server._resolve_root",
+      "file": "claude_hooks/code_graph/mcp_server.py",
+      "line": 50,
+      "tag": "EXTRACTED",
+      "doc": "If caller didn't pass a root, fall back to the env var or cwd.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.mcp_server.build_server",
+      "type": "function",
+      "name": "build_server",
+      "qualname": "claude_hooks.code_graph.mcp_server.build_server",
+      "file": "claude_hooks/code_graph/mcp_server.py",
+      "line": 69,
+      "tag": "EXTRACTED",
+      "doc": "Build and return the FastMCP server with all tools registered.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_lookup",
+      "type": "function",
+      "name": "code_graph_lookup",
+      "qualname": "claude_hooks.code_graph.mcp_server.build_server.code_graph_lookup",
+      "file": "claude_hooks/code_graph/mcp_server.py",
+      "line": 78,
+      "tag": "EXTRACTED",
+      "doc": "Look up a symbol in the project's code graph.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_impact",
+      "type": "function",
+      "name": "code_graph_impact",
+      "qualname": "claude_hooks.code_graph.mcp_server.build_server.code_graph_impact",
+      "file": "claude_hooks/code_graph/mcp_server.py",
+      "line": 95,
+      "tag": "EXTRACTED",
+      "doc": "Show transitive callers + callees of a symbol (blast radius).",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_changes",
+      "type": "function",
+      "name": "code_graph_changes",
+      "qualname": "claude_hooks.code_graph.mcp_server.build_server.code_graph_changes",
+      "file": "claude_hooks/code_graph/mcp_server.py",
+      "line": 131,
+      "tag": "EXTRACTED",
+      "doc": "Blast-radius report for the current git diff.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_trace",
+      "type": "function",
+      "name": "code_graph_trace",
+      "qualname": "claude_hooks.code_graph.mcp_server.build_server.code_graph_trace",
+      "file": "claude_hooks/code_graph/mcp_server.py",
+      "line": 158,
+      "tag": "EXTRACTED",
+      "doc": "Forward call-chain trace from an entrypoint.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_mermaid",
+      "type": "function",
+      "name": "code_graph_mermaid",
+      "qualname": "claude_hooks.code_graph.mcp_server.build_server.code_graph_mermaid",
+      "file": "claude_hooks/code_graph/mcp_server.py",
+      "line": 191,
+      "tag": "EXTRACTED",
+      "doc": "Render a Mermaid diagram of the project's code structure.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_companions",
+      "type": "function",
+      "name": "code_graph_companions",
+      "qualname": "claude_hooks.code_graph.mcp_server.build_server.code_graph_companions",
+      "file": "claude_hooks/code_graph/mcp_server.py",
+      "line": 226,
+      "tag": "EXTRACTED",
+      "doc": "Report which optional code-intelligence tools are detected.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.mcp_server.main",
+      "type": "function",
+      "name": "main",
+      "qualname": "claude_hooks.code_graph.mcp_server.main",
+      "file": "claude_hooks/code_graph/mcp_server.py",
+      "line": 259,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
       "id": "module:claude_hooks.code_graph.changes",
       "type": "module",
       "name": "claude_hooks.code_graph.changes",
@@ -5110,6 +5397,78 @@
       "line": 195,
       "tag": "EXTRACTED",
       "doc": "One-shot: load graph, diff, compute, render. Always returns markdown.",
+      "is_async": false
+    },
+    {
+      "id": "module:claude_hooks.code_graph.trace",
+      "type": "module",
+      "name": "claude_hooks.code_graph.trace",
+      "file": "claude_hooks/code_graph/trace.py",
+      "line": 1,
+      "tag": "EXTRACTED"
+    },
+    {
+      "id": "class:claude_hooks.code_graph.trace.TraceNode",
+      "type": "class",
+      "name": "TraceNode",
+      "qualname": "claude_hooks.code_graph.trace.TraceNode",
+      "file": "claude_hooks/code_graph/trace.py",
+      "line": 40,
+      "tag": "EXTRACTED",
+      "doc": "One step in the trace \u2014 a node + its depth + its parents."
+    },
+    {
+      "id": "class:claude_hooks.code_graph.trace.Trace",
+      "type": "class",
+      "name": "Trace",
+      "qualname": "claude_hooks.code_graph.trace.Trace",
+      "file": "claude_hooks/code_graph/trace.py",
+      "line": 48,
+      "tag": "EXTRACTED",
+      "doc": "Forward call-chain trace from a root entrypoint."
+    },
+    {
+      "id": "func:claude_hooks.code_graph.trace.Trace.total",
+      "type": "method",
+      "name": "total",
+      "qualname": "claude_hooks.code_graph.trace.Trace.total",
+      "file": "claude_hooks/code_graph/trace.py",
+      "line": 56,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.trace.enumerate_entrypoints",
+      "type": "function",
+      "name": "enumerate_entrypoints",
+      "qualname": "claude_hooks.code_graph.trace.enumerate_entrypoints",
+      "file": "claude_hooks/code_graph/trace.py",
+      "line": 64,
+      "tag": "EXTRACTED",
+      "doc": "Heuristic: name-keyword match + (optionally) zero in-degree on",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.trace.trace",
+      "type": "function",
+      "name": "trace",
+      "qualname": "claude_hooks.code_graph.trace.trace",
+      "file": "claude_hooks/code_graph/trace.py",
+      "line": 101,
+      "tag": "EXTRACTED",
+      "doc": "Forward BFS from ``root_id`` over ``calls`` edges. Returns a Trace.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.trace.format_trace_report",
+      "type": "function",
+      "name": "format_trace_report",
+      "qualname": "claude_hooks.code_graph.trace.format_trace_report",
+      "file": "claude_hooks/code_graph/trace.py",
+      "line": 152,
+      "tag": "EXTRACTED",
+      "doc": "Markdown report grouping nodes by depth from the root.",
       "is_async": false
     },
     {
@@ -11065,6 +11424,383 @@
       "qualname": "tests.test_providers.TestMemoryKgProvider.test_signature_tools",
       "file": "tests/test_providers.py",
       "line": 157,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "module:tests.test_code_graph_tier3",
+      "type": "module",
+      "name": "tests.test_code_graph_tier3",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 1,
+      "tag": "EXTRACTED"
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3._git_init",
+      "type": "function",
+      "name": "_git_init",
+      "qualname": "tests.test_code_graph_tier3._git_init",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 16,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3._write",
+      "type": "function",
+      "name": "_write",
+      "qualname": "tests.test_code_graph_tier3._write",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 22,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.repo",
+      "type": "function",
+      "name": "repo",
+      "qualname": "tests.test_code_graph_tier3.repo",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 29,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_code_graph_tier3.TestMermaid",
+      "type": "class",
+      "name": "TestMermaid",
+      "qualname": "tests.test_code_graph_tier3.TestMermaid",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 66,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestMermaid.test_module_map_emits_flowchart",
+      "type": "method",
+      "name": "test_module_map_emits_flowchart",
+      "qualname": "tests.test_code_graph_tier3.TestMermaid.test_module_map_emits_flowchart",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 67,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestMermaid.test_module_map_empty_graph",
+      "type": "method",
+      "name": "test_module_map_empty_graph",
+      "qualname": "tests.test_code_graph_tier3.TestMermaid.test_module_map_empty_graph",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 74,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestMermaid.test_module_map_caps_edges",
+      "type": "method",
+      "name": "test_module_map_caps_edges",
+      "qualname": "tests.test_code_graph_tier3.TestMermaid.test_module_map_caps_edges",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 80,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestMermaid.test_subgraph_around_node",
+      "type": "method",
+      "name": "test_subgraph_around_node",
+      "qualname": "tests.test_code_graph_tier3.TestMermaid.test_subgraph_around_node",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 86,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestMermaid.test_subgraph_unknown_node",
+      "type": "method",
+      "name": "test_subgraph_unknown_node",
+      "qualname": "tests.test_code_graph_tier3.TestMermaid.test_subgraph_unknown_node",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 94,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestMermaid.test_safe_id_handles_dots_and_colons",
+      "type": "method",
+      "name": "test_safe_id_handles_dots_and_colons",
+      "qualname": "tests.test_code_graph_tier3.TestMermaid.test_safe_id_handles_dots_and_colons",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 99,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_code_graph_tier3.TestTrace",
+      "type": "class",
+      "name": "TestTrace",
+      "qualname": "tests.test_code_graph_tier3.TestTrace",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 112,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestTrace.test_enumerate_finds_main",
+      "type": "method",
+      "name": "test_enumerate_finds_main",
+      "qualname": "tests.test_code_graph_tier3.TestTrace.test_enumerate_finds_main",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 113,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestTrace.test_trace_walks_forward",
+      "type": "method",
+      "name": "test_trace_walks_forward",
+      "qualname": "tests.test_code_graph_tier3.TestTrace.test_trace_walks_forward",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 121,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestTrace.test_trace_respects_max_depth",
+      "type": "method",
+      "name": "test_trace_respects_max_depth",
+      "qualname": "tests.test_code_graph_tier3.TestTrace.test_trace_respects_max_depth",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 131,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestTrace.test_trace_truncates_at_node_cap",
+      "type": "method",
+      "name": "test_trace_truncates_at_node_cap",
+      "qualname": "tests.test_code_graph_tier3.TestTrace.test_trace_truncates_at_node_cap",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 138,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestTrace.test_trace_unknown_root",
+      "type": "method",
+      "name": "test_trace_unknown_root",
+      "qualname": "tests.test_code_graph_tier3.TestTrace.test_trace_unknown_root",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 145,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestTrace.test_trace_empty_root_returns_empty_trace",
+      "type": "method",
+      "name": "test_trace_empty_root_returns_empty_trace",
+      "qualname": "tests.test_code_graph_tier3.TestTrace.test_trace_empty_root_returns_empty_trace",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 150,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestTrace.test_format_trace_groups_by_depth",
+      "type": "method",
+      "name": "test_format_trace_groups_by_depth",
+      "qualname": "tests.test_code_graph_tier3.TestTrace.test_format_trace_groups_by_depth",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 155,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestTrace.test_format_trace_handles_leaf",
+      "type": "method",
+      "name": "test_format_trace_handles_leaf",
+      "qualname": "tests.test_code_graph_tier3.TestTrace.test_format_trace_handles_leaf",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 163,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_code_graph_tier3.TestClustering",
+      "type": "class",
+      "name": "TestClustering",
+      "qualname": "tests.test_code_graph_tier3.TestClustering",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 174,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestClustering.test_compute_returns_one_per_node",
+      "type": "method",
+      "name": "test_compute_returns_one_per_node",
+      "qualname": "tests.test_code_graph_tier3.TestClustering.test_compute_returns_one_per_node",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 175,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestClustering.test_summary_sorted_by_size",
+      "type": "method",
+      "name": "test_summary_sorted_by_size",
+      "qualname": "tests.test_code_graph_tier3.TestClustering.test_summary_sorted_by_size",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 184,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestClustering.test_summary_label_picks_common_prefix",
+      "type": "method",
+      "name": "test_summary_label_picks_common_prefix",
+      "qualname": "tests.test_code_graph_tier3.TestClustering.test_summary_label_picks_common_prefix",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 196,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestClustering.test_empty_graph_returns_empty",
+      "type": "method",
+      "name": "test_empty_graph_returns_empty",
+      "qualname": "tests.test_code_graph_tier3.TestClustering.test_empty_graph_returns_empty",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 202,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestClustering.test_format_report_smoke",
+      "type": "method",
+      "name": "test_format_report_smoke",
+      "qualname": "tests.test_code_graph_tier3.TestClustering.test_format_report_smoke",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 206,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestClustering.test_file_fallback_runs_without_louvain",
+      "type": "method",
+      "name": "test_file_fallback_runs_without_louvain",
+      "qualname": "tests.test_code_graph_tier3.TestClustering.test_file_fallback_runs_without_louvain",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 215,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_code_graph_tier3.TestMcpServer",
+      "type": "class",
+      "name": "TestMcpServer",
+      "qualname": "tests.test_code_graph_tier3.TestMcpServer",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 227,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestMcpServer.test_build_server_registers_tools",
+      "type": "method",
+      "name": "test_build_server_registers_tools",
+      "qualname": "tests.test_code_graph_tier3.TestMcpServer.test_build_server_registers_tools",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 228,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_code_graph_tier3.TestCli",
+      "type": "class",
+      "name": "TestCli",
+      "qualname": "tests.test_code_graph_tier3.TestCli",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 253,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestCli._run",
+      "type": "method",
+      "name": "_run",
+      "qualname": "tests.test_code_graph_tier3.TestCli._run",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 254,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestCli.test_trace_cli",
+      "type": "method",
+      "name": "test_trace_cli",
+      "qualname": "tests.test_code_graph_tier3.TestCli.test_trace_cli",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 266,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestCli.test_mermaid_cli_module_map",
+      "type": "method",
+      "name": "test_mermaid_cli_module_map",
+      "qualname": "tests.test_code_graph_tier3.TestCli.test_mermaid_cli_module_map",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 271,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestCli.test_mermaid_cli_centered",
+      "type": "method",
+      "name": "test_mermaid_cli_centered",
+      "qualname": "tests.test_code_graph_tier3.TestCli.test_mermaid_cli_centered",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 276,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_tier3.TestCli.test_clusters_cli",
+      "type": "method",
+      "name": "test_clusters_cli",
+      "qualname": "tests.test_code_graph_tier3.TestCli.test_clusters_cli",
+      "file": "tests/test_code_graph_tier3.py",
+      "line": 282,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -25514,6 +26250,96 @@
       "tag": "EXTRACTED"
     },
     {
+      "source": "module:claude_hooks.code_graph.clustering",
+      "target": "func:claude_hooks.code_graph.clustering.is_louvain_available",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.clustering",
+      "target": "class:claude_hooks.code_graph.clustering.ClusterSummary",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:claude_hooks.code_graph.clustering.ClusterSummary",
+      "target": "func:claude_hooks.code_graph.clustering.ClusterSummary.size",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.clustering",
+      "target": "func:claude_hooks.code_graph.clustering.compute_clusters",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.clustering.compute_clusters",
+      "target": "func:claude_hooks.code_graph.clustering.is_louvain_available",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.clustering.compute_clusters",
+      "target": "func:claude_hooks.code_graph.clustering._louvain_clusters",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.clustering.compute_clusters",
+      "target": "func:claude_hooks.code_graph.clustering._file_clusters",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.clustering",
+      "target": "func:claude_hooks.code_graph.clustering._louvain_clusters",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.clustering._louvain_clusters",
+      "target": "func:claude_hooks.code_graph.clustering._file_clusters",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.clustering",
+      "target": "func:claude_hooks.code_graph.clustering._file_clusters",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.clustering",
+      "target": "func:claude_hooks.code_graph.clustering.cluster_summary",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.clustering.cluster_summary",
+      "target": "func:claude_hooks.code_graph.clustering._most_common_label",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.clustering",
+      "target": "func:claude_hooks.code_graph.clustering._most_common_label",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.clustering",
+      "target": "func:claude_hooks.code_graph.clustering.format_cluster_report",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.clustering.format_cluster_report",
+      "target": "func:claude_hooks.code_graph.clustering.is_louvain_available",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
       "source": "module:claude_hooks.code_graph.impact",
       "target": "module:claude_hooks.code_graph.detect",
       "type": "imports",
@@ -25899,6 +26725,126 @@
     },
     {
       "source": "module:claude_hooks.code_graph.__main__",
+      "target": "module:claude_hooks.code_graph.impact",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.__main__",
+      "target": "module:claude_hooks.code_graph.trace",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.impact.resolve_target",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.impact.name_candidates",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.impact.format_disambig",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.trace.trace",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.trace.format_trace_report",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.__main__",
+      "target": "module:claude_hooks.code_graph.impact",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.__main__",
+      "target": "module:claude_hooks.code_graph.mermaid",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.impact.resolve_target",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.mermaid.render_subgraph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.mermaid.render_module_map",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.__main__",
+      "target": "module:claude_hooks.code_graph.clustering",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.__main__",
+      "target": "module:claude_hooks.code_graph.impact",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.clustering.compute_clusters",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.clustering.cluster_summary",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.clustering.format_cluster_report",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.__main__",
       "target": "module:claude_hooks.code_graph.detect",
       "type": "imports",
       "tag": "EXTRACTED"
@@ -25924,6 +26870,114 @@
     {
       "source": "func:claude_hooks.code_graph.__main__.main",
       "target": "func:claude_hooks.code_graph.detect.graph_report_path",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.mermaid",
+      "target": "func:claude_hooks.code_graph.mermaid._safe_id",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.mermaid",
+      "target": "func:claude_hooks.code_graph.mermaid._quote_label",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.mermaid",
+      "target": "func:claude_hooks.code_graph.mermaid.render_module_map",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mermaid.render_module_map",
+      "target": "func:claude_hooks.code_graph.mermaid._empty_diagram",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mermaid.render_module_map",
+      "target": "func:claude_hooks.code_graph.mermaid.render_module_map._score",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mermaid.render_module_map",
+      "target": "func:claude_hooks.code_graph.mermaid._safe_id",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mermaid.render_module_map",
+      "target": "func:claude_hooks.code_graph.mermaid._quote_label",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mermaid.render_module_map",
+      "target": "func:claude_hooks.code_graph.mermaid._safe_id",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mermaid.render_module_map",
+      "target": "func:claude_hooks.code_graph.mermaid._safe_id",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.mermaid",
+      "target": "func:claude_hooks.code_graph.mermaid.render_subgraph",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mermaid.render_subgraph",
+      "target": "func:claude_hooks.code_graph.mermaid._empty_diagram",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mermaid.render_subgraph",
+      "target": "func:claude_hooks.code_graph.mermaid._safe_id",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mermaid.render_subgraph",
+      "target": "func:claude_hooks.code_graph.mermaid._quote_label",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mermaid.render_subgraph",
+      "target": "func:claude_hooks.code_graph.mermaid._quote_label",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mermaid.render_subgraph",
+      "target": "func:claude_hooks.code_graph.mermaid._safe_id",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mermaid.render_subgraph",
+      "target": "func:claude_hooks.code_graph.mermaid._safe_id",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.mermaid",
+      "target": "func:claude_hooks.code_graph.mermaid._empty_diagram",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mermaid._empty_diagram",
+      "target": "func:claude_hooks.code_graph.mermaid._quote_label",
       "type": "calls",
       "tag": "INFERRED"
     },
@@ -26312,6 +27366,282 @@
       "tag": "EXTRACTED"
     },
     {
+      "source": "module:claude_hooks.code_graph.mcp_server",
+      "target": "func:claude_hooks.code_graph.mcp_server._resolve_root",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.mcp_server",
+      "target": "func:claude_hooks.code_graph.mcp_server.build_server",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server",
+      "target": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_lookup",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.mcp_server",
+      "target": "module:claude_hooks.code_graph.symbol_lookup",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_lookup",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_lookup",
+      "target": "func:claude_hooks.code_graph.mcp_server._resolve_root",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server",
+      "target": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_impact",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.mcp_server",
+      "target": "module:claude_hooks.code_graph.impact",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_impact",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_impact",
+      "target": "func:claude_hooks.code_graph.mcp_server._resolve_root",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_impact",
+      "target": "func:claude_hooks.code_graph.impact.resolve_target",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_impact",
+      "target": "func:claude_hooks.code_graph.impact.name_candidates",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_impact",
+      "target": "func:claude_hooks.code_graph.impact.format_disambig",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_impact",
+      "target": "func:claude_hooks.code_graph.impact.callers_of",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_impact",
+      "target": "func:claude_hooks.code_graph.impact.callees_of",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_impact",
+      "target": "func:claude_hooks.code_graph.impact.format_impact_report",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server",
+      "target": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_changes",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.mcp_server",
+      "target": "module:claude_hooks.code_graph.changes",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_changes",
+      "target": "func:claude_hooks.code_graph.changes.run_for_root",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_changes",
+      "target": "func:claude_hooks.code_graph.mcp_server._resolve_root",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server",
+      "target": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_trace",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.mcp_server",
+      "target": "module:claude_hooks.code_graph.impact",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.mcp_server",
+      "target": "module:claude_hooks.code_graph.trace",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_trace",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_trace",
+      "target": "func:claude_hooks.code_graph.mcp_server._resolve_root",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_trace",
+      "target": "func:claude_hooks.code_graph.impact.resolve_target",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_trace",
+      "target": "func:claude_hooks.code_graph.impact.name_candidates",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_trace",
+      "target": "func:claude_hooks.code_graph.impact.format_disambig",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_trace",
+      "target": "func:claude_hooks.code_graph.trace.trace",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_trace",
+      "target": "func:claude_hooks.code_graph.trace.format_trace_report",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server",
+      "target": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_mermaid",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.mcp_server",
+      "target": "module:claude_hooks.code_graph.impact",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.mcp_server",
+      "target": "module:claude_hooks.code_graph.mermaid",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_mermaid",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_mermaid",
+      "target": "func:claude_hooks.code_graph.mcp_server._resolve_root",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_mermaid",
+      "target": "func:claude_hooks.code_graph.impact.resolve_target",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_mermaid",
+      "target": "func:claude_hooks.code_graph.mermaid.render_subgraph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_mermaid",
+      "target": "func:claude_hooks.code_graph.mermaid.render_module_map",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server",
+      "target": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_companions",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.mcp_server",
+      "target": "module:claude_hooks.code_graph.detect",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.mcp_server",
+      "target": "module:claude_hooks.gitnexus_integration",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_companions",
+      "target": "func:claude_hooks.code_graph.mcp_server._resolve_root",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_companions",
+      "target": "func:claude_hooks.code_graph.detect.graph_json_path",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_companions",
+      "target": "func:claude_hooks.code_graph.detect.graph_json_path",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.mcp_server.build_server.code_graph_companions",
+      "target": "func:claude_hooks.code_graph.detect.graph_report_path",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.mcp_server",
+      "target": "func:claude_hooks.code_graph.mcp_server.main",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
       "source": "module:claude_hooks.code_graph.changes",
       "target": "module:claude_hooks.code_graph.impact",
       "type": "imports",
@@ -26418,6 +27748,48 @@
       "target": "func:claude_hooks.code_graph.changes.format_blast_radius_report",
       "type": "calls",
       "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.trace",
+      "target": "module:claude_hooks.code_graph.impact",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.trace",
+      "target": "class:claude_hooks.code_graph.trace.TraceNode",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.trace",
+      "target": "class:claude_hooks.code_graph.trace.Trace",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:claude_hooks.code_graph.trace.Trace",
+      "target": "func:claude_hooks.code_graph.trace.Trace.total",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.trace",
+      "target": "func:claude_hooks.code_graph.trace.enumerate_entrypoints",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.trace",
+      "target": "func:claude_hooks.code_graph.trace.trace",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.trace",
+      "target": "func:claude_hooks.code_graph.trace.format_trace_report",
+      "type": "contains",
+      "tag": "EXTRACTED"
     },
     {
       "source": "module:claude_hooks.hooks.session_end",
@@ -34216,6 +35588,654 @@
     {
       "source": "class:tests.test_providers.TestMemoryKgProvider",
       "target": "func:tests.test_providers.TestMemoryKgProvider.test_signature_tools",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.builder",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.impact",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "func:tests.test_code_graph_tier3._git_init",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "func:tests.test_code_graph_tier3._write",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "func:tests.test_code_graph_tier3.repo",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.repo",
+      "target": "func:claude_hooks.code_graph.builder.build_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "class:tests.test_code_graph_tier3.TestMermaid",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestMermaid",
+      "target": "func:tests.test_code_graph_tier3.TestMermaid.test_module_map_emits_flowchart",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.mermaid",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestMermaid.test_module_map_emits_flowchart",
+      "target": "func:claude_hooks.code_graph.mermaid.render_module_map",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestMermaid.test_module_map_emits_flowchart",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestMermaid",
+      "target": "func:tests.test_code_graph_tier3.TestMermaid.test_module_map_empty_graph",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.mermaid",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestMermaid.test_module_map_empty_graph",
+      "target": "func:claude_hooks.code_graph.mermaid.render_module_map",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestMermaid",
+      "target": "func:tests.test_code_graph_tier3.TestMermaid.test_module_map_caps_edges",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.mermaid",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestMermaid.test_module_map_caps_edges",
+      "target": "func:claude_hooks.code_graph.mermaid.render_module_map",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestMermaid.test_module_map_caps_edges",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestMermaid",
+      "target": "func:tests.test_code_graph_tier3.TestMermaid.test_subgraph_around_node",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.mermaid",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestMermaid.test_subgraph_around_node",
+      "target": "func:claude_hooks.code_graph.mermaid.render_subgraph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestMermaid.test_subgraph_around_node",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestMermaid",
+      "target": "func:tests.test_code_graph_tier3.TestMermaid.test_subgraph_unknown_node",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.mermaid",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestMermaid.test_subgraph_unknown_node",
+      "target": "func:claude_hooks.code_graph.mermaid.render_subgraph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestMermaid.test_subgraph_unknown_node",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestMermaid",
+      "target": "func:tests.test_code_graph_tier3.TestMermaid.test_safe_id_handles_dots_and_colons",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.mermaid",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestMermaid.test_safe_id_handles_dots_and_colons",
+      "target": "func:claude_hooks.code_graph.mermaid._safe_id",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestMermaid.test_safe_id_handles_dots_and_colons",
+      "target": "func:claude_hooks.code_graph.mermaid._safe_id",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestMermaid.test_safe_id_handles_dots_and_colons",
+      "target": "func:claude_hooks.code_graph.mermaid._safe_id",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "class:tests.test_code_graph_tier3.TestTrace",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestTrace",
+      "target": "func:tests.test_code_graph_tier3.TestTrace.test_enumerate_finds_main",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.trace",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestTrace.test_enumerate_finds_main",
+      "target": "func:claude_hooks.code_graph.trace.enumerate_entrypoints",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestTrace.test_enumerate_finds_main",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestTrace",
+      "target": "func:tests.test_code_graph_tier3.TestTrace.test_trace_walks_forward",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.trace",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestTrace.test_trace_walks_forward",
+      "target": "func:claude_hooks.code_graph.trace.trace",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestTrace.test_trace_walks_forward",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestTrace",
+      "target": "func:tests.test_code_graph_tier3.TestTrace.test_trace_respects_max_depth",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.trace",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestTrace.test_trace_respects_max_depth",
+      "target": "func:claude_hooks.code_graph.trace.trace",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestTrace.test_trace_respects_max_depth",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestTrace",
+      "target": "func:tests.test_code_graph_tier3.TestTrace.test_trace_truncates_at_node_cap",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.trace",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestTrace.test_trace_truncates_at_node_cap",
+      "target": "func:claude_hooks.code_graph.trace.trace",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestTrace.test_trace_truncates_at_node_cap",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestTrace",
+      "target": "func:tests.test_code_graph_tier3.TestTrace.test_trace_unknown_root",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.trace",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestTrace.test_trace_unknown_root",
+      "target": "func:claude_hooks.code_graph.trace.trace",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestTrace.test_trace_unknown_root",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestTrace",
+      "target": "func:tests.test_code_graph_tier3.TestTrace.test_trace_empty_root_returns_empty_trace",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.trace",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestTrace.test_trace_empty_root_returns_empty_trace",
+      "target": "func:claude_hooks.code_graph.trace.trace",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestTrace.test_trace_empty_root_returns_empty_trace",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestTrace",
+      "target": "func:tests.test_code_graph_tier3.TestTrace.test_format_trace_groups_by_depth",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.trace",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestTrace.test_format_trace_groups_by_depth",
+      "target": "func:claude_hooks.code_graph.trace.trace",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestTrace.test_format_trace_groups_by_depth",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestTrace.test_format_trace_groups_by_depth",
+      "target": "func:claude_hooks.code_graph.trace.format_trace_report",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestTrace.test_format_trace_groups_by_depth",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestTrace",
+      "target": "func:tests.test_code_graph_tier3.TestTrace.test_format_trace_handles_leaf",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.trace",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestTrace.test_format_trace_handles_leaf",
+      "target": "func:claude_hooks.code_graph.trace.trace",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestTrace.test_format_trace_handles_leaf",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestTrace.test_format_trace_handles_leaf",
+      "target": "func:claude_hooks.code_graph.trace.format_trace_report",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestTrace.test_format_trace_handles_leaf",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "class:tests.test_code_graph_tier3.TestClustering",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestClustering",
+      "target": "func:tests.test_code_graph_tier3.TestClustering.test_compute_returns_one_per_node",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.clustering",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestClustering.test_compute_returns_one_per_node",
+      "target": "func:claude_hooks.code_graph.clustering.compute_clusters",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestClustering.test_compute_returns_one_per_node",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestClustering",
+      "target": "func:tests.test_code_graph_tier3.TestClustering.test_summary_sorted_by_size",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.clustering",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestClustering.test_summary_sorted_by_size",
+      "target": "func:claude_hooks.code_graph.clustering.compute_clusters",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestClustering.test_summary_sorted_by_size",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestClustering.test_summary_sorted_by_size",
+      "target": "func:claude_hooks.code_graph.clustering.cluster_summary",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestClustering.test_summary_sorted_by_size",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestClustering",
+      "target": "func:tests.test_code_graph_tier3.TestClustering.test_summary_label_picks_common_prefix",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.clustering",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestClustering.test_summary_label_picks_common_prefix",
+      "target": "func:claude_hooks.code_graph.clustering._most_common_label",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestClustering.test_summary_label_picks_common_prefix",
+      "target": "func:claude_hooks.code_graph.clustering._most_common_label",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestClustering.test_summary_label_picks_common_prefix",
+      "target": "func:claude_hooks.code_graph.clustering._most_common_label",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestClustering",
+      "target": "func:tests.test_code_graph_tier3.TestClustering.test_empty_graph_returns_empty",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.clustering",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestClustering.test_empty_graph_returns_empty",
+      "target": "func:claude_hooks.code_graph.clustering.compute_clusters",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestClustering",
+      "target": "func:tests.test_code_graph_tier3.TestClustering.test_format_report_smoke",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.clustering",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestClustering.test_format_report_smoke",
+      "target": "func:claude_hooks.code_graph.clustering.compute_clusters",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestClustering.test_format_report_smoke",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestClustering.test_format_report_smoke",
+      "target": "func:claude_hooks.code_graph.clustering.cluster_summary",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestClustering.test_format_report_smoke",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestClustering.test_format_report_smoke",
+      "target": "func:claude_hooks.code_graph.clustering.format_cluster_report",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestClustering",
+      "target": "func:tests.test_code_graph_tier3.TestClustering.test_file_fallback_runs_without_louvain",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestClustering.test_file_fallback_runs_without_louvain",
+      "target": "func:claude_hooks.code_graph.clustering.compute_clusters",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestClustering.test_file_fallback_runs_without_louvain",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "class:tests.test_code_graph_tier3.TestMcpServer",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestMcpServer",
+      "target": "func:tests.test_code_graph_tier3.TestMcpServer.test_build_server_registers_tools",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "module:claude_hooks.code_graph.mcp_server",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_tier3.TestMcpServer.test_build_server_registers_tools",
+      "target": "func:claude_hooks.mcp_client.McpClient.list_tools",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_code_graph_tier3",
+      "target": "class:tests.test_code_graph_tier3.TestCli",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestCli",
+      "target": "func:tests.test_code_graph_tier3.TestCli._run",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestCli",
+      "target": "func:tests.test_code_graph_tier3.TestCli.test_trace_cli",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestCli",
+      "target": "func:tests.test_code_graph_tier3.TestCli.test_mermaid_cli_module_map",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestCli",
+      "target": "func:tests.test_code_graph_tier3.TestCli.test_mermaid_cli_centered",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_tier3.TestCli",
+      "target": "func:tests.test_code_graph_tier3.TestCli.test_clusters_cli",
       "type": "contains",
       "tag": "EXTRACTED"
     },

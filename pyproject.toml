@@ -34,6 +34,15 @@ sqlite-vec = ["sqlite-vec"]
 # package works (we lazy-probe at import time, preferring the actively
 # maintained fork).
 code-graph = ["tree-sitter-language-pack>=0.13"]
+# Optional community detection on top of code_graph. Both deps are pure
+# Python (MIT/BSD), no native build required. When installed,
+# ``code_graph.clustering`` uses Louvain modularity on the call graph
+# to find functional communities + per-node cohesion scores; absent →
+# graceful fallback to per-file clustering.
+clustering = ["python-louvain>=0.16", "networkx>=3.0"]
+# MCP server exposing code_graph features as callable tools.
+# Wire into Claude Code via ``~/.claude.json``'s ``mcpServers``.
+mcp-server = ["mcp[cli]>=1.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

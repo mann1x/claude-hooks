@@ -164,6 +164,35 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     p_companions.add_argument("--root", type=Path, default=Path.cwd())
 
+    p_trace = sub.add_parser(
+        "trace",
+        help="Forward call-chain trace from an entrypoint",
+    )
+    p_trace.add_argument("entrypoint",
+                         help="Symbol name / qualname / id to trace from")
+    p_trace.add_argument("--root", type=Path, default=Path.cwd())
+    p_trace.add_argument("--max-depth", type=int, default=8)
+    p_trace.add_argument("--max-nodes", type=int, default=200)
+
+    p_mermaid = sub.add_parser(
+        "mermaid",
+        help="Render a Mermaid module-map (or symbol subgraph with --center)",
+    )
+    p_mermaid.add_argument("--root", type=Path, default=Path.cwd())
+    p_mermaid.add_argument("--center", default=None,
+                           help="Symbol to center on (renders local subgraph)")
+    p_mermaid.add_argument("--depth", type=int, default=2,
+                           help="Subgraph depth when --center is set")
+    p_mermaid.add_argument("--top-n", type=int, default=15,
+                           help="Module count for the global map")
+
+    p_clusters = sub.add_parser(
+        "clusters",
+        help="Detect functional communities in the call graph",
+    )
+    p_clusters.add_argument("--root", type=Path, default=Path.cwd())
+    p_clusters.add_argument("--top-n", type=int, default=10)
+
     args = ap.parse_args(argv)
 
     if not args.quiet if hasattr(args, "quiet") else True:
@@ -241,6 +270,60 @@ def main(argv: Optional[list[str]] = None) -> int:
             max_depth=args.max_depth,
             include_untracked=args.include_untracked,
         ))
+        return 0
+
+    if args.cmd == "trace":
+        from claude_hooks.code_graph.impact import (
+            format_disambig, load_graph, name_candidates, resolve_target,
+        )
+        from claude_hooks.code_graph.trace import format_trace_report, trace
+        graph = load_graph(root)
+        if not graph:
+            print("no graph — run 'build' first", file=sys.stderr)
+            return 1
+        target = resolve_target(graph, args.entrypoint)
+        if target is None:
+            cands = name_candidates(graph, args.entrypoint)
+            if cands:
+                print(format_disambig(cands), file=sys.stderr)
+                return 1
+            print(f"no symbol matching {args.entrypoint!r}", file=sys.stderr)
+            return 1
+        t = trace(graph, target, max_depth=args.max_depth, max_nodes=args.max_nodes)
+        print(format_trace_report(graph, t))
+        return 0
+
+    if args.cmd == "mermaid":
+        from claude_hooks.code_graph.impact import load_graph, resolve_target
+        from claude_hooks.code_graph.mermaid import (
+            render_module_map, render_subgraph,
+        )
+        graph = load_graph(root)
+        if not graph:
+            print("flowchart LR\n    empty[\"no graph — run build first\"]")
+            return 0
+        if args.center:
+            target = resolve_target(graph, args.center)
+            if target is None:
+                print(f"flowchart LR\n    empty[\"unknown symbol: {args.center}\"]")
+                return 1
+            print(render_subgraph(graph, target, depth=args.depth))
+        else:
+            print(render_module_map(graph, top_n=args.top_n))
+        return 0
+
+    if args.cmd == "clusters":
+        from claude_hooks.code_graph.clustering import (
+            cluster_summary, compute_clusters, format_cluster_report,
+        )
+        from claude_hooks.code_graph.impact import load_graph
+        graph = load_graph(root)
+        if not graph:
+            print("no graph — run 'build' first", file=sys.stderr)
+            return 1
+        clusters = compute_clusters(graph)
+        summaries = cluster_summary(graph, clusters)
+        print(format_cluster_report(summaries, top_n=args.top_n))
         return 0
 
     if args.cmd == "companions":
