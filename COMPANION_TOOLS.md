@@ -308,15 +308,23 @@ transparent drop-in — `which gitnexus` still resolves and the
 companion_integration detects it normally. See `docker/gitnexus/README.md`
 for setup.
 
-**Known gitnexus 1.6.3 limitation on C# repos**: tree-sitter scope
-extraction fails (`"Invalid argument"`) on individual large C# files
-(30-100 KB range with complex generics / async patterns) — non-fatal,
-the file is dropped from the call graph but the index still builds.
-Auto-generated WinForms `*.Designer.cs` files trip a harder failure
-in scopeResolution (`"Cannot add property 1, object is not extensible"`)
-that abandons the entire index. Hiding `*.Designer.cs` files before
-indexing doesn't fully work (the bug recurs). Until upstream fixes,
-heavily-WinForms repos may not be indexable.
+**gitnexus 1.6.3 C# notes**: tree-sitter scope extraction can fail
+(`"Invalid argument"`) on individual large C# files (30-100 KB range
+with complex generics / async patterns). **Non-fatal** — the file is
+dropped from the call graph but the index still builds.
+
+A separate, harder failure that previously abandoned the entire C#
+index — `TypeError: Cannot add property N, object is not extensible`
+in `populateCsharpNamespaceSiblings` — has been fixed in
+[abhigyanpatwari/GitNexus#1083](https://github.com/abhigyanpatwari/GitNexus/pull/1083).
+Until that lands in an npm release, install from a fork build:
+
+```bash
+git clone https://github.com/mann1x/GitNexus  # or your own fork with the patch
+cd GitNexus/gitnexus
+npm install && npm run build && npm pack
+npm i -g ./gitnexus-1.6.3.tgz
+```
 
 **claude-hooks integration (automatic when detected):**
 - SessionStart inject appends a hint pointing at the `mcp__gitnexus__*`

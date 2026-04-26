@@ -16,5 +16,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN npm i -g gitnexus@latest && gitnexus --version
+
+# DEBUG: print original stack trace when a phase fails. The upstream
+# runner only surfaces err.message (with cause buried), which makes
+# bugs like "Cannot add property 1, object is not extensible" impossible
+# to triage. Patch in a single console.error before the rethrow.
+RUN sed -i \
+  's|const originalMessage = err instanceof Error|try { console.error("\\n[DEBUG]", phase.name, err \&\& err.stack); } catch {}\\n            const originalMessage = err instanceof Error|' \
+  /usr/local/lib/node_modules/gitnexus/dist/core/ingestion/pipeline-phases/runner.js
 WORKDIR /work
 ENTRYPOINT ["gitnexus"]
