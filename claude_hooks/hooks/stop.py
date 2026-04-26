@@ -78,25 +78,25 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
         except Exception as e:
             log.debug("code_graph Stop rebuild skipped: %s", e)
 
-    # gitnexus analyze: same pattern, complementary to code_graph.
-    # When the project has ``.gitnexus/`` and the turn modified files,
-    # spawn ``gitnexus analyze`` detached. Silent no-op if gitnexus
-    # isn't installed or the project hasn't been indexed.
-    gn_cfg = (config.get("hooks") or {}).get("gitnexus") or {}
+    # Companion engines (axon, gitnexus): when the project has been
+    # indexed by either and the turn modified files, spawn that engine's
+    # reindex. Silent no-op when neither tool is installed or the
+    # project hasn't been initialised.
+    comp_cfg = (config.get("hooks") or {}).get("companions") or {}
     if (
-        gn_cfg.get("enabled", True)
-        and gn_cfg.get("reindex_on_stop", True)
+        comp_cfg.get("enabled", True)
+        and comp_cfg.get("reindex_on_stop", True)
         and turn_modified
     ):
         try:
-            from claude_hooks.gitnexus_integration import reindex_if_dirty_async
+            from claude_hooks.companion_integration import reindex_if_dirty_async
             reindex_if_dirty_async(
                 cwd=event.get("cwd", ""),
                 turn_modified=True,
-                lock_min_age_seconds=int(gn_cfg.get("lock_min_age_seconds", 60)),
+                lock_min_age_seconds=int(comp_cfg.get("lock_min_age_seconds", 60)),
             )
         except Exception as e:
-            log.debug("gitnexus reindex skipped: %s", e)
+            log.debug("companion reindex skipped: %s", e)
 
     # Stop-phrase guard: if the assistant is about to stop with an
     # ownership-dodging or session-quitting phrase, block the stop and

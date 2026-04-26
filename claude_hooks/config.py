@@ -181,17 +181,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
             # many edits land in rapid succession.
             "rebuild_on_stop": True,
         },
-        "gitnexus": {
-            # Optional integrator for https://github.com/abhigyanpatwari/GitNexus
-            # — a heavier-weight code-graph engine with its own MCP
-            # server (impact, cypher, hybrid search, etc). When the
-            # binary is on PATH and the project has been indexed
-            # (``.gitnexus/`` exists), claude-hooks will:
-            #   * append a SessionStart hint pointing at the gitnexus
-            #     MCP tools so the model knows it can reach for them
-            #   * spawn ``gitnexus analyze`` on Stop when the turn
-            #     modified source files
-            # Silent no-op when gitnexus isn't installed.
+        "companions": {
+            # Coordinator for heavier-weight code-graph engines that
+            # claude-hooks integrates when present:
+            #   - axon     (https://github.com/harshkedia177/axon)
+            #     RECOMMENDED for Python/JS/TS repos. Pure-Python install
+            #     (`pip install axoniq`), KuzuDB-backed, dead-code
+            #     detection, watcher mode.
+            #   - gitnexus (https://github.com/abhigyanpatwari/GitNexus)
+            #     14 languages + multi-repo group_* queries. Pick when
+            #     you need languages outside Python/JS/TS.
+            # When either is detected (binary + .axon/ or .gitnexus/
+            # in the repo), the SessionStart hook appends a hint about
+            # its mcp__*__* tools, and the Stop hook spawns its
+            # reindexer when the turn modified files. Silent no-op
+            # when neither is installed.
             "enabled": True,
             "reindex_on_stop": True,
             "lock_min_age_seconds": 60,

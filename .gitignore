@@ -28,6 +28,10 @@ Thumbs.db
 # claudemem/mnemex index (local, machine-specific)
 .claudemem/
 
+# axon / gitnexus indices (local, machine-specific — per-host code graphs)
+.axon/
+.gitnexus/
+
 # Environment
 .env
 

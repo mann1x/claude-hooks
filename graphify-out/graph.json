@@ -3,18 +3,18 @@
   "multigraph": false,
   "graph": {
     "generated_by": "claude-hooks",
-    "generated_at": "2026-04-26T09:15:33Z",
+    "generated_at": "2026-04-26T10:02:27Z",
     "stats": {
-      "files_parsed": 125,
+      "files_parsed": 129,
       "files_cached": 0,
-      "nodes": 1977,
-      "edges": 4284,
-      "calls_resolved": 2107,
-      "calls_external": 6235,
-      "calls_ambiguous": 661,
-      "imports_external": 810,
+      "nodes": 2042,
+      "edges": 4337,
+      "calls_resolved": 2095,
+      "calls_external": 6369,
+      "calls_ambiguous": 747,
+      "imports_external": 825,
       "by_language": {
-        ".py": 125
+        ".py": 129
       },
       "parse_errors": 0
     }
@@ -73,12 +73,23 @@
       "is_async": false
     },
     {
+      "id": "func:install._ensure_code_graph_extras",
+      "type": "function",
+      "name": "_ensure_code_graph_extras",
+      "qualname": "install._ensure_code_graph_extras",
+      "file": "install.py",
+      "line": 399,
+      "tag": "EXTRACTED",
+      "doc": "Probe the conda env for each code_graph optional extra; offer to install.",
+      "is_async": false
+    },
+    {
       "id": "func:install._check_conda_env",
       "type": "function",
       "name": "_check_conda_env",
       "qualname": "install._check_conda_env",
       "file": "install.py",
-      "line": 363,
+      "line": 453,
       "tag": "EXTRACTED",
       "doc": "Check the conda env, offer to create it + install deps if missing.",
       "is_async": false
@@ -89,7 +100,7 @@
       "name": "main",
       "qualname": "install.main",
       "file": "install.py",
-      "line": 430,
+      "line": 520,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -100,7 +111,7 @@
       "name": "pick_provider",
       "qualname": "install.pick_provider",
       "file": "install.py",
-      "line": 576,
+      "line": 673,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -111,7 +122,7 @@
       "name": "user_settings_path",
       "qualname": "install.user_settings_path",
       "file": "install.py",
-      "line": 622,
+      "line": 719,
       "tag": "EXTRACTED",
       "doc": "Return the path to ~/.claude/settings.json (works on both OSes).",
       "is_async": false
@@ -122,7 +133,7 @@
       "name": "install_hooks",
       "qualname": "install.install_hooks",
       "file": "install.py",
-      "line": 627,
+      "line": 724,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -133,7 +144,7 @@
       "name": "uninstall",
       "qualname": "install.uninstall",
       "file": "install.py",
-      "line": 683,
+      "line": 780,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -144,7 +155,7 @@
       "name": "_is_our_hook",
       "qualname": "install._is_our_hook",
       "file": "install.py",
-      "line": 724,
+      "line": 821,
       "tag": "EXTRACTED",
       "doc": "Check if a hook entry belongs to claude-hooks (by tag or command pattern).",
       "is_async": false
@@ -155,7 +166,7 @@
       "name": "build_command",
       "qualname": "install.build_command",
       "file": "install.py",
-      "line": 734,
+      "line": 831,
       "tag": "EXTRACTED",
       "doc": "Return the literal hook command string for the current OS.",
       "is_async": false
@@ -166,7 +177,7 @@
       "name": "backup_path",
       "qualname": "install.backup_path",
       "file": "install.py",
-      "line": 748,
+      "line": 845,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -177,7 +188,7 @@
       "name": "_load_json",
       "qualname": "install._load_json",
       "file": "install.py",
-      "line": 753,
+      "line": 850,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -188,7 +199,7 @@
       "name": "_save_json",
       "qualname": "install._save_json",
       "file": "install.py",
-      "line": 763,
+      "line": 860,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -199,7 +210,7 @@
       "name": "_detect_companion_tools",
       "qualname": "install._detect_companion_tools",
       "file": "install.py",
-      "line": 796,
+      "line": 893,
       "tag": "EXTRACTED",
       "doc": "Check which companion tools are installed. Returns {name: bool}.",
       "is_async": false
@@ -210,7 +221,7 @@
       "name": "_ensure_marketplace",
       "qualname": "install._ensure_marketplace",
       "file": "install.py",
-      "line": 823,
+      "line": 920,
       "tag": "EXTRACTED",
       "doc": "Ensure the MadAppGang plugin marketplace is registered in settings.json.",
       "is_async": false
@@ -221,7 +232,7 @@
       "name": "_install_skills",
       "qualname": "install._install_skills",
       "file": "install.py",
-      "line": 867,
+      "line": 964,
       "tag": "EXTRACTED",
       "doc": "Copy skills from the repo to ~/.claude/skills/, respecting deps.",
       "is_async": false
@@ -232,7 +243,7 @@
       "name": "_setup_episodic",
       "qualname": "install._setup_episodic",
       "file": "install.py",
-      "line": 939,
+      "line": 1036,
       "tag": "EXTRACTED",
       "doc": "Configure episodic memory server or client mode.",
       "is_async": false
@@ -243,7 +254,7 @@
       "name": "_fix_plugin_paths",
       "qualname": "install._fix_plugin_paths",
       "file": "install.py",
-      "line": 1014,
+      "line": 1111,
       "tag": "EXTRACTED",
       "doc": "Fix stale paths in plugin JSON files.",
       "is_async": false
@@ -254,7 +265,7 @@
       "name": "_install_episodic_systemd",
       "qualname": "install._install_episodic_systemd",
       "file": "install.py",
-      "line": 1089,
+      "line": 1186,
       "tag": "EXTRACTED",
       "doc": "Install the episodic-server as a systemd service.",
       "is_async": false
@@ -265,7 +276,7 @@
       "name": "_prompt_env_vars",
       "qualname": "install._prompt_env_vars",
       "file": "install.py",
-      "line": 1164,
+      "line": 1261,
       "tag": "EXTRACTED",
       "doc": "Offer to inject opt-in Claude Code env-var recommendations into",
       "is_async": false
@@ -399,6 +410,146 @@
       "line": 265,
       "tag": "EXTRACTED",
       "doc": "Drop memories that don't match the filter criteria.",
+      "is_async": false
+    },
+    {
+      "id": "module:claude_hooks.axon_integration",
+      "type": "module",
+      "name": "claude_hooks.axon_integration",
+      "file": "claude_hooks/axon_integration.py",
+      "line": 1,
+      "tag": "EXTRACTED"
+    },
+    {
+      "id": "func:claude_hooks.axon_integration.binary_path",
+      "type": "function",
+      "name": "binary_path",
+      "qualname": "claude_hooks.axon_integration.binary_path",
+      "file": "claude_hooks/axon_integration.py",
+      "line": 48,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.axon_integration._global_registry",
+      "type": "function",
+      "name": "_global_registry",
+      "qualname": "claude_hooks.axon_integration._global_registry",
+      "file": "claude_hooks/axon_integration.py",
+      "line": 52,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.axon_integration._project_index_dir",
+      "type": "function",
+      "name": "_project_index_dir",
+      "qualname": "claude_hooks.axon_integration._project_index_dir",
+      "file": "claude_hooks/axon_integration.py",
+      "line": 57,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.axon_integration.is_available",
+      "type": "function",
+      "name": "is_available",
+      "qualname": "claude_hooks.axon_integration.is_available",
+      "file": "claude_hooks/axon_integration.py",
+      "line": 61,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.axon_integration.is_indexed",
+      "type": "function",
+      "name": "is_indexed",
+      "qualname": "claude_hooks.axon_integration.is_indexed",
+      "file": "claude_hooks/axon_integration.py",
+      "line": 69,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.axon_integration.status",
+      "type": "function",
+      "name": "status",
+      "qualname": "claude_hooks.axon_integration.status",
+      "file": "claude_hooks/axon_integration.py",
+      "line": 73,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.axon_integration._probe_version",
+      "type": "function",
+      "name": "_probe_version",
+      "qualname": "claude_hooks.axon_integration._probe_version",
+      "file": "claude_hooks/axon_integration.py",
+      "line": 83,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.axon_integration._acquire_lock",
+      "type": "function",
+      "name": "_acquire_lock",
+      "qualname": "claude_hooks.axon_integration._acquire_lock",
+      "file": "claude_hooks/axon_integration.py",
+      "line": 103,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.axon_integration._spawn_analyze",
+      "type": "function",
+      "name": "_spawn_analyze",
+      "qualname": "claude_hooks.axon_integration._spawn_analyze",
+      "file": "claude_hooks/axon_integration.py",
+      "line": 119,
+      "tag": "EXTRACTED",
+      "doc": "Detached ``axon analyze .`` for incremental update.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.axon_integration.reindex_if_dirty_async",
+      "type": "function",
+      "name": "reindex_if_dirty_async",
+      "qualname": "claude_hooks.axon_integration.reindex_if_dirty_async",
+      "file": "claude_hooks/axon_integration.py",
+      "line": 135,
+      "tag": "EXTRACTED",
+      "doc": "Detached ``axon analyze`` when the turn touched source files.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.axon_integration._find_marker_root",
+      "type": "function",
+      "name": "_find_marker_root",
+      "qualname": "claude_hooks.axon_integration._find_marker_root",
+      "file": "claude_hooks/axon_integration.py",
+      "line": 167,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.axon_integration.session_start_hint",
+      "type": "function",
+      "name": "session_start_hint",
+      "qualname": "claude_hooks.axon_integration.session_start_hint",
+      "file": "claude_hooks/axon_integration.py",
+      "line": 193,
+      "tag": "EXTRACTED",
+      "doc": "One-line markdown hint, or None when axon isn't here.",
       "is_async": false
     },
     {
@@ -687,7 +838,7 @@
       "name": "repo_root",
       "qualname": "claude_hooks.config.repo_root",
       "file": "claude_hooks/config.py",
-      "line": 343,
+      "line": 347,
       "tag": "EXTRACTED",
       "doc": "Path to the claude-hooks repo root (one level above this file's package).",
       "is_async": false
@@ -698,7 +849,7 @@
       "name": "default_config_path",
       "qualname": "claude_hooks.config.default_config_path",
       "file": "claude_hooks/config.py",
-      "line": 348,
+      "line": 352,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -709,7 +860,7 @@
       "name": "load_config",
       "qualname": "claude_hooks.config.load_config",
       "file": "claude_hooks/config.py",
-      "line": 352,
+      "line": 356,
       "tag": "EXTRACTED",
       "doc": "Load the config file from disk and merge it on top of DEFAULT_CONFIG.",
       "is_async": false
@@ -720,7 +871,7 @@
       "name": "save_config",
       "qualname": "claude_hooks.config.save_config",
       "file": "claude_hooks/config.py",
-      "line": 370,
+      "line": 374,
       "tag": "EXTRACTED",
       "doc": "Atomically write the config to disk and return the path.",
       "is_async": false
@@ -731,7 +882,7 @@
       "name": "_deep_merge",
       "qualname": "claude_hooks.config._deep_merge",
       "file": "claude_hooks/config.py",
-      "line": 382,
+      "line": 386,
       "tag": "EXTRACTED",
       "doc": "Recursively merge ``src`` into ``dst`` in place.",
       "is_async": false
@@ -742,7 +893,7 @@
       "name": "expand_user_path",
       "qualname": "claude_hooks.config.expand_user_path",
       "file": "claude_hooks/config.py",
-      "line": 391,
+      "line": 395,
       "tag": "EXTRACTED",
       "doc": "Expand ``~`` and environment variables in a path string.",
       "is_async": false
@@ -753,7 +904,7 @@
       "name": "project_disabled",
       "qualname": "claude_hooks.config.project_disabled",
       "file": "claude_hooks/config.py",
-      "line": 396,
+      "line": 400,
       "tag": "EXTRACTED",
       "doc": "Check whether ``cwd`` (or any ancestor up to root) contains the disable",
       "is_async": false
@@ -1434,7 +1585,7 @@
       "name": "binary_path",
       "qualname": "claude_hooks.gitnexus_integration.binary_path",
       "file": "claude_hooks/gitnexus_integration.py",
-      "line": 54,
+      "line": 43,
       "tag": "EXTRACTED",
       "doc": "Path to the gitnexus binary, or None.",
       "is_async": false
@@ -1445,7 +1596,7 @@
       "name": "_global_registry",
       "qualname": "claude_hooks.gitnexus_integration._global_registry",
       "file": "claude_hooks/gitnexus_integration.py",
-      "line": 59,
+      "line": 48,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -1456,7 +1607,7 @@
       "name": "_project_index_dir",
       "qualname": "claude_hooks.gitnexus_integration._project_index_dir",
       "file": "claude_hooks/gitnexus_integration.py",
-      "line": 64,
+      "line": 53,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -1467,7 +1618,7 @@
       "name": "is_available",
       "qualname": "claude_hooks.gitnexus_integration.is_available",
       "file": "claude_hooks/gitnexus_integration.py",
-      "line": 68,
+      "line": 57,
       "tag": "EXTRACTED",
       "doc": "True if gitnexus appears to be installed on this machine.",
       "is_async": false
@@ -1478,7 +1629,7 @@
       "name": "is_indexed",
       "qualname": "claude_hooks.gitnexus_integration.is_indexed",
       "file": "claude_hooks/gitnexus_integration.py",
-      "line": 81,
+      "line": 66,
       "tag": "EXTRACTED",
       "doc": "True iff ``root/.gitnexus/`` exists (project has a built index).",
       "is_async": false
@@ -1489,7 +1640,7 @@
       "name": "status",
       "qualname": "claude_hooks.gitnexus_integration.status",
       "file": "claude_hooks/gitnexus_integration.py",
-      "line": 90,
+      "line": 71,
       "tag": "EXTRACTED",
       "doc": "Summary dict \u2014 version, install state, project-index state.",
       "is_async": false
@@ -1500,9 +1651,9 @@
       "name": "_probe_version",
       "qualname": "claude_hooks.gitnexus_integration._probe_version",
       "file": "claude_hooks/gitnexus_integration.py",
-      "line": 102,
+      "line": 83,
       "tag": "EXTRACTED",
-      "doc": "Run ``gitnexus --version`` with a tight timeout. None on failure.",
+      "doc": null,
       "is_async": false
     },
     {
@@ -1511,7 +1662,7 @@
       "name": "_acquire_lock",
       "qualname": "claude_hooks.gitnexus_integration._acquire_lock",
       "file": "claude_hooks/gitnexus_integration.py",
-      "line": 123,
+      "line": 103,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -1522,7 +1673,7 @@
       "name": "_spawn_analyze",
       "qualname": "claude_hooks.gitnexus_integration._spawn_analyze",
       "file": "claude_hooks/gitnexus_integration.py",
-      "line": 139,
+      "line": 119,
       "tag": "EXTRACTED",
       "doc": "Detached ``gitnexus analyze`` for incremental update.",
       "is_async": false
@@ -1533,7 +1684,7 @@
       "name": "reindex_if_dirty_async",
       "qualname": "claude_hooks.gitnexus_integration.reindex_if_dirty_async",
       "file": "claude_hooks/gitnexus_integration.py",
-      "line": 155,
+      "line": 135,
       "tag": "EXTRACTED",
       "doc": "Detached gitnexus reindex when the turn touched source files.",
       "is_async": false
@@ -1544,7 +1695,7 @@
       "name": "_find_marker_root",
       "qualname": "claude_hooks.gitnexus_integration._find_marker_root",
       "file": "claude_hooks/gitnexus_integration.py",
-      "line": 193,
+      "line": 166,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -1555,9 +1706,50 @@
       "name": "session_start_hint",
       "qualname": "claude_hooks.gitnexus_integration.session_start_hint",
       "file": "claude_hooks/gitnexus_integration.py",
-      "line": 214,
+      "line": 187,
       "tag": "EXTRACTED",
-      "doc": "Return a one-line markdown hint, or None when gitnexus isn't here.",
+      "doc": "One-line hint, or None when gitnexus isn't here.",
+      "is_async": false
+    },
+    {
+      "id": "module:claude_hooks.companion_integration",
+      "type": "module",
+      "name": "claude_hooks.companion_integration",
+      "file": "claude_hooks/companion_integration.py",
+      "line": 1,
+      "tag": "EXTRACTED"
+    },
+    {
+      "id": "func:claude_hooks.companion_integration.status",
+      "type": "function",
+      "name": "status",
+      "qualname": "claude_hooks.companion_integration.status",
+      "file": "claude_hooks/companion_integration.py",
+      "line": 40,
+      "tag": "EXTRACTED",
+      "doc": "Detection summary for both engines, side-by-side.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.companion_integration.reindex_if_dirty_async",
+      "type": "function",
+      "name": "reindex_if_dirty_async",
+      "qualname": "claude_hooks.companion_integration.reindex_if_dirty_async",
+      "file": "claude_hooks/companion_integration.py",
+      "line": 48,
+      "tag": "EXTRACTED",
+      "doc": "Trigger reindex on whichever engine(s) have indexed this project.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.companion_integration.session_start_hint",
+      "type": "function",
+      "name": "session_start_hint",
+      "qualname": "claude_hooks.companion_integration.session_start_hint",
+      "file": "claude_hooks/companion_integration.py",
+      "line": 79,
+      "tag": "EXTRACTED",
+      "doc": "Combined hint mentioning whichever engines are present.",
       "is_async": false
     },
     {
@@ -5299,7 +5491,7 @@
       "name": "main",
       "qualname": "claude_hooks.code_graph.mcp_server.main",
       "file": "claude_hooks/code_graph/mcp_server.py",
-      "line": 259,
+      "line": 260,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -8810,6 +9002,262 @@
       "qualname": "tests.test_proxy_p3.TestBlockWarmup.test_block_warmup_false_forwards_warmup",
       "file": "tests/test_proxy_p3.py",
       "line": 194,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "module:tests.test_axon_integration",
+      "type": "module",
+      "name": "tests.test_axon_integration",
+      "file": "tests/test_axon_integration.py",
+      "line": 1,
+      "tag": "EXTRACTED"
+    },
+    {
+      "id": "func:tests.test_axon_integration._no_real_axon",
+      "type": "function",
+      "name": "_no_real_axon",
+      "qualname": "tests.test_axon_integration._no_real_axon",
+      "file": "tests/test_axon_integration.py",
+      "line": 11,
+      "tag": "EXTRACTED",
+      "doc": "Make sure detection never picks up a real axon install.",
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_axon_integration.TestDetection",
+      "type": "class",
+      "name": "TestDetection",
+      "qualname": "tests.test_axon_integration.TestDetection",
+      "file": "tests/test_axon_integration.py",
+      "line": 18,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_axon_integration.TestDetection.test_unavailable_when_nothing_present",
+      "type": "method",
+      "name": "test_unavailable_when_nothing_present",
+      "qualname": "tests.test_axon_integration.TestDetection.test_unavailable_when_nothing_present",
+      "file": "tests/test_axon_integration.py",
+      "line": 19,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_axon_integration.TestDetection.test_available_when_binary_on_path",
+      "type": "method",
+      "name": "test_available_when_binary_on_path",
+      "qualname": "tests.test_axon_integration.TestDetection.test_available_when_binary_on_path",
+      "file": "tests/test_axon_integration.py",
+      "line": 23,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_axon_integration.TestDetection.test_available_when_global_registry_present",
+      "type": "method",
+      "name": "test_available_when_global_registry_present",
+      "qualname": "tests.test_axon_integration.TestDetection.test_available_when_global_registry_present",
+      "file": "tests/test_axon_integration.py",
+      "line": 31,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_axon_integration.TestDetection.test_indexed_when_project_dir_exists",
+      "type": "method",
+      "name": "test_indexed_when_project_dir_exists",
+      "qualname": "tests.test_axon_integration.TestDetection.test_indexed_when_project_dir_exists",
+      "file": "tests/test_axon_integration.py",
+      "line": 37,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_axon_integration.TestDetection.test_not_indexed_when_dir_missing",
+      "type": "method",
+      "name": "test_not_indexed_when_dir_missing",
+      "qualname": "tests.test_axon_integration.TestDetection.test_not_indexed_when_dir_missing",
+      "file": "tests/test_axon_integration.py",
+      "line": 41,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_axon_integration.TestStatus",
+      "type": "class",
+      "name": "TestStatus",
+      "qualname": "tests.test_axon_integration.TestStatus",
+      "file": "tests/test_axon_integration.py",
+      "line": 45,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_axon_integration.TestStatus.test_when_nothing_installed",
+      "type": "method",
+      "name": "test_when_nothing_installed",
+      "qualname": "tests.test_axon_integration.TestStatus.test_when_nothing_installed",
+      "file": "tests/test_axon_integration.py",
+      "line": 46,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_axon_integration.TestStatus.test_when_indexed_and_installed",
+      "type": "method",
+      "name": "test_when_indexed_and_installed",
+      "qualname": "tests.test_axon_integration.TestStatus.test_when_indexed_and_installed",
+      "file": "tests/test_axon_integration.py",
+      "line": 52,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_axon_integration.TestHint",
+      "type": "class",
+      "name": "TestHint",
+      "qualname": "tests.test_axon_integration.TestHint",
+      "file": "tests/test_axon_integration.py",
+      "line": 65,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_axon_integration.TestHint.test_silent_when_not_present",
+      "type": "method",
+      "name": "test_silent_when_not_present",
+      "qualname": "tests.test_axon_integration.TestHint.test_silent_when_not_present",
+      "file": "tests/test_axon_integration.py",
+      "line": 66,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_axon_integration.TestHint.test_indexed_hint_mentions_mcp_tools",
+      "type": "method",
+      "name": "test_indexed_hint_mentions_mcp_tools",
+      "qualname": "tests.test_axon_integration.TestHint.test_indexed_hint_mentions_mcp_tools",
+      "file": "tests/test_axon_integration.py",
+      "line": 69,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_axon_integration.TestHint.test_installed_unindexed_hint",
+      "type": "method",
+      "name": "test_installed_unindexed_hint",
+      "qualname": "tests.test_axon_integration.TestHint.test_installed_unindexed_hint",
+      "file": "tests/test_axon_integration.py",
+      "line": 77,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_axon_integration.TestReindex",
+      "type": "class",
+      "name": "TestReindex",
+      "qualname": "tests.test_axon_integration.TestReindex",
+      "file": "tests/test_axon_integration.py",
+      "line": 85,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_axon_integration.TestReindex.test_no_op_when_unmodified",
+      "type": "method",
+      "name": "test_no_op_when_unmodified",
+      "qualname": "tests.test_axon_integration.TestReindex.test_no_op_when_unmodified",
+      "file": "tests/test_axon_integration.py",
+      "line": 86,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_axon_integration.TestReindex.test_no_op_without_binary",
+      "type": "method",
+      "name": "test_no_op_without_binary",
+      "qualname": "tests.test_axon_integration.TestReindex.test_no_op_without_binary",
+      "file": "tests/test_axon_integration.py",
+      "line": 89,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_axon_integration.TestReindex.test_spawns_when_indexed_and_present",
+      "type": "method",
+      "name": "test_spawns_when_indexed_and_present",
+      "qualname": "tests.test_axon_integration.TestReindex.test_spawns_when_indexed_and_present",
+      "file": "tests/test_axon_integration.py",
+      "line": 94,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_axon_integration.TestReindex.test_spawns_when_indexed_and_present._FakePopen",
+      "type": "class",
+      "name": "_FakePopen",
+      "qualname": "tests.test_axon_integration.TestReindex.test_spawns_when_indexed_and_present._FakePopen",
+      "file": "tests/test_axon_integration.py",
+      "line": 103,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_axon_integration.TestReindex.test_spawns_when_indexed_and_present._FakePopen.__init__",
+      "type": "method",
+      "name": "__init__",
+      "qualname": "tests.test_axon_integration.TestReindex.test_spawns_when_indexed_and_present._FakePopen.__init__",
+      "file": "tests/test_axon_integration.py",
+      "line": 104,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_axon_integration.TestReindex.test_lock_blocks_rapid_respawn",
+      "type": "method",
+      "name": "test_lock_blocks_rapid_respawn",
+      "qualname": "tests.test_axon_integration.TestReindex.test_lock_blocks_rapid_respawn",
+      "file": "tests/test_axon_integration.py",
+      "line": 113,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_axon_integration.TestReindex.test_no_op_when_not_indexed",
+      "type": "method",
+      "name": "test_no_op_when_not_indexed",
+      "qualname": "tests.test_axon_integration.TestReindex.test_no_op_when_not_indexed",
+      "file": "tests/test_axon_integration.py",
+      "line": 125,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_axon_integration.TestReindex.test_never_raises_on_garbage_cwd",
+      "type": "method",
+      "name": "test_never_raises_on_garbage_cwd",
+      "qualname": "tests.test_axon_integration.TestReindex.test_never_raises_on_garbage_cwd",
+      "file": "tests/test_axon_integration.py",
+      "line": 135,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -12640,6 +13088,253 @@
       "qualname": "tests.test_recall.TestRunRecallOpenWolf.test_openwolf_skipped_when_flag_false",
       "file": "tests/test_recall.py",
       "line": 199,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "module:tests.test_companion_integration",
+      "type": "module",
+      "name": "tests.test_companion_integration",
+      "file": "tests/test_companion_integration.py",
+      "line": 1,
+      "tag": "EXTRACTED"
+    },
+    {
+      "id": "func:tests.test_companion_integration._no_real_engines",
+      "type": "function",
+      "name": "_no_real_engines",
+      "qualname": "tests.test_companion_integration._no_real_engines",
+      "file": "tests/test_companion_integration.py",
+      "line": 15,
+      "tag": "EXTRACTED",
+      "doc": "Both engines invisible by default; tests opt back in selectively.",
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_companion_integration._apply_which_routes",
+      "type": "function",
+      "name": "_apply_which_routes",
+      "qualname": "tests.test_companion_integration._apply_which_routes",
+      "file": "tests/test_companion_integration.py",
+      "line": 30,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_companion_integration._enable_axon",
+      "type": "function",
+      "name": "_enable_axon",
+      "qualname": "tests.test_companion_integration._enable_axon",
+      "file": "tests/test_companion_integration.py",
+      "line": 35,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_companion_integration._enable_gitnexus",
+      "type": "function",
+      "name": "_enable_gitnexus",
+      "qualname": "tests.test_companion_integration._enable_gitnexus",
+      "file": "tests/test_companion_integration.py",
+      "line": 40,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_companion_integration._reset_which_routes",
+      "type": "function",
+      "name": "_reset_which_routes",
+      "qualname": "tests.test_companion_integration._reset_which_routes",
+      "file": "tests/test_companion_integration.py",
+      "line": 46,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_companion_integration.TestStatus",
+      "type": "class",
+      "name": "TestStatus",
+      "qualname": "tests.test_companion_integration.TestStatus",
+      "file": "tests/test_companion_integration.py",
+      "line": 52,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_companion_integration.TestStatus.test_status_dual_shape",
+      "type": "method",
+      "name": "test_status_dual_shape",
+      "qualname": "tests.test_companion_integration.TestStatus.test_status_dual_shape",
+      "file": "tests/test_companion_integration.py",
+      "line": 53,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_companion_integration.TestStatus.test_status_reflects_individual_engines",
+      "type": "method",
+      "name": "test_status_reflects_individual_engines",
+      "qualname": "tests.test_companion_integration.TestStatus.test_status_reflects_individual_engines",
+      "file": "tests/test_companion_integration.py",
+      "line": 58,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_companion_integration.TestSessionStartHint",
+      "type": "class",
+      "name": "TestSessionStartHint",
+      "qualname": "tests.test_companion_integration.TestSessionStartHint",
+      "file": "tests/test_companion_integration.py",
+      "line": 66,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_companion_integration.TestSessionStartHint.test_silent_when_neither_present",
+      "type": "method",
+      "name": "test_silent_when_neither_present",
+      "qualname": "tests.test_companion_integration.TestSessionStartHint.test_silent_when_neither_present",
+      "file": "tests/test_companion_integration.py",
+      "line": 67,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_companion_integration.TestSessionStartHint.test_axon_only",
+      "type": "method",
+      "name": "test_axon_only",
+      "qualname": "tests.test_companion_integration.TestSessionStartHint.test_axon_only",
+      "file": "tests/test_companion_integration.py",
+      "line": 70,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_companion_integration.TestSessionStartHint.test_gitnexus_only",
+      "type": "method",
+      "name": "test_gitnexus_only",
+      "qualname": "tests.test_companion_integration.TestSessionStartHint.test_gitnexus_only",
+      "file": "tests/test_companion_integration.py",
+      "line": 78,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_companion_integration.TestSessionStartHint.test_both_indexed_axon_first",
+      "type": "method",
+      "name": "test_both_indexed_axon_first",
+      "qualname": "tests.test_companion_integration.TestSessionStartHint.test_both_indexed_axon_first",
+      "file": "tests/test_companion_integration.py",
+      "line": 85,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_companion_integration.TestSessionStartHint.test_installed_but_unindexed_emits_hint",
+      "type": "method",
+      "name": "test_installed_but_unindexed_emits_hint",
+      "qualname": "tests.test_companion_integration.TestSessionStartHint.test_installed_but_unindexed_emits_hint",
+      "file": "tests/test_companion_integration.py",
+      "line": 95,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_companion_integration.TestReindex",
+      "type": "class",
+      "name": "TestReindex",
+      "qualname": "tests.test_companion_integration.TestReindex",
+      "file": "tests/test_companion_integration.py",
+      "line": 102,
+      "tag": "EXTRACTED",
+      "doc": "The two engine modules share the ``subprocess`` import, so we"
+    },
+    {
+      "id": "func:tests.test_companion_integration.TestReindex._install_spawn_capture",
+      "type": "method",
+      "name": "_install_spawn_capture",
+      "qualname": "tests.test_companion_integration.TestReindex._install_spawn_capture",
+      "file": "tests/test_companion_integration.py",
+      "line": 107,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_companion_integration.TestReindex._install_spawn_capture.fake_popen",
+      "type": "function",
+      "name": "fake_popen",
+      "qualname": "tests.test_companion_integration.TestReindex._install_spawn_capture.fake_popen",
+      "file": "tests/test_companion_integration.py",
+      "line": 110,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_companion_integration.TestReindex.test_no_op_when_unmodified",
+      "type": "method",
+      "name": "test_no_op_when_unmodified",
+      "qualname": "tests.test_companion_integration.TestReindex.test_no_op_when_unmodified",
+      "file": "tests/test_companion_integration.py",
+      "line": 121,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_companion_integration.TestReindex.test_routes_to_axon",
+      "type": "method",
+      "name": "test_routes_to_axon",
+      "qualname": "tests.test_companion_integration.TestReindex.test_routes_to_axon",
+      "file": "tests/test_companion_integration.py",
+      "line": 124,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_companion_integration.TestReindex.test_routes_to_gitnexus",
+      "type": "method",
+      "name": "test_routes_to_gitnexus",
+      "qualname": "tests.test_companion_integration.TestReindex.test_routes_to_gitnexus",
+      "file": "tests/test_companion_integration.py",
+      "line": 134,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_companion_integration.TestReindex.test_routes_to_both_when_both_indexed",
+      "type": "method",
+      "name": "test_routes_to_both_when_both_indexed",
+      "qualname": "tests.test_companion_integration.TestReindex.test_routes_to_both_when_both_indexed",
+      "file": "tests/test_companion_integration.py",
+      "line": 144,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_companion_integration.TestReindex.test_silent_no_op_when_neither",
+      "type": "method",
+      "name": "test_silent_no_op_when_neither",
+      "qualname": "tests.test_companion_integration.TestReindex.test_silent_no_op_when_neither",
+      "file": "tests/test_companion_integration.py",
+      "line": 155,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -21175,6 +21870,12 @@
     },
     {
       "source": "module:install",
+      "target": "func:install._ensure_code_graph_extras",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:install",
       "target": "func:install._check_conda_env",
       "type": "contains",
       "tag": "EXTRACTED"
@@ -21260,6 +21961,12 @@
     {
       "source": "func:install.main",
       "target": "func:install._ensure_proxy_deps",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:install.main",
+      "target": "func:install._ensure_code_graph_extras",
       "type": "calls",
       "tag": "INFERRED"
     },
@@ -21716,6 +22423,78 @@
     {
       "source": "module:claude_hooks.recall",
       "target": "func:claude_hooks.recall._apply_metadata_filter",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.axon_integration",
+      "target": "func:claude_hooks.axon_integration.binary_path",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.axon_integration",
+      "target": "func:claude_hooks.axon_integration._global_registry",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.axon_integration",
+      "target": "func:claude_hooks.axon_integration._project_index_dir",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.axon_integration",
+      "target": "func:claude_hooks.axon_integration.is_available",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.axon_integration",
+      "target": "func:claude_hooks.axon_integration.is_indexed",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.axon_integration",
+      "target": "func:claude_hooks.axon_integration.status",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.axon_integration",
+      "target": "func:claude_hooks.axon_integration._probe_version",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.axon_integration",
+      "target": "func:claude_hooks.axon_integration._acquire_lock",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.axon_integration",
+      "target": "func:claude_hooks.axon_integration._spawn_analyze",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.axon_integration",
+      "target": "func:claude_hooks.axon_integration.reindex_if_dirty_async",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.axon_integration",
+      "target": "func:claude_hooks.axon_integration._find_marker_root",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.axon_integration",
+      "target": "func:claude_hooks.axon_integration.session_start_hint",
       "type": "contains",
       "tag": "EXTRACTED"
     },
@@ -22710,28 +23489,10 @@
       "tag": "EXTRACTED"
     },
     {
-      "source": "func:claude_hooks.gitnexus_integration.is_available",
-      "target": "func:claude_hooks.gitnexus_integration.binary_path",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:claude_hooks.gitnexus_integration.is_available",
-      "target": "func:claude_hooks.gitnexus_integration._global_registry",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
       "source": "module:claude_hooks.gitnexus_integration",
       "target": "func:claude_hooks.gitnexus_integration.is_indexed",
       "type": "contains",
       "tag": "EXTRACTED"
-    },
-    {
-      "source": "func:claude_hooks.gitnexus_integration.is_indexed",
-      "target": "func:claude_hooks.gitnexus_integration._project_index_dir",
-      "type": "calls",
-      "tag": "INFERRED"
     },
     {
       "source": "module:claude_hooks.gitnexus_integration",
@@ -22740,58 +23501,10 @@
       "tag": "EXTRACTED"
     },
     {
-      "source": "func:claude_hooks.gitnexus_integration.status",
-      "target": "func:claude_hooks.gitnexus_integration.binary_path",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:claude_hooks.gitnexus_integration.status",
-      "target": "func:claude_hooks.gitnexus_integration._global_registry",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:claude_hooks.gitnexus_integration.status",
-      "target": "func:claude_hooks.gitnexus_integration._global_registry",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:claude_hooks.gitnexus_integration.status",
-      "target": "func:claude_hooks.gitnexus_integration.is_indexed",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:claude_hooks.gitnexus_integration.status",
-      "target": "func:claude_hooks.gitnexus_integration.is_indexed",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:claude_hooks.gitnexus_integration.status",
-      "target": "func:claude_hooks.gitnexus_integration._project_index_dir",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:claude_hooks.gitnexus_integration.status",
-      "target": "func:claude_hooks.gitnexus_integration._probe_version",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
       "source": "module:claude_hooks.gitnexus_integration",
       "target": "func:claude_hooks.gitnexus_integration._probe_version",
       "type": "contains",
       "tag": "EXTRACTED"
-    },
-    {
-      "source": "func:claude_hooks.gitnexus_integration._probe_version",
-      "target": "func:claude_hooks.gitnexus_integration.binary_path",
-      "type": "calls",
-      "tag": "INFERRED"
     },
     {
       "source": "module:claude_hooks.gitnexus_integration",
@@ -22812,30 +23525,6 @@
       "tag": "EXTRACTED"
     },
     {
-      "source": "func:claude_hooks.gitnexus_integration.reindex_if_dirty_async",
-      "target": "func:claude_hooks.gitnexus_integration.binary_path",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:claude_hooks.gitnexus_integration.reindex_if_dirty_async",
-      "target": "func:claude_hooks.gitnexus_integration._find_marker_root",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:claude_hooks.gitnexus_integration.reindex_if_dirty_async",
-      "target": "func:claude_hooks.gitnexus_integration.is_indexed",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:claude_hooks.gitnexus_integration.reindex_if_dirty_async",
-      "target": "func:claude_hooks.gitnexus_integration._spawn_analyze",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
       "source": "module:claude_hooks.gitnexus_integration",
       "target": "func:claude_hooks.gitnexus_integration._find_marker_root",
       "type": "contains",
@@ -22848,16 +23537,34 @@
       "tag": "EXTRACTED"
     },
     {
-      "source": "func:claude_hooks.gitnexus_integration.session_start_hint",
-      "target": "func:claude_hooks.gitnexus_integration.is_indexed",
-      "type": "calls",
-      "tag": "INFERRED"
+      "source": "module:claude_hooks.companion_integration",
+      "target": "module:claude_hooks",
+      "type": "imports",
+      "tag": "EXTRACTED"
     },
     {
-      "source": "func:claude_hooks.gitnexus_integration.session_start_hint",
-      "target": "func:claude_hooks.gitnexus_integration.is_indexed",
-      "type": "calls",
-      "tag": "INFERRED"
+      "source": "module:claude_hooks.companion_integration",
+      "target": "module:claude_hooks",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.companion_integration",
+      "target": "func:claude_hooks.companion_integration.status",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.companion_integration",
+      "target": "func:claude_hooks.companion_integration.reindex_if_dirty_async",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.companion_integration",
+      "target": "func:claude_hooks.companion_integration.session_start_hint",
+      "type": "contains",
+      "tag": "EXTRACTED"
     },
     {
       "source": "module:claude_hooks.decay",
@@ -26851,7 +27558,7 @@
     },
     {
       "source": "module:claude_hooks.code_graph.__main__",
-      "target": "module:claude_hooks.gitnexus_integration",
+      "target": "module:claude_hooks.companion_integration",
       "type": "imports",
       "tag": "EXTRACTED"
     },
@@ -27607,7 +28314,7 @@
     },
     {
       "source": "module:claude_hooks.code_graph.mcp_server",
-      "target": "module:claude_hooks.gitnexus_integration",
+      "target": "module:claude_hooks.companion_integration",
       "type": "imports",
       "tag": "EXTRACTED"
     },
@@ -27877,7 +28584,7 @@
     },
     {
       "source": "module:claude_hooks.hooks.stop",
-      "target": "module:claude_hooks.gitnexus_integration",
+      "target": "module:claude_hooks.companion_integration",
       "type": "imports",
       "tag": "EXTRACTED"
     },
@@ -28261,15 +28968,9 @@
     },
     {
       "source": "module:claude_hooks.hooks.session_start",
-      "target": "module:claude_hooks.gitnexus_integration",
+      "target": "module:claude_hooks.companion_integration",
       "type": "imports",
       "tag": "EXTRACTED"
-    },
-    {
-      "source": "func:claude_hooks.hooks.session_start.handle",
-      "target": "func:claude_hooks.gitnexus_integration.session_start_hint",
-      "type": "calls",
-      "tag": "INFERRED"
     },
     {
       "source": "module:claude_hooks.hooks.session_start",
@@ -31794,22 +32495,10 @@
       "tag": "EXTRACTED"
     },
     {
-      "source": "func:tests.test_gitnexus_integration.TestDetection.test_unavailable_when_nothing_present",
-      "target": "func:claude_hooks.gitnexus_integration.binary_path",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
       "source": "class:tests.test_gitnexus_integration.TestDetection",
       "target": "func:tests.test_gitnexus_integration.TestDetection.test_available_when_binary_on_path",
       "type": "contains",
       "tag": "EXTRACTED"
-    },
-    {
-      "source": "func:tests.test_gitnexus_integration.TestDetection.test_available_when_binary_on_path",
-      "target": "func:claude_hooks.gitnexus_integration.binary_path",
-      "type": "calls",
-      "tag": "INFERRED"
     },
     {
       "source": "class:tests.test_gitnexus_integration.TestDetection",
@@ -31824,22 +32513,10 @@
       "tag": "EXTRACTED"
     },
     {
-      "source": "func:tests.test_gitnexus_integration.TestDetection.test_indexed_when_project_dir_exists",
-      "target": "func:claude_hooks.gitnexus_integration.is_indexed",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
       "source": "class:tests.test_gitnexus_integration.TestDetection",
       "target": "func:tests.test_gitnexus_integration.TestDetection.test_not_indexed_when_dir_missing",
       "type": "contains",
       "tag": "EXTRACTED"
-    },
-    {
-      "source": "func:tests.test_gitnexus_integration.TestDetection.test_not_indexed_when_dir_missing",
-      "target": "func:claude_hooks.gitnexus_integration.is_indexed",
-      "type": "calls",
-      "tag": "INFERRED"
     },
     {
       "source": "module:tests.test_gitnexus_integration",
@@ -31854,22 +32531,10 @@
       "tag": "EXTRACTED"
     },
     {
-      "source": "func:tests.test_gitnexus_integration.TestStatus.test_status_when_nothing_installed",
-      "target": "func:claude_hooks.gitnexus_integration.status",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
       "source": "class:tests.test_gitnexus_integration.TestStatus",
       "target": "func:tests.test_gitnexus_integration.TestStatus.test_status_when_indexed_and_installed",
       "type": "contains",
       "tag": "EXTRACTED"
-    },
-    {
-      "source": "func:tests.test_gitnexus_integration.TestStatus.test_status_when_indexed_and_installed",
-      "target": "func:claude_hooks.gitnexus_integration.status",
-      "type": "calls",
-      "tag": "INFERRED"
     },
     {
       "source": "class:tests.test_gitnexus_integration.TestStatus",
@@ -31884,12 +32549,6 @@
       "tag": "EXTRACTED"
     },
     {
-      "source": "func:tests.test_gitnexus_integration.TestStatus.test_version_probe_swallows_errors",
-      "target": "func:claude_hooks.gitnexus_integration._probe_version",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
       "source": "module:tests.test_gitnexus_integration",
       "target": "class:tests.test_gitnexus_integration.TestHint",
       "type": "contains",
@@ -31902,34 +32561,16 @@
       "tag": "EXTRACTED"
     },
     {
-      "source": "func:tests.test_gitnexus_integration.TestHint.test_silent_when_not_present",
-      "target": "func:claude_hooks.gitnexus_integration.session_start_hint",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
       "source": "class:tests.test_gitnexus_integration.TestHint",
       "target": "func:tests.test_gitnexus_integration.TestHint.test_hint_when_indexed",
       "type": "contains",
       "tag": "EXTRACTED"
     },
     {
-      "source": "func:tests.test_gitnexus_integration.TestHint.test_hint_when_indexed",
-      "target": "func:claude_hooks.gitnexus_integration.session_start_hint",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
       "source": "class:tests.test_gitnexus_integration.TestHint",
       "target": "func:tests.test_gitnexus_integration.TestHint.test_hint_when_installed_but_unindexed",
       "type": "contains",
       "tag": "EXTRACTED"
-    },
-    {
-      "source": "func:tests.test_gitnexus_integration.TestHint.test_hint_when_installed_but_unindexed",
-      "target": "func:claude_hooks.gitnexus_integration.session_start_hint",
-      "type": "calls",
-      "tag": "INFERRED"
     },
     {
       "source": "module:tests.test_gitnexus_integration",
@@ -32788,6 +33429,150 @@
       "target": "func:tests.test_proxy_p3._post",
       "type": "calls",
       "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_axon_integration",
+      "target": "module:claude_hooks",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_axon_integration",
+      "target": "func:tests.test_axon_integration._no_real_axon",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_axon_integration",
+      "target": "class:tests.test_axon_integration.TestDetection",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_axon_integration.TestDetection",
+      "target": "func:tests.test_axon_integration.TestDetection.test_unavailable_when_nothing_present",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_axon_integration.TestDetection",
+      "target": "func:tests.test_axon_integration.TestDetection.test_available_when_binary_on_path",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_axon_integration.TestDetection",
+      "target": "func:tests.test_axon_integration.TestDetection.test_available_when_global_registry_present",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_axon_integration.TestDetection",
+      "target": "func:tests.test_axon_integration.TestDetection.test_indexed_when_project_dir_exists",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_axon_integration.TestDetection",
+      "target": "func:tests.test_axon_integration.TestDetection.test_not_indexed_when_dir_missing",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_axon_integration",
+      "target": "class:tests.test_axon_integration.TestStatus",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_axon_integration.TestStatus",
+      "target": "func:tests.test_axon_integration.TestStatus.test_when_nothing_installed",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_axon_integration.TestStatus",
+      "target": "func:tests.test_axon_integration.TestStatus.test_when_indexed_and_installed",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_axon_integration",
+      "target": "class:tests.test_axon_integration.TestHint",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_axon_integration.TestHint",
+      "target": "func:tests.test_axon_integration.TestHint.test_silent_when_not_present",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_axon_integration.TestHint",
+      "target": "func:tests.test_axon_integration.TestHint.test_indexed_hint_mentions_mcp_tools",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_axon_integration.TestHint",
+      "target": "func:tests.test_axon_integration.TestHint.test_installed_unindexed_hint",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_axon_integration",
+      "target": "class:tests.test_axon_integration.TestReindex",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_axon_integration.TestReindex",
+      "target": "func:tests.test_axon_integration.TestReindex.test_no_op_when_unmodified",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_axon_integration.TestReindex",
+      "target": "func:tests.test_axon_integration.TestReindex.test_no_op_without_binary",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_axon_integration.TestReindex",
+      "target": "func:tests.test_axon_integration.TestReindex.test_spawns_when_indexed_and_present",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_axon_integration.TestReindex.test_spawns_when_indexed_and_present",
+      "target": "class:tests.test_axon_integration.TestReindex.test_spawns_when_indexed_and_present._FakePopen",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_axon_integration.TestReindex.test_spawns_when_indexed_and_present._FakePopen",
+      "target": "func:tests.test_axon_integration.TestReindex.test_spawns_when_indexed_and_present._FakePopen.__init__",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_axon_integration.TestReindex",
+      "target": "func:tests.test_axon_integration.TestReindex.test_lock_blocks_rapid_respawn",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_axon_integration.TestReindex",
+      "target": "func:tests.test_axon_integration.TestReindex.test_no_op_when_not_indexed",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_axon_integration.TestReindex",
+      "target": "func:tests.test_axon_integration.TestReindex.test_never_raises_on_garbage_cwd",
+      "type": "contains",
+      "tag": "EXTRACTED"
     },
     {
       "source": "module:tests.test_sse_thinking",
@@ -37420,6 +38205,234 @@
       "target": "func:tests.conftest.base_config",
       "type": "calls",
       "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_companion_integration",
+      "target": "module:claude_hooks",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_companion_integration",
+      "target": "func:tests.test_companion_integration._no_real_engines",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_companion_integration",
+      "target": "func:tests.test_companion_integration._apply_which_routes",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_companion_integration",
+      "target": "func:tests.test_companion_integration._enable_axon",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_companion_integration._enable_axon",
+      "target": "func:tests.test_companion_integration._apply_which_routes",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_companion_integration",
+      "target": "func:tests.test_companion_integration._enable_gitnexus",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_companion_integration._enable_gitnexus",
+      "target": "func:tests.test_companion_integration._apply_which_routes",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_companion_integration",
+      "target": "func:tests.test_companion_integration._reset_which_routes",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_companion_integration",
+      "target": "class:tests.test_companion_integration.TestStatus",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_companion_integration.TestStatus",
+      "target": "func:tests.test_companion_integration.TestStatus.test_status_dual_shape",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_companion_integration.TestStatus",
+      "target": "func:tests.test_companion_integration.TestStatus.test_status_reflects_individual_engines",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_companion_integration.TestStatus.test_status_reflects_individual_engines",
+      "target": "func:tests.test_companion_integration._enable_axon",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_companion_integration",
+      "target": "class:tests.test_companion_integration.TestSessionStartHint",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_companion_integration.TestSessionStartHint",
+      "target": "func:tests.test_companion_integration.TestSessionStartHint.test_silent_when_neither_present",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_companion_integration.TestSessionStartHint",
+      "target": "func:tests.test_companion_integration.TestSessionStartHint.test_axon_only",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_companion_integration.TestSessionStartHint.test_axon_only",
+      "target": "func:tests.test_companion_integration._enable_axon",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_companion_integration.TestSessionStartHint",
+      "target": "func:tests.test_companion_integration.TestSessionStartHint.test_gitnexus_only",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_companion_integration.TestSessionStartHint.test_gitnexus_only",
+      "target": "func:tests.test_companion_integration._enable_gitnexus",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_companion_integration.TestSessionStartHint",
+      "target": "func:tests.test_companion_integration.TestSessionStartHint.test_both_indexed_axon_first",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_companion_integration.TestSessionStartHint.test_both_indexed_axon_first",
+      "target": "func:tests.test_companion_integration._enable_axon",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_companion_integration.TestSessionStartHint.test_both_indexed_axon_first",
+      "target": "func:tests.test_companion_integration._enable_gitnexus",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_companion_integration.TestSessionStartHint",
+      "target": "func:tests.test_companion_integration.TestSessionStartHint.test_installed_but_unindexed_emits_hint",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_companion_integration.TestSessionStartHint.test_installed_but_unindexed_emits_hint",
+      "target": "func:tests.test_companion_integration._enable_axon",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_companion_integration",
+      "target": "class:tests.test_companion_integration.TestReindex",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_companion_integration.TestReindex",
+      "target": "func:tests.test_companion_integration.TestReindex._install_spawn_capture",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_companion_integration.TestReindex._install_spawn_capture",
+      "target": "func:tests.test_companion_integration.TestReindex._install_spawn_capture.fake_popen",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_companion_integration.TestReindex",
+      "target": "func:tests.test_companion_integration.TestReindex.test_no_op_when_unmodified",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_companion_integration.TestReindex",
+      "target": "func:tests.test_companion_integration.TestReindex.test_routes_to_axon",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_companion_integration.TestReindex.test_routes_to_axon",
+      "target": "func:tests.test_companion_integration._enable_axon",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_companion_integration.TestReindex.test_routes_to_axon",
+      "target": "func:tests.test_companion_integration.TestReindex._install_spawn_capture",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_companion_integration.TestReindex",
+      "target": "func:tests.test_companion_integration.TestReindex.test_routes_to_gitnexus",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_companion_integration.TestReindex.test_routes_to_gitnexus",
+      "target": "func:tests.test_companion_integration._enable_gitnexus",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_companion_integration.TestReindex.test_routes_to_gitnexus",
+      "target": "func:tests.test_companion_integration.TestReindex._install_spawn_capture",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_companion_integration.TestReindex",
+      "target": "func:tests.test_companion_integration.TestReindex.test_routes_to_both_when_both_indexed",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_companion_integration.TestReindex.test_routes_to_both_when_both_indexed",
+      "target": "func:tests.test_companion_integration._enable_axon",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_companion_integration.TestReindex.test_routes_to_both_when_both_indexed",
+      "target": "func:tests.test_companion_integration._enable_gitnexus",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_companion_integration.TestReindex.test_routes_to_both_when_both_indexed",
+      "target": "func:tests.test_companion_integration.TestReindex._install_spawn_capture",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_companion_integration.TestReindex",
+      "target": "func:tests.test_companion_integration.TestReindex.test_silent_no_op_when_neither",
+      "type": "contains",
+      "tag": "EXTRACTED"
     },
     {
       "source": "module:tests.test_config",

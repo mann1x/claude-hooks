@@ -114,6 +114,57 @@ Claude responds (knowing the prior context, deterministically)
 - **Metadata-gated rerank** — `hooks.user_prompt_submit.metadata_filter`
   filters candidates by cwd / type / age / tags before vector rerank.
 
+### Code graph (v0.6+)
+
+A built-in, file-based code-structure graph (`graphify-out/graph.json`
++ `GRAPH_REPORT.md`) auto-built per project. Stdlib-only Python `ast`
+extractor; opt-in `[code-graph]` extra adds tree-sitter parsing for
+JS/TS/Go/Rust/Java/Ruby. SessionStart injects a 2-3 KB structural
+summary; per-Grep `code_graph_lookup_enabled` adds one-line "X is at
+file:line, N callers" hints when the pattern looks like an identifier.
+
+CLI subcommands (`python -m claude_hooks.code_graph ...`):
+
+| Command | What |
+|---|---|
+| `build` | Walk the tree, extract symbols + calls + imports, write graph.json + GRAPH_REPORT.md |
+| `info` | Print the graph's stats (file/node/edge counts, by-language) |
+| `impact <symbol>` | Transitive callers + callees of a symbol (blast radius before refactoring) |
+| `changes [--base REF]` | Blast-radius report for the current `git diff` (pre-commit / PR sanity check) |
+| `trace <entrypoint>` | Forward call-chain trace from an entry function ("how does X flow through the system?") |
+| `mermaid [--center SYM]` | Render a Mermaid module-map or local subgraph diagram |
+| `clusters` | Detect functional communities in the call graph (Louvain when `[clustering]` extra installed; file-based fallback otherwise) |
+| `companions` | Show detection state for axon + gitnexus + the local code graph |
+
+Optional extras:
+
+- **`pip install claude-hooks[code-graph]`** — `tree-sitter-language-pack` for multi-language parsing.
+- **`pip install claude-hooks[clustering]`** — `python-louvain` + `networkx` for Leiden-style community detection.
+- **`pip install claude-hooks[mcp-server]`** — `mcp[cli]` to spin up an MCP server (`python -m claude_hooks.code_graph.mcp_server`) exposing the lookup/impact/changes/trace/mermaid/companions tools to any MCP client (Claude Code, Cursor, etc.).
+
+### Companion code-graph engines
+
+When you want richer queries than the built-in `code_graph` provides,
+claude-hooks integrates with two heavier engines as **opt-in companion
+tools** (silent no-op when absent):
+
+- **[axon](https://github.com/harshkedia177/axon)** (RECOMMENDED for Python/JS/TS) — `pip install axoniq`,
+  KuzuDB-backed, dead-code detection, file watcher, 7 MCP tools.
+- **[gitnexus](https://github.com/abhigyanpatwari/GitNexus)** (ALTERNATIVE for 14 languages or multi-repo) — `npm i -g gitnexus`,
+  LadybugDB-backed, hybrid BM25+vector+RRF search, multi-repo `group_*` tools, 16 MCP tools.
+
+claude-hooks detects either via filesystem checks (binary on PATH +
+per-project marker dir + global registry), appends a `mcp__axon__*` /
+`mcp__gitnexus__*` hint to the SessionStart inject, and spawns the
+appropriate `analyze` on Stop when the turn modified files. Both can
+coexist; both reindex paths fire when their respective marker dirs
+are present. See [`COMPANION_TOOLS.md`](COMPANION_TOOLS.md) §6-7 for
+the install + comparison matrix.
+
+The built-in `code_graph` always runs as the floor; the companions
+upgrade specific dimensions (live MCP queries, dead-code detection,
+multi-language coverage) when present.
+
 ### Scripts
 
 | Script | What |

@@ -332,17 +332,16 @@ def main(argv: Optional[list[str]] = None) -> int:
             graph_report_path,
         )
         try:
-            from claude_hooks.gitnexus_integration import status as gn_status
+            from claude_hooks.companion_integration import status as comp_status
         except Exception:
-            gn_status = lambda _r: {"binary": None, "project_indexed": False}  # type: ignore
-        gn = gn_status(root)
+            comp_status = lambda _r: {"axon": {}, "gitnexus": {}}  # type: ignore
         report = {
             "code_graph": {
                 "graph_json": str(graph_json_path(root)),
                 "exists": graph_json_path(root).exists(),
                 "report": str(graph_report_path(root)),
             },
-            "gitnexus": gn,
+            **comp_status(root),
         }
         print(json.dumps(report, indent=2))
         return 0

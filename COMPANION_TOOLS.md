@@ -214,25 +214,81 @@ http://localhost:3847/tokens     # token budget view
 
 ---
 
-## 6. gitnexus -- MCP-native Code Knowledge Graph
+## 6. axon -- MCP-native Code Knowledge Graph (RECOMMENDED)
 
-**Importance: MEDIUM** -- Heavier-weight code-graph engine that indexes
-14 languages with cross-file resolution (constructor inference, heritage
-tracking, type annotations) into LadybugDB and exposes 16 MCP tools
-(`impact`, `context`, `cypher`, `query`, `detect_changes`, `rename`,
-hybrid BM25+vector search, group/multi-repo, ...). Where claude-hooks's
-built-in `code_graph` covers the always-available baseline (Python `ast`
-+ tree-sitter, file-based `graphify-out/graph.json`), gitnexus is the
-upgrade path for richer queries from inside Claude Code.
+**Importance: HIGH** -- Pure-Python code-intelligence engine that
+indexes Python/TS/JS into KuzuDB and exposes a focused MCP tool surface
+(`query`, `context`, `impact`, `dead_code`, `cypher`, `detect_changes`,
+`list_repos`). Best fit for the typical claude-hooks user (Python-heavy
+codebase, conda env already in place). Where claude-hooks's built-in
+`code_graph` covers the zero-config baseline, axon is the upgrade path
+for richer live queries from inside Claude Code.
 
 **What it brings (beyond `code_graph`):**
-- 16 MCP tools for graph queries (`mcp__gitnexus__impact`, ...,
-  `mcp__gitnexus__cypher`)
-- Hybrid search (BM25 + semantic vector + RRF) over symbols
-- Leiden community detection with cohesion scores
-- Cross-file constructor / heritage / interface resolution
-- Multi-repo "group" tools for cross-repo queries
-- Mermaid architecture diagrams via the `generate_map` MCP prompt
+- 7 MCP tools (`mcp__axon__query`, `mcp__axon__impact`, ...) callable
+  from any context, not just Grep
+- Live file watcher mode -- index updates as you edit
+- Hybrid search (BM25 + 384-d vector embeddings + fuzzy)
+- Leiden community detection with cohesion scoring
+- **Dead-code detection** (`axon_dead_code`) -- a feature gap our
+  built-in `code_graph` doesn't cover
+- Cypher graph queries against the embedded KuzuDB
+- Branch-diff structural comparison (`axon diff`)
+
+**Install (user-driven):**
+```bash
+pip install axoniq         # into your claude-hooks conda env
+axon analyze .             # one-time index build per repo
+axon setup --claude        # prints the MCP server JSON to add to ~/.claude.json
+```
+
+Then add to `~/.claude.json` `mcpServers`:
+```json
+{
+  "axon": {
+    "type": "stdio",
+    "command": "axon",
+    "args": ["serve", "--watch"]
+  }
+}
+```
+
+**claude-hooks integration (automatic when detected):**
+- SessionStart inject appends a one-line hint pointing at the
+  `mcp__axon__*` tools when `.axon/` is present in the repo
+- Stop hook spawns `axon analyze .` detached when the turn modified
+  source files (belt-and-braces -- axon's `serve --watch` already
+  re-indexes live; this catches sessions launched without `--watch`)
+- `python -m claude_hooks.code_graph companions` shows detection state
+- Silent no-op when axon isn't installed; `code_graph` still runs
+
+Toggles live under `hooks.companions` in `config/claude-hooks.json`
+(default `enabled: true` so detection just works).
+
+---
+
+## 7. gitnexus -- Multi-language Code Knowledge Graph (ALTERNATIVE)
+
+**Importance: MEDIUM** -- The 14-language alternative to axon. Indexes
+TS/JS/Python/Java/Kotlin/C#/Go/Rust/PHP/Ruby/Swift/C/C++/Dart with
+cross-file resolution (constructor inference, heritage tracking, type
+annotations) into LadybugDB and exposes 16 MCP tools including
+multi-repo `group_*` queries.
+
+**Pick gitnexus over axon when:**
+- You write languages outside Python/JS/TS (Java, Kotlin, Rust,
+  Swift, etc.)
+- You need cross-repo queries via `group_list`/`group_query`/etc.
+- You want Mermaid diagrams via the `generate_map` MCP prompt
+  (claude-hooks ships its own `code_graph mermaid` CLI as a
+  zero-dep alternative)
+
+**Pick axon over gitnexus when:**
+- Python/JS/TS only
+- You want the lightest install footprint (no Node.js + native
+  bindings, just `pip install`)
+- Dead-code detection is on your wishlist
+- You already have a conda env you'd rather not pollute with `npm`
 
 **Install (user-driven):**
 ```bash
@@ -242,15 +298,12 @@ gitnexus mcp install        # wires its MCP server into ~/.claude.json
 ```
 
 **claude-hooks integration (automatic when detected):**
-- SessionStart inject appends a one-line hint pointing at the
-  `mcp__gitnexus__*` tools, so the model knows to reach for them
-- Stop hook spawns `gitnexus analyze` (detached) when the turn
-  modified source files -- mirrors the `code_graph` rebuild trigger
-- `python -m claude_hooks.code_graph companions` shows detection state
-- Silent no-op when gitnexus isn't installed; `code_graph` still runs
-
-Toggles live under `hooks.gitnexus` in `config/claude-hooks.json`
-(default `enabled: true` so detection just works).
+- SessionStart inject appends a hint pointing at the `mcp__gitnexus__*`
+  tools when `.gitnexus/` is present
+- Stop hook spawns `gitnexus analyze` detached on file edits
+- Both axon and gitnexus can coexist in the same repo; both detection
+  paths fire and both reindex hooks trigger when their respective
+  marker dir is present
 
 ---
 
@@ -260,6 +313,7 @@ Toggles live under `hooks.gitnexus` in `config/claude-hooks.json`
 |------|-----------|---------------|-------------------|
 | **mnemex** | HIGH | `/code-analysis--claudemem-search` | `mnemex search/index/map/symbol/callers` |
 | **episodic-memory** | HIGH | `/episodic <query>` | `episodic-memory search/sync/show/stats` |
+| **axon** | HIGH | (via `mcp__axon__*` tools) | `axon analyze/serve/dead-code/cypher` |
 | **caliber** | MEDIUM | `/setup-caliber`, `/find-skills` | `caliber score/hooks/learn/refresh/skills` |
 | **claudekit** | MEDIUM | `/checkpoint:create/restore/list` | `claudekit-hooks profile` |
 | **gitnexus** | MEDIUM | (via `mcp__gitnexus__*` tools) | `gitnexus init/analyze/mcp` |

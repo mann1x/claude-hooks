@@ -227,7 +227,8 @@ def build_server(name: str = "claude-hooks-code-graph") -> FastMCP:
         """Report which optional code-intelligence tools are detected.
 
         Returns a JSON dump showing whether code_graph is built and
-        whether gitnexus is installed/indexed.
+        whether the supported companion engines (axon, gitnexus) are
+        installed/indexed for this project.
 
         Args:
             root: Project root.
@@ -236,9 +237,9 @@ def build_server(name: str = "claude-hooks-code-graph") -> FastMCP:
             graph_json_path, graph_report_path,
         )
         try:
-            from claude_hooks.gitnexus_integration import status as gn_status
+            from claude_hooks.companion_integration import status as comp_status
         except Exception:
-            gn_status = lambda _r: {"binary": None, "project_indexed": False}  # type: ignore
+            comp_status = lambda _r: {"axon": {}, "gitnexus": {}}  # type: ignore
         r = _resolve_root(root)
         return json.dumps({
             "code_graph": {
@@ -246,7 +247,7 @@ def build_server(name: str = "claude-hooks-code-graph") -> FastMCP:
                 "exists": graph_json_path(r).exists(),
                 "report": str(graph_report_path(r)),
             },
-            "gitnexus": gn_status(r),
+            **comp_status(r),
         }, indent=2)
 
     return mcp
