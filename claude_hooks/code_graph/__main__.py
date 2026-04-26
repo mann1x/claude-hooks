@@ -138,6 +138,32 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_info = sub.add_parser("info", help="Print stats about the existing graph")
     p_info.add_argument("--root", type=Path, default=Path.cwd())
 
+    p_impact = sub.add_parser(
+        "impact",
+        help="Show transitive callers + callees of a symbol (blast radius)",
+    )
+    p_impact.add_argument("symbol", help="Symbol name, qualname, or node id")
+    p_impact.add_argument("--root", type=Path, default=Path.cwd())
+    p_impact.add_argument("--max-depth", type=int, default=5,
+                          help="BFS depth cap (0 = unbounded)")
+
+    p_changes = sub.add_parser(
+        "changes",
+        help="Blast-radius report for the current git diff (vs HEAD)",
+    )
+    p_changes.add_argument("--root", type=Path, default=Path.cwd())
+    p_changes.add_argument("--base", default="HEAD",
+                           help="Diff base (default: HEAD — stages + working tree)")
+    p_changes.add_argument("--max-depth", type=int, default=5)
+    p_changes.add_argument("--include-untracked", action="store_true",
+                           help="Also analyse new files git hasn't tracked yet")
+
+    p_companions = sub.add_parser(
+        "companions",
+        help="Show which optional code-intelligence tools are detected",
+    )
+    p_companions.add_argument("--root", type=Path, default=Path.cwd())
+
     args = ap.parse_args(argv)
 
     if not args.quiet if hasattr(args, "quiet") else True:
@@ -177,6 +203,65 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"could not read graph: {e}", file=sys.stderr)
             return 1
         print(json.dumps(payload.get("graph", {}), indent=2))
+        return 0
+
+    if args.cmd == "impact":
+        from claude_hooks.code_graph.impact import (
+            callees_of,
+            callers_of,
+            format_disambig,
+            format_impact_report,
+            load_graph,
+            name_candidates,
+            resolve_target,
+        )
+        graph = load_graph(root)
+        if not graph:
+            print("no graph — run 'build' first", file=sys.stderr)
+            return 1
+        depth = None if args.max_depth == 0 else args.max_depth
+        target_id = resolve_target(graph, args.symbol)
+        if target_id is None:
+            cands = name_candidates(graph, args.symbol)
+            if cands:
+                print(format_disambig(cands), file=sys.stderr)
+                return 1
+            print(f"no symbol matching {args.symbol!r} in graph", file=sys.stderr)
+            return 1
+        callers = callers_of(graph, target_id, max_depth=depth)
+        callees = callees_of(graph, target_id, max_depth=depth)
+        print(format_impact_report(graph, target_id, callers, callees))
+        return 0
+
+    if args.cmd == "changes":
+        from claude_hooks.code_graph.changes import run_for_root
+        print(run_for_root(
+            root,
+            base=args.base,
+            max_depth=args.max_depth,
+            include_untracked=args.include_untracked,
+        ))
+        return 0
+
+    if args.cmd == "companions":
+        from claude_hooks.code_graph.detect import (
+            graph_json_path,
+            graph_report_path,
+        )
+        try:
+            from claude_hooks.gitnexus_integration import status as gn_status
+        except Exception:
+            gn_status = lambda _r: {"binary": None, "project_indexed": False}  # type: ignore
+        gn = gn_status(root)
+        report = {
+            "code_graph": {
+                "graph_json": str(graph_json_path(root)),
+                "exists": graph_json_path(root).exists(),
+                "report": str(graph_report_path(root)),
+            },
+            "gitnexus": gn,
+        }
+        print(json.dumps(report, indent=2))
         return 0
 
     return 2

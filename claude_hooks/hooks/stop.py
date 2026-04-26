@@ -34,6 +34,8 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     transcript_path = event.get("transcript_path")
     transcript = _read_transcript(transcript_path) if transcript_path else None
 
+    turn_modified = _turn_modified_files(transcript)
+
     # Claudemem reindex: if the turn touched files and the project has
     # a claudemem index, spawn a background reindex. Runs detached so
     # it never adds latency to the hook itself.
@@ -41,7 +43,7 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     if (
         reindex_cfg.get("enabled", True)
         and reindex_cfg.get("check_on_stop", True)
-        and _turn_modified_files(transcript)
+        and turn_modified
     ):
         try:
             from claude_hooks.claudemem_reindex import reindex_if_dirty_async
@@ -52,6 +54,49 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
             )
         except Exception as e:
             log.debug("claudemem reindex skipped: %s", e)
+
+    # code_graph rebuild: same pattern. If the turn modified source
+    # files, spawn a detached graph rebuild so the next session (or
+    # this session's next Grep symbol-lookup) sees fresh data. The
+    # builder's own cooldown lock prevents thrash when many edits
+    # land in rapid succession.
+    cg_cfg = (config.get("hooks") or {}).get("code_graph") or {}
+    if (
+        cg_cfg.get("enabled", True)
+        and cg_cfg.get("rebuild_on_stop", True)
+        and turn_modified
+    ):
+        try:
+            from claude_hooks.code_graph.__main__ import build_async as _cg_build_async
+            _cg_build_async(
+                cwd=event.get("cwd", ""),
+                cooldown_minutes=int(cg_cfg.get("staleness_minutes", 10)),
+                min_source_files=int(cg_cfg.get("min_source_files", 5)),
+                max_files_to_scan=int(cg_cfg.get("max_files_to_scan", 2000)),
+                lock_min_age_seconds=int(cg_cfg.get("lock_min_age_seconds", 60)),
+            )
+        except Exception as e:
+            log.debug("code_graph Stop rebuild skipped: %s", e)
+
+    # gitnexus analyze: same pattern, complementary to code_graph.
+    # When the project has ``.gitnexus/`` and the turn modified files,
+    # spawn ``gitnexus analyze`` detached. Silent no-op if gitnexus
+    # isn't installed or the project hasn't been indexed.
+    gn_cfg = (config.get("hooks") or {}).get("gitnexus") or {}
+    if (
+        gn_cfg.get("enabled", True)
+        and gn_cfg.get("reindex_on_stop", True)
+        and turn_modified
+    ):
+        try:
+            from claude_hooks.gitnexus_integration import reindex_if_dirty_async
+            reindex_if_dirty_async(
+                cwd=event.get("cwd", ""),
+                turn_modified=True,
+                lock_min_age_seconds=int(gn_cfg.get("lock_min_age_seconds", 60)),
+            )
+        except Exception as e:
+            log.debug("gitnexus reindex skipped: %s", e)
 
     # Stop-phrase guard: if the assistant is about to stop with an
     # ownership-dodging or session-quitting phrase, block the stop and

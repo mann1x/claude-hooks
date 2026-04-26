@@ -3,18 +3,18 @@
   "multigraph": false,
   "graph": {
     "generated_by": "claude-hooks",
-    "generated_at": "2026-04-26T07:28:07Z",
+    "generated_at": "2026-04-26T08:57:46Z",
     "stats": {
-      "files_parsed": 115,
+      "files_parsed": 120,
       "files_cached": 0,
-      "nodes": 1795,
-      "edges": 3839,
-      "calls_resolved": 1887,
-      "calls_external": 5622,
-      "calls_ambiguous": 580,
-      "imports_external": 741,
+      "nodes": 1908,
+      "edges": 4070,
+      "calls_resolved": 1996,
+      "calls_external": 5961,
+      "calls_ambiguous": 644,
+      "imports_external": 777,
       "by_language": {
-        ".py": 115
+        ".py": 120
       },
       "parse_errors": 0
     }
@@ -687,7 +687,7 @@
       "name": "repo_root",
       "qualname": "claude_hooks.config.repo_root",
       "file": "claude_hooks/config.py",
-      "line": 324,
+      "line": 343,
       "tag": "EXTRACTED",
       "doc": "Path to the claude-hooks repo root (one level above this file's package).",
       "is_async": false
@@ -698,7 +698,7 @@
       "name": "default_config_path",
       "qualname": "claude_hooks.config.default_config_path",
       "file": "claude_hooks/config.py",
-      "line": 329,
+      "line": 348,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -709,7 +709,7 @@
       "name": "load_config",
       "qualname": "claude_hooks.config.load_config",
       "file": "claude_hooks/config.py",
-      "line": 333,
+      "line": 352,
       "tag": "EXTRACTED",
       "doc": "Load the config file from disk and merge it on top of DEFAULT_CONFIG.",
       "is_async": false
@@ -720,7 +720,7 @@
       "name": "save_config",
       "qualname": "claude_hooks.config.save_config",
       "file": "claude_hooks/config.py",
-      "line": 351,
+      "line": 370,
       "tag": "EXTRACTED",
       "doc": "Atomically write the config to disk and return the path.",
       "is_async": false
@@ -731,7 +731,7 @@
       "name": "_deep_merge",
       "qualname": "claude_hooks.config._deep_merge",
       "file": "claude_hooks/config.py",
-      "line": 363,
+      "line": 382,
       "tag": "EXTRACTED",
       "doc": "Recursively merge ``src`` into ``dst`` in place.",
       "is_async": false
@@ -742,7 +742,7 @@
       "name": "expand_user_path",
       "qualname": "claude_hooks.config.expand_user_path",
       "file": "claude_hooks/config.py",
-      "line": 372,
+      "line": 391,
       "tag": "EXTRACTED",
       "doc": "Expand ``~`` and environment variables in a path string.",
       "is_async": false
@@ -753,7 +753,7 @@
       "name": "project_disabled",
       "qualname": "claude_hooks.config.project_disabled",
       "file": "claude_hooks/config.py",
-      "line": 377,
+      "line": 396,
       "tag": "EXTRACTED",
       "doc": "Check whether ``cwd`` (or any ancestor up to root) contains the disable",
       "is_async": false
@@ -1418,6 +1418,146 @@
       "line": 169,
       "tag": "EXTRACTED",
       "doc": "Build the Claude Code PreToolUse \"ask\" response JSON.",
+      "is_async": false
+    },
+    {
+      "id": "module:claude_hooks.gitnexus_integration",
+      "type": "module",
+      "name": "claude_hooks.gitnexus_integration",
+      "file": "claude_hooks/gitnexus_integration.py",
+      "line": 1,
+      "tag": "EXTRACTED"
+    },
+    {
+      "id": "func:claude_hooks.gitnexus_integration.binary_path",
+      "type": "function",
+      "name": "binary_path",
+      "qualname": "claude_hooks.gitnexus_integration.binary_path",
+      "file": "claude_hooks/gitnexus_integration.py",
+      "line": 54,
+      "tag": "EXTRACTED",
+      "doc": "Path to the gitnexus binary, or None.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.gitnexus_integration._global_registry",
+      "type": "function",
+      "name": "_global_registry",
+      "qualname": "claude_hooks.gitnexus_integration._global_registry",
+      "file": "claude_hooks/gitnexus_integration.py",
+      "line": 59,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.gitnexus_integration._project_index_dir",
+      "type": "function",
+      "name": "_project_index_dir",
+      "qualname": "claude_hooks.gitnexus_integration._project_index_dir",
+      "file": "claude_hooks/gitnexus_integration.py",
+      "line": 64,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.gitnexus_integration.is_available",
+      "type": "function",
+      "name": "is_available",
+      "qualname": "claude_hooks.gitnexus_integration.is_available",
+      "file": "claude_hooks/gitnexus_integration.py",
+      "line": 68,
+      "tag": "EXTRACTED",
+      "doc": "True if gitnexus appears to be installed on this machine.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.gitnexus_integration.is_indexed",
+      "type": "function",
+      "name": "is_indexed",
+      "qualname": "claude_hooks.gitnexus_integration.is_indexed",
+      "file": "claude_hooks/gitnexus_integration.py",
+      "line": 81,
+      "tag": "EXTRACTED",
+      "doc": "True iff ``root/.gitnexus/`` exists (project has a built index).",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.gitnexus_integration.status",
+      "type": "function",
+      "name": "status",
+      "qualname": "claude_hooks.gitnexus_integration.status",
+      "file": "claude_hooks/gitnexus_integration.py",
+      "line": 90,
+      "tag": "EXTRACTED",
+      "doc": "Summary dict \u2014 version, install state, project-index state.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.gitnexus_integration._probe_version",
+      "type": "function",
+      "name": "_probe_version",
+      "qualname": "claude_hooks.gitnexus_integration._probe_version",
+      "file": "claude_hooks/gitnexus_integration.py",
+      "line": 102,
+      "tag": "EXTRACTED",
+      "doc": "Run ``gitnexus --version`` with a tight timeout. None on failure.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.gitnexus_integration._acquire_lock",
+      "type": "function",
+      "name": "_acquire_lock",
+      "qualname": "claude_hooks.gitnexus_integration._acquire_lock",
+      "file": "claude_hooks/gitnexus_integration.py",
+      "line": 123,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.gitnexus_integration._spawn_analyze",
+      "type": "function",
+      "name": "_spawn_analyze",
+      "qualname": "claude_hooks.gitnexus_integration._spawn_analyze",
+      "file": "claude_hooks/gitnexus_integration.py",
+      "line": 139,
+      "tag": "EXTRACTED",
+      "doc": "Detached ``gitnexus analyze`` for incremental update.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.gitnexus_integration.reindex_if_dirty_async",
+      "type": "function",
+      "name": "reindex_if_dirty_async",
+      "qualname": "claude_hooks.gitnexus_integration.reindex_if_dirty_async",
+      "file": "claude_hooks/gitnexus_integration.py",
+      "line": 155,
+      "tag": "EXTRACTED",
+      "doc": "Detached gitnexus reindex when the turn touched source files.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.gitnexus_integration._find_marker_root",
+      "type": "function",
+      "name": "_find_marker_root",
+      "qualname": "claude_hooks.gitnexus_integration._find_marker_root",
+      "file": "claude_hooks/gitnexus_integration.py",
+      "line": 193,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.gitnexus_integration.session_start_hint",
+      "type": "function",
+      "name": "session_start_hint",
+      "qualname": "claude_hooks.gitnexus_integration.session_start_hint",
+      "file": "claude_hooks/gitnexus_integration.py",
+      "line": 214,
+      "tag": "EXTRACTED",
+      "doc": "Return a one-line markdown hint, or None when gitnexus isn't here.",
       "is_async": false
     },
     {
@@ -4262,6 +4402,124 @@
       "is_async": false
     },
     {
+      "id": "module:claude_hooks.code_graph.impact",
+      "type": "module",
+      "name": "claude_hooks.code_graph.impact",
+      "file": "claude_hooks/code_graph/impact.py",
+      "line": 1,
+      "tag": "EXTRACTED"
+    },
+    {
+      "id": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "function",
+      "name": "load_graph",
+      "qualname": "claude_hooks.code_graph.impact.load_graph",
+      "file": "claude_hooks/code_graph/impact.py",
+      "line": 43,
+      "tag": "EXTRACTED",
+      "doc": "Read graph.json. Returns ``{}`` on any failure.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.impact.resolve_target",
+      "type": "function",
+      "name": "resolve_target",
+      "qualname": "claude_hooks.code_graph.impact.resolve_target",
+      "file": "claude_hooks/code_graph/impact.py",
+      "line": 59,
+      "tag": "EXTRACTED",
+      "doc": "Convert a name-like ref to a graph node id, or None.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.impact.name_candidates",
+      "type": "function",
+      "name": "name_candidates",
+      "qualname": "claude_hooks.code_graph.impact.name_candidates",
+      "file": "claude_hooks/code_graph/impact.py",
+      "line": 102,
+      "tag": "EXTRACTED",
+      "doc": "Return all matching nodes for a ref. Used to print disambig hints.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.impact._build_adjacency",
+      "type": "function",
+      "name": "_build_adjacency",
+      "qualname": "claude_hooks.code_graph.impact._build_adjacency",
+      "file": "claude_hooks/code_graph/impact.py",
+      "line": 118,
+      "tag": "EXTRACTED",
+      "doc": "Return (predecessors, successors) for the calls + contains subgraphs.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.impact.callers_of",
+      "type": "function",
+      "name": "callers_of",
+      "qualname": "claude_hooks.code_graph.impact.callers_of",
+      "file": "claude_hooks/code_graph/impact.py",
+      "line": 147,
+      "tag": "EXTRACTED",
+      "doc": "BFS upstream. Returns ``[(id, depth), ...]`` excluding the seed.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.impact.callees_of",
+      "type": "function",
+      "name": "callees_of",
+      "qualname": "claude_hooks.code_graph.impact.callees_of",
+      "file": "claude_hooks/code_graph/impact.py",
+      "line": 164,
+      "tag": "EXTRACTED",
+      "doc": "BFS downstream. Returns ``[(id, depth), ...]`` excluding the seed.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.impact._bfs",
+      "type": "function",
+      "name": "_bfs",
+      "qualname": "claude_hooks.code_graph.impact._bfs",
+      "file": "claude_hooks/code_graph/impact.py",
+      "line": 176,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.impact.files_touched",
+      "type": "function",
+      "name": "files_touched",
+      "qualname": "claude_hooks.code_graph.impact.files_touched",
+      "file": "claude_hooks/code_graph/impact.py",
+      "line": 219,
+      "tag": "EXTRACTED",
+      "doc": "Group node ids by their containing file.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.impact.format_impact_report",
+      "type": "function",
+      "name": "format_impact_report",
+      "qualname": "claude_hooks.code_graph.impact.format_impact_report",
+      "file": "claude_hooks/code_graph/impact.py",
+      "line": 236,
+      "tag": "EXTRACTED",
+      "doc": "Markdown report mirroring gitnexus's ``impact`` shape.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.impact.format_disambig",
+      "type": "function",
+      "name": "format_disambig",
+      "qualname": "claude_hooks.code_graph.impact.format_disambig",
+      "file": "claude_hooks/code_graph/impact.py",
+      "line": 295,
+      "tag": "EXTRACTED",
+      "doc": "Render a 'did you mean?' list when a bare name has multiple defs.",
+      "is_async": false
+    },
+    {
       "id": "module:claude_hooks.code_graph.detect",
       "type": "module",
       "name": "claude_hooks.code_graph.detect",
@@ -4760,6 +5018,101 @@
       "is_async": false
     },
     {
+      "id": "module:claude_hooks.code_graph.changes",
+      "type": "module",
+      "name": "claude_hooks.code_graph.changes",
+      "file": "claude_hooks/code_graph/changes.py",
+      "line": 1,
+      "tag": "EXTRACTED"
+    },
+    {
+      "id": "class:claude_hooks.code_graph.changes.BlastEntry",
+      "type": "class",
+      "name": "BlastEntry",
+      "qualname": "claude_hooks.code_graph.changes.BlastEntry",
+      "file": "claude_hooks/code_graph/changes.py",
+      "line": 38,
+      "tag": "EXTRACTED",
+      "doc": "One changed symbol + its impact set."
+    },
+    {
+      "id": "func:claude_hooks.code_graph.changes.BlastEntry.caller_count",
+      "type": "method",
+      "name": "caller_count",
+      "qualname": "claude_hooks.code_graph.changes.BlastEntry.caller_count",
+      "file": "claude_hooks/code_graph/changes.py",
+      "line": 44,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.changes.git_changed_files",
+      "type": "function",
+      "name": "git_changed_files",
+      "qualname": "claude_hooks.code_graph.changes.git_changed_files",
+      "file": "claude_hooks/code_graph/changes.py",
+      "line": 52,
+      "tag": "EXTRACTED",
+      "doc": "Files that differ between ``base`` and the working tree.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.changes._git",
+      "type": "function",
+      "name": "_git",
+      "qualname": "claude_hooks.code_graph.changes._git",
+      "file": "claude_hooks/code_graph/changes.py",
+      "line": 80,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.changes.symbols_in_files",
+      "type": "function",
+      "name": "symbols_in_files",
+      "qualname": "claude_hooks.code_graph.changes.symbols_in_files",
+      "file": "claude_hooks/code_graph/changes.py",
+      "line": 100,
+      "tag": "EXTRACTED",
+      "doc": "All function/method/class nodes whose ``file`` is in ``files``.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.changes.blast_radius",
+      "type": "function",
+      "name": "blast_radius",
+      "qualname": "claude_hooks.code_graph.changes.blast_radius",
+      "file": "claude_hooks/code_graph/changes.py",
+      "line": 116,
+      "tag": "EXTRACTED",
+      "doc": "For every symbol defined in ``files``, walk callers up to depth.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.changes.format_blast_radius_report",
+      "type": "function",
+      "name": "format_blast_radius_report",
+      "qualname": "claude_hooks.code_graph.changes.format_blast_radius_report",
+      "file": "claude_hooks/code_graph/changes.py",
+      "line": 139,
+      "tag": "EXTRACTED",
+      "doc": "Markdown report. One-line summary up top, then per-symbol detail.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.changes.run_for_root",
+      "type": "function",
+      "name": "run_for_root",
+      "qualname": "claude_hooks.code_graph.changes.run_for_root",
+      "file": "claude_hooks/code_graph/changes.py",
+      "line": 195,
+      "tag": "EXTRACTED",
+      "doc": "One-shot: load graph, diff, compute, render. Always returns markdown.",
+      "is_async": false
+    },
+    {
       "id": "module:claude_hooks.hooks.session_end",
       "type": "module",
       "name": "claude_hooks.hooks.session_end",
@@ -4825,7 +5178,7 @@
       "name": "_read_transcript",
       "qualname": "claude_hooks.hooks.stop._read_transcript",
       "file": "claude_hooks/hooks/stop.py",
-      "line": 170,
+      "line": 215,
       "tag": "EXTRACTED",
       "doc": "Load a JSONL transcript file. Returns None on any error.",
       "is_async": false
@@ -4836,7 +5189,7 @@
       "name": "_msg_role",
       "qualname": "claude_hooks.hooks.stop._msg_role",
       "file": "claude_hooks/hooks/stop.py",
-      "line": 191,
+      "line": 236,
       "tag": "EXTRACTED",
       "doc": "Extract the role from a transcript message.",
       "is_async": false
@@ -4847,7 +5200,7 @@
       "name": "_find_last_user_idx",
       "qualname": "claude_hooks.hooks.stop._find_last_user_idx",
       "file": "claude_hooks/hooks/stop.py",
-      "line": 196,
+      "line": 241,
       "tag": "EXTRACTED",
       "doc": "Return the index of the last user message, or -1 if none.",
       "is_async": false
@@ -4858,7 +5211,7 @@
       "name": "_turn_modified_files",
       "qualname": "claude_hooks.hooks.stop._turn_modified_files",
       "file": "claude_hooks/hooks/stop.py",
-      "line": 205,
+      "line": 250,
       "tag": "EXTRACTED",
       "doc": "Return True if the most recent turn called Edit/Write/MultiEdit.",
       "is_async": false
@@ -4869,7 +5222,7 @@
       "name": "_is_noteworthy",
       "qualname": "claude_hooks.hooks.stop._is_noteworthy",
       "file": "claude_hooks/hooks/stop.py",
-      "line": 225,
+      "line": 270,
       "tag": "EXTRACTED",
       "doc": "Decide whether the most recent turn was worth remembering.",
       "is_async": false
@@ -4880,7 +5233,7 @@
       "name": "_build_summary",
       "qualname": "claude_hooks.hooks.stop._build_summary",
       "file": "claude_hooks/hooks/stop.py",
-      "line": 256,
+      "line": 301,
       "tag": "EXTRACTED",
       "doc": "Build a stored summary of the most recent turn.",
       "is_async": false
@@ -4891,7 +5244,7 @@
       "name": "_build_summary_markdown",
       "qualname": "claude_hooks.hooks.stop._build_summary_markdown",
       "file": "claude_hooks/hooks/stop.py",
-      "line": 336,
+      "line": 381,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -4902,7 +5255,7 @@
       "name": "_build_summary_xml",
       "qualname": "claude_hooks.hooks.stop._build_summary_xml",
       "file": "claude_hooks/hooks/stop.py",
-      "line": 357,
+      "line": 402,
       "tag": "EXTRACTED",
       "doc": "Structured observation layout (ported from thedotmack/claude-mem).",
       "is_async": false
@@ -4913,7 +5266,7 @@
       "name": "esc",
       "qualname": "claude_hooks.hooks.stop._build_summary_xml.esc",
       "file": "claude_hooks/hooks/stop.py",
-      "line": 376,
+      "line": 421,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -4924,7 +5277,7 @@
       "name": "_extract_xml_observation_type",
       "qualname": "claude_hooks.hooks.stop._extract_xml_observation_type",
       "file": "claude_hooks/hooks/stop.py",
-      "line": 409,
+      "line": 454,
       "tag": "EXTRACTED",
       "doc": "Parse ``<type>\u2026</type>`` from an XML observation summary.",
       "is_async": false
@@ -4935,7 +5288,7 @@
       "name": "_classify_turn_type",
       "qualname": "claude_hooks.hooks.stop._classify_turn_type",
       "file": "claude_hooks/hooks/stop.py",
-      "line": 438,
+      "line": 483,
       "tag": "EXTRACTED",
       "doc": "Very lightweight classifier for the XML ``<type>`` field.",
       "is_async": false
@@ -4946,7 +5299,7 @@
       "name": "_derive_title",
       "qualname": "claude_hooks.hooks.stop._derive_title",
       "file": "claude_hooks/hooks/stop.py",
-      "line": 456,
+      "line": 501,
       "tag": "EXTRACTED",
       "doc": "Pick the most informative single-line title for the observation.",
       "is_async": false
@@ -4957,7 +5310,7 @@
       "name": "_extract_text",
       "qualname": "claude_hooks.hooks.stop._extract_text",
       "file": "claude_hooks/hooks/stop.py",
-      "line": 473,
+      "line": 518,
       "tag": "EXTRACTED",
       "doc": "Extract plain text from a transcript message regardless of shape.",
       "is_async": false
@@ -4968,7 +5321,7 @@
       "name": "_strip_system_tags",
       "qualname": "claude_hooks.hooks.stop._strip_system_tags",
       "file": "claude_hooks/hooks/stop.py",
-      "line": 502,
+      "line": 547,
       "tag": "EXTRACTED",
       "doc": "Remove ``<system-reminder>\u2026</system-reminder>`` and similar",
       "is_async": false
@@ -4979,7 +5332,7 @@
       "name": "_truncate",
       "qualname": "claude_hooks.hooks.stop._truncate",
       "file": "claude_hooks/hooks/stop.py",
-      "line": 560,
+      "line": 605,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -4990,7 +5343,7 @@
       "name": "_classify_observation",
       "qualname": "claude_hooks.hooks.stop._classify_observation",
       "file": "claude_hooks/hooks/stop.py",
-      "line": 588,
+      "line": 633,
       "tag": "EXTRACTED",
       "doc": "Classify a turn into: fix, preference, decision, gotcha, or general.",
       "is_async": false
@@ -5001,7 +5354,7 @@
       "name": "_run_stop_guard",
       "qualname": "claude_hooks.hooks.stop._run_stop_guard",
       "file": "claude_hooks/hooks/stop.py",
-      "line": 639,
+      "line": 684,
       "tag": "EXTRACTED",
       "doc": "Return the stop-guard correction for the last assistant message, or None.",
       "is_async": false
@@ -7039,6 +7392,305 @@
       "qualname": "tests.test_consolidate.TestFindMergeCandidates.test_empty_input_returns_empty",
       "file": "tests/test_consolidate.py",
       "line": 163,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "module:tests.test_gitnexus_integration",
+      "type": "module",
+      "name": "tests.test_gitnexus_integration",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 1,
+      "tag": "EXTRACTED"
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration._no_real_gitnexus",
+      "type": "function",
+      "name": "_no_real_gitnexus",
+      "qualname": "tests.test_gitnexus_integration._no_real_gitnexus",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 17,
+      "tag": "EXTRACTED",
+      "doc": "Make sure detection never picks up a real gitnexus install on the",
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_gitnexus_integration.TestDetection",
+      "type": "class",
+      "name": "TestDetection",
+      "qualname": "tests.test_gitnexus_integration.TestDetection",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 29,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration.TestDetection.test_unavailable_when_nothing_present",
+      "type": "method",
+      "name": "test_unavailable_when_nothing_present",
+      "qualname": "tests.test_gitnexus_integration.TestDetection.test_unavailable_when_nothing_present",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 30,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration.TestDetection.test_available_when_binary_on_path",
+      "type": "method",
+      "name": "test_available_when_binary_on_path",
+      "qualname": "tests.test_gitnexus_integration.TestDetection.test_available_when_binary_on_path",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 34,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration.TestDetection.test_available_when_global_registry_present",
+      "type": "method",
+      "name": "test_available_when_global_registry_present",
+      "qualname": "tests.test_gitnexus_integration.TestDetection.test_available_when_global_registry_present",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 43,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration.TestDetection.test_indexed_when_project_dir_exists",
+      "type": "method",
+      "name": "test_indexed_when_project_dir_exists",
+      "qualname": "tests.test_gitnexus_integration.TestDetection.test_indexed_when_project_dir_exists",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 50,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration.TestDetection.test_not_indexed_when_dir_missing",
+      "type": "method",
+      "name": "test_not_indexed_when_dir_missing",
+      "qualname": "tests.test_gitnexus_integration.TestDetection.test_not_indexed_when_dir_missing",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 54,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_gitnexus_integration.TestStatus",
+      "type": "class",
+      "name": "TestStatus",
+      "qualname": "tests.test_gitnexus_integration.TestStatus",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 62,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration.TestStatus.test_status_when_nothing_installed",
+      "type": "method",
+      "name": "test_status_when_nothing_installed",
+      "qualname": "tests.test_gitnexus_integration.TestStatus.test_status_when_nothing_installed",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 63,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration.TestStatus.test_status_when_indexed_and_installed",
+      "type": "method",
+      "name": "test_status_when_indexed_and_installed",
+      "qualname": "tests.test_gitnexus_integration.TestStatus.test_status_when_indexed_and_installed",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 69,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration.TestStatus.test_version_probe_swallows_errors",
+      "type": "method",
+      "name": "test_version_probe_swallows_errors",
+      "qualname": "tests.test_gitnexus_integration.TestStatus.test_version_probe_swallows_errors",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 81,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration.TestStatus.test_version_probe_swallows_errors.boom",
+      "type": "function",
+      "name": "boom",
+      "qualname": "tests.test_gitnexus_integration.TestStatus.test_version_probe_swallows_errors.boom",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 84,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_gitnexus_integration.TestHint",
+      "type": "class",
+      "name": "TestHint",
+      "qualname": "tests.test_gitnexus_integration.TestHint",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 94,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration.TestHint.test_silent_when_not_present",
+      "type": "method",
+      "name": "test_silent_when_not_present",
+      "qualname": "tests.test_gitnexus_integration.TestHint.test_silent_when_not_present",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 95,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration.TestHint.test_hint_when_indexed",
+      "type": "method",
+      "name": "test_hint_when_indexed",
+      "qualname": "tests.test_gitnexus_integration.TestHint.test_hint_when_indexed",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 98,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration.TestHint.test_hint_when_installed_but_unindexed",
+      "type": "method",
+      "name": "test_hint_when_installed_but_unindexed",
+      "qualname": "tests.test_gitnexus_integration.TestHint.test_hint_when_installed_but_unindexed",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 105,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_gitnexus_integration.TestReindex",
+      "type": "class",
+      "name": "TestReindex",
+      "qualname": "tests.test_gitnexus_integration.TestReindex",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 117,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration.TestReindex.test_no_op_when_unmodified",
+      "type": "method",
+      "name": "test_no_op_when_unmodified",
+      "qualname": "tests.test_gitnexus_integration.TestReindex.test_no_op_when_unmodified",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 118,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration.TestReindex.test_no_op_when_no_binary",
+      "type": "method",
+      "name": "test_no_op_when_no_binary",
+      "qualname": "tests.test_gitnexus_integration.TestReindex.test_no_op_when_no_binary",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 122,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration.TestReindex.test_spawns_when_indexed_and_present",
+      "type": "method",
+      "name": "test_spawns_when_indexed_and_present",
+      "qualname": "tests.test_gitnexus_integration.TestReindex.test_spawns_when_indexed_and_present",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 126,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_gitnexus_integration.TestReindex.test_spawns_when_indexed_and_present._FakePopen",
+      "type": "class",
+      "name": "_FakePopen",
+      "qualname": "tests.test_gitnexus_integration.TestReindex.test_spawns_when_indexed_and_present._FakePopen",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 138,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration.TestReindex.test_spawns_when_indexed_and_present._FakePopen.__init__",
+      "type": "method",
+      "name": "__init__",
+      "qualname": "tests.test_gitnexus_integration.TestReindex.test_spawns_when_indexed_and_present._FakePopen.__init__",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 139,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration.TestReindex.test_lock_blocks_rapid_respawn",
+      "type": "method",
+      "name": "test_lock_blocks_rapid_respawn",
+      "qualname": "tests.test_gitnexus_integration.TestReindex.test_lock_blocks_rapid_respawn",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 150,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration.TestReindex.test_no_op_when_project_not_indexed",
+      "type": "method",
+      "name": "test_no_op_when_project_not_indexed",
+      "qualname": "tests.test_gitnexus_integration.TestReindex.test_no_op_when_project_not_indexed",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 164,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration.TestReindex.test_never_raises_on_garbage_cwd",
+      "type": "method",
+      "name": "test_never_raises_on_garbage_cwd",
+      "qualname": "tests.test_gitnexus_integration.TestReindex.test_never_raises_on_garbage_cwd",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 174,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_gitnexus_integration.TestCompanionsCli",
+      "type": "class",
+      "name": "TestCompanionsCli",
+      "qualname": "tests.test_gitnexus_integration.TestCompanionsCli",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 184,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_gitnexus_integration.TestCompanionsCli.test_companions_prints_status",
+      "type": "method",
+      "name": "test_companions_prints_status",
+      "qualname": "tests.test_gitnexus_integration.TestCompanionsCli.test_companions_prints_status",
+      "file": "tests/test_gitnexus_integration.py",
+      "line": 185,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -10413,6 +11065,567 @@
       "qualname": "tests.test_providers.TestMemoryKgProvider.test_signature_tools",
       "file": "tests/test_providers.py",
       "line": 157,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "module:tests.test_code_graph_impact",
+      "type": "module",
+      "name": "tests.test_code_graph_impact",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 1,
+      "tag": "EXTRACTED"
+    },
+    {
+      "id": "func:tests.test_code_graph_impact._git_init",
+      "type": "function",
+      "name": "_git_init",
+      "qualname": "tests.test_code_graph_impact._git_init",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 33,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact._write",
+      "type": "function",
+      "name": "_write",
+      "qualname": "tests.test_code_graph_impact._write",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 39,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.repo",
+      "type": "function",
+      "name": "repo",
+      "qualname": "tests.test_code_graph_impact.repo",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 46,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_code_graph_impact.TestResolve",
+      "type": "class",
+      "name": "TestResolve",
+      "qualname": "tests.test_code_graph_impact.TestResolve",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 88,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestResolve.test_resolve_by_id",
+      "type": "method",
+      "name": "test_resolve_by_id",
+      "qualname": "tests.test_code_graph_impact.TestResolve.test_resolve_by_id",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 89,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestResolve.test_resolve_by_qualname",
+      "type": "method",
+      "name": "test_resolve_by_qualname",
+      "qualname": "tests.test_code_graph_impact.TestResolve.test_resolve_by_qualname",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 93,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestResolve.test_resolve_by_bare_name_when_unique",
+      "type": "method",
+      "name": "test_resolve_by_bare_name_when_unique",
+      "qualname": "tests.test_code_graph_impact.TestResolve.test_resolve_by_bare_name_when_unique",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 97,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestResolve.test_resolve_ambiguous_returns_none",
+      "type": "method",
+      "name": "test_resolve_ambiguous_returns_none",
+      "qualname": "tests.test_code_graph_impact.TestResolve.test_resolve_ambiguous_returns_none",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 101,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestResolve.test_resolve_module_by_file",
+      "type": "method",
+      "name": "test_resolve_module_by_file",
+      "qualname": "tests.test_code_graph_impact.TestResolve.test_resolve_module_by_file",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 113,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestResolve.test_unknown_returns_none",
+      "type": "method",
+      "name": "test_unknown_returns_none",
+      "qualname": "tests.test_code_graph_impact.TestResolve.test_unknown_returns_none",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 117,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestResolve.test_empty_returns_none",
+      "type": "method",
+      "name": "test_empty_returns_none",
+      "qualname": "tests.test_code_graph_impact.TestResolve.test_empty_returns_none",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 121,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_code_graph_impact.TestBfs",
+      "type": "class",
+      "name": "TestBfs",
+      "qualname": "tests.test_code_graph_impact.TestBfs",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 130,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestBfs.test_callers_includes_transitive",
+      "type": "method",
+      "name": "test_callers_includes_transitive",
+      "qualname": "tests.test_code_graph_impact.TestBfs.test_callers_includes_transitive",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 131,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestBfs.test_callers_respects_max_depth",
+      "type": "method",
+      "name": "test_callers_respects_max_depth",
+      "qualname": "tests.test_code_graph_impact.TestBfs.test_callers_respects_max_depth",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 141,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestBfs.test_callers_unbounded_when_max_depth_none",
+      "type": "method",
+      "name": "test_callers_unbounded_when_max_depth_none",
+      "qualname": "tests.test_code_graph_impact.TestBfs.test_callers_unbounded_when_max_depth_none",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 150,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestBfs.test_callers_excludes_seed",
+      "type": "method",
+      "name": "test_callers_excludes_seed",
+      "qualname": "tests.test_code_graph_impact.TestBfs.test_callers_excludes_seed",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 155,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestBfs.test_callees_walks_down",
+      "type": "method",
+      "name": "test_callees_walks_down",
+      "qualname": "tests.test_code_graph_impact.TestBfs.test_callees_walks_down",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 160,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestBfs.test_isolated_has_no_callers",
+      "type": "method",
+      "name": "test_isolated_has_no_callers",
+      "qualname": "tests.test_code_graph_impact.TestBfs.test_isolated_has_no_callers",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 170,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestBfs.test_unknown_node_returns_empty",
+      "type": "method",
+      "name": "test_unknown_node_returns_empty",
+      "qualname": "tests.test_code_graph_impact.TestBfs.test_unknown_node_returns_empty",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 174,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestBfs.test_empty_node_id_returns_empty",
+      "type": "method",
+      "name": "test_empty_node_id_returns_empty",
+      "qualname": "tests.test_code_graph_impact.TestBfs.test_empty_node_id_returns_empty",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 179,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_code_graph_impact.TestReport",
+      "type": "class",
+      "name": "TestReport",
+      "qualname": "tests.test_code_graph_impact.TestReport",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 188,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestReport.test_files_touched_groups_by_file",
+      "type": "method",
+      "name": "test_files_touched_groups_by_file",
+      "qualname": "tests.test_code_graph_impact.TestReport.test_files_touched_groups_by_file",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 189,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestReport.test_format_impact_report_smoke",
+      "type": "method",
+      "name": "test_format_impact_report_smoke",
+      "qualname": "tests.test_code_graph_impact.TestReport.test_format_impact_report_smoke",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 197,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestReport.test_isolated_report_handles_no_callers",
+      "type": "method",
+      "name": "test_isolated_report_handles_no_callers",
+      "qualname": "tests.test_code_graph_impact.TestReport.test_isolated_report_handles_no_callers",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 208,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestReport.test_disambig_lists_candidates",
+      "type": "method",
+      "name": "test_disambig_lists_candidates",
+      "qualname": "tests.test_code_graph_impact.TestReport.test_disambig_lists_candidates",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 213,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_code_graph_impact.TestLoadGraph",
+      "type": "class",
+      "name": "TestLoadGraph",
+      "qualname": "tests.test_code_graph_impact.TestLoadGraph",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 230,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestLoadGraph.test_missing_returns_empty",
+      "type": "method",
+      "name": "test_missing_returns_empty",
+      "qualname": "tests.test_code_graph_impact.TestLoadGraph.test_missing_returns_empty",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 231,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestLoadGraph.test_corrupt_returns_empty",
+      "type": "method",
+      "name": "test_corrupt_returns_empty",
+      "qualname": "tests.test_code_graph_impact.TestLoadGraph.test_corrupt_returns_empty",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 234,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_code_graph_impact.TestGitChanges",
+      "type": "class",
+      "name": "TestGitChanges",
+      "qualname": "tests.test_code_graph_impact.TestGitChanges",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 244,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestGitChanges.test_no_changes_empty",
+      "type": "method",
+      "name": "test_no_changes_empty",
+      "qualname": "tests.test_code_graph_impact.TestGitChanges.test_no_changes_empty",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 245,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestGitChanges.test_modified_file_shows_up",
+      "type": "method",
+      "name": "test_modified_file_shows_up",
+      "qualname": "tests.test_code_graph_impact.TestGitChanges.test_modified_file_shows_up",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 248,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestGitChanges.test_staged_file_shows_up",
+      "type": "method",
+      "name": "test_staged_file_shows_up",
+      "qualname": "tests.test_code_graph_impact.TestGitChanges.test_staged_file_shows_up",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 253,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestGitChanges.test_untracked_only_when_flag_set",
+      "type": "method",
+      "name": "test_untracked_only_when_flag_set",
+      "qualname": "tests.test_code_graph_impact.TestGitChanges.test_untracked_only_when_flag_set",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 259,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestGitChanges.test_non_repo_returns_empty",
+      "type": "method",
+      "name": "test_non_repo_returns_empty",
+      "qualname": "tests.test_code_graph_impact.TestGitChanges.test_non_repo_returns_empty",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 264,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_code_graph_impact.TestBlastRadius",
+      "type": "class",
+      "name": "TestBlastRadius",
+      "qualname": "tests.test_code_graph_impact.TestBlastRadius",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 273,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestBlastRadius.test_symbols_in_files",
+      "type": "method",
+      "name": "test_symbols_in_files",
+      "qualname": "tests.test_code_graph_impact.TestBlastRadius.test_symbols_in_files",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 274,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestBlastRadius.test_blast_radius_sorted_by_caller_count",
+      "type": "method",
+      "name": "test_blast_radius_sorted_by_caller_count",
+      "qualname": "tests.test_code_graph_impact.TestBlastRadius.test_blast_radius_sorted_by_caller_count",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 280,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestBlastRadius.test_blast_radius_empty_for_unknown_files",
+      "type": "method",
+      "name": "test_blast_radius_empty_for_unknown_files",
+      "qualname": "tests.test_code_graph_impact.TestBlastRadius.test_blast_radius_empty_for_unknown_files",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 289,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestBlastRadius.test_format_report_smoke",
+      "type": "method",
+      "name": "test_format_report_smoke",
+      "qualname": "tests.test_code_graph_impact.TestBlastRadius.test_format_report_smoke",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 293,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestBlastRadius.test_format_report_no_entries_still_renders",
+      "type": "method",
+      "name": "test_format_report_no_entries_still_renders",
+      "qualname": "tests.test_code_graph_impact.TestBlastRadius.test_format_report_no_entries_still_renders",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 301,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_code_graph_impact.TestRunForRoot",
+      "type": "class",
+      "name": "TestRunForRoot",
+      "qualname": "tests.test_code_graph_impact.TestRunForRoot",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 311,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestRunForRoot.test_no_changes_short_message",
+      "type": "method",
+      "name": "test_no_changes_short_message",
+      "qualname": "tests.test_code_graph_impact.TestRunForRoot.test_no_changes_short_message",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 312,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestRunForRoot.test_with_changes_full_report",
+      "type": "method",
+      "name": "test_with_changes_full_report",
+      "qualname": "tests.test_code_graph_impact.TestRunForRoot.test_with_changes_full_report",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 316,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestRunForRoot.test_no_graph_returns_advice",
+      "type": "method",
+      "name": "test_no_graph_returns_advice",
+      "qualname": "tests.test_code_graph_impact.TestRunForRoot.test_no_graph_returns_advice",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 323,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_code_graph_impact.TestCli",
+      "type": "class",
+      "name": "TestCli",
+      "qualname": "tests.test_code_graph_impact.TestCli",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 333,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestCli._run",
+      "type": "method",
+      "name": "_run",
+      "qualname": "tests.test_code_graph_impact.TestCli._run",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 334,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestCli.test_impact_renders",
+      "type": "method",
+      "name": "test_impact_renders",
+      "qualname": "tests.test_code_graph_impact.TestCli.test_impact_renders",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 346,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestCli.test_impact_unknown_symbol",
+      "type": "method",
+      "name": "test_impact_unknown_symbol",
+      "qualname": "tests.test_code_graph_impact.TestCli.test_impact_unknown_symbol",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 352,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestCli.test_impact_ambiguous_prints_disambig",
+      "type": "method",
+      "name": "test_impact_ambiguous_prints_disambig",
+      "qualname": "tests.test_code_graph_impact.TestCli.test_impact_ambiguous_prints_disambig",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 357,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestCli.test_changes_no_diff",
+      "type": "method",
+      "name": "test_changes_no_diff",
+      "qualname": "tests.test_code_graph_impact.TestCli.test_changes_no_diff",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 368,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_impact.TestCli.test_changes_with_diff",
+      "type": "method",
+      "name": "test_changes_with_diff",
+      "qualname": "tests.test_code_graph_impact.TestCli.test_changes_with_diff",
+      "file": "tests/test_code_graph_impact.py",
+      "line": 373,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -20737,6 +21950,180 @@
       "tag": "EXTRACTED"
     },
     {
+      "source": "module:claude_hooks.gitnexus_integration",
+      "target": "func:claude_hooks.gitnexus_integration.binary_path",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.gitnexus_integration",
+      "target": "func:claude_hooks.gitnexus_integration._global_registry",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.gitnexus_integration",
+      "target": "func:claude_hooks.gitnexus_integration._project_index_dir",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.gitnexus_integration",
+      "target": "func:claude_hooks.gitnexus_integration.is_available",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.gitnexus_integration.is_available",
+      "target": "func:claude_hooks.gitnexus_integration.binary_path",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.gitnexus_integration.is_available",
+      "target": "func:claude_hooks.gitnexus_integration._global_registry",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.gitnexus_integration",
+      "target": "func:claude_hooks.gitnexus_integration.is_indexed",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.gitnexus_integration.is_indexed",
+      "target": "func:claude_hooks.gitnexus_integration._project_index_dir",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.gitnexus_integration",
+      "target": "func:claude_hooks.gitnexus_integration.status",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.gitnexus_integration.status",
+      "target": "func:claude_hooks.gitnexus_integration.binary_path",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.gitnexus_integration.status",
+      "target": "func:claude_hooks.gitnexus_integration._global_registry",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.gitnexus_integration.status",
+      "target": "func:claude_hooks.gitnexus_integration._global_registry",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.gitnexus_integration.status",
+      "target": "func:claude_hooks.gitnexus_integration.is_indexed",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.gitnexus_integration.status",
+      "target": "func:claude_hooks.gitnexus_integration.is_indexed",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.gitnexus_integration.status",
+      "target": "func:claude_hooks.gitnexus_integration._project_index_dir",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.gitnexus_integration.status",
+      "target": "func:claude_hooks.gitnexus_integration._probe_version",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.gitnexus_integration",
+      "target": "func:claude_hooks.gitnexus_integration._probe_version",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.gitnexus_integration._probe_version",
+      "target": "func:claude_hooks.gitnexus_integration.binary_path",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.gitnexus_integration",
+      "target": "func:claude_hooks.gitnexus_integration._acquire_lock",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.gitnexus_integration",
+      "target": "func:claude_hooks.gitnexus_integration._spawn_analyze",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.gitnexus_integration",
+      "target": "func:claude_hooks.gitnexus_integration.reindex_if_dirty_async",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.gitnexus_integration.reindex_if_dirty_async",
+      "target": "func:claude_hooks.gitnexus_integration.binary_path",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.gitnexus_integration.reindex_if_dirty_async",
+      "target": "func:claude_hooks.gitnexus_integration._find_marker_root",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.gitnexus_integration.reindex_if_dirty_async",
+      "target": "func:claude_hooks.gitnexus_integration.is_indexed",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.gitnexus_integration.reindex_if_dirty_async",
+      "target": "func:claude_hooks.gitnexus_integration._spawn_analyze",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.gitnexus_integration",
+      "target": "func:claude_hooks.gitnexus_integration._find_marker_root",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.gitnexus_integration",
+      "target": "func:claude_hooks.gitnexus_integration.session_start_hint",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.gitnexus_integration.session_start_hint",
+      "target": "func:claude_hooks.gitnexus_integration.is_indexed",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.gitnexus_integration.session_start_hint",
+      "target": "func:claude_hooks.gitnexus_integration.is_indexed",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
       "source": "module:claude_hooks.decay",
       "target": "module:claude_hooks.config",
       "type": "imports",
@@ -24037,12 +25424,6 @@
       "tag": "EXTRACTED"
     },
     {
-      "source": "func:claude_hooks.code_graph.tree_sitter_backend.supported_extensions",
-      "target": "func:claude_hooks.code_graph.tree_sitter_backend.is_available",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
       "source": "module:claude_hooks.code_graph.tree_sitter_backend",
       "target": "module:claude_hooks.code_graph.builder",
       "type": "imports",
@@ -24053,12 +25434,6 @@
       "target": "func:claude_hooks.code_graph.tree_sitter_backend.extract_file",
       "type": "contains",
       "tag": "EXTRACTED"
-    },
-    {
-      "source": "func:claude_hooks.code_graph.tree_sitter_backend.extract_file",
-      "target": "func:claude_hooks.code_graph.tree_sitter_backend.is_available",
-      "type": "calls",
-      "tag": "INFERRED"
     },
     {
       "source": "func:claude_hooks.code_graph.tree_sitter_backend.extract_file",
@@ -24135,6 +25510,96 @@
     {
       "source": "module:claude_hooks.code_graph.tree_sitter_backend",
       "target": "func:claude_hooks.code_graph.tree_sitter_backend._normalize_import_target",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.impact",
+      "target": "module:claude_hooks.code_graph.detect",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.impact",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.impact.load_graph",
+      "target": "func:claude_hooks.code_graph.detect.graph_json_path",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.impact",
+      "target": "func:claude_hooks.code_graph.impact.resolve_target",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.impact",
+      "target": "func:claude_hooks.code_graph.impact.name_candidates",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.impact",
+      "target": "func:claude_hooks.code_graph.impact._build_adjacency",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.impact",
+      "target": "func:claude_hooks.code_graph.impact.callers_of",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.impact.callers_of",
+      "target": "func:claude_hooks.code_graph.impact._bfs",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.impact",
+      "target": "func:claude_hooks.code_graph.impact.callees_of",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.impact.callees_of",
+      "target": "func:claude_hooks.code_graph.impact._bfs",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.impact",
+      "target": "func:claude_hooks.code_graph.impact._bfs",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.impact",
+      "target": "func:claude_hooks.code_graph.impact.files_touched",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.impact",
+      "target": "func:claude_hooks.code_graph.impact.format_impact_report",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.impact.format_impact_report",
+      "target": "func:claude_hooks.code_graph.impact.files_touched",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.impact",
+      "target": "func:claude_hooks.code_graph.impact.format_disambig",
       "type": "contains",
       "tag": "EXTRACTED"
     },
@@ -24369,6 +25834,96 @@
     {
       "source": "func:claude_hooks.code_graph.__main__.main",
       "target": "func:claude_hooks.code_graph.detect.graph_json_path",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.__main__",
+      "target": "module:claude_hooks.code_graph.impact",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.impact.resolve_target",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.impact.name_candidates",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.impact.format_disambig",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.impact.callers_of",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.impact.callees_of",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.impact.format_impact_report",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.__main__",
+      "target": "module:claude_hooks.code_graph.changes",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.changes.run_for_root",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.__main__",
+      "target": "module:claude_hooks.code_graph.detect",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.__main__",
+      "target": "module:claude_hooks.gitnexus_integration",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.detect.graph_json_path",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.detect.graph_json_path",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.__main__.main",
+      "target": "func:claude_hooks.code_graph.detect.graph_report_path",
       "type": "calls",
       "tag": "INFERRED"
     },
@@ -24757,6 +26312,114 @@
       "tag": "EXTRACTED"
     },
     {
+      "source": "module:claude_hooks.code_graph.changes",
+      "target": "module:claude_hooks.code_graph.impact",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.changes",
+      "target": "class:claude_hooks.code_graph.changes.BlastEntry",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:claude_hooks.code_graph.changes.BlastEntry",
+      "target": "func:claude_hooks.code_graph.changes.BlastEntry.caller_count",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.changes",
+      "target": "func:claude_hooks.code_graph.changes.git_changed_files",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.changes.git_changed_files",
+      "target": "func:claude_hooks.code_graph.changes._git",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.changes.git_changed_files",
+      "target": "func:claude_hooks.code_graph.changes._git",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.changes",
+      "target": "func:claude_hooks.code_graph.changes._git",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.changes",
+      "target": "func:claude_hooks.code_graph.changes.symbols_in_files",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.changes",
+      "target": "func:claude_hooks.code_graph.changes.blast_radius",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.changes.blast_radius",
+      "target": "func:claude_hooks.code_graph.changes.symbols_in_files",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.changes.blast_radius",
+      "target": "func:claude_hooks.code_graph.impact.callers_of",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.changes",
+      "target": "func:claude_hooks.code_graph.changes.format_blast_radius_report",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.changes.format_blast_radius_report",
+      "target": "func:claude_hooks.code_graph.impact.files_touched",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.changes",
+      "target": "func:claude_hooks.code_graph.changes.run_for_root",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.changes.run_for_root",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.changes.run_for_root",
+      "target": "func:claude_hooks.code_graph.changes.git_changed_files",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.changes.run_for_root",
+      "target": "func:claude_hooks.code_graph.changes.blast_radius",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.changes.run_for_root",
+      "target": "func:claude_hooks.code_graph.changes.format_blast_radius_report",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
       "source": "module:claude_hooks.hooks.session_end",
       "target": "module:claude_hooks.config",
       "type": "imports",
@@ -24835,10 +26498,16 @@
       "tag": "EXTRACTED"
     },
     {
-      "source": "func:claude_hooks.hooks.stop.handle",
-      "target": "func:claude_hooks.claudemem_reindex.reindex_if_dirty_async",
-      "type": "calls",
-      "tag": "INFERRED"
+      "source": "module:claude_hooks.hooks.stop",
+      "target": "module:claude_hooks.code_graph.__main__",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.hooks.stop",
+      "target": "module:claude_hooks.gitnexus_integration",
+      "type": "imports",
+      "tag": "EXTRACTED"
     },
     {
       "source": "func:claude_hooks.hooks.stop.handle",
@@ -25215,6 +26884,18 @@
     {
       "source": "func:claude_hooks.hooks.session_start.handle",
       "target": "func:claude_hooks.code_graph.inject.build_session_block",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.hooks.session_start",
+      "target": "module:claude_hooks.gitnexus_integration",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.hooks.session_start.handle",
+      "target": "func:claude_hooks.gitnexus_integration.session_start_hint",
       "type": "calls",
       "tag": "INFERRED"
     },
@@ -28715,6 +30396,234 @@
       "target": "func:claude_hooks.consolidate._find_merge_candidates",
       "type": "calls",
       "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_gitnexus_integration",
+      "target": "module:claude_hooks",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_gitnexus_integration",
+      "target": "func:tests.test_gitnexus_integration._no_real_gitnexus",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_gitnexus_integration",
+      "target": "class:tests.test_gitnexus_integration.TestDetection",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_gitnexus_integration.TestDetection",
+      "target": "func:tests.test_gitnexus_integration.TestDetection.test_unavailable_when_nothing_present",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_gitnexus_integration.TestDetection.test_unavailable_when_nothing_present",
+      "target": "func:claude_hooks.gitnexus_integration.binary_path",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_gitnexus_integration.TestDetection",
+      "target": "func:tests.test_gitnexus_integration.TestDetection.test_available_when_binary_on_path",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_gitnexus_integration.TestDetection.test_available_when_binary_on_path",
+      "target": "func:claude_hooks.gitnexus_integration.binary_path",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_gitnexus_integration.TestDetection",
+      "target": "func:tests.test_gitnexus_integration.TestDetection.test_available_when_global_registry_present",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_gitnexus_integration.TestDetection",
+      "target": "func:tests.test_gitnexus_integration.TestDetection.test_indexed_when_project_dir_exists",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_gitnexus_integration.TestDetection.test_indexed_when_project_dir_exists",
+      "target": "func:claude_hooks.gitnexus_integration.is_indexed",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_gitnexus_integration.TestDetection",
+      "target": "func:tests.test_gitnexus_integration.TestDetection.test_not_indexed_when_dir_missing",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_gitnexus_integration.TestDetection.test_not_indexed_when_dir_missing",
+      "target": "func:claude_hooks.gitnexus_integration.is_indexed",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_gitnexus_integration",
+      "target": "class:tests.test_gitnexus_integration.TestStatus",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_gitnexus_integration.TestStatus",
+      "target": "func:tests.test_gitnexus_integration.TestStatus.test_status_when_nothing_installed",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_gitnexus_integration.TestStatus.test_status_when_nothing_installed",
+      "target": "func:claude_hooks.gitnexus_integration.status",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_gitnexus_integration.TestStatus",
+      "target": "func:tests.test_gitnexus_integration.TestStatus.test_status_when_indexed_and_installed",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_gitnexus_integration.TestStatus.test_status_when_indexed_and_installed",
+      "target": "func:claude_hooks.gitnexus_integration.status",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_gitnexus_integration.TestStatus",
+      "target": "func:tests.test_gitnexus_integration.TestStatus.test_version_probe_swallows_errors",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_gitnexus_integration.TestStatus.test_version_probe_swallows_errors",
+      "target": "func:tests.test_gitnexus_integration.TestStatus.test_version_probe_swallows_errors.boom",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_gitnexus_integration.TestStatus.test_version_probe_swallows_errors",
+      "target": "func:claude_hooks.gitnexus_integration._probe_version",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_gitnexus_integration",
+      "target": "class:tests.test_gitnexus_integration.TestHint",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_gitnexus_integration.TestHint",
+      "target": "func:tests.test_gitnexus_integration.TestHint.test_silent_when_not_present",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_gitnexus_integration.TestHint.test_silent_when_not_present",
+      "target": "func:claude_hooks.gitnexus_integration.session_start_hint",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_gitnexus_integration.TestHint",
+      "target": "func:tests.test_gitnexus_integration.TestHint.test_hint_when_indexed",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_gitnexus_integration.TestHint.test_hint_when_indexed",
+      "target": "func:claude_hooks.gitnexus_integration.session_start_hint",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_gitnexus_integration.TestHint",
+      "target": "func:tests.test_gitnexus_integration.TestHint.test_hint_when_installed_but_unindexed",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_gitnexus_integration.TestHint.test_hint_when_installed_but_unindexed",
+      "target": "func:claude_hooks.gitnexus_integration.session_start_hint",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_gitnexus_integration",
+      "target": "class:tests.test_gitnexus_integration.TestReindex",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_gitnexus_integration.TestReindex",
+      "target": "func:tests.test_gitnexus_integration.TestReindex.test_no_op_when_unmodified",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_gitnexus_integration.TestReindex",
+      "target": "func:tests.test_gitnexus_integration.TestReindex.test_no_op_when_no_binary",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_gitnexus_integration.TestReindex",
+      "target": "func:tests.test_gitnexus_integration.TestReindex.test_spawns_when_indexed_and_present",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_gitnexus_integration.TestReindex.test_spawns_when_indexed_and_present",
+      "target": "class:tests.test_gitnexus_integration.TestReindex.test_spawns_when_indexed_and_present._FakePopen",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_gitnexus_integration.TestReindex.test_spawns_when_indexed_and_present._FakePopen",
+      "target": "func:tests.test_gitnexus_integration.TestReindex.test_spawns_when_indexed_and_present._FakePopen.__init__",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_gitnexus_integration.TestReindex",
+      "target": "func:tests.test_gitnexus_integration.TestReindex.test_lock_blocks_rapid_respawn",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_gitnexus_integration.TestReindex",
+      "target": "func:tests.test_gitnexus_integration.TestReindex.test_no_op_when_project_not_indexed",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_gitnexus_integration.TestReindex",
+      "target": "func:tests.test_gitnexus_integration.TestReindex.test_never_raises_on_garbage_cwd",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_gitnexus_integration",
+      "target": "class:tests.test_gitnexus_integration.TestCompanionsCli",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_gitnexus_integration.TestCompanionsCli",
+      "target": "func:tests.test_gitnexus_integration.TestCompanionsCli.test_companions_prints_status",
+      "type": "contains",
+      "tag": "EXTRACTED"
     },
     {
       "source": "module:tests.test_safety_scan",
@@ -32311,6 +34220,762 @@
       "tag": "EXTRACTED"
     },
     {
+      "source": "module:tests.test_code_graph_impact",
+      "target": "module:claude_hooks.code_graph.builder",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_impact",
+      "target": "module:claude_hooks.code_graph.changes",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_impact",
+      "target": "module:claude_hooks.code_graph.impact",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_impact",
+      "target": "func:tests.test_code_graph_impact._git_init",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_impact",
+      "target": "func:tests.test_code_graph_impact._write",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_impact",
+      "target": "func:tests.test_code_graph_impact.repo",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.repo",
+      "target": "func:claude_hooks.code_graph.builder.build_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_code_graph_impact",
+      "target": "class:tests.test_code_graph_impact.TestResolve",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestResolve",
+      "target": "func:tests.test_code_graph_impact.TestResolve.test_resolve_by_id",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestResolve.test_resolve_by_id",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestResolve.test_resolve_by_id",
+      "target": "func:claude_hooks.code_graph.impact.resolve_target",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestResolve",
+      "target": "func:tests.test_code_graph_impact.TestResolve.test_resolve_by_qualname",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestResolve.test_resolve_by_qualname",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestResolve.test_resolve_by_qualname",
+      "target": "func:claude_hooks.code_graph.impact.resolve_target",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestResolve",
+      "target": "func:tests.test_code_graph_impact.TestResolve.test_resolve_by_bare_name_when_unique",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestResolve.test_resolve_by_bare_name_when_unique",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestResolve.test_resolve_by_bare_name_when_unique",
+      "target": "func:claude_hooks.code_graph.impact.resolve_target",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestResolve",
+      "target": "func:tests.test_code_graph_impact.TestResolve.test_resolve_ambiguous_returns_none",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestResolve.test_resolve_ambiguous_returns_none",
+      "target": "func:claude_hooks.code_graph.builder.build_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestResolve.test_resolve_ambiguous_returns_none",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestResolve.test_resolve_ambiguous_returns_none",
+      "target": "func:claude_hooks.code_graph.impact.resolve_target",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestResolve.test_resolve_ambiguous_returns_none",
+      "target": "func:claude_hooks.code_graph.impact.name_candidates",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestResolve",
+      "target": "func:tests.test_code_graph_impact.TestResolve.test_resolve_module_by_file",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestResolve.test_resolve_module_by_file",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestResolve.test_resolve_module_by_file",
+      "target": "func:claude_hooks.code_graph.impact.resolve_target",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestResolve",
+      "target": "func:tests.test_code_graph_impact.TestResolve.test_unknown_returns_none",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestResolve.test_unknown_returns_none",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestResolve.test_unknown_returns_none",
+      "target": "func:claude_hooks.code_graph.impact.resolve_target",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestResolve",
+      "target": "func:tests.test_code_graph_impact.TestResolve.test_empty_returns_none",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestResolve.test_empty_returns_none",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestResolve.test_empty_returns_none",
+      "target": "func:claude_hooks.code_graph.impact.resolve_target",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_code_graph_impact",
+      "target": "class:tests.test_code_graph_impact.TestBfs",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestBfs",
+      "target": "func:tests.test_code_graph_impact.TestBfs.test_callers_includes_transitive",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBfs.test_callers_includes_transitive",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBfs.test_callers_includes_transitive",
+      "target": "func:claude_hooks.code_graph.impact.callers_of",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestBfs",
+      "target": "func:tests.test_code_graph_impact.TestBfs.test_callers_respects_max_depth",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBfs.test_callers_respects_max_depth",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBfs.test_callers_respects_max_depth",
+      "target": "func:claude_hooks.code_graph.impact.callers_of",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestBfs",
+      "target": "func:tests.test_code_graph_impact.TestBfs.test_callers_unbounded_when_max_depth_none",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBfs.test_callers_unbounded_when_max_depth_none",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBfs.test_callers_unbounded_when_max_depth_none",
+      "target": "func:claude_hooks.code_graph.impact.callers_of",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestBfs",
+      "target": "func:tests.test_code_graph_impact.TestBfs.test_callers_excludes_seed",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBfs.test_callers_excludes_seed",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBfs.test_callers_excludes_seed",
+      "target": "func:claude_hooks.code_graph.impact.callers_of",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestBfs",
+      "target": "func:tests.test_code_graph_impact.TestBfs.test_callees_walks_down",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBfs.test_callees_walks_down",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBfs.test_callees_walks_down",
+      "target": "func:claude_hooks.code_graph.impact.callees_of",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestBfs",
+      "target": "func:tests.test_code_graph_impact.TestBfs.test_isolated_has_no_callers",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBfs.test_isolated_has_no_callers",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBfs.test_isolated_has_no_callers",
+      "target": "func:claude_hooks.code_graph.impact.callers_of",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestBfs",
+      "target": "func:tests.test_code_graph_impact.TestBfs.test_unknown_node_returns_empty",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBfs.test_unknown_node_returns_empty",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBfs.test_unknown_node_returns_empty",
+      "target": "func:claude_hooks.code_graph.impact.callers_of",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBfs.test_unknown_node_returns_empty",
+      "target": "func:claude_hooks.code_graph.impact.callees_of",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestBfs",
+      "target": "func:tests.test_code_graph_impact.TestBfs.test_empty_node_id_returns_empty",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBfs.test_empty_node_id_returns_empty",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBfs.test_empty_node_id_returns_empty",
+      "target": "func:claude_hooks.code_graph.impact.callers_of",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_code_graph_impact",
+      "target": "class:tests.test_code_graph_impact.TestReport",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestReport",
+      "target": "func:tests.test_code_graph_impact.TestReport.test_files_touched_groups_by_file",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestReport.test_files_touched_groups_by_file",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestReport.test_files_touched_groups_by_file",
+      "target": "func:claude_hooks.code_graph.impact.callers_of",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestReport.test_files_touched_groups_by_file",
+      "target": "func:claude_hooks.code_graph.impact.files_touched",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestReport",
+      "target": "func:tests.test_code_graph_impact.TestReport.test_format_impact_report_smoke",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestReport.test_format_impact_report_smoke",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestReport.test_format_impact_report_smoke",
+      "target": "func:claude_hooks.code_graph.impact.callers_of",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestReport.test_format_impact_report_smoke",
+      "target": "func:claude_hooks.code_graph.impact.callees_of",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestReport.test_format_impact_report_smoke",
+      "target": "func:claude_hooks.code_graph.impact.format_impact_report",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestReport",
+      "target": "func:tests.test_code_graph_impact.TestReport.test_isolated_report_handles_no_callers",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestReport.test_isolated_report_handles_no_callers",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestReport.test_isolated_report_handles_no_callers",
+      "target": "func:claude_hooks.code_graph.impact.format_impact_report",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestReport",
+      "target": "func:tests.test_code_graph_impact.TestReport.test_disambig_lists_candidates",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestReport.test_disambig_lists_candidates",
+      "target": "func:claude_hooks.code_graph.builder.build_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestReport.test_disambig_lists_candidates",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestReport.test_disambig_lists_candidates",
+      "target": "func:claude_hooks.code_graph.impact.format_disambig",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestReport.test_disambig_lists_candidates",
+      "target": "func:claude_hooks.code_graph.impact.name_candidates",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_code_graph_impact",
+      "target": "class:tests.test_code_graph_impact.TestLoadGraph",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestLoadGraph",
+      "target": "func:tests.test_code_graph_impact.TestLoadGraph.test_missing_returns_empty",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestLoadGraph.test_missing_returns_empty",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestLoadGraph",
+      "target": "func:tests.test_code_graph_impact.TestLoadGraph.test_corrupt_returns_empty",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_impact",
+      "target": "module:claude_hooks.code_graph.detect",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestLoadGraph.test_corrupt_returns_empty",
+      "target": "func:claude_hooks.code_graph.detect.graph_json_path",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestLoadGraph.test_corrupt_returns_empty",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_code_graph_impact",
+      "target": "class:tests.test_code_graph_impact.TestGitChanges",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestGitChanges",
+      "target": "func:tests.test_code_graph_impact.TestGitChanges.test_no_changes_empty",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestGitChanges.test_no_changes_empty",
+      "target": "func:claude_hooks.code_graph.changes.git_changed_files",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestGitChanges",
+      "target": "func:tests.test_code_graph_impact.TestGitChanges.test_modified_file_shows_up",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestGitChanges.test_modified_file_shows_up",
+      "target": "func:claude_hooks.code_graph.changes.git_changed_files",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestGitChanges",
+      "target": "func:tests.test_code_graph_impact.TestGitChanges.test_staged_file_shows_up",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestGitChanges.test_staged_file_shows_up",
+      "target": "func:claude_hooks.code_graph.changes.git_changed_files",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestGitChanges",
+      "target": "func:tests.test_code_graph_impact.TestGitChanges.test_untracked_only_when_flag_set",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestGitChanges.test_untracked_only_when_flag_set",
+      "target": "func:claude_hooks.code_graph.changes.git_changed_files",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestGitChanges.test_untracked_only_when_flag_set",
+      "target": "func:claude_hooks.code_graph.changes.git_changed_files",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestGitChanges",
+      "target": "func:tests.test_code_graph_impact.TestGitChanges.test_non_repo_returns_empty",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestGitChanges.test_non_repo_returns_empty",
+      "target": "func:claude_hooks.code_graph.changes.git_changed_files",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_code_graph_impact",
+      "target": "class:tests.test_code_graph_impact.TestBlastRadius",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestBlastRadius",
+      "target": "func:tests.test_code_graph_impact.TestBlastRadius.test_symbols_in_files",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBlastRadius.test_symbols_in_files",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBlastRadius.test_symbols_in_files",
+      "target": "func:claude_hooks.code_graph.changes.symbols_in_files",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestBlastRadius",
+      "target": "func:tests.test_code_graph_impact.TestBlastRadius.test_blast_radius_sorted_by_caller_count",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBlastRadius.test_blast_radius_sorted_by_caller_count",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBlastRadius.test_blast_radius_sorted_by_caller_count",
+      "target": "func:claude_hooks.code_graph.changes.blast_radius",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestBlastRadius",
+      "target": "func:tests.test_code_graph_impact.TestBlastRadius.test_blast_radius_empty_for_unknown_files",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBlastRadius.test_blast_radius_empty_for_unknown_files",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBlastRadius.test_blast_radius_empty_for_unknown_files",
+      "target": "func:claude_hooks.code_graph.changes.blast_radius",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestBlastRadius",
+      "target": "func:tests.test_code_graph_impact.TestBlastRadius.test_format_report_smoke",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBlastRadius.test_format_report_smoke",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBlastRadius.test_format_report_smoke",
+      "target": "func:claude_hooks.code_graph.changes.blast_radius",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBlastRadius.test_format_report_smoke",
+      "target": "func:claude_hooks.code_graph.changes.format_blast_radius_report",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestBlastRadius",
+      "target": "func:tests.test_code_graph_impact.TestBlastRadius.test_format_report_no_entries_still_renders",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBlastRadius.test_format_report_no_entries_still_renders",
+      "target": "func:claude_hooks.code_graph.impact.load_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestBlastRadius.test_format_report_no_entries_still_renders",
+      "target": "func:claude_hooks.code_graph.changes.format_blast_radius_report",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_code_graph_impact",
+      "target": "class:tests.test_code_graph_impact.TestRunForRoot",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestRunForRoot",
+      "target": "func:tests.test_code_graph_impact.TestRunForRoot.test_no_changes_short_message",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestRunForRoot.test_no_changes_short_message",
+      "target": "func:claude_hooks.code_graph.changes.run_for_root",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestRunForRoot",
+      "target": "func:tests.test_code_graph_impact.TestRunForRoot.test_with_changes_full_report",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestRunForRoot.test_with_changes_full_report",
+      "target": "func:claude_hooks.code_graph.changes.run_for_root",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestRunForRoot",
+      "target": "func:tests.test_code_graph_impact.TestRunForRoot.test_no_graph_returns_advice",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestRunForRoot.test_no_graph_returns_advice",
+      "target": "func:claude_hooks.code_graph.changes.run_for_root",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_code_graph_impact",
+      "target": "class:tests.test_code_graph_impact.TestCli",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestCli",
+      "target": "func:tests.test_code_graph_impact.TestCli._run",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestCli",
+      "target": "func:tests.test_code_graph_impact.TestCli.test_impact_renders",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestCli",
+      "target": "func:tests.test_code_graph_impact.TestCli.test_impact_unknown_symbol",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestCli",
+      "target": "func:tests.test_code_graph_impact.TestCli.test_impact_ambiguous_prints_disambig",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_impact.TestCli.test_impact_ambiguous_prints_disambig",
+      "target": "func:claude_hooks.code_graph.builder.build_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestCli",
+      "target": "func:tests.test_code_graph_impact.TestCli.test_changes_no_diff",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_impact.TestCli",
+      "target": "func:tests.test_code_graph_impact.TestCli.test_changes_with_diff",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
       "source": "module:tests.test_recall",
       "target": "module:claude_hooks.providers.base",
       "type": "imports",
@@ -35833,12 +38498,6 @@
       "tag": "INFERRED"
     },
     {
-      "source": "func:tests.test_claudemem_reindex.ReindexIfDirtyTests.test_skip_when_not_modified",
-      "target": "func:claude_hooks.claudemem_reindex.reindex_if_dirty_async",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
       "source": "class:tests.test_claudemem_reindex.ReindexIfDirtyTests",
       "target": "func:tests.test_claudemem_reindex.ReindexIfDirtyTests.test_skip_when_binary_missing",
       "type": "contains",
@@ -35851,34 +38510,16 @@
       "tag": "INFERRED"
     },
     {
-      "source": "func:tests.test_claudemem_reindex.ReindexIfDirtyTests.test_skip_when_binary_missing",
-      "target": "func:claude_hooks.claudemem_reindex.reindex_if_dirty_async",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
       "source": "class:tests.test_claudemem_reindex.ReindexIfDirtyTests",
       "target": "func:tests.test_claudemem_reindex.ReindexIfDirtyTests.test_skip_when_no_git",
       "type": "contains",
       "tag": "EXTRACTED"
     },
     {
-      "source": "func:tests.test_claudemem_reindex.ReindexIfDirtyTests.test_skip_when_no_git",
-      "target": "func:claude_hooks.claudemem_reindex.reindex_if_dirty_async",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
       "source": "class:tests.test_claudemem_reindex.ReindexIfDirtyTests",
       "target": "func:tests.test_claudemem_reindex.ReindexIfDirtyTests.test_skip_when_no_claudemem_dir",
       "type": "contains",
       "tag": "EXTRACTED"
-    },
-    {
-      "source": "func:tests.test_claudemem_reindex.ReindexIfDirtyTests.test_skip_when_no_claudemem_dir",
-      "target": "func:claude_hooks.claudemem_reindex.reindex_if_dirty_async",
-      "type": "calls",
-      "tag": "INFERRED"
     },
     {
       "source": "class:tests.test_claudemem_reindex.ReindexIfDirtyTests",
@@ -35893,12 +38534,6 @@
       "tag": "INFERRED"
     },
     {
-      "source": "func:tests.test_claudemem_reindex.ReindexIfDirtyTests.test_spawns_when_all_conditions_met",
-      "target": "func:claude_hooks.claudemem_reindex.reindex_if_dirty_async",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
       "source": "class:tests.test_claudemem_reindex.ReindexIfDirtyTests",
       "target": "func:tests.test_claudemem_reindex.ReindexIfDirtyTests.test_does_not_raise_on_spawn_error",
       "type": "contains",
@@ -35907,12 +38542,6 @@
     {
       "source": "func:tests.test_claudemem_reindex.ReindexIfDirtyTests.test_does_not_raise_on_spawn_error",
       "target": "func:tests.test_claudemem_reindex.ReindexIfDirtyTests._make_project",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:tests.test_claudemem_reindex.ReindexIfDirtyTests.test_does_not_raise_on_spawn_error",
-      "target": "func:claude_hooks.claudemem_reindex.reindex_if_dirty_async",
       "type": "calls",
       "tag": "INFERRED"
     },
@@ -36386,12 +39015,6 @@
     },
     {
       "source": "func:tests.test_code_graph.TestCli.test_build_writes_graph",
-      "target": "func:tests.test_code_graph.TestCli._run",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:tests.test_code_graph.TestCli.test_build_writes_graph",
       "target": "func:claude_hooks.code_graph.detect.graph_json_path",
       "type": "calls",
       "tag": "INFERRED"
@@ -36409,34 +39032,16 @@
       "tag": "INFERRED"
     },
     {
-      "source": "func:tests.test_code_graph.TestCli.test_info_prints_stats",
-      "target": "func:tests.test_code_graph.TestCli._run",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
       "source": "class:tests.test_code_graph.TestCli",
       "target": "func:tests.test_code_graph.TestCli.test_info_fails_without_graph",
       "type": "contains",
       "tag": "EXTRACTED"
     },
     {
-      "source": "func:tests.test_code_graph.TestCli.test_info_fails_without_graph",
-      "target": "func:tests.test_code_graph.TestCli._run",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
       "source": "class:tests.test_code_graph.TestCli",
       "target": "func:tests.test_code_graph.TestCli.test_build_fails_outside_git",
       "type": "contains",
       "tag": "EXTRACTED"
-    },
-    {
-      "source": "func:tests.test_code_graph.TestCli.test_build_fails_outside_git",
-      "target": "func:tests.test_code_graph.TestCli._run",
-      "type": "calls",
-      "tag": "INFERRED"
     },
     {
       "source": "module:tests.test_code_graph",
@@ -36449,12 +39054,6 @@
       "target": "module:claude_hooks.code_graph",
       "type": "imports",
       "tag": "EXTRACTED"
-    },
-    {
-      "source": "func:tests.test_code_graph._ts_available",
-      "target": "func:claude_hooks.code_graph.tree_sitter_backend.is_available",
-      "type": "calls",
-      "tag": "INFERRED"
     },
     {
       "source": "module:tests.test_code_graph",

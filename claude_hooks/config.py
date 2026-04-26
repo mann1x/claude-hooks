@@ -176,6 +176,25 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "max_inject_chars": 4000,
             # Trigger a detached rebuild on SessionStart if stale.
             "rebuild_on_session_start": True,
+            # Trigger a detached rebuild on Stop when the turn ran
+            # Edit/Write/MultiEdit. Lock + cooldown prevent thrash when
+            # many edits land in rapid succession.
+            "rebuild_on_stop": True,
+        },
+        "gitnexus": {
+            # Optional integrator for https://github.com/abhigyanpatwari/GitNexus
+            # — a heavier-weight code-graph engine with its own MCP
+            # server (impact, cypher, hybrid search, etc). When the
+            # binary is on PATH and the project has been indexed
+            # (``.gitnexus/`` exists), claude-hooks will:
+            #   * append a SessionStart hint pointing at the gitnexus
+            #     MCP tools so the model knows it can reach for them
+            #   * spawn ``gitnexus analyze`` on Stop when the turn
+            #     modified source files
+            # Silent no-op when gitnexus isn't installed.
+            "enabled": True,
+            "reindex_on_stop": True,
+            "lock_min_age_seconds": 60,
         },
         "claudemem_reindex": {
             # Auto-reindex the claudemem semantic index when the project

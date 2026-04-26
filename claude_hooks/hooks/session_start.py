@@ -44,6 +44,19 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
                 )
                 if block:
                     cg_block = block
+                # Append a one-line hint pointing at gitnexus when present.
+                # Cheap detection — only filesystem checks, never spawns.
+                gn_cfg = (config.get("hooks") or {}).get("gitnexus") or {}
+                if gn_cfg.get("enabled", True):
+                    try:
+                        from claude_hooks.gitnexus_integration import (
+                            session_start_hint,
+                        )
+                        hint = session_start_hint(root)
+                        if hint:
+                            cg_block = (cg_block + "\n\n" + hint) if cg_block else hint
+                    except Exception as e:
+                        log.debug("gitnexus hint skipped: %s", e)
                 if cg_cfg.get("rebuild_on_session_start", True):
                     _cg_build_async(
                         cwd=cwd,

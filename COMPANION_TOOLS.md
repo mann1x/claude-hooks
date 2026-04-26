@@ -214,6 +214,46 @@ http://localhost:3847/tokens     # token budget view
 
 ---
 
+## 6. gitnexus -- MCP-native Code Knowledge Graph
+
+**Importance: MEDIUM** -- Heavier-weight code-graph engine that indexes
+14 languages with cross-file resolution (constructor inference, heritage
+tracking, type annotations) into LadybugDB and exposes 16 MCP tools
+(`impact`, `context`, `cypher`, `query`, `detect_changes`, `rename`,
+hybrid BM25+vector search, group/multi-repo, ...). Where claude-hooks's
+built-in `code_graph` covers the always-available baseline (Python `ast`
++ tree-sitter, file-based `graphify-out/graph.json`), gitnexus is the
+upgrade path for richer queries from inside Claude Code.
+
+**What it brings (beyond `code_graph`):**
+- 16 MCP tools for graph queries (`mcp__gitnexus__impact`, ...,
+  `mcp__gitnexus__cypher`)
+- Hybrid search (BM25 + semantic vector + RRF) over symbols
+- Leiden community detection with cohesion scores
+- Cross-file constructor / heritage / interface resolution
+- Multi-repo "group" tools for cross-repo queries
+- Mermaid architecture diagrams via the `generate_map` MCP prompt
+
+**Install (user-driven):**
+```bash
+npm i -g gitnexus           # or: npx gitnexus init
+gitnexus init               # in your repo
+gitnexus mcp install        # wires its MCP server into ~/.claude.json
+```
+
+**claude-hooks integration (automatic when detected):**
+- SessionStart inject appends a one-line hint pointing at the
+  `mcp__gitnexus__*` tools, so the model knows to reach for them
+- Stop hook spawns `gitnexus analyze` (detached) when the turn
+  modified source files -- mirrors the `code_graph` rebuild trigger
+- `python -m claude_hooks.code_graph companions` shows detection state
+- Silent no-op when gitnexus isn't installed; `code_graph` still runs
+
+Toggles live under `hooks.gitnexus` in `config/claude-hooks.json`
+(default `enabled: true` so detection just works).
+
+---
+
 ## Summary
 
 | Tool | Importance | Slash commands | Terminal commands |
@@ -222,6 +262,7 @@ http://localhost:3847/tokens     # token budget view
 | **episodic-memory** | HIGH | `/episodic <query>` | `episodic-memory search/sync/show/stats` |
 | **caliber** | MEDIUM | `/setup-caliber`, `/find-skills` | `caliber score/hooks/learn/refresh/skills` |
 | **claudekit** | MEDIUM | `/checkpoint:create/restore/list` | `claudekit-hooks profile` |
+| **gitnexus** | MEDIUM | (via `mcp__gitnexus__*` tools) | `gitnexus init/analyze/mcp` |
 | **claude-code-organizer** | LOW | `/cco` | `npx @mcpware/claude-code-organizer` |
 | **code-analysis** | HIGH (extract!) | `/code-analysis--*` | `python3 extract_plugin.py` |
 
