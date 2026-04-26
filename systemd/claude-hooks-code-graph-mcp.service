@@ -1,0 +1,30 @@
+[Unit]
+Description=claude-hooks code-graph MCP server — exposes impact/changes/trace/etc as MCP tools
+Documentation=https://github.com/mann1x/claude-hooks/blob/main/COMPANION_TOOLS.md
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=__REPO_PATH__
+Environment=CLAUDE_HOOKS_REPO=__REPO_PATH__
+Environment=PYTHONPATH=__REPO_PATH__
+# CLAUDE_HOOKS_PROJECT_ROOT pins the project; tool calls without an
+# explicit `root` argument use this. Override per-project by re-launching
+# the unit with a different env or by passing `root` in tool calls.
+Environment=CLAUDE_HOOKS_PROJECT_ROOT=__REPO_PATH__
+ExecStart=__CONDA_PYTHON__ -m claude_hooks.code_graph.mcp_server --transport streamable-http --host 127.0.0.1 --port 38090
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=10s
+
+# Same hardening posture as the dashboard unit.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__HOME__/.claude
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
