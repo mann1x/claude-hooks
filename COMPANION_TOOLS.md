@@ -293,9 +293,30 @@ multi-repo `group_*` queries.
 **Install (user-driven):**
 ```bash
 npm i -g gitnexus           # or: npx gitnexus init
-gitnexus init               # in your repo
-gitnexus mcp install        # wires its MCP server into ~/.claude.json
+gitnexus analyze .          # in your repo
+gitnexus setup --claude     # prints MCP server JSON to add to ~/.claude.json
 ```
+
+**Old-glibc workaround**: gitnexus 1.6+ ships LadybugDB binaries built
+against glibc 2.32 / GLIBCXX 3.4.32. Hosts with older runtimes (e.g.
+Debian 11 / Proxmox VE 7) will see `Error: ... version 'GLIBC_2.32'
+not found` on every gitnexus call. claude-hooks ships a Docker wrapper
+at [`docker/gitnexus/`](docker/gitnexus/) that runs gitnexus inside a
+Debian-trixie container and persists the registry to
+`/shared/config/gitnexus/`. After install, `gitnexus` becomes a
+transparent drop-in — `which gitnexus` still resolves and the
+companion_integration detects it normally. See `docker/gitnexus/README.md`
+for setup.
+
+**Known gitnexus 1.6.3 limitation on C# repos**: tree-sitter scope
+extraction fails (`"Invalid argument"`) on individual large C# files
+(30-100 KB range with complex generics / async patterns) — non-fatal,
+the file is dropped from the call graph but the index still builds.
+Auto-generated WinForms `*.Designer.cs` files trip a harder failure
+in scopeResolution (`"Cannot add property 1, object is not extensible"`)
+that abandons the entire index. Hiding `*.Designer.cs` files before
+indexing doesn't fully work (the bug recurs). Until upstream fixes,
+heavily-WinForms repos may not be indexable.
 
 **claude-hooks integration (automatic when detected):**
 - SessionStart inject appends a hint pointing at the `mcp__gitnexus__*`
