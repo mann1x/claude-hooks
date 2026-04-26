@@ -360,6 +360,96 @@ def _ensure_proxy_deps(cfg: dict, *, non_interactive: bool, dry_run: bool) -> No
         print(f"  Run manually: {' '.join(pip_cmd)}")
 
 
+CODE_GRAPH_EXTRAS = (
+    {
+        "name": "tree-sitter (multi-language code-graph)",
+        "probe": "import tree_sitter_language_pack",
+        "pkgs": ["tree-sitter-language-pack>=0.13"],
+        "feature": (
+            "Without this, code_graph parses Python only (via stdlib ast). "
+            "With it, it also parses JS/TS/Go/Rust/Java/Ruby."
+        ),
+        "config_extra": "code-graph",
+    },
+    {
+        "name": "Louvain clustering",
+        "probe": "import community, networkx",
+        "pkgs": ["python-louvain>=0.16", "networkx>=3.0"],
+        "feature": (
+            "Replaces the file-based fallback in `code_graph clusters` with "
+            "modularity-based community detection (cohesion scores + cross-"
+            "file groupings)."
+        ),
+        "config_extra": "clustering",
+    },
+    {
+        "name": "MCP server (code_graph as live tools)",
+        "probe": "from mcp.server.fastmcp import FastMCP",
+        "pkgs": ["mcp[cli]>=1.0"],
+        "feature": (
+            "Lets the model call lookup/impact/changes/trace/mermaid/companions "
+            "as MCP tools instead of via Grep + report. Adds a stdio entry "
+            "to ~/.claude.json's mcpServers when wired."
+        ),
+        "config_extra": "mcp-server",
+    },
+)
+
+
+def _ensure_code_graph_extras(*, non_interactive: bool, dry_run: bool) -> None:
+    """Probe the conda env for each code_graph optional extra; offer to install.
+
+    Mirrors :func:`_ensure_proxy_deps`. Each extra is gated by an import
+    probe — if it imports cleanly we move on; otherwise we describe what
+    the user gains by installing and ask. Defaults to ``Y`` to keep the
+    installer feeling forward.
+    """
+    conda_py = CONDA_PY_WIN if os.name == "nt" else CONDA_PY_LINUX
+    py = str(conda_py) if conda_py.exists() else sys.executable
+
+    print("\n==> code_graph optional extras")
+    print("    code_graph runs without these — they unlock additional features.")
+    print(f"    Target Python: {py}")
+
+    for extra in CODE_GRAPH_EXTRAS:
+        probe = subprocess.run(
+            [py, "-c", extra["probe"]],
+            capture_output=True, text=True,
+        )
+        if probe.returncode == 0:
+            print(f"  {extra['name']:48} OK")
+            continue
+
+        print(f"  {extra['name']:48} MISSING")
+        print(f"    {extra['feature']}")
+        pkg_list = " ".join(repr(p) for p in extra["pkgs"])
+
+        if dry_run:
+            print(f"    [dry-run] Would: {py} -m pip install {pkg_list}")
+            continue
+
+        if non_interactive:
+            print("    --non-interactive: installing…")
+        else:
+            ans = input(f"    Install? [Y/n]: ").strip().lower()
+            if ans not in ("", "y", "yes"):
+                print(f"    Skipped. To install later:")
+                print(f"      {py} -m pip install {pkg_list}")
+                print(f"      # or via the extra: pip install 'claude-hooks[{extra['config_extra']}]'")
+                continue
+
+        pip_bin = str(Path(py).parent / ("pip.exe" if os.name == "nt" else "pip"))
+        pip_cmd = ([pip_bin, "install", *extra["pkgs"]]
+                   if Path(pip_bin).exists()
+                   else [py, "-m", "pip", "install", *extra["pkgs"]])
+        rc = subprocess.run(pip_cmd, capture_output=True, text=True)
+        if rc.returncode == 0:
+            print("    Installed.")
+        else:
+            print(f"    pip install failed:\n{rc.stderr[-500:]}")
+            print(f"    Run manually: {' '.join(pip_cmd)}")
+
+
 def _check_conda_env(*, non_interactive: bool, dry_run: bool) -> None:
     """Check the conda env, offer to create it + install deps if missing."""
     conda_py = CONDA_PY_WIN if os.name == "nt" else CONDA_PY_LINUX
@@ -518,6 +608,13 @@ def main() -> int:
     # is enabled. The httpx[http2] profile is what lets the proxy
     # pass Anthropic's edge gate that 429s HTTP/1.1-per-request.
     _ensure_proxy_deps(cfg, non_interactive=args.non_interactive, dry_run=args.dry_run)
+
+    # Offer to install the code_graph optional extras (multi-language
+    # tree-sitter, Louvain clustering, MCP server). Each is opt-in; the
+    # installer probes the conda env first and only asks for missing ones.
+    _ensure_code_graph_extras(
+        non_interactive=args.non_interactive, dry_run=args.dry_run,
+    )
 
     # Offer to install the proxy + rollup-timer + dashboard systemd
     # units (Linux only; idempotent — skips units already installed).
