@@ -125,6 +125,39 @@ class TestReadState:
         assert mod.read_state(p) == {"five_hour_utilization": 0.5}
 
 
+class TestReadStateRemote:
+    def test_unwraps_dashboard_envelope(self, mod, monkeypatch):
+        body = json.dumps({"state": {"five_hour_utilization": 0.42}, "burn": {}}).encode()
+        self._install_fake_urlopen(monkeypatch, mod, body)
+        assert mod.read_state_remote("http://x/api/ratelimit.json") == {"five_hour_utilization": 0.42}
+
+    def test_accepts_bare_state_payload(self, mod, monkeypatch):
+        body = json.dumps({"five_hour_utilization": 0.10}).encode()
+        self._install_fake_urlopen(monkeypatch, mod, body)
+        assert mod.read_state_remote("http://x/api/ratelimit.json") == {"five_hour_utilization": 0.10}
+
+    def test_network_error_returns_empty(self, mod, monkeypatch):
+        import urllib.error
+        def raiser(*a, **kw):
+            raise urllib.error.URLError("boom")
+        monkeypatch.setattr(mod.urllib.request, "urlopen", raiser)
+        assert mod.read_state_remote("http://x/api/ratelimit.json") == {}
+
+    def test_bad_json_returns_empty(self, mod, monkeypatch):
+        self._install_fake_urlopen(monkeypatch, mod, b"not json")
+        assert mod.read_state_remote("http://x/api/ratelimit.json") == {}
+
+    @staticmethod
+    def _install_fake_urlopen(monkeypatch, mod, body):
+        class _Resp:
+            def __init__(self, body): self._body = body
+            def read(self): return self._body
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        monkeypatch.setattr(mod.urllib.request, "urlopen",
+                            lambda req, timeout=None: _Resp(body))
+
+
 class TestCliEntryPoint:
     def test_exit_zero_on_missing_file(self, tmp_path):
         out = subprocess.run(

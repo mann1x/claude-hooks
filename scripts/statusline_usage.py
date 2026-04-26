@@ -24,6 +24,7 @@ Usage:
     python3 scripts/statusline_usage.py --format plain
     python3 scripts/statusline_usage.py --state-file /custom/path.json
     python3 scripts/statusline_usage.py --stale-seconds 600
+    python3 scripts/statusline_usage.py --remote-url http://host:38081/api/ratelimit.json
 """
 
 from __future__ import annotations
@@ -32,12 +33,15 @@ import argparse
 import datetime as _dt
 import json
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
 
 DEFAULT_STATE_PATH = Path.home() / ".claude" / "claude-hooks-proxy" / "ratelimit-state.json"
 DEFAULT_STALE_SECONDS = 600   # 10 min — state older than this is treated as absent
+DEFAULT_REMOTE_TIMEOUT = 2.0  # seconds — keep tight; statusline runs often
 
 
 def _parse_ts(raw: str) -> Optional[_dt.datetime]:
@@ -146,6 +150,27 @@ def read_state(path: Path) -> dict:
         return {}
 
 
+def read_state_remote(url: str, timeout: float = DEFAULT_REMOTE_TIMEOUT) -> dict:
+    """Fetch state JSON from the proxy dashboard's /api/ratelimit.json.
+
+    The endpoint wraps the state under ``{"state": {...}, "burn": ...}`` —
+    we unwrap to match the local-file shape. Returns {} on any failure;
+    statusline callers must never see an exception.
+    """
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    state = data.get("state")
+    if isinstance(state, dict):
+        return state
+    return data
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument(
@@ -164,14 +189,29 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument(
         "--show-blocked", action="store_true",
         help="append ' · blk=N' when today's proxy log has N Warmup-"
-             "blocked events. Reads the same directory as --state-file.",
+             "blocked events. Reads the same directory as --state-file. "
+             "Disabled automatically when --remote-url is used.",
+    )
+    ap.add_argument(
+        "--remote-url", default=None,
+        help="fetch state from a proxy dashboard endpoint instead of a "
+             "local file (e.g. http://solidpc:38081/api/ratelimit.json)",
+    )
+    ap.add_argument(
+        "--remote-timeout", type=float, default=DEFAULT_REMOTE_TIMEOUT,
+        help=f"timeout in seconds for --remote-url "
+             f"(default: {DEFAULT_REMOTE_TIMEOUT})",
     )
     try:
         args = ap.parse_args(argv)
-        state = read_state(args.state_file)
-        blocked = None
-        if args.show_blocked:
-            blocked = count_blocked_today(args.state_file.parent)
+        if args.remote_url:
+            state = read_state_remote(args.remote_url, timeout=args.remote_timeout)
+            blocked = None
+        else:
+            state = read_state(args.state_file)
+            blocked = None
+            if args.show_blocked:
+                blocked = count_blocked_today(args.state_file.parent)
         segment = format_segment(
             state, fmt=args.format, stale_seconds=args.stale_seconds,
             blocked_today=blocked,
