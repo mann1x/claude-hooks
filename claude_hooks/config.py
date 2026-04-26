@@ -243,6 +243,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
             # REGARDLESS of safety_scan_enabled. Set to false to opt out
             # and accept that rtk rewrites auto-approve unconditionally.
             "rtk_scan_rewrites": True,
+            # code_graph symbol lookup on Grep. When enabled, a Grep
+            # whose pattern looks like an identifier triggers a single
+            # dict lookup against the pre-built graph and injects a
+            # one-line "X is at file:line, N callers" hint. Cheap when
+            # the pattern is regex-shaped or stopword-y (early reject);
+            # silent when the symbol isn't in the graph or has > N hits.
+            # Off by default — opt in after building graphify-out/.
+            "code_graph_lookup_enabled": False,
+            # Wall-clock budget for the lookup stage. Discard the result
+            # silently rather than ever blocking the tool call.
+            "code_graph_lookup_budget_ms": 50,
+            # Max hits to render. Above this threshold we return nothing
+            # — the grep is the right tool for that case.
+            "code_graph_lookup_max_hits": 5,
         },
     },
     "reflect": {

@@ -3,18 +3,18 @@
   "multigraph": false,
   "graph": {
     "generated_by": "claude-hooks",
-    "generated_at": "2026-04-26T07:13:52Z",
+    "generated_at": "2026-04-26T07:28:07Z",
     "stats": {
-      "files_parsed": 113,
+      "files_parsed": 115,
       "files_cached": 0,
-      "nodes": 1757,
-      "edges": 3778,
-      "calls_resolved": 1878,
-      "calls_external": 5550,
-      "calls_ambiguous": 529,
-      "imports_external": 723,
+      "nodes": 1795,
+      "edges": 3839,
+      "calls_resolved": 1887,
+      "calls_external": 5622,
+      "calls_ambiguous": 580,
+      "imports_external": 741,
       "by_language": {
-        ".py": 113
+        ".py": 115
       },
       "parse_errors": 0
     }
@@ -687,7 +687,7 @@
       "name": "repo_root",
       "qualname": "claude_hooks.config.repo_root",
       "file": "claude_hooks/config.py",
-      "line": 310,
+      "line": 324,
       "tag": "EXTRACTED",
       "doc": "Path to the claude-hooks repo root (one level above this file's package).",
       "is_async": false
@@ -698,7 +698,7 @@
       "name": "default_config_path",
       "qualname": "claude_hooks.config.default_config_path",
       "file": "claude_hooks/config.py",
-      "line": 315,
+      "line": 329,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -709,7 +709,7 @@
       "name": "load_config",
       "qualname": "claude_hooks.config.load_config",
       "file": "claude_hooks/config.py",
-      "line": 319,
+      "line": 333,
       "tag": "EXTRACTED",
       "doc": "Load the config file from disk and merge it on top of DEFAULT_CONFIG.",
       "is_async": false
@@ -720,7 +720,7 @@
       "name": "save_config",
       "qualname": "claude_hooks.config.save_config",
       "file": "claude_hooks/config.py",
-      "line": 337,
+      "line": 351,
       "tag": "EXTRACTED",
       "doc": "Atomically write the config to disk and return the path.",
       "is_async": false
@@ -731,7 +731,7 @@
       "name": "_deep_merge",
       "qualname": "claude_hooks.config._deep_merge",
       "file": "claude_hooks/config.py",
-      "line": 349,
+      "line": 363,
       "tag": "EXTRACTED",
       "doc": "Recursively merge ``src`` into ``dst`` in place.",
       "is_async": false
@@ -742,7 +742,7 @@
       "name": "expand_user_path",
       "qualname": "claude_hooks.config.expand_user_path",
       "file": "claude_hooks/config.py",
-      "line": 358,
+      "line": 372,
       "tag": "EXTRACTED",
       "doc": "Expand ``~`` and environment variables in a path string.",
       "is_async": false
@@ -753,7 +753,7 @@
       "name": "project_disabled",
       "qualname": "claude_hooks.config.project_disabled",
       "file": "claude_hooks/config.py",
-      "line": 363,
+      "line": 377,
       "tag": "EXTRACTED",
       "doc": "Check whether ``cwd`` (or any ancestor up to root) contains the disable",
       "is_async": false
@@ -4344,6 +4344,69 @@
       "tag": "EXTRACTED"
     },
     {
+      "id": "module:claude_hooks.code_graph.symbol_lookup",
+      "type": "module",
+      "name": "claude_hooks.code_graph.symbol_lookup",
+      "file": "claude_hooks/code_graph/symbol_lookup.py",
+      "line": 1,
+      "tag": "EXTRACTED"
+    },
+    {
+      "id": "func:claude_hooks.code_graph.symbol_lookup.looks_like_symbol",
+      "type": "function",
+      "name": "looks_like_symbol",
+      "qualname": "claude_hooks.code_graph.symbol_lookup.looks_like_symbol",
+      "file": "claude_hooks/code_graph/symbol_lookup.py",
+      "line": 86,
+      "tag": "EXTRACTED",
+      "doc": "True iff ``pattern`` looks like a single identifier worth a lookup.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.symbol_lookup._load_index",
+      "type": "function",
+      "name": "_load_index",
+      "qualname": "claude_hooks.code_graph.symbol_lookup._load_index",
+      "file": "claude_hooks/code_graph/symbol_lookup.py",
+      "line": 127,
+      "tag": "EXTRACTED",
+      "doc": "Return the symbol index for ``root``, building if missing/stale.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.symbol_lookup.clear_cache",
+      "type": "function",
+      "name": "clear_cache",
+      "qualname": "claude_hooks.code_graph.symbol_lookup.clear_cache",
+      "file": "claude_hooks/code_graph/symbol_lookup.py",
+      "line": 184,
+      "tag": "EXTRACTED",
+      "doc": "Drop the in-process index cache (test helper).",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "type": "function",
+      "name": "inject_for_grep",
+      "qualname": "claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "file": "claude_hooks/code_graph/symbol_lookup.py",
+      "line": 193,
+      "tag": "EXTRACTED",
+      "doc": "Return the additionalContext block for a Grep call, or None.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.code_graph.symbol_lookup._format",
+      "type": "function",
+      "name": "_format",
+      "qualname": "claude_hooks.code_graph.symbol_lookup._format",
+      "file": "claude_hooks/code_graph/symbol_lookup.py",
+      "line": 233,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
       "id": "module:claude_hooks.code_graph.__main__",
       "type": "module",
       "name": "claude_hooks.code_graph.__main__",
@@ -4987,7 +5050,7 @@
       "name": "_run_rtk_rewrite_raw",
       "qualname": "claude_hooks.hooks.pre_tool_use._run_rtk_rewrite_raw",
       "file": "claude_hooks/hooks/pre_tool_use.py",
-      "line": 169,
+      "line": 183,
       "tag": "EXTRACTED",
       "doc": "Attempt rtk rewrite on a Bash command. Returns the rewritten string or None.",
       "is_async": false
@@ -4998,9 +5061,20 @@
       "name": "_run_safety_scan_raw",
       "qualname": "claude_hooks.hooks.pre_tool_use._run_safety_scan_raw",
       "file": "claude_hooks/hooks/pre_tool_use.py",
-      "line": 190,
+      "line": 204,
       "tag": "EXTRACTED",
       "doc": "Scan a Bash command. Returns (pattern_name, reason) on match, else None.",
+      "is_async": false
+    },
+    {
+      "id": "func:claude_hooks.hooks.pre_tool_use._try_code_graph_lookup",
+      "type": "function",
+      "name": "_try_code_graph_lookup",
+      "qualname": "claude_hooks.hooks.pre_tool_use._try_code_graph_lookup",
+      "file": "claude_hooks/hooks/pre_tool_use.py",
+      "line": 244,
+      "tag": "EXTRACTED",
+      "doc": "Run the symbol lookup with a hard wall-clock budget. Returns the",
       "is_async": false
     },
     {
@@ -5009,7 +5083,7 @@
       "name": "_probe_string",
       "qualname": "claude_hooks.hooks.pre_tool_use._probe_string",
       "file": "claude_hooks/hooks/pre_tool_use.py",
-      "line": 230,
+      "line": 279,
       "tag": "EXTRACTED",
       "doc": null,
       "is_async": false
@@ -17544,6 +17618,340 @@
       "is_async": false
     },
     {
+      "id": "module:tests.test_code_graph_symbol_lookup",
+      "type": "module",
+      "name": "tests.test_code_graph_symbol_lookup",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 1,
+      "tag": "EXTRACTED"
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup._git_init",
+      "type": "function",
+      "name": "_git_init",
+      "qualname": "tests.test_code_graph_symbol_lookup._git_init",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 18,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup._write",
+      "type": "function",
+      "name": "_write",
+      "qualname": "tests.test_code_graph_symbol_lookup._write",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 22,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.repo",
+      "type": "function",
+      "name": "repo",
+      "qualname": "tests.test_code_graph_symbol_lookup.repo",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 29,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol",
+      "type": "class",
+      "name": "TestLooksLikeSymbol",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 68,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol.test_accepts_real_identifiers",
+      "type": "method",
+      "name": "test_accepts_real_identifiers",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol.test_accepts_real_identifiers",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 73,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol.test_rejects_non_symbols",
+      "type": "method",
+      "name": "test_rejects_non_symbols",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol.test_rejects_non_symbols",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 91,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol.test_dotted_path_accepted_when_leaf_is_real",
+      "type": "method",
+      "name": "test_dotted_path_accepted_when_leaf_is_real",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol.test_dotted_path_accepted_when_leaf_is_real",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 94,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol.test_dotted_path_rejected_when_leaf_is_stopword",
+      "type": "method",
+      "name": "test_dotted_path_rejected_when_leaf_is_stopword",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol.test_dotted_path_rejected_when_leaf_is_stopword",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 97,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_code_graph_symbol_lookup.TestInject",
+      "type": "class",
+      "name": "TestInject",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestInject",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 105,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestInject.test_one_hit_returns_one_liner",
+      "type": "method",
+      "name": "test_one_hit_returns_one_liner",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestInject.test_one_hit_returns_one_liner",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 106,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestInject.test_multi_hit_returns_list",
+      "type": "method",
+      "name": "test_multi_hit_returns_list",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestInject.test_multi_hit_returns_list",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 115,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestInject.test_zero_hits_returns_none",
+      "type": "method",
+      "name": "test_zero_hits_returns_none",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestInject.test_zero_hits_returns_none",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 123,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestInject.test_too_many_hits_returns_none",
+      "type": "method",
+      "name": "test_too_many_hits_returns_none",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestInject.test_too_many_hits_returns_none",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 126,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestInject.test_qualified_pattern_narrows",
+      "type": "method",
+      "name": "test_qualified_pattern_narrows",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestInject.test_qualified_pattern_narrows",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 138,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestInject.test_regex_pattern_returns_none",
+      "type": "method",
+      "name": "test_regex_pattern_returns_none",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestInject.test_regex_pattern_returns_none",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 145,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestInject.test_stopword_returns_none",
+      "type": "method",
+      "name": "test_stopword_returns_none",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestInject.test_stopword_returns_none",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 149,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestInject.test_no_graph_returns_none",
+      "type": "method",
+      "name": "test_no_graph_returns_none",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestInject.test_no_graph_returns_none",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 154,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestInject.test_corrupt_graph_returns_none",
+      "type": "method",
+      "name": "test_corrupt_graph_returns_none",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestInject.test_corrupt_graph_returns_none",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 160,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestInject.test_never_raises",
+      "type": "method",
+      "name": "test_never_raises",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestInject.test_never_raises",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 165,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestInject.test_class_lookup",
+      "type": "method",
+      "name": "test_class_lookup",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestInject.test_class_lookup",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 173,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_code_graph_symbol_lookup.TestIndexCache",
+      "type": "class",
+      "name": "TestIndexCache",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestIndexCache",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 183,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestIndexCache.test_cache_hit_skips_rebuild",
+      "type": "method",
+      "name": "test_cache_hit_skips_rebuild",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestIndexCache.test_cache_hit_skips_rebuild",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 184,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestIndexCache.test_mtime_change_triggers_rebuild",
+      "type": "method",
+      "name": "test_mtime_change_triggers_rebuild",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestIndexCache.test_mtime_change_triggers_rebuild",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 195,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "class:tests.test_code_graph_symbol_lookup.TestHookIntegration",
+      "type": "class",
+      "name": "TestHookIntegration",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestHookIntegration",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 218,
+      "tag": "EXTRACTED",
+      "doc": null
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestHookIntegration._event",
+      "type": "method",
+      "name": "_event",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestHookIntegration._event",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 219,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestHookIntegration.test_disabled_by_default",
+      "type": "method",
+      "name": "test_disabled_by_default",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestHookIntegration.test_disabled_by_default",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 226,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestHookIntegration.test_enabled_emits_inject",
+      "type": "method",
+      "name": "test_enabled_emits_inject",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestHookIntegration.test_enabled_emits_inject",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 234,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestHookIntegration.test_enabled_skips_non_grep",
+      "type": "method",
+      "name": "test_enabled_skips_non_grep",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestHookIntegration.test_enabled_skips_non_grep",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 249,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestHookIntegration.test_enabled_silent_on_regex_pattern",
+      "type": "method",
+      "name": "test_enabled_silent_on_regex_pattern",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestHookIntegration.test_enabled_silent_on_regex_pattern",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 265,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
+      "id": "func:tests.test_code_graph_symbol_lookup.TestHookIntegration.test_budget_zero_returns_none",
+      "type": "method",
+      "name": "test_budget_zero_returns_none",
+      "qualname": "tests.test_code_graph_symbol_lookup.TestHookIntegration.test_budget_zero_returns_none",
+      "file": "tests/test_code_graph_symbol_lookup.py",
+      "line": 276,
+      "tag": "EXTRACTED",
+      "doc": null,
+      "is_async": false
+    },
+    {
       "id": "module:tests.test_proxy",
       "type": "module",
       "name": "tests.test_proxy",
@@ -22148,43 +22556,7 @@
     },
     {
       "source": "func:claude_hooks.proxy.stub.build_streaming",
-      "target": "func:claude_hooks.proxy.stub.build_streaming._event",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:claude_hooks.proxy.stub.build_streaming",
       "target": "func:claude_hooks.proxy.stub._empty_usage",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:claude_hooks.proxy.stub.build_streaming",
-      "target": "func:claude_hooks.proxy.stub.build_streaming._event",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:claude_hooks.proxy.stub.build_streaming",
-      "target": "func:claude_hooks.proxy.stub.build_streaming._event",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:claude_hooks.proxy.stub.build_streaming",
-      "target": "func:claude_hooks.proxy.stub.build_streaming._event",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:claude_hooks.proxy.stub.build_streaming",
-      "target": "func:claude_hooks.proxy.stub.build_streaming._event",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:claude_hooks.proxy.stub.build_streaming",
-      "target": "func:claude_hooks.proxy.stub.build_streaming._event",
       "type": "calls",
       "tag": "INFERRED"
     },
@@ -23833,6 +24205,66 @@
       "tag": "EXTRACTED"
     },
     {
+      "source": "module:claude_hooks.code_graph.symbol_lookup",
+      "target": "module:claude_hooks.code_graph.detect",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.symbol_lookup",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.looks_like_symbol",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.symbol_lookup",
+      "target": "func:claude_hooks.code_graph.symbol_lookup._load_index",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.symbol_lookup._load_index",
+      "target": "func:claude_hooks.code_graph.detect.graph_json_path",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.symbol_lookup",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.clear_cache",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.symbol_lookup",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.looks_like_symbol",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "target": "func:claude_hooks.code_graph.symbol_lookup._load_index",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "target": "func:claude_hooks.code_graph.symbol_lookup._format",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.code_graph.symbol_lookup",
+      "target": "func:claude_hooks.code_graph.symbol_lookup._format",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
       "source": "module:claude_hooks.code_graph.__main__",
       "target": "module:claude_hooks.code_graph.builder",
       "type": "imports",
@@ -24824,6 +25256,12 @@
     },
     {
       "source": "func:claude_hooks.hooks.pre_tool_use.handle",
+      "target": "func:claude_hooks.hooks.pre_tool_use._try_code_graph_lookup",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.hooks.pre_tool_use.handle",
       "target": "func:claude_hooks.hooks.pre_tool_use._run_rtk_rewrite_raw",
       "type": "calls",
       "tag": "INFERRED"
@@ -24903,6 +25341,36 @@
     {
       "source": "func:claude_hooks.hooks.pre_tool_use._run_safety_scan_raw",
       "target": "func:claude_hooks.safety_scan.log_match",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:claude_hooks.hooks.pre_tool_use",
+      "target": "func:claude_hooks.hooks.pre_tool_use._try_code_graph_lookup",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.hooks.pre_tool_use",
+      "target": "module:claude_hooks.code_graph.detect",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:claude_hooks.hooks.pre_tool_use",
+      "target": "module:claude_hooks.code_graph.symbol_lookup",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:claude_hooks.hooks.pre_tool_use._try_code_graph_lookup",
+      "target": "func:claude_hooks.code_graph.detect.project_root",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:claude_hooks.hooks.pre_tool_use._try_code_graph_lookup",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
       "type": "calls",
       "tag": "INFERRED"
     },
@@ -35533,48 +36001,6 @@
       "tag": "EXTRACTED"
     },
     {
-      "source": "func:tests.test_code_graph.small_repo",
-      "target": "func:tests.test_code_graph._git_init",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:tests.test_code_graph.small_repo",
-      "target": "func:tests.test_code_graph._write",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:tests.test_code_graph.small_repo",
-      "target": "func:tests.test_code_graph._write",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:tests.test_code_graph.small_repo",
-      "target": "func:tests.test_code_graph._write",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:tests.test_code_graph.small_repo",
-      "target": "func:tests.test_code_graph._write",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:tests.test_code_graph.small_repo",
-      "target": "func:tests.test_code_graph._write",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:tests.test_code_graph.small_repo",
-      "target": "func:tests.test_code_graph._write",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
       "source": "module:tests.test_code_graph",
       "target": "class:tests.test_code_graph.TestDetect",
       "type": "contains",
@@ -35639,18 +36065,6 @@
       "target": "func:tests.test_code_graph.TestDetect.test_is_code_repo_skips_ignored_dirs",
       "type": "contains",
       "tag": "EXTRACTED"
-    },
-    {
-      "source": "func:tests.test_code_graph.TestDetect.test_is_code_repo_skips_ignored_dirs",
-      "target": "func:tests.test_code_graph._git_init",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:tests.test_code_graph.TestDetect.test_is_code_repo_skips_ignored_dirs",
-      "target": "func:tests.test_code_graph._write",
-      "type": "calls",
-      "tag": "INFERRED"
     },
     {
       "source": "func:tests.test_code_graph.TestDetect.test_is_code_repo_skips_ignored_dirs",
@@ -35861,12 +36275,6 @@
       "target": "func:tests.test_code_graph.TestBuilder.test_handles_syntax_error_gracefully",
       "type": "contains",
       "tag": "EXTRACTED"
-    },
-    {
-      "source": "func:tests.test_code_graph.TestBuilder.test_handles_syntax_error_gracefully",
-      "target": "func:tests.test_code_graph._write",
-      "type": "calls",
-      "tag": "INFERRED"
     },
     {
       "source": "func:tests.test_code_graph.TestBuilder.test_handles_syntax_error_gracefully",
@@ -36092,24 +36500,6 @@
     },
     {
       "source": "func:tests.test_code_graph.TestTreeSitterBackend.test_extracts_javascript_functions",
-      "target": "func:tests.test_code_graph._git_init",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:tests.test_code_graph.TestTreeSitterBackend.test_extracts_javascript_functions",
-      "target": "func:tests.test_code_graph._write",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:tests.test_code_graph.TestTreeSitterBackend.test_extracts_javascript_functions",
-      "target": "func:tests.test_code_graph._write",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:tests.test_code_graph.TestTreeSitterBackend.test_extracts_javascript_functions",
       "target": "func:claude_hooks.code_graph.builder.build_graph",
       "type": "calls",
       "tag": "INFERRED"
@@ -36128,24 +36518,6 @@
     },
     {
       "source": "func:tests.test_code_graph.TestTreeSitterBackend.test_extracts_typescript",
-      "target": "func:tests.test_code_graph._git_init",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:tests.test_code_graph.TestTreeSitterBackend.test_extracts_typescript",
-      "target": "func:tests.test_code_graph._write",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:tests.test_code_graph.TestTreeSitterBackend.test_extracts_typescript",
-      "target": "func:tests.test_code_graph._write",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:tests.test_code_graph.TestTreeSitterBackend.test_extracts_typescript",
       "target": "func:claude_hooks.code_graph.builder.build_graph",
       "type": "calls",
       "tag": "INFERRED"
@@ -36161,24 +36533,6 @@
       "target": "func:tests.test_code_graph.TestTreeSitterBackend.test_extracts_go",
       "type": "contains",
       "tag": "EXTRACTED"
-    },
-    {
-      "source": "func:tests.test_code_graph.TestTreeSitterBackend.test_extracts_go",
-      "target": "func:tests.test_code_graph._git_init",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:tests.test_code_graph.TestTreeSitterBackend.test_extracts_go",
-      "target": "func:tests.test_code_graph._write",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:tests.test_code_graph.TestTreeSitterBackend.test_extracts_go",
-      "target": "func:tests.test_code_graph._write",
-      "type": "calls",
-      "tag": "INFERRED"
     },
     {
       "source": "func:tests.test_code_graph.TestTreeSitterBackend.test_extracts_go",
@@ -36245,24 +36599,6 @@
       "target": "func:tests.test_code_graph.TestTreeSitterBackend.test_handles_unparsable_gracefully",
       "type": "contains",
       "tag": "EXTRACTED"
-    },
-    {
-      "source": "func:tests.test_code_graph.TestTreeSitterBackend.test_handles_unparsable_gracefully",
-      "target": "func:tests.test_code_graph._git_init",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:tests.test_code_graph.TestTreeSitterBackend.test_handles_unparsable_gracefully",
-      "target": "func:tests.test_code_graph._write",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:tests.test_code_graph.TestTreeSitterBackend.test_handles_unparsable_gracefully",
-      "target": "func:tests.test_code_graph._write",
-      "type": "calls",
-      "tag": "INFERRED"
     },
     {
       "source": "func:tests.test_code_graph.TestTreeSitterBackend.test_handles_unparsable_gracefully",
@@ -36335,18 +36671,6 @@
       "target": "module:claude_hooks.code_graph.__main__",
       "type": "imports",
       "tag": "EXTRACTED"
-    },
-    {
-      "source": "func:tests.test_code_graph.TestBuildAsync.test_no_op_when_too_few_files",
-      "target": "func:tests.test_code_graph._git_init",
-      "type": "calls",
-      "tag": "INFERRED"
-    },
-    {
-      "source": "func:tests.test_code_graph.TestBuildAsync.test_no_op_when_too_few_files",
-      "target": "func:tests.test_code_graph._write",
-      "type": "calls",
-      "tag": "INFERRED"
     },
     {
       "source": "func:tests.test_code_graph.TestBuildAsync.test_no_op_when_too_few_files",
@@ -40329,6 +40653,456 @@
     {
       "source": "func:tests.test_dedup.TestShouldStore.test_provider_error_fails_open",
       "target": "func:claude_hooks.dedup.should_store",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_code_graph_symbol_lookup",
+      "target": "module:claude_hooks.code_graph",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_symbol_lookup",
+      "target": "module:claude_hooks.code_graph.builder",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_symbol_lookup",
+      "target": "module:claude_hooks.code_graph.detect",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_symbol_lookup",
+      "target": "func:tests.test_code_graph_symbol_lookup._git_init",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_symbol_lookup",
+      "target": "func:tests.test_code_graph_symbol_lookup._write",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_symbol_lookup",
+      "target": "func:tests.test_code_graph_symbol_lookup.repo",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.repo",
+      "target": "func:claude_hooks.code_graph.builder.build_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.repo",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.clear_cache",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_code_graph_symbol_lookup",
+      "target": "class:tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol.test_accepts_real_identifiers",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol.test_accepts_real_identifiers",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.looks_like_symbol",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol.test_rejects_non_symbols",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol.test_rejects_non_symbols",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.looks_like_symbol",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol.test_dotted_path_accepted_when_leaf_is_real",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol.test_dotted_path_accepted_when_leaf_is_real",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.looks_like_symbol",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol.test_dotted_path_rejected_when_leaf_is_stopword",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestLooksLikeSymbol.test_dotted_path_rejected_when_leaf_is_stopword",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.looks_like_symbol",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_code_graph_symbol_lookup",
+      "target": "class:tests.test_code_graph_symbol_lookup.TestInject",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestInject",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestInject.test_one_hit_returns_one_liner",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestInject.test_one_hit_returns_one_liner",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestInject",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestInject.test_multi_hit_returns_list",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestInject.test_multi_hit_returns_list",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestInject",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestInject.test_zero_hits_returns_none",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestInject.test_zero_hits_returns_none",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestInject",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestInject.test_too_many_hits_returns_none",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestInject.test_too_many_hits_returns_none",
+      "target": "func:claude_hooks.code_graph.builder.build_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestInject.test_too_many_hits_returns_none",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.clear_cache",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestInject.test_too_many_hits_returns_none",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestInject",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestInject.test_qualified_pattern_narrows",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestInject.test_qualified_pattern_narrows",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestInject",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestInject.test_regex_pattern_returns_none",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestInject.test_regex_pattern_returns_none",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestInject.test_regex_pattern_returns_none",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestInject",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestInject.test_stopword_returns_none",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestInject.test_stopword_returns_none",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestInject",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestInject.test_no_graph_returns_none",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestInject.test_no_graph_returns_none",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.clear_cache",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestInject.test_no_graph_returns_none",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestInject",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestInject.test_corrupt_graph_returns_none",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestInject.test_corrupt_graph_returns_none",
+      "target": "func:claude_hooks.code_graph.detect.graph_json_path",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestInject.test_corrupt_graph_returns_none",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.clear_cache",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestInject.test_corrupt_graph_returns_none",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestInject",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestInject.test_never_raises",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestInject.test_never_raises",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestInject",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestInject.test_class_lookup",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestInject.test_class_lookup",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_code_graph_symbol_lookup",
+      "target": "class:tests.test_code_graph_symbol_lookup.TestIndexCache",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestIndexCache",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestIndexCache.test_cache_hit_skips_rebuild",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestIndexCache.test_cache_hit_skips_rebuild",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.clear_cache",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestIndexCache.test_cache_hit_skips_rebuild",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestIndexCache.test_cache_hit_skips_rebuild",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestIndexCache",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestIndexCache.test_mtime_change_triggers_rebuild",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestIndexCache.test_mtime_change_triggers_rebuild",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.clear_cache",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestIndexCache.test_mtime_change_triggers_rebuild",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestIndexCache.test_mtime_change_triggers_rebuild",
+      "target": "func:claude_hooks.code_graph.builder.build_graph",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestIndexCache.test_mtime_change_triggers_rebuild",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.inject_for_grep",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "module:tests.test_code_graph_symbol_lookup",
+      "target": "class:tests.test_code_graph_symbol_lookup.TestHookIntegration",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestHookIntegration",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestHookIntegration._event",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestHookIntegration",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestHookIntegration.test_disabled_by_default",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_symbol_lookup",
+      "target": "module:claude_hooks.config",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_symbol_lookup",
+      "target": "module:claude_hooks.hooks.pre_tool_use",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestHookIntegration",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestHookIntegration.test_enabled_emits_inject",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_symbol_lookup",
+      "target": "module:claude_hooks.config",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_symbol_lookup",
+      "target": "module:claude_hooks.hooks.pre_tool_use",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestHookIntegration.test_enabled_emits_inject",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.clear_cache",
+      "type": "calls",
+      "tag": "INFERRED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestHookIntegration",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestHookIntegration.test_enabled_skips_non_grep",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_symbol_lookup",
+      "target": "module:claude_hooks.config",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_symbol_lookup",
+      "target": "module:claude_hooks.hooks.pre_tool_use",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestHookIntegration",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestHookIntegration.test_enabled_silent_on_regex_pattern",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_symbol_lookup",
+      "target": "module:claude_hooks.config",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_symbol_lookup",
+      "target": "module:claude_hooks.hooks.pre_tool_use",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "class:tests.test_code_graph_symbol_lookup.TestHookIntegration",
+      "target": "func:tests.test_code_graph_symbol_lookup.TestHookIntegration.test_budget_zero_returns_none",
+      "type": "contains",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_symbol_lookup",
+      "target": "module:claude_hooks.config",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "module:tests.test_code_graph_symbol_lookup",
+      "target": "module:claude_hooks.hooks.pre_tool_use",
+      "type": "imports",
+      "tag": "EXTRACTED"
+    },
+    {
+      "source": "func:tests.test_code_graph_symbol_lookup.TestHookIntegration.test_budget_zero_returns_none",
+      "target": "func:claude_hooks.code_graph.symbol_lookup.clear_cache",
       "type": "calls",
       "tag": "INFERRED"
     },

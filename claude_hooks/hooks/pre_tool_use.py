@@ -42,6 +42,20 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     tool_name = event.get("tool_name", "")
     tool_input = event.get("tool_input") or {}
 
+    # Stage 0: code_graph symbol lookup on Grep. Cheap when the pattern
+    # isn't symbol-shaped (early reject); when it is, a single dict
+    # lookup against an mtime-cached index emits a one-line "X is at
+    # file:line, N callers" hint. Opt-in.
+    if tool_name == "Grep" and hook_cfg.get("code_graph_lookup_enabled", False):
+        block = _try_code_graph_lookup(event, hook_cfg)
+        if block:
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "additionalContext": block,
+                }
+            }
+
     # Stages 1+2: rtk rewriter + safety scanner (Bash only).
     #
     # Order matters: rtk first, then safety_scan on the *rewritten* command.
@@ -225,6 +239,41 @@ def _run_safety_scan_raw(cmd: str, hook_cfg: dict) -> Optional[tuple[str, str]]:
         )
 
     return pattern_name, reason
+
+
+def _try_code_graph_lookup(event: dict, hook_cfg: dict) -> Optional[str]:
+    """Run the symbol lookup with a hard wall-clock budget. Returns the
+    additionalContext markdown or None.
+
+    The budget guards against future pathologies (a giant graph.json,
+    a slow filesystem, etc.); the index lookup itself is O(1).
+    """
+    try:
+        import time
+        from claude_hooks.code_graph.detect import project_root
+        from claude_hooks.code_graph.symbol_lookup import inject_for_grep
+
+        cwd = event.get("cwd") or ""
+        root = project_root(cwd)
+        if root is None:
+            return None
+        pattern = (event.get("tool_input") or {}).get("pattern", "") or ""
+        if not pattern:
+            return None
+        budget_ms = float(hook_cfg.get("code_graph_lookup_budget_ms", 50))
+        deadline = time.monotonic() + budget_ms / 1000.0
+
+        block = inject_for_grep(
+            pattern, root,
+            max_hits=int(hook_cfg.get("code_graph_lookup_max_hits", 5)),
+        )
+        if time.monotonic() > deadline:
+            log.debug("code_graph lookup exceeded %dms budget — discarding", budget_ms)
+            return None
+        return block
+    except Exception as e:
+        log.debug("code_graph lookup failed: %s", e)
+        return None
 
 
 def _probe_string(tool_name: str, tool_input: dict) -> str:
