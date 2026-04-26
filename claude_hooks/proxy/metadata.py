@@ -162,7 +162,21 @@ def extract_request_info(
 # ------------------------------------------------------------------ #
 # S2 helpers
 # ------------------------------------------------------------------ #
-_MAIN_AGENT_PREFIX = "You are Claude Code"
+# Personas that indicate a "main" (top-level) Claude session rather than
+# a subagent. Two known shapes:
+#   - "You are Claude Code, …"            — interactive CLI (cc_entrypoint=cli)
+#   - "You are a Claude agent, built on Anthropic's Claude Agent SDK." —
+#                                           one-shot CLI (`claude -p`,
+#                                           cc_entrypoint=sdk-cli)
+# The second prefix matters because without it, `claude -p` calls fall
+# through to the subagent classifier and then get caught by the SDK-
+# priming short-circuit (subagent + sdk-cli + 1 msg → warmup), which
+# blocks legitimate one-shot prompts (e.g. caliber refresh's claude-cli
+# provider).
+_MAIN_AGENT_PREFIXES = (
+    "You are Claude Code",
+    "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+)
 
 
 def _first_user_text(messages: Any) -> str:
@@ -203,7 +217,7 @@ def _classify_agent(
     persona = _find_persona_text(system)
     if not persona:
         return "unknown", None
-    if persona.startswith(_MAIN_AGENT_PREFIX):
+    if persona.startswith(_MAIN_AGENT_PREFIXES):
         return "main", "main"
     # Subagent — try to extract a readable handle from the first clause.
     name = _extract_agent_name(persona)

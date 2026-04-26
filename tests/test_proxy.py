@@ -315,6 +315,48 @@ class TestMetadataExtractors:
         out = extract_request_info(body, {})
         assert out["is_warmup"] is False
 
+    def test_claude_p_sdk_cli_persona_classified_as_main(self):
+        # `claude -p` in CC 2.1.119+ ships an SDK-style persona under
+        # cc_entrypoint=sdk-cli with a single user message. Without the
+        # second main-prefix entry this would fall into the subagent
+        # branch and then be flipped to warmup by the SDK-priming
+        # heuristic — silently dropping the user's prompt.
+        body = json.dumps({
+            "system": [
+                {"type": "text", "text":
+                 "x-anthropic-billing-header: cc_version=2.1.119; "
+                 "cc_entrypoint=sdk-cli; cch=abc;"},
+                {"type": "text", "text":
+                 "You are a Claude agent, built on Anthropic's "
+                 "Claude Agent SDK."},
+                {"type": "text", "text": "...full instructions..."},
+            ],
+            "messages": [{"role": "user", "content": "Reply PONG"}],
+        }).encode("utf-8")
+        out = extract_request_info(body, {})
+        assert out["agent_type"] == "main"
+        assert out["is_warmup"] is False
+        assert out["cc_entrypoint"] == "sdk-cli"
+
+    def test_real_sdk_agent_priming_still_flagged_as_warmup(self):
+        # A genuine SDK Agent() priming request: subagent persona,
+        # sdk-cli entrypoint, one priming message. Should still be
+        # caught by the heuristic so we don't lose the warmup-block
+        # savings.
+        body = json.dumps({
+            "system": [
+                {"type": "text", "text":
+                 "x-anthropic-billing-header: cc_version=2.1.119; "
+                 "cc_entrypoint=sdk-cli;"},
+                {"type": "text", "text":
+                 "You are a code reviewer specialized in TypeScript."},
+            ],
+            "messages": [{"role": "user", "content": "priming"}],
+        }).encode("utf-8")
+        out = extract_request_info(body, {})
+        assert out["is_warmup"] is True
+        assert out["agent_type"] == "warmup"
+
     def test_extract_request_invalid_json(self):
         out = extract_request_info(b"not json", {})
         assert out["model_requested"] is None
