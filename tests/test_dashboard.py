@@ -8,6 +8,7 @@ expected shape and the HTML renders.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import socket
 import sqlite3
@@ -19,6 +20,16 @@ from pathlib import Path
 import pytest
 
 from claude_hooks.proxy import dashboard, stats_db
+
+
+# Use today's UTC date so the dashboard's "today" endpoint sees our
+# seeded rows. Hardcoding a date here would make the test fail on any
+# day other than the one it was written.
+TODAY = _dt.datetime.utcnow().strftime("%Y-%m-%d")
+TODAY_TS_MIDNIGHT = f"{TODAY}T00:00:00Z"
+TODAY_TS_06 = f"{TODAY}T06:00:00Z"
+TODAY_TS_10 = f"{TODAY}T10:00:00Z"
+TODAY_TS_11 = f"{TODAY}T11:00:00Z"
 
 
 def _find_port() -> int:
@@ -46,30 +57,30 @@ def seeded_db(tmp_path):
                 thinking_request_count, total_thinking_delta_count,
                 total_thinking_signature_bytes, total_thinking_output_tokens
             ) VALUES (
-                '2026-04-15', 100, 10, 10, 0, 90, 5, 5, 0,
+                ?, 100, 10, 10, 0, 90, 5, 5, 0,
                 0, 1000, 5000, 50000, 900000,
-                0.947, 10000, 50000, 120000, '2026-04-15T00:00:00Z',
+                0.947, 10000, 50000, 120000, ?,
                 20, 80, 12000, 0
             )
-        """)
+        """, (TODAY, TODAY_TS_MIDNIGHT))
         conn.execute("""
             INSERT INTO agent_rollup(
                 date, agent_name, agent_type, request_count,
                 warmup_blocked_count, input_tokens, output_tokens,
                 cache_creation_tokens, cache_read_tokens
             ) VALUES
-              ('2026-04-15', 'main', 'main', 50, 0, 500, 2500, 30000, 500000),
-              ('2026-04-15', 'code reviewer', 'subagent', 40, 0, 400, 2000, 15000, 300000),
-              ('2026-04-15', 'warmup', 'warmup', 10, 10, 0, 0, 0, 0)
-        """)
+              (?, 'main', 'main', 50, 0, 500, 2500, 30000, 500000),
+              (?, 'code reviewer', 'subagent', 40, 0, 400, 2000, 15000, 300000),
+              (?, 'warmup', 'warmup', 10, 10, 0, 0, 0, 0)
+        """, (TODAY, TODAY, TODAY))
         conn.execute("""
             INSERT INTO model_rollup(
                 date, model, request_count, input_tokens, output_tokens,
                 cache_creation_tokens, cache_read_tokens
             ) VALUES
-              ('2026-04-15', 'claude-opus-4-6', 85, 800, 4000, 40000, 700000),
-              ('2026-04-15', 'claude-haiku-4-5-20251001', 15, 200, 1000, 10000, 200000)
-        """)
+              (?, 'claude-opus-4-6', 85, 800, 4000, 40000, 700000),
+              (?, 'claude-haiku-4-5-20251001', 15, 200, 1000, 10000, 200000)
+        """, (TODAY, TODAY))
         # Two distinct beta-feature sets across 2 rows so _query_betas
         # has something to flatten.
         conn.execute("""
@@ -77,18 +88,18 @@ def seeded_db(tmp_path):
                 ts, date, source_file, source_line, method, path, status,
                 is_warmup, warmup_blocked, synthetic, beta_features
             ) VALUES
-              ('2026-04-15T10:00:00Z', '2026-04-15', 's.jsonl', 1, 'POST', '/v1/messages', 200, 0, 0, 0,
+              (?, ?, 's.jsonl', 1, 'POST', '/v1/messages', 200, 0, 0, 0,
                'context-management-2025-06-27,oauth-2025-04-20'),
-              ('2026-04-15T11:00:00Z', '2026-04-15', 's.jsonl', 2, 'POST', '/v1/messages', 200, 0, 0, 0,
+              (?, ?, 's.jsonl', 2, 'POST', '/v1/messages', 200, 0, 0, 0,
                'context-management-2025-06-27,effort-2025-11-24')
-        """)
+        """, (TODAY_TS_10, TODAY, TODAY_TS_11, TODAY))
     finally:
         conn.close()
 
     # Ratelimit state.
     rl = tmp_path / "ratelimit-state.json"
     rl.write_text(json.dumps({
-        "last_updated": "2026-04-15T06:00:00Z",
+        "last_updated": TODAY_TS_06,
         "five_hour_utilization": 0.5,
         "seven_day_utilization": 0.8,
         "representative_claim": "seven_day",
@@ -150,7 +161,7 @@ class TestEndpoints:
         assert status == 200
         j = json.loads(body)
         # Today shape
-        assert j["today"]["date"] == "2026-04-15"
+        assert j["today"]["date"] == TODAY
         assert j["today"]["request_count"] == 100
         assert abs(j["today"]["cache_hit_rate"] - 0.947) < 1e-6
         # last_7d aggregated
@@ -160,7 +171,7 @@ class TestEndpoints:
         assert j["burn"]["five_hour"] is not None
 
     def test_agents_rollup(self, running_dashboard):
-        status, _, body = _get(running_dashboard + "/api/agents.json?date=2026-04-15")
+        status, _, body = _get(running_dashboard + "/api/agents.json?date=" + TODAY)
         assert status == 200
         rows = json.loads(body)
         names = {r["agent_name"] for r in rows}
@@ -170,7 +181,7 @@ class TestEndpoints:
         assert rows[0]["request_count"] == 50
 
     def test_models_rollup(self, running_dashboard):
-        status, _, body = _get(running_dashboard + "/api/models.json?date=2026-04-15")
+        status, _, body = _get(running_dashboard + "/api/models.json?date=" + TODAY)
         assert status == 200
         rows = json.loads(body)
         assert rows[0]["model"] == "claude-opus-4-6"
@@ -181,7 +192,7 @@ class TestEndpoints:
         assert status == 200
         rows = json.loads(body)
         assert len(rows) == 1
-        assert rows[0]["date"] == "2026-04-15"
+        assert rows[0]["date"] == TODAY
 
     def test_betas_flattened(self, running_dashboard):
         status, _, body = _get(running_dashboard + "/api/betas.json")

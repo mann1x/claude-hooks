@@ -21,6 +21,40 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     if not hook_cfg.get("enabled", True):
         return None
 
+    cwd = event.get("cwd", "") or ""
+
+    # Code-structure graph: read pre-built GRAPH_REPORT.md to inject as
+    # additionalContext, and spawn a detached rebuild if stale. Silent
+    # no-op when the project doesn't look like a code repo.
+    cg_cfg = (config.get("hooks") or {}).get("code_graph") or {}
+    cg_block = ""
+    if cg_cfg.get("enabled", True):
+        try:
+            from claude_hooks.code_graph import (
+                build_session_block,
+                project_root as _cg_root,
+            )
+            from claude_hooks.code_graph.__main__ import build_async as _cg_build_async
+
+            root = _cg_root(cwd)
+            if root is not None:
+                block = build_session_block(
+                    root,
+                    max_chars=int(cg_cfg.get("max_inject_chars", 4000)),
+                )
+                if block:
+                    cg_block = block
+                if cg_cfg.get("rebuild_on_session_start", True):
+                    _cg_build_async(
+                        cwd=cwd,
+                        cooldown_minutes=int(cg_cfg.get("staleness_minutes", 10)),
+                        min_source_files=int(cg_cfg.get("min_source_files", 5)),
+                        max_files_to_scan=int(cg_cfg.get("max_files_to_scan", 2000)),
+                        lock_min_age_seconds=int(cg_cfg.get("lock_min_age_seconds", 60)),
+                    )
+        except Exception as e:
+            log.debug("code_graph SessionStart skipped: %s", e)
+
     # Claudemem freshness: if the index is stale compared to the newest
     # source file, kick off a detached reindex. Silent no-op if claudemem
     # is not installed or the project has no .claudemem directory.
@@ -37,7 +71,7 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
             else:
                 ignored = _DEFAULT_IGNORED_DIRS
             reindex_if_stale_async(
-                cwd=event.get("cwd", ""),
+                cwd=cwd,
                 staleness_minutes=int(reindex_cfg.get("staleness_minutes", 10)),
                 max_files_to_scan=int(reindex_cfg.get("max_files_to_scan", 2000)),
                 ignored_dirs=ignored,
@@ -73,24 +107,33 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
                 config=config,
                 providers=providers,
                 hook_name="user_prompt_submit",
-                cwd=event.get("cwd", ""),
+                cwd=cwd,
             )
             if recalled:
+                parts = [status_line, recalled]
+                if cg_block:
+                    parts.append(cg_block)
                 return {
                     "hookSpecificOutput": {
                         "hookEventName": "SessionStart",
-                        "additionalContext": f"{status_line}\n\n{recalled}",
+                        "additionalContext": "\n\n".join(parts),
                     }
                 }
         except Exception as e:
             log.warning("compact recall failed: %s", e)
 
-    if not hook_cfg.get("show_status_line", True):
+    show_status = hook_cfg.get("show_status_line", True)
+    parts = []
+    if show_status:
+        parts.append(status_line)
+    if cg_block:
+        parts.append(cg_block)
+    if not parts:
         return None
 
     return {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": status_line,
+            "additionalContext": "\n\n".join(parts),
         }
     }

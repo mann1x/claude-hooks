@@ -29,6 +29,46 @@ from claude_hooks.config import DEFAULT_CONFIG
 from claude_hooks.providers.base import Memory, Provider, ServerCandidate
 
 
+def pytest_configure(config):
+    """Loud warning if the test runner isn't the claude-hooks conda env.
+
+    Running under system Python 3.9 produces ~18 spurious proxy-test
+    failures (missing ``h2`` for httpx http2, etc.) that look like real
+    bugs but aren't. The fix is to use:
+
+        /root/anaconda3/envs/claude-hooks/bin/python -m pytest ...
+        # or:  make test
+    """
+    import sys
+    import sysconfig
+
+    expected_marker = "envs/claude-hooks"
+    exe = sys.executable or ""
+    prefix = sysconfig.get_config_var("prefix") or ""
+    if expected_marker not in exe and expected_marker not in prefix:
+        msg = (
+            f"\n\n  ⚠  pytest is NOT running under the claude-hooks conda env.\n"
+            f"     sys.executable = {exe}\n"
+            f"     Expected path containing: {expected_marker!r}\n"
+            f"     Run: make test    (or)    "
+            f"/root/anaconda3/envs/claude-hooks/bin/python -m pytest tests/\n"
+            f"     Some tests rely on optional deps (h2, etc.) that the system\n"
+            f"     Python lacks; expect spurious failures otherwise.\n"
+        )
+        # Use the pytest TerminalReporter when available so it shows up
+        # right under the header, otherwise fall back to stderr.
+        try:
+            tr = config.pluginmanager.get_plugin("terminalreporter")
+            if tr is not None:
+                tr.write_sep("=", "ENV WARNING", red=True)
+                tr.write_line(msg.strip())
+                tr.write_sep("=", "", red=True)
+                return
+        except Exception:
+            pass
+        sys.stderr.write(msg)
+
+
 # --------------------------------------------------------------------- #
 # Fake provider — minimal ``Provider`` subclass backed by an in-memory list.
 # --------------------------------------------------------------------- #

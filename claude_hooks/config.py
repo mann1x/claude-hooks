@@ -149,6 +149,34 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "session_end": {
             "enabled": True,
         },
+        "code_graph": {
+            # Lightweight code-structure graph (modules, classes,
+            # functions, imports, calls) written to
+            # ``<project>/graphify-out/{graph.json, GRAPH_REPORT.md}``
+            # so it co-exists with graphify (https://github.com/safishamsi/graphify).
+            #
+            # SessionStart injects a truncated GRAPH_REPORT.md as
+            # additionalContext (one-shot, never PreToolUse) and may
+            # spawn a detached rebuild if the graph is stale.
+            "enabled": True,
+            # Skip the build entirely when the project has fewer than
+            # this many source files — too small for the orientation
+            # value to outweigh the build cost.
+            "min_source_files": 5,
+            # Cap stale-scan + builder walks so monorepos can't freeze
+            # SessionStart.
+            "max_files_to_scan": 2000,
+            # Cooldown: don't rebuild within N minutes regardless of
+            # source churn (mirrors claudemem_reindex).
+            "staleness_minutes": 10,
+            # Lock guard: don't spawn another build if one started this
+            # recently.
+            "lock_min_age_seconds": 60,
+            # Cap the injected report at this many chars. ~4k = ~1k tokens.
+            "max_inject_chars": 4000,
+            # Trigger a detached rebuild on SessionStart if stale.
+            "rebuild_on_session_start": True,
+        },
         "claudemem_reindex": {
             # Auto-reindex the claudemem semantic index when the project
             # has been modified. Runs detached (no per-turn latency) and

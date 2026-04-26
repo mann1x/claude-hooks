@@ -28,6 +28,12 @@ Repository = "https://github.com/mann1x/claude-hooks"
 dev = ["pytest>=8.0", "coverage>=7.0"]
 pgvector = ["psycopg[binary]"]
 sqlite-vec = ["sqlite-vec"]
+# Multi-language code-graph builder. With this extra installed the
+# code_graph module parses JS/TS/Go/Rust/Java/Ruby in addition to the
+# stdlib-ast-driven Python support that ships in the core. Either
+# package works (we lazy-probe at import time, preferring the actively
+# maintained fork).
+code-graph = ["tree-sitter-language-pack>=0.13"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
