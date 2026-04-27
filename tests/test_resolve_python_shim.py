@@ -80,10 +80,19 @@ class TestResolverOrder:
         _make_fake_python(home / "anaconda3" / "envs" / "claude-hooks" / "bin" / "python")
         assert _resolve(repo, home) == str(venv_py)
 
-    def test_venv_windows_layout_picked(self, repo_and_home):
-        """Repo-local .venv on Windows uses Scripts/python.exe (no
-        bin/python). The resolver must accept that layout — that's
-        the whole point of the patch."""
+    def test_venv_msys2_hybrid_layout_picked(self, repo_and_home):
+        """``python -m venv`` on MSYS2's ucrt64 Python produces a
+        hybrid layout: POSIX ``bin/`` directory but Windows
+        ``python.exe`` filename. Observed on pandorum 2026-04-27."""
+        repo, home = repo_and_home
+        msys_py = repo / ".venv" / "bin" / "python.exe"
+        _make_fake_python(msys_py)
+        assert _resolve(repo, home) == str(msys_py)
+
+    def test_venv_windows_native_layout_picked(self, repo_and_home):
+        """Native Windows venv (created from cmd.exe / PowerShell)
+        uses Scripts/python.exe. The resolver must accept that
+        layout — that's the whole point of the patch."""
         repo, home = repo_and_home
         win_py = repo / ".venv" / "Scripts" / "python.exe"
         _make_fake_python(win_py)

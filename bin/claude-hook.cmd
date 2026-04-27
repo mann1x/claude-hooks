@@ -19,7 +19,12 @@ if defined CLAUDE_HOOKS_PY if exist "%CLAUDE_HOOKS_PY%" (
     exit /b 0
 )
 
-REM Repo-local venv (Windows layout).
+REM Repo-local venv (MSYS2 hybrid layout: bin/python.exe).
+if exist "%REPO%\.venv\bin\python.exe" (
+    "%REPO%\.venv\bin\python.exe" "%REPO%\run.py" %*
+    exit /b 0
+)
+REM Repo-local venv (native Windows layout: Scripts/python.exe).
 if exist "%REPO%\.venv\Scripts\python.exe" (
     "%REPO%\.venv\Scripts\python.exe" "%REPO%\run.py" %*
     exit /b 0

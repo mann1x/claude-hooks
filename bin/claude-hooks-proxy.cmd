@@ -10,6 +10,10 @@ if defined CLAUDE_HOOKS_PY if exist "%CLAUDE_HOOKS_PY%" (
     exit /b %ERRORLEVEL%
 )
 
+if exist "%REPO%\.venv\bin\python.exe" (
+    "%REPO%\.venv\bin\python.exe" -m claude_hooks.proxy %*
+    exit /b %ERRORLEVEL%
+)
 if exist "%REPO%\.venv\Scripts\python.exe" (
     "%REPO%\.venv\Scripts\python.exe" -m claude_hooks.proxy %*
     exit /b %ERRORLEVEL%

@@ -4,11 +4,14 @@
 # preference order:
 #
 #   1. Repo-local venv  ``$REPO/.venv/bin/python`` (POSIX layout)
-#   2. Repo-local venv  ``$REPO/.venv/Scripts/python.exe`` (Windows
-#      layout, sourced from MSYS / Git-Bash where ``-x`` works)
-#   3. Conda env        ``$HOME/{anaconda3,miniconda3}/envs/claude-hooks/bin/python``
-#   4. Conda env Win    ``…/envs/claude-hooks/Scripts/python.exe``
-#   5. System ``python3`` / ``python`` from ``$PATH``
+#   2. Repo-local venv  ``$REPO/.venv/bin/python.exe`` (MSYS2 hybrid:
+#      POSIX dir layout but Windows ``.exe`` extension — what
+#      ``python -m venv`` produces on MSYS2's ucrt64 Python)
+#   3. Repo-local venv  ``$REPO/.venv/Scripts/python.exe`` (native
+#      Windows layout, e.g. venvs created from cmd.exe / PowerShell)
+#   4. Conda env        ``$HOME/{anaconda3,miniconda3}/envs/claude-hooks/bin/python[.exe]``
+#   5. Conda env Win    ``…/envs/claude-hooks/Scripts/python.exe``
+#   6. System ``python3`` / ``python`` from ``$PATH``
 #
 # Override with ``CLAUDE_HOOKS_PY`` to pin a specific interpreter — the
 # probe is skipped entirely.
@@ -27,10 +30,13 @@ fi
 PY=""
 for _ch_cand in \
     "${REPO:-}/.venv/bin/python" \
+    "${REPO:-}/.venv/bin/python.exe" \
     "${REPO:-}/.venv/Scripts/python.exe" \
     "$HOME/anaconda3/envs/claude-hooks/bin/python" \
+    "$HOME/anaconda3/envs/claude-hooks/bin/python.exe" \
     "$HOME/anaconda3/envs/claude-hooks/Scripts/python.exe" \
     "$HOME/miniconda3/envs/claude-hooks/bin/python" \
+    "$HOME/miniconda3/envs/claude-hooks/bin/python.exe" \
     "$HOME/miniconda3/envs/claude-hooks/Scripts/python.exe"
 do
     if [ -x "$_ch_cand" ]; then
