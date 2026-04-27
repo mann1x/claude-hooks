@@ -336,17 +336,19 @@ class TestForwarderRetry:
         from claude_hooks.proxy import forwarder as fwd
 
         fwd._reset_client()
-        client = fwd._get_client(timeout=5.0)
 
         calls = {"n": 0}
 
-        def always_fail(req, *args, **kwargs):
+        def always_fail(client, method, url, headers, body):
             calls["n"] += 1
             raise httpx.RemoteProtocolError("Server disconnected")
 
-        monkeypatch.setattr(client, "send", always_fail)
+        # Patch _forward_attempt directly so the test is independent of
+        # pool-drain plumbing (which rebuilds the client mid-loop).
+        monkeypatch.setattr(fwd, "_forward_attempt", always_fail)
         # Collapse backoff for speed.
         monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
 
         with pytest.raises(httpx.RemoteProtocolError):
             forward(
@@ -729,3 +731,187 @@ class TestForwarderPoolResetOn5xx:
         finally:
             srv.shutdown(); srv.server_close()
             fwd._reset_client()
+
+
+# --------------------------------------------------------------- #
+# Sticky-bad-connection mitigation, connection-level edition. The
+# 5xx drain logic above only catches authentic upstream HTTP errors;
+# in practice (2026-04-27 production logs) most "stuck" pools surface
+# as consecutive RemoteProtocolError ("Server disconnected") on every
+# retry. httpx doesn't reliably evict the dead pooled connection on
+# its own, so we drain after a low number of repeats.
+# --------------------------------------------------------------- #
+class TestForwarderPoolResetOnProtocolError:
+    def test_consecutive_protocol_errors_drain_pool(self, monkeypatch):
+        """N consecutive RemoteProtocolError in one forward() must drain
+        the pool so the next attempt opens a fresh connection."""
+        import httpx
+        from claude_hooks.proxy import forwarder as fwd
+
+        fwd._reset_client()
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
+        monkeypatch.setattr(fwd, "_PROTO_RESET_AFTER", 2)
+
+        resets = {"n": 0}
+        real_reset = fwd._reset_client
+
+        def counting_reset():
+            resets["n"] += 1
+            real_reset()
+
+        monkeypatch.setattr(fwd, "_reset_client", counting_reset)
+
+        # Patch _forward_attempt directly: first 3 calls raise, 4th
+        # returns a real UpstreamResult so the call eventually succeeds.
+        # Going through the real client.send is brittle here because
+        # _reset_client() rebuilds the client mid-loop and any pinned
+        # send-monkeypatch would survive into the new client.
+        from claude_hooks.proxy.forwarder import UpstreamResult
+        attempts = {"n": 0}
+
+        def fake_attempt(client, method, url, headers, body):
+            attempts["n"] += 1
+            if attempts["n"] <= 3:
+                raise httpx.RemoteProtocolError("Server disconnected")
+            return UpstreamResult(
+                status=200, reason="OK",
+                headers={"content-type": "application/json"},
+                first_chunk=b'{"ok":true}',
+                body_iter=iter([]),
+                stats={"bytes_read": 11, "http_version": "HTTP/2"},
+                sse_tail=None,
+            )
+
+        monkeypatch.setattr(fwd, "_forward_attempt", fake_attempt)
+
+        result = forward(
+            "http://127.0.0.1:1", "POST", "/v1/messages",
+            {"Content-Type": "application/json"},
+            b'{"x":1}', timeout=5.0,
+        )
+        assert result.status == 200
+        assert attempts["n"] == 4
+        # 3 errors → drain after #2 and again after a 4th would-be
+        # repeat; the 4th attempt succeeded so only one drain fired.
+        assert resets["n"] >= 1, (
+            "expected pool drain after 2+ consecutive protocol errors"
+        )
+        fwd._reset_client()
+
+    def test_single_protocol_error_does_not_drain_pool(self, monkeypatch):
+        """One isolated protocol error followed by success must NOT
+        drain the pool — connection blips happen and reopening the pool
+        on every blip would add reconnect cost without benefit."""
+        import httpx
+        from claude_hooks.proxy import forwarder as fwd
+
+        fwd._reset_client()
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
+        monkeypatch.setattr(fwd, "_PROTO_RESET_AFTER", 2)
+
+        resets = {"n": 0}
+        real_reset = fwd._reset_client
+
+        def counting_reset():
+            resets["n"] += 1
+            real_reset()
+
+        monkeypatch.setattr(fwd, "_reset_client", counting_reset)
+
+        from claude_hooks.proxy.forwarder import UpstreamResult
+        attempts = {"n": 0}
+
+        def fake_attempt(client, method, url, headers, body):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise httpx.RemoteProtocolError("Server disconnected")
+            return UpstreamResult(
+                status=200, reason="OK",
+                headers={"content-type": "application/json"},
+                first_chunk=b'{"ok":true}',
+                body_iter=iter([]),
+                stats={"bytes_read": 11, "http_version": "HTTP/2"},
+                sse_tail=None,
+            )
+
+        monkeypatch.setattr(fwd, "_forward_attempt", fake_attempt)
+
+        result = forward(
+            "http://127.0.0.1:1", "POST", "/v1/messages",
+            {"Content-Type": "application/json"},
+            b'{"x":1}', timeout=5.0,
+        )
+        assert result.status == 200
+        assert attempts["n"] == 2
+        assert resets["n"] == 0, (
+            "single protocol-error blip must not drain the pool"
+        )
+        fwd._reset_client()
+
+    def test_5xx_then_protocol_error_resets_5xx_counter(self, monkeypatch):
+        """A protocol error after a 5xx must reset the 5xx counter (and
+        vice-versa) so each error class is judged on its own consecutive
+        run, not interleaved noise."""
+        import httpx
+        from claude_hooks.proxy import forwarder as fwd
+
+        fwd._reset_client()
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
+        monkeypatch.setattr(fwd, "_SLOW_5XX_RESET_SEC", 999.0)
+        monkeypatch.setattr(fwd, "_5XX_RESET_AFTER", 3)
+        monkeypatch.setattr(fwd, "_PROTO_RESET_AFTER", 3)
+
+        resets = {"n": 0}
+        real_reset = fwd._reset_client
+
+        def counting_reset():
+            resets["n"] += 1
+            real_reset()
+
+        monkeypatch.setattr(fwd, "_reset_client", counting_reset)
+
+        from claude_hooks.proxy.forwarder import (
+            UpstreamResult, _RetryableStatus,
+        )
+        attempts = {"n": 0}
+
+        def fake_attempt(client, method, url, headers, body):
+            attempts["n"] += 1
+            # 5xx, proto, 5xx, success — neither counter ever hits 3.
+            if attempts["n"] == 1:
+                raise _RetryableStatus(
+                    status=502, reason="Bad Gateway",
+                    body=b'{"err":"x"}', headers={},
+                )
+            if attempts["n"] == 2:
+                raise httpx.RemoteProtocolError("Server disconnected")
+            if attempts["n"] == 3:
+                raise _RetryableStatus(
+                    status=502, reason="Bad Gateway",
+                    body=b'{"err":"x"}', headers={},
+                )
+            return UpstreamResult(
+                status=200, reason="OK",
+                headers={"content-type": "application/json"},
+                first_chunk=b'{"ok":true}',
+                body_iter=iter([]),
+                stats={"bytes_read": 11, "http_version": "HTTP/2"},
+                sse_tail=None,
+            )
+
+        monkeypatch.setattr(fwd, "_forward_attempt", fake_attempt)
+
+        result = forward(
+            "http://127.0.0.1:1", "POST", "/v1/messages",
+            {"Content-Type": "application/json"},
+            b'{"x":1}', timeout=5.0,
+        )
+        assert result.status == 200
+        assert attempts["n"] == 4
+        assert resets["n"] == 0, (
+            "interleaved error classes must not trip either drain"
+        )
+        fwd._reset_client()
