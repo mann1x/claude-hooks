@@ -13,6 +13,9 @@ Output shapes (no trailing newline):
 - ``5h 42% · 7d 18%``               — both windows present
 - ``5h 65% ⚠``                      — ≥ 50% on the binding window
 - ``5h 85% 🔴``                      — ≥ 80%
+- ``5h 20% · 7d 23% ⏰``             — Anthropic shoulder hours (US business)
+- ``5h 20% · 7d 23% 🔥``             — Anthropic peak-of-peak hours (mid-afternoon ET)
+- ``5h 65% 🔥 ⚠``                    — peak + utilization warning stack
 - ``(empty string)``                — no state file, stale, or unreadable
 
 Exit codes are always 0 — the script must never break the statusline
@@ -32,16 +35,87 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 
 DEFAULT_STATE_PATH = Path.home() / ".claude" / "claude-hooks-proxy" / "ratelimit-state.json"
 DEFAULT_STALE_SECONDS = 600   # 10 min — state older than this is treated as absent
 DEFAULT_REMOTE_TIMEOUT = 2.0  # seconds — keep tight; statusline runs often
+
+# Default Anthropic peak-hour windows (UTC, end-exclusive).
+#
+# Shoulder ⏰ : 13:00-22:00 UTC = 09:00-18:00 ET — North-American
+# business hours, where edge load is consistently elevated.
+# Peak-of-peak 🔥 : 17:00-21:00 UTC = 13:00-17:00 ET — mid-afternoon
+# ET, the window where 502 storms most often clustered in our logs.
+# Peak-of-peak applies to weekdays only; shoulder applies any day.
+#
+# Override per-installation:
+#   CLAUDE_HOOKS_STATUSLINE_PEAK_HOURS_UTC="HH-HH"      (shoulder)
+#   CLAUDE_HOOKS_STATUSLINE_PEAKPEAK_HOURS_UTC="HH-HH"  (peak-of-peak)
+_DEFAULT_SHOULDER_HOURS = (13, 22)
+_DEFAULT_PEAK_HOURS = (17, 21)
+
+
+def _parse_hour_range(raw: Optional[str], default: Tuple[int, int]) -> Tuple[int, int]:
+    """Parse ``"HH-HH"`` (UTC, end-exclusive). Returns ``default`` on
+    any malformed input — statusline must never crash."""
+    if not raw:
+        return default
+    try:
+        a_s, b_s = raw.split("-", 1)
+        a, b = int(a_s), int(b_s)
+    except (ValueError, AttributeError):
+        return default
+    if 0 <= a < 24 and 0 < b <= 24 and a < b:
+        return (a, b)
+    return default
+
+
+def peak_marker(
+    now: Optional[_dt.datetime] = None,
+    fmt: str = "emoji",
+) -> str:
+    """Return a peak-hour marker, or ``""`` outside peak windows.
+
+    Two tiers (UTC, end-exclusive):
+
+    - shoulder (any day, default 13:00-22:00) — ``⏰`` / ``[busy]``
+    - peak-of-peak (weekdays only, default 17:00-21:00) — ``🔥`` / ``[peak]``
+
+    ``fmt="plain"`` always returns ``""`` to match the existing
+    utilization-glyph convention. ``fmt="ascii"`` returns bracketed
+    text; ``fmt="emoji"`` returns the unicode glyph.
+    """
+    now = now or _dt.datetime.utcnow()
+    shoulder = _parse_hour_range(
+        os.environ.get("CLAUDE_HOOKS_STATUSLINE_PEAK_HOURS_UTC"),
+        _DEFAULT_SHOULDER_HOURS,
+    )
+    peak = _parse_hour_range(
+        os.environ.get("CLAUDE_HOOKS_STATUSLINE_PEAKPEAK_HOURS_UTC"),
+        _DEFAULT_PEAK_HOURS,
+    )
+    h = now.hour
+    is_weekday = now.weekday() < 5
+    if is_weekday and peak[0] <= h < peak[1]:
+        if fmt == "emoji":
+            return "🔥"
+        if fmt == "ascii":
+            return "[peak]"
+        return ""
+    if shoulder[0] <= h < shoulder[1]:
+        if fmt == "emoji":
+            return "⏰"
+        if fmt == "ascii":
+            return "[busy]"
+        return ""
+    return ""
 
 
 def _parse_ts(raw: str) -> Optional[_dt.datetime]:
@@ -111,7 +185,13 @@ def format_segment(
         elif binding >= 0.50:
             glyph = " ⚠" if fmt == "emoji" else " !"
 
-    return base + glyph
+    # Peak-hour marker comes BEFORE the utilization warning so the
+    # contextual ("we're in the busy window") sign reads first and
+    # the dynamic ("you're at 65%") sign reads second when both fire.
+    peak = peak_marker(now=now, fmt=fmt)
+    peak_part = (" " + peak) if peak else ""
+
+    return base + peak_part + glyph
 
 
 def count_blocked_today(log_dir: Path) -> int:

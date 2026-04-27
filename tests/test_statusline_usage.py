@@ -110,6 +110,121 @@ class TestFormatSegment:
         assert mod.format_segment(s, fmt="plain") == ""
 
 
+class TestPeakMarker:
+    """Anthropic peak-hour indicator. Default windows in UTC:
+    shoulder = weekdays+weekends 13:00-22:00 (US business),
+    peak-of-peak = weekdays only 17:00-21:00 (mid-afternoon ET)."""
+
+    # 2026-04-27 was a Monday (weekday); 2026-05-02 was a Saturday.
+    _MONDAY = _dt.datetime(2026, 4, 27)
+    _SATURDAY = _dt.datetime(2026, 5, 2)
+
+    def test_off_peak_weekday_morning(self, mod):
+        # 06:00 UTC Monday — well before US shoulder.
+        t = self._MONDAY.replace(hour=6, minute=0)
+        assert mod.peak_marker(now=t, fmt="emoji") == ""
+        assert mod.peak_marker(now=t, fmt="ascii") == ""
+
+    def test_shoulder_weekday(self, mod):
+        # 14:00 UTC Monday — inside shoulder, outside peak-of-peak.
+        t = self._MONDAY.replace(hour=14, minute=30)
+        assert mod.peak_marker(now=t, fmt="emoji") == "⏰"
+        assert mod.peak_marker(now=t, fmt="ascii") == "[busy]"
+        assert mod.peak_marker(now=t, fmt="plain") == ""
+
+    def test_peak_of_peak_weekday(self, mod):
+        # 18:30 UTC Monday — inside peak-of-peak window.
+        t = self._MONDAY.replace(hour=18, minute=30)
+        assert mod.peak_marker(now=t, fmt="emoji") == "🔥"
+        assert mod.peak_marker(now=t, fmt="ascii") == "[peak]"
+        assert mod.peak_marker(now=t, fmt="plain") == ""
+
+    def test_weekend_during_peak_hours_drops_to_shoulder(self, mod):
+        # 18:30 UTC Saturday — inside peak window but Sat → shoulder only.
+        t = self._SATURDAY.replace(hour=18, minute=30)
+        assert mod.peak_marker(now=t, fmt="emoji") == "⏰"
+
+    def test_weekend_off_peak(self, mod):
+        # 06:00 UTC Saturday — outside both windows.
+        t = self._SATURDAY.replace(hour=6, minute=0)
+        assert mod.peak_marker(now=t, fmt="emoji") == ""
+
+    def test_boundary_inclusive_start_exclusive_end(self, mod):
+        # Default shoulder is 13-22; 13:00 fires, 22:00 doesn't.
+        t13 = self._MONDAY.replace(hour=13, minute=0)
+        t22 = self._MONDAY.replace(hour=22, minute=0)
+        assert mod.peak_marker(now=t13, fmt="emoji") == "⏰"
+        assert mod.peak_marker(now=t22, fmt="emoji") == ""
+
+    def test_env_override_shoulder(self, mod, monkeypatch):
+        # Force shoulder to 06-08 UTC; 14:00 should now be off-peak.
+        monkeypatch.setenv("CLAUDE_HOOKS_STATUSLINE_PEAK_HOURS_UTC", "6-8")
+        # Push peak-of-peak out of the way too.
+        monkeypatch.setenv("CLAUDE_HOOKS_STATUSLINE_PEAKPEAK_HOURS_UTC", "23-24")
+        t = self._MONDAY.replace(hour=14, minute=0)
+        assert mod.peak_marker(now=t, fmt="emoji") == ""
+        t = self._MONDAY.replace(hour=7, minute=0)
+        assert mod.peak_marker(now=t, fmt="emoji") == "⏰"
+
+    def test_env_override_garbage_falls_back_to_default(self, mod, monkeypatch):
+        monkeypatch.setenv("CLAUDE_HOOKS_STATUSLINE_PEAK_HOURS_UTC", "not-a-range")
+        # Default shoulder still applies → 14:00 weekday is shoulder.
+        t = self._MONDAY.replace(hour=14, minute=0)
+        assert mod.peak_marker(now=t, fmt="emoji") == "⏰"
+
+    def test_format_segment_appends_peak_before_warning(self, mod):
+        # 18:30 UTC Monday + 65% util on binding window → "🔥 ⚠" stack.
+        t = self._MONDAY.replace(hour=18, minute=30)
+        s = _state(
+            five_hour_utilization=0.65,
+            seven_day_utilization=0.20,
+            representative_claim="five_hour",
+            last_updated=t.isoformat() + "Z",
+        )
+        out = mod.format_segment(s, fmt="emoji", now=t)
+        assert out.endswith(" 🔥 ⚠")
+
+    def test_format_segment_peak_only_no_warning(self, mod):
+        # 18:30 UTC Monday + 10% util → 🔥 alone, no rate warning.
+        t = self._MONDAY.replace(hour=18, minute=30)
+        s = _state(
+            five_hour_utilization=0.10,
+            seven_day_utilization=0.20,
+            representative_claim="five_hour",
+            last_updated=t.isoformat() + "Z",
+        )
+        out = mod.format_segment(s, fmt="emoji", now=t)
+        assert out.endswith(" 🔥")
+        assert "⚠" not in out
+        assert "🔴" not in out
+
+    def test_format_segment_off_peak_no_marker(self, mod):
+        # 06:00 UTC Monday + 10% util → no marker at all.
+        t = self._MONDAY.replace(hour=6, minute=0)
+        s = _state(
+            five_hour_utilization=0.10,
+            seven_day_utilization=0.20,
+            representative_claim="five_hour",
+            last_updated=t.isoformat() + "Z",
+        )
+        out = mod.format_segment(s, fmt="emoji", now=t)
+        assert "🔥" not in out
+        assert "⏰" not in out
+        # Plain pct only.
+        assert out == "5h 10% · 7d 20%"
+
+    def test_format_segment_plain_format_drops_peak(self, mod):
+        # Plain format never shows glyphs of any kind.
+        t = self._MONDAY.replace(hour=18, minute=30)
+        s = _state(
+            five_hour_utilization=0.20,
+            representative_claim="five_hour",
+            last_updated=t.isoformat() + "Z",
+        )
+        out = mod.format_segment(s, fmt="plain", now=t)
+        assert out == "5h 20%"
+
+
 class TestReadState:
     def test_missing_file_returns_empty_dict(self, mod, tmp_path):
         assert mod.read_state(tmp_path / "nope.json") == {}
