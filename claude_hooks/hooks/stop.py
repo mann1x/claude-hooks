@@ -176,6 +176,7 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
         try:
             provider.store(summary, metadata=metadata)
             stored.append(provider.name)
+            log.debug("provider %s stored turn summary", provider.name)
         except Exception as e:
             failed.append((provider.name, str(e)))
             log.warning("provider %s store failed: %s", provider.name, e)
