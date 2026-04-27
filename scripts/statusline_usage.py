@@ -77,6 +77,29 @@ def _parse_hour_range(raw: Optional[str], default: Tuple[int, int]) -> Tuple[int
     return default
 
 
+_VALID_FORMATS = frozenset({"emoji", "ascii", "plain"})
+
+
+def default_format() -> str:
+    """Pick the safe default glyph style for the current host.
+
+    Windows cmd.exe / legacy PowerShell consoles ship without emoji-
+    capable fonts, so the warning / peak glyphs (``⏰`` ``🔥`` ``⚠``
+    ``🔴``) render as tofu boxes. Default to ``"ascii"`` there to keep
+    the statusline readable. Linux / macOS terminals (and Windows
+    Terminal with Cascadia Code) handle emoji fine — keep the rich
+    glyphs as default.
+
+    Override with ``CLAUDE_HOOKS_STATUSLINE_FORMAT={emoji,ascii,plain}``
+    for a Windows host that DOES render emoji (e.g. Windows Terminal),
+    or to force ascii / plain on Linux for accessibility.
+    """
+    env = (os.environ.get("CLAUDE_HOOKS_STATUSLINE_FORMAT") or "").strip().lower()
+    if env in _VALID_FORMATS:
+        return env
+    return "ascii" if sys.platform == "win32" else "emoji"
+
+
 def peak_marker(
     now: Optional[_dt.datetime] = None,
     fmt: str = "emoji",
@@ -258,8 +281,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         help=f"path to ratelimit-state.json (default: {DEFAULT_STATE_PATH})",
     )
     ap.add_argument(
-        "--format", choices=("emoji", "plain", "ascii"), default="emoji",
-        help="glyph style for the warning indicator (default: emoji)",
+        "--format", choices=("emoji", "plain", "ascii"),
+        default=default_format(),
+        help="glyph style for the warning indicator "
+             "(default: emoji on Linux/macOS, ascii on Windows; "
+             "override with CLAUDE_HOOKS_STATUSLINE_FORMAT)",
     )
     ap.add_argument(
         "--stale-seconds", type=int, default=DEFAULT_STALE_SECONDS,

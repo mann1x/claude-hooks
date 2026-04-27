@@ -225,6 +225,57 @@ class TestPeakMarker:
         assert out == "5h 20%"
 
 
+class TestDefaultFormat:
+    """``default_format`` chooses ``ascii`` on Windows (cmd.exe / legacy
+    consoles can't render emoji) and ``emoji`` elsewhere. Env var
+    ``CLAUDE_HOOKS_STATUSLINE_FORMAT`` overrides regardless of platform."""
+
+    def test_linux_default_is_emoji(self, mod, monkeypatch):
+        monkeypatch.delenv("CLAUDE_HOOKS_STATUSLINE_FORMAT", raising=False)
+        monkeypatch.setattr(mod.sys, "platform", "linux")
+        assert mod.default_format() == "emoji"
+
+    def test_darwin_default_is_emoji(self, mod, monkeypatch):
+        monkeypatch.delenv("CLAUDE_HOOKS_STATUSLINE_FORMAT", raising=False)
+        monkeypatch.setattr(mod.sys, "platform", "darwin")
+        assert mod.default_format() == "emoji"
+
+    def test_windows_default_is_ascii(self, mod, monkeypatch):
+        """The bug from pandorum 2026-04-27 — cmd.exe rendered ⏰ ⚠
+        as tofu boxes. The default must be ascii on win32."""
+        monkeypatch.delenv("CLAUDE_HOOKS_STATUSLINE_FORMAT", raising=False)
+        monkeypatch.setattr(mod.sys, "platform", "win32")
+        assert mod.default_format() == "ascii"
+
+    def test_env_override_wins_on_windows(self, mod, monkeypatch):
+        """Windows Terminal users can opt back into emoji."""
+        monkeypatch.setattr(mod.sys, "platform", "win32")
+        monkeypatch.setenv("CLAUDE_HOOKS_STATUSLINE_FORMAT", "emoji")
+        assert mod.default_format() == "emoji"
+
+    def test_env_override_wins_on_linux(self, mod, monkeypatch):
+        monkeypatch.setattr(mod.sys, "platform", "linux")
+        monkeypatch.setenv("CLAUDE_HOOKS_STATUSLINE_FORMAT", "ascii")
+        assert mod.default_format() == "ascii"
+
+    def test_env_plain_is_honoured(self, mod, monkeypatch):
+        monkeypatch.setattr(mod.sys, "platform", "linux")
+        monkeypatch.setenv("CLAUDE_HOOKS_STATUSLINE_FORMAT", "plain")
+        assert mod.default_format() == "plain"
+
+    def test_invalid_env_falls_back_to_platform_default(self, mod, monkeypatch):
+        """A bogus env value must not break the statusline — fall back
+        to the platform default (which is what we'd have used anyway)."""
+        monkeypatch.setattr(mod.sys, "platform", "win32")
+        monkeypatch.setenv("CLAUDE_HOOKS_STATUSLINE_FORMAT", "rainbow")
+        assert mod.default_format() == "ascii"
+
+    def test_env_value_is_lowercased_and_stripped(self, mod, monkeypatch):
+        monkeypatch.setattr(mod.sys, "platform", "linux")
+        monkeypatch.setenv("CLAUDE_HOOKS_STATUSLINE_FORMAT", "  ASCII  ")
+        assert mod.default_format() == "ascii"
+
+
 class TestReadState:
     def test_missing_file_returns_empty_dict(self, mod, tmp_path):
         assert mod.read_state(tmp_path / "nope.json") == {}

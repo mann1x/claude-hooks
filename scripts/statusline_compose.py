@@ -29,6 +29,7 @@ from scripts.statusline_usage import (  # noqa: E402
     DEFAULT_REMOTE_TIMEOUT,
     DEFAULT_STALE_SECONDS,
     DEFAULT_STATE_PATH,
+    default_format,
     format_segment,
     read_state,
     read_state_remote,
@@ -71,7 +72,12 @@ def main(argv=None) -> int:
     ap.add_argument("--proxy-timeout", type=float, default=DEFAULT_REMOTE_TIMEOUT)
     ap.add_argument("--state-file", type=Path, default=DEFAULT_STATE_PATH)
     ap.add_argument("--stale-seconds", type=int, default=DEFAULT_STALE_SECONDS)
-    ap.add_argument("--format", choices=("emoji", "plain", "ascii"), default="emoji")
+    ap.add_argument(
+        "--format", choices=("emoji", "plain", "ascii"),
+        default=default_format(),
+        help="glyph style (default: emoji on Linux/macOS, ascii on "
+             "Windows; override with CLAUDE_HOOKS_STATUSLINE_FORMAT)",
+    )
     args = ap.parse_args(argv)
 
     try:
