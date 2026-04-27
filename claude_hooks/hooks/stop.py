@@ -267,11 +267,52 @@ def _turn_modified_files(transcript: Optional[list[dict]]) -> bool:
     return False
 
 
+_REASONING_MARKERS = (
+    "root cause",
+    "diagnosed",
+    "diagnose",
+    "confirmed",
+    "investigated",
+    "investigation",
+    "the bug is",
+    "the issue is",
+    "the problem is",
+    "the fix is",
+    "fixed by",
+    "turns out",
+    "key insight",
+    "key finding",
+    "found that",
+    "verified that",
+    "evidence: ",
+    "in conclusion",
+)
+
+_TRIVIAL_TOOLS = frozenset({
+    "Read", "Glob", "Grep", "TaskList", "TaskGet", "TodoRead",
+    "TaskCreate", "TaskUpdate",
+})
+
+
 def _is_noteworthy(transcript: Optional[list[dict]]) -> bool:
     """
     Decide whether the most recent turn was worth remembering.
-    Default heuristic: the assistant called a non-trivial tool.
-    Trivial tools: TaskList, TaskGet, TodoRead, view-only Reads.
+
+    Two paths qualify:
+
+    1) **Action turn** — the assistant called a non-trivial tool such
+       as ``Edit``/``Write``/``Bash`` (the historical bar). Files
+       changed or shell commands executed are concrete enough to
+       memorize on their own.
+    2) **Diagnostic turn** — the assistant produced reasoning text
+       containing markers like *root cause*, *diagnosed*, *confirmed*,
+       *fixed by*, AND ran at least one tool (even a "trivial" one
+       like ``Read`` or ``Grep`` — the *combination* with reasoning is
+       what signals a real investigation, not vibes-only commentary).
+
+    Trivial-only turns (read + describe with no diagnostic markers)
+    still skip — they're recoverable from `git log` and the transcript
+    itself, so storing them dilutes recall.
     """
     if not transcript:
         return False
@@ -280,22 +321,44 @@ def _is_noteworthy(transcript: Optional[list[dict]]) -> bool:
         return False
     tail = transcript[last_user_idx + 1 :]
 
-    interesting_tools = {
+    action_tools = frozenset({
         "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit",
         "mcp__github-mcp__create_pull_request",
         "mcp__github-mcp__create_or_update_file",
         "mcp__github-mcp__push_files",
-    }
+    })
+
+    saw_any_tool = False
+    asst_text_parts: list[str] = []
     for msg in tail:
         if not isinstance(msg, dict):
             continue
+        if _msg_role(msg) == "assistant":
+            t = _extract_text(msg)
+            if t:
+                asst_text_parts.append(t)
         content = (msg.get("message") or {}).get("content") or msg.get("content") or []
         if isinstance(content, list):
             for block in content:
-                if isinstance(block, dict) and block.get("type") == "tool_use":
-                    if block.get("name") in interesting_tools:
-                        return True
-    return False
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") != "tool_use":
+                    continue
+                name = block.get("name", "")
+                if name in action_tools:
+                    return True  # Path 1: action turn
+                if name and name not in _TRIVIAL_TOOLS:
+                    # MCP calls, WebFetch, WebSearch, etc. — non-trivial
+                    # by themselves.
+                    return True
+                saw_any_tool = True
+
+    if not saw_any_tool:
+        return False
+
+    # Path 2: trivial-tool turn upgraded by diagnostic reasoning.
+    blob = "\n".join(asst_text_parts).lower()
+    return any(m in blob for m in _REASONING_MARKERS)
 
 
 def _build_summary(

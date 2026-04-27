@@ -781,6 +781,57 @@ class TestStopHelpers:
     def test_is_noteworthy_false_without_user(self):
         assert stop._is_noteworthy([{"role": "assistant"}]) is False
 
+    def _transcript_with(self, asst_text="", tool_name=None):
+        """Build a transcript with one user msg + one assistant msg
+        containing the given text and (optionally) one tool_use block."""
+        asst_blocks = []
+        if asst_text:
+            asst_blocks.append({"type": "text", "text": asst_text})
+        if tool_name:
+            asst_blocks.append({
+                "type": "tool_use", "name": tool_name, "input": {},
+            })
+        return [
+            {"message": {"role": "user", "content": [
+                {"type": "text", "text": "go"},
+            ]}},
+            {"message": {"role": "assistant", "content": asst_blocks}},
+        ]
+
+    def test_is_noteworthy_true_for_action_tool(self):
+        """Path 1 — a single Edit/Write/Bash is enough on its own."""
+        for tool in ("Bash", "Edit", "Write", "MultiEdit"):
+            t = self._transcript_with(tool_name=tool)
+            assert stop._is_noteworthy(t) is True, f"{tool} must be noteworthy"
+
+    def test_is_noteworthy_true_for_non_trivial_mcp(self):
+        """Path 1 — non-trivial MCP / Web tools count too."""
+        t = self._transcript_with(tool_name="WebFetch")
+        assert stop._is_noteworthy(t) is True
+
+    def test_is_noteworthy_false_for_trivial_only(self):
+        """Path 2 floor — Read/Grep alone with no diagnostic markers
+        is NOT noteworthy. The transcript itself is recoverable."""
+        t = self._transcript_with(asst_text="Looked at the file.", tool_name="Read")
+        assert stop._is_noteworthy(t) is False
+
+    def test_is_noteworthy_true_for_trivial_plus_diagnosis(self):
+        """Path 2 — trivial tool + reasoning markers DOES qualify.
+        This is the gap that caused 326 'not noteworthy' skips on
+        2026-04-27 despite real diagnostic work happening."""
+        t = self._transcript_with(
+            asst_text="Root cause: the drain logic only fires for 5xx, "
+                      "not RemoteProtocolError.",
+            tool_name="Read",
+        )
+        assert stop._is_noteworthy(t) is True
+
+    def test_is_noteworthy_false_for_diagnosis_without_any_tool(self):
+        """Diagnostic text alone — with NO tool calls — is vibes,
+        not investigation. Don't store it."""
+        t = self._transcript_with(asst_text="The bug is probably in foo.")
+        assert stop._is_noteworthy(t) is False
+
     def test_extract_text_from_string_content(self):
         msg = {"role": "user", "content": "plain string"}
         assert stop._extract_text(msg) == "plain string"
