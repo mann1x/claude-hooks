@@ -1,7 +1,8 @@
 #!/bin/sh
-# claude-hooks proxy rollup — prefer the conda env's python, else system.
-HERE="$(cd "$(dirname "$0")/.." && pwd)"
-CONDA_PY="$HOME/anaconda3/envs/claude-hooks/bin/python"
-[ -x "$CONDA_PY" ] || CONDA_PY="$(command -v python3)"
-export PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}"
-exec "$CONDA_PY" "$HERE/scripts/proxy_rollup.py" "$@" || exit 0
+# claude-hooks proxy rollup — uses the shared Python resolver.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+. "$HERE/_resolve_python.sh"
+[ -z "$PY" ] && { echo "claude-hooks-rollup: no python found" >&2; exit 1; }
+export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PY" "$REPO/scripts/proxy_rollup.py" "$@" || exit 0

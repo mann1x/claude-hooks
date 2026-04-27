@@ -1,7 +1,8 @@
 #!/bin/sh
-# claude-hooks proxy dashboard — prefer the conda env's python, else system.
-HERE="$(cd "$(dirname "$0")/.." && pwd)"
-CONDA_PY="$HOME/anaconda3/envs/claude-hooks/bin/python"
-[ -x "$CONDA_PY" ] || CONDA_PY="$(command -v python3)"
-export PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}"
-exec "$CONDA_PY" -m claude_hooks.proxy.dashboard "$@" || exit 0
+# claude-hooks proxy dashboard — uses the shared Python resolver.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+. "$HERE/_resolve_python.sh"
+[ -z "$PY" ] && { echo "claude-hooks-dashboard: no python found" >&2; exit 1; }
+export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PY" -m claude_hooks.proxy.dashboard "$@" || exit 0

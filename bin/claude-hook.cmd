@@ -13,12 +13,29 @@ setlocal
 set HERE=%~dp0
 set REPO=%HERE%..
 
-REM Prefer conda env python if it exists, then py launcher, then python.
+REM CLAUDE_HOOKS_PY override wins.
+if defined CLAUDE_HOOKS_PY if exist "%CLAUDE_HOOKS_PY%" (
+    "%CLAUDE_HOOKS_PY%" "%REPO%\run.py" %*
+    exit /b 0
+)
+
+REM Repo-local venv (Windows layout).
+if exist "%REPO%\.venv\Scripts\python.exe" (
+    "%REPO%\.venv\Scripts\python.exe" "%REPO%\run.py" %*
+    exit /b 0
+)
+
+REM Conda env (anaconda3 / miniconda3).
 if exist "%USERPROFILE%\anaconda3\envs\claude-hooks\python.exe" (
     "%USERPROFILE%\anaconda3\envs\claude-hooks\python.exe" "%REPO%\run.py" %*
     exit /b 0
 )
+if exist "%USERPROFILE%\miniconda3\envs\claude-hooks\python.exe" (
+    "%USERPROFILE%\miniconda3\envs\claude-hooks\python.exe" "%REPO%\run.py" %*
+    exit /b 0
+)
 
+REM System python (py launcher first, then python on PATH).
 where py >nul 2>nul
 if %ERRORLEVEL% EQU 0 (
     py -3 "%REPO%\run.py" %*

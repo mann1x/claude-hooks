@@ -15,14 +15,9 @@
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 
-CONDA_PY="$HOME/anaconda3/envs/claude-hooks/bin/python"
-if [ -x "$CONDA_PY" ]; then
-    PY="$CONDA_PY"
-elif command -v python3 >/dev/null 2>&1; then
-    PY=python3
-elif command -v python >/dev/null 2>&1; then
-    PY=python
-else
+. "$HERE/_resolve_python.sh"
+
+if [ -z "$PY" ]; then
     echo "claude-hooks-proxy: no python found" >&2
     exit 1
 fi

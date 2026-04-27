@@ -5,9 +5,22 @@ setlocal
 set HERE=%~dp0
 set REPO=%HERE%..
 
-set CONDA_PY=%USERPROFILE%\anaconda3\envs\claude-hooks\python.exe
-if exist "%CONDA_PY%" (
-    "%CONDA_PY%" -m claude_hooks.proxy %*
+if defined CLAUDE_HOOKS_PY if exist "%CLAUDE_HOOKS_PY%" (
+    "%CLAUDE_HOOKS_PY%" -m claude_hooks.proxy %*
+    exit /b %ERRORLEVEL%
+)
+
+if exist "%REPO%\.venv\Scripts\python.exe" (
+    "%REPO%\.venv\Scripts\python.exe" -m claude_hooks.proxy %*
+    exit /b %ERRORLEVEL%
+)
+
+if exist "%USERPROFILE%\anaconda3\envs\claude-hooks\python.exe" (
+    "%USERPROFILE%\anaconda3\envs\claude-hooks\python.exe" -m claude_hooks.proxy %*
+    exit /b %ERRORLEVEL%
+)
+if exist "%USERPROFILE%\miniconda3\envs\claude-hooks\python.exe" (
+    "%USERPROFILE%\miniconda3\envs\claude-hooks\python.exe" -m claude_hooks.proxy %*
     exit /b %ERRORLEVEL%
 )
 

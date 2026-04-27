@@ -13,19 +13,11 @@
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 
-# Prefer the conda env's Python if the env exists, then fall back to
-# system python3 / python.  The conda env is installed by setup and
-# contains all optional deps (pytest, psycopg, sqlite-vec, …).
-CONDA_PY="$HOME/anaconda3/envs/claude-hooks/bin/python"
-if [ -x "$CONDA_PY" ]; then
-    PY="$CONDA_PY"
-elif command -v python3 >/dev/null 2>&1; then
-    PY=python3
-elif command -v python >/dev/null 2>&1; then
-    PY=python
-else
-    # No python — exit silently (cannot run hook).
-    exit 0
-fi
+# Resolve PY via the shared helper. Probes repo-local .venv (POSIX or
+# Windows layout), then conda env, then system python.
+. "$HERE/_resolve_python.sh"
+
+# No python — exit silently. Hooks must never block Claude Code.
+[ -z "$PY" ] && exit 0
 
 exec "$PY" "$REPO/run.py" "$@" || exit 0
