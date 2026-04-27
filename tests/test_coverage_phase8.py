@@ -23,6 +23,7 @@ import tempfile
 import time
 import unittest
 from copy import deepcopy
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -252,6 +253,134 @@ class TestMemoryKgStore:
             mc.return_value.call_tool.side_effect = McpError("network down")
             with pytest.raises(McpError):
                 p.store("data")
+
+    def test_store_promotes_with_classification_metadata(self):
+        """When the stop hook tags the summary with observation_type=fix,
+        the entity is promoted from session-<ts> to bug-fix-<slug>-<date>
+        with type 'bug-fix' so search_nodes('proxy') hits a structured node."""
+        from claude_hooks.providers import memory_kg as mk
+        p = self._make()
+        with patch.object(p, "_client") as mc:
+            mc.return_value.call_tool.return_value = {}
+            summary = (
+                "# Turn @ 2026-04-27T13:00:00+00:00\n"
+                "## Result\nDrain pool on RemoteProtocolError\n"
+                "## Files touched\n- forwarder.py"
+            )
+            p.store(summary, metadata={"observation_type": "fix"})
+            name, args = mc.return_value.call_tool.call_args.args
+            assert name == "create_entities"
+            ent = args["entities"][0]
+            assert ent["entityType"] == "bug-fix"
+            assert ent["name"].startswith("bug-fix-")
+            assert "drain-pool-remoteprotocolerror" in ent["name"]
+            assert ent["name"].endswith(  # date suffix
+                datetime.now(timezone.utc).strftime("-%Y-%m-%d")
+            )
+
+    def test_store_promotes_using_xml_title(self):
+        """XML observation summaries use <title> for the topic slug."""
+        p = self._make()
+        with patch.object(p, "_client") as mc:
+            mc.return_value.call_tool.return_value = {}
+            summary = (
+                '<observation ts="2026-04-27T13:00:00+00:00">'
+                "<type>fix</type>"
+                "<title>Memory KG underused — promote to typed entities</title>"
+                "</observation>"
+            )
+            p.store(summary, metadata={"observation_type": "fix"})
+            ent = mc.return_value.call_tool.call_args.args[1]["entities"][0]
+            assert ent["entityType"] == "bug-fix"
+            assert "memory-kg-underused-promote-typed" in ent["name"]
+
+    def test_store_falls_back_to_session_when_no_classification(self):
+        """No observation_type in metadata = legacy session-<ts> entity.
+        Keeps ad-hoc stores (and old callers) on the original schema."""
+        p = self._make()
+        with patch.object(p, "_client") as mc:
+            mc.return_value.call_tool.return_value = {}
+            p.store("just some content")
+            ent = mc.return_value.call_tool.call_args.args[1]["entities"][0]
+            assert ent["entityType"] == "session"
+            assert ent["name"].startswith("session-")
+
+    def test_store_falls_back_to_session_when_topic_unrecoverable(self):
+        """Classified turn but content has no derivable topic — stay
+        on session-<ts> so we don't mint a noise entity name."""
+        p = self._make()
+        with patch.object(p, "_client") as mc:
+            mc.return_value.call_tool.return_value = {}
+            # Pure punctuation / stopwords — no slug should survive.
+            p.store("the and of", metadata={"observation_type": "fix"})
+            ent = mc.return_value.call_tool.call_args.args[1]["entities"][0]
+            assert ent["entityType"] == "session"
+
+    def test_store_unknown_observation_type_falls_back(self):
+        """observation_type='general' (or anything not in the kind map)
+        stays as session-<ts>. The map is the allowlist."""
+        p = self._make()
+        with patch.object(p, "_client") as mc:
+            mc.return_value.call_tool.return_value = {}
+            p.store(
+                "## Result\nSomething happened",
+                metadata={"observation_type": "general"},
+            )
+            ent = mc.return_value.call_tool.call_args.args[1]["entities"][0]
+            assert ent["entityType"] == "session"
+
+    def test_store_explicit_entity_name_overrides_classification(self):
+        """Explicit entity_name in metadata wins over the classifier —
+        keeps the manual KG-shaping API working."""
+        p = self._make()
+        with patch.object(p, "_client") as mc:
+            mc.return_value.call_tool.return_value = {}
+            p.store(
+                "## Result\nProxy drain fix",
+                metadata={
+                    "observation_type": "fix",
+                    "entity_name": "proxy-server",
+                    "entity_type": "service",
+                },
+            )
+            ent = mc.return_value.call_tool.call_args.args[1]["entities"][0]
+            assert ent["name"] == "proxy-server"
+            assert ent["entityType"] == "service"
+
+
+class TestMemoryKgClassifier:
+    """Direct unit tests for the slug + classifier helpers."""
+
+    def test_slugify_strips_non_alnum_and_stopwords(self):
+        from claude_hooks.providers.memory_kg import _slugify
+        assert _slugify("The Quick Brown Fox!") == "quick-brown-fox"
+
+    def test_slugify_truncates_at_token_boundary(self):
+        from claude_hooks.providers.memory_kg import _slugify
+        out = _slugify("alpha beta gamma delta epsilon zeta", max_len=15)
+        assert len(out) <= 15
+        assert out.endswith(("alpha", "beta", "gamma"))
+        assert "-" not in out[-1]  # no trailing dash
+
+    def test_slugify_empty(self):
+        from claude_hooks.providers.memory_kg import _slugify
+        assert _slugify("") == ""
+        assert _slugify("the and of") == ""
+
+    def test_derive_topic_slug_from_xml_title(self):
+        from claude_hooks.providers.memory_kg import _derive_topic_slug
+        slug = _derive_topic_slug("<title>Fix Proxy 502 Drain</title>")
+        assert slug == "fix-proxy-502-drain"
+
+    def test_derive_topic_slug_from_markdown_result(self):
+        from claude_hooks.providers.memory_kg import _derive_topic_slug
+        s = "# Turn\ncwd: /x\n## Result\nDrain pool on protocol error\n"
+        assert _derive_topic_slug(s) == "drain-pool-protocol-error"
+
+    def test_derive_topic_slug_skips_heading_and_cwd(self):
+        from claude_hooks.providers.memory_kg import _derive_topic_slug
+        s = "# Turn\ncwd: /tmp\nReal content here.\n"
+        assert _derive_topic_slug(s) == "real-content-here"
 
 
 # ===================================================================== #
