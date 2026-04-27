@@ -306,6 +306,115 @@ def _install_caliber_proxy_systemd(
         print(f"  [!!] enable failed:\n{rc.stderr.strip()[-300:]}")
 
 
+_AXON_HOST_UNIT = "axon-host.service"
+_AXON_HOST_CWD = Path("/var/lib/axon-host")
+_AXON_PLACEHOLDER = (
+    "# Placeholder. axon host indexes its cwd at startup and crashes\n"
+    "# when the cwd has no parseable files (ThreadPoolExecutor(\n"
+    "# max_workers=0) upstream bug). This single tiny module satisfies\n"
+    "# the parser without adding meaningful content. Do not delete.\n"
+    "EMPTY = None\n"
+)
+
+
+def _install_axon_host_systemd(
+    cfg: dict, *, non_interactive: bool, dry_run: bool,
+) -> None:
+    """Install the axon shared-host systemd unit when
+    ``companions.axon_host.enabled`` is true. Linux-only; idempotent.
+
+    The axon shared host runs at http://127.0.0.1:8420/mcp and serves
+    every repo registered under ~/.axon/repos/ to all Claude Code
+    sessions over a single HTTP MCP endpoint - replacing the legacy
+    ``axon serve --watch`` per-session stdio MCP, which auto-indexes
+    whatever cwd Claude Code launched in (and on 2026-04-27 burned
+    64 GB of resident memory trying to index a model directory).
+
+    The unit ships with three workarounds for upstream quirks:
+      * ``WorkingDirectory=/var/lib/axon-host`` so axon can't scan the
+        user's home or another real tree.
+      * A 1-line ``_placeholder.py`` dropped in that cwd, because an
+        empty cwd trips ``ThreadPoolExecutor(max_workers=0)`` in the
+        import resolver.
+      * ``MemoryMax=8G`` / ``MemoryHigh=6G`` so a future runaway can
+        not OOM the host.
+    """
+    if os.name == "nt":
+        return
+    if not Path("/etc/systemd/system").is_dir():
+        return
+    companions_cfg = (cfg.get("companions") or cfg.get("hooks", {}).get("companions") or {})
+    axon_host_cfg = (companions_cfg.get("axon_host") or {})
+    if not axon_host_cfg.get("enabled", False):
+        return
+
+    axon_bin = shutil.which("axon")
+    if axon_bin is None:
+        # Fall back to the conda env claude-hooks itself uses, mirroring
+        # the bin/claude-hook shim's lookup.
+        candidate = Path.home() / "anaconda3" / "envs" / "claude-hooks" / "bin" / "axon"
+        if candidate.is_file():
+            axon_bin = str(candidate)
+    if axon_bin is None:
+        print("\n==> axon-host systemd unit")
+        print("  axon binary not found on PATH or in ~/anaconda3/envs/claude-hooks/bin/")
+        print("  Skipped. Run `pip install axoniq` and re-run install.py.")
+        return
+
+    src = HERE / "systemd" / _AXON_HOST_UNIT
+    dest = Path("/etc/systemd/system") / _AXON_HOST_UNIT
+    if dest.exists():
+        return  # idempotent
+
+    print("\n==> axon-host systemd unit")
+    if not src.exists():
+        print(f"  [!!] {src} missing — skipping")
+        return
+    print(f"  Will install to {dest} with __AXON_BIN__ = {axon_bin}")
+    print(f"  Will create cwd {_AXON_HOST_CWD} with placeholder file")
+    if dry_run:
+        print("  [dry-run] skipping write.")
+        return
+    if non_interactive:
+        print("  --non-interactive: proceeding.")
+    else:
+        ans = input("  Install axon-host unit? [Y/n]: ").strip().lower()
+        if ans not in ("", "y", "yes"):
+            print("  Skipped.")
+            return
+
+    try:
+        _AXON_HOST_CWD.mkdir(parents=True, exist_ok=True)
+        (_AXON_HOST_CWD / "_placeholder.py").write_text(
+            _AXON_PLACEHOLDER, encoding="utf-8",
+        )
+    except OSError as e:
+        print(f"  [!!] Failed to prepare {_AXON_HOST_CWD}: {e}")
+        return
+
+    axon_bin_dir = str(Path(axon_bin).parent)
+    content = src.read_text(encoding="utf-8")
+    content = content.replace("__AXON_BIN__", axon_bin)
+    content = content.replace("__AXON_BIN_DIR__", axon_bin_dir)
+    try:
+        dest.write_text(content, encoding="utf-8")
+    except OSError as e:
+        print(f"  [!!] Failed to write {dest}: {e}")
+        return
+    print(f"  + wrote {_AXON_HOST_UNIT}")
+    subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
+    rc = subprocess.run(
+        ["systemctl", "enable", "--now", _AXON_HOST_UNIT],
+        capture_output=True, text=True,
+    )
+    if rc.returncode == 0:
+        print(f"  · enabled + started {_AXON_HOST_UNIT}")
+        print("  · point ~/.claude.json axon MCP entry at:")
+        print('      {"axon": {"type":"http","url":"http://127.0.0.1:8420/mcp"}}')
+    else:
+        print(f"  [!!] enable failed:\n{rc.stderr.strip()[-300:]}")
+
+
 def _ensure_proxy_deps(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
     """Verify httpx + h2 are available when the proxy is enabled.
 
@@ -628,6 +737,17 @@ def main() -> int:
     # compat proxy that adds project grounding + tools to caliber calls
     # routed at Ollama. See claude_hooks/caliber_proxy/.
     _install_caliber_proxy_systemd(
+        cfg,
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
+    # Offer to install the axon shared-host systemd unit (opt-in under
+    # companions.axon_host.enabled in config). Runs a singleton axon
+    # daemon at http://127.0.0.1:8420/mcp so users can drop the legacy
+    # `axon serve --watch` per-session stdio MCP - the per-session form
+    # auto-indexes whatever cwd Claude Code launched in, which on
+    # 2026-04-27 ate 64 GB of RAM on a model directory.
+    _install_axon_host_systemd(
         cfg,
         non_interactive=args.non_interactive,
         dry_run=args.dry_run,

@@ -1,0 +1,52 @@
+[Unit]
+Description=axon shared host - single global daemon for HTTP MCP + UI on :8420
+Documentation=https://github.com/harshkedia177/axon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+
+# Working dir MUST be a small non-empty dir that contains nothing
+# parseable beyond a placeholder file. Two upstream quirks force this:
+#   1. `axon host` runs an "initial index" of cwd at startup regardless
+#      of `--watch` / `--no-watch`.
+#   2. Empty cwd crashes the import resolver with
+#      ValueError: max_workers must be greater than 0
+#      (axon/core/ingestion/imports.py: ThreadPoolExecutor(max_workers=0)).
+# The install.py helper writes /var/lib/axon-host/_placeholder.py to
+# satisfy both. Do NOT point this at a real code repo or model dir -
+# we hit a 64 GB resident-set blow-up on 2026-04-27 with cwd in a
+# directory that contained .gguf / .safetensors blobs.
+WorkingDirectory=/var/lib/axon-host
+
+# axon binary lives in the user's conda env. Replace at install time
+# via `__AXON_BIN__` substitution; default points at the conda env that
+# claude-hooks itself uses.
+Environment=PATH=__AXON_BIN_DIR__:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=__AXON_BIN__ host --port 8420 --bind 127.0.0.1 --no-open --no-watch
+
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=15s
+SendSIGKILL=yes
+
+# Hard cap so a future runaway watcher (e.g. registry pointing at a
+# stray model dir) cannot OOM the host. 8 GB is generous for a code
+# graph daemon and well below the 64 GB blow-up we observed.
+MemoryMax=8G
+MemoryHigh=6G
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# axon needs to read repos under /srv and /shared, write its global
+# registry under /root/.axon/, and bootstrap a placeholder index in cwd.
+ReadWritePaths=/root/.axon /var/lib/axon-host
+ReadOnlyPaths=/srv /shared
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -199,6 +199,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "enabled": True,
             "reindex_on_stop": True,
             "lock_min_age_seconds": 60,
+            # Optional shared-host axon daemon. When enabled, install.py
+            # writes /etc/systemd/system/axon-host.service running
+            # `axon host --port 8420 --bind 127.0.0.1 --no-open --no-watch`,
+            # and the user can drop the legacy `axon serve --watch`
+            # per-session stdio MCP from ~/.claude.json in favour of:
+            #     {"axon": {"type":"http","url":"http://127.0.0.1:8420/mcp"}}
+            # Recommended on multi-project hosts because the legacy
+            # form auto-indexes whatever cwd Claude Code launched in -
+            # it ate 64 GB of RAM on a model directory on 2026-04-27.
+            # Linux-only (systemd). Off by default; opt-in.
+            "axon_host": {
+                "enabled": False,
+            },
         },
         "claudemem_reindex": {
             # Auto-reindex the claudemem semantic index when the project

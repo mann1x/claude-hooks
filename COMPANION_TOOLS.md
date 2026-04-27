@@ -238,12 +238,29 @@ for richer live queries from inside Claude Code.
 **Install (user-driven):**
 ```bash
 pip install axoniq         # into your claude-hooks conda env
-axon analyze .             # one-time index build per repo
-axon setup --claude        # prints the MCP server JSON to add to ~/.claude.json
+axon analyze .             # one-time index build per repo (only repos
+                           # you actually want indexed - see warning
+                           # below about the legacy MCP form)
+axon setup --claude        # prints the MCP server JSON
 ```
 
-Then add to `~/.claude.json` `mcpServers`:
-```json
+Two MCP wiring options. **Pick the shared-host form on any machine
+with more than one Claude Code project**:
+
+```jsonc
+// ~/.claude.json mcpServers - RECOMMENDED on multi-project hosts.
+// One singleton daemon serves every registered repo over HTTP.
+{
+  "axon": {
+    "type": "http",
+    "url": "http://127.0.0.1:8420/mcp"
+  }
+}
+```
+
+```jsonc
+// ~/.claude.json mcpServers - LEGACY single-session stdio.
+// DANGEROUS on multi-project hosts. See "Failure mode" below.
 {
   "axon": {
     "type": "stdio",
@@ -253,17 +270,42 @@ Then add to `~/.claude.json` `mcpServers`:
 }
 ```
 
+The shared-host form needs a daemon listening on `127.0.0.1:8420`.
+claude-hooks ships a systemd unit for that (`systemd/axon-host.service`)
+which install.py will offer to install when
+`companions.axon_host.enabled` is true in `config/claude-hooks.json`.
+Defaults to `false` because not every host runs systemd.
+
+**Failure mode the shared host avoids.** The legacy
+`axon serve --watch` MCP form starts a fresh daemon **per Claude Code
+session**, in whatever directory Claude Code was launched from. Each
+daemon then auto-bootstraps an axon index of that cwd. We hit this on
+2026-04-27 with a 64 GB resident-set blow-up on a session that opened
+inside a directory of `.gguf` / `.safetensors` model blobs. Eleven
+parallel daemons stacked up over a day, each binding to port 8421 and
+trying to watch a different cwd. The shared-host form replaces all of
+that with one daemon serving a curated registry under `~/.axon/repos/`.
+
+**`.axonignore` convention.** Drop a `.axonignore` file (gitignore-
+style) in any directory you want axon to leave alone. claude-hooks
+treats this as a documentary "do not analyze" marker; it's also the
+right place to keep `*` if the directory might ever land under a
+runaway watcher (model dirs, dataset roots, `/tmp`, etc.).
+
 **claude-hooks integration (automatic when detected):**
 - SessionStart inject appends a one-line hint pointing at the
   `mcp__axon__*` tools when `.axon/` is present in the repo
 - Stop hook spawns `axon analyze .` detached when the turn modified
-  source files (belt-and-braces -- axon's `serve --watch` already
-  re-indexes live; this catches sessions launched without `--watch`)
+  source files (belt-and-braces -- axon's `host --watch` already
+  re-indexes live; this catches sessions where the host was started
+  with `--no-watch`, including the systemd unit's default config)
 - `python -m claude_hooks.code_graph companions` shows detection state
 - Silent no-op when axon isn't installed; `code_graph` still runs
 
 Toggles live under `hooks.companions` in `config/claude-hooks.json`
-(default `enabled: true` so detection just works).
+(default `enabled: true` so detection just works). The optional
+shared-host systemd unit lives under `companions.axon_host.enabled`
+(default `false`).
 
 ---
 
