@@ -355,18 +355,35 @@ for setup.
 with complex generics / async patterns). **Non-fatal** — the file is
 dropped from the call graph but the index still builds.
 
-A separate, harder failure that previously abandoned the entire C#
-index — `TypeError: Cannot add property N, object is not extensible`
-in `populateCsharpNamespaceSiblings` — has been fixed in
-[abhigyanpatwari/GitNexus#1083](https://github.com/abhigyanpatwari/GitNexus/pull/1083).
-Until that lands in an npm release, install from a fork build:
+Two harder failures that previously abandoned the entire C# index for
+affected files have been fixed upstream and merged to `main`:
+
+- `TypeError: Cannot add property N, object is not extensible` in
+  `populateCsharpNamespaceSiblings` —
+  [#1082](https://github.com/abhigyanpatwari/GitNexus/pull/1082)
+  +
+  [#1085](https://github.com/abhigyanpatwari/GitNexus/pull/1085)
+  (companion fixture).
+- `Namespace has kind 'Namespace' but no parent. Only 'Module' scopes
+  may be root-level` for files where `compilation_unit` and the
+  top-level `namespace_declaration` share an identical tree-sitter
+  range (no leading content, no trailing newline — common shape for
+  WinForms `.Designer.cs`) —
+  [#1087](https://github.com/abhigyanpatwari/GitNexus/pull/1087).
+
+Both fixes are in `main` as of 2026-04-27 but not yet in any npm
+release (latest stable is still 1.6.3). Install from upstream main
+until the next release ships:
 
 ```bash
-git clone https://github.com/mann1x/GitNexus  # or your own fork with the patch
-cd GitNexus/gitnexus
-npm install && npm run build && npm pack
-npm i -g ./gitnexus-1.6.3.tgz
+git clone https://github.com/abhigyanpatwari/GitNexus
+cd GitNexus/gitnexus-shared && npm ci && npm run build
+cd ../gitnexus && npm ci && npm pack
+npm i -g ./gitnexus-1.6.3.tgz   # version label unchanged until upstream tags 1.6.4
 ```
+
+Once upstream publishes 1.6.4 (or rc.9+) on npm, drop this recipe
+and use `npm i -g gitnexus@latest`.
 
 **claude-hooks integration (automatic when detected):**
 - SessionStart inject appends a hint pointing at the `mcp__gitnexus__*`
