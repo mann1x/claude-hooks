@@ -87,6 +87,29 @@ _UPSTREAM_RETRIES = int(os.environ.get("CLAUDE_HOOKS_PROXY_RETRIES", "10"))
 _RETRY_BACKOFF_BASE = float(os.environ.get("CLAUDE_HOOKS_PROXY_RETRY_BACKOFF", "0.15"))
 _RETRY_BACKOFF_MAX = float(os.environ.get("CLAUDE_HOOKS_PROXY_RETRY_BACKOFF_MAX", "0.5"))
 
+# Pool-reset triggers for "sticky bad connection" scenarios. When a
+# kept-alive HTTP/2 connection is pinned to a degraded upstream edge
+# node, every retry on that connection sees the same 5xx — and the
+# whole forward() call balloons to 30-120s while sibling connections
+# in the pool serve other sessions fine. Two heuristics decide when
+# to drop the pool so the next attempt opens a fresh connection
+# (which the edge LB usually routes to a different node):
+#
+#  - SLOW_5XX_RESET_SEC: a retryable-5xx attempt that took at least
+#    this long is almost certainly sticky, not just edge overload.
+#  - 5XX_RESET_AFTER: this many consecutive retryable 5xx in one
+#    forward() call regardless of duration — catches fast-502 floods
+#    where the connection is sick but each attempt rejects quickly.
+#
+# Both default to values that fire only when something is genuinely
+# wrong; healthy retries (sub-second blips) keep reusing the pool.
+_SLOW_5XX_RESET_SEC = float(
+    os.environ.get("CLAUDE_HOOKS_PROXY_SLOW_5XX_RESET_SEC", "5.0")
+)
+_5XX_RESET_AFTER = int(
+    os.environ.get("CLAUDE_HOOKS_PROXY_5XX_RESET_AFTER", "3")
+)
+
 # Default 5xx codes we treat as retryable. Excludes 501 (Not Implemented)
 # and 505-511 (protocol / semantic errors that won't change on retry).
 _DEFAULT_RETRY_STATUS = frozenset({
@@ -228,7 +251,9 @@ def forward(
     client = _get_client(timeout)
 
     last_exc: Optional[Exception] = None
+    consecutive_5xx = 0
     for attempt in range(_UPSTREAM_RETRIES + 1):
+        attempt_started = time.monotonic()
         try:
             return _forward_attempt(client, method, url, out_headers, body)
         except (httpx.RemoteProtocolError, httpx.ConnectError,
@@ -243,6 +268,27 @@ def forward(
             wait = min(_RETRY_BACKOFF_BASE * (attempt + 1),
                        _RETRY_BACKOFF_MAX)
             time.sleep(wait)
+            # If the failure looks like a sticky-bad-connection symptom,
+            # drop the pool so the next attempt opens a fresh upstream
+            # connection (different edge LB hop). RemoteProtocolError /
+            # ConnectError already imply the connection is dead — only
+            # 5xx retries need this nudge.
+            elapsed = time.monotonic() - attempt_started
+            if isinstance(e, _RetryableStatus):
+                consecutive_5xx += 1
+                if (elapsed >= _SLOW_5XX_RESET_SEC
+                        or consecutive_5xx >= _5XX_RESET_AFTER):
+                    log.info(
+                        "draining pool after retryable %d "
+                        "(elapsed=%.2fs, consecutive=%d): "
+                        "next retry will open a fresh upstream connection",
+                        e.status, elapsed, consecutive_5xx,
+                    )
+                    _reset_client()
+                    client = _get_client(timeout)
+                    consecutive_5xx = 0
+            else:
+                consecutive_5xx = 0
             log.debug("retry %d after %s: %s",
                       attempt + 1, type(e).__name__, e)
 

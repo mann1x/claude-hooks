@@ -563,3 +563,169 @@ class TestForwarderStatusRetry:
         assert fwd._parse_status_set("502, foo, 504") == frozenset(
             {502, 504}
         )
+
+
+# --------------------------------------------------------------- #
+# Sticky-bad-connection mitigation: reset the httpx pool when a
+# retryable 5xx looks like it's coming from a stuck kept-alive
+# connection (slow attempt or N consecutive 5xx in one forward()
+# call). Without this, all retries land on the same sick conn and
+# the whole call balloons to 30-120s while sibling connections in
+# the pool serve other sessions fine.
+# --------------------------------------------------------------- #
+class TestForwarderPoolResetOn5xx:
+    def _build_flaky_server(self, responses, slow_secs=0.0):
+        """Like the sibling helper but optionally sleeps for ``slow_secs``
+        BEFORE writing the response, to simulate an upstream backend
+        that's slow to fail."""
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        calls = {"n": 0}
+        state = {"i": 0}
+        responses = list(responses)
+
+        class Flaky(BaseHTTPRequestHandler):
+            def log_message(self, *a, **k): pass
+
+            def do_POST(self):
+                calls["n"] += 1
+                if state["i"] < len(responses):
+                    status, body = responses[state["i"]]
+                    state["i"] += 1
+                else:
+                    status, body = 200, b'{"ok":true}'
+                if slow_secs > 0 and status >= 500:
+                    time.sleep(slow_secs)
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        s = socket.socket(); s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]; s.close()
+        srv = HTTPServer(("127.0.0.1", port), Flaky)
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        return srv, port, calls
+
+    def test_slow_5xx_drains_pool_before_next_retry(self, monkeypatch):
+        """A retryable 5xx that took >= _SLOW_5XX_RESET_SEC must drain
+        the pool so the next attempt opens a fresh connection. We don't
+        instrument the socket itself; we instrument _reset_client() and
+        verify it was called between the slow 502 and the recovery 200.
+        """
+        from claude_hooks.proxy import forwarder as fwd
+        fwd._reset_client()
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
+        # Threshold low enough that a 0.1s "slow" 5xx trips it.
+        monkeypatch.setattr(fwd, "_SLOW_5XX_RESET_SEC", 0.05)
+        # Disable the consecutive-count branch so this test isolates
+        # the slow-elapsed branch.
+        monkeypatch.setattr(fwd, "_5XX_RESET_AFTER", 999)
+
+        resets = {"n": 0}
+        real_reset = fwd._reset_client
+
+        def counting_reset():
+            resets["n"] += 1
+            real_reset()
+
+        monkeypatch.setattr(fwd, "_reset_client", counting_reset)
+
+        srv, port, calls = self._build_flaky_server(
+            [(502, b'{"err":"overloaded"}')], slow_secs=0.15
+        )
+        try:
+            result = forward(
+                f"http://127.0.0.1:{port}", "POST", "/v1/messages",
+                {"Content-Type": "application/json"},
+                b'{"x":1}', timeout=5.0,
+            )
+            body = result.first_chunk + b"".join(result.body_iter)
+            assert result.status == 200
+            assert b'{"ok":true}' in body
+            assert calls["n"] == 2
+            assert resets["n"] >= 1, "slow 5xx should have drained the pool"
+        finally:
+            srv.shutdown(); srv.server_close()
+            fwd._reset_client()
+
+    def test_consecutive_5xx_drains_pool(self, monkeypatch):
+        """N consecutive fast 5xx in one forward() call must drain
+        the pool. Catches the case where each individual 502 is fast
+        but the underlying connection is sick across retries."""
+        from claude_hooks.proxy import forwarder as fwd
+        fwd._reset_client()
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
+        # Make the slow path unreachable so we test the count branch.
+        monkeypatch.setattr(fwd, "_SLOW_5XX_RESET_SEC", 999.0)
+        monkeypatch.setattr(fwd, "_5XX_RESET_AFTER", 3)
+
+        resets = {"n": 0}
+        real_reset = fwd._reset_client
+
+        def counting_reset():
+            resets["n"] += 1
+            real_reset()
+
+        monkeypatch.setattr(fwd, "_reset_client", counting_reset)
+
+        # 5 consecutive 502s, then 200. The 3rd 5xx should reset.
+        srv, port, calls = self._build_flaky_server(
+            [(502, b'{"err":"x"}')] * 5
+        )
+        try:
+            result = forward(
+                f"http://127.0.0.1:{port}", "POST", "/v1/messages",
+                {"Content-Type": "application/json"},
+                b'{"x":1}', timeout=5.0,
+            )
+            assert result.status == 200
+            # 5 502s + 1 success
+            assert calls["n"] == 6
+            assert resets["n"] >= 1, (
+                "expected at least one reset after 3 consecutive 5xx"
+            )
+        finally:
+            srv.shutdown(); srv.server_close()
+            fwd._reset_client()
+
+    def test_single_fast_5xx_does_not_drain_pool(self, monkeypatch):
+        """A single fast 5xx (the common transient blip) must NOT
+        drain the pool — that would add reconnect cost to every blip
+        without helping. Pool drains only kick in on slow or persistent
+        failures."""
+        from claude_hooks.proxy import forwarder as fwd
+        fwd._reset_client()
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
+        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
+        monkeypatch.setattr(fwd, "_SLOW_5XX_RESET_SEC", 999.0)
+        monkeypatch.setattr(fwd, "_5XX_RESET_AFTER", 999)
+
+        resets = {"n": 0}
+        real_reset = fwd._reset_client
+
+        def counting_reset():
+            resets["n"] += 1
+            real_reset()
+
+        monkeypatch.setattr(fwd, "_reset_client", counting_reset)
+
+        srv, port, calls = self._build_flaky_server(
+            [(502, b'{"err":"x"}')]
+        )
+        try:
+            result = forward(
+                f"http://127.0.0.1:{port}", "POST", "/v1/messages",
+                {"Content-Type": "application/json"},
+                b'{"x":1}', timeout=5.0,
+            )
+            assert result.status == 200
+            assert calls["n"] == 2
+            assert resets["n"] == 0, "fast single 5xx must not drain pool"
+        finally:
+            srv.shutdown(); srv.server_close()
+            fwd._reset_client()
