@@ -894,6 +894,67 @@ class TestStopHelpers:
     def test_find_last_user_idx_no_user(self):
         assert stop._find_last_user_idx([{"role": "assistant"}]) == -1
 
+    def test_is_real_user_prompt_true_for_text_content(self):
+        msg = {"message": {"role": "user", "content": [
+            {"type": "text", "text": "do the thing"},
+        ]}}
+        assert stop._is_real_user_prompt(msg) is True
+
+    def test_is_real_user_prompt_true_for_string_content(self):
+        msg = {"role": "user", "content": "do the thing"}
+        assert stop._is_real_user_prompt(msg) is True
+
+    def test_is_real_user_prompt_false_for_tool_result_only(self):
+        """Tool-result echoes carry role:user but are not real prompts.
+        This is the 2026-04-27 bug — `_find_last_user_idx` was grabbing
+        the most recent tool_result, cutting the noteworthy-check tail
+        down to just the assistant's wrap-up text."""
+        msg = {"message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "abc", "content": "ok"},
+        ]}}
+        assert stop._is_real_user_prompt(msg) is False
+
+    def test_is_real_user_prompt_true_for_mixed_content(self):
+        """Mixed tool_result + text is a real prompt (rare but valid)."""
+        msg = {"message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "abc", "content": "ok"},
+            {"type": "text", "text": "and now another thing"},
+        ]}}
+        assert stop._is_real_user_prompt(msg) is True
+
+    def test_is_real_user_prompt_false_for_assistant(self):
+        assert stop._is_real_user_prompt({"role": "assistant"}) is False
+
+    def test_find_last_user_idx_skips_tool_result_echoes(self):
+        """The fix: walk backward past tool_result-only `role:user`
+        messages until a real prompt is found. Without this, every
+        long tool-using turn skipped the store path."""
+        transcript = [
+            {"message": {"role": "user", "content": [
+                {"type": "text", "text": "fix the bug"},
+            ]}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Edit", "input": {}},
+            ]}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "1", "content": "ok"},
+            ]}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash", "input": {}},
+            ]}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "2", "content": "ok"},
+            ]}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "text", "text": "all done"},
+            ]}},
+        ]
+        # Real prompt is at index 0; everything else is automation.
+        assert stop._find_last_user_idx(transcript) == 0
+        # And the noteworthy check picks up the Edit + Bash in the tail.
+        assert stop._is_noteworthy(transcript) is True
+        assert stop._turn_modified_files(transcript) is True
+
     def test_turn_modified_false_for_empty(self):
         assert stop._turn_modified_files(None) is False
         assert stop._turn_modified_files([]) is False

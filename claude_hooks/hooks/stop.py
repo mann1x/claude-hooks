@@ -238,11 +238,40 @@ def _msg_role(msg: dict) -> str:
     return (msg.get("message") or {}).get("role") or msg.get("role") or ""
 
 
+def _is_real_user_prompt(msg: dict) -> bool:
+    """True if ``msg`` is an actual user-typed prompt, not a tool_result echo.
+
+    The Anthropic transcript schema returns tool results as ``role: "user"``
+    messages whose content is one or more ``{type: "tool_result"}`` blocks.
+    A naive "find the last role:user" treats those as turn boundaries, which
+    cuts the noteworthy-check tail down to just the wrap-up after the final
+    tool result and almost always misses the action_tools / reasoning markers
+    earlier in the turn. Filter them out by requiring at least one non-
+    tool_result content block (text, image, etc.) — or no list-shaped content
+    at all (string content is always a real prompt).
+    """
+    if _msg_role(msg) != "user":
+        return False
+    content = (msg.get("message") or {}).get("content") or msg.get("content") or []
+    if not isinstance(content, list):
+        return True
+    for block in content:
+        if not isinstance(block, dict):
+            return True
+        if block.get("type") != "tool_result":
+            return True
+    return False
+
+
 def _find_last_user_idx(transcript: list[dict]) -> int:
-    """Return the index of the last user message, or -1 if none."""
+    """Return the index of the last *real* user prompt, or -1 if none.
+
+    Skips tool_result echoes that also carry ``role: "user"`` — see
+    ``_is_real_user_prompt``.
+    """
     for i in range(len(transcript) - 1, -1, -1):
         msg = transcript[i]
-        if isinstance(msg, dict) and _msg_role(msg) == "user":
+        if isinstance(msg, dict) and _is_real_user_prompt(msg):
             return i
     return -1
 
