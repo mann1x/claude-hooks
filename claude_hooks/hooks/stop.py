@@ -126,14 +126,14 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     if not summary:
         return None
 
-    # Append OpenWolf data (cerebrum learnings, bug fixes) if available.
-    try:
-        from claude_hooks.openwolf import store_content
-        wolf_content = store_content(event.get("cwd", ""))
-        if wolf_content:
-            summary += f"\n\n---\n## OpenWolf context\n{wolf_content}"
-    except Exception as e:
-        log.debug("openwolf store content skipped: %s", e)
+    # NOTE: We deliberately DO NOT append OpenWolf cerebrum/buglog
+    # contents to per-turn stores. Doing so duplicated the same
+    # ~3KB boilerplate into every stored turn, which:
+    #   - dominated Qdrant embeddings (high cosine similarity between
+    #     unrelated turns from boilerplate alone)
+    #   - bypassed dedup_threshold (every summary >= 100 chars)
+    #   - added zero recall value — the same data is already injected
+    #     fresh on UserPromptSubmit via openwolf.recall_context().
 
     metadata = {
         "type": "session_turn",
@@ -323,6 +323,102 @@ _TRIVIAL_TOOLS = frozenset({
     "TaskCreate", "TaskUpdate",
 })
 
+# Bash commands whose leading verb means "I'm just looking at state."
+# Treated like Read/Grep — store-worthy only when paired with diagnostic
+# reasoning. Anything that mutates the working tree, the index, the
+# filesystem, or remote state goes through Path 1's fast-track.
+#
+# Conservative on purpose: when in doubt, leave it OFF this list so the
+# turn fast-tracks. False negatives (over-storing) are recoverable;
+# false positives (under-storing a fix) are not.
+_TRIVIAL_BASH_VERBS = frozenset({
+    # listing / location
+    "ls", "dir", "tree", "pwd", "which", "whereis", "command",
+    "find",     # read-only by default; -exec mutators handled below
+    "stat", "file", "readlink", "realpath",
+    # viewing
+    "cat", "head", "tail", "less", "more", "nl", "od", "hexdump",
+    "wc", "column",
+    # search
+    "grep", "egrep", "fgrep", "rg", "ag", "ack",
+    # text inspection (sed -n is read-only; sed -i isn't — handled below)
+    "awk", "cut", "tr", "sort", "uniq", "diff", "cmp", "comm",
+    "jq", "yq", "xmllint",
+    # hashing / size (read-only)
+    "md5sum", "sha1sum", "sha256sum", "du", "df",
+    # system info
+    "date", "whoami", "hostname", "uname", "uptime", "id",
+    "env", "printenv", "type", "echo", "true", "false",
+    "ps", "top", "free",
+    # git read-only
+    "gh",       # most gh subcommands read; mutators (pr create, issue create) are common too — keep conservative? See note.
+})
+
+# Git subcommands that mutate refs / working tree / remote — never trivial.
+_GIT_MUTATING_SUBCOMMANDS = frozenset({
+    "add", "rm", "mv", "commit", "push", "reset", "checkout", "switch",
+    "restore", "merge", "rebase", "cherry-pick", "revert", "stash",
+    "tag", "branch", "clone", "init", "pull", "am", "apply",
+    "fetch",   # updates remote-tracking refs — borderline, but caching state changes — keep non-trivial
+    "config",  # may write
+    "remote",  # subverbs may mutate
+    "submodule",
+    "worktree",
+})
+
+# Markers that turn an otherwise-trivial command into a mutating one.
+# E.g. `find . -exec rm {} \;`, `cat foo > bar`, `tee out`.
+_BASH_MUTATING_MARKERS = (
+    "-exec ", "-execdir ", "-delete",
+    " > ", " >> ", " | tee ", " | sudo ",
+    " && rm ", " ; rm ",
+    "sed -i", "sed --in-place",
+)
+
+
+def _bash_command_is_trivial(tool_input: dict) -> bool:
+    """Decide whether a Bash invocation is read-only "looking around."
+
+    Returns True when the command's leading verb is in
+    ``_TRIVIAL_BASH_VERBS`` AND no mutating marker appears anywhere in
+    the command. Special-cases ``git <subcommand>`` — read-only git
+    verbs (log, status, diff, show, …) are trivial; mutating ones
+    (commit, push, reset, …) are not.
+    """
+    if not isinstance(tool_input, dict):
+        return False
+    cmd = tool_input.get("command")
+    if not isinstance(cmd, str) or not cmd.strip():
+        return False
+    s = cmd.strip()
+    # Bail out early if any mutating marker appears anywhere in the
+    # command string — pipes / redirects / -exec rm patterns disqualify
+    # otherwise-trivial leading verbs.
+    for marker in _BASH_MUTATING_MARKERS:
+        if marker in s:
+            return False
+    # First non-assignment token is the verb. Skip leading FOO=bar
+    # assignments and "sudo" / "time" wrappers.
+    tokens = s.split()
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if "=" in t and not t.startswith("-") and i == 0:
+            i += 1
+            continue
+        if t in ("sudo", "time", "nohup", "exec"):
+            return False  # sudo etc. is itself non-trivial intent
+        break
+    if i >= len(tokens):
+        return False
+    verb = tokens[i]
+    if verb == "git":
+        sub = tokens[i + 1] if i + 1 < len(tokens) else ""
+        if sub in _GIT_MUTATING_SUBCOMMANDS:
+            return False
+        return True   # git log / status / diff / show / blame / etc.
+    return verb in _TRIVIAL_BASH_VERBS
+
 
 def _is_noteworthy(transcript: Optional[list[dict]]) -> bool:
     """
@@ -375,6 +471,13 @@ def _is_noteworthy(transcript: Optional[list[dict]]) -> bool:
                 if block.get("type") != "tool_use":
                     continue
                 name = block.get("name", "")
+                if name == "Bash":
+                    if _bash_command_is_trivial(block.get("input") or {}):
+                        # Read-only `git log`, `ls`, `cat`, … — count
+                        # as trivial (Path 2 reasoning required).
+                        saw_any_tool = True
+                        continue
+                    return True  # Path 1: mutating Bash command.
                 if name in action_tools:
                     return True  # Path 1: action turn
                 if name and name not in _TRIVIAL_TOOLS:

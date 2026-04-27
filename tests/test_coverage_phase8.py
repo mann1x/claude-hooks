@@ -1022,6 +1022,84 @@ class TestStopHelpers:
         t = self._transcript_with(asst_text="The bug is probably in foo.")
         assert stop._is_noteworthy(t) is False
 
+    def _bash_transcript(self, command: str, asst_text: str = ""):
+        return [
+            {"message": {"role": "user", "content": [
+                {"type": "text", "text": "go"},
+            ]}},
+            {"message": {"role": "assistant", "content": (
+                ([{"type": "text", "text": asst_text}] if asst_text else []) + [
+                    {"type": "tool_use", "name": "Bash",
+                     "input": {"command": command}},
+                ]
+            )}},
+        ]
+
+    def test_bash_trivial_git_log_alone_is_not_noteworthy(self):
+        """Read-only `git log -3` on its own — no reasoning markers — must
+        skip the store. Otherwise every "what did we just commit?" turn
+        gets stored, polluting recall."""
+        t = self._bash_transcript("git log --oneline -3")
+        assert stop._is_noteworthy(t) is False
+
+    def test_bash_trivial_ls_alone_is_not_noteworthy(self):
+        t = self._bash_transcript("ls -la /tmp")
+        assert stop._is_noteworthy(t) is False
+
+    def test_bash_trivial_cat_with_diagnosis_qualifies(self):
+        """Same trivial Bash + reasoning markers → qualifies via Path 2."""
+        t = self._bash_transcript(
+            "cat config.json",
+            asst_text="Root cause: the dedup_threshold is misconfigured.",
+        )
+        assert stop._is_noteworthy(t) is True
+
+    def test_bash_mutating_git_commit_is_noteworthy(self):
+        """Path 1 still fast-tracks state-changing git operations."""
+        t = self._bash_transcript("git commit -m 'fix x'")
+        assert stop._is_noteworthy(t) is True
+
+    def test_bash_mutating_rm_is_noteworthy(self):
+        t = self._bash_transcript("rm -rf /tmp/junk")
+        assert stop._is_noteworthy(t) is True
+
+    def test_bash_redirect_disqualifies_trivial_verb(self):
+        """`cat > file` writes — must not be classified trivial."""
+        t = self._bash_transcript("cat > /tmp/out.txt")
+        assert stop._is_noteworthy(t) is True
+
+    def test_bash_find_with_exec_disqualifies_trivial(self):
+        t = self._bash_transcript("find . -name '*.tmp' -exec rm {} \\;")
+        assert stop._is_noteworthy(t) is True
+
+    def test_bash_sudo_is_never_trivial(self):
+        """`sudo <anything>` always escalates — Path 1."""
+        t = self._bash_transcript("sudo systemctl restart foo")
+        assert stop._is_noteworthy(t) is True
+
+    def test_bash_sed_in_place_disqualifies(self):
+        t = self._bash_transcript("sed -i 's/foo/bar/' file.txt")
+        assert stop._is_noteworthy(t) is True
+
+    def test_bash_command_is_trivial_helper(self):
+        """Direct unit-tests for the helper, covering its branches."""
+        f = stop._bash_command_is_trivial
+        assert f({"command": "git log -1"}) is True
+        assert f({"command": "git status"}) is True
+        assert f({"command": "git diff HEAD~1"}) is True
+        assert f({"command": "git push"}) is False
+        assert f({"command": "git commit -m x"}) is False
+        assert f({"command": "ls"}) is True
+        assert f({"command": "ls > out.txt"}) is False  # redirect
+        assert f({"command": "echo hello"}) is True
+        assert f({"command": "cat foo | tee bar"}) is False  # tee writes
+        assert f({"command": "sudo ls"}) is False
+        assert f({"command": "FOO=bar ls -la"}) is True   # env-var assignment skipped
+        assert f({"command": ""}) is False
+        assert f({"command": None}) is False
+        assert f({}) is False
+        assert f("not a dict") is False
+
     def test_extract_text_from_string_content(self):
         msg = {"role": "user", "content": "plain string"}
         assert stop._extract_text(msg) == "plain string"
@@ -1126,26 +1204,30 @@ class TestStopBuildSummary:
 
 
 class TestStopHandlerOpenwolfAndDedup:
-    def test_openwolf_failure_swallowed(
+    def test_no_openwolf_tail_in_stored_summary(
         self, base_config, transcript_file, fake_provider,
     ):
+        """Regression: per-turn stores must NOT include OpenWolf cerebrum
+        / buglog content. That data already arrives via UserPromptSubmit
+        recall — duplicating it inflated every Qdrant entry by ~3KB and
+        dominated cosine similarity. See the 2026-04-27 audit for the
+        full pollution analysis."""
         p = fake_provider(name="qdrant")
         path = transcript_file(
             user="please",
             assistant_text="done",
             assistant_tools=[{"name": "Edit", "input": {"file_path": "x.py"}}],
         )
-        with patch(
-            "claude_hooks.openwolf.store_content",
-            side_effect=RuntimeError("simulated"),
-        ):
-            stop.handle(
-                event={"transcript_path": path, "cwd": "/p", "session_id": "s"},
-                config=base_config(),
-                providers=[p],
-            )
-        # Store still ran despite openwolf failure.
+        stop.handle(
+            event={"transcript_path": path, "cwd": "/p", "session_id": "s"},
+            config=base_config(),
+            providers=[p],
+        )
         assert len(p.stored) == 1
+        body = p.stored[0][0] if isinstance(p.stored[0], tuple) else p.stored[0]
+        assert "OpenWolf context" not in body
+        assert "Key learnings" not in body
+        assert "Bug fixes (" not in body
 
     def test_dedup_skips_near_duplicate(
         self, base_config, transcript_file, fake_provider,

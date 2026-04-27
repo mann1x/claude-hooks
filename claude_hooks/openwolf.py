@@ -8,12 +8,16 @@ When a project uses OpenWolf (https://github.com/cytostack/openwolf), its
   decision log
 - ``buglog.json``  — auto-detected and manually logged bugs with root causes
 
-claude-hooks reads these at two points:
+claude-hooks reads these at one point:
 
-1. **Recall** (UserPromptSubmit) — inject the Do-Not-Repeat section so the
-   model never forgets past mistakes in this project.
-2. **Store** (Stop) — push new cerebrum entries and bug fixes into Qdrant
-   so they're available across all projects.
+**Recall** (UserPromptSubmit) — inject the Do-Not-Repeat section + recent
+bugs so the model never forgets past mistakes in this project.
+
+(There used to be a "Store" path that appended cerebrum + buglog content
+to every Qdrant entry on Stop. Removed 2026-04-27 — it duplicated ~3KB of
+boilerplate into every stored turn, dominated cosine similarity, and added
+no recall value because the same data is already injected fresh on every
+UserPromptSubmit.)
 """
 
 from __future__ import annotations
@@ -104,49 +108,3 @@ def _recent_bugs(path: Path, limit: int = 5) -> list[dict]:
     return bugs[:limit]
 
 
-# ---------------------------------------------------------------------- #
-# Store: extract new data for cross-project persistence
-# ---------------------------------------------------------------------- #
-def store_content(cwd: str) -> Optional[str]:
-    """
-    Build a summary of OpenWolf data worth storing to Qdrant/Memory KG.
-    Called from the Stop handler when a turn is noteworthy.
-    Returns None if nothing new to store.
-    """
-    wd = wolf_dir(cwd)
-    if not wd:
-        return None
-
-    parts: list[str] = []
-    project_name = Path(cwd).name
-
-    # Key Learnings
-    learnings = _extract_section(wd / "cerebrum.md", "Key Learnings")
-    if learnings:
-        parts.append(f"Key learnings ({project_name}):\n{learnings}")
-
-    # Do-Not-Repeat
-    dnr = _extract_section(wd / "cerebrum.md", "Do-Not-Repeat")
-    if dnr:
-        parts.append(f"Do-Not-Repeat ({project_name}):\n{dnr}")
-
-    # Decision Log
-    decisions = _extract_section(wd / "cerebrum.md", "Decision Log")
-    if decisions:
-        parts.append(f"Decisions ({project_name}):\n{decisions}")
-
-    # Bug fixes
-    bugs = _recent_bugs(wd / "buglog.json", limit=10)
-    if bugs:
-        bug_lines = []
-        for b in bugs:
-            bug_lines.append(
-                f"- [{b.get('id','?')}] {b.get('file','?')}: "
-                f"{b.get('error_message','')} | root_cause: {b.get('root_cause','')} | "
-                f"fix: {b.get('fix','')}"
-            )
-        parts.append(f"Bug fixes ({project_name}):\n" + "\n".join(bug_lines))
-
-    if not parts:
-        return None
-    return "\n\n".join(parts)

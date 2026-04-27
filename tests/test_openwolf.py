@@ -11,7 +11,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 
-from claude_hooks.openwolf import recall_context, store_content, wolf_dir
+from claude_hooks.openwolf import recall_context, wolf_dir
 
 
 class TestOpenWolf(unittest.TestCase):
@@ -85,20 +85,6 @@ class TestOpenWolf(unittest.TestCase):
     def test_recall_context_no_wolf(self):
         with tempfile.TemporaryDirectory() as td:
             self.assertIsNone(recall_context(td))
-
-    def test_store_content_extracts_all_sections(self):
-        with tempfile.TemporaryDirectory() as td:
-            self._make_wolf(td)
-            content = store_content(td)
-            self.assertIsNotNone(content)
-            self.assertIn("Key learnings", content)
-            self.assertIn("Do-Not-Repeat", content)
-            self.assertIn("Decisions", content)
-            self.assertIn("Bug fixes", content)
-
-    def test_store_content_no_wolf(self):
-        with tempfile.TemporaryDirectory() as td:
-            self.assertIsNone(store_content(td))
 
     def test_empty_cerebrum_returns_none(self):
         with tempfile.TemporaryDirectory() as td:
