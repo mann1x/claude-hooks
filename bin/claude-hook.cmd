@@ -30,14 +30,14 @@ if exist "%REPO%\.venv\Scripts\python.exe" (
     exit /b 0
 )
 
-REM Conda env (anaconda3 / miniconda3).
-if exist "%USERPROFILE%\anaconda3\envs\claude-hooks\python.exe" (
-    "%USERPROFILE%\anaconda3\envs\claude-hooks\python.exe" "%REPO%\run.py" %*
-    exit /b 0
-)
-if exist "%USERPROFILE%\miniconda3\envs\claude-hooks\python.exe" (
-    "%USERPROFILE%\miniconda3\envs\claude-hooks\python.exe" "%REPO%\run.py" %*
-    exit /b 0
+REM Conda env — Windows layout puts python.exe directly in the env
+REM root. Try both anaconda3 and miniconda3 (case-insensitive on NTFS,
+REM but list both spellings for clarity).
+for %%C in (anaconda3 Anaconda3 miniconda3 Miniconda3) do (
+    if exist "%USERPROFILE%\%%C\envs\claude-hooks\python.exe" (
+        "%USERPROFILE%\%%C\envs\claude-hooks\python.exe" "%REPO%\run.py" %*
+        exit /b 0
+    )
 )
 
 REM System python (py launcher first, then python on PATH).

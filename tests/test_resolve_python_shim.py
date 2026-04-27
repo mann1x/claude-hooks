@@ -110,6 +110,18 @@ class TestResolverOrder:
         _make_fake_python(mini_py)
         assert _resolve(repo, home) == str(mini_py)
 
+    def test_windows_conda_env_root_layout_picked(self, repo_and_home):
+        """Windows conda envs put python.exe directly in the env root
+        (no bin/ or Scripts/ subdir) — observed on pandorum's
+        Miniconda3 install. Cover both lowercase and Capitalised
+        directory spellings since NTFS is case-insensitive."""
+        repo, home = repo_and_home
+        for parent in ("miniconda3", "Miniconda3", "anaconda3", "Anaconda3"):
+            (home / parent).mkdir(parents=True, exist_ok=True)
+        env_py = home / "Miniconda3" / "envs" / "claude-hooks" / "python.exe"
+        _make_fake_python(env_py)
+        assert _resolve(repo, home) == str(env_py)
+
     def test_falls_back_to_system_python3(self, repo_and_home):
         """No venv, no conda — should resolve to the system python3
         from PATH (which exists in the test environment)."""

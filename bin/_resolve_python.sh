@@ -35,9 +35,13 @@ for _ch_cand in \
     "$HOME/anaconda3/envs/claude-hooks/bin/python" \
     "$HOME/anaconda3/envs/claude-hooks/bin/python.exe" \
     "$HOME/anaconda3/envs/claude-hooks/Scripts/python.exe" \
+    "$HOME/anaconda3/envs/claude-hooks/python.exe" \
     "$HOME/miniconda3/envs/claude-hooks/bin/python" \
     "$HOME/miniconda3/envs/claude-hooks/bin/python.exe" \
-    "$HOME/miniconda3/envs/claude-hooks/Scripts/python.exe"
+    "$HOME/miniconda3/envs/claude-hooks/Scripts/python.exe" \
+    "$HOME/miniconda3/envs/claude-hooks/python.exe" \
+    "$HOME/Miniconda3/envs/claude-hooks/python.exe" \
+    "$HOME/Anaconda3/envs/claude-hooks/python.exe"
 do
     if [ -x "$_ch_cand" ]; then
         PY="$_ch_cand"

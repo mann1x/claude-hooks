@@ -19,13 +19,11 @@ if exist "%REPO%\.venv\Scripts\python.exe" (
     exit /b %ERRORLEVEL%
 )
 
-if exist "%USERPROFILE%\anaconda3\envs\claude-hooks\python.exe" (
-    "%USERPROFILE%\anaconda3\envs\claude-hooks\python.exe" -m claude_hooks.proxy %*
-    exit /b %ERRORLEVEL%
-)
-if exist "%USERPROFILE%\miniconda3\envs\claude-hooks\python.exe" (
-    "%USERPROFILE%\miniconda3\envs\claude-hooks\python.exe" -m claude_hooks.proxy %*
-    exit /b %ERRORLEVEL%
+for %%C in (anaconda3 Anaconda3 miniconda3 Miniconda3) do (
+    if exist "%USERPROFILE%\%%C\envs\claude-hooks\python.exe" (
+        "%USERPROFILE%\%%C\envs\claude-hooks\python.exe" -m claude_hooks.proxy %*
+        exit /b %ERRORLEVEL%
+    )
 )
 
 where python >NUL 2>&1
