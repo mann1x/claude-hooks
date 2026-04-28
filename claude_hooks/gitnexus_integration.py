@@ -184,13 +184,29 @@ _HINT_PREFIX = (
 )
 
 
-def session_start_hint(root: Path) -> Optional[str]:
-    """One-line hint, or None when gitnexus isn't here."""
-    if not is_indexed(root) and not is_available():
+def session_start_hint(
+    root: Path,
+    *,
+    show_init_hint: bool = True,
+    enabled: bool = True,
+) -> Optional[str]:
+    """One-line hint, or None when gitnexus isn't relevant here.
+
+    Parameters mirror :func:`axon_integration.session_start_hint`:
+
+    - ``show_init_hint=False`` suppresses the "Run `gitnexus init` ..."
+      nag for projects where the binary is installed but no
+      ``.gitnexus/`` index exists. The positive "indexed for this repo"
+      hint is unaffected.
+    - ``enabled=False`` suppresses all hints — used by the dispatcher
+      to skip projects where the user hasn't opted in via per-project
+      ``mcpServers`` in ``~/.claude.json``.
+    """
+    if not enabled:
         return None
     if is_indexed(root):
         return _HINT_PREFIX
-    if is_available():
+    if is_available() and show_init_hint:
         return (
             "_gitnexus is installed. Run `gitnexus init` in this repo "
             "to enable richer code-graph queries via its MCP tools._"

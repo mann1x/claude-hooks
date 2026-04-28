@@ -53,7 +53,7 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
                         from claude_hooks.companion_integration import (
                             session_start_hint,
                         )
-                        hint = session_start_hint(root)
+                        hint = session_start_hint(root, config=config)
                         if hint:
                             cg_block = (cg_block + "\n\n" + hint) if cg_block else hint
                     except Exception as e:

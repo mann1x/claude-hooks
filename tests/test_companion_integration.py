@@ -13,11 +13,21 @@ from claude_hooks import (
 
 @pytest.fixture(autouse=True)
 def _no_real_engines(monkeypatch):
-    """Both engines invisible by default; tests opt back in selectively."""
+    """Both engines invisible by default; tests opt back in selectively.
+
+    Also stubs the per-project mcpServers helper so the hint logic
+    treats both engines as "enabled in user's ~/.claude.json" without
+    depending on the host's actual config. Tests that want to assert
+    the per-project filter behaviour override this.
+    """
     monkeypatch.setattr(ax.shutil, "which", lambda _: None)
     monkeypatch.setattr(ax, "_global_registry", lambda: None)
     monkeypatch.setattr(gn.shutil, "which", lambda _: None)
     monkeypatch.setattr(gn, "_global_registry", lambda: None)
+    monkeypatch.setattr(
+        comp, "_engines_enabled_for_cwd",
+        lambda _cwd: {"axon", "gitnexus"},
+    )
     yield
 
 
@@ -92,11 +102,51 @@ class TestSessionStartHint:
         # axon comes first in the recommendation order
         assert h.lower().index("axon") < h.lower().index("gitnexus")
 
-    def test_installed_but_unindexed_emits_hint(self, monkeypatch, tmp_path):
+    def test_installed_but_unindexed_silent_by_default(self, monkeypatch, tmp_path):
+        # New default (2026-04-28): no init-hint nag for unindexed projects,
+        # because the engines are user-level mcpServers and the nag fires on
+        # every project the user hasn't explicitly opted into.
         _enable_axon(monkeypatch)
         h = comp.session_start_hint(tmp_path)
+        assert h is None
+
+    def test_installed_but_unindexed_emits_hint_when_opted_in(self, monkeypatch, tmp_path):
+        # Caller opts back into the old behaviour via config.
+        _enable_axon(monkeypatch)
+        cfg = {"hooks": {"companions": {
+            "show_engine_init_hints": True,
+            "per_project_mcp_filter": False,
+        }}}
+        h = comp.session_start_hint(tmp_path, config=cfg)
         assert h is not None
         assert "axon analyze" in h.lower()
+
+    def test_per_project_filter_suppresses_disabled_engine(self, monkeypatch, tmp_path):
+        # axon is enabled (binary + index), but the user hasn't added it
+        # to this project's mcpServers — hint must stay silent.
+        _enable_axon(monkeypatch)
+        (tmp_path / ".axon").mkdir()
+        monkeypatch.setattr(comp, "_engines_enabled_for_cwd", lambda _cwd: {"gitnexus"})
+        assert comp.session_start_hint(tmp_path) is None
+
+    def test_per_project_filter_allows_enabled_engine(self, monkeypatch, tmp_path):
+        _enable_axon(monkeypatch)
+        (tmp_path / ".axon").mkdir()
+        monkeypatch.setattr(comp, "_engines_enabled_for_cwd", lambda _cwd: {"axon"})
+        h = comp.session_start_hint(tmp_path)
+        assert h is not None
+        assert "axon" in h.lower()
+
+    def test_per_project_filter_disabled_falls_back_to_binary_detection(self, monkeypatch, tmp_path):
+        # When the filter is off, the helper isn't even consulted —
+        # any engine the binary detects emits its hint.
+        _enable_axon(monkeypatch)
+        (tmp_path / ".axon").mkdir()
+        monkeypatch.setattr(comp, "_engines_enabled_for_cwd", lambda _cwd: set())
+        cfg = {"hooks": {"companions": {"per_project_mcp_filter": False}}}
+        h = comp.session_start_hint(tmp_path, config=cfg)
+        assert h is not None
+        assert "axon" in h.lower()
 
 
 class TestReindex:

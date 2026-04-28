@@ -190,10 +190,31 @@ _HINT_AVAILABLE = (
 )
 
 
-def session_start_hint(root: Path) -> Optional[str]:
-    """One-line markdown hint, or None when axon isn't here."""
+def session_start_hint(
+    root: Path,
+    *,
+    show_init_hint: bool = True,
+    enabled: bool = True,
+) -> Optional[str]:
+    """One-line markdown hint, or None when axon isn't relevant here.
+
+    Parameters
+    ----------
+    show_init_hint:
+        When False, suppress the "Run `axon analyze .` ..." nag for
+        projects where the binary is installed but no `.axon/` index
+        exists. The positive "indexed for this repo" hint is unaffected.
+        Default True for back-compat; the SessionStart caller flips it
+        based on `hooks.companions.show_engine_init_hints`.
+    enabled:
+        When False, suppress all hints. Used by the companion dispatcher
+        to skip projects where the user hasn't opted into axon via the
+        per-project `mcpServers` block in `~/.claude.json`.
+    """
+    if not enabled:
+        return None
     if is_indexed(root):
         return _HINT_INDEXED
-    if is_available():
+    if is_available() and show_init_hint:
         return _HINT_AVAILABLE
     return None
