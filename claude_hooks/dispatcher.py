@@ -20,7 +20,12 @@ import traceback
 from typing import Any, Optional
 
 from claude_hooks.config import expand_user_path, load_config, project_disabled
-from claude_hooks.providers import REGISTRY, Provider, ServerCandidate
+from claude_hooks.providers import (
+    Provider,
+    ServerCandidate,
+    get_provider_class,
+    provider_names,
+)
 
 # Map Claude Code event name → handler module name (under claude_hooks/hooks/).
 HANDLERS = {
@@ -96,16 +101,21 @@ def build_providers(cfg: dict) -> list[Provider]:
     out: list[Provider] = []
     provider_cfgs = (cfg.get("providers") or {})
 
-    for cls in REGISTRY:
-        pcfg = provider_cfgs.get(cls.name) or {}
+    # Hot-path optimisation: iterate names (no imports) and only import
+    # the provider module when we know it's enabled + has a URL. Disabled
+    # providers cost ~0ms instead of the ~25ms each provider's import
+    # would take through the eager REGISTRY iteration.
+    for name in provider_names():
+        pcfg = provider_cfgs.get(name) or {}
         if not pcfg.get("enabled"):
             continue
         url = (pcfg.get("mcp_url") or "").strip()
         if not url:
-            log.debug("provider %s has no mcp_url configured — skipping", cls.name)
+            log.debug("provider %s has no mcp_url configured — skipping", name)
             continue
+        cls = get_provider_class(name)
         candidate = ServerCandidate(
-            server_key=cls.name,
+            server_key=name,
             url=url,
             headers=pcfg.get("headers") or {},
             source="config",
