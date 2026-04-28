@@ -188,58 +188,70 @@ class TestFreshInstallBranch:
         assert "/Run" in verbs
 
     def test_create_uses_pythonw_when_available(self, tmp_path):
-        """When pythonw.exe is found, /TR points at it + run_daemon.py
-        (no console window). Falls back to .cmd otherwise."""
+        """When pythonw.exe is found, the XML's <Command> points at it +
+        the <Arguments> field has run_daemon.py."""
         fake_pyw = tmp_path / "pythonw.exe"
         fake_pyw.touch()
         existence = iter([False, False, True])
+        captured = {}
+
+        def _fake_xml(*, command, arguments, workdir):
+            captured["command"] = command
+            captured["arguments"] = arguments
+            captured["workdir"] = workdir
+            p = tmp_path / "fake-task.xml"
+            p.write_text("<task/>", encoding="utf-8")
+            return p
+
         with patch(
             "install._windows_task_exists",
             side_effect=lambda *_: next(existence),
         ), patch("install._is_windows_admin", return_value=True), \
              patch("install.find_conda_env_pythonw", return_value=fake_pyw), \
+             patch("install._write_daemon_task_xml", side_effect=_fake_xml), \
              patch("builtins.input", return_value="y"), \
              patch.object(
                  install.subprocess, "run",
                  return_value=MagicMock(returncode=0, stderr=""),
              ) as run:
             install._install_daemon_windows(non_interactive=False)
-        # The /Create call's /TR value should reference pythonw.exe and
-        # run_daemon.py — NOT the .cmd shim.
+        # XML was generated with pythonw.exe as command and run_daemon.py
+        # as the argument.
+        assert "pythonw.exe" in captured["command"]
+        assert "run_daemon.py" in captured["arguments"]
+        # schtasks /Create was invoked with /XML pointing at our fake file.
         create_calls = [
             call[0][0] for call in run.call_args_list
             if call[0][0] and call[0][0][0] == "schtasks"
             and call[0][0][1] == "/Create"
         ]
         assert create_calls, "no /Create schtasks call"
-        tr_idx = create_calls[0].index("/TR")
-        tr_value = create_calls[0][tr_idx + 1]
-        assert "pythonw.exe" in tr_value
-        assert "run_daemon.py" in tr_value
-        assert "claude-hooks-daemon.cmd" not in tr_value
+        assert "/XML" in create_calls[0]
 
-    def test_create_falls_back_to_cmd_when_pythonw_missing(self, capsys):
-        """No pythonw.exe → use the .cmd shim and warn the user."""
+    def test_create_falls_back_to_cmd_when_pythonw_missing(self, capsys, tmp_path):
+        """No pythonw.exe → XML <Command> uses the .cmd shim and a warning prints."""
         existence = iter([False, False, True])
+        captured = {}
+
+        def _fake_xml(*, command, arguments, workdir):
+            captured["command"] = command
+            p = tmp_path / "fake-task.xml"
+            p.write_text("<task/>", encoding="utf-8")
+            return p
+
         with patch(
             "install._windows_task_exists",
             side_effect=lambda *_: next(existence),
         ), patch("install._is_windows_admin", return_value=True), \
              patch("install.find_conda_env_pythonw", return_value=None), \
+             patch("install._write_daemon_task_xml", side_effect=_fake_xml), \
              patch("builtins.input", return_value="y"), \
              patch.object(
                  install.subprocess, "run",
                  return_value=MagicMock(returncode=0, stderr=""),
-             ) as run:
+             ):
             install._install_daemon_windows(non_interactive=False)
-        create_calls = [
-            call[0][0] for call in run.call_args_list
-            if call[0][0] and call[0][0][0] == "schtasks"
-            and call[0][0][1] == "/Create"
-        ]
-        tr_idx = create_calls[0].index("/TR")
-        tr_value = create_calls[0][tr_idx + 1]
-        assert "claude-hooks-daemon.cmd" in tr_value
+        assert "claude-hooks-daemon.cmd" in captured["command"]
         out = capsys.readouterr().out
         assert "pythonw.exe not found" in out
 
@@ -347,6 +359,60 @@ class TestFreshInstallBranch:
             install._install_daemon_windows(non_interactive=False)
         out = capsys.readouterr().out
         assert "Failed to launch elevated process" in out
+
+
+# ===================================================================== #
+# _write_daemon_task_xml — verify the power/timing overrides land in XML
+# ===================================================================== #
+class TestWriteDaemonTaskXml:
+    def test_xml_disables_battery_restrictions(self):
+        path = install._write_daemon_task_xml(
+            command="C:\\py.exe", arguments="", workdir="C:\\repo",
+        )
+        try:
+            content = path.read_bytes().decode("utf-16")
+            assert "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>" in content
+            assert "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>" in content
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_xml_removes_execution_time_limit(self):
+        path = install._write_daemon_task_xml(
+            command="C:\\py.exe", arguments="", workdir="C:\\repo",
+        )
+        try:
+            content = path.read_bytes().decode("utf-16")
+            # PT0S = no limit (the default would be PT72H).
+            assert "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>" in content
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_xml_embeds_command_arguments_workdir(self):
+        path = install._write_daemon_task_xml(
+            command="C:\\Users\\manni\\Miniconda3\\envs\\claude-hooks\\pythonw.exe",
+            arguments='"C:\\Users\\manni\\claude-hooks\\run_daemon.py"',
+            workdir="C:\\Users\\manni\\claude-hooks",
+        )
+        try:
+            content = path.read_bytes().decode("utf-16")
+            assert "pythonw.exe" in content
+            assert "run_daemon.py" in content
+            assert "claude-hooks" in content
+            # XML escaping of double quotes around the runner path.
+            assert "&quot;" in content
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_xml_is_utf16_encoded(self):
+        path = install._write_daemon_task_xml(
+            command="x", arguments="", workdir="y",
+        )
+        try:
+            raw = path.read_bytes()
+            # UTF-16 LE BOM is 0xFF 0xFE.
+            assert raw[:2] in (b"\xff\xfe", b"\xfe\xff")
+        finally:
+            path.unlink(missing_ok=True)
 
 
 # ===================================================================== #

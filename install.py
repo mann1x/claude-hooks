@@ -902,6 +902,116 @@ def _install_daemon_launchd(
 
 _DAEMON_TASK_NAME = "claude-hooks-daemon"
 
+# Windows scheduled-task XML. Imported via ``schtasks /Create /XML`` so we
+# can override defaults that the CLI form can't reach:
+#
+#   * ExecutionTimeLimit = PT0S — the default 72 h cap stops a long-lived
+#     daemon mid-session. PT0S means "no limit".
+#   * DisallowStartIfOnBatteries / StopIfGoingOnBatteries = false — laptops
+#     should keep the daemon running on battery; the user explicitly asked
+#     for this.
+#   * StartWhenAvailable = true — if the user wasn't logged in at logon
+#     time, fire as soon as we are.
+#   * MultipleInstancesPolicy = IgnoreNew — duplicate /Run requests don't
+#     spawn a second daemon (port-bind would fail anyway).
+#
+# UTF-16 encoded on disk because that's what schtasks /XML expects.
+_DAEMON_TASK_XML = """<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>claude-hooks-daemon — long-lived hook executor (Tier 3.8)</Description>
+    <Author>claude-hooks installer</Author>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{user_id}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{user_id}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <DisallowStartOnRemoteAppSession>false</DisallowStartOnRemoteAppSession>
+    <UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{command}</Command>
+      <Arguments>{arguments}</Arguments>
+      <WorkingDirectory>{workdir}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+def _windows_user_id() -> str:
+    """Return ``DOMAIN\\username`` for the current user (Windows-only)."""
+    domain = os.environ.get("USERDOMAIN") or os.environ.get("COMPUTERNAME") or ""
+    user = os.environ.get("USERNAME") or ""
+    if domain and user:
+        return f"{domain}\\{user}"
+    return user or "."
+
+
+def _xml_escape(s: str) -> str:
+    """Escape characters that would break the XML we write to disk."""
+    return (
+        s.replace("&", "&amp;")
+         .replace("<", "&lt;")
+         .replace(">", "&gt;")
+         .replace('"', "&quot;")
+         .replace("'", "&apos;")
+    )
+
+
+def _write_daemon_task_xml(
+    *, command: str, arguments: str, workdir: str,
+) -> Path:
+    """Write the task XML to a temp file and return its path.
+
+    Writes UTF-16 LE with BOM (Python's default for "utf-16") because
+    that's what schtasks /XML expects on Windows. Caller is responsible
+    for cleaning the file up after schtasks consumes it.
+    """
+    xml = _DAEMON_TASK_XML.format(
+        user_id=_xml_escape(_windows_user_id()),
+        command=_xml_escape(command),
+        arguments=_xml_escape(arguments),
+        workdir=_xml_escape(workdir),
+    )
+    import tempfile  # noqa: PLC0415 — Windows-only path
+    fd, path = tempfile.mkstemp(prefix="claude-hooks-daemon-", suffix=".xml")
+    os.close(fd)
+    Path(path).write_bytes(xml.encode("utf-16"))
+    return Path(path)
+
 
 def _wait_for_daemon(*, timeout: float = 15.0) -> bool:
     """Poll the daemon until ping succeeds or the deadline elapses.
@@ -1015,32 +1125,57 @@ def _install_daemon_windows(
     """
     task_name = _DAEMON_TASK_NAME
     runner = (HERE / "run_daemon.py").resolve()
+    workdir = str(HERE.resolve())
 
     # Prefer pythonw.exe (no console window) over the .cmd shim. Falls
     # back to the .cmd only if pythonw isn't available — at the cost of
     # a visible cmd window flash, which is the historical behaviour.
     pyw = find_conda_env_pythonw()
     if pyw is not None:
-        # /TR "<pythonw> <runner>" — both paths quoted for cmd.exe's
-        # re-tokenize when the task fires.
-        tr_value = f'\\"{pyw}\\" \\"{runner}\\"'
-        tr_value_argv = f'"{pyw}" "{runner}"'
+        exec_command = str(pyw)
+        exec_arguments = f'"{runner}"'
     else:
         cmd_path = (HERE / "bin" / "claude-hooks-daemon.cmd").resolve()
         print(
             "  [!] pythonw.exe not found — falling back to the .cmd shim. "
             "A console window will be visible while the daemon runs."
         )
-        tr_value = f'\\"{cmd_path}\\"'
-        tr_value_argv = f'"{cmd_path}"'
+        exec_command = str(cmd_path)
+        exec_arguments = ""
 
+    # Generate the task XML so we can override CLI-uncontrollable settings:
+    #   * no 72-hour stop-task limit
+    #   * don't disallow start on battery, don't stop on battery transition
+    xml_path = _write_daemon_task_xml(
+        command=exec_command, arguments=exec_arguments, workdir=workdir,
+    )
+    try:
+        return _install_daemon_windows_inner(
+            non_interactive=non_interactive,
+            force_reinstall=force_reinstall,
+            task_name=task_name,
+            runner=runner,
+            pyw=pyw,
+            xml_path=xml_path,
+        )
+    finally:
+        try:
+            xml_path.unlink()
+        except OSError:
+            pass
+
+
+def _install_daemon_windows_inner(
+    *, non_interactive: bool, force_reinstall: bool,
+    task_name: str, runner: Path, pyw: Optional[Path], xml_path: Path,
+) -> None:
+    """Body of ``_install_daemon_windows``. Wrapped so the temp XML file
+    is always cleaned up via the caller's ``try/finally``."""
     create_argstr = (
-        f'/Create /SC ONLOGON /TN "{task_name}" '
-        f'/TR "{tr_value}" /RL HIGHEST /F'
+        f'/Create /XML "{xml_path}" /TN "{task_name}" /F'
     )
     create_argv = [
-        "/Create", "/SC", "ONLOGON", "/TN", task_name,
-        "/TR", tr_value_argv, "/RL", "HIGHEST", "/F",
+        "/Create", "/XML", str(xml_path), "/TN", task_name, "/F",
     ]
     run_argstr = f'/Run /TN "{task_name}"'
     run_argv = ["/Run", "/TN", task_name]
