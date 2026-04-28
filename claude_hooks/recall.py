@@ -77,23 +77,32 @@ def run_recall(
     filter_enabled = bool(filter_cfg.get("enabled", False))
     over_fetch = int(filter_cfg.get("over_fetch_factor", 4)) if filter_enabled else 1
 
-    raw_hits_by_provider: dict[str, list[Memory]] = {}
-    for provider in active:
+    from claude_hooks._parallel import parallel_map
+
+    def _raw_recall(provider):
         pcfg = (config.get("providers") or {}).get(provider.name) or {}
         k = int(pcfg.get("recall_k", 5))
         fetch_k = k * over_fetch
-        try:
-            mems = provider.recall(query, k=fetch_k)
-        except Exception as e:
-            log.warning("provider %s recall failed: %s", provider.name, e)
-            continue
+        mems = provider.recall(query, k=fetch_k)
         for m in mems or []:
             m.source_provider = provider.name
         filtered = _apply_metadata_filter(
             list(mems or []), filter_cfg, cwd=cwd,
         ) if filter_enabled else list(mems or [])
-        # Cap back to k after filter so downstream sees the usual count.
-        raw_hits_by_provider[provider.name] = filtered[:k]
+        return (provider.name, filtered[:k])
+
+    raw_hits_by_provider: dict[str, list[Memory]] = {}
+    raw_results = parallel_map(
+        _raw_recall, active,
+        on_error=lambda p, e: log.warning(
+            "provider %s recall failed: %s", p.name, e,
+        ),
+    )
+    for r in raw_results:
+        if r is None:
+            continue
+        name, mems = r
+        raw_hits_by_provider[name] = mems
 
     total_raw = sum(len(v) for v in raw_hits_by_provider.values())
 
@@ -117,21 +126,31 @@ def run_recall(
         # Only do a refined recall if the expansion actually produced
         # something different from the raw query.
         if search_query and search_query != query:
-            for provider in active:
+            def _refined_recall(provider):
                 pcfg = (config.get("providers") or {}).get(provider.name) or {}
                 k = int(pcfg.get("recall_k", 5))
-                try:
-                    refined = provider.recall(search_query, k=k)
-                except Exception as e:
-                    log.warning("provider %s refined recall failed: %s", provider.name, e)
-                    continue
+                refined = provider.recall(search_query, k=k)
                 if not refined:
-                    continue
+                    return (provider.name, k, [])
                 for m in refined:
                     m.source_provider = provider.name
+                return (provider.name, k, refined)
+
+            refined_results = parallel_map(
+                _refined_recall, active,
+                on_error=lambda p, e: log.warning(
+                    "provider %s refined recall failed: %s", p.name, e,
+                ),
+            )
+            for r in refined_results:
+                if r is None:
+                    continue
+                name, k, refined = r
+                if not refined:
+                    continue
                 # Raw-first merge: keep raw hits in order, append refined
                 # hits that aren't already present.
-                existing = hits_by_provider.get(provider.name, [])
+                existing = hits_by_provider.get(name, [])
                 seen = {m.text.strip() for m in existing if m.text.strip()}
                 for m in refined:
                     key = m.text.strip()
@@ -139,7 +158,7 @@ def run_recall(
                         existing.append(m)
                         seen.add(key)
                 # Cap at recall_k after merge so we don't balloon the context.
-                hits_by_provider[provider.name] = existing[:k]
+                hits_by_provider[name] = existing[:k]
 
     # --- Step 3: Assemble blocks + decay list ---
     blocks: list[str] = []

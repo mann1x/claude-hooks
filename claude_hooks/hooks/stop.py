@@ -155,31 +155,51 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     # Tag with the summary format so consumers know how to parse.
     metadata["summary_format"] = summary_format
 
-    stored = []
-    failed = []
-    for provider in providers:
-        provider_cfg = ((config.get("providers") or {}).get(provider.name)) or {}
-        if (provider_cfg.get("store_mode") or "auto").lower() != "auto":
-            continue
+    # Filter to providers in auto-store mode before fanning out.
+    auto_providers = [
+        p for p in providers
+        if (((config.get("providers") or {}).get(p.name)) or {})
+           .get("store_mode", "auto").lower() == "auto"
+    ]
 
-        # Dedup check: skip if a near-duplicate already exists.
+    def _dedup_and_store(provider):
+        """Per-provider dedup-check + store. Runs concurrently across
+        providers via parallel_map. Returns ('stored', name) on success,
+        ('skipped', name) on dedup-skip, raises on store error."""
+        provider_cfg = ((config.get("providers") or {}).get(provider.name)) or {}
         dedup_threshold = float(provider_cfg.get("dedup_threshold", 0.0))
         if dedup_threshold > 0.0 and len(summary) >= 100:
             try:
                 from claude_hooks.dedup import should_store as dedup_ok
                 if not dedup_ok(summary, provider, threshold=dedup_threshold):
-                    log.info("skipping store to %s: near-duplicate detected", provider.name)
-                    continue
+                    log.info(
+                        "skipping store to %s: near-duplicate detected",
+                        provider.name,
+                    )
+                    return ("skipped", provider.name)
             except Exception as e:
                 log.debug("dedup check failed, storing anyway: %s", e)
+        provider.store(summary, metadata=metadata)
+        log.debug("provider %s stored turn summary", provider.name)
+        return ("stored", provider.name)
 
-        try:
-            provider.store(summary, metadata=metadata)
-            stored.append(provider.name)
-            log.debug("provider %s stored turn summary", provider.name)
-        except Exception as e:
-            failed.append((provider.name, str(e)))
-            log.warning("provider %s store failed: %s", provider.name, e)
+    stored: list[str] = []
+    failed: list[tuple[str, str]] = []
+
+    def _on_store_error(provider, exc):
+        failed.append((provider.name, str(exc)))
+        log.warning("provider %s store failed: %s", provider.name, exc)
+
+    from claude_hooks._parallel import parallel_map
+    results = parallel_map(
+        _dedup_and_store, auto_providers, on_error=_on_store_error,
+    )
+    for r in results:
+        if r is None:
+            continue
+        outcome, name = r
+        if outcome == "stored":
+            stored.append(name)
 
     # Instinct extraction: detect bug-fix patterns and save as reusable instincts.
     if hook_cfg.get("extract_instincts"):
