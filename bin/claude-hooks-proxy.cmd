@@ -5,6 +5,11 @@ setlocal
 set HERE=%~dp0
 set REPO=%HERE%..
 
+REM Switch into repo root so `python -m claude_hooks.proxy` finds the
+REM package on cwd-on-sys.path. Without this, launchers that set cwd
+REM elsewhere (Task Scheduler, services) fail with ModuleNotFoundError.
+cd /d "%REPO%"
+
 if defined CLAUDE_HOOKS_PY if exist "%CLAUDE_HOOKS_PY%" (
     "%CLAUDE_HOOKS_PY%" -m claude_hooks.proxy %*
     exit /b %ERRORLEVEL%
