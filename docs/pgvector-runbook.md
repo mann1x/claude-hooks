@@ -14,6 +14,9 @@ embedder pick.
 ## TL;DR
 
 ```bash
+# 0. Install the pgvector Python deps
+pip install -r requirements.txt -r requirements-pgvector.txt
+
 # 1. Bring up the docker stack
 cd /shared/config/mcp-pgvector
 cp .env.example .env && ${EDITOR} .env       # set POSTGRES_PASSWORD
@@ -279,3 +282,150 @@ binds Postgres to all interfaces on the host network — locked at the
 firewall/router boundary, not at Postgres itself. If you want a
 tighter listen scope, set `listen_addresses = '192.168.178.2,127.0.0.1'`
 in `postgresql.conf` and restart the container.
+
+---
+
+## 7. Hard cutover walkthrough — replacing Qdrant + Memory KG
+
+This is the procedure used on solidpc + pandorum on 2026-04-28 to retire
+the two MCP-backed memory services. Keep both `mcp-qdrant` and
+`mcp-memory` containers **stopped, not removed** — rollback is a single
+`docker compose start` away.
+
+### A. Pre-flight (each host)
+
+```bash
+# Solidpc-style hosts: psycopg already in conda env
+/root/anaconda3/envs/claude-hooks/bin/python -c "import psycopg; print(psycopg.__version__)"
+
+# Pandorum-style hosts: install if missing
+C:\Users\you\miniconda3\envs\claude-hooks\python.exe -m pip install "psycopg[binary]"
+
+# Network: the host needs reachability to the pgvector instance
+# (default port 5432 on the LAN IP).
+nc -zv 192.168.178.2 5432            # POSIX
+Test-NetConnection -ComputerName 192.168.178.2 -Port 5432   # PowerShell
+```
+
+### B. Edit `config/claude-hooks.json` (per host)
+
+Disable the two old providers, enable pgvector with hybrid recall:
+
+```json
+"providers": {
+  "qdrant":    { "enabled": false, ... },
+  "memory_kg": { "enabled": false, ... },
+  "pgvector": {
+    "enabled": true,
+    "dsn": "postgresql://claude:PASS@192.168.178.2:5432/memory",
+    "table": "memories_nomic",
+    "additional_tables": ["kg_observations_nomic"],
+    "embedder": "ollama",
+    "embedder_options": {
+      "url": "http://192.168.178.2:11434/api/embeddings",
+      "model": "nomic-embed-text"
+    },
+    "recall_k": 5,
+    "store_mode": "auto",
+    "timeout": 10.0
+  }
+}
+```
+
+The `additional_tables` list makes the single pgvector instance hybrid-search both
+the Qdrant-equivalent (`memories_nomic`) and the Memory-KG-equivalent
+(`kg_observations_nomic`) and merge results by cosine distance.
+
+Update `hooks.user_prompt_submit.include_providers`:
+```json
+"include_providers": ["pgvector"]
+```
+
+### C. Edit `~/.claude.json` — remove the dead MCP entries
+
+Claude Code probes every entry in `mcpServers` at startup; dead URLs
+slow startup and add log noise. Remove the `qdrant` and `memory` keys
+(back up `~/.claude.json` first). On Linux:
+
+```bash
+cp ~/.claude.json ~/.claude.json.bak-$(date +%F)
+python3 -c "
+import json, os
+p = os.path.expanduser('~/.claude.json')
+cfg = json.load(open(p))
+for k in ('qdrant', 'memory'):
+    cfg.get('mcpServers', {}).pop(k, None)
+json.dump(cfg, open(p,'w'), indent=2)
+"
+```
+
+### D. Stop the old MCP containers (data preserved)
+
+```bash
+cd /shared/config/mcp-qdrant && docker compose stop
+cd /shared/config/mcp-memory && docker compose stop
+```
+
+**Do not run `docker compose down -v`** — that would delete the data
+volumes and break the rollback path. Plain `stop` keeps everything.
+
+### E. Restart the claude-hooks daemon
+
+The daemon caches modules in memory. Without a restart it keeps using
+the pre-cutover dispatcher and config:
+
+```bash
+# Linux/macOS
+bin/claude-hooks-daemon-ctl restart
+
+# Windows
+bin\claude-hooks-daemon-ctl.cmd restart
+# If that reports "already responding" without a clean stop:
+#   wmic process where "ProcessId=<pid>" get CommandLine
+#   taskkill /F /PID <pid>
+#   bin\claude-hooks-daemon-ctl.cmd start
+```
+
+### F. Smoke-test the live hook
+
+```bash
+echo '{"hook_event_name":"UserPromptSubmit","prompt":"verify pgvector hybrid recall","cwd":"'$(pwd)'","session_id":"smoke","transcript_path":"/tmp/x.jsonl"}' \
+  | bin/claude-hook UserPromptSubmit
+```
+
+The output should contain a single recall block whose summary line names
+the active backend explicitly:
+
+```
+## Recalled memory
+
+_5 hit(s) from Postgres pgvector — claude-hooks_
+
+### Postgres pgvector (5)
+- ...
+```
+
+If you see `_N hit(s) from 0 providers_` or get an empty body, the
+daemon didn't restart cleanly — kill the process and re-run step E.
+
+### Rollback
+
+If anything goes wrong, the cutover is reversible in seconds:
+
+```bash
+# 1. Restart the old containers (data still on disk)
+cd /shared/config/mcp-qdrant && docker compose start
+cd /shared/config/mcp-memory && docker compose start
+
+# 2. Restore the backed-up configs
+cp config/claude-hooks.json.bak-<TS> config/claude-hooks.json
+cp ~/.claude.json.bak-<TS> ~/.claude.json
+
+# 3. Restart the daemon
+bin/claude-hooks-daemon-ctl restart
+```
+
+The pgvector container can stay running during rollback — it's idle
+when no provider points at it. Drop it later with `docker compose down`
+under `/shared/config/mcp-pgvector/` if you decide pgvector wasn't the
+right call.
