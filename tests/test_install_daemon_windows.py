@@ -1,13 +1,17 @@
 """
 Tests for ``install._install_daemon_windows`` and its helpers.
 
-Covers the Windows daemon-install flow: prompt → elevated schtasks via
-PowerShell ``Start-Process -Verb RunAs`` (or direct schtasks when
-already admin) → verify with ``schtasks /Query`` → retry-or-skip.
+Covers the Windows daemon-install flow:
+
+  1. If task exists → ask re-install (yes: delete + reinstall + verify;
+     no: ping-verify the running daemon and report).
+  2. If task absent → /Create (UAC) → /Run (UAC) → ping-verify with
+     ``_wait_for_daemon``. Retry on /Create UAC declined or daemon
+     non-responsive.
 
 The helpers don't actually require Windows at runtime (they shell out
-to subprocess), so these tests run on Linux too with subprocess.run
-patched.
+to subprocess), so these tests run on Linux too with subprocess.run +
+``_wait_for_daemon`` patched.
 """
 from __future__ import annotations
 
@@ -22,6 +26,18 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 import install  # noqa: E402
+
+# Capture the unpatched _wait_for_daemon function so the dedicated
+# TestWaitForDaemon class below can exercise the real polling logic
+# even though every other test patches it via the autouse fixture.
+_REAL_WAIT_FOR_DAEMON = install._wait_for_daemon
+
+
+@pytest.fixture(autouse=True)
+def _ping_succeeds():
+    """Stub _wait_for_daemon → True so tests don't actually poll TCP."""
+    with patch("install._wait_for_daemon", return_value=True) as p:
+        yield p
 
 
 # ===================================================================== #
@@ -50,29 +66,90 @@ class TestWindowsTaskExists:
 
 
 # ===================================================================== #
-# _install_daemon_windows — flow logic
+# _install_daemon_windows — task-already-exists branch
 # ===================================================================== #
-class TestInstallDaemonWindows:
-    def test_skips_when_task_already_exists(self, capsys):
+class TestAlreadyInstalledBranch:
+    def test_already_exists_non_interactive_verifies_daemon(self, capsys):
+        """In non-interactive mode + task present, leave as-is and just
+        ping. Should not call schtasks at all."""
         with patch("install._windows_task_exists", return_value=True), \
              patch.object(install.subprocess, "run") as run:
             install._install_daemon_windows(non_interactive=True)
         run.assert_not_called()
         out = capsys.readouterr().out
         assert "already exists" in out
+        assert "daemon responding" in out
 
-    def test_non_interactive_prints_command_skips_run(self, capsys):
-        # Task absent, non-interactive → must print the manual schtasks
-        # invocation and not spawn anything.
+    def test_already_exists_user_declines_reinstall_verifies(self, capsys):
+        """Task present + user says no to reinstall → ping daemon."""
+        with patch("install._windows_task_exists", return_value=True), \
+             patch("builtins.input", return_value="n"), \
+             patch.object(install.subprocess, "run") as run:
+            install._install_daemon_windows(non_interactive=False)
+        # Should NOT have called schtasks (no /Create, no /Delete, no /Run)
+        run.assert_not_called()
+        out = capsys.readouterr().out
+        assert "already registered" in out or "already exists" in out
+        assert "daemon responding" in out
+
+    def test_already_exists_user_declines_daemon_unresponsive_warns(
+        self, capsys, _ping_succeeds,
+    ):
+        """Task present + user says no + daemon NOT responding → guidance."""
+        _ping_succeeds.return_value = False
+        with patch("install._windows_task_exists", return_value=True), \
+             patch("builtins.input", return_value="n"), \
+             patch.object(install.subprocess, "run") as run:
+            install._install_daemon_windows(non_interactive=False)
+        run.assert_not_called()
+        out = capsys.readouterr().out
+        assert "not responding" in out
+        # Suggest schtasks /Run as the recovery
+        assert "/Run" in out
+
+    def test_already_exists_user_accepts_reinstall_deletes_and_recreates(self):
+        """Task present + user says yes → /Delete, then /Create + /Run."""
+        # Existence sequence:
+        #   - top-of-fn check (True, prompts for reinstall)
+        #   - inside fresh-install loop: not _windows_task_exists check (False after delete)
+        #   - after /Create: True
+        existence = iter([True, False, True])
+        with patch(
+            "install._windows_task_exists",
+            side_effect=lambda *_: next(existence),
+        ), patch("install._is_windows_admin", return_value=True), \
+             patch("builtins.input", side_effect=["y", "y"]), \
+             patch.object(
+                 install.subprocess, "run",
+                 return_value=MagicMock(returncode=0, stderr=""),
+             ) as run:
+            install._install_daemon_windows(non_interactive=False)
+        # Verify schtasks was called with /Delete, /Create, and /Run.
+        verbs = []
+        for call in run.call_args_list:
+            cmdline = call[0][0]
+            if cmdline and cmdline[0] == "schtasks":
+                # First arg after "schtasks" is the verb.
+                verbs.append(cmdline[1])
+        assert "/Delete" in verbs
+        assert "/Create" in verbs
+        assert "/Run" in verbs
+
+
+# ===================================================================== #
+# _install_daemon_windows — fresh-install branch
+# ===================================================================== #
+class TestFreshInstallBranch:
+    def test_non_interactive_prints_both_commands(self, capsys):
         with patch("install._windows_task_exists", return_value=False), \
              patch.object(install.subprocess, "run") as run:
             install._install_daemon_windows(non_interactive=True)
         run.assert_not_called()
         out = capsys.readouterr().out
-        assert "schtasks /Create /SC ONLOGON /TN" in out
-        assert "claude-hooks-daemon" in out
+        assert "/Create" in out
+        assert "/Run" in out
 
-    def test_user_declines_skips_with_manual_command(self, capsys):
+    def test_user_declines_proceed_skips_with_manual_commands(self, capsys):
         with patch("install._windows_task_exists", return_value=False), \
              patch("builtins.input", return_value="n"), \
              patch.object(install.subprocess, "run") as run:
@@ -80,15 +157,21 @@ class TestInstallDaemonWindows:
         run.assert_not_called()
         out = capsys.readouterr().out
         assert "Skipped" in out
-        assert "schtasks /Create /SC ONLOGON" in out
+        assert "/Create" in out
+        assert "/Run" in out
 
-    def test_admin_path_calls_schtasks_directly(self):
-        """When already elevated, skip the PowerShell Start-Process dance."""
-        # Sequence: task absent, user accepts, schtasks succeeds, task exists.
-        exists_calls = iter([False, True])
+    def test_admin_path_calls_create_then_run_directly(self):
+        """When elevated, /Create + /Run bypass PowerShell.
+
+        Existence sequence (3 checks during a fresh successful install):
+          1. top-of-fn already-exists check → False
+          2. loop: if-not-exists check → False (will create)
+          3. post-/Create exists check → True
+        """
+        existence = iter([False, False, True])
         with patch(
             "install._windows_task_exists",
-            side_effect=lambda *_: next(exists_calls),
+            side_effect=lambda *_: next(existence),
         ), patch("install._is_windows_admin", return_value=True), \
              patch("builtins.input", return_value="y"), \
              patch.object(
@@ -96,19 +179,19 @@ class TestInstallDaemonWindows:
                  return_value=MagicMock(returncode=0, stderr=""),
              ) as run:
             install._install_daemon_windows(non_interactive=False)
-        # First and only subprocess.run call invokes schtasks directly.
-        cmdline = run.call_args[0][0]
-        assert cmdline[0] == "schtasks"
-        assert "/Create" in cmdline
-        assert "/SC" in cmdline and "ONLOGON" in cmdline
-        assert "/RL" in cmdline and "HIGHEST" in cmdline
+        verbs = [
+            call[0][0][1] for call in run.call_args_list
+            if call[0][0] and call[0][0][0] == "schtasks"
+        ]
+        assert "/Create" in verbs
+        assert "/Run" in verbs
 
-    def test_non_admin_path_uses_powershell_runas(self):
-        """When not elevated, route through PowerShell Start-Process -Verb RunAs."""
-        exists_calls = iter([False, True])
+    def test_non_admin_path_uses_powershell_runas_for_each_step(self):
+        """Non-admin: each schtasks step routes through Start-Process RunAs."""
+        existence = iter([False, False, True])
         with patch(
             "install._windows_task_exists",
-            side_effect=lambda *_: next(exists_calls),
+            side_effect=lambda *_: next(existence),
         ), patch("install._is_windows_admin", return_value=False), \
              patch("builtins.input", return_value="y"), \
              patch.object(
@@ -116,19 +199,23 @@ class TestInstallDaemonWindows:
                  return_value=MagicMock(returncode=0, stderr=""),
              ) as run:
             install._install_daemon_windows(non_interactive=False)
-        cmdline = run.call_args[0][0]
-        assert cmdline[0] == "powershell"
-        assert "-NoProfile" in cmdline
-        # The PS command must contain Start-Process and -Verb RunAs.
-        ps_body = cmdline[-1]
-        assert "Start-Process" in ps_body
-        assert "-Verb RunAs" in ps_body
-        assert "-Wait" in ps_body
-        assert "schtasks" in ps_body
+        ps_bodies = [
+            call[0][0][-1] for call in run.call_args_list
+            if call[0][0] and call[0][0][0] == "powershell"
+        ]
+        # Two PowerShell calls (Create + Run); each via Start-Process RunAs.
+        assert len(ps_bodies) == 2
+        for body in ps_bodies:
+            assert "Start-Process" in body
+            assert "-Verb RunAs" in body
+            assert "-Wait" in body
+            assert "schtasks" in body
+        # First contains /Create, second contains /Run.
+        assert any("/Create" in b for b in ps_bodies)
+        assert any("/Run" in b for b in ps_bodies)
 
-    def test_uac_declined_then_user_skips(self, capsys):
-        """Elevation 'fails' (task still absent), user declines retry."""
-        # Task absent both before and after → simulates UAC declined.
+    def test_uac_declined_creates_then_user_skips(self, capsys):
+        """/Create elevation declined → task still absent → retry=n → exit."""
         with patch("install._windows_task_exists", return_value=False), \
              patch("install._is_windows_admin", return_value=False), \
              patch("builtins.input", side_effect=["y", "n"]), \
@@ -138,38 +225,61 @@ class TestInstallDaemonWindows:
              ):
             install._install_daemon_windows(non_interactive=False)
         out = capsys.readouterr().out
-        assert "Task not detected" in out
-        assert "Skipped" in out
+        assert "task not detected" in out
 
     def test_uac_declined_then_retry_succeeds(self):
-        """First elevation fails (task missing), user retries, second works.
+        """First /Create fails, user retries, second /Create succeeds.
 
-        Existence sequence: top-of-fn check (False), after attempt #1
-        (False, retry), after attempt #2 (True, succeed).
-        Inputs: proceed#1=y, retry=y, proceed#2=y.
+        Existence sequence (5 checks):
+          1. top-of-fn already-exists → False
+          2. loop iter 1: if-not-exists → False (create attempt #1)
+          3. post-/Create #1 → False (UAC declined → retry path)
+          4. loop iter 2: if-not-exists → False (create attempt #2)
+          5. post-/Create #2 → True (success)
         """
-        existence = iter([False, False, True])
-        ps_calls = []
-
-        def _run_side(cmdline, **kw):
-            ps_calls.append(cmdline)
-            return MagicMock(returncode=0, stderr="")
-
+        existence = iter([False, False, False, False, True])
         with patch(
             "install._windows_task_exists",
             side_effect=lambda *_: next(existence),
         ), patch("install._is_windows_admin", return_value=False), \
              patch("builtins.input", side_effect=["y", "y", "y"]), \
-             patch.object(install.subprocess, "run", side_effect=_run_side):
+             patch.object(
+                 install.subprocess, "run",
+                 return_value=MagicMock(returncode=0, stderr=""),
+             ) as run:
             install._install_daemon_windows(non_interactive=False)
-        # Two PowerShell elevations attempted.
-        assert len(ps_calls) == 2
-        for c in ps_calls:
-            assert c[0] == "powershell"
+        # Two /Create elevations were attempted.
+        ps_create_bodies = [
+            call[0][0][-1] for call in run.call_args_list
+            if call[0][0] and call[0][0][0] == "powershell"
+            and "/Create" in call[0][0][-1]
+        ]
+        assert len(ps_create_bodies) == 2
 
-    def test_powershell_oserror_falls_through_to_retry_prompt(self, capsys):
-        """If PowerShell can't be launched at all, we surface the error and
-        proceed to the retry prompt (user can decline)."""
+    def test_daemon_unresponsive_after_create_offers_retry(
+        self, capsys, _ping_succeeds,
+    ):
+        """/Create + /Run succeeded but daemon not pinging → retry prompt.
+
+        On retry-decline, we exit (no recreate), since the task already exists.
+        """
+        _ping_succeeds.return_value = False
+        # Existence: top-of-fn=False, then True after /Create on every check.
+        with patch(
+            "install._windows_task_exists",
+            side_effect=[False, True],
+        ), patch("install._is_windows_admin", return_value=True), \
+             patch("builtins.input", side_effect=["y", "n"]), \
+             patch.object(
+                 install.subprocess, "run",
+                 return_value=MagicMock(returncode=0, stderr=""),
+             ):
+            install._install_daemon_windows(non_interactive=False)
+        out = capsys.readouterr().out
+        assert "did not respond" in out
+        # User declined retry — function exits cleanly.
+
+    def test_powershell_oserror_surfaces_then_retry_prompt(self, capsys):
         with patch("install._windows_task_exists", return_value=False), \
              patch("install._is_windows_admin", return_value=False), \
              patch("builtins.input", side_effect=["y", "n"]), \
@@ -180,4 +290,30 @@ class TestInstallDaemonWindows:
             install._install_daemon_windows(non_interactive=False)
         out = capsys.readouterr().out
         assert "Failed to launch elevated process" in out
-        assert "Skipped" in out
+
+
+# ===================================================================== #
+# _wait_for_daemon — uses the captured pre-patch reference so the
+# autouse `_ping_succeeds` fixture above doesn't mask the real fn.
+# ===================================================================== #
+class TestWaitForDaemon:
+    def test_returns_true_on_first_ping(self):
+        with patch("claude_hooks.daemon_client.ping", return_value=True):
+            assert _REAL_WAIT_FOR_DAEMON(timeout=2.0) is True
+
+    def test_returns_false_on_timeout(self):
+        with patch("claude_hooks.daemon_client.ping", return_value=False):
+            assert _REAL_WAIT_FOR_DAEMON(timeout=0.5) is False
+
+    def test_swallows_exceptions_during_polling(self):
+        """A single ping raising should not abort the wait loop."""
+        responses = iter([RuntimeError("transient"), True])
+
+        def flaky(**kw):
+            r = next(responses)
+            if isinstance(r, Exception):
+                raise r
+            return r
+
+        with patch("claude_hooks.daemon_client.ping", side_effect=flaky):
+            assert _REAL_WAIT_FOR_DAEMON(timeout=3.0) is True

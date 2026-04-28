@@ -574,21 +574,47 @@ def _install_claude_hooks_daemon(
 
     # POSIX path: try systemd first, then launchd.
     if Path("/etc/systemd/system").is_dir():
-        _install_daemon_systemd()
+        _install_daemon_systemd(non_interactive=non_interactive)
         return
     if sys.platform == "darwin":
-        _install_daemon_launchd()
+        _install_daemon_launchd(non_interactive=non_interactive)
         return
     print("  [!!] No supported autostart manager (systemd / launchd) detected.")
     print("       Run manually:  bin/claude-hooks-daemon")
 
 
-def _install_daemon_systemd() -> None:
+def _install_daemon_systemd(*, non_interactive: bool = False) -> None:
     src = HERE / "systemd" / _DAEMON_UNIT
     dest = Path("/etc/systemd/system") / _DAEMON_UNIT
+
     if dest.exists():
-        print(f"  · {_DAEMON_UNIT} already installed — leaving as-is")
-        return
+        if non_interactive:
+            ans = "n"
+        else:
+            ans = input(
+                f"  {_DAEMON_UNIT} already installed. Re-install + re-verify? [y/N]: "
+            ).strip().lower()
+        if ans in ("y", "yes"):
+            subprocess.run(
+                ["systemctl", "disable", "--now", _DAEMON_UNIT],
+                capture_output=True,
+            )
+            try:
+                dest.unlink()
+            except OSError as e:
+                print(f"  [!!] could not remove {dest}: {e} — leaving as-is")
+                return
+        else:
+            print(f"  · leaving {_DAEMON_UNIT} as-is — verifying it's responding")
+            if _wait_for_daemon(timeout=5.0):
+                print(f"  · daemon responding on 127.0.0.1:47018")
+            else:
+                print(
+                    "  [!!] daemon not responding. Try: "
+                    f"systemctl restart {_DAEMON_UNIT}"
+                )
+            return
+
     if not src.exists():
         print(f"  [!!] {src} missing — skipping")
         return
@@ -608,10 +634,17 @@ def _install_daemon_systemd() -> None:
         ["systemctl", "enable", "--now", _DAEMON_UNIT],
         capture_output=True, text=True,
     )
-    if rc.returncode == 0:
-        print(f"  · enabled + started {_DAEMON_UNIT}")
-    else:
+    if rc.returncode != 0:
         print(f"  [!!] enable failed:\n{rc.stderr.strip()[-300:]}")
+        return
+    print(f"  · enabled + started {_DAEMON_UNIT}")
+    if _wait_for_daemon():
+        print("  · daemon responding on 127.0.0.1:47018")
+    else:
+        print(
+            "  [!!] daemon not responding within 15 s. Check: "
+            f"systemctl status {_DAEMON_UNIT}"
+        )
 
 
 _LAUNCHD_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
@@ -634,13 +667,39 @@ _LAUNCHD_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
-def _install_daemon_launchd() -> None:
+def _install_daemon_launchd(*, non_interactive: bool = False) -> None:
     plist_dir = Path.home() / "Library" / "LaunchAgents"
     plist_dir.mkdir(parents=True, exist_ok=True)
     dest = plist_dir / "com.claude-hooks.daemon.plist"
+
     if dest.exists():
-        print(f"  · {dest} already installed — leaving as-is")
-        return
+        if non_interactive:
+            ans = "n"
+        else:
+            ans = input(
+                f"  {dest.name} already installed. Re-install + re-verify? [y/N]: "
+            ).strip().lower()
+        if ans in ("y", "yes"):
+            subprocess.run(
+                ["launchctl", "unload", "-w", str(dest)],
+                capture_output=True,
+            )
+            try:
+                dest.unlink()
+            except OSError as e:
+                print(f"  [!!] could not remove {dest}: {e} — leaving as-is")
+                return
+        else:
+            print(f"  · leaving {dest.name} as-is — verifying daemon")
+            if _wait_for_daemon(timeout=5.0):
+                print("  · daemon responding on 127.0.0.1:47018")
+            else:
+                print(
+                    "  [!!] daemon not responding. Try: launchctl kickstart "
+                    "-k gui/$(id -u)/com.claude-hooks.daemon"
+                )
+            return
+
     content = _LAUNCHD_PLIST
     content = content.replace("__REPO_PATH__", str(HERE.resolve()))
     content = content.replace("__HOME__", str(Path.home()))
@@ -654,13 +713,47 @@ def _install_daemon_launchd() -> None:
         ["launchctl", "load", "-w", str(dest)],
         capture_output=True, text=True,
     )
-    if rc.returncode == 0:
-        print("  · loaded into launchd (will start at next login + now)")
-    else:
+    if rc.returncode != 0:
         print(f"  [!!] launchctl load failed:\n{rc.stderr.strip()[-300:]}")
+        return
+    print("  · loaded into launchd")
+    if _wait_for_daemon():
+        print("  · daemon responding on 127.0.0.1:47018")
+    else:
+        print("  [!!] daemon not responding within 15 s.")
 
 
 _DAEMON_TASK_NAME = "claude-hooks-daemon"
+
+
+def _wait_for_daemon(*, timeout: float = 15.0) -> bool:
+    """Poll the daemon until ping succeeds or the deadline elapses.
+
+    Used by every platform's daemon-install path to confirm the
+    autostart entry actually launched the daemon. Returns True on
+    first successful ping, False on timeout. Never raises.
+
+    The first ping after install can take a few seconds because:
+      - systemd / launchd may delay the spawn behind dependencies
+      - Windows Task Scheduler /Run is async
+      - the daemon's first action is ``ensure_secret`` which creates
+        ``~/.claude/claude-hooks-daemon-secret`` — only after that
+        does it bind the listener
+    """
+    try:
+        from claude_hooks.daemon_client import ping  # noqa: PLC0415
+    except ImportError:
+        return False
+    import time as _time  # noqa: PLC0415
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        try:
+            if ping(timeout=1.0):
+                return True
+        except Exception:  # pragma: no cover — defensive
+            pass
+        _time.sleep(0.5)
+    return False
 
 
 def _is_windows_admin() -> bool:
@@ -684,90 +777,167 @@ def _windows_task_exists(task_name: str) -> bool:
         return False
 
 
+def _run_schtasks_elevated(argstr: str, argv: list) -> bool:
+    """Invoke ``schtasks <args>`` elevated, returning True on rc=0.
+
+    Direct call when already admin; PowerShell ``Start-Process -Verb
+    RunAs -Wait`` (one UAC prompt) otherwise. ``argstr`` is the
+    arguments as a single PowerShell-safe string; ``argv`` is the
+    pre-tokenised list used in the admin shortcut path.
+    """
+    if _is_windows_admin():
+        try:
+            rc = subprocess.run(
+                ["schtasks", *argv],
+                capture_output=True, text=True,
+            )
+            if rc.returncode != 0:
+                print(f"  [!!] schtasks failed:\n{rc.stderr.strip()[-300:]}")
+                return False
+            return True
+        except OSError as e:
+            print(f"  [!!] schtasks invocation failed: {e}")
+            return False
+
+    ps_cmd = (
+        "Start-Process -FilePath schtasks "
+        f"-ArgumentList '{argstr}' "
+        "-Verb RunAs -Wait"
+    )
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True, text=True,
+        )
+    except OSError as e:
+        print(f"  [!!] Failed to launch elevated process: {e}")
+        return False
+    # Start-Process -Wait returns once the elevated child exits but
+    # hides its rc — the caller verifies via /Query (or the calling
+    # context's own check, e.g. _wait_for_daemon).
+    return True
+
+
 def _install_daemon_windows(*, non_interactive: bool) -> None:
-    """Register the daemon as a Windows logon-triggered scheduled task.
+    """Register the daemon as a Windows logon-triggered scheduled task,
+    start it now, and verify it's responding.
 
-    Mirrors clink's self-update flow: confirm with the user, spawn an
-    elevated process via ``Start-Process -Verb RunAs`` (which triggers
-    the UAC prompt), wait for it to finish, then verify the task exists.
-    If verification fails (UAC declined / schtasks errored), offer to
-    retry. Skip path always prints the manual command so the user can
-    run it themselves later.
+    Three failure / re-entry modes:
 
-    When the script is itself already elevated, skip the PowerShell
-    indirection and call ``schtasks`` directly — saves a process spawn
-    and avoids a no-op UAC pop.
+    1. Task already exists — ask whether to delete + reinstall +
+       re-verify, or just leave as-is (and verify ping).
+    2. /Create succeeded but daemon didn't come up — retry /Run + ping.
+    3. UAC declined — retry the elevation or skip.
+
+    Mirrors clink's self-update flow: one UAC prompt per elevated
+    operation, installer itself stays unprivileged.
     """
     cmd_path = (HERE / "bin" / "claude-hooks-daemon.cmd").resolve()
     task_name = _DAEMON_TASK_NAME
     # Embedded \" pair re-quotes the path for cmd.exe's re-tokenize when
     # the task fires — needed when the path contains spaces.
-    schtasks_argstr = (
+    create_argstr = (
         f'/Create /SC ONLOGON /TN "{task_name}" '
         f'/TR "\\"{cmd_path}\\"" /RL HIGHEST /F'
     )
-    schtasks_argv = [
+    create_argv = [
         "/Create", "/SC", "ONLOGON", "/TN", task_name,
         "/TR", f'"{cmd_path}"', "/RL", "HIGHEST", "/F",
     ]
+    run_argstr = f'/Run /TN "{task_name}"'
+    run_argv = ["/Run", "/TN", task_name]
+    delete_argstr = f'/Delete /TN "{task_name}" /F'
+    delete_argv = ["/Delete", "/TN", task_name, "/F"]
 
+    # ---------- already-installed branch ----------
     if _windows_task_exists(task_name):
-        print(f"  · scheduled task '{task_name}' already exists — leaving as-is")
-        return
+        if non_interactive:
+            print(
+                f"  · task '{task_name}' already exists "
+                f"(--non-interactive — leaving as-is)"
+            )
+            ans = "n"
+        else:
+            print()
+            print(f"  Scheduled task '{task_name}' is already registered.")
+            ans = input(
+                "  Re-install (delete + recreate + verify)? [y/N]: "
+            ).strip().lower()
 
+        if ans in ("y", "yes"):
+            print(f"  Deleting existing task '{task_name}'...")
+            if not _run_schtasks_elevated(delete_argstr, delete_argv):
+                print("  [!!] could not delete existing task — leaving as-is")
+                return
+            # Fall through to fresh-install loop.
+        else:
+            # Just verify the daemon is actually responding.
+            print("  Verifying the daemon is responding...")
+            if _wait_for_daemon(timeout=5.0):
+                print("  · daemon responding on 127.0.0.1:47018")
+            else:
+                print(
+                    "  [!!] task is registered but the daemon is not "
+                    "responding. Start it now from an elevated cmd:"
+                )
+                print(f"  schtasks {run_argstr}")
+            return
+
+    # ---------- fresh install (or post-delete) branch ----------
     if non_interactive:
         print("  --non-interactive: cannot prompt for UAC. Run manually from")
         print("  an elevated cmd:")
-        print(f"  schtasks {schtasks_argstr}")
+        print(f"  schtasks {create_argstr}")
+        print(f"  schtasks {run_argstr}")
         return
 
     while True:
         print()
         print(f"  Will register '{task_name}' as a Windows logon-triggered")
-        print(f"  scheduled task pointing at {cmd_path}.")
-        print("  This triggers a UAC prompt — accept it to grant admin to")
-        print("  the schtasks call only. install.py itself stays unprivileged.")
+        print(f"  scheduled task pointing at {cmd_path},")
+        print("  start it now, and verify the daemon is responding.")
+        print("  Each UAC prompt is scoped to one schtasks call.")
         ans = input("  Proceed? [Y/n]: ").strip().lower()
         if ans not in ("", "y", "yes"):
             print("  Skipped. Run manually later from an elevated cmd:")
-            print(f"  schtasks {schtasks_argstr}")
+            print(f"  schtasks {create_argstr}")
+            print(f"  schtasks {run_argstr}")
             return
 
-        if _is_windows_admin():
-            try:
-                rc = subprocess.run(
-                    ["schtasks", *schtasks_argv],
-                    capture_output=True, text=True,
+        # Step 1: create the task if it doesn't exist yet.
+        if not _windows_task_exists(task_name):
+            _run_schtasks_elevated(create_argstr, create_argv)
+            if not _windows_task_exists(task_name):
+                print(
+                    "  [!!] task not detected after /Create — UAC declined "
+                    "or schtasks errored."
                 )
-                if rc.returncode != 0:
-                    print(
-                        f"  [!!] schtasks failed:\n{rc.stderr.strip()[-300:]}"
-                    )
-            except OSError as e:
-                print(f"  [!!] schtasks invocation failed: {e}")
-        else:
-            ps_cmd = (
-                "Start-Process -FilePath schtasks "
-                f"-ArgumentList '{schtasks_argstr}' "
-                "-Verb RunAs -Wait"
-            )
-            try:
-                subprocess.run(
-                    ["powershell", "-NoProfile", "-Command", ps_cmd],
-                    capture_output=True, text=True,
-                )
-            except OSError as e:
-                print(f"  [!!] Failed to launch elevated process: {e}")
+                retry = input("  Retry? [Y/n]: ").strip().lower()
+                if retry not in ("", "y", "yes"):
+                    return
+                continue
+            print(f"  · task '{task_name}' registered")
 
-        if _windows_task_exists(task_name):
-            print(f"  · scheduled task '{task_name}' registered successfully")
+        # Step 2: trigger the task now (ONLOGON only fires at next logon
+        # otherwise — and the user wants the daemon up immediately).
+        _run_schtasks_elevated(run_argstr, run_argv)
+
+        # Step 3: confirm the daemon is actually answering on its port.
+        print("  Waiting for the daemon to come up...")
+        if _wait_for_daemon():
+            print("  · daemon responding on 127.0.0.1:47018")
             return
 
-        print("  [!!] Task not detected — UAC declined or schtasks errored.")
-        retry = input("  Retry the elevation? [Y/n]: ").strip().lower()
+        print(
+            "  [!!] daemon did not respond within 15 s. The task is "
+            "registered but the daemon may have crashed at startup."
+        )
+        print(
+            "       Inspect the daemon's stderr by running it directly: "
+            f"{cmd_path}"
+        )
+        retry = input("  Retry /Run + verify? [Y/n]: ").strip().lower()
         if retry not in ("", "y", "yes"):
-            print("  Skipped. Run manually later from an elevated cmd:")
-            print(f"  schtasks {schtasks_argstr}")
             return
 
 
