@@ -65,20 +65,57 @@ class OllamaEmbedder(Embedder):
 
     name = "ollama"
 
+    # Defaults assume a modern nomic/arctic/jina-class embedder with native
+    # 8k-token training. Without ``num_ctx`` set, Ollama caps each request
+    # at 2048 tokens and a Stop-hook turn summary easily overflows that,
+    # returning HTTP 500. Setting ``num_ctx`` higher than the model's
+    # *native trained* max gives no quality benefit (positions past the
+    # trained range get untrained embeddings) and may degrade results,
+    # so 8192 is the practical ceiling for the popular Ollama embedders.
+    #
+    # ``max_chars`` is a belt-and-suspenders truncation so pathologically
+    # long inputs land within the token window even when tokenisation is
+    # dense (code, paths). 16000 chars at the worst tested ~2 chars/token
+    # ratio = 8000 tokens, fits 8k context. Realistic prose at 4 chars/token
+    # is ~4000 tokens, leaving plenty of headroom.
+    #
+    # Override per-model via ``embedder_options`` in claude-hooks.json:
+    #   minilm-l6-v2  (256-token native): num_ctx=256,  max_chars=400
+    #   mxbai-embed-large-v1 (512 native): num_ctx=512, max_chars=1500
+    DEFAULT_NUM_CTX: int = 8192
+    DEFAULT_MAX_CHARS: int = 16000
+
     def __init__(
         self,
         url: str = "http://localhost:11434/api/embeddings",
         model: str = "nomic-embed-text",
         timeout: float = 10.0,
+        max_chars: Optional[int] = None,
+        num_ctx: Optional[int] = None,
+        keep_alive: Optional[str] = None,
     ):
         self.url = url
         self.model = model
         self.timeout = timeout
+        self.max_chars = max_chars if max_chars is not None else self.DEFAULT_MAX_CHARS
+        self.num_ctx = num_ctx if num_ctx is not None else self.DEFAULT_NUM_CTX
+        self.keep_alive = keep_alive
+
+    def _options_payload(self) -> dict:
+        out: dict = {}
+        if self.num_ctx:
+            out["options"] = {"num_ctx": self.num_ctx}
+        if self.keep_alive:
+            out["keep_alive"] = self.keep_alive
+        return out
 
     def embed(self, text: str) -> list[float]:
         if not text:
             raise EmbedderError("cannot embed empty string")
-        body = json.dumps({"model": self.model, "prompt": text}).encode("utf-8")
+        if self.max_chars:
+            text = text[: self.max_chars]
+        payload = {"model": self.model, "prompt": text, **self._options_payload()}
+        body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             self.url,
             data=body,
@@ -104,11 +141,14 @@ class OllamaEmbedder(Embedder):
         per-text /api/embeddings on HTTP error so older daemons still work."""
         if not texts:
             return []
+        if self.max_chars:
+            texts = [t[: self.max_chars] for t in texts]
         # Derive the batch endpoint from the configured per-text URL.
         batch_url = self.url
         if batch_url.endswith("/api/embeddings"):
             batch_url = batch_url[: -len("/api/embeddings")] + "/api/embed"
-        body = json.dumps({"model": self.model, "input": texts}).encode("utf-8")
+        payload = {"model": self.model, "input": texts, **self._options_payload()}
+        body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             batch_url,
             data=body,
@@ -197,7 +237,8 @@ def make_embedder(name: str, options: Optional[dict] = None) -> Embedder:
     """
     options = options or {}
     if name == "ollama":
-        return OllamaEmbedder(**{k: v for k, v in options.items() if k in ("url", "model", "timeout")})
+        allowed = ("url", "model", "timeout", "max_chars", "num_ctx", "keep_alive")
+        return OllamaEmbedder(**{k: v for k, v in options.items() if k in allowed})
     if name in ("openai", "openai_compatible"):
         return OpenAiCompatibleEmbedder(
             **{k: v for k, v in options.items() if k in ("url", "model", "api_key", "timeout")}

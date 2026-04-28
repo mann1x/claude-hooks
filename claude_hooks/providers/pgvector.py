@@ -44,10 +44,18 @@ required" and prompts for the DSN if the user wants to enable it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 from typing import Optional
+
+
+def _content_hash(text: str) -> bytes:
+    """SHA-256 of normalised text — matches scripts/migrate_to_pgvector.py
+    so production stores collide on the same content_hash key as migrated rows."""
+    normalised = " ".join(text.split())
+    return hashlib.sha256(normalised.encode("utf-8")).digest()
 
 from claude_hooks.embedders import Embedder, EmbedderError, make_embedder
 from claude_hooks.providers.base import (
@@ -184,9 +192,16 @@ class PgvectorProvider(Provider):
         table = _safe_table(self.options.get("table") or "claude_hooks_memory")
         try:
             with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                # ``content_hash`` matches the migration-script schema —
+                # without it inserts into ``memories_<model>`` (which has
+                # NOT NULL on content_hash) fail. ON CONFLICT DO NOTHING
+                # makes repeat stores of identical content a silent no-op
+                # rather than a unique-constraint error.
                 cur.execute(
-                    f"INSERT INTO {table} (content, metadata, embedding) VALUES (%s, %s, %s)",
-                    (content, json.dumps(metadata or {}), str(vec)),
+                    f"INSERT INTO {table} (content, content_hash, metadata, embedding) "
+                    f"VALUES (%s, %s, %s, %s) "
+                    f"ON CONFLICT (content_hash) DO NOTHING",
+                    (content, _content_hash(content), json.dumps(metadata or {}), str(vec)),
                 )
                 self._conn.commit()  # type: ignore[union-attr]
         except Exception as e:
@@ -254,13 +269,15 @@ class PgvectorProvider(Provider):
             raise RuntimeError(f"pgvector batch embed failed: {e}")
         table = _safe_table(self.options.get("table") or "claude_hooks_memory")
         params = [
-            (c, json.dumps(m or {}), str(v))
+            (c, _content_hash(c), json.dumps(m or {}), str(v))
             for (c, m), v in zip(items, vectors)
         ]
         try:
             with self._conn.cursor() as cur:  # type: ignore[union-attr]
                 cur.executemany(
-                    f"INSERT INTO {table} (content, metadata, embedding) VALUES (%s, %s, %s)",
+                    f"INSERT INTO {table} (content, content_hash, metadata, embedding) "
+                    f"VALUES (%s, %s, %s, %s) "
+                    f"ON CONFLICT (content_hash) DO NOTHING",
                     params,
                 )
                 self._conn.commit()  # type: ignore[union-attr]
@@ -315,18 +332,24 @@ class PgvectorProvider(Provider):
                 )
 
         with self._conn.cursor() as cur:  # type: ignore[union-attr]
+            # Schema mirrors scripts/migrate_to_pgvector.py:schema_sql_for_model
+            # so production stores from the live hook collide on the same
+            # content_hash key as migration-loaded rows.
             cur.execute(
                 f"""CREATE TABLE IF NOT EXISTS {table} (
-                    id          BIGSERIAL PRIMARY KEY,
-                    content     TEXT NOT NULL,
-                    metadata    JSONB,
-                    embedding   vector({dim}),
-                    created_at  TIMESTAMPTZ DEFAULT now()
+                    id              BIGSERIAL PRIMARY KEY,
+                    content         TEXT NOT NULL,
+                    content_hash    BYTEA NOT NULL,
+                    metadata        JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                    embedding       vector({dim}) NOT NULL,
+                    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    CONSTRAINT {table}_content_hash_unique UNIQUE (content_hash)
                 )"""
             )
             cur.execute(
                 f"""CREATE INDEX IF NOT EXISTS {table}_embedding_hnsw
-                    ON {table} USING hnsw (embedding vector_cosine_ops)"""
+                    ON {table} USING hnsw (embedding vector_cosine_ops)
+                    WITH (m = 16, ef_construction = 64)"""
             )
         self._conn.commit()  # type: ignore[union-attr]
         self._table_created = True
