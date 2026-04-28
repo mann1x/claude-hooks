@@ -141,10 +141,19 @@ class TestAlreadyInstalledBranch:
 # ===================================================================== #
 class TestFreshInstallBranch:
     def test_non_interactive_prints_both_commands(self, capsys):
+        # subprocess.run will be called for whoami inside _windows_user_id —
+        # what matters is that no schtasks call fires, since we're skipping.
         with patch("install._windows_task_exists", return_value=False), \
-             patch.object(install.subprocess, "run") as run:
+             patch.object(
+                 install.subprocess, "run",
+                 return_value=MagicMock(returncode=0, stdout="", stderr=""),
+             ) as run:
             install._install_daemon_windows(non_interactive=True)
-        run.assert_not_called()
+        schtasks_calls = [
+            c for c in run.call_args_list
+            if c[0][0] and c[0][0][0] == "schtasks"
+        ]
+        assert schtasks_calls == []
         out = capsys.readouterr().out
         assert "/Create" in out
         assert "/Run" in out
@@ -152,9 +161,16 @@ class TestFreshInstallBranch:
     def test_user_declines_proceed_skips_with_manual_commands(self, capsys):
         with patch("install._windows_task_exists", return_value=False), \
              patch("builtins.input", return_value="n"), \
-             patch.object(install.subprocess, "run") as run:
+             patch.object(
+                 install.subprocess, "run",
+                 return_value=MagicMock(returncode=0, stdout="", stderr=""),
+             ) as run:
             install._install_daemon_windows(non_interactive=False)
-        run.assert_not_called()
+        schtasks_calls = [
+            c for c in run.call_args_list
+            if c[0][0] and c[0][0][0] == "schtasks"
+        ]
+        assert schtasks_calls == []
         out = capsys.readouterr().out
         assert "Skipped" in out
         assert "/Create" in out
@@ -359,6 +375,52 @@ class TestFreshInstallBranch:
             install._install_daemon_windows(non_interactive=False)
         out = capsys.readouterr().out
         assert "Failed to launch elevated process" in out
+
+
+# ===================================================================== #
+# _windows_user_id — SID extraction with fallbacks
+# ===================================================================== #
+class TestWindowsUserId:
+    def test_returns_sid_from_whoami(self):
+        with patch.object(
+            install.subprocess, "run",
+            return_value=MagicMock(
+                returncode=0,
+                stdout='"PANDORUM\\manni","S-1-5-21-1234-5678-9012-1001"\n',
+            ),
+        ):
+            assert install._windows_user_id() == "S-1-5-21-1234-5678-9012-1001"
+
+    def test_falls_back_to_computername_when_whoami_fails(self, monkeypatch):
+        monkeypatch.setenv("USERNAME", "manni")
+        monkeypatch.setenv("COMPUTERNAME", "PANDORUM")
+        with patch.object(
+            install.subprocess, "run",
+            return_value=MagicMock(returncode=1, stdout=""),
+        ):
+            out = install._windows_user_id()
+        assert out == "PANDORUM\\manni"
+
+    def test_skips_workgroup_in_computername_fallback(self, monkeypatch):
+        # If COMPUTERNAME is somehow "WORKGROUP" (unusual but possible),
+        # fall back to bare username — that's still a valid local UserId.
+        monkeypatch.setenv("USERNAME", "manni")
+        monkeypatch.setenv("COMPUTERNAME", "WORKGROUP")
+        with patch.object(
+            install.subprocess, "run",
+            return_value=MagicMock(returncode=1, stdout=""),
+        ):
+            out = install._windows_user_id()
+        assert out == "manni"
+
+    def test_returns_dot_when_nothing_resolvable(self, monkeypatch):
+        monkeypatch.delenv("USERNAME", raising=False)
+        monkeypatch.delenv("COMPUTERNAME", raising=False)
+        with patch.object(
+            install.subprocess, "run",
+            side_effect=OSError("whoami missing"),
+        ):
+            assert install._windows_user_id() == "."
 
 
 # ===================================================================== #

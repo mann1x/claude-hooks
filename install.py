@@ -972,12 +972,42 @@ _DAEMON_TASK_XML = """<?xml version="1.0" encoding="UTF-16"?>
 
 
 def _windows_user_id() -> str:
-    """Return ``DOMAIN\\username`` for the current user (Windows-only)."""
-    domain = os.environ.get("USERDOMAIN") or os.environ.get("COMPUTERNAME") or ""
+    """Return the current user's SID (or DOMAIN\\username fallback).
+
+    The Task XML's ``<UserId>`` field accepts either form, but a SID is
+    the only one that's reliably valid in every case. ``USERDOMAIN`` is
+    set to ``"WORKGROUP"`` on non-domain-joined machines, and schtasks
+    /XML rejects ``WORKGROUP\\<user>`` with::
+
+        ERROR: No mapping between account names and security IDs was done.
+
+    so we can't trust the env-var form. Try ``whoami /user`` first to
+    get the SID; fall back to ``COMPUTERNAME\\username`` for local
+    accounts (always valid because the local computer IS the principal
+    authority for its accounts), then to the bare username.
+    """
+    try:
+        rc = subprocess.run(
+            ["whoami", "/user", "/fo", "csv", "/nh"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if rc.returncode == 0:
+            # Output: "DOMAIN\user","S-1-5-21-..."
+            line = rc.stdout.strip().splitlines()[-1] if rc.stdout.strip() else ""
+            parts = [p.strip().strip('"') for p in line.split(",")]
+            if len(parts) >= 2 and parts[1].startswith("S-"):
+                return parts[1]
+    except (OSError, subprocess.SubprocessError):
+        pass
     user = os.environ.get("USERNAME") or ""
-    if domain and user:
-        return f"{domain}\\{user}"
-    return user or "."
+    if not user:
+        return "."
+    # Local-account form: prefer COMPUTERNAME (always valid for local
+    # users) over USERDOMAIN (== "WORKGROUP" on non-domain machines).
+    computer = os.environ.get("COMPUTERNAME") or ""
+    if computer and computer.upper() != "WORKGROUP":
+        return f"{computer}\\{user}"
+    return user
 
 
 def _xml_escape(s: str) -> str:
@@ -1143,40 +1173,79 @@ def _install_daemon_windows(
         exec_command = str(cmd_path)
         exec_arguments = ""
 
-    # Generate the task XML so we can override CLI-uncontrollable settings:
-    #   * no 72-hour stop-task limit
-    #   * don't disallow start on battery, don't stop on battery transition
-    xml_path = _write_daemon_task_xml(
-        command=exec_command, arguments=exec_arguments, workdir=workdir,
+    # XML generation is deferred until we're actually about to /Create —
+    # see _write_xml_now() inside _install_daemon_windows_inner. The
+    # verify-only / declined-skip / already-exists-leave-alone paths
+    # don't need XML at all and would otherwise pay the whoami cost.
+    return _install_daemon_windows_inner(
+        non_interactive=non_interactive,
+        force_reinstall=force_reinstall,
+        task_name=task_name,
+        runner=runner,
+        pyw=pyw,
+        exec_command=exec_command,
+        exec_arguments=exec_arguments,
+        workdir=workdir,
     )
+
+
+def _install_daemon_windows_inner(
+    *, non_interactive: bool, force_reinstall: bool,
+    task_name: str, runner: Path, pyw: Optional[Path],
+    exec_command: str, exec_arguments: str, workdir: str,
+) -> None:
+    """Body of ``_install_daemon_windows``. The XML is generated lazily
+    via ``_ensure_xml`` and cleaned up via ``_cleanup_xml`` so we only
+    pay the cost (and the whoami subprocess) on paths that actually
+    register a task."""
+    xml_holder: dict = {}
+
+    def _ensure_xml() -> Path:
+        if "path" not in xml_holder:
+            xml_holder["path"] = _write_daemon_task_xml(
+                command=exec_command, arguments=exec_arguments, workdir=workdir,
+            )
+        return xml_holder["path"]
+
+    def _cleanup_xml() -> None:
+        p = xml_holder.get("path")
+        if p is None:
+            return
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
     try:
-        return _install_daemon_windows_inner(
+        return _install_daemon_windows_steps(
             non_interactive=non_interactive,
             force_reinstall=force_reinstall,
             task_name=task_name,
             runner=runner,
             pyw=pyw,
-            xml_path=xml_path,
+            ensure_xml=_ensure_xml,
         )
     finally:
-        try:
-            xml_path.unlink()
-        except OSError:
-            pass
+        _cleanup_xml()
 
 
-def _install_daemon_windows_inner(
+def _install_daemon_windows_steps(
     *, non_interactive: bool, force_reinstall: bool,
-    task_name: str, runner: Path, pyw: Optional[Path], xml_path: Path,
+    task_name: str, runner: Path, pyw: Optional[Path],
+    ensure_xml,
 ) -> None:
-    """Body of ``_install_daemon_windows``. Wrapped so the temp XML file
-    is always cleaned up via the caller's ``try/finally``."""
-    create_argstr = (
-        f'/Create /XML "{xml_path}" /TN "{task_name}" /F'
-    )
-    create_argv = [
-        "/Create", "/XML", str(xml_path), "/TN", task_name, "/F",
-    ]
+    """The actual install logic, separated so the XML lifetime can be
+    managed by the caller (``_install_daemon_windows_inner``)."""
+    def _create_argstr_and_argv():
+        xml_path = ensure_xml()
+        create_argstr = (
+            f'/Create /XML "{xml_path}" /TN "{task_name}" /F'
+        )
+        create_argv = [
+            "/Create", "/XML", str(xml_path), "/TN", task_name, "/F",
+        ]
+        return create_argstr, create_argv
+
     run_argstr = f'/Run /TN "{task_name}"'
     run_argv = ["/Run", "/TN", task_name]
     delete_argstr = f'/Delete /TN "{task_name}" /F'
@@ -1222,6 +1291,7 @@ def _install_daemon_windows_inner(
     if non_interactive:
         print("  --non-interactive: cannot prompt for UAC. Run manually from")
         print("  an elevated cmd:")
+        create_argstr, _ = _create_argstr_and_argv()
         print(f"  schtasks {create_argstr}")
         print(f"  schtasks {run_argstr}")
         return
@@ -1238,12 +1308,14 @@ def _install_daemon_windows_inner(
         ans = input("  Proceed? [Y/n]: ").strip().lower()
         if ans not in ("", "y", "yes"):
             print("  Skipped. Run manually later from an elevated cmd:")
+            create_argstr, _ = _create_argstr_and_argv()
             print(f"  schtasks {create_argstr}")
             print(f"  schtasks {run_argstr}")
             return
 
         # Step 1: create the task if it doesn't exist yet.
         if not _windows_task_exists(task_name):
+            create_argstr, create_argv = _create_argstr_and_argv()
             _run_schtasks_elevated(create_argstr, create_argv)
             if not _windows_task_exists(task_name):
                 print(
