@@ -173,6 +173,7 @@ class TestFreshInstallBranch:
             "install._windows_task_exists",
             side_effect=lambda *_: next(existence),
         ), patch("install._is_windows_admin", return_value=True), \
+             patch("install.find_conda_env_pythonw", return_value=None), \
              patch("builtins.input", return_value="y"), \
              patch.object(
                  install.subprocess, "run",
@@ -185,6 +186,62 @@ class TestFreshInstallBranch:
         ]
         assert "/Create" in verbs
         assert "/Run" in verbs
+
+    def test_create_uses_pythonw_when_available(self, tmp_path):
+        """When pythonw.exe is found, /TR points at it + run_daemon.py
+        (no console window). Falls back to .cmd otherwise."""
+        fake_pyw = tmp_path / "pythonw.exe"
+        fake_pyw.touch()
+        existence = iter([False, False, True])
+        with patch(
+            "install._windows_task_exists",
+            side_effect=lambda *_: next(existence),
+        ), patch("install._is_windows_admin", return_value=True), \
+             patch("install.find_conda_env_pythonw", return_value=fake_pyw), \
+             patch("builtins.input", return_value="y"), \
+             patch.object(
+                 install.subprocess, "run",
+                 return_value=MagicMock(returncode=0, stderr=""),
+             ) as run:
+            install._install_daemon_windows(non_interactive=False)
+        # The /Create call's /TR value should reference pythonw.exe and
+        # run_daemon.py — NOT the .cmd shim.
+        create_calls = [
+            call[0][0] for call in run.call_args_list
+            if call[0][0] and call[0][0][0] == "schtasks"
+            and call[0][0][1] == "/Create"
+        ]
+        assert create_calls, "no /Create schtasks call"
+        tr_idx = create_calls[0].index("/TR")
+        tr_value = create_calls[0][tr_idx + 1]
+        assert "pythonw.exe" in tr_value
+        assert "run_daemon.py" in tr_value
+        assert "claude-hooks-daemon.cmd" not in tr_value
+
+    def test_create_falls_back_to_cmd_when_pythonw_missing(self, capsys):
+        """No pythonw.exe → use the .cmd shim and warn the user."""
+        existence = iter([False, False, True])
+        with patch(
+            "install._windows_task_exists",
+            side_effect=lambda *_: next(existence),
+        ), patch("install._is_windows_admin", return_value=True), \
+             patch("install.find_conda_env_pythonw", return_value=None), \
+             patch("builtins.input", return_value="y"), \
+             patch.object(
+                 install.subprocess, "run",
+                 return_value=MagicMock(returncode=0, stderr=""),
+             ) as run:
+            install._install_daemon_windows(non_interactive=False)
+        create_calls = [
+            call[0][0] for call in run.call_args_list
+            if call[0][0] and call[0][0][0] == "schtasks"
+            and call[0][0][1] == "/Create"
+        ]
+        tr_idx = create_calls[0].index("/TR")
+        tr_value = create_calls[0][tr_idx + 1]
+        assert "claude-hooks-daemon.cmd" in tr_value
+        out = capsys.readouterr().out
+        assert "pythonw.exe not found" in out
 
     def test_non_admin_path_uses_powershell_runas_for_each_step(self):
         """Non-admin: each schtasks step routes through Start-Process RunAs."""

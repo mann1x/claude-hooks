@@ -111,6 +111,43 @@ class TestFindCondaEnvPython:
 
 
 # ===================================================================== #
+# find_conda_env_pythonw — derives pythonw.exe from python.exe location
+# ===================================================================== #
+class TestFindCondaEnvPythonw:
+    def test_returns_pythonw_alongside_python_exe(self, tmp_path, monkeypatch):
+        env = tmp_path / "Miniconda3" / "envs" / "claude-hooks"
+        env.mkdir(parents=True)
+        (env / "python.exe").touch()
+        (env / "pythonw.exe").touch()
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out = install.find_conda_env_pythonw()
+        assert out is not None
+        assert out.name == "pythonw.exe"
+        assert out.exists()
+
+    def test_returns_none_when_python_exists_but_no_pythonw(
+        self, tmp_path, monkeypatch,
+    ):
+        env = tmp_path / "Miniconda3" / "envs" / "claude-hooks"
+        env.mkdir(parents=True)
+        (env / "python.exe").touch()
+        # No pythonw.exe alongside.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        out = install.find_conda_env_pythonw()
+        assert out is None
+
+    def test_returns_none_when_python_itself_missing(
+        self, tmp_path, monkeypatch,
+    ):
+        # Empty home — find_conda_env_python falls back to nonexistent path.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        with patch.object(install, "_find_conda", return_value=None):
+            out = install.find_conda_env_pythonw()
+        assert out is None
+
+
+# ===================================================================== #
 # _find_conda — handles Windows .bat + capitalised dirs
 # ===================================================================== #
 class TestFindConda:

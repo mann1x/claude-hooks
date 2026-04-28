@@ -71,6 +71,32 @@ CONDA_PY_WIN = Path.home() / "anaconda3" / "envs" / CONDA_ENV_NAME / "python.exe
 _CONDA_PY_CACHE: Optional[Path] = None
 
 
+def find_conda_env_pythonw(env_name: str = CONDA_ENV_NAME) -> Optional[Path]:
+    """Return ``pythonw.exe`` from the named conda env, or None if missing.
+
+    ``pythonw.exe`` runs without a console window — used by the Windows
+    daemon scheduled task so it doesn't flash a permanent cmd.exe box on
+    the user's desktop. Sits alongside ``python.exe`` in the same env;
+    we just swap the filename rather than re-running the env-list probe.
+    Returns None when no pythonw.exe exists alongside a discovered
+    ``python.exe`` (very old Python builds, custom installs).
+    """
+    py = find_conda_env_python(env_name)
+    if not py.exists():
+        return None
+    # Layout 1: ``...\envs\<name>\python.exe`` (Anaconda/Miniconda Win)
+    pyw = py.parent / "pythonw.exe"
+    if pyw.exists():
+        return pyw
+    # Layout 2: ``...\envs\<name>\Scripts\python.exe`` (some venvs)
+    if py.parent.name.lower() == "scripts":
+        pyw_alt = py.parent / "pythonw.exe"
+        if pyw_alt.exists():
+            return pyw_alt
+    # Layout 3: ``...\envs\<name>\bin\python`` (POSIX) — no pythonw on POSIX.
+    return None
+
+
 def find_conda_env_python(env_name: str = CONDA_ENV_NAME) -> Path:
     """Locate the Python interpreter inside the named conda env.
 
@@ -987,17 +1013,34 @@ def _install_daemon_windows(
     Mirrors clink's self-update flow: one UAC prompt per elevated
     operation, installer itself stays unprivileged.
     """
-    cmd_path = (HERE / "bin" / "claude-hooks-daemon.cmd").resolve()
     task_name = _DAEMON_TASK_NAME
-    # Embedded \" pair re-quotes the path for cmd.exe's re-tokenize when
-    # the task fires — needed when the path contains spaces.
+    runner = (HERE / "run_daemon.py").resolve()
+
+    # Prefer pythonw.exe (no console window) over the .cmd shim. Falls
+    # back to the .cmd only if pythonw isn't available — at the cost of
+    # a visible cmd window flash, which is the historical behaviour.
+    pyw = find_conda_env_pythonw()
+    if pyw is not None:
+        # /TR "<pythonw> <runner>" — both paths quoted for cmd.exe's
+        # re-tokenize when the task fires.
+        tr_value = f'\\"{pyw}\\" \\"{runner}\\"'
+        tr_value_argv = f'"{pyw}" "{runner}"'
+    else:
+        cmd_path = (HERE / "bin" / "claude-hooks-daemon.cmd").resolve()
+        print(
+            "  [!] pythonw.exe not found — falling back to the .cmd shim. "
+            "A console window will be visible while the daemon runs."
+        )
+        tr_value = f'\\"{cmd_path}\\"'
+        tr_value_argv = f'"{cmd_path}"'
+
     create_argstr = (
         f'/Create /SC ONLOGON /TN "{task_name}" '
-        f'/TR "\\"{cmd_path}\\"" /RL HIGHEST /F'
+        f'/TR "{tr_value}" /RL HIGHEST /F'
     )
     create_argv = [
         "/Create", "/SC", "ONLOGON", "/TN", task_name,
-        "/TR", f'"{cmd_path}"', "/RL", "HIGHEST", "/F",
+        "/TR", tr_value_argv, "/RL", "HIGHEST", "/F",
     ]
     run_argstr = f'/Run /TN "{task_name}"'
     run_argv = ["/Run", "/TN", task_name]
@@ -1048,10 +1091,13 @@ def _install_daemon_windows(
         print(f"  schtasks {run_argstr}")
         return
 
+    target_for_msg = pyw if pyw is not None else (HERE / "bin" / "claude-hooks-daemon.cmd").resolve()
     while True:
         print()
         print(f"  Will register '{task_name}' as a Windows logon-triggered")
-        print(f"  scheduled task pointing at {cmd_path},")
+        print(f"  scheduled task pointing at {target_for_msg},")
+        if pyw is not None:
+            print(f"  with launcher script {runner},")
         print("  start it now, and verify the daemon is responding.")
         print("  Each UAC prompt is scoped to one schtasks call.")
         ans = input("  Proceed? [Y/n]: ").strip().lower()
@@ -1089,10 +1135,16 @@ def _install_daemon_windows(
             "  [!!] daemon did not respond within 15 s. The task is "
             "registered but the daemon may have crashed at startup."
         )
-        print(
-            "       Inspect the daemon's stderr by running it directly: "
-            f"{cmd_path}"
-        )
+        if pyw is not None:
+            print(
+                f"       Inspect the daemon's stderr by running it directly:"
+                f"\n           \"{pyw.parent / 'python.exe'}\" \"{runner}\""
+            )
+        else:
+            print(
+                "       Inspect the daemon's stderr by running it directly: "
+                f"{(HERE / 'bin' / 'claude-hooks-daemon.cmd').resolve()}"
+            )
         retry = input("  Retry /Run + verify? [Y/n]: ").strip().lower()
         if retry not in ("", "y", "yes"):
             return
