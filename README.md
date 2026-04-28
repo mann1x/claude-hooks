@@ -335,7 +335,26 @@ This removes the 4 hook entries tagged `_managedBy: "claude-hooks"` from
 3. Re-run `python3 install.py`
 
 The 4 methods a provider implements (`detect`, `verify`, `recall`, `store`)
-are the entire contract.
+are the entire contract. Providers may optionally override `batch_recall`
+and `batch_store` for backends with native bulk operations — the default
+implementation parallelises single-shot calls.
+
+## Pgvector backend (optional)
+
+For users who'd rather run a single Postgres-backed memory store than
+Qdrant + Memory KG, claude-hooks ships an opt-in pgvector provider plus
+a docker stack and a migration script.
+
+The full walkthrough lives at **[`docs/pgvector-runbook.md`](docs/pgvector-runbook.md)**:
+docker compose at `/shared/config/mcp-pgvector/`, idempotent migration
++ delta sync via `scripts/migrate_to_pgvector.py`, a benchmark harness
+at `scripts/bench_recall.py`, and the design rationale at
+[`docs/PLAN-pgvector-migration.md`](docs/PLAN-pgvector-migration.md).
+
+Bench-driven default embedder pick is `nomic-embed-text` (768 dim,
+~35 ms p50 recall vs ~86 ms Qdrant baseline, full 8k-token context).
+Pgvector runs alongside Qdrant + Memory KG until you decide to retire
+them — there's no flag day.
 
 ## Plugin Extraction
 

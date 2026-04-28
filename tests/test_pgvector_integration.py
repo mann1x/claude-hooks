@@ -20,12 +20,29 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 
+def _dsn_from_env_file() -> str:
+    """Best-effort .env reader for /shared/config/mcp-pgvector/.env."""
+    pg_env: dict[str, str] = {}
+    try:
+        with open("/shared/config/mcp-pgvector/.env") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln or ln.startswith("#") or "=" not in ln:
+                    continue
+                k, v = ln.split("=", 1)
+                pg_env[k.strip()] = v.strip().strip("'\"")
+    except OSError:
+        pass
+    user, pw, db = pg_env.get("POSTGRES_USER"), pg_env.get("POSTGRES_PASSWORD"), pg_env.get("POSTGRES_DB")
+    if user and pw and db:
+        return f"postgresql://{user}:{pw}@127.0.0.1:5432/{db}"
+    return "postgresql://claude:hooks@localhost:5433/memory"
+
+
 # Connection defaults — override with env vars for CI.
-PGVECTOR_DSN = os.environ.get(
-    "PGVECTOR_DSN", "postgresql://claude:hooks@localhost:5433/memory"
-)
+PGVECTOR_DSN = os.environ.get("PGVECTOR_DSN") or _dsn_from_env_file()
 OLLAMA_URL = os.environ.get(
-    "OLLAMA_EMBEDDINGS_URL", "http://localhost:11434/api/embeddings"
+    "OLLAMA_EMBEDDINGS_URL", "http://192.168.178.2:11434/api/embeddings"
 )
 
 # Use a unique table name per test run to avoid collisions.
@@ -176,15 +193,51 @@ class TestPgvectorIntegration(unittest.TestCase):
             _safe_table("memory; DROP TABLE users")
         self.assertEqual(_safe_table("claude_hooks_memory"), "claude_hooks_memory")
 
+    def test_09_batch_store_and_recall(self):
+        """batch_store + batch_recall round-trip with a real DB + Ollama."""
+        prov = self._make_provider(table=TEST_TABLE + "_batch")
+        items: list[tuple[str, dict | None]] = [
+            ("Postgres HNSW index uses m=16 and ef_construction=64 by default", {"k": "hnsw"}),
+            ("Cosine distance is the operator <=> in pgvector", {"k": "ops"}),
+            ("nomic-embed-text returns 768-dim vectors", {"k": "model"}),
+            ("snowflake-arctic-embed2 is 1024-dim and slower than nomic", {"k": "model"}),
+        ]
+        prov.batch_store(items)
+        self.assertGreaterEqual(prov.count(), len(items))
+
+        queries = [
+            "what cosine operator does pgvector use?",
+            "what dimension is nomic-embed-text?",
+            "tell me about HNSW indexing parameters",
+        ]
+        results = prov.batch_recall(queries, k=2)
+        self.assertEqual(len(results), len(queries))
+        # Each query gets at least one hit.
+        for r in results:
+            self.assertGreater(len(r), 0)
+        # Top result for the cosine query should mention the operator.
+        joined = " ".join(m.text.lower() for m in results[0])
+        self.assertIn("<=>", joined)
+
+    def test_10_batch_recall_skips_blank_queries(self):
+        """Blank queries should map to empty results without crashing."""
+        prov = self._make_provider(table=TEST_TABLE + "_batch")
+        out = prov.batch_recall(["", "   ", "real query about HNSW"], k=2)
+        self.assertEqual(len(out), 3)
+        self.assertEqual(out[0], [])
+        self.assertEqual(out[1], [])
+        self.assertGreater(len(out[2]), 0)
+
     @classmethod
     def tearDownClass(cls):
-        """Clean up the test table."""
+        """Clean up the test tables."""
         try:
             import psycopg
 
             conn = psycopg.connect(PGVECTOR_DSN, connect_timeout=3)
             with conn.cursor() as cur:
                 cur.execute(f"DROP TABLE IF EXISTS {TEST_TABLE} CASCADE")
+                cur.execute(f"DROP TABLE IF EXISTS {TEST_TABLE}_batch CASCADE")
             conn.commit()
             conn.close()
         except Exception:

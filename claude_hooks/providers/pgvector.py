@@ -173,6 +173,82 @@ class PgvectorProvider(Provider):
             return 0
 
     # ------------------------------------------------------------------ #
+    # Batch overrides
+    # ------------------------------------------------------------------ #
+    def batch_recall(self, queries: list[str], k: int = 5) -> list[list[Memory]]:
+        """Embed all queries in one Ollama batch, then issue SQL queries
+        in parallel via the shared connection. Each per-query SQL is fast
+        (sub-2 ms), so the win comes from amortising the embed model load
+        and HTTP round-trip — not from SQL parallelism."""
+        queries = [q for q in queries if isinstance(q, str)]
+        non_empty = [(i, q) for i, q in enumerate(queries) if q.strip()]
+        if not non_empty:
+            return [[] for _ in queries]
+        try:
+            self._ensure_ready()
+        except (ImportError, EmbedderError) as e:
+            log.warning("pgvector unavailable: %s", e)
+            return [[] for _ in queries]
+        try:
+            vectors = self._embedder.embed_batch([q for _, q in non_empty])  # type: ignore[union-attr]
+        except EmbedderError as e:
+            log.warning("pgvector batch_embed failed: %s", e)
+            return [[] for _ in queries]
+
+        table = _safe_table(self.options.get("table") or "claude_hooks_memory")
+        results: list[list[Memory]] = [[] for _ in queries]
+        with self._conn.cursor() as cur:  # type: ignore[union-attr]
+            for (idx, _), vec in zip(non_empty, vectors):
+                try:
+                    cur.execute(
+                        f"SELECT content, metadata, embedding <=> %s AS distance "
+                        f"FROM {table} ORDER BY distance LIMIT %s",
+                        (str(vec), k),
+                    )
+                    rows = cur.fetchall()
+                except Exception as e:
+                    log.warning("pgvector batch_recall query %d failed: %s", idx, e)
+                    continue
+                mems: list[Memory] = []
+                for content, meta, distance in rows:
+                    meta = meta or {}
+                    meta["_distance"] = distance
+                    mems.append(Memory(text=content, metadata=meta))
+                results[idx] = mems
+        return results
+
+    def batch_store(self, items: list[tuple[str, Optional[dict]]]) -> None:
+        """One Ollama batch + one ``executemany`` per chunk. Idempotent on
+        unique (content). For large bulk loads use scripts/migrate_to_pgvector.py
+        which uses the same shape."""
+        items = [(c, m) for (c, m) in items if isinstance(c, str) and c.strip()]
+        if not items:
+            return
+        try:
+            self._ensure_ready()
+        except (ImportError, EmbedderError) as e:
+            raise RuntimeError(f"pgvector batch_store failed: {e}")
+        try:
+            vectors = self._embedder.embed_batch([c for c, _ in items])  # type: ignore[union-attr]
+        except EmbedderError as e:
+            raise RuntimeError(f"pgvector batch embed failed: {e}")
+        table = _safe_table(self.options.get("table") or "claude_hooks_memory")
+        params = [
+            (c, json.dumps(m or {}), str(v))
+            for (c, m), v in zip(items, vectors)
+        ]
+        try:
+            with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                cur.executemany(
+                    f"INSERT INTO {table} (content, metadata, embedding) VALUES (%s, %s, %s)",
+                    params,
+                )
+                self._conn.commit()  # type: ignore[union-attr]
+        except Exception as e:
+            log.warning("pgvector batch insert failed: %s", e)
+            raise
+
+    # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
     def _ensure_ready(self) -> None:

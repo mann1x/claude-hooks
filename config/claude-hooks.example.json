@@ -61,12 +61,29 @@
       "timeout": 5.0
     },
     "pgvector": {
+      "_doc": [
+        "Postgres + pgvector. See docs/pgvector-runbook.md for the full",
+        "compose+migrate walkthrough and benchmark results.",
+        "",
+        "Default embedder is nomic-embed-text (768 dim). Bench-evaluated",
+        "as the practical default — ~36 ms p50 recall vs ~86 ms for the",
+        "Qdrant baseline, with full 8k-token context (no truncation).",
+        "Avoid all-MiniLM-L6-v2 (256-token cap truncates real memories);",
+        "snowflake-arctic-embed2 has the best quality but ~210 ms embed",
+        "is too slow for the on-every-prompt recall path. Use it for",
+        "backfills if you care about retrieval quality more than latency.",
+        "",
+        "Table is auto-created on first store/recall using the embedder's",
+        "dimension. To bench multiple models side-by-side, run",
+        "scripts/migrate_to_pgvector.py --embedder all (creates",
+        "memories_<model> per model)."
+      ],
       "enabled": false,
-      "dsn": "",
+      "dsn": "postgresql://claude:CHANGE_ME@127.0.0.1:5432/memory",
       "table": "claude_hooks_memory",
       "embedder": "ollama",
       "embedder_options": {
-        "url": "http://localhost:11434/api/embeddings",
+        "url": "http://YOUR-HOST:11434/api/embeddings",
         "model": "nomic-embed-text"
       },
       "recall_k": 5,

@@ -36,6 +36,13 @@ class Embedder(ABC):
     def embed(self, text: str) -> list[float]:
         """Return a vector embedding of ``text``."""
 
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """Embed a batch of texts. Default loops single-shot ``embed``;
+        subclasses with a real batch endpoint should override (the win is
+        avoiding model reload + amortising HTTP round-trips).
+        """
+        return [self.embed(t) for t in texts]
+
 
 class NullEmbedder(Embedder):
     """Always raises. Used as a placeholder when no embedder is configured."""
@@ -92,6 +99,38 @@ class OllamaEmbedder(Embedder):
             self.dim = len(emb)
         return emb
 
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """Use Ollama's /api/embed (input array) endpoint. Falls back to
+        per-text /api/embeddings on HTTP error so older daemons still work."""
+        if not texts:
+            return []
+        # Derive the batch endpoint from the configured per-text URL.
+        batch_url = self.url
+        if batch_url.endswith("/api/embeddings"):
+            batch_url = batch_url[: -len("/api/embeddings")] + "/api/embed"
+        body = json.dumps({"model": self.model, "input": texts}).encode("utf-8")
+        req = urllib.request.Request(
+            batch_url,
+            data=body,
+            headers={"Content-Type": "application/json", "Connection": "close"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError:
+            return [self.embed(t) for t in texts]
+        except (urllib.error.URLError, socket.timeout) as e:
+            raise EmbedderError(f"ollama unreachable at {batch_url}: {e}")
+        embs = data.get("embeddings")
+        if not isinstance(embs, list) or len(embs) != len(texts):
+            raise EmbedderError(
+                f"ollama /api/embed returned {len(embs) if embs else 0} embeddings for {len(texts)} inputs"
+            )
+        if not self.dim and embs and isinstance(embs[0], list):
+            self.dim = len(embs[0])
+        return embs
+
 
 class OpenAiCompatibleEmbedder(Embedder):
     """
@@ -116,7 +155,17 @@ class OpenAiCompatibleEmbedder(Embedder):
     def embed(self, text: str) -> list[float]:
         if not text:
             raise EmbedderError("cannot embed empty string")
-        body = json.dumps({"model": self.model, "input": text}).encode("utf-8")
+        return self._call([text])[0]
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """OpenAI-format /v1/embeddings already accepts ``input: string|array``
+        — one call covers the whole batch."""
+        if not texts:
+            return []
+        return self._call(texts)
+
+    def _call(self, texts: list[str]) -> list[list[float]]:
+        body = json.dumps({"model": self.model, "input": texts}).encode("utf-8")
         headers = {"Content-Type": "application/json", "Connection": "close"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -129,12 +178,16 @@ class OpenAiCompatibleEmbedder(Embedder):
         except (urllib.error.URLError, socket.timeout) as e:
             raise EmbedderError(f"embeddings endpoint unreachable: {e}")
         try:
-            emb = data["data"][0]["embedding"]
-        except (KeyError, IndexError, TypeError):
+            embs = [item["embedding"] for item in data["data"]]
+        except (KeyError, TypeError):
             raise EmbedderError(f"unexpected embeddings response shape: {str(data)[:200]}")
-        if not self.dim:
-            self.dim = len(emb)
-        return emb
+        if len(embs) != len(texts):
+            raise EmbedderError(
+                f"embeddings: server returned {len(embs)} for {len(texts)} inputs"
+            )
+        if not self.dim and embs:
+            self.dim = len(embs[0])
+        return embs
 
 
 def make_embedder(name: str, options: Optional[dict] = None) -> Embedder:
