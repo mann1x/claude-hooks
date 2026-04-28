@@ -79,6 +79,56 @@ def _parse_hour_range(raw: Optional[str], default: Tuple[int, int]) -> Tuple[int
 
 _VALID_FORMATS = frozenset({"emoji", "ascii", "plain"})
 
+_TRUTHY_ENV = frozenset({"1", "true", "yes", "on"})
+
+
+def _is_windows_console() -> bool:
+    """Detect Windows-like consoles where emoji glyphs commonly tofu.
+
+    Covers more than ``sys.platform == "win32"`` because the statusline
+    is often launched from environments that hide native Windows behind
+    a POSIX-shaped Python:
+
+    - native Windows Python (``sys.platform == "win32"``, ``os.name == "nt"``)
+    - Cygwin / msys2 Python (``sys.platform`` in ``"cygwin"`` / ``"msys"``)
+    - Git Bash on Windows (Python sees POSIX but ``MSYSTEM`` is set)
+    - any shell that exports ``OS=Windows_NT``
+
+    WSL is intentionally NOT included — its Python runs on real Linux
+    with a real Linux font stack and emoji renders fine in WSL terminals.
+    """
+    if sys.platform in ("win32", "cygwin", "msys"):
+        return True
+    if os.name == "nt":
+        return True
+    if os.environ.get("MSYSTEM"):
+        return True
+    if (os.environ.get("OS") or "").lower() == "windows_nt":
+        return True
+    return False
+
+
+def _force_emoji_on_windows() -> bool:
+    """Escape hatch — Windows Terminal + Cascadia Code renders emoji
+    fine, so users on those setups can keep the rich glyphs by
+    exporting ``CLAUDE_HOOKS_STATUSLINE_FORCE_EMOJI=1``.
+    """
+    return (os.environ.get("CLAUDE_HOOKS_STATUSLINE_FORCE_EMOJI") or "").strip().lower() in _TRUTHY_ENV
+
+
+def _effective_format(fmt: str) -> str:
+    """Honour caller's choice, but downgrade ``emoji`` → ``ascii`` on
+    Windows-like consoles where the glyphs render as tofu boxes.
+
+    This is a runtime safety net: even if the statusline command was
+    wired with a hardcoded ``--format emoji`` (e.g. from older docs),
+    the user still gets a readable line on cmd.exe / PowerShell /
+    Git Bash. Set ``CLAUDE_HOOKS_STATUSLINE_FORCE_EMOJI=1`` to opt out.
+    """
+    if fmt == "emoji" and _is_windows_console() and not _force_emoji_on_windows():
+        return "ascii"
+    return fmt
+
 
 def default_format() -> str:
     """Pick the safe default glyph style for the current host.
@@ -97,7 +147,7 @@ def default_format() -> str:
     env = (os.environ.get("CLAUDE_HOOKS_STATUSLINE_FORMAT") or "").strip().lower()
     if env in _VALID_FORMATS:
         return env
-    return "ascii" if sys.platform == "win32" else "emoji"
+    return "ascii" if _is_windows_console() else "emoji"
 
 
 def peak_marker(
@@ -115,6 +165,7 @@ def peak_marker(
     utilization-glyph convention. ``fmt="ascii"`` returns bracketed
     text; ``fmt="emoji"`` returns the unicode glyph.
     """
+    fmt = _effective_format(fmt)
     now = now or _dt.datetime.utcnow()
     shoulder = _parse_hour_range(
         os.environ.get("CLAUDE_HOOKS_STATUSLINE_PEAK_HOURS_UTC"),
@@ -171,6 +222,7 @@ def format_segment(
     (passed in from the proxy's JSONL log). When > 0, appends a
     compact ``· blk=N`` segment so the savings are visible inline.
     """
+    fmt = _effective_format(fmt)
     if not state:
         return ""
     last = _parse_ts(state.get("last_updated") or "")

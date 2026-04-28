@@ -276,6 +276,169 @@ class TestDefaultFormat:
         assert mod.default_format() == "ascii"
 
 
+class TestIsWindowsConsole:
+    """``_is_windows_console`` covers more than ``sys.platform == "win32"``
+    so emoji still tofu-downgrades from Cygwin / msys2 / Git Bash where
+    Python sees a POSIX-shaped world but the underlying console can't
+    render the glyphs."""
+
+    def _clear_env(self, monkeypatch):
+        for k in ("MSYSTEM", "OS", "CLAUDE_HOOKS_STATUSLINE_FORCE_EMOJI"):
+            monkeypatch.delenv(k, raising=False)
+
+    def test_native_win32_detected(self, mod, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setattr(mod.sys, "platform", "win32")
+        monkeypatch.setattr(mod.os, "name", "nt")
+        assert mod._is_windows_console() is True
+
+    def test_cygwin_detected(self, mod, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setattr(mod.sys, "platform", "cygwin")
+        monkeypatch.setattr(mod.os, "name", "posix")
+        assert mod._is_windows_console() is True
+
+    def test_msys_detected(self, mod, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setattr(mod.sys, "platform", "msys")
+        monkeypatch.setattr(mod.os, "name", "posix")
+        assert mod._is_windows_console() is True
+
+    def test_git_bash_detected_via_msystem(self, mod, monkeypatch):
+        """Git Bash on Windows: Python reports ``sys.platform == "linux"``
+        in some builds, but ``MSYSTEM`` betrays the real environment."""
+        self._clear_env(monkeypatch)
+        monkeypatch.setattr(mod.sys, "platform", "linux")
+        monkeypatch.setattr(mod.os, "name", "posix")
+        monkeypatch.setenv("MSYSTEM", "MINGW64")
+        assert mod._is_windows_console() is True
+
+    def test_windows_nt_env_detected(self, mod, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setattr(mod.sys, "platform", "linux")
+        monkeypatch.setattr(mod.os, "name", "posix")
+        monkeypatch.setenv("OS", "Windows_NT")
+        assert mod._is_windows_console() is True
+
+    def test_linux_not_detected(self, mod, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setattr(mod.sys, "platform", "linux")
+        monkeypatch.setattr(mod.os, "name", "posix")
+        assert mod._is_windows_console() is False
+
+    def test_darwin_not_detected(self, mod, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setattr(mod.sys, "platform", "darwin")
+        monkeypatch.setattr(mod.os, "name", "posix")
+        assert mod._is_windows_console() is False
+
+    def test_wsl_not_treated_as_windows(self, mod, monkeypatch):
+        """WSL runs real Linux Python with real Linux fonts — emoji
+        renders fine in WSL terminals so we must not downgrade."""
+        self._clear_env(monkeypatch)
+        monkeypatch.setattr(mod.sys, "platform", "linux")
+        monkeypatch.setattr(mod.os, "name", "posix")
+        # WSL leaves no ``MSYSTEM`` and ``OS`` typically isn't Windows_NT
+        # inside the WSL shell session.
+        assert mod._is_windows_console() is False
+
+
+class TestEffectiveFormatRuntimeDowngrade:
+    """The exact bug the user reported on pandorum: their statusLine
+    command was wired with a hardcoded ``--format emoji`` (older docs
+    suggested it), which bypassed the safe ``default_format`` Windows
+    fallback. ``_effective_format`` is the runtime safety net — even if
+    the caller passes ``"emoji"`` explicitly, we downgrade on Windows-
+    like consoles unless the user opted back in via the FORCE env var."""
+
+    def _clear_env(self, monkeypatch):
+        for k in ("MSYSTEM", "OS", "CLAUDE_HOOKS_STATUSLINE_FORCE_EMOJI"):
+            monkeypatch.delenv(k, raising=False)
+
+    def test_emoji_downgrades_on_windows(self, mod, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setattr(mod.sys, "platform", "win32")
+        monkeypatch.setattr(mod.os, "name", "nt")
+        assert mod._effective_format("emoji") == "ascii"
+
+    def test_emoji_passes_through_on_linux(self, mod, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setattr(mod.sys, "platform", "linux")
+        monkeypatch.setattr(mod.os, "name", "posix")
+        assert mod._effective_format("emoji") == "emoji"
+
+    def test_ascii_unchanged_on_windows(self, mod, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setattr(mod.sys, "platform", "win32")
+        monkeypatch.setattr(mod.os, "name", "nt")
+        assert mod._effective_format("ascii") == "ascii"
+
+    def test_plain_unchanged_on_windows(self, mod, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setattr(mod.sys, "platform", "win32")
+        monkeypatch.setattr(mod.os, "name", "nt")
+        assert mod._effective_format("plain") == "plain"
+
+    def test_force_emoji_env_keeps_emoji_on_windows(self, mod, monkeypatch):
+        """Windows Terminal + Cascadia Code users opt back in."""
+        self._clear_env(monkeypatch)
+        monkeypatch.setattr(mod.sys, "platform", "win32")
+        monkeypatch.setattr(mod.os, "name", "nt")
+        monkeypatch.setenv("CLAUDE_HOOKS_STATUSLINE_FORCE_EMOJI", "1")
+        assert mod._effective_format("emoji") == "emoji"
+
+    def test_force_emoji_accepts_truthy_aliases(self, mod, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setattr(mod.sys, "platform", "win32")
+        monkeypatch.setattr(mod.os, "name", "nt")
+        for v in ("true", "yes", "on", "TRUE", "Yes"):
+            monkeypatch.setenv("CLAUDE_HOOKS_STATUSLINE_FORCE_EMOJI", v)
+            assert mod._effective_format("emoji") == "emoji", v
+
+    def test_force_emoji_falsy_does_not_keep_emoji(self, mod, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setattr(mod.sys, "platform", "win32")
+        monkeypatch.setattr(mod.os, "name", "nt")
+        monkeypatch.setenv("CLAUDE_HOOKS_STATUSLINE_FORCE_EMOJI", "0")
+        assert mod._effective_format("emoji") == "ascii"
+
+    def test_format_segment_runtime_downgrade_warn_glyph(self, mod, monkeypatch):
+        """End-to-end: ``--format emoji`` from a Windows-wired statusline
+        command must produce ASCII glyphs, not emoji."""
+        self._clear_env(monkeypatch)
+        monkeypatch.setattr(mod.sys, "platform", "win32")
+        monkeypatch.setattr(mod.os, "name", "nt")
+        s = _state(
+            five_hour_utilization=0.55,
+            representative_claim="five_hour",
+        )
+        out = mod.format_segment(s, fmt="emoji")
+        assert "⚠" not in out
+        assert out.endswith(" !")
+
+    def test_peak_marker_runtime_downgrade_shoulder(self, mod, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setattr(mod.sys, "platform", "win32")
+        monkeypatch.setattr(mod.os, "name", "nt")
+        t = _dt.datetime(2026, 4, 27, 14, 30)  # Mon 14:30 UTC — shoulder window
+        out = mod.peak_marker(now=t, fmt="emoji")
+        assert out == "[busy]"
+
+    def test_format_segment_force_emoji_keeps_glyphs_on_windows(
+        self, mod, monkeypatch,
+    ):
+        self._clear_env(monkeypatch)
+        monkeypatch.setattr(mod.sys, "platform", "win32")
+        monkeypatch.setattr(mod.os, "name", "nt")
+        monkeypatch.setenv("CLAUDE_HOOKS_STATUSLINE_FORCE_EMOJI", "1")
+        s = _state(
+            five_hour_utilization=0.55,
+            representative_claim="five_hour",
+        )
+        out = mod.format_segment(s, fmt="emoji")
+        assert out.endswith(" ⚠")
+
+
 class TestReadState:
     def test_missing_file_returns_empty_dict(self, mod, tmp_path):
         assert mod.read_state(tmp_path / "nope.json") == {}
