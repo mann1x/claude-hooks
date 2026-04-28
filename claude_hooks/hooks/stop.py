@@ -808,21 +808,51 @@ def _truncate(text: str, max_chars: int) -> str:
 # ---------------------------------------------------------------------- #
 # Observation classification
 # ---------------------------------------------------------------------- #
+# Classifier keyword sets.
+#
+# Each set holds *phrases* (substring matches against the lowercased
+# summary), not bare single words. Bare words like "fix" or "bug" or
+# "approach" matched too eagerly — every commit message, every
+# pulled-the-issue-down turn, every "decided which approach" admin
+# discussion got promoted to a typed observation. The phrase-based
+# variants here only fire when the summary contains genuine
+# narrative signal that the turn was a fix / decision / preference /
+# gotcha, not just that the topic *included* one of those words.
+#
+# The transcript-side check inside _classify_observation (saw_error
+# in tool_result AND saw Edit/Write) remains the strongest fix
+# signal; these keyword sets are a fallback for turns whose
+# transcript path doesn't expose the error-then-edit pattern.
+
 _FIX_KEYWORDS = {
-    "fix", "fixed", "bug", "error", "broken", "issue", "resolved", "patch",
-    "workaround", "hotfix", "regression", "traceback", "exception",
+    # Narrative markers — someone is telling a fix story.
+    "root cause", "root-cause",
+    "the bug is", "the bug was", "the issue is", "the issue was",
+    "the problem is", "the problem was",
+    "the fix is", "the fix was",
+    "fixed by", "fix the bug", "fixed the bug", "fix the issue",
+    "fixed the issue",
+    "regression test", "stack trace", "traceback",
+    "diagnosed", "patched the", "the workaround",
+    # Commit-message / heading-style labels.
+    "fix:", "bug:", "bugfix:", "hotfix:",
+    "## fix", "## bug", "## root cause",
 }
 _PREF_KEYWORDS = {
-    "actually", "prefer", "don't", "always use", "never use",
-    "should be", "not like that", "wrong approach",
+    "user prefers", "user wants", "prefer to",
+    "always use", "never use",
+    "you should always", "you should never",
+    "from now on",
+    "wrong approach", "not like that",
 }
 _DECISION_KEYWORDS = {
-    "chose", "decided", "architecture", "approach", "design", "strategy",
-    "trade-off", "switched to", "migrated", "opted for", "went with",
+    "decided to", "chose to", "chose between", "opted for",
+    "went with", "switched to", "migrated to",
+    "design decision", "architectural decision", "trade-off",
 }
 _GOTCHA_KEYWORDS = {
-    "gotcha", "pitfall", "watch out", "careful", "trap", "surprising",
-    "unexpected", "quirk", "caveat", "heads up", "warning",
+    "gotcha", "pitfall", "watch out", "be careful",
+    "surprising", "unexpected", "quirk", "caveat", "heads up",
 }
 
 

@@ -257,7 +257,12 @@ class TestMemoryKgStore:
     def test_store_promotes_with_classification_metadata(self):
         """When the stop hook tags the summary with observation_type=fix,
         the entity is promoted from session-<ts> to bug-fix-<slug>-<date>
-        with type 'bug-fix' so search_nodes('proxy') hits a structured node."""
+        with type 'bug-fix' so search_nodes('proxy') hits a structured node.
+
+        Slug priority: a `## Files touched` section is now strong signal,
+        preferred over the result text when present — `forwarder` is a
+        better topic identifier than `drain-pool-remoteprotocolerror` for
+        future search_nodes() queries."""
         from claude_hooks.providers import memory_kg as mk
         p = self._make()
         with patch.object(p, "_client") as mc:
@@ -272,11 +277,65 @@ class TestMemoryKgStore:
             assert name == "create_entities"
             ent = args["entities"][0]
             assert ent["entityType"] == "bug-fix"
-            assert ent["name"].startswith("bug-fix-")
-            assert "drain-pool-remoteprotocolerror" in ent["name"]
+            assert ent["name"].startswith("bug-fix-forwarder-")
             assert ent["name"].endswith(  # date suffix
                 datetime.now(timezone.utc).strftime("-%Y-%m-%d")
             )
+
+    def test_store_uses_root_cause_marker_when_present(self):
+        """An inline `Root cause: …` marker is the strongest topic signal —
+        wins over Files touched even when both are present."""
+        p = self._make()
+        with patch.object(p, "_client") as mc:
+            mc.return_value.call_tool.return_value = {}
+            summary = (
+                "# Turn @ 2026-04-27T13:00:00+00:00\n"
+                "## Result\nFixed it.\n"
+                "Root cause: sticky pool keeps reusing dead connection\n"
+                "## Files touched\n- forwarder.py"
+            )
+            p.store(summary, metadata={"observation_type": "fix"})
+            args = mc.return_value.call_tool.call_args.args[1]
+            ent = args["entities"][0]
+            assert "sticky-pool" in ent["name"]
+            assert ent["entityType"] == "bug-fix"
+
+    def test_store_uses_bug_heading_when_present(self):
+        """`## Bug: …` heading also wins over Files touched and Result body."""
+        p = self._make()
+        with patch.object(p, "_client") as mc:
+            mc.return_value.call_tool.return_value = {}
+            summary = (
+                "# Turn @ 2026-04-27T13:00:00+00:00\n"
+                "## Bug: tool_result echoes confuse last-user-idx\n"
+                "## Result\nrandom unrelated wrap-up text\n"
+                "## Files touched\n- stop.py"
+            )
+            p.store(summary, metadata={"observation_type": "fix"})
+            args = mc.return_value.call_tool.call_args.args[1]
+            ent = args["entities"][0]
+            assert "tool-result-echoes" in ent["name"]
+            assert ent["entityType"] == "bug-fix"
+
+    def test_store_falls_through_to_session_when_no_topic_signal(self):
+        """observation_type=general (no fix/decision/etc.) → session-<ts>
+        no matter what the content looks like. Prevents admin turns
+        ('committed and pushed', 'pulled completions') from being promoted
+        to typed bug-fix entities just because the slugifier could pick
+        words from them."""
+        p = self._make()
+        with patch.object(p, "_client") as mc:
+            mc.return_value.call_tool.return_value = {}
+            summary = (
+                "# Turn @ 2026-04-27T13:00:00+00:00\n"
+                "## Result\nCommitted and pushed.\n"
+                "## Files touched\n- forwarder.py"
+            )
+            p.store(summary, metadata={"observation_type": "general"})
+            args = mc.return_value.call_tool.call_args.args[1]
+            ent = args["entities"][0]
+            assert ent["entityType"] == "session"
+            assert ent["name"].startswith("session-")
 
     def test_store_promotes_using_xml_title(self):
         """XML observation summaries use <title> for the topic slug."""
@@ -1149,6 +1208,64 @@ class TestStopClassifyObservation:
             ]}},
         ]
         assert stop._classify_observation("plain summary", transcript) == "fix"
+
+    # --- Tightened-classifier regressions (2026-04-28) ----------------- #
+    # The old keyword set fired on bare words like "fix" or "bug" or
+    # "approach", over-classifying admin turns as typed observations.
+    # These tests pin down the new, narrower behaviour.
+
+    def test_general_for_admin_turns_with_loose_words(self):
+        """'Committed and pushed' / 'pulled completions' / 'pandorum sync'
+        used to land as observation_type=fix and got promoted to typed
+        bug-fix-* KG entities. They must classify as general now."""
+        for summary in (
+            "Committed and pushed b034f6c. Tests pass.",
+            "Pulled completions from pod's completed v3final JSON.",
+            "Done. Pandorum's claude-hooks is at 588af04, fast-forward.",
+            "957 pass (up from 951 before this work).",
+            "Both buglogs clean — solidpc has 2 real entries, pandorum 0.",
+        ):
+            assert stop._classify_observation(summary, None) == "general", (
+                f"should NOT classify as fix: {summary!r}"
+            )
+
+    def test_general_for_loose_decision_words(self):
+        """Bare 'approach' / 'design' / 'architecture' are not enough."""
+        for summary in (
+            "Reviewed the architecture doc.",
+            "The design pattern here is interesting.",
+            "We considered a different approach.",
+        ):
+            assert stop._classify_observation(summary, None) == "general"
+
+    def test_fix_for_real_narrative_markers(self):
+        """Tightened keywords still fire on actual fix narratives."""
+        for summary in (
+            "Root cause: sticky pool keeps reusing dead connection.",
+            "The bug is in _find_last_user_idx walking past tool_result echoes.",
+            "Fixed by clearing the dynamic-module cache.",
+            "## Fix: drop OpenWolf tail from per-turn stores.",
+            "Diagnosed the libuv assertion as a telemetry issue.",
+        ):
+            assert stop._classify_observation(summary, None) == "fix", (
+                f"should classify as fix: {summary!r}"
+            )
+
+    def test_decision_for_real_decision_markers(self):
+        for summary in (
+            "Decided to use HTTP/2 for the proxy forwarder.",
+            "We went with sqlite-vec over pgvector.",
+            "Chose between Bash gating and reasoning markers; picked both.",
+        ):
+            assert stop._classify_observation(summary, None) == "decision"
+
+    def test_preference_for_real_preference_markers(self):
+        for summary in (
+            "Always use the conda env, never system Python.",
+            "From now on log debug on successful store.",
+            "User prefers terse end-of-turn summaries.",
+        ):
+            assert stop._classify_observation(summary, None) == "preference"
 
 
 class TestStopBuildSummary:

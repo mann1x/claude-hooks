@@ -61,6 +61,30 @@ _TITLE_RE = re.compile(r"<title>([^<]+)</title>", re.IGNORECASE)
 _RESULT_HEADING_RE = re.compile(
     r"^\s*##\s+Result\s*\n+(.+?)(?:\n##|\Z)", re.MULTILINE | re.DOTALL,
 )
+# Strong-signal headings — when the user / model has explicitly tagged
+# the turn with a Bug/Fix/Root-cause subject line, that text is a
+# better topic identifier than the result body.
+_BUG_HEADING_RE = re.compile(
+    # Heading body may sit on the same line after a colon
+    # ("## Bug: <topic>") or on subsequent lines below the heading
+    # ("## Bug\n\n<topic body>"). Single regex covers both.
+    r"^\s*##\s+(?:Bug|Fix|Root\s*[Cc]ause|Issue)\s*[:\-]?\s*(.+?)(?:\n##|\Z)",
+    re.MULTILINE | re.DOTALL | re.IGNORECASE,
+)
+# Inline narrative markers — `Root cause: foo bar baz`.
+_INLINE_FIX_RE = re.compile(
+    r"(?:^|\n)\s*(?:Root\s*[Cc]ause|The\s+bug\s+(?:is|was)|"
+    r"The\s+issue\s+(?:is|was)|The\s+fix\s+(?:is|was)|Fixed\s+by)\s*"
+    r"[:\-]\s*(.+?)(?:\n|$)",
+    re.IGNORECASE,
+)
+# Files touched section — the first listed file's basename is a
+# strong topic identifier when no narrative heading is present.
+_FILES_TOUCHED_RE = re.compile(
+    r"^\s*##\s+Files\s+(?:touched|changed|modified)\s*\n+(.+?)(?:\n##|\Z)",
+    re.MULTILINE | re.DOTALL | re.IGNORECASE,
+)
+_FIRST_FILE_LINE_RE = re.compile(r"^\s*[-*]\s+(\S+)", re.MULTILINE)
 _SLUG_STRIP_RE = re.compile(r"[^a-z0-9]+")
 _STOPWORDS = frozenset({
     "the", "a", "an", "and", "or", "but", "of", "to", "in", "on", "at",
@@ -95,18 +119,77 @@ def _slugify(text: str, max_len: int = 40) -> str:
     return "-".join(out) if out else slug[:max_len].rstrip("-")
 
 
+def _file_basename_slug(path: str) -> str:
+    """Strip directories + extension, return slugified basename.
+
+    Returns "" for paths we can't sensibly slug (empty, single dot, …)."""
+    if not path:
+        return ""
+    p = path.strip().rstrip("/").rstrip("\\")
+    p = p.split("/")[-1].split("\\")[-1]
+    if not p or p == ".":
+        return ""
+    # Drop file extension(s): foo.test.py -> foo-test
+    if "." in p:
+        p = p.rsplit(".", 1)[0]
+    return _slugify(p)
+
+
 def _derive_topic_slug(content: str) -> str:
     """Extract a short topic slug from the summary content.
 
-    Tries (in order): XML ``<title>`` tag, markdown ``## Result`` first
-    line, first non-empty line of the content. Returns empty string when
-    nothing usable is found.
+    Priority (strongest signal first):
+
+    1. XML ``<title>`` tag — explicit user/model labelling.
+    2. ``## Bug:`` / ``## Fix:`` / ``## Root cause:`` heading body —
+       narrative tag means the topic is the bug being fixed.
+    3. Inline ``Root cause: …`` / ``The bug is …`` / ``Fixed by: …``
+       marker — same narrative signal in prose form.
+    4. ``## Files touched`` first file's basename — when filenames
+       are listed, the topic is almost always *that file*'s behaviour,
+       not whatever leading words happen to start the result text.
+    5. ``## Result`` first line (legacy fallback).
+    6. First non-empty line of content (last-resort fallback).
+
+    Returns empty string when nothing usable is found.
     """
     if not content:
         return ""
+
+    # 1. Explicit XML title tag.
     m = _TITLE_RE.search(content)
     if m:
-        return _slugify(m.group(1).strip())
+        slug = _slugify(m.group(1).strip())
+        if slug:
+            return slug
+
+    # 2. ## Bug: / ## Fix: / ## Root cause: heading body.
+    m = _BUG_HEADING_RE.search(content)
+    if m:
+        first_line = next(
+            (ln for ln in m.group(1).splitlines() if ln.strip()), "",
+        )
+        slug = _slugify(first_line)
+        if slug:
+            return slug
+
+    # 3. Inline narrative marker — `Root cause: foo bar baz`.
+    m = _INLINE_FIX_RE.search(content)
+    if m:
+        slug = _slugify(m.group(1).strip())
+        if slug:
+            return slug
+
+    # 4. First file under ## Files touched.
+    m = _FILES_TOUCHED_RE.search(content)
+    if m:
+        f = _FIRST_FILE_LINE_RE.search(m.group(1))
+        if f:
+            slug = _file_basename_slug(f.group(1))
+            if slug:
+                return slug
+
+    # 5. ## Result first non-empty line (legacy).
     m = _RESULT_HEADING_RE.search(content)
     if m:
         first_line = next(
@@ -115,6 +198,8 @@ def _derive_topic_slug(content: str) -> str:
         slug = _slugify(first_line)
         if slug:
             return slug
+
+    # 6. First non-empty line (last-resort fallback).
     for line in content.splitlines():
         s = line.strip()
         # Skip the markdown heading itself and any cwd: lines.
