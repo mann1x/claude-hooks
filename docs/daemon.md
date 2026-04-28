@@ -59,8 +59,32 @@ either way — daemon-or-fallback.
 
 ## Manual control
 
+The repo ships a unified `bin/claude-hooks-daemon-ctl` (`.cmd` on
+Windows) so you don't have to remember each platform's tooling:
+
 ```bash
-# Foreground (blocks)
+claude-hooks-daemon-ctl status     # alive? autostart entry? hint if neither
+claude-hooks-daemon-ctl start      # idempotent (no-op if already up)
+claude-hooks-daemon-ctl stop       # graceful HMAC _shutdown, falls back to platform End
+claude-hooks-daemon-ctl restart    # stop + bounded ping wait + start
+claude-hooks-daemon-ctl tail -n 80 # last 80 log lines (Windows) or the journalctl/log command (Linux/macOS)
+```
+
+Exit codes: `status` returns `0` when responding, `1` when down but
+the autostart entry exists, `2` when the daemon isn't installed at
+all. Other verbs return `0` on apparent success and non-zero on any
+inability to do the thing — useful for monitoring scripts.
+
+Stop is graceful by default — the daemon receives an HMAC-signed
+`_shutdown` over its own socket, replies, then schedules its own
+shutdown so the response makes it back. If the graceful path doesn't
+take within 5 seconds, the wrapper falls through to `schtasks /End`,
+`systemctl --user stop`, or `launchctl kill SIGTERM`.
+
+Direct platform tooling still works if you prefer it:
+
+```bash
+# Foreground (blocks — for debugging)
 bin/claude-hooks-daemon
 
 # Linux
@@ -73,6 +97,7 @@ launchctl unload ~/Library/LaunchAgents/com.claude-hooks.daemon.plist
 
 # Windows
 schtasks /Run /TN "claude-hooks-daemon"
+schtasks /End /TN "claude-hooks-daemon"
 ```
 
 ## Disable per-invocation

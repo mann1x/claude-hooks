@@ -1,0 +1,24 @@
+#!/usr/bin/env sh
+# claude-hooks-daemon-ctl — POSIX entry point for daemon control.
+#
+# Usage:
+#     claude-hooks-daemon-ctl status
+#     claude-hooks-daemon-ctl start | stop | restart
+#     claude-hooks-daemon-ctl tail [-n 80]
+#
+# Companion to bin/claude-hooks-daemon (which RUNS the daemon). This
+# wrapper TALKS to a running daemon via its HMAC-authenticated control
+# socket, falling back to the platform manager (systemctl / launchctl /
+# schtasks) when the graceful path doesn't apply.
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+
+. "$HERE/_resolve_python.sh"
+
+if [ -z "$PY" ]; then
+    echo "claude-hooks-daemon-ctl: no python found" >&2
+    exit 1
+fi
+
+exec "$PY" -m claude_hooks.daemon_ctl "$@"
