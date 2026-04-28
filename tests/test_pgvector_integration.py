@@ -228,6 +228,56 @@ class TestPgvectorIntegration(unittest.TestCase):
         self.assertEqual(out[1], [])
         self.assertGreater(len(out[2]), 0)
 
+    def test_11_additional_tables_hybrid_recall(self):
+        """recall() merges results from additional_tables and tags ``_table``."""
+        # Both tables already populated by test_01/02/09. We just verify
+        # that with additional_tables set, results from BOTH show up.
+        from claude_hooks.providers.base import ServerCandidate
+        from claude_hooks.providers.pgvector import PgvectorProvider
+
+        # Prime a second table with distinct content.
+        primary = self._make_provider(table=TEST_TABLE + "_hybrid_a")
+        primary.store("primary table fact: alpha is the first letter")
+        secondary = self._make_provider(table=TEST_TABLE + "_hybrid_b")
+        secondary.store("secondary table fact: beta is the second letter")
+
+        # Hybrid provider points at A, with B as additional.
+        server = ServerCandidate(
+            server_key="pgvector", url=PGVECTOR_DSN, source="test", confidence="high",
+        )
+        opts = {
+            "table": TEST_TABLE + "_hybrid_a",
+            "additional_tables": [TEST_TABLE + "_hybrid_b"],
+            "embedder": "ollama",
+            "embedder_options": {
+                "url": OLLAMA_URL, "model": "nomic-embed-text", "timeout": 30.0,
+            },
+        }
+        hybrid = PgvectorProvider(server, opts)
+
+        # A "letters" query should find both rows; merge sorts by distance.
+        results = hybrid.recall("greek letter ordering", k=4)
+        sources = {m.metadata.get("_table") for m in results}
+        self.assertIn(TEST_TABLE + "_hybrid_a", sources)
+        self.assertIn(TEST_TABLE + "_hybrid_b", sources)
+
+    def test_12_additional_tables_rejects_unsafe_names(self):
+        """Identifiers that fail _safe_table regex are silently dropped."""
+        from claude_hooks.providers.pgvector import PgvectorProvider
+        from claude_hooks.providers.base import ServerCandidate
+
+        server = ServerCandidate(
+            server_key="pgvector", url=PGVECTOR_DSN, source="test", confidence="high",
+        )
+        opts = {
+            "table": TEST_TABLE,
+            "additional_tables": ["valid_extra", "; DROP TABLE users--", "", 42],
+        }
+        prov = PgvectorProvider(server, opts)
+        resolved = prov._resolve_tables()
+        # primary kept + valid_extra; injection attempt dropped
+        self.assertEqual(resolved, [TEST_TABLE, "valid_extra"])
+
     @classmethod
     def tearDownClass(cls):
         """Clean up the test tables."""
@@ -236,8 +286,8 @@ class TestPgvectorIntegration(unittest.TestCase):
 
             conn = psycopg.connect(PGVECTOR_DSN, connect_timeout=3)
             with conn.cursor() as cur:
-                cur.execute(f"DROP TABLE IF EXISTS {TEST_TABLE} CASCADE")
-                cur.execute(f"DROP TABLE IF EXISTS {TEST_TABLE}_batch CASCADE")
+                for suffix in ("", "_batch", "_hybrid_a", "_hybrid_b"):
+                    cur.execute(f"DROP TABLE IF EXISTS {TEST_TABLE}{suffix} CASCADE")
             conn.commit()
             conn.close()
         except Exception:

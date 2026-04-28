@@ -121,22 +121,55 @@ class PgvectorProvider(Provider):
             log.warning("pgvector embed failed: %s", e)
             return []
 
-        table = _safe_table(self.options.get("table") or "claude_hooks_memory")
-        try:
-            with self._conn.cursor() as cur:  # type: ignore[union-attr]
-                cur.execute(
-                    f"SELECT content, metadata, embedding <=> %s AS distance "
-                    f"FROM {table} ORDER BY distance LIMIT %s",
-                    (str(qvec), k),
-                )
-                rows = cur.fetchall()
-        except Exception as e:
-            log.warning("pgvector query failed: %s", e)
-            return []
+        return self._search_tables(qvec, k)
+
+    def _resolve_tables(self) -> list[str]:
+        """Return the validated list of tables to search.
+
+        Always includes the primary ``table``. ``additional_tables`` (config)
+        adds further per-table searches whose results merge with the primary
+        — useful when one pgvector instance should serve both ``memories_*``
+        and ``kg_observations_*`` (hybrid Qdrant + Memory-KG replacement).
+        Tables in ``additional_tables`` MUST share the embedding dimension
+        of the primary; pgvector enforces this at query time.
+        """
+        primary = _safe_table(self.options.get("table") or "claude_hooks_memory")
+        extras = self.options.get("additional_tables") or []
+        if not isinstance(extras, list):
+            extras = []
+        validated = [primary]
+        for t in extras:
+            if isinstance(t, str) and t and _SAFE_IDENT_RE.match(t):
+                if t != primary and t not in validated:
+                    validated.append(t)
+        return validated
+
+    def _search_tables(self, qvec: list[float], k: int) -> list[Memory]:
+        """Search every resolved table for top-k, merge by distance, return top-k."""
+        tables = self._resolve_tables()
+        vec_literal = str(qvec)
+        rows: list[tuple] = []
+        for t in tables:
+            try:
+                with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                    # kg_observations tables don't carry a metadata column;
+                    # synthesise one so the result row shape stays uniform.
+                    metadata_expr = "metadata" if "kg_observations" not in t else "'{}'::jsonb AS metadata"
+                    cur.execute(
+                        f"SELECT content, {metadata_expr}, embedding <=> %s AS distance, %s AS _src "
+                        f"FROM {t} ORDER BY distance LIMIT %s",
+                        (vec_literal, t, k),
+                    )
+                    rows.extend(cur.fetchall())
+            except Exception as e:
+                log.warning("pgvector query on %s failed: %s", t, e)
+                continue
+        rows.sort(key=lambda r: r[2])
         result: list[Memory] = []
-        for content, meta, distance in rows:
-            meta = meta or {}
+        for content, meta, distance, src in rows[:k]:
+            meta = dict(meta) if meta else {}
             meta["_distance"] = distance
+            meta["_table"] = src
             result.append(Memory(text=content, metadata=meta))
         return result
 
@@ -195,26 +228,13 @@ class PgvectorProvider(Provider):
             log.warning("pgvector batch_embed failed: %s", e)
             return [[] for _ in queries]
 
-        table = _safe_table(self.options.get("table") or "claude_hooks_memory")
         results: list[list[Memory]] = [[] for _ in queries]
-        with self._conn.cursor() as cur:  # type: ignore[union-attr]
-            for (idx, _), vec in zip(non_empty, vectors):
-                try:
-                    cur.execute(
-                        f"SELECT content, metadata, embedding <=> %s AS distance "
-                        f"FROM {table} ORDER BY distance LIMIT %s",
-                        (str(vec), k),
-                    )
-                    rows = cur.fetchall()
-                except Exception as e:
-                    log.warning("pgvector batch_recall query %d failed: %s", idx, e)
-                    continue
-                mems: list[Memory] = []
-                for content, meta, distance in rows:
-                    meta = meta or {}
-                    meta["_distance"] = distance
-                    mems.append(Memory(text=content, metadata=meta))
-                results[idx] = mems
+        for (idx, _), vec in zip(non_empty, vectors):
+            try:
+                results[idx] = self._search_tables(vec, k)
+            except Exception as e:
+                log.warning("pgvector batch_recall query %d failed: %s", idx, e)
+                continue
         return results
 
     def batch_store(self, items: list[tuple[str, Optional[dict]]]) -> None:

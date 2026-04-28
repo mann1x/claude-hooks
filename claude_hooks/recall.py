@@ -113,11 +113,25 @@ def run_recall(
     hits_by_provider: dict[str, list[Memory]] = dict(raw_hits_by_provider)
 
     if hyde_enabled and total_raw > 0:
-        qdrant_raw = raw_hits_by_provider.get("qdrant") or []
-        if hyde_grounded and qdrant_raw:
-            # Grounded expansion: feed the raw Qdrant hits to the LLM
+        # Grounding source: prefer the configured semantic-recall backend
+        # (qdrant, pgvector, or sqlite_vec — any vector store works). Fall
+        # back to whichever provider returned the most raw hits, so
+        # grounding stays useful regardless of which backends are enabled.
+        configured = hook_cfg.get("hyde_grounding_provider")
+        for candidate in (configured, "qdrant", "pgvector", "sqlite_vec"):
+            if candidate and candidate in raw_hits_by_provider:
+                grounding_provider = candidate
+                break
+        else:
+            grounding_provider = max(
+                raw_hits_by_provider,
+                key=lambda n: len(raw_hits_by_provider[n]),
+                default=None,
+            )
+        grounding_raw = raw_hits_by_provider.get(grounding_provider) or [] if grounding_provider else []
+        if hyde_grounded and grounding_raw:
             grounding_k = int(hook_cfg.get("hyde_ground_k", 3))
-            grounding = [m.text for m in qdrant_raw[:grounding_k]]
+            grounding = [m.text for m in grounding_raw[:grounding_k]]
             search_query = _hyde_expand_grounded(query, grounding, hook_cfg)
         else:
             # Plain expansion: raw prompt only
@@ -164,13 +178,16 @@ def run_recall(
     blocks: list[str] = []
     all_mems: list[Memory] = []
     total_hits = 0
+    contributing_provider_labels: list[str] = []
     for provider in active:
         mems = hits_by_provider.get(provider.name) or []
         if not mems:
             continue
         all_mems.extend(mems)
         total_hits += len(mems)
-        blocks.append(format_block(provider.display_name or provider.name, mems, progressive=progressive))
+        label = provider.display_name or provider.name
+        contributing_provider_labels.append(label)
+        blocks.append(format_block(label, mems, progressive=progressive))
 
     # --- Step 3: Attention decay re-ranking ---
     # (Applied per-provider above via the block list; cross-provider decay
@@ -198,9 +215,13 @@ def run_recall(
     # --- Step 5: Assemble and truncate ---
     body = "\n\n".join(blocks)
     body = _truncate(body, max_total_chars)
+    if contributing_provider_labels:
+        provider_summary = ", ".join(contributing_provider_labels)
+    else:
+        provider_summary = "0 providers"
     return (
         "## Recalled memory\n\n"
-        f"_{total_hits} hit(s) from {len([b for b in blocks if b.startswith('###')])} provider(s) — claude-hooks_\n\n"
+        f"_{total_hits} hit(s) from {provider_summary} — claude-hooks_\n\n"
         f"{body}"
     )
 

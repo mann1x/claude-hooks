@@ -1,0 +1,14 @@
+# Optional deps for the pgvector backend.
+#
+# Required when ``providers.pgvector.enabled = true`` in
+# config/claude-hooks.json. The provider talks SQL directly to a
+# Postgres + pgvector instance — see docs/pgvector-runbook.md for
+# the full setup walkthrough (docker compose, init SQL, migration).
+#
+# Install on top of the core deps:
+#   pip install -r requirements.txt -r requirements-pgvector.txt
+#
+# psycopg[binary] ships a precompiled libpq, no system Postgres dev
+# package required. Works on Linux + Windows + macOS.
+
+psycopg[binary]>=3.2

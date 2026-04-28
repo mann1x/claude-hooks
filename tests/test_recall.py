@@ -69,7 +69,8 @@ class TestRunRecallSimple:
         assert "## Recalled memory" in out
         assert "memory one" in out
         assert "memory two" in out
-        assert "2 hit(s) from 1 provider(s)" in out
+        # The summary line names the contributing provider(s) explicitly.
+        assert "2 hit(s) from Qdrant" in out
 
     def test_include_providers_filter(self, base_config, fake_provider):
         qdrant = fake_provider(name="qdrant", recall_returns=[Memory(text="from q")])

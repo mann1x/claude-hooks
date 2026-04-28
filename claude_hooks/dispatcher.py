@@ -109,9 +109,12 @@ def build_providers(cfg: dict) -> list[Provider]:
         pcfg = provider_cfgs.get(name) or {}
         if not pcfg.get("enabled"):
             continue
-        url = (pcfg.get("mcp_url") or "").strip()
+        # Accept ``mcp_url`` (HTTP MCP backends) or ``dsn`` (DB-backed
+        # providers like pgvector / sqlite_vec). The provider receives the
+        # value as ``ServerCandidate.url`` and is free to interpret it.
+        url = (pcfg.get("mcp_url") or pcfg.get("dsn") or "").strip()
         if not url:
-            log.debug("provider %s has no mcp_url configured — skipping", name)
+            log.debug("provider %s has no mcp_url/dsn configured — skipping", name)
             continue
         cls = get_provider_class(name)
         candidate = ServerCandidate(

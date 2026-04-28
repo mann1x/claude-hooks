@@ -1,4 +1,4 @@
-# claude-hooks runtime deps.
+# claude-hooks runtime deps (core).
 #
 # The core framework (hooks, MCP client, recall/store) is stdlib-only.
 # The proxy module requires httpx + h2 so the forwarder can present an
@@ -8,13 +8,17 @@
 # install.py pip-installs this file into the conda env when creating
 # it, and re-installs when proxy.enabled is true and the deps are
 # missing (see _ensure_proxy_deps in install.py).
+#
+# OPTIONAL provider extras live in their own files — install only the
+# ones you actually enable in config/claude-hooks.json:
+#
+#   pip install -r requirements.txt                        # core only
+#   pip install -r requirements.txt -r requirements-pgvector.txt
+#   pip install -r requirements.txt -r requirements-sqlite-vec.txt
+#
+# Or all of them at once:
+#   pip install -r requirements.txt -r requirements-pgvector.txt -r requirements-sqlite-vec.txt
+#   pip install -r requirements-dev.txt                    # tests
+#
 
 httpx[http2]>=0.27
-
-# Optional providers — uncomment only if you enable them in config.
-
-# pgvector provider (optional)
-# psycopg[binary]>=3.1
-
-# sqlite-vec provider (optional)
-# sqlite-vec>=0.1.1

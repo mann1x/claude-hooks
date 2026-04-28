@@ -1,3 +1,8 @@
-"""claude-hooks: cross-platform Claude Code hooks for Qdrant + Memory KG recall/store."""
+"""claude-hooks: cross-platform Claude Code hooks for memory recall/store.
+
+Pluggable provider backends: Qdrant, Memory KG, Postgres+pgvector, sqlite-vec.
+Multiple backends can run simultaneously — the dispatcher fans out recall in
+parallel and merges the result blocks into the prompt.
+"""
 
 __version__ = "0.4.0"

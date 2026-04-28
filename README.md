@@ -186,10 +186,42 @@ multi-language coverage) when present.
 
 ## Requirements
 
-- **Python 3.9+**. Stdlib only for the default Qdrant + Memory KG setup.
+- **Python 3.9+**. The recall/store core is **stdlib-only**; only the proxy
+  and the optional DB-backed providers (pgvector, sqlite-vec) need wheels.
 - **Claude Code** with hooks support.
-- **A Qdrant MCP server** and/or a **Memory KG MCP server** over HTTP.
-- *(Optional)* **Ollama** for HyDE, /reflect, and consolidation features.
+- **At least one memory backend** — pick from the table below. Multiple can
+  run simultaneously; the dispatcher fans out recall in parallel.
+- *(Optional)* **Ollama** for HyDE, /reflect, /consolidate, and the embedder
+  side of the pgvector / sqlite-vec providers.
+
+### Memory backends — pick at install time
+
+| Backend | Setup | Extra deps | Strengths |
+|---|---|---|---|
+| **Qdrant** (HTTP MCP) | Run `mcp-server-qdrant` (we ship a patched version under `vendor/mcp-qdrant/`) | none | mature vector search; the historical default |
+| **Memory KG** (HTTP MCP) | Run `mcp-memory` (npm `@modelcontextprotocol/server-memory`) | none | typed entity graph + observation keyword search |
+| **Postgres + pgvector** | Local docker stack — see [`docs/pgvector-runbook.md`](docs/pgvector-runbook.md) | `pip install -r requirements-pgvector.txt` | single SQL backend that replaces both Qdrant + Memory KG; hybrid recall |
+| **sqlite-vec** | Standalone SQLite file at `~/.claude/claude-hooks-memory.db` | `pip install -r requirements-sqlite-vec.txt` | zero-server, single-file, low-footprint |
+
+### Conda env + dependency files
+
+The installer creates a `claude-hooks` conda env (Python 3.11) by default
+and pip-installs the requirements files relevant to your enabled
+backends. Manual install for reference:
+
+```bash
+conda create -n claude-hooks python=3.11 -y
+conda activate claude-hooks
+
+pip install -r requirements.txt                          # core (httpx[http2])
+pip install -r requirements-pgvector.txt                 # if pgvector enabled
+pip install -r requirements-sqlite-vec.txt               # if sqlite-vec enabled
+pip install -r requirements-dev.txt                      # tests + coverage
+```
+
+The `bin/claude-hook` shim auto-detects this env (POSIX layout, Windows
+`Scripts/python.exe`, MSYS2 hybrid) and falls back to system `python3`,
+so no activation step is needed at hook runtime.
 
 ## Install
 

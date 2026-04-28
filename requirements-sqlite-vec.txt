@@ -1,0 +1,11 @@
+# Optional deps for the sqlite_vec backend.
+#
+# Required when ``providers.sqlite_vec.enabled = true`` in
+# config/claude-hooks.json. sqlite_vec is a SQLite extension that
+# adds vector search; the Python package bundles the loadable
+# extension so no system sqlite build flags are required.
+#
+# Install on top of the core deps:
+#   pip install -r requirements.txt -r requirements-sqlite-vec.txt
+
+sqlite-vec>=0.1.6
