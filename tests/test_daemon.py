@@ -246,6 +246,71 @@ class TestClientServerRoundTrip:
         assert resp["result"] is None
 
 
+class TestShutdownClient:
+    """``daemon_client.shutdown`` is the graceful stop verb used by the
+    daemon-ctl wrapper. Confirms the request is signed, the response
+    arrives before the server tears down, and the daemon does in fact
+    stop accepting new connections shortly afterwards."""
+
+    def test_shutdown_returns_true_against_running_daemon(self, running_daemon):
+        host, port, secret_path = running_daemon
+        assert daemon_client.shutdown(
+            host=host, port=port, secret_path=secret_path,
+        ) is True
+
+    def test_shutdown_actually_stops_the_daemon(self, running_daemon):
+        host, port, secret_path = running_daemon
+        # Daemon is up — confirm before asking it to stop.
+        assert daemon_client.ping(
+            host=host, port=port, secret_path=secret_path,
+        ) is True
+
+        assert daemon_client.shutdown(
+            host=host, port=port, secret_path=secret_path,
+        ) is True
+
+        # Give the side thread a moment to actually close the socket.
+        # ``request_shutdown`` schedules ``server.shutdown()`` on a
+        # background thread so the response can flush first.
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            if daemon_client.ping(
+                host=host, port=port, secret_path=secret_path,
+                timeout=0.5,
+            ) is False:
+                return
+            time.sleep(0.05)
+        pytest.fail("daemon still responding 3 s after shutdown ack")
+
+    def test_shutdown_returns_false_when_daemon_down(self, tmp_path):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            free_port = s.getsockname()[1]
+        assert daemon_client.shutdown(
+            host="127.0.0.1", port=free_port,
+            secret_path=tmp_path / "missing-secret",
+        ) is False
+
+    def test_shutdown_returns_false_on_auth_failure(
+        self, running_daemon, tmp_path,
+    ):
+        host, port, _ = running_daemon
+        wrong = tmp_path / "wrong-secret"
+        wrong.write_text("nope-not-the-real-secret", encoding="utf-8")
+        if os.name == "posix":
+            os.chmod(wrong, 0o600)
+        # Bad secret → daemon replies 401, our helper treats as failure.
+        # Daemon must remain up afterwards so the test doesn't break the
+        # fixture cleanup.
+        assert daemon_client.shutdown(
+            host=host, port=port, secret_path=wrong,
+        ) is False
+        # Sanity: real ping with the real secret (loaded by the fixture)
+        # is not part of this helper's contract — but the daemon is
+        # definitely not torn down. Best we can verify here is that the
+        # fixture's teardown completes without hanging.
+
+
 # ===================================================================== #
 # Bad-request handling — server rejects without crashing
 # ===================================================================== #

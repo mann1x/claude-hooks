@@ -152,3 +152,31 @@ def ping(
         return False
     result = resp.get("result") or {}
     return result.get("protocol") == PROTOCOL_VERSION
+
+
+def shutdown(
+    *,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    secret_path: Path = DEFAULT_SECRET_PATH,
+    timeout: float = 2.0,
+) -> bool:
+    """Ask the daemon to shut down cleanly. Return True on a confirmed
+    ``{shutdown: true}`` reply, False on any other outcome (daemon down,
+    auth failure, timeout, malformed response).
+
+    The graceful path. The daemon receives the request, replies first,
+    then triggers ``request_shutdown`` from a side thread so the
+    response makes it back. If this returns False, callers that need
+    the daemon stopped should fall through to the platform manager
+    (``schtasks /End`` / ``systemctl --user stop`` / ``launchctl kill``)
+    to force the issue.
+    """
+    resp = call(
+        "_shutdown", {},
+        host=host, port=port, secret_path=secret_path, timeout=timeout,
+    )
+    if not resp or not resp.get("ok"):
+        return False
+    result = resp.get("result") or {}
+    return bool(result.get("shutdown"))
