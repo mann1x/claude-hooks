@@ -67,7 +67,7 @@ claude-hooks-daemon-ctl status     # alive? autostart entry? hint if neither
 claude-hooks-daemon-ctl start      # idempotent (no-op if already up)
 claude-hooks-daemon-ctl stop       # graceful HMAC _shutdown, falls back to platform End
 claude-hooks-daemon-ctl restart    # stop + bounded ping wait + start
-claude-hooks-daemon-ctl tail -n 80 # last 80 log lines (Windows) or the journalctl/log command (Linux/macOS)
+claude-hooks-daemon-ctl tail -n 80 # last 80 log lines (Windows: %USERPROFILE%\.claude\claude-hooks-daemon.log) or the journalctl/log command (Linux/macOS)
 ```
 
 Exit codes: `status` returns `0` when responding, `1` when down but
@@ -118,3 +118,19 @@ isolates issues quickly.
 - Secret file refused at startup if mode bits include `0o077`
   (POSIX). Windows ACLs aren't checked — keep your home directory
   permissions sensible.
+
+## Logging
+
+- **Linux**: stdout/stderr captured by systemd → `journalctl -u
+  claude-hooks-daemon`.
+- **macOS**: launchd writes to the unified log; `log stream` to follow.
+- **Windows**: `pythonw.exe` has no console and Task Scheduler doesn't
+  capture stderr, so `run_daemon.py` redirects both streams into
+  `%USERPROFILE%\.claude\claude-hooks-daemon.log` (line-buffered append).
+  The launcher rotates the file to `claude-hooks-daemon.log.1` on
+  startup if it has crossed 5 MiB — keeps one prior generation,
+  no scheduled rotation, no log spam.
+
+The daemon's logger is `claude_hooks.daemon` at INFO level; raise to
+DEBUG by editing `daemon.py:367` if you need per-connection signing
+trace.
