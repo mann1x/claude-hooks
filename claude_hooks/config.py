@@ -159,6 +159,29 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "session_end": {
             "enabled": True,
         },
+        "daemon": {
+            # Long-lived hook executor (Tier 3.8). When the daemon is
+            # running, bin/claude-hook sends events to it over an
+            # HMAC-authenticated TCP localhost socket and skips the
+            # ~150-300 ms Python interpreter spawn that the inline
+            # path pays.
+            #
+            # ``enabled`` controls whether install.py should *prompt*
+            # to install the systemd / launchd / Windows scheduled-task
+            # autostart at install time. The runtime behaviour is
+            # daemon-or-fallback regardless: if the daemon is up, the
+            # client uses it; if not, the client falls back silently
+            # to in-process dispatch.
+            "enabled": True,
+            # Override the bind host / port if you run multiple
+            # daemons on one box (rare). Default 127.0.0.1:47018.
+            "host": "127.0.0.1",
+            "port": 47018,
+            # Replay protection window (seconds). Requests older than
+            # this are rejected even with a valid HMAC, bounding the
+            # forgery surface on a leaked secret.
+            "replay_window_seconds": 60,
+        },
         "code_graph": {
             # Lightweight code-structure graph (modules, classes,
             # functions, imports, calls) written to

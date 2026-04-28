@@ -415,6 +415,170 @@ def _install_axon_host_systemd(
         print(f"  [!!] enable failed:\n{rc.stderr.strip()[-300:]}")
 
 
+_DAEMON_UNIT = "claude-hooks-daemon.service"
+
+
+def _install_claude_hooks_daemon(
+    cfg: dict, *, non_interactive: bool, dry_run: bool,
+) -> None:
+    """Install the long-lived hook executor (Tier 3.8 latency reduction).
+
+    The daemon owns the Python interpreter, providers, HyDE cache, and
+    other per-process state across hook invocations — saves ~150-300 ms
+    per hook compared with the per-invocation interpreter spawn the
+    bin/claude-hook shim does without it.
+
+    Cross-platform:
+
+    - **Linux (systemd)**: writes ``claude-hooks-daemon.service`` with
+      ``__REPO_PATH__`` / ``__HOME__`` substituted, then ``systemctl
+      enable --now``.
+
+    - **macOS (launchd)**: writes ``~/Library/LaunchAgents/
+      com.claude-hooks.daemon.plist`` and ``launchctl load``.
+
+    - **Windows**: prints the ``schtasks`` command the user can run
+      to register the daemon as a logon-triggered scheduled task. We
+      don't run it automatically because it needs an elevated prompt.
+
+    The daemon itself is OPTIONAL — installs that skip this step still
+    work because the client falls back to in-process dispatch when the
+    daemon isn't running. So this prompt always defaults to "yes" but
+    a "no" is harmless.
+    """
+    cfg_section = (cfg.get("hooks") or {}).get("daemon") or {}
+    if cfg_section.get("enabled") is False:
+        # Explicit opt-out via config — respect it without prompting.
+        return
+
+    print("\n==> claude-hooks-daemon (long-lived hook executor)")
+    print("    Owns providers, HyDE cache, and Python interpreter across")
+    print("    hook calls — saves ~150-300 ms per hook.")
+    print("    OPTIONAL: hooks fall back to in-process dispatch when the")
+    print("    daemon isn't running, so skipping this is safe.")
+
+    if dry_run:
+        print("  [dry-run] skipping daemon install.")
+        return
+
+    if not non_interactive:
+        ans = input("  Install + enable claude-hooks-daemon? [Y/n]: ").strip().lower()
+        if ans not in ("", "y", "yes"):
+            print("  Skipped.")
+            return
+
+    if os.name == "nt":
+        _install_daemon_windows()
+        return
+
+    # POSIX path: try systemd first, then launchd.
+    if Path("/etc/systemd/system").is_dir():
+        _install_daemon_systemd()
+        return
+    if sys.platform == "darwin":
+        _install_daemon_launchd()
+        return
+    print("  [!!] No supported autostart manager (systemd / launchd) detected.")
+    print("       Run manually:  bin/claude-hooks-daemon")
+
+
+def _install_daemon_systemd() -> None:
+    src = HERE / "systemd" / _DAEMON_UNIT
+    dest = Path("/etc/systemd/system") / _DAEMON_UNIT
+    if dest.exists():
+        print(f"  · {_DAEMON_UNIT} already installed — leaving as-is")
+        return
+    if not src.exists():
+        print(f"  [!!] {src} missing — skipping")
+        return
+    repo_path = str(HERE.resolve())
+    home_path = str(Path.home())
+    content = src.read_text(encoding="utf-8")
+    content = content.replace("__REPO_PATH__", repo_path)
+    content = content.replace("__HOME__", home_path)
+    try:
+        dest.write_text(content, encoding="utf-8")
+    except OSError as e:
+        print(f"  [!!] Failed to write {dest}: {e}")
+        return
+    print(f"  + wrote {_DAEMON_UNIT}")
+    subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
+    rc = subprocess.run(
+        ["systemctl", "enable", "--now", _DAEMON_UNIT],
+        capture_output=True, text=True,
+    )
+    if rc.returncode == 0:
+        print(f"  · enabled + started {_DAEMON_UNIT}")
+    else:
+        print(f"  [!!] enable failed:\n{rc.stderr.strip()[-300:]}")
+
+
+_LAUNCHD_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.claude-hooks.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__REPO_PATH__/bin/claude-hooks-daemon</string>
+  </array>
+  <key>WorkingDirectory</key><string>__REPO_PATH__</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>__HOME__/.claude/claude-hooks-daemon.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/.claude/claude-hooks-daemon.log</string>
+</dict>
+</plist>
+"""
+
+
+def _install_daemon_launchd() -> None:
+    plist_dir = Path.home() / "Library" / "LaunchAgents"
+    plist_dir.mkdir(parents=True, exist_ok=True)
+    dest = plist_dir / "com.claude-hooks.daemon.plist"
+    if dest.exists():
+        print(f"  · {dest} already installed — leaving as-is")
+        return
+    content = _LAUNCHD_PLIST
+    content = content.replace("__REPO_PATH__", str(HERE.resolve()))
+    content = content.replace("__HOME__", str(Path.home()))
+    try:
+        dest.write_text(content, encoding="utf-8")
+    except OSError as e:
+        print(f"  [!!] Failed to write {dest}: {e}")
+        return
+    print(f"  + wrote {dest}")
+    rc = subprocess.run(
+        ["launchctl", "load", "-w", str(dest)],
+        capture_output=True, text=True,
+    )
+    if rc.returncode == 0:
+        print("  · loaded into launchd (will start at next login + now)")
+    else:
+        print(f"  [!!] launchctl load failed:\n{rc.stderr.strip()[-300:]}")
+
+
+def _install_daemon_windows() -> None:
+    """On Windows we don't auto-register a scheduled task (needs admin).
+
+    Instead, print the exact `schtasks` invocation the user can run from
+    an elevated PowerShell or cmd. The shim ``bin/claude-hooks-daemon.cmd``
+    is what the task should execute.
+    """
+    cmd_path = (HERE / "bin" / "claude-hooks-daemon.cmd").resolve()
+    print("  Windows: register the daemon as a logon-triggered task")
+    print("  by running the following from an elevated cmd:")
+    print()
+    print(
+        f'  schtasks /Create /SC ONLOGON /TN "claude-hooks-daemon" '
+        f'/TR "\\"{cmd_path}\\"" /RL HIGHEST /F'
+    )
+    print()
+    print("  Or use pm2-windows-startup if you already manage Node-style")
+    print("  background services via pm2. Both approaches work; pick one.")
+
+
 def _ensure_proxy_deps(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
     """Verify httpx + h2 are available when the proxy is enabled.
 
@@ -748,6 +912,18 @@ def main() -> int:
     # auto-indexes whatever cwd Claude Code launched in, which on
     # 2026-04-27 ate 64 GB of RAM on a model directory.
     _install_axon_host_systemd(
+        cfg,
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
+
+    # Offer to install the long-lived hook executor (Tier 3.8). When
+    # enabled, the bin/claude-hook shim sends events to the running
+    # daemon over an HMAC-authenticated TCP localhost socket instead of
+    # spinning up a fresh interpreter — saves 150-300 ms per hook. The
+    # client falls back to in-process dispatch automatically when the
+    # daemon isn't running, so this step is strictly optional.
+    _install_claude_hooks_daemon(
         cfg,
         non_interactive=args.non_interactive,
         dry_run=args.dry_run,

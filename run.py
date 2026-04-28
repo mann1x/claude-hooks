@@ -33,6 +33,27 @@ def main() -> int:
     from claude_hooks.dispatcher import dispatch, read_event_from_stdin
 
     event = read_event_from_stdin()
+
+    # Tier 3.8: try the long-lived daemon first if it's running. The
+    # client returns None on any failure (no secret, refused connect,
+    # timeout, bad response) and we fall back to in-process dispatch.
+    # That keeps the daemon strictly optional — installs without it
+    # work exactly as before.
+    if os.environ.get("CLAUDE_HOOKS_DAEMON_DISABLE", "").strip() not in ("1", "true", "yes"):
+        try:
+            from claude_hooks.daemon_client import call as _daemon_call
+            resp = _daemon_call(event_name, event)
+        except Exception:
+            resp = None
+        if resp is not None and resp.get("ok"):
+            result = resp.get("result")
+            if isinstance(result, dict):
+                import json as _json
+                sys.stdout.write(_json.dumps(result))
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            return 0
+
     return dispatch(event_name, event)
 
 

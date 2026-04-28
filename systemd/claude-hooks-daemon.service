@@ -1,0 +1,30 @@
+[Unit]
+Description=claude-hooks-daemon — long-lived hook executor (Tier 3.8 latency reduction)
+Documentation=https://github.com/mann1x/claude-hooks/blob/main/docs/daemon.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# install.py substitutes __REPO_PATH__ and __HOME__ on install; edit
+# here only if you manage the unit yourself.
+User=root
+WorkingDirectory=__REPO_PATH__
+Environment=CLAUDE_HOOKS_REPO=__REPO_PATH__
+ExecStart=__REPO_PATH__/bin/claude-hooks-daemon
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=10s
+SendSIGKILL=yes
+
+# Hardening — the daemon binds to 127.0.0.1 only and reads its config /
+# secret from $HOME/.claude.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__HOME__/.claude
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
