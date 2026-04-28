@@ -136,7 +136,10 @@ class TestExpandQueryWithContext:
             return _R(b'{"response": "grounded answer here"}')
 
         with patch("claude_hooks.hyde.urllib.request.urlopen", side_effect=_capture):
-            expand_query_with_context("my question", ["FIRST-MEMORY-XYZ", "SECOND-ONE"])
+            expand_query_with_context(
+                "my question", ["FIRST-MEMORY-XYZ", "SECOND-ONE"],
+                cache_enabled=False,  # bypass HyDE cache; this test asserts on request body shape
+            )
         # The context block must reach the LLM.
         assert "FIRST-MEMORY-XYZ" in captured["body"]["prompt"]
         assert "SECOND-ONE" in captured["body"]["prompt"]

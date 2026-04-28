@@ -60,13 +60,31 @@ def expand_query(
     timeout: float = 30.0,
     max_tokens: int = 150,
     keep_alive: str = "15m",
+    cache_enabled: bool = True,
+    cache_ttl_seconds: int = 86400,
 ) -> str:
     """
     Generate a hypothetical answer to use as a vector search query.
     Returns the original prompt on any failure.
+
+    When ``cache_enabled`` (default True), looks up the expansion in
+    ``~/.claude/claude-hooks-hyde-cache.json`` first — same prompt +
+    model produces the same expansion, so a hit skips the Ollama call
+    entirely (saves the 0.5–4 s per UserPromptSubmit). On miss, the
+    fresh expansion is written back for next time.
     """
     if not prompt.strip():
         return prompt
+
+    if cache_enabled:
+        try:
+            from claude_hooks.hyde_cache import get as cache_get
+            cached = cache_get(prompt, model, grounding="", ttl_seconds=cache_ttl_seconds)
+            if cached:
+                log.debug("hyde cache HIT (%s): %s", model, cached[:80])
+                return cached
+        except Exception as exc:  # pragma: no cover — cache must never break recall
+            log.debug("hyde cache read failed: %s", exc)
 
     for m in [model, fallback_model]:
         result = _call_ollama(
@@ -80,6 +98,12 @@ def expand_query(
         )
         if result:
             log.debug("hyde expanded with %s: %s", m, result[:80])
+            if cache_enabled:
+                try:
+                    from claude_hooks.hyde_cache import put as cache_put
+                    cache_put(prompt, m, result, grounding="")
+                except Exception as exc:  # pragma: no cover
+                    log.debug("hyde cache write failed: %s", exc)
             return result
 
     log.debug("hyde: all models failed, using raw prompt")
@@ -97,6 +121,8 @@ def expand_query_with_context(
     max_tokens: int = 150,
     keep_alive: str = "15m",
     max_context_chars: int = 1500,
+    cache_enabled: bool = True,
+    cache_ttl_seconds: int = 86400,
 ) -> str:
     """
     Generate a hypothetical answer grounded in the supplied memory snippets.
@@ -108,6 +134,9 @@ def expand_query_with_context(
     Returns the original prompt on any failure or if ``memories`` is empty
     (in which case there is nothing to ground against and plain ``expand_query``
     should be used instead — callers should gate on this).
+
+    Cache key includes the grounding context so different raw-recall
+    snapshots don't collide. Hits skip the Ollama call entirely.
     """
     if not prompt.strip():
         return prompt
@@ -121,6 +150,16 @@ def expand_query_with_context(
         f"Write the factual memory entry now:"
     )
 
+    if cache_enabled:
+        try:
+            from claude_hooks.hyde_cache import get as cache_get
+            cached = cache_get(prompt, model, grounding=context, ttl_seconds=cache_ttl_seconds)
+            if cached:
+                log.debug("hyde (grounded) cache HIT (%s): %s", model, cached[:80])
+                return cached
+        except Exception as exc:  # pragma: no cover
+            log.debug("hyde (grounded) cache read failed: %s", exc)
+
     for m in [model, fallback_model]:
         result = _call_ollama(
             user_prompt=user_prompt,
@@ -133,6 +172,12 @@ def expand_query_with_context(
         )
         if result:
             log.debug("hyde (grounded) expanded with %s: %s", m, result[:80])
+            if cache_enabled:
+                try:
+                    from claude_hooks.hyde_cache import put as cache_put
+                    cache_put(prompt, m, result, grounding=context)
+                except Exception as exc:  # pragma: no cover
+                    log.debug("hyde (grounded) cache write failed: %s", exc)
             return result
 
     log.debug("hyde (grounded): all models failed, using raw prompt")
