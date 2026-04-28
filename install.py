@@ -57,9 +57,90 @@ from claude_hooks.providers import REGISTRY, ServerCandidate
 
 MANAGED_BY = "claude-hooks"
 
-# The conda env Python that bin/claude-hook prefers at runtime.
-CONDA_PY_LINUX = Path.home() / "anaconda3" / "envs" / "claude-hooks" / "bin" / "python"
-CONDA_PY_WIN = Path.home() / "anaconda3" / "envs" / "claude-hooks" / "python.exe"
+# The conda env Python that bin/claude-hook prefers at runtime. Resolved
+# by ``find_conda_env_python`` which probes a list of common layouts and
+# (as a last resort) asks conda directly via ``conda env list --json``.
+# Kept as fallback constants for tests / dry-run paths that don't want
+# to spawn conda.
+CONDA_ENV_NAME = "claude-hooks"
+CONDA_PY_LINUX = Path.home() / "anaconda3" / "envs" / CONDA_ENV_NAME / "bin" / "python"
+CONDA_PY_WIN = Path.home() / "anaconda3" / "envs" / CONDA_ENV_NAME / "python.exe"
+
+# Resolved env path is cached so repeated calls during a single install
+# run don't re-spawn ``conda env list``.
+_CONDA_PY_CACHE: Optional[Path] = None
+
+
+def find_conda_env_python(env_name: str = CONDA_ENV_NAME) -> Path:
+    """Locate the Python interpreter inside the named conda env.
+
+    Probes hardcoded common layouts first (fast — no subprocess), then
+    falls back to ``conda env list --json`` and walks the prefixes it
+    reports. Returns the platform-default fallback path when nothing is
+    found, so callers can still ``.exists()``-check on it.
+
+    Cached after first successful probe per process.
+    """
+    global _CONDA_PY_CACHE
+    if _CONDA_PY_CACHE is not None and _CONDA_PY_CACHE.exists():
+        return _CONDA_PY_CACHE
+
+    # Step 1 — try common install paths without spawning conda. Covers:
+    #   - Linux:   ~/anaconda3, ~/miniconda3, /opt/conda
+    #   - Windows: ~/Anaconda3, ~/Miniconda3 (capitalised), ~/anaconda3
+    #   - Both:    bin/python (POSIX) and python.exe / Scripts/python.exe (Win)
+    home = Path.home()
+    candidates: list[Path] = []
+    roots = [
+        home / "anaconda3", home / "miniconda3",
+        home / "Anaconda3", home / "Miniconda3",
+        Path("/opt/conda"), Path("/opt/miniconda3"),
+        Path("/opt/anaconda3"), Path("C:/ProgramData/Anaconda3"),
+        Path("C:/ProgramData/Miniconda3"),
+    ]
+    for root in roots:
+        env = root / "envs" / env_name
+        candidates += [
+            env / "bin" / "python",
+            env / "bin" / "python.exe",
+            env / "Scripts" / "python.exe",
+            env / "python.exe",
+        ]
+    for c in candidates:
+        if c.exists():
+            _CONDA_PY_CACHE = c
+            return c
+
+    # Step 2 — ask conda where it thinks the env lives.
+    conda_bin = _find_conda()
+    if conda_bin:
+        try:
+            rc = subprocess.run(
+                [conda_bin, "env", "list", "--json"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if rc.returncode == 0:
+                envs = json.loads(rc.stdout).get("envs") or []
+                for prefix_str in envs:
+                    prefix = Path(prefix_str)
+                    if prefix.name != env_name:
+                        continue
+                    for layout in (
+                        prefix / "bin" / "python",
+                        prefix / "bin" / "python.exe",
+                        prefix / "Scripts" / "python.exe",
+                        prefix / "python.exe",
+                    ):
+                        if layout.exists():
+                            _CONDA_PY_CACHE = layout
+                            return layout
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+            pass
+
+    # Last resort: return the platform-default fallback. Caller will
+    # ``.exists()`` it; if it doesn't, the install path proceeds with
+    # system python3.
+    return CONDA_PY_WIN if os.name == "nt" else CONDA_PY_LINUX
 
 # Hook entries to install in ~/.claude/settings.json. Each event has its own
 # matcher block; matchers are empty strings (= match everything) for events
@@ -138,18 +219,38 @@ PRE_TOOL_USE_TEMPLATE = {
 
 
 def _find_conda() -> Optional[str]:
-    """Find the conda executable, trying common locations."""
+    """Find the conda executable, trying common locations.
+
+    Handles the Windows variants (Miniconda3 capitalised, ``conda.bat``
+    in ``condabin``) and the Linux/macOS variants (lowercase miniconda3,
+    /opt/conda). ``shutil.which`` finds ``conda`` on PATH first when an
+    env is active.
+    """
     # Check if conda is already on PATH (e.g. env is active).
-    if shutil.which("conda"):
-        return "conda"
-    # Try known install locations.
-    for candidate in [
-        Path.home() / "anaconda3" / "condabin" / "conda",
-        Path.home() / "miniconda3" / "condabin" / "conda",
-        Path("/opt/conda/condabin/conda"),
-        Path.home() / "anaconda3" / "condabin" / "conda",
-        Path.home() / "miniconda3" / "condabin" / "conda",
-    ]:
+    found = shutil.which("conda")
+    if found:
+        return found
+    # Windows often has only conda.bat on PATH.
+    if os.name == "nt":
+        found = shutil.which("conda.bat")
+        if found:
+            return found
+
+    home = Path.home()
+    candidates: list[Path] = []
+    for root in (
+        home / "anaconda3", home / "miniconda3",
+        home / "Anaconda3", home / "Miniconda3",
+        Path("/opt/conda"), Path("/opt/miniconda3"),
+        Path("/opt/anaconda3"),
+        Path("C:/ProgramData/Anaconda3"),
+        Path("C:/ProgramData/Miniconda3"),
+    ):
+        cb = root / "condabin"
+        # Windows: condabin/conda.bat. POSIX: condabin/conda.
+        candidates += [cb / "conda", cb / "conda.bat", cb / "conda.exe"]
+
+    for candidate in candidates:
         if candidate.exists():
             return str(candidate)
     return None
@@ -684,7 +785,7 @@ def _ensure_proxy_deps(cfg: dict, *, non_interactive: bool, dry_run: bool) -> No
     if not proxy_cfg.get("enabled", False):
         return
 
-    conda_py = CONDA_PY_WIN if os.name == "nt" else CONDA_PY_LINUX
+    conda_py = find_conda_env_python()
     # Use conda env's python when available, else system python.
     py = str(conda_py) if conda_py.exists() else sys.executable
 
@@ -768,7 +869,7 @@ def _ensure_code_graph_extras(*, non_interactive: bool, dry_run: bool) -> None:
     the user gains by installing and ask. Defaults to ``Y`` to keep the
     installer feeling forward.
     """
-    conda_py = CONDA_PY_WIN if os.name == "nt" else CONDA_PY_LINUX
+    conda_py = find_conda_env_python()
     py = str(conda_py) if conda_py.exists() else sys.executable
 
     print("\n==> code_graph optional extras")
@@ -816,7 +917,7 @@ def _ensure_code_graph_extras(*, non_interactive: bool, dry_run: bool) -> None:
 
 def _check_conda_env(*, non_interactive: bool, dry_run: bool) -> None:
     """Check the conda env, offer to create it + install deps if missing."""
-    conda_py = CONDA_PY_WIN if os.name == "nt" else CONDA_PY_LINUX
+    conda_py = find_conda_env_python()
     in_conda = os.environ.get("CONDA_DEFAULT_ENV") == "claude-hooks"
 
     if conda_py.exists():
@@ -1045,7 +1146,7 @@ def main() -> int:
         dry_run=args.dry_run,
     )
 
-    conda_py = CONDA_PY_WIN if os.name == "nt" else CONDA_PY_LINUX
+    conda_py = find_conda_env_python()
     print("\n==> Done.")
     print("    Open a new Claude Code session and the hooks will fire on the next prompt.")
     print(f"    Runtime: {conda_py if conda_py.exists() else 'system python3'}")
