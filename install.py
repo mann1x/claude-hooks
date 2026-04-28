@@ -571,13 +571,8 @@ def _install_claude_hooks_daemon(
     if already:
         print(f"  Already installed: {already}")
         if non_interactive:
-            print(
-                "  --non-interactive: leaving as-is and verifying the daemon."
-            )
-            if _wait_for_daemon(timeout=5.0):
-                print("  · daemon responding on 127.0.0.1:47018")
-            else:
-                print("  [!!] daemon not responding.")
+            print("  --non-interactive: leaving as-is and verifying the daemon.")
+            _verify_and_start_daemon()
             return
         ans = input(
             "  Re-install (delete + recreate + verify), verify-only, "
@@ -591,15 +586,8 @@ def _install_claude_hooks_daemon(
             # branch will do the delete + recreate + verify.
             pass
         else:
-            # Default ("", "v", "verify") → just ping and report.
-            if _wait_for_daemon(timeout=5.0):
-                print("  · daemon responding on 127.0.0.1:47018")
-            else:
-                print(
-                    "  [!!] daemon not responding. The autostart entry exists"
-                    " but the daemon isn't running — try restarting it"
-                    " through the platform's tooling."
-                )
+            # Default ("", "v", "verify") → ping; start if not running.
+            _verify_and_start_daemon()
             return
     else:
         if not non_interactive:
@@ -651,6 +639,91 @@ def _detect_existing_daemon_entry() -> Optional[str]:
     if plist.exists():
         return f"launchd plist {plist}"
     return None
+
+
+def _start_daemon_via_platform() -> None:
+    """Trigger the daemon via the platform's autostart manager.
+
+    Used by the verify-only path when the autostart entry exists but
+    the daemon isn't currently listening — e.g. the task is registered
+    but hasn't fired since the last logon, or the systemd service was
+    manually stopped. Best-effort: failures are reported, never raised.
+    """
+    if os.name == "nt":
+        run_argstr = f'/Run /TN "{_DAEMON_TASK_NAME}"'
+        run_argv = ["/Run", "/TN", _DAEMON_TASK_NAME]
+        _run_schtasks_elevated(run_argstr, run_argv)
+        return
+
+    # systemd: start the service.
+    if (Path("/etc/systemd/system") / _DAEMON_UNIT).exists():
+        rc = subprocess.run(
+            ["systemctl", "start", _DAEMON_UNIT],
+            capture_output=True, text=True,
+        )
+        if rc.returncode != 0:
+            print(
+                f"  [!!] systemctl start {_DAEMON_UNIT} failed: "
+                f"{rc.stderr.strip()[-200:]}"
+            )
+        return
+
+    # launchd: kickstart the agent.
+    plist = (
+        Path.home() / "Library" / "LaunchAgents"
+        / "com.claude-hooks.daemon.plist"
+    )
+    if plist.exists():
+        try:
+            uid = os.getuid()  # type: ignore[attr-defined]
+        except AttributeError:
+            uid = 0
+        rc = subprocess.run(
+            ["launchctl", "kickstart", "-k",
+             f"gui/{uid}/com.claude-hooks.daemon"],
+            capture_output=True, text=True,
+        )
+        if rc.returncode != 0:
+            print(
+                f"  [!!] launchctl kickstart failed: "
+                f"{rc.stderr.strip()[-200:]}"
+            )
+
+
+def _verify_and_start_daemon() -> bool:
+    """Ping the daemon; if it isn't running, try to start it via the
+    platform manager and ping again. Returns True iff the daemon ends
+    up responding. Prints progress so the user can see what happened.
+    """
+    print("  Verifying the daemon is responding...")
+    if _wait_for_daemon(timeout=5.0):
+        print("  · daemon responding on 127.0.0.1:47018")
+        return True
+
+    print("  · daemon not running — attempting to start it...")
+    _start_daemon_via_platform()
+    if _wait_for_daemon(timeout=15.0):
+        print("  · daemon started and responding on 127.0.0.1:47018")
+        return True
+
+    print(
+        "  [!!] daemon still not responding after a start attempt."
+    )
+    if os.name == "nt":
+        print(
+            f"       Inspect the task: schtasks /Query /TN "
+            f"\"{_DAEMON_TASK_NAME}\" /V /FO LIST"
+        )
+        print(
+            "       Run the daemon directly to see its stderr: "
+            f"{(HERE / 'bin' / 'claude-hooks-daemon.cmd').resolve()}"
+        )
+    elif (Path("/etc/systemd/system") / _DAEMON_UNIT).exists():
+        print(f"       systemctl status {_DAEMON_UNIT} -l")
+        print(f"       journalctl -u {_DAEMON_UNIT} -e --no-pager")
+    else:
+        print(f"       launchctl print gui/$(id -u)/com.claude-hooks.daemon")
+    return False
 
 
 def _install_daemon_systemd(

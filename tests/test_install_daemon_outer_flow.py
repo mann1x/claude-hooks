@@ -136,18 +136,44 @@ class TestOuterFlowAlreadyInstalled:
             )
         win.assert_not_called()
 
-    def test_already_installed_verify_reports_unresponsive(
-        self, capsys, _ping_succeeds,
+    def test_already_installed_verify_unresponsive_attempts_start(
+        self, capsys, _ping_succeeds, monkeypatch,
     ):
+        """Verify-only path with unresponsive daemon must attempt to start
+        it, not just report 'not responding'."""
         _ping_succeeds.return_value = False
+        monkeypatch.setattr(install.os, "name", "nt")
         with patch(
             "install._detect_existing_daemon_entry", return_value="task X",
-        ), patch("builtins.input", return_value=""):
+        ), patch("builtins.input", return_value=""), \
+             patch("install._start_daemon_via_platform") as start:
             install._install_claude_hooks_daemon(
                 _base_cfg(), non_interactive=False, dry_run=False,
             )
+        # Start was attempted before giving up.
+        start.assert_called_once()
         out = capsys.readouterr().out
-        assert "not responding" in out
+        assert "Verifying" in out
+        assert "attempting to start" in out
+        assert "still not responding" in out
+
+    def test_already_installed_verify_unresponsive_then_starts_successfully(
+        self, capsys, _ping_succeeds, monkeypatch,
+    ):
+        """First ping fails, start succeeds, second ping returns True."""
+        # Ping returns False then True.
+        _ping_succeeds.side_effect = [False, True]
+        monkeypatch.setattr(install.os, "name", "nt")
+        with patch(
+            "install._detect_existing_daemon_entry", return_value="task X",
+        ), patch("builtins.input", return_value=""), \
+             patch("install._start_daemon_via_platform") as start:
+            install._install_claude_hooks_daemon(
+                _base_cfg(), non_interactive=False, dry_run=False,
+            )
+        start.assert_called_once()
+        out = capsys.readouterr().out
+        assert "started and responding" in out
 
     def test_already_installed_reinstall_routes_to_platform_installer(
         self, monkeypatch,
@@ -242,6 +268,48 @@ class TestForceReinstallFlag:
             )
         # No prompt — force_reinstall short-circuited it.
         inp.assert_not_called()
+
+    def test_verify_and_start_responds_first_try(self, capsys, _ping_succeeds):
+        _ping_succeeds.return_value = True
+        with patch("install._start_daemon_via_platform") as start:
+            assert install._verify_and_start_daemon() is True
+        start.assert_not_called()
+        out = capsys.readouterr().out
+        assert "Verifying" in out
+        assert "responding" in out
+
+    def test_verify_and_start_starts_when_unresponsive(
+        self, capsys, _ping_succeeds,
+    ):
+        # First ping False, second ping True.
+        _ping_succeeds.side_effect = [False, True]
+        with patch("install._start_daemon_via_platform") as start:
+            assert install._verify_and_start_daemon() is True
+        start.assert_called_once()
+
+    def test_verify_and_start_gives_up_after_failed_start(
+        self, capsys, _ping_succeeds,
+    ):
+        _ping_succeeds.return_value = False
+        with patch("install._start_daemon_via_platform") as start:
+            assert install._verify_and_start_daemon() is False
+        start.assert_called_once()
+        out = capsys.readouterr().out
+        assert "still not responding" in out
+
+    def test_start_daemon_via_platform_windows_runs_schtasks_run(
+        self, monkeypatch,
+    ):
+        monkeypatch.setattr(install.os, "name", "nt")
+        with patch("install._run_schtasks_elevated", return_value=True) as r:
+            install._start_daemon_via_platform()
+        r.assert_called_once()
+        argstr = r.call_args[0][0]
+        argv = r.call_args[0][1]
+        assert "/Run" in argstr
+        assert install._DAEMON_TASK_NAME in argstr
+        assert argv[0] == "/Run"
+        assert argv[2] == install._DAEMON_TASK_NAME
 
     def test_windows_force_reinstall_skips_inner_prompt(self):
         # task exists at top (force_reinstall ⇒ delete), then post-delete
