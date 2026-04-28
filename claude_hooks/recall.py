@@ -261,8 +261,8 @@ def _hyde_expand(query: str, hook_cfg: dict) -> str:
         from claude_hooks.hyde import expand_query
         return expand_query(
             query,
-            model=hook_cfg.get("hyde_model", "qwen3.5:2b"),
-            fallback_model=hook_cfg.get("hyde_fallback_model", "gemma4:e2b"),
+            model=hook_cfg.get("hyde_model", "gemma4:e2b"),
+            fallback_model=hook_cfg.get("hyde_fallback_model", "gemma4:e4b"),
             url=hook_cfg.get("hyde_url", "http://localhost:11434/api/generate"),
             timeout=float(hook_cfg.get("hyde_timeout", 30.0)),
             max_tokens=int(hook_cfg.get("hyde_max_tokens", 150)),
@@ -282,8 +282,8 @@ def _hyde_expand_grounded(query: str, memories: list[str], hook_cfg: dict) -> st
         return expand_query_with_context(
             query,
             memories,
-            model=hook_cfg.get("hyde_model", "qwen3.5:2b"),
-            fallback_model=hook_cfg.get("hyde_fallback_model", "gemma4:e2b"),
+            model=hook_cfg.get("hyde_model", "gemma4:e2b"),
+            fallback_model=hook_cfg.get("hyde_fallback_model", "gemma4:e4b"),
             url=hook_cfg.get("hyde_url", "http://localhost:11434/api/generate"),
             timeout=float(hook_cfg.get("hyde_timeout", 30.0)),
             max_tokens=int(hook_cfg.get("hyde_max_tokens", 150)),

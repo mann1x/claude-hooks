@@ -131,7 +131,7 @@ class TestExpandQueryUsesCache:
         import claude_hooks.hyde_cache as hc
         hc.DEFAULT_CACHE_PATH = cache_path
 
-        put("the prompt", "qwen3.5:2b", "cached expansion", path=cache_path)
+        put("the prompt", "gemma4:e2b", "cached expansion", path=cache_path)
 
         calls = []
 
@@ -202,4 +202,4 @@ class TestExpandQueryUsesCache:
         # cache_enabled=False — cache must not be touched
         out = hyde.expand_query("p", cache_enabled=False)
         assert out == "fresh"
-        assert calls == ["qwen3.5:2b"]
+        assert calls == ["gemma4:e2b"]

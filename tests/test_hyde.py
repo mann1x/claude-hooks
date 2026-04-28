@@ -19,7 +19,7 @@ def _args():
     return dict(
         user_prompt="raw",
         system_prompt="sys",
-        model="qwen3.5:2b",
+        model="gemma4:e2b",
         url="http://localhost:11434/api/generate",
         timeout=5.0,
         max_tokens=50,

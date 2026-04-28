@@ -539,8 +539,8 @@ hypothetical answer before vector search, which usually lands better in
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `hyde_model` | `qwen3.5:2b` | Primary Ollama model |
-| `hyde_fallback_model` | `gemma4:e2b` | Fallback if primary fails |
+| `hyde_model` | `gemma4:e2b` | Primary Ollama model |
+| `hyde_fallback_model` | `gemma4:e4b` | Fallback if primary fails |
 | `hyde_url` | `http://localhost:11434/api/generate` | Ollama endpoint |
 | `hyde_timeout` | `30.0` | Per-call timeout (seconds) |
 | `hyde_max_tokens` | `150` | Output length cap for the hypothetical answer |
