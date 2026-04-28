@@ -109,6 +109,47 @@ class Provider(ABC):
         """Persist a new memory. Idempotency is the backend's responsibility."""
 
     # ------------------------------------------------------------------ #
+    # Batch API (optional, Tier 2.6)
+    # ------------------------------------------------------------------ #
+    # Subclasses MAY override these when their backend supports a real
+    # batch endpoint (e.g. a Postgres COPY for batch_store, or a multi-
+    # query similarity call). The defaults fall back to the single-shot
+    # methods running concurrently via ThreadPoolExecutor — which gives
+    # the network-bound parallelism win for free, even for providers
+    # that have no native batch.
+    #
+    # Callers should prefer batch_recall / batch_store when they have N
+    # queries / N items against the SAME provider (e.g. multi-query
+    # recall, end-of-session store-flush). Single-shot recall/store
+    # remains the right call for one query / one item.
+
+    def batch_recall(self, queries: list[str], k: int = 5) -> list[list[Memory]]:
+        """Recall up to ``k`` memories for each query. Returns one list
+        per query in the same order. Default implementation parallelises
+        single-shot ``recall`` calls; override when a backend has a real
+        batch endpoint."""
+        if not queries:
+            return []
+        if len(queries) == 1:
+            return [self.recall(queries[0], k=k)]
+        from claude_hooks._parallel import parallel_map
+        results = parallel_map(lambda q: self.recall(q, k=k), queries)
+        return [r if r is not None else [] for r in results]
+
+    def batch_store(self, items: list[tuple[str, Optional[dict]]]) -> None:
+        """Persist multiple ``(content, metadata)`` pairs. Default
+        implementation parallelises single-shot ``store`` calls; override
+        when a backend has a real batch endpoint (e.g. Postgres COPY)."""
+        if not items:
+            return
+        if len(items) == 1:
+            content, metadata = items[0]
+            self.store(content, metadata=metadata)
+            return
+        from claude_hooks._parallel import parallel_map
+        parallel_map(lambda it: self.store(it[0], metadata=it[1]), items)
+
+    # ------------------------------------------------------------------ #
     # Helpers shared by all providers
     # ------------------------------------------------------------------ #
     def _client(self, timeout: float = 5.0):
