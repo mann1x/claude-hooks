@@ -9,6 +9,14 @@ embedder pick.
 > + Memory KG remain the supported defaults. This runbook documents the
 > migration path for users who want a single Postgres-backed store.
 
+> ⚠ **Vector-space mismatch is a silent footgun.** If you change
+> `embedder_options.model`, you MUST re-embed the corpus before flipping
+> the active config. Embeddings from different models live in
+> incompatible vector spaces — recall against a `memories_X` table
+> populated with model A but queried with model B's embeddings returns
+> garbage with no error. Use the **[Swapping the embedding
+> model](#5-swapping-the-embedding-model)** recipe.
+
 ---
 
 ## TL;DR
@@ -126,9 +134,16 @@ default config does).
 | `locusai/all-minilm-l6-v2` | 256 | 400 | dense text tokenises tight; truncation **does** lose information |
 | `nomic-embed-text` | 8192 | 5000 | safe headroom for code/path-heavy memories |
 | `snowflake-arctic-embed2` | 8192 | 5000 | same |
+| `qwen3-embedding:0.6b` | 32768 | 30000 | the silent-truncation problem disappears entirely; default since 2026-04-28 |
 
 Truncation only affects the embedding — the full text is stored intact
 in the `content` column.
+
+When changing the embedder via the active config, mirror these in
+`embedder_options.num_ctx` and `embedder_options.max_chars` —
+`OllamaEmbedder` defaults are `num_ctx=8192` / `max_chars=16000`,
+which silently caps a 32k-ctx model at 8k. The example config ships
+the qwen3 values; nomic/arctic do not need overrides.
 
 ---
 
@@ -143,6 +158,12 @@ Run on solidPC. 17 representative queries × 8 timed runs, k=5, after
 | pgvector + minilm (384d) | **18 ms** | 34 ms | 17 ms | 0.9 ms | 0.32 |
 | pgvector + nomic (768d) | 35 ms | 44 ms | 33 ms | 2.1 ms | 0.22 |
 | pgvector + arctic (1024d) | 208 ms | 251 ms | 206 ms | 1.4 ms | 0.23 |
+| pgvector + qwen3 (1024d) | 87 ms | 104 ms | 85 ms | 1.6 ms | — |
+
+`qwen3` numbers are from a re-bench on 2026-04-28 against the same
+17-query set, after the swap to `qwen3-embedding:0.6b`. Embed latency
+sits between nomic and arctic; absolute total stays under 100 ms.
+Quality wins on niche queries — see the side-by-side block below.
 
 ### Reading the numbers
 
@@ -170,9 +191,24 @@ Nomic is competitive on specific bug/fact queries.
 
 | Use case | Model |
 |---|---|
-| Default for the recall hook (every UserPromptSubmit) | **`nomic-embed-text`** |
-| Migrations / overnight backfills / quality-first | `snowflake-arctic-embed2` |
+| Default for the recall hook (every UserPromptSubmit) | **`qwen3-embedding:0.6b`** — 32k native ctx, tight cosine on niche queries, ~85 ms p50 embed |
+| Speed-first if your corpus is short turns and you can live with 8k ctx | `nomic-embed-text` |
+| Quality-first overnight backfills | `snowflake-arctic-embed2` (slowest embed, but good ranking) |
 | Don't pick | `all-MiniLM-L6-v2` — 256-token cap is a recall ceiling |
+
+The default flipped from `nomic-embed-text` to `qwen3-embedding:0.6b`
+on 2026-04-28 after a side-by-side bench:
+
+| Query | nomic top-1 distance | qwen3 top-1 distance | Winner |
+|---|---|---|---|
+| "how to suppress windows console window when spawning subprocess" | 0.414 | **0.328** | qwen3 — same row, tighter signal |
+| "pandorum training on RTX 5080 GPU" | 0.360 (off-topic user profile) | **0.284** (GPU monitoring rule) | qwen3 — actually relevant |
+| "OllamaEmbedder default num_ctx and max_chars values" | 0.396 (off-topic) | **0.309** (embedder config) | qwen3 |
+| "pgvector content_hash dedup ON CONFLICT" | **0.304** | 0.372 | nomic — exact lexical match |
+
+Qwen3's edge is consistent on intent/architecture queries; nomic still
+wins on lexical-match queries where the literal string is in the
+corpus. The 32k ctx is the tie-breaker for long Stop summaries.
 
 The bench harness lives at `scripts/bench_recall.py` — re-run it any
 time you want to retest with different embedders, query sets, or HNSW
@@ -190,11 +226,15 @@ and set the pgvector block:
 "pgvector": {
   "enabled": true,
   "dsn": "postgresql://claude:YOUR_PASSWORD@127.0.0.1:5432/memory",
-  "table": "memories_nomic",
+  "table": "memories_qwen3",
+  "additional_tables": ["kg_observations_qwen3"],
   "embedder": "ollama",
   "embedder_options": {
     "url": "http://YOUR-OLLAMA-HOST:11434/api/embeddings",
-    "model": "nomic-embed-text"
+    "model": "qwen3-embedding:0.6b",
+    "num_ctx": 32768,
+    "max_chars": 30000,
+    "timeout": 30.0
   },
   "recall_k": 5,
   "store_mode": "auto",
@@ -205,6 +245,16 @@ and set the pgvector block:
 The provider auto-creates the table on first store/recall using the
 embedder's vector dimension. If you migrated with the script above,
 the table already exists and the auto-create is a no-op.
+
+The `table` and `additional_tables[*]` suffixes must agree with the
+`embedder_options.model` you pick. Pgvector enforces the column's
+declared dim, so a model→table mismatch where the dims differ
+(e.g. `model=nomic-embed-text` against `table=memories_qwen3`,
+768 vs 1024) fails fast at SQL. The silent-garbage case is when two
+models *share* a dim — qwen3 and arctic are both 1024 — so a
+`model=snowflake-arctic-embed2` query against `memories_qwen3` returns
+rows without error, but cosine distances are meaningless because the
+vector spaces don't align. Re-embed before swapping.
 
 ### Running pgvector alongside Qdrant + Memory KG
 
@@ -221,7 +271,164 @@ config change away.
 
 ---
 
-## 5. Batch API
+## 5. Swapping the embedding model
+
+This is the recipe a new user needs when they want a different
+embedder than the one in the example config — e.g. dropping back to
+`nomic-embed-text` for speed, switching to `snowflake-arctic-embed2`
+for quality-first backfills, or trying a model not yet in the
+registry.
+
+> ⚠ **Re-embed before flipping the active config.** Embeddings from
+> different models are NOT interchangeable. If two models share a
+> dim (qwen3 and arctic are both 1024) the SQL won't error — cosine
+> distances will silently be meaningless. The model→table suffix
+> agreement is what protects you.
+
+### A. Pick (or add) the model in the registry
+
+The migration + bench scripts read from `MODELS` in
+`scripts/migrate_to_pgvector.py`. To add a new candidate:
+
+```python
+MODELS: dict[str, ModelSpec] = {
+    "minilm": ModelSpec("minilm", "locusai/all-minilm-l6-v2:latest", 384,  "minilm", 400,    256),
+    "nomic":  ModelSpec("nomic",  "nomic-embed-text",                768,  "nomic",  5000,   8192),
+    "arctic": ModelSpec("arctic", "snowflake-arctic-embed2",         1024, "arctic", 5000,   8192),
+    "qwen3":  ModelSpec("qwen3",  "qwen3-embedding:0.6b",            1024, "qwen3",  30000,  32768),
+    # add yours here
+}
+```
+
+`short` is the table suffix. Pick one that won't collide with an
+existing `memories_<short>` table. `max_chars` should be ≈ `num_ctx × 1`
+in the worst case (1 char/token for dense paths/code) and ≈
+`num_ctx × 3` for normal prose.
+
+### B. Pull the model on Ollama (or your embedder host)
+
+```bash
+ollama pull qwen3-embedding:0.6b
+```
+
+### C. Populate the per-model tables
+
+If you already have data in another `memories_<short>` table (initial
+migration or another model's tables), re-embed from there into the
+new tables:
+
+```bash
+# Source from Qdrant + Memory KG (fresh install only — has the side
+# effect of also populating kg_entities and kg_relations).
+python scripts/migrate_to_pgvector.py --embedder qwen3 --source all
+
+# Source from an existing pgvector model — best path when Qdrant is
+# already retired. There's no first-class flag for this yet; the
+# inline pattern below works for any (src_short, dst_short):
+python <<'PY'
+import sys; sys.path.insert(0, ".")
+from scripts.migrate_to_pgvector import (
+    OllamaBatchEmbedder, MODELS, _vec_to_pg_literal, _load_pgvector_env_dotfile,
+)
+import json, psycopg
+env = _load_pgvector_env_dotfile()
+dsn = f"postgresql://{env['POSTGRES_USER']}:{env['POSTGRES_PASSWORD']}@127.0.0.1:5432/{env['POSTGRES_DB']}"
+spec, src_short = MODELS["qwen3"], "nomic"
+emb = OllamaBatchEmbedder("http://YOUR-OLLAMA-HOST:11434", spec.ollama_model,
+                          max_chars=spec.max_chars, num_ctx=spec.num_ctx, timeout=180.0)
+with psycopg.connect(dsn) as conn:
+    src = conn.execute(
+        f"SELECT content, COALESCE(metadata,'{{}}'::jsonb), source_id, created_at, content_hash "
+        f"FROM memories_{src_short} ORDER BY id"
+    ).fetchall()
+    for i in range(0, len(src), 16):
+        chunk = src[i:i+16]
+        vecs = emb.embed([r[0] for r in chunk])
+        with conn.cursor() as cur:
+            cur.executemany(
+                f"INSERT INTO memories_{spec.short} "
+                "(content, metadata, source_id, created_at, content_hash, embedding) "
+                "VALUES (%s,%s,%s,%s,%s,%s::vector) "
+                "ON CONFLICT (content_hash) DO NOTHING",
+                [(r[0], json.dumps(r[1]), r[2], r[3], r[4], _vec_to_pg_literal(v))
+                 for r, v in zip(chunk, vecs)],
+            )
+        conn.commit()
+    # Same loop for kg_observations_{src_short} → kg_observations_{spec.short}.
+PY
+```
+
+### D. (Optional) Bench the new model
+
+```bash
+OLLAMA_URL=http://YOUR-OLLAMA-HOST:11434 \
+    python scripts/bench_recall.py --skip-qdrant --models nomic,qwen3 --warm 2 --repeat 5
+```
+
+If you have a local query set you care about more than the curated
+17, pass `--queries-file my_queries.txt` (one query per line).
+
+### E. Flip the active config — atomic 4-line edit
+
+```diff
+ "pgvector": {
+   "enabled": true,
+   "dsn": "postgresql://claude:PASS@127.0.0.1:5432/memory",
+-  "table": "memories_nomic",
+-  "additional_tables": ["kg_observations_nomic"],
++  "table": "memories_qwen3",
++  "additional_tables": ["kg_observations_qwen3"],
+   "embedder": "ollama",
+   "embedder_options": {
+     "url": "http://YOUR-OLLAMA-HOST:11434/api/embeddings",
+-    "model": "nomic-embed-text"
++    "model": "qwen3-embedding:0.6b",
++    "num_ctx": 32768,
++    "max_chars": 30000
+   }
+ }
+```
+
+The four fields that must agree: `table` suffix, every entry in
+`additional_tables`, `embedder_options.model`, and the `num_ctx` /
+`max_chars` overrides if the new model differs from the
+`OllamaEmbedder` defaults (8192 / 16000). Forgetting any one of these
+is the most common foot-gun.
+
+### F. Restart the daemon and verify
+
+```bash
+bin/claude-hooks-daemon-ctl restart           # POSIX
+bin\claude-hooks-daemon-ctl.cmd restart       # Windows
+
+# Smoke test: live recall via the running provider
+python -c "
+from claude_hooks.config import load_config
+from claude_hooks.dispatcher import build_providers
+cfg = load_config()
+pg = next(p for p in build_providers(cfg) if p.name == 'pgvector')
+hits = pg.recall('a query that should have stored matches', k=3)
+print(f'recall: {len(hits)} hits'); [print(f'  {h[:120]}') for h in hits]
+"
+```
+
+If recall returns 0 hits *and the corpus is non-empty*, you've hit
+the silent same-dim mismatch — re-check that the table suffix matches
+the model you re-embedded with. If recall returns hits but they look
+unrelated, you may have skipped step C (re-embed) entirely.
+
+### G. Rollback
+
+The old tables are still on disk untouched. Revert step E (just put
+the previous `table` / `additional_tables` / `embedder_options.model`
+back, drop the `num_ctx` / `max_chars` override if it doesn't apply
+to the old model), restart the daemon. No data loss; the new tables
+linger as additional storage you can drop with `TRUNCATE` (or
+`DROP TABLE` if you're certain).
+
+---
+
+## 6. Batch API
 
 `PgvectorProvider` overrides the default `batch_recall` and
 `batch_store` methods to use real Ollama batch (`/api/embed` with
@@ -241,7 +448,7 @@ not a quality tradeoff.
 
 ---
 
-## 6. Operational notes
+## 7. Operational notes
 
 ### Schema migrations
 
@@ -263,8 +470,8 @@ docker exec mcp-pgvector pg_dump -U claude memory > /backup/pgvector_$(date +%F)
 ```bash
 # Truncate everything but keep the tables.
 docker exec -e PGPASSWORD=$POSTGRES_PASSWORD mcp-pgvector psql -U claude -d memory -c "
-  TRUNCATE memories_minilm, memories_nomic, memories_arctic,
-           kg_observations_minilm, kg_observations_nomic, kg_observations_arctic,
+  TRUNCATE memories_minilm, memories_nomic, memories_arctic, memories_qwen3,
+           kg_observations_minilm, kg_observations_nomic, kg_observations_arctic, kg_observations_qwen3,
            kg_relations, kg_entities, migration_state RESTART IDENTITY CASCADE;
 "
 
@@ -285,7 +492,7 @@ in `postgresql.conf` and restart the container.
 
 ---
 
-## 7. Hard cutover walkthrough — replacing Qdrant + Memory KG
+## 8. Hard cutover walkthrough — replacing Qdrant + Memory KG
 
 This is the procedure used on solidpc + pandorum on 2026-04-28 to retire
 the two MCP-backed memory services. Keep both `mcp-qdrant` and

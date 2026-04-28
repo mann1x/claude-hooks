@@ -12,17 +12,24 @@ candidates can coexist while we benchmark them:
 
 Usage:
 
-    # Single model (default: nomic, both sources):
+    # Single model — current recommended default for new installs is qwen3
+    # (32k native ctx, 1024 dim, ~85 ms p50 embed). nomic remains the
+    # speed-first fallback.
+    python scripts/migrate_to_pgvector.py --embedder qwen3
+
+    # Default if no flag is given is still nomic (kept for back-compat
+    # with the original migration runs). New users should pass --embedder
+    # qwen3 explicitly.
     python scripts/migrate_to_pgvector.py
 
-    # All three models, both sources, no writes:
+    # All four models, both sources, no writes:
     python scripts/migrate_to_pgvector.py --embedder all --dry-run
 
     # Just delta-sync new Qdrant points since last run:
-    python scripts/migrate_to_pgvector.py --embedder nomic --source qdrant
+    python scripts/migrate_to_pgvector.py --embedder qwen3 --source qdrant
 
-    # Explicit target table prefix and DSN override:
-    python scripts/migrate_to_pgvector.py --embedder arctic \
+    # Explicit DSN override:
+    python scripts/migrate_to_pgvector.py --embedder qwen3 \
         --dsn postgresql://claude:pass@127.0.0.1:5432/memory
 
 Environment overrides (or pass --flag):
@@ -74,6 +81,7 @@ MODELS: dict[str, ModelSpec] = {
     "minilm": ModelSpec("minilm", "locusai/all-minilm-l6-v2:latest", 384,  "minilm", 400,    256),    # 256-tok ctx
     "nomic":  ModelSpec("nomic",  "nomic-embed-text",                768,  "nomic",  5000,   8192),   # 8k tok ctx
     "arctic": ModelSpec("arctic", "snowflake-arctic-embed2",         1024, "arctic", 5000,   8192),   # 8k tok ctx
+    "qwen3":  ModelSpec("qwen3",  "qwen3-embedding:0.6b",            1024, "qwen3",  30000,  32768),  # 32k tok ctx
 }
 
 

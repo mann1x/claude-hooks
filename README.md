@@ -383,8 +383,17 @@ docker compose at `/shared/config/mcp-pgvector/`, idempotent migration
 at `scripts/bench_recall.py`, and the design rationale at
 [`docs/PLAN-pgvector-migration.md`](docs/PLAN-pgvector-migration.md).
 
-Bench-driven default embedder pick is `nomic-embed-text` (768 dim,
-~35 ms p50 recall vs ~86 ms Qdrant baseline, full 8k-token context).
+Bench-driven default embedder pick (since 2026-04-28) is
+`qwen3-embedding:0.6b` (1024 dim, native 32k ctx). It replaces the
+earlier `nomic-embed-text` default after a head-to-head bench showed
+tighter cosine distances on niche queries and full 32k context that
+eliminates the silent 8k truncation cliff on long Stop summaries.
+Speed cost is real (~85 ms p50 embed vs ~38 ms for nomic) but total
+recall stays under 100 ms end-to-end on HNSW. **Tables are
+model-namespaced** (`memories_<short>`) because the embedding dim is
+part of the column type — see the runbook's *Swapping the embedding
+model* section if you want to change it.
+
 Pgvector runs alongside Qdrant + Memory KG until you decide to retire
 them — there's no flag day.
 
