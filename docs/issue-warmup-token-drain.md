@@ -7,7 +7,41 @@
 
 **Claude Code version at time of regression:** ≥ 2.0.77 (reproduced on 2.1.107)
 **Symptom first observed:** 2026-04-09 17:12 UTC
+**Apparent client-side fix observed:** Claude Code **2.1.121** (see "Update — 2026-04-28" below)
 **Related (all closed):** [#17457](https://github.com/anthropics/claude-code/issues/17457) `NOT_PLANNED`, [#16752](https://github.com/anthropics/claude-code/issues/16752), [#16961](https://github.com/anthropics/claude-code/issues/16961), [#25138](https://github.com/anthropics/claude-code/issues/25138)
+
+## Update — 2026-04-28: Warmup traffic disappeared
+
+After upgrading to Claude Code 2.1.121 the literal `"Warmup"`
+priming call stopped appearing in the proxy logs entirely.
+Observed in `~/.claude/claude-hooks-proxy/*.jsonl` on a single
+host that has had `block_warmup: true` continuously enabled:
+
+| Day | Total reqs | Detected Warmups | Blocked | Haiku calls | Sub-100ms calls |
+|---|---:|---:|---:|---:|---:|
+| 2026-04-26 | 2 953 | 14 | 12 | 32 | 12 |
+| 2026-04-27 | 3 379 | **60** | **60** | 96 | 14 |
+| 2026-04-28 | 1 304 | **0** | **0** | 3 | 0 |
+
+The fingerprint that was being blocked on 04-27 (`num_messages=1`,
+`cc_entrypoint=None`, `model_requested` in `claude-haiku-4-5-*` /
+`claude-opus-4-5-*`, `duration_ms < 30 ms` because we stubbed them)
+is absent from the 04-28 traffic. The proxy's detector
+(`metadata._classify_request`) is unchanged; there is simply
+nothing matching the Warmup shape to detect.
+
+This is **a client-side change** — Anthropic's API behaviour did
+not move. Claude Code 2.1.121's session bootstrap appears to have
+either dropped the Warmup ping or migrated it under the
+`sdk-cli` persona, which our classifier (post-`6b23d10`,
+2026-04-26) routes as main-conversation rather than priming. We
+have not observed an unrecognised single-message ping on 04-28
+that could be a renamed Warmup — the count is genuinely zero, not
+a coverage gap.
+
+The proxy's `block_warmup: true` is kept on as a safety net for
+any future regression. The accompanying statusline indicator
+(`· blk=N`) correctly hides itself when the day's count is zero.
 
 ## Summary
 

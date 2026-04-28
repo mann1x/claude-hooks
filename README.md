@@ -102,6 +102,15 @@ Claude responds (knowing the prior context, deterministically)
   identically when `block_warmup` is on. The dashboard's
   *warmups_blocked* counter aggregates them; `scripts/proxy_stats.py
   --show-sidechain` breaks them out.
+
+  > **Update 2026-04-28** — the literal `"Warmup"` priming call no
+  > longer appears in proxy logs starting with Claude Code **2.1.121**
+  > (60 blocks on 04-27 → 0 on 04-28 across 1,300+ requests, on a host
+  > with no proxy config change). The detector is unchanged; the
+  > traffic itself is absent. We're keeping `block_warmup: true` on
+  > as a safety net in case the pattern returns. See
+  > [`docs/issue-warmup-token-drain.md`](docs/issue-warmup-token-drain.md#update--2026-04-28-warmup-traffic-disappeared)
+  > for the per-day evidence and the upstream issue thread.
 - **Live weekly-limit %** — proxy captures Anthropic's
   `anthropic-ratelimit-unified-*` headers into a rolling state file;
   `scripts/statusline_usage.py` reads it for a compact statusline
