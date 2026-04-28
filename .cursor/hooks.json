@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "hooks": {
+    "postToolUse": [
+      {
+        "command": "/usr/local/bin/caliber learn observe"
+      }
+    ],
+    "postToolUseFailure": [
+      {
+        "command": "/usr/local/bin/caliber learn observe --failure"
+      }
+    ],
+    "userPromptSubmit": [
+      {
+        "command": "/usr/local/bin/caliber learn observe --prompt"
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "/usr/local/bin/caliber learn finalize --auto"
+      }
+    ]
+  }
+}

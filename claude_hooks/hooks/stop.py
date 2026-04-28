@@ -162,6 +162,27 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
            .get("store_mode", "auto").lower() == "auto"
     ]
 
+    # Detach path (Tier 1.3): when the user has opted in, fork a small
+    # subprocess to run dedup+store off the hot path. Stop returns the
+    # systemMessage immediately and Claude Code unblocks ~200-500 ms
+    # sooner. Failures are logged but never surfaced because the parent
+    # has already returned by the time the child finishes.
+    if hook_cfg.get("detach_store", False) and auto_providers:
+        try:
+            from claude_hooks.store_async import spawn as _spawn_store
+            ok = _spawn_store({
+                "config": config,
+                "summary": summary,
+                "metadata": metadata,
+                "provider_names": [p.name for p in auto_providers],
+            })
+            if ok:
+                names = ", ".join(p.name for p in auto_providers)
+                return {"systemMessage": f"[claude-hooks] storing to {names} (async)"}
+            log.debug("store_async spawn returned False — falling back to inline")
+        except Exception as e:
+            log.debug("store_async spawn raised — falling back to inline: %s", e)
+
     def _dedup_and_store(provider):
         """Per-provider dedup-check + store. Runs concurrently across
         providers via parallel_map. Returns ('stored', name) on success,

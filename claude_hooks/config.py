@@ -118,6 +118,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
             # recall filtering. Not default yet because existing Qdrant
             # corpora were written in markdown and search would mix them.
             "summary_format": "markdown",
+            # Tier 1.3: when true, spawn a detached subprocess for the
+            # dedup-and-store fan-out instead of running it inline. Stop
+            # returns its systemMessage immediately and the user sees
+            # ~200-500 ms less latency per noteworthy turn. Trade-off:
+            # store failures are logged but not surfaced in the message
+            # (the parent has already returned by then), so providers
+            # cannot block the hook even on hard error. Once the daemon
+            # (Tier 3.8) ships this flag will be replaced by the daemon
+            # path. Off by default — opt-in.
+            "detach_store": False,
         },
         "stop_guard": {
             # Disabled by default: the default patterns are opinionated
