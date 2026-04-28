@@ -468,7 +468,7 @@ def _install_claude_hooks_daemon(
             return
 
     if os.name == "nt":
-        _install_daemon_windows()
+        _install_daemon_windows(non_interactive=non_interactive)
         return
 
     # POSIX path: try systemd first, then launchd.
@@ -559,24 +559,115 @@ def _install_daemon_launchd() -> None:
         print(f"  [!!] launchctl load failed:\n{rc.stderr.strip()[-300:]}")
 
 
-def _install_daemon_windows() -> None:
-    """On Windows we don't auto-register a scheduled task (needs admin).
+_DAEMON_TASK_NAME = "claude-hooks-daemon"
 
-    Instead, print the exact `schtasks` invocation the user can run from
-    an elevated PowerShell or cmd. The shim ``bin/claude-hooks-daemon.cmd``
-    is what the task should execute.
+
+def _is_windows_admin() -> bool:
+    """Return True iff the current process has admin rights on Windows."""
+    try:
+        import ctypes  # noqa: PLC0415 — Windows-only path
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        return False
+
+
+def _windows_task_exists(task_name: str) -> bool:
+    """Return True iff ``schtasks /Query /TN <name>`` succeeds."""
+    try:
+        rc = subprocess.run(
+            ["schtasks", "/Query", "/TN", task_name],
+            capture_output=True, text=True,
+        )
+        return rc.returncode == 0
+    except OSError:
+        return False
+
+
+def _install_daemon_windows(*, non_interactive: bool) -> None:
+    """Register the daemon as a Windows logon-triggered scheduled task.
+
+    Mirrors clink's self-update flow: confirm with the user, spawn an
+    elevated process via ``Start-Process -Verb RunAs`` (which triggers
+    the UAC prompt), wait for it to finish, then verify the task exists.
+    If verification fails (UAC declined / schtasks errored), offer to
+    retry. Skip path always prints the manual command so the user can
+    run it themselves later.
+
+    When the script is itself already elevated, skip the PowerShell
+    indirection and call ``schtasks`` directly — saves a process spawn
+    and avoids a no-op UAC pop.
     """
     cmd_path = (HERE / "bin" / "claude-hooks-daemon.cmd").resolve()
-    print("  Windows: register the daemon as a logon-triggered task")
-    print("  by running the following from an elevated cmd:")
-    print()
-    print(
-        f'  schtasks /Create /SC ONLOGON /TN "claude-hooks-daemon" '
+    task_name = _DAEMON_TASK_NAME
+    # Embedded \" pair re-quotes the path for cmd.exe's re-tokenize when
+    # the task fires — needed when the path contains spaces.
+    schtasks_argstr = (
+        f'/Create /SC ONLOGON /TN "{task_name}" '
         f'/TR "\\"{cmd_path}\\"" /RL HIGHEST /F'
     )
-    print()
-    print("  Or use pm2-windows-startup if you already manage Node-style")
-    print("  background services via pm2. Both approaches work; pick one.")
+    schtasks_argv = [
+        "/Create", "/SC", "ONLOGON", "/TN", task_name,
+        "/TR", f'"{cmd_path}"', "/RL", "HIGHEST", "/F",
+    ]
+
+    if _windows_task_exists(task_name):
+        print(f"  · scheduled task '{task_name}' already exists — leaving as-is")
+        return
+
+    if non_interactive:
+        print("  --non-interactive: cannot prompt for UAC. Run manually from")
+        print("  an elevated cmd:")
+        print(f"  schtasks {schtasks_argstr}")
+        return
+
+    while True:
+        print()
+        print(f"  Will register '{task_name}' as a Windows logon-triggered")
+        print(f"  scheduled task pointing at {cmd_path}.")
+        print("  This triggers a UAC prompt — accept it to grant admin to")
+        print("  the schtasks call only. install.py itself stays unprivileged.")
+        ans = input("  Proceed? [Y/n]: ").strip().lower()
+        if ans not in ("", "y", "yes"):
+            print("  Skipped. Run manually later from an elevated cmd:")
+            print(f"  schtasks {schtasks_argstr}")
+            return
+
+        if _is_windows_admin():
+            try:
+                rc = subprocess.run(
+                    ["schtasks", *schtasks_argv],
+                    capture_output=True, text=True,
+                )
+                if rc.returncode != 0:
+                    print(
+                        f"  [!!] schtasks failed:\n{rc.stderr.strip()[-300:]}"
+                    )
+            except OSError as e:
+                print(f"  [!!] schtasks invocation failed: {e}")
+        else:
+            ps_cmd = (
+                "Start-Process -FilePath schtasks "
+                f"-ArgumentList '{schtasks_argstr}' "
+                "-Verb RunAs -Wait"
+            )
+            try:
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps_cmd],
+                    capture_output=True, text=True,
+                )
+            except OSError as e:
+                print(f"  [!!] Failed to launch elevated process: {e}")
+
+        if _windows_task_exists(task_name):
+            print(f"  · scheduled task '{task_name}' registered successfully")
+            return
+
+        print("  [!!] Task not detected — UAC declined or schtasks errored.")
+        retry = input("  Retry the elevation? [Y/n]: ").strip().lower()
+        if retry not in ("", "y", "yes"):
+            print("  Skipped. Run manually later from an elevated cmd:")
+            print(f"  schtasks {schtasks_argstr}")
+            return
 
 
 def _ensure_proxy_deps(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:

@@ -52,7 +52,7 @@ start by `claude_hooks.daemon.ensure_secret`).
 |----------|------------------------------------------------------|
 | Linux    | `systemd/claude-hooks-daemon.service` → `/etc/systemd/system/`, `systemctl enable --now` |
 | macOS    | `~/Library/LaunchAgents/com.claude-hooks.daemon.plist`, `launchctl load -w` |
-| Windows  | Prints the `schtasks /Create /SC ONLOGON …` command (admin needed) |
+| Windows  | `schtasks /Create /SC ONLOGON /TN claude-hooks-daemon …` via PowerShell `Start-Process -Verb RunAs -Wait` (one UAC prompt). Falls back to printing the manual command if UAC is declined or PowerShell isn't available. |
 
 You can opt out at install time. The runtime behaviour is unchanged
 either way — daemon-or-fallback.
