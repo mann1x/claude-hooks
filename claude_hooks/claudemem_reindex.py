@@ -56,6 +56,15 @@ _LOCK_FILENAME = ".claudemem-reindex.lock"
 # Configurable per-call via ``lock_min_age_seconds``.
 _DEFAULT_LOCK_MIN_AGE_SECONDS = 60
 
+# Windows-only Popen creation flags. Suppresses the cmd-shim console
+# window that ``claudemem.cmd`` would otherwise allocate (claudemem is
+# a Node CLI shipped via npm, so its bin is a .cmd shim that goes
+# through cmd.exe → spawns a new console). On a long-running reindex
+# (5+ minutes on a large repo) the window stays visible for the entire
+# duration. CREATE_NO_WINDOW prevents the allocation; DETACHED_PROCESS
+# keeps the child off the parent's process group too. Imported lazily
+# inside ``_spawn_reindex`` so POSIX platforms never touch the symbols.
+
 # Directories we never need to scan for staleness detection. Users can
 # extend this via config (``hooks.claudemem_reindex.ignored_dirs``).
 _DEFAULT_IGNORED_DIRS: frozenset[str] = frozenset({
@@ -94,27 +103,120 @@ def _claudemem_indexed(root: Path) -> bool:
     return (root / ".claudemem").is_dir()
 
 
+def _pid_running(pid: int) -> bool:
+    """Best-effort cross-platform 'is this PID alive?' check.
+
+    POSIX uses ``kill(pid, 0)``; Windows uses ``OpenProcess`` via ctypes
+    (no psutil dependency — keep this module stdlib-only). Returns
+    ``False`` on any error so a stale-but-uncheckable lock falls
+    through and a new reindex can spawn. Conservative: prefers
+    re-spawning over assuming a process is still running.
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes  # local import — POSIX never pays this
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            handle = kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid),
+            )
+            if not handle:
+                return False
+            # Pull exit code; STILL_ACTIVE (259) means the process is alive.
+            exit_code = ctypes.c_ulong()
+            ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            kernel32.CloseHandle(handle)
+            if not ok:
+                return False
+            return exit_code.value == 259  # STILL_ACTIVE
+        except Exception:
+            return False
+    # POSIX
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+
+
+def _read_lock(lock: Path) -> tuple[Optional[int], Optional[float]]:
+    """Parse the lock file. Returns (pid, timestamp) — either may be
+    ``None`` if the file is missing or in an older single-timestamp
+    format. New format is two lines: ``<pid>\\n<unix-ts>``."""
+    try:
+        body = lock.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None, None
+    if not body:
+        return None, None
+    parts = body.split("\n", 1)
+    if len(parts) == 2:
+        try:
+            return int(parts[0]), float(parts[1])
+        except ValueError:
+            return None, None
+    # Legacy single-line timestamp (pre-PID lock format). Treat as
+    # "no PID known" so the cooldown still applies but a stale-running
+    # check can't be done.
+    try:
+        return None, float(parts[0])
+    except ValueError:
+        return None, None
+
+
 def _acquire_lock(
     root: Path,
     min_age_seconds: int = _DEFAULT_LOCK_MIN_AGE_SECONDS,
 ) -> bool:
-    """Return True if we should proceed (stale or missing lock), False otherwise."""
+    """Return True if we should proceed, False otherwise.
+
+    Two guards combine:
+
+    1. **Live-process check** — if the lock names a PID and that PID
+       is still running, refuse regardless of age. Prevents pile-ups
+       when the previous reindex outlives the cooldown (claudemem on a
+       large repo over a remote Ollama can run for many minutes).
+    2. **Cooldown** — if the lock's timestamp is younger than
+       ``min_age_seconds``, refuse. Prevents rapid Stop-hook
+       reentry from spawning multiple back-to-back indexes when no
+       previous PID was recorded (legacy lock format).
+    """
     lock = root / _LOCK_FILENAME
     now = time.time()
-    if lock.exists():
-        try:
-            age = now - lock.stat().st_mtime
-            if age < min_age_seconds:
-                log.debug("reindex lock fresh (%ds old) — skipping", int(age))
-                return False
-        except OSError:
-            pass
+    pid, ts = _read_lock(lock)
+
+    if pid is not None and _pid_running(pid):
+        log.debug("reindex lock held by live pid %d — skipping", pid)
+        return False
+
+    if ts is not None:
+        age = now - ts
+        if age < min_age_seconds:
+            log.debug("reindex lock fresh (%ds old) — skipping", int(age))
+            return False
+
+    # Caller is expected to spawn next and then call ``_record_lock_pid``
+    # to stamp the actual child PID. We pre-write the timestamp here so
+    # a crash between this and the spawn still updates the cooldown.
     try:
         lock.write_text(str(int(now)), encoding="utf-8")
     except OSError as e:
         log.debug("could not write reindex lock: %s", e)
         return False
     return True
+
+
+def _record_lock_pid(root: Path, pid: int) -> None:
+    """Stamp the spawned PID into the lock file. Safe-by-design — any
+    failure (disk full, perms) leaves the legacy timestamp-only lock,
+    which still serves the cooldown role."""
+    lock = root / _LOCK_FILENAME
+    try:
+        lock.write_text(f"{pid}\n{int(time.time())}", encoding="utf-8")
+    except OSError as e:
+        log.debug("could not stamp pid into reindex lock: %s", e)
 
 
 def _index_mtime(claudemem_dir: Path) -> Optional[float]:
@@ -142,21 +244,51 @@ def _index_mtime(claudemem_dir: Path) -> Optional[float]:
         return None
 
 
-def _spawn_reindex(binary: str, root: Path) -> None:
-    """Start ``claudemem index --quiet`` as a detached background process."""
-    try:
-        # Detach: new session, redirect stdio to devnull so parent doesn't block.
-        subprocess.Popen(
-            [binary, "index", "--quiet"],
-            cwd=str(root),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
+def _spawn_reindex(binary: str, root: Path) -> Optional[int]:
+    """Start ``claudemem index --quiet`` as a detached background process.
+
+    Returns the spawned PID on success, ``None`` on failure. The PID
+    is recorded into the lock file by the caller so subsequent
+    invocations can skip while the prior reindex is still running.
+
+    On Windows, ``creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS``
+    is required to suppress the console window that the npm-installed
+    ``claudemem.cmd`` shim would otherwise allocate. claudemem's index
+    pass on a non-trivial repo (≥ a few hundred files, remote Ollama)
+    runs for minutes, and a parent ``pythonw.exe`` daemon spawning a
+    .cmd child without these flags pops a *visible* black cmd window
+    that stays on screen until indexing finishes — disruptive,
+    cosmetically resembles an admin prompt because of the npm shim's
+    ``title %COMSPEC%`` line.
+
+    On POSIX, ``start_new_session=True`` already detaches the child
+    from our session and pgrp.
+    """
+    kwargs: dict = {
+        "cwd": str(root),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        # CREATE_NO_WINDOW (0x08000000) hides the console; DETACHED_PROCESS
+        # (0x00000008) detaches from the parent's console group. Combined,
+        # the child gets neither a visible window nor a stray inherited
+        # console handle that could resurface on parent exit.
+        kwargs["creationflags"] = (
+            subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+            | subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
         )
-        log.info("spawned claudemem index --quiet in %s", root)
+    else:
+        kwargs["start_new_session"] = True
+
+    try:
+        proc = subprocess.Popen([binary, "index", "--quiet"], **kwargs)
+        log.info("spawned claudemem index --quiet in %s (pid=%d)", root, proc.pid)
+        return proc.pid
     except OSError as e:
         log.debug("could not spawn claudemem: %s", e)
+        return None
 
 
 def reindex_if_dirty_async(
@@ -182,7 +314,9 @@ def reindex_if_dirty_async(
             return
         if not _acquire_lock(root, min_age_seconds=lock_min_age_seconds):
             return
-        _spawn_reindex(binary, root)
+        pid = _spawn_reindex(binary, root)
+        if pid is not None:
+            _record_lock_pid(root, pid)
     except Exception as e:
         log.debug("reindex_if_dirty_async failed: %s", e)
 
@@ -255,7 +389,9 @@ def reindex_if_stale_async(
                     continue
                 if mt > index_mtime:
                     if _acquire_lock(root, min_age_seconds=lock_min_age_seconds):
-                        _spawn_reindex(binary, root)
+                        pid = _spawn_reindex(binary, root)
+                        if pid is not None:
+                            _record_lock_pid(root, pid)
                     return
     except Exception as e:
         log.debug("reindex_if_stale_async failed: %s", e)

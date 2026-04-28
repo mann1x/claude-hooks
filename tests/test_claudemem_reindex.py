@@ -52,6 +52,74 @@ class LockTests(unittest.TestCase):
             self.assertTrue(claudemem_reindex._acquire_lock(root))
             self.assertTrue((root / claudemem_reindex._LOCK_FILENAME).exists())
 
+    def test_live_pid_blocks_even_when_old(self):
+        """The previous reindex outlives the cooldown — pile-up
+        prevention. claudemem index on a large repo can run for
+        minutes; without this check, the next Stop hook would spawn a
+        parallel reindex against the same Lance/sqlite store."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock = root / claudemem_reindex._LOCK_FILENAME
+            # Pretend a process owns the lock with a stamp older than cooldown.
+            lock.write_text(f"{os.getpid()}\n{int(time.time()) - 999}")
+            # _pid_running on our own pid returns True.
+            self.assertFalse(claudemem_reindex._acquire_lock(root))
+
+    def test_dead_pid_with_old_timestamp_allows(self):
+        """Lock left by a crashed-or-completed reindex must NOT
+        permanently wedge the cooldown. PID is gone + timestamp is
+        old → allow the next reindex."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock = root / claudemem_reindex._LOCK_FILENAME
+            # Pid 1 is init/launchd on POSIX, System on Windows — never
+            # something the lock could legitimately have stamped, but
+            # _pid_running will report it alive. Use a high unallocated
+            # pid instead so the check returns False.
+            stale_pid = 999_999_999
+            self.assertFalse(claudemem_reindex._pid_running(stale_pid))
+            old_ts = int(time.time()) - 999
+            lock.write_text(f"{stale_pid}\n{old_ts}")
+            self.assertTrue(claudemem_reindex._acquire_lock(root))
+
+    def test_dead_pid_with_recent_timestamp_still_blocks_on_cooldown(self):
+        """PID is gone but the cooldown hasn't passed — still refuse,
+        otherwise rapid Stop-hook reentry would spawn pile-ups
+        regardless of the previous run's outcome."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock = root / claudemem_reindex._LOCK_FILENAME
+            stale_pid = 999_999_999
+            self.assertFalse(claudemem_reindex._pid_running(stale_pid))
+            recent_ts = int(time.time())
+            lock.write_text(f"{stale_pid}\n{recent_ts}")
+            self.assertFalse(claudemem_reindex._acquire_lock(root))
+
+    def test_legacy_timestamp_only_format_still_works(self):
+        """Pre-PID lock format: a single-line unix timestamp. We must
+        keep parsing it correctly so existing on-disk locks don't break
+        when this code rolls out."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock = root / claudemem_reindex._LOCK_FILENAME
+            lock.write_text(str(int(time.time())))
+            pid, ts = claudemem_reindex._read_lock(lock)
+            self.assertIsNone(pid)
+            self.assertIsNotNone(ts)
+            self.assertFalse(claudemem_reindex._acquire_lock(root))
+
+    def test_record_lock_pid_writes_new_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            claudemem_reindex._record_lock_pid(root, 12345)
+            pid, ts = claudemem_reindex._read_lock(
+                root / claudemem_reindex._LOCK_FILENAME,
+            )
+            self.assertEqual(pid, 12345)
+            self.assertIsNotNone(ts)
+            # Sanity: ts should be approximately now.
+            self.assertLess(abs(ts - time.time()), 5)
+
 
 class ReindexIfDirtyTests(unittest.TestCase):
     def _make_project(self, tmp: str) -> Path:
@@ -179,6 +247,124 @@ class ReindexIfStaleTests(unittest.TestCase):
                     cwd=str(root), staleness_minutes=10,
                 )
                 spawn.assert_not_called()
+
+
+class SpawnReindexTests(unittest.TestCase):
+    """``_spawn_reindex`` must (a) launch detached without leaving a
+    visible window on Windows, and (b) return the spawned PID so the
+    caller can stamp it into the lock for pile-up prevention."""
+
+    def test_returns_pid_on_success(self):
+        fake = MagicMock()
+        fake.pid = 4242
+        with patch("claude_hooks.claudemem_reindex.subprocess.Popen", return_value=fake):
+            pid = claudemem_reindex._spawn_reindex("/usr/bin/claudemem", Path("/tmp"))
+        self.assertEqual(pid, 4242)
+
+    def test_returns_none_on_oserror(self):
+        with patch(
+            "claude_hooks.claudemem_reindex.subprocess.Popen",
+            side_effect=OSError("simulated"),
+        ):
+            pid = claudemem_reindex._spawn_reindex("/usr/bin/claudemem", Path("/tmp"))
+        self.assertIsNone(pid)
+
+    def test_posix_uses_start_new_session(self):
+        """On POSIX, the helper must pass ``start_new_session=True`` so
+        the child detaches from our process group — otherwise SIGINT to
+        the daemon would also kill the child reindex."""
+        with patch("claude_hooks.claudemem_reindex.os.name", "posix"), \
+             patch("claude_hooks.claudemem_reindex.subprocess.Popen") as Popen:
+            Popen.return_value = MagicMock(pid=1)
+            claudemem_reindex._spawn_reindex("/usr/bin/claudemem", Path("/tmp"))
+            kwargs = Popen.call_args.kwargs
+            self.assertTrue(kwargs.get("start_new_session"))
+            self.assertNotIn("creationflags", kwargs)
+
+    def test_windows_uses_creationflags_no_window(self):
+        """The pandorum bug: a long-running ``claudemem index --quiet``
+        spawned via Popen WITHOUT creationflags pops a visible cmd
+        window for the whole multi-minute reindex. CREATE_NO_WINDOW +
+        DETACHED_PROCESS prevents the console allocation."""
+        # subprocess.CREATE_NO_WINDOW / DETACHED_PROCESS only exist as
+        # attrs on Windows builds of Python; provide them as constants
+        # on the patched module so the helper's bit-or works on POSIX.
+        CREATE_NO_WINDOW = 0x08000000
+        DETACHED_PROCESS = 0x00000008
+        # Pre-construct the Path BEFORE patching os.name — pathlib's
+        # Path() picks Posix vs Windows at instantiation time and would
+        # raise on Linux if asked to build a WindowsPath.
+        root = Path("/tmp")
+        with patch("claude_hooks.claudemem_reindex.os.name", "nt"), \
+             patch("claude_hooks.claudemem_reindex.subprocess.Popen") as Popen, \
+             patch.object(
+                claudemem_reindex.subprocess,
+                "CREATE_NO_WINDOW",
+                CREATE_NO_WINDOW,
+                create=True,
+            ), \
+             patch.object(
+                claudemem_reindex.subprocess,
+                "DETACHED_PROCESS",
+                DETACHED_PROCESS,
+                create=True,
+            ):
+            Popen.return_value = MagicMock(pid=1)
+            claudemem_reindex._spawn_reindex("C:/x/claudemem.cmd", root)
+            kwargs = Popen.call_args.kwargs
+            self.assertNotIn("start_new_session", kwargs)
+            flags = kwargs.get("creationflags", 0)
+            self.assertTrue(flags & CREATE_NO_WINDOW,
+                            "CREATE_NO_WINDOW must be set on Windows")
+            self.assertTrue(flags & DETACHED_PROCESS,
+                            "DETACHED_PROCESS must be set on Windows")
+
+
+class IntegrationLockingTests(unittest.TestCase):
+    """End-to-end: reindex_if_dirty_async must stamp the PID into the
+    lock so the next call within the cooldown window can see it's
+    still running and skip."""
+
+    def _make_project(self, tmp: str) -> Path:
+        root = Path(tmp)
+        (root / ".git").mkdir()
+        (root / ".claudemem").mkdir()
+        return root
+
+    def test_pid_stamped_after_successful_spawn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._make_project(tmp)
+            with patch("claude_hooks.claudemem_reindex.shutil.which",
+                       return_value="/usr/bin/claudemem"), \
+                 patch("claude_hooks.claudemem_reindex._spawn_reindex",
+                       return_value=77777):
+                claudemem_reindex.reindex_if_dirty_async(
+                    cwd=str(root), turn_modified=True,
+                )
+            pid, ts = claudemem_reindex._read_lock(
+                root / claudemem_reindex._LOCK_FILENAME,
+            )
+            self.assertEqual(pid, 77777)
+            self.assertIsNotNone(ts)
+
+    def test_no_pid_stamp_when_spawn_fails(self):
+        """If the child failed to launch (Popen returned None), the
+        lock must NOT carry a stale PID — the legacy timestamp-only
+        format is safe and lets the next attempt retry after cooldown."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._make_project(tmp)
+            with patch("claude_hooks.claudemem_reindex.shutil.which",
+                       return_value="/usr/bin/claudemem"), \
+                 patch("claude_hooks.claudemem_reindex._spawn_reindex",
+                       return_value=None):
+                claudemem_reindex.reindex_if_dirty_async(
+                    cwd=str(root), turn_modified=True,
+                )
+            pid, ts = claudemem_reindex._read_lock(
+                root / claudemem_reindex._LOCK_FILENAME,
+            )
+            self.assertIsNone(pid)
+            self.assertIsNotNone(ts)
 
 
 if __name__ == "__main__":
