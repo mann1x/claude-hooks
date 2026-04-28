@@ -925,7 +925,6 @@ _DAEMON_TASK_XML = """<?xml version="1.0" encoding="UTF-16"?>
   <Triggers>
     <LogonTrigger>
       <Enabled>true</Enabled>
-      <UserId>{user_id}</UserId>
     </LogonTrigger>
   </Triggers>
   <Principals>
