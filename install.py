@@ -562,33 +562,107 @@ def _install_claude_hooks_daemon(
         print("  [dry-run] skipping daemon install.")
         return
 
-    if not non_interactive:
-        ans = input("  Install + enable claude-hooks-daemon? [Y/n]: ").strip().lower()
-        if ans not in ("", "y", "yes"):
+    # Detect existing autostart entry BEFORE the install prompt so we
+    # can show the right question. Without this, a re-run of install.py
+    # always asks "Install + enable…?" even when the task / unit / plist
+    # is already in place — confusing because the install has already
+    # happened.
+    already = _detect_existing_daemon_entry()
+    if already:
+        print(f"  Already installed: {already}")
+        if non_interactive:
+            print(
+                "  --non-interactive: leaving as-is and verifying the daemon."
+            )
+            if _wait_for_daemon(timeout=5.0):
+                print("  · daemon responding on 127.0.0.1:47018")
+            else:
+                print("  [!!] daemon not responding.")
+            return
+        ans = input(
+            "  Re-install (delete + recreate + verify), verify-only, "
+            "or skip? [r/V/s]: "
+        ).strip().lower()
+        if ans in ("s", "skip", "n", "no"):
             print("  Skipped.")
             return
+        if ans in ("r", "reinstall", "re-install"):
+            # Fall through to platform installer; its already-exists
+            # branch will do the delete + recreate + verify.
+            pass
+        else:
+            # Default ("", "v", "verify") → just ping and report.
+            if _wait_for_daemon(timeout=5.0):
+                print("  · daemon responding on 127.0.0.1:47018")
+            else:
+                print(
+                    "  [!!] daemon not responding. The autostart entry exists"
+                    " but the daemon isn't running — try restarting it"
+                    " through the platform's tooling."
+                )
+            return
+    else:
+        if not non_interactive:
+            ans = input(
+                "  Install + enable claude-hooks-daemon? [Y/n]: "
+            ).strip().lower()
+            if ans not in ("", "y", "yes"):
+                print("  Skipped.")
+                return
+
+    force_reinstall = bool(already)
 
     if os.name == "nt":
-        _install_daemon_windows(non_interactive=non_interactive)
+        _install_daemon_windows(
+            non_interactive=non_interactive,
+            force_reinstall=force_reinstall,
+        )
         return
 
     # POSIX path: try systemd first, then launchd.
     if Path("/etc/systemd/system").is_dir():
-        _install_daemon_systemd(non_interactive=non_interactive)
+        _install_daemon_systemd(
+            non_interactive=non_interactive,
+            force_reinstall=force_reinstall,
+        )
         return
     if sys.platform == "darwin":
-        _install_daemon_launchd(non_interactive=non_interactive)
+        _install_daemon_launchd(
+            non_interactive=non_interactive,
+            force_reinstall=force_reinstall,
+        )
         return
     print("  [!!] No supported autostart manager (systemd / launchd) detected.")
     print("       Run manually:  bin/claude-hooks-daemon")
 
 
-def _install_daemon_systemd(*, non_interactive: bool = False) -> None:
+def _detect_existing_daemon_entry() -> Optional[str]:
+    """Return a human-readable description of the existing daemon
+    autostart entry, or None when nothing is installed yet."""
+    if os.name == "nt":
+        if _windows_task_exists(_DAEMON_TASK_NAME):
+            return f"Windows scheduled task '{_DAEMON_TASK_NAME}'"
+        return None
+    # systemd unit file is the strongest signal on Linux — even if the
+    # service is currently stopped, the autostart is "installed".
+    if (Path("/etc/systemd/system") / _DAEMON_UNIT).exists():
+        return f"systemd unit /etc/systemd/system/{_DAEMON_UNIT}"
+    plist = Path.home() / "Library" / "LaunchAgents" / "com.claude-hooks.daemon.plist"
+    if plist.exists():
+        return f"launchd plist {plist}"
+    return None
+
+
+def _install_daemon_systemd(
+    *, non_interactive: bool = False, force_reinstall: bool = False,
+) -> None:
     src = HERE / "systemd" / _DAEMON_UNIT
     dest = Path("/etc/systemd/system") / _DAEMON_UNIT
 
     if dest.exists():
-        if non_interactive:
+        if force_reinstall:
+            ans = "y"
+        elif non_interactive:
             ans = "n"
         else:
             ans = input(
@@ -667,13 +741,17 @@ _LAUNCHD_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
-def _install_daemon_launchd(*, non_interactive: bool = False) -> None:
+def _install_daemon_launchd(
+    *, non_interactive: bool = False, force_reinstall: bool = False,
+) -> None:
     plist_dir = Path.home() / "Library" / "LaunchAgents"
     plist_dir.mkdir(parents=True, exist_ok=True)
     dest = plist_dir / "com.claude-hooks.daemon.plist"
 
     if dest.exists():
-        if non_interactive:
+        if force_reinstall:
+            ans = "y"
+        elif non_interactive:
             ans = "n"
         else:
             ans = input(
@@ -818,14 +896,18 @@ def _run_schtasks_elevated(argstr: str, argv: list) -> bool:
     return True
 
 
-def _install_daemon_windows(*, non_interactive: bool) -> None:
+def _install_daemon_windows(
+    *, non_interactive: bool, force_reinstall: bool = False,
+) -> None:
     """Register the daemon as a Windows logon-triggered scheduled task,
     start it now, and verify it's responding.
 
     Three failure / re-entry modes:
 
     1. Task already exists — ask whether to delete + reinstall +
-       re-verify, or just leave as-is (and verify ping).
+       re-verify, or just leave as-is (and verify ping). When the
+       outer caller passes ``force_reinstall=True`` (because it
+       already collected that decision), skip the inner prompt.
     2. /Create succeeded but daemon didn't come up — retry /Run + ping.
     3. UAC declined — retry the elevation or skip.
 
@@ -851,7 +933,9 @@ def _install_daemon_windows(*, non_interactive: bool) -> None:
 
     # ---------- already-installed branch ----------
     if _windows_task_exists(task_name):
-        if non_interactive:
+        if force_reinstall:
+            ans = "y"
+        elif non_interactive:
             print(
                 f"  · task '{task_name}' already exists "
                 f"(--non-interactive — leaving as-is)"
