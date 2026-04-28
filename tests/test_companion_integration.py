@@ -10,6 +10,10 @@ from claude_hooks import (
     gitnexus_integration as gn,
 )
 
+# Captured before the autouse fixture replaces it — tests that exercise
+# the real per-project lookup grab this back via monkeypatch.setattr.
+_REAL_ENGINES_FN = comp._engines_enabled_for_cwd
+
 
 @pytest.fixture(autouse=True)
 def _no_real_engines(monkeypatch):
@@ -147,6 +151,52 @@ class TestSessionStartHint:
         h = comp.session_start_hint(tmp_path, config=cfg)
         assert h is not None
         assert "axon" in h.lower()
+
+
+class TestEnginesEnabledForCwd:
+    """Direct tests for the per-project mcpServers reader.
+
+    Claude Code on Windows stores `projects[*]` keys with forward slashes
+    (``C:/Users/...``) even though Python's ``str(Path(...))`` yields
+    backslashes on Windows. The helper must look up both forms so the
+    hint logic doesn't misclassify Windows projects as "engine not
+    configured here".
+    """
+
+    def test_finds_project_via_forward_slash_key(self, monkeypatch, tmp_path):
+        # Restore the real helper — the autouse fixture stubs it.
+        monkeypatch.setattr(comp, "_engines_enabled_for_cwd", _REAL_ENGINES_FN)
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        (fake_home / ".claude.json").write_text(
+            '{"projects": {"C:/Users/u/proj": {"mcpServers": {"gitnexus": {}}}}}',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(comp.os.path, "expanduser", lambda p: str(fake_home) if p == "~" else p)
+
+        # Caller passes a backslash-style path (what str(Path) yields on Win).
+        result = comp._engines_enabled_for_cwd(comp.Path(r"C:\Users\u\proj"))
+        assert result is not None
+        assert "gitnexus" in result
+
+    def test_finds_project_via_lowercase_drive(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(comp, "_engines_enabled_for_cwd", _REAL_ENGINES_FN)
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        (fake_home / ".claude.json").write_text(
+            '{"projects": {"c:/Users/u/proj": {"mcpServers": {"axon": {}}}}}',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(comp.os.path, "expanduser", lambda p: str(fake_home) if p == "~" else p)
+        result = comp._engines_enabled_for_cwd(comp.Path(r"C:\Users\u\proj"))
+        assert result is not None
+        assert "axon" in result
+
+    def test_returns_none_on_missing_config(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(comp, "_engines_enabled_for_cwd", _REAL_ENGINES_FN)
+        fake_home = tmp_path / "no_such_home"
+        monkeypatch.setattr(comp.os.path, "expanduser", lambda p: str(fake_home) if p == "~" else p)
+        assert comp._engines_enabled_for_cwd(tmp_path) is None
 
 
 class TestReindex:

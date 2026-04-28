@@ -59,8 +59,22 @@ def _engines_enabled_for_cwd(cwd: Path) -> Optional[set[str]]:
         log.debug("could not read %s for per-project engine check: %s", home, e)
         return None
     keys: set[str] = set((c.get("mcpServers") or {}).keys())
-    project = (c.get("projects") or {}).get(str(cwd)) or {}
-    keys |= set((project.get("mcpServers") or {}).keys())
+    projects = c.get("projects") or {}
+    # Claude Code on Windows stores project keys with forward slashes
+    # ("C:/Users/..."), but str(Path) on Windows yields backslashes.
+    # Try both forms (and a lowercase-drive variant) so the helper
+    # works regardless of which casing/separator the cwd arrives as.
+    s = str(cwd)
+    candidates = {s, s.replace("\\", "/"), s.replace("/", "\\")}
+    if len(s) >= 2 and s[1] == ":":
+        # Windows: C:\... / C:/... -> also try lowercase-drive form.
+        lc = s[0].lower() + s[1:]
+        candidates |= {lc, lc.replace("\\", "/"), lc.replace("/", "\\")}
+    for cand in candidates:
+        project = projects.get(cand)
+        if project:
+            keys |= set((project.get("mcpServers") or {}).keys())
+            break
     return keys
 
 
