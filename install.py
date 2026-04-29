@@ -371,6 +371,451 @@ def _install_proxy_stack_systemd(
             print(f"  [!!] {name} enable failed:\n{rc.stderr.strip()[-300:]}")
 
 
+def _set_settings_env_vars(
+    settings_path: Path, vars_to_set: dict, *,
+    dry_run: bool = False, _print: bool = True,
+) -> None:
+    """Idempotently merge ``vars_to_set`` into the ``env`` block of
+    ``~/.claude/settings.json`` (creating both file and section as
+    needed). Backs up the prior file if one exists.
+
+    Used by the proxy-orchestrator to write ``ANTHROPIC_BASE_URL``
+    after the user picks local-or-remote proxy mode.
+    """
+    if dry_run:
+        if _print:
+            print(f"  [dry-run] would set in {settings_path}:")
+            for k, v in vars_to_set.items():
+                print(f"    {k}={v}")
+        return
+
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings = _load_json(settings_path) if settings_path.exists() else {}
+    if settings_path.exists():
+        try:
+            shutil.copy(settings_path, backup_path(settings_path))
+        except OSError as e:
+            if _print:
+                print(f"  [!!] Could not back up {settings_path}: {e}")
+            return
+    env = settings.setdefault("env", {})
+    if not isinstance(env, dict):
+        settings["env"] = env = {}
+    changed = False
+    for k, v in vars_to_set.items():
+        if env.get(k) != v:
+            env[k] = v
+            changed = True
+    if not changed:
+        if _print:
+            print(f"  · {settings_path}: env already set, no change")
+        return
+    _save_json(settings_path, settings)
+    if _print:
+        print(f"  + updated {settings_path}: " +
+              ", ".join(f"{k}={v}" for k, v in vars_to_set.items()))
+
+
+def _setup_proxy_orchestrator(
+    cfg: dict, settings_path: Path, *,
+    non_interactive: bool, dry_run: bool,
+) -> None:
+    """Top-level proxy decision: do you want the API proxy at all?
+    If yes, install locally on this host or point at an existing
+    proxy already running on the network?
+
+    Mutates ``cfg["proxy"]["enabled"]`` in-place; the per-OS install
+    helpers downstream see the updated value. For "remote" mode it
+    also writes ``ANTHROPIC_BASE_URL`` directly into settings.json so
+    Claude Code routes through the existing proxy without a local
+    service install.
+
+    Non-interactive mode preserves the existing config -- nothing is
+    asked or changed.
+    """
+    if non_interactive:
+        return
+
+    print("\n==> claude-hooks API proxy")
+    print(
+        "    Optional local HTTP proxy in front of api.anthropic.com.\n"
+        "    Adds: real weekly-limit %, Warmup token-drain block,\n"
+        "          rate-limit header capture, structured request logs.\n"
+        "    Can be installed locally on this host, or you can point\n"
+        "    this host at an existing proxy already running on the LAN.\n"
+        "    See docs/proxy.md."
+    )
+
+    proxy_cfg = cfg.setdefault("proxy", {})
+    currently_enabled = bool(proxy_cfg.get("enabled", False))
+
+    ans = input(
+        f"  Use the API proxy? (current: {'yes' if currently_enabled else 'no'}) [y/N]: "
+    ).strip().lower()
+    if ans not in ("y", "yes"):
+        # Don't flip an already-true value to false silently -- if the
+        # user has it on, they probably want to keep it. Only set the
+        # default when it wasn't already enabled.
+        if not currently_enabled:
+            proxy_cfg["enabled"] = False
+        return
+
+    print("\n  Two options:")
+    print("    [1] Install the proxy on THIS host.")
+    print("        Service runs locally; Claude Code points at 127.0.0.1.")
+    print("    [2] Use an existing proxy already on the network.")
+    print("        Skip local install -- just set ANTHROPIC_BASE_URL on")
+    print("        this host to the URL you supply.")
+    while True:
+        choice = input("  Choose [1/2] (default 1): ").strip() or "1"
+        if choice in ("1", "2"):
+            break
+        print("  Please enter 1 or 2.")
+
+    if choice == "1":
+        proxy_cfg["enabled"] = True
+        print("  · proxy.enabled = true; per-OS service installer will run.")
+        host = proxy_cfg.get("listen_host", "127.0.0.1")
+        port = proxy_cfg.get("listen_port", 38080)
+        advertise = "127.0.0.1" if host == "0.0.0.0" else host
+        url = f"http://{advertise}:{port}"
+        ans = input(
+            f"  Also set ANTHROPIC_BASE_URL={url} in {settings_path} now? [Y/n]: "
+        ).strip().lower()
+        if ans in ("", "y", "yes"):
+            _set_settings_env_vars(
+                settings_path, {"ANTHROPIC_BASE_URL": url}, dry_run=dry_run,
+            )
+        else:
+            print(f"  · Set it manually later: {url}")
+    else:
+        # Remote -- don't install locally.
+        proxy_cfg["enabled"] = False
+        while True:
+            url = input(
+                "  URL of the existing proxy (e.g. http://192.168.178.2:38080): "
+            ).strip().rstrip("/")
+            if url.startswith(("http://", "https://")):
+                break
+            print("  Please enter a URL beginning with http:// or https://")
+        _set_settings_env_vars(
+            settings_path, {"ANTHROPIC_BASE_URL": url}, dry_run=dry_run,
+        )
+        print(f"  · Local proxy NOT installed. ANTHROPIC_BASE_URL={url}")
+
+
+_PROXY_LAUNCHD_LABEL = "com.claude-hooks.proxy"
+_PROXY_LAUNCHD_FILENAME = f"{_PROXY_LAUNCHD_LABEL}.plist"
+
+# Mirrors _LAUNCHD_PLIST for the daemon, but points at the proxy entry
+# point. KeepAlive=true so launchd respawns it if it crashes; logs land
+# next to the daemon's so `claude-hooks-daemon-ctl tail` style commands
+# can find them by convention.
+_LAUNCHD_PROXY_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>__LABEL__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__REPO_PATH__/bin/claude-hooks-proxy</string>
+  </array>
+  <key>WorkingDirectory</key><string>__REPO_PATH__</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>__HOME__/.claude/claude-hooks-proxy.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/.claude/claude-hooks-proxy.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CLAUDE_HOOKS_REPO</key><string>__REPO_PATH__</string>
+  </dict>
+</dict>
+</plist>
+"""
+
+
+def _install_proxy_launchd(
+    cfg: dict, *, non_interactive: bool, dry_run: bool,
+) -> None:
+    """Install the proxy as a macOS LaunchAgent when ``proxy.enabled``
+    is true. macOS-only; idempotent.
+
+    Outer entry only checks the OS gate; the actual work lives in
+    ``_install_proxy_launchd_steps`` so tests can drive the install
+    flow on non-macOS hosts.
+    """
+    if sys.platform != "darwin":
+        return
+    _install_proxy_launchd_steps(
+        cfg, non_interactive=non_interactive, dry_run=dry_run,
+    )
+
+
+def _install_proxy_launchd_steps(
+    cfg: dict, *, non_interactive: bool, dry_run: bool,
+) -> None:
+    """The body of ``_install_proxy_launchd`` -- assumes we're already
+    on macOS. Mirrors ``_install_daemon_launchd`` but for the proxy.
+    Loads immediately via ``launchctl load -w`` so the proxy is
+    responding before the installer returns.
+    """
+    proxy_cfg = (cfg.get("proxy") or {})
+    if not proxy_cfg.get("enabled", False):
+        return
+
+    plist_dir = Path.home() / "Library" / "LaunchAgents"
+    dest = plist_dir / _PROXY_LAUNCHD_FILENAME
+
+    print("\n==> Proxy launchd agent (macOS)")
+    if dest.exists():
+        print(f"  · {dest.name} already installed -- leaving as-is")
+        return
+    if dry_run:
+        print(f"  [dry-run] would write {dest}")
+        return
+    if non_interactive:
+        print("  --non-interactive: proceeding.")
+    else:
+        ans = input(
+            f"  Install proxy LaunchAgent at {dest}? [Y/n]: "
+        ).strip().lower()
+        if ans not in ("", "y", "yes"):
+            print("  Skipped.")
+            return
+
+    plist_dir.mkdir(parents=True, exist_ok=True)
+    content = (
+        _LAUNCHD_PROXY_PLIST
+        .replace("__LABEL__", _PROXY_LAUNCHD_LABEL)
+        .replace("__REPO_PATH__", str(HERE.resolve()))
+        .replace("__HOME__", str(Path.home()))
+    )
+    try:
+        dest.write_text(content, encoding="utf-8")
+    except OSError as e:
+        print(f"  [!!] Failed to write {dest}: {e}")
+        return
+    print(f"  + wrote {dest}")
+    rc = subprocess.run(
+        ["launchctl", "load", "-w", str(dest)],
+        capture_output=True, text=True,
+    )
+    if rc.returncode != 0:
+        print(f"  [!!] launchctl load failed:\n{rc.stderr.strip()[-300:]}")
+        return
+    print(f"  · loaded {_PROXY_LAUNCHD_LABEL} into launchd")
+    _print_proxy_post_install_hint(proxy_cfg)
+
+
+_PROXY_TASK_NAME = "claude-hooks-proxy"
+
+# Mirrors _DAEMON_TASK_XML for the daemon. The proxy runs forever, so
+# ExecutionTimeLimit=PT0S; MultipleInstancesPolicy=IgnoreNew because
+# port-bind would fail anyway; StartWhenAvailable=true catches the
+# logon-trigger miss case.
+_PROXY_TASK_XML = """<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>claude-hooks-proxy -- local HTTP proxy in front of api.anthropic.com</Description>
+    <Author>claude-hooks installer</Author>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{user_id}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>true</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{command}</Command>
+      <Arguments>{arguments}</Arguments>
+      <WorkingDirectory>{workdir}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+def _write_proxy_task_xml(
+    *, command: str, arguments: str, workdir: str,
+) -> Path:
+    """Render the proxy task XML to a UTF-16 temp file and return its
+    path. Caller is responsible for cleanup.
+    """
+    user_id = _windows_user_id()
+    xml = _PROXY_TASK_XML.format(
+        user_id=_xml_escape(user_id),
+        command=_xml_escape(command),
+        arguments=_xml_escape(arguments),
+        workdir=_xml_escape(workdir),
+    )
+    fd, path = tempfile.mkstemp(prefix="claude-hooks-proxy-", suffix=".xml")
+    os.close(fd)
+    p = Path(path)
+    # schtasks /XML wants UTF-16
+    p.write_bytes(xml.encode("utf-16"))
+    return p
+
+
+def _install_proxy_windows(
+    cfg: dict, *, non_interactive: bool, dry_run: bool,
+) -> None:
+    """Register the proxy as a Windows logon-triggered scheduled task
+    when ``proxy.enabled`` is true. Windows-only; idempotent.
+
+    Outer entry only checks the OS gate; the actual work lives in
+    ``_install_proxy_windows_steps`` so tests can drive the install
+    flow on Linux without globally patching ``os.name`` (which would
+    poison ``pathlib``'s class selector).
+    """
+    if os.name != "nt":
+        return
+    _install_proxy_windows_steps(
+        cfg, non_interactive=non_interactive, dry_run=dry_run,
+    )
+
+
+def _install_proxy_windows_steps(
+    cfg: dict, *, non_interactive: bool, dry_run: bool,
+) -> None:
+    """The body of ``_install_proxy_windows`` -- assumes we're already
+    on Windows. Mirrors ``_install_daemon_windows_steps`` (UAC-elevated
+    /Create + /Run + verify). The proxy is launched via pythonw.exe +
+    run_proxy.py to avoid a permanent cmd.exe console window.
+    """
+    proxy_cfg = (cfg.get("proxy") or {})
+    if not proxy_cfg.get("enabled", False):
+        return
+
+    print("\n==> Proxy scheduled task (Windows)")
+    if dry_run:
+        print("  [dry-run] would register schtasks task "
+              f"{_PROXY_TASK_NAME}")
+        return
+
+    task_name = _PROXY_TASK_NAME
+    runner = (HERE / "run_proxy.py").resolve()
+    workdir = str(HERE.resolve())
+
+    pyw = find_conda_env_pythonw()
+    if pyw is not None:
+        exec_command = str(pyw)
+        exec_arguments = f'"{runner}"'
+    else:
+        cmd_path = (HERE / "bin" / "claude-hooks-proxy.cmd").resolve()
+        print(
+            "  [!] pythonw.exe not found -- falling back to the .cmd shim. "
+            "A console window will be visible while the proxy runs."
+        )
+        exec_command = str(cmd_path)
+        exec_arguments = ""
+
+    if _windows_task_exists(task_name):
+        if non_interactive:
+            ans = "n"
+        else:
+            ans = input(
+                f"  Task {task_name} already exists. Re-install? [y/N]: "
+            ).strip().lower()
+        if ans not in ("y", "yes"):
+            print(f"  · leaving {task_name} as-is")
+            _print_proxy_post_install_hint(proxy_cfg)
+            return
+        # Delete first so the /Create below wins cleanly.
+        if not _run_schtasks_elevated(
+            f'/Delete /TN "{task_name}" /F',
+            ["/Delete", "/TN", task_name, "/F"],
+        ):
+            print("  [!!] /Delete failed -- aborting reinstall")
+            return
+
+    if not non_interactive:
+        ans = input(
+            f"  Install scheduled task {task_name}? "
+            "(one UAC prompt for /Create and /Run) [Y/n]: "
+        ).strip().lower()
+        if ans not in ("", "y", "yes"):
+            print("  Skipped.")
+            return
+
+    xml_path = _write_proxy_task_xml(
+        command=exec_command, arguments=exec_arguments, workdir=workdir,
+    )
+    try:
+        ok = _run_schtasks_elevated(
+            f'/Create /XML "{xml_path}" /TN "{task_name}" /F',
+            ["/Create", "/XML", str(xml_path), "/TN", task_name, "/F"],
+        )
+        if not ok:
+            print("  [!!] /Create failed -- skipping /Run")
+            return
+        print(f"  · registered {task_name}")
+        ok = _run_schtasks_elevated(
+            f'/Run /TN "{task_name}"',
+            ["/Run", "/TN", task_name],
+        )
+        if ok:
+            print(f"  · started {task_name}")
+        else:
+            print(f"  [!!] /Run failed -- task is registered but not started; "
+                  f"use `schtasks /Run /TN {task_name}` manually")
+    finally:
+        try:
+            xml_path.unlink()
+        except OSError:
+            pass
+
+    _print_proxy_post_install_hint(proxy_cfg)
+
+
+def _print_proxy_post_install_hint(proxy_cfg: dict) -> None:
+    """Remind the user that the proxy is only useful once Claude Code
+    points at it via ``ANTHROPIC_BASE_URL``. Same message regardless of
+    OS so installs end with a consistent pointer.
+    """
+    host = proxy_cfg.get("listen_host", "127.0.0.1")
+    port = proxy_cfg.get("listen_port", 38080)
+    # ``0.0.0.0`` means "all interfaces" -- the *client* should use a
+    # routable address (loopback for same-host, LAN IP for shared).
+    advertise_host = "127.0.0.1" if host == "0.0.0.0" else host
+    print(
+        "\n  Next step: route Claude Code through the proxy by setting\n"
+        f'      "env": {{"ANTHROPIC_BASE_URL": "http://{advertise_host}:{port}"}}\n'
+        "  in ~/.claude/settings.json on every host that should use it.\n"
+        "  See docs/proxy.md for the full setup."
+    )
+
+
 _CALIBER_PROXY_UNIT = "caliber-grounding-proxy.service"
 
 
@@ -2108,6 +2553,19 @@ def main() -> int:
         dry_run=args.dry_run,
     )
 
+    # API proxy orchestrator: ask whether to use the proxy at all,
+    # then choose local install vs existing remote URL. Mutates
+    # ``cfg["proxy"]["enabled"]`` in-place so the per-OS installers
+    # downstream see the right value, and writes
+    # ``ANTHROPIC_BASE_URL`` directly into settings.json for the
+    # remote-URL case (no local service install needed).
+    _setup_proxy_orchestrator(
+        cfg,
+        user_settings_path(),
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
+
     # Save config.
     if args.dry_run:
         print(f"\n[dry-run] Would write config to {cfg_path}:")
@@ -2131,6 +2589,22 @@ def main() -> int:
     # Offer to install the proxy + rollup-timer + dashboard systemd
     # units (Linux only; idempotent -- skips units already installed).
     _install_proxy_stack_systemd(
+        cfg,
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
+    # macOS and Windows analogues -- each silent no-op when its OS
+    # doesn't match. Linux ships proxy + rollup + dashboard via the
+    # call above; macOS/Windows install just the proxy itself
+    # (rollup/dashboard are Linux conveniences and run fine standalone
+    # as periodic ``python -m claude_hooks.proxy.dashboard`` etc. when
+    # the user wants them on those OSes).
+    _install_proxy_launchd(
+        cfg,
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
+    _install_proxy_windows(
         cfg,
         non_interactive=args.non_interactive,
         dry_run=args.dry_run,
