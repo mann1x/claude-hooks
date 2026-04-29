@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -244,6 +245,73 @@ def _index_mtime(claudemem_dir: Path) -> Optional[float]:
         return None
 
 
+_CMD_SHIM_TARGET_RE = re.compile(
+    r'"(?P<prog>[^"]+)"\s+"(?P<js>[^"]+\.js)"\s+%\*\s*$',
+    re.IGNORECASE,
+)
+
+
+def _resolve_npm_cmd_shim(cmd_path: str) -> Optional[tuple[str, str]]:
+    """Parse an npm-generated ``.cmd`` shim and return ``(runtime, js_path)``.
+
+    npm cmd shims hand off to ``node`` / ``bun`` / ``deno`` via a line
+    of the form
+
+        ... & "%_prog%"  "%dp0%\\node_modules\\<pkg>\\dist\\index.js" %*
+
+    On Windows, spawning the shim directly — even with
+    ``CREATE_NO_WINDOW | DETACHED_PROCESS`` — leaves a visible
+    ``cmd.exe`` console for the lifetime of the child, because the
+    shim's ``title %COMSPEC%`` line forces a console allocation
+    before the runtime starts. The fix that makes the flash go away
+    for real is the same one that landed in caliber PR #197: skip
+    the shim, invoke the runtime + entry-point JS directly.
+
+    Returns None when the path doesn't exist, isn't a recognisable
+    npm shim, or refers to a runtime not on PATH. Caller falls back
+    to spawning the shim.
+    """
+    try:
+        with open(cmd_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError:
+        return None
+    m = _CMD_SHIM_TARGET_RE.search(content)
+    if not m:
+        return None
+    prog = m.group("prog").strip()
+    js_template = m.group("js").strip()
+    # The shim uses ``%dp0%`` (the .cmd's own dir) with backslash
+    # separators; cmd shims are Windows-only so we use ``\\`` directly
+    # instead of os.sep (lets the resolver be unit-tested cross-platform).
+    dp0 = os.path.dirname(os.path.abspath(cmd_path))
+    if not (dp0.endswith("\\") or dp0.endswith("/")):
+        dp0 += "\\"
+    js_path = js_template.replace("%dp0%\\", dp0).replace("%dp0%/", dp0).replace("%dp0%", dp0)
+    # Convert all backslashes to forward slashes after substitution.
+    # Windows accepts both as path separators, and this lets the unit
+    # tests run on POSIX (where os.path.normpath does not translate
+    # backslashes). We then normalise once more for cleanliness.
+    js_path = os.path.normpath(js_path.replace("\\", "/"))
+    if not os.path.exists(js_path):
+        return None
+    # Resolve the runtime — shims often use literal ``%_prog%`` or
+    # ``"%~dp0\\bun.exe"``. Try absolute → PATH lookup → bare name.
+    if "%" in prog:
+        # Pattern like "%_prog%" — fall back to the bare runtime name
+        # used by claudemem (bun) / most npm packages (node).
+        runtime_candidates = ["bun", "node"]
+    elif os.path.exists(prog):
+        runtime_candidates = [prog]
+    else:
+        runtime_candidates = [prog]
+    for rc in runtime_candidates:
+        resolved = shutil.which(rc) or (rc if os.path.exists(rc) else None)
+        if resolved:
+            return (resolved, js_path)
+    return None
+
+
 def _spawn_reindex(binary: str, root: Path) -> Optional[int]:
     """Start ``claudemem index --quiet`` as a detached background process.
 
@@ -252,17 +320,16 @@ def _spawn_reindex(binary: str, root: Path) -> Optional[int]:
     invocations can skip while the prior reindex is still running.
 
     On Windows, ``creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS``
-    is required to suppress the console window that the npm-installed
-    ``claudemem.cmd`` shim would otherwise allocate. claudemem's index
-    pass on a non-trivial repo (≥ a few hundred files, remote Ollama)
-    runs for minutes, and a parent ``pythonw.exe`` daemon spawning a
-    .cmd child without these flags pops a *visible* black cmd window
-    that stays on screen until indexing finishes — disruptive,
-    cosmetically resembles an admin prompt because of the npm shim's
-    ``title %COMSPEC%`` line.
+    alone is NOT enough — the npm-generated ``claudemem.cmd`` shim
+    has a ``title %COMSPEC%`` line that forces a visible cmd window
+    before the runtime even starts. We resolve the shim's target
+    (``bun ...\\mnemex\\dist\\index.js``) and spawn the runtime
+    directly; only then does CREATE_NO_WINDOW suppress the console
+    for real. Same pattern as caliber PR #197 (cmd-shim flash fix).
 
     On POSIX, ``start_new_session=True`` already detaches the child
-    from our session and pgrp.
+    from our session and pgrp; the binary is a real ELF/Mach-O so
+    the shim-bypass logic never fires.
     """
     kwargs: dict = {
         "cwd": str(root),
@@ -271,10 +338,6 @@ def _spawn_reindex(binary: str, root: Path) -> Optional[int]:
         "stderr": subprocess.DEVNULL,
     }
     if os.name == "nt":
-        # CREATE_NO_WINDOW (0x08000000) hides the console; DETACHED_PROCESS
-        # (0x00000008) detaches from the parent's console group. Combined,
-        # the child gets neither a visible window nor a stray inherited
-        # console handle that could resurface on parent exit.
         kwargs["creationflags"] = (
             subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
             | subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
@@ -282,8 +345,16 @@ def _spawn_reindex(binary: str, root: Path) -> Optional[int]:
     else:
         kwargs["start_new_session"] = True
 
+    argv: list[str] = [binary, "index", "--quiet"]
+    if os.name == "nt" and binary.lower().endswith(".cmd"):
+        resolved = _resolve_npm_cmd_shim(binary)
+        if resolved:
+            runtime, js_path = resolved
+            argv = [runtime, js_path, "index", "--quiet"]
+            log.debug("bypassing cmd shim: %s -> %s %s", binary, runtime, js_path)
+
     try:
-        proc = subprocess.Popen([binary, "index", "--quiet"], **kwargs)
+        proc = subprocess.Popen(argv, **kwargs)
         log.info("spawned claudemem index --quiet in %s (pid=%d)", root, proc.pid)
         return proc.pid
     except OSError as e:

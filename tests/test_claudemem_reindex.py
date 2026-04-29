@@ -320,6 +320,127 @@ class SpawnReindexTests(unittest.TestCase):
                             "DETACHED_PROCESS must be set on Windows")
 
 
+class ResolveNpmCmdShimTests(unittest.TestCase):
+    """The Windows ``claudemem.cmd`` shim spawned with
+    ``CREATE_NO_WINDOW | DETACHED_PROCESS`` STILL pops a visible cmd
+    window — its ``title %COMSPEC%`` line forces a console allocation
+    before the runtime starts. The fix is the same as caliber PR #197:
+    parse the shim, invoke the runtime + entry-point JS directly."""
+
+    _REAL_SHIM = (
+        "@ECHO off\r\n"
+        ":start\r\n"
+        'IF EXIST "%dp0%\\bun.exe" (\r\n'
+        '  SET "_prog=%dp0%\\bun.exe"\r\n'
+        ") ELSE (\r\n"
+        '  SET "_prog=bun"\r\n'
+        ")\r\n"
+        'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  '
+        '"%dp0%\\node_modules\\mnemex\\dist\\index.js" %*\r\n'
+    )
+
+    def _write_shim(self, td: str, body: str) -> str:
+        cmd = os.path.join(td, "claudemem.cmd")
+        nm = os.path.join(td, "node_modules", "mnemex", "dist")
+        os.makedirs(nm)
+        Path(os.path.join(nm, "index.js")).write_text("//", encoding="utf-8")
+        Path(cmd).write_text(body, encoding="utf-8")
+        return cmd
+
+    def test_parses_real_claudemem_shim(self):
+        with tempfile.TemporaryDirectory() as td:
+            cmd = self._write_shim(td, self._REAL_SHIM)
+            with patch("claude_hooks.claudemem_reindex.shutil.which",
+                       side_effect=lambda n: "/usr/bin/" + n if n in ("bun", "node") else None):
+                resolved = claudemem_reindex._resolve_npm_cmd_shim(cmd)
+            # Must assert before tempdir cleanup — js path is inside it.
+            self.assertIsNotNone(resolved)
+            runtime, js = resolved  # type: ignore[misc]
+            self.assertTrue(runtime.endswith("bun"),
+                            f"expected runtime to be bun, got {runtime!r}")
+            self.assertTrue(js.endswith("index.js"))
+            self.assertTrue(os.path.exists(js))
+
+    def test_returns_none_when_file_missing(self):
+        self.assertIsNone(
+            claudemem_reindex._resolve_npm_cmd_shim("/no/such/path.cmd"),
+        )
+
+    def test_returns_none_for_non_shim_cmd(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".cmd", delete=False) as f:
+            f.write("@echo this is not a shim\r\n")
+            path = f.name
+        try:
+            self.assertIsNone(claudemem_reindex._resolve_npm_cmd_shim(path))
+        finally:
+            os.unlink(path)
+
+    def test_returns_none_when_runtime_missing_from_path(self):
+        """If the shim asks for ``bun`` but bun isn't on PATH, the
+        resolver bails so the caller falls back to running the .cmd
+        itself (degraded but functional)."""
+        with tempfile.TemporaryDirectory() as td:
+            cmd = self._write_shim(td, self._REAL_SHIM)
+            with patch("claude_hooks.claudemem_reindex.shutil.which",
+                       return_value=None):
+                self.assertIsNone(claudemem_reindex._resolve_npm_cmd_shim(cmd))
+
+
+class SpawnReindexShimBypassTests(unittest.TestCase):
+    """When the binary path ends in ``.cmd`` and points at a parseable
+    npm shim, ``_spawn_reindex`` must invoke the runtime + JS path
+    directly instead of running the shim."""
+
+    def test_bypasses_shim_on_windows(self):
+        with tempfile.TemporaryDirectory() as td:
+            cmd = os.path.join(td, "claudemem.cmd")
+            nm = os.path.join(td, "node_modules", "mnemex", "dist")
+            os.makedirs(nm)
+            Path(os.path.join(nm, "index.js")).write_text("//", encoding="utf-8")
+            Path(cmd).write_text(
+                ResolveNpmCmdShimTests._REAL_SHIM, encoding="utf-8",
+            )
+            CREATE_NO_WINDOW = 0x08000000
+            DETACHED_PROCESS = 0x00000008
+            root = Path("/tmp")
+            with patch("claude_hooks.claudemem_reindex.os.name", "nt"), \
+                 patch("claude_hooks.claudemem_reindex.shutil.which",
+                       side_effect=lambda n: "/usr/bin/" + n if n in ("bun","node") else None), \
+                 patch("claude_hooks.claudemem_reindex.subprocess.Popen") as Popen, \
+                 patch.object(claudemem_reindex.subprocess, "CREATE_NO_WINDOW",
+                              CREATE_NO_WINDOW, create=True), \
+                 patch.object(claudemem_reindex.subprocess, "DETACHED_PROCESS",
+                              DETACHED_PROCESS, create=True):
+                Popen.return_value = MagicMock(pid=1)
+                claudemem_reindex._spawn_reindex(cmd, root)
+                argv = Popen.call_args.args[0]
+        # argv is [runtime, js_path, "index", "--quiet"] — no .cmd in sight.
+        self.assertEqual(len(argv), 4)
+        self.assertTrue(argv[0].endswith("bun"))
+        self.assertTrue(argv[1].endswith("index.js"))
+        self.assertEqual(argv[2:], ["index", "--quiet"])
+        # Crucially: the shim path is NOT the first arg anymore.
+        self.assertFalse(argv[0].endswith(".cmd"))
+
+    def test_falls_back_to_shim_when_unparseable(self):
+        """If the .cmd doesn't exist or isn't a recognisable shim, the
+        helper still runs the .cmd directly (with creationflags) so
+        functionality stays intact even when the bypass is impossible."""
+        CREATE_NO_WINDOW = 0x08000000
+        DETACHED_PROCESS = 0x00000008
+        root = Path("/tmp")
+        with patch("claude_hooks.claudemem_reindex.os.name", "nt"), \
+             patch("claude_hooks.claudemem_reindex.subprocess.Popen") as Popen, \
+             patch.object(claudemem_reindex.subprocess, "CREATE_NO_WINDOW",
+                          CREATE_NO_WINDOW, create=True), \
+             patch.object(claudemem_reindex.subprocess, "DETACHED_PROCESS",
+                          DETACHED_PROCESS, create=True):
+            Popen.return_value = MagicMock(pid=1)
+            claudemem_reindex._spawn_reindex("C:/no-such-shim.cmd", root)
+            argv = Popen.call_args.args[0]
+        self.assertEqual(argv, ["C:/no-such-shim.cmd", "index", "--quiet"])
+
+
 class IntegrationLockingTests(unittest.TestCase):
     """End-to-end: reindex_if_dirty_async must stamp the PID into the
     lock so the next call within the cooldown window can see it's
