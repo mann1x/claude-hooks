@@ -433,6 +433,120 @@ def _install_caliber_proxy_systemd(
         print(f"  [!!] enable failed:\n{rc.stderr.strip()[-300:]}")
 
 
+_KAIROS_PIN_SERVICE = "claude-hooks-kairos-pin.service"
+_KAIROS_PIN_PATH = "claude-hooks-kairos-pin.path"
+
+
+def _install_kairos_pin_systemd(
+    *, non_interactive: bool, dry_run: bool,
+) -> None:
+    """Install the kairos-pin systemd path-watcher when the user's
+    ``cachedGrowthBookFeatures.tengu_kairos_cron_durable`` flag is
+    currently false. Linux-only; idempotent.
+
+    Background: the flag silently downgrades ``CronCreate(durable=true)``
+    to session-only for accounts where Anthropic hasn't rolled it out
+    yet. CC re-fetches GrowthBook on session start and overwrites any
+    manual flip on disk -- so a one-time edit doesn't stick. The
+    path-watcher re-pins the flag within ms of any rewrite, keeping
+    durable scheduling functional across sessions.
+
+    See claude_hooks/kairos_pin.py for the underlying logic.
+    """
+    if os.name == "nt":
+        return
+    if not Path("/etc/systemd/system").is_dir():
+        return
+
+    # Only propose when the flag is actually rolled-back -- avoid
+    # pestering users on hosts where Anthropic has already enabled it
+    # (or where the file doesn't exist yet, e.g. fresh installs that
+    # haven't run claude code yet).
+    try:
+        from claude_hooks.kairos_pin import is_pin_needed
+    except Exception as exc:
+        print(f"  [!!] kairos_pin import failed: {exc}")
+        return
+    if not is_pin_needed():
+        return
+
+    service_src = HERE / "systemd" / _KAIROS_PIN_SERVICE
+    path_src = HERE / "systemd" / _KAIROS_PIN_PATH
+    service_dest = Path("/etc/systemd/system") / _KAIROS_PIN_SERVICE
+    path_dest = Path("/etc/systemd/system") / _KAIROS_PIN_PATH
+    if service_dest.exists() and path_dest.exists():
+        # Already installed -- ensure the path unit is enabled and
+        # active (idempotent re-run on a host that was set up earlier).
+        rc = subprocess.run(
+            ["systemctl", "is-active", "--quiet", _KAIROS_PIN_PATH],
+            capture_output=True,
+        )
+        if rc.returncode != 0:
+            subprocess.run(
+                ["systemctl", "enable", "--now", _KAIROS_PIN_PATH],
+                capture_output=True,
+            )
+        return
+    if not service_src.exists() or not path_src.exists():
+        print(f"  [!!] kairos-pin templates missing under {HERE}/systemd/ -- skipping")
+        return
+
+    print("\n==> kairos-pin systemd path-watcher (durable cron fix)")
+    print("    Detected: cachedGrowthBookFeatures.tengu_kairos_cron_durable = false.")
+    print("    This flag silently downgrades CronCreate(durable=true) to session-only.")
+    print("    The path-watcher re-pins the flag within ms of every Claude Code rewrite,")
+    print("    so durable safety-net crons survive session restarts. Opt-in.")
+    if dry_run:
+        print("  [dry-run] skipping write.")
+        return
+    if non_interactive:
+        print("  --non-interactive: proceeding.")
+    else:
+        ans = input("  Install kairos-pin path-watcher? [Y/n]: ").strip().lower()
+        if ans not in ("", "y", "yes"):
+            print("  Skipped. Re-run install.py to revisit.")
+            return
+
+    # Substitute the template placeholders. Run as the *invoking* user
+    # since ~/.claude.json lives in their home; root can write it
+    # directly, non-root needs User= so the unit can read+write the file.
+    home = str(Path.home().resolve())
+    user = os.environ.get("SUDO_USER") or os.environ.get("USER") or "root"
+    repo = str(HERE.resolve())
+
+    for src, dest in ((service_src, service_dest), (path_src, path_dest)):
+        content = src.read_text(encoding="utf-8")
+        content = (
+            content
+            .replace("__HOME__", home)
+            .replace("__USER__", user)
+            .replace("__REPO_PATH__", repo)
+        )
+        try:
+            dest.write_text(content, encoding="utf-8")
+        except OSError as e:
+            print(f"  [!!] Failed to write {dest}: {e}")
+            return
+        print(f"  + wrote {dest.name}")
+
+    subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
+    rc = subprocess.run(
+        ["systemctl", "enable", "--now", _KAIROS_PIN_PATH],
+        capture_output=True, text=True,
+    )
+    if rc.returncode == 0:
+        print(f"  · enabled + started {_KAIROS_PIN_PATH}")
+        # Trigger a one-shot run now to flip the flag immediately
+        # without waiting for the next CC rewrite.
+        subprocess.run(
+            ["systemctl", "start", _KAIROS_PIN_SERVICE],
+            capture_output=True,
+        )
+        print("  · ran kairos-pin once -- flag should be true now")
+    else:
+        print(f"  [!!] enable failed:\n{rc.stderr.strip()[-300:]}")
+
+
 _AXON_HOST_UNIT = "axon-host.service"
 _AXON_HOST_CWD = Path("/var/lib/axon-host")
 _AXON_PLACEHOLDER = (
@@ -2152,6 +2266,18 @@ def main() -> int:
     # 2026-04-27 ate 64 GB of RAM on a model directory.
     _install_axon_host_systemd(
         cfg,
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
+
+    # Offer to install the kairos-pin systemd path-watcher *only* when
+    # the user's cached GrowthBook flag for durable crons is currently
+    # false (otherwise nothing to fix). When CC re-fetches GrowthBook
+    # on session start, the flag rolls back to false and silent-
+    # downgrades CronCreate(durable=true) to session-only -- losing
+    # the safety net for paid pods / GPUs. The path-watcher re-pins
+    # the flag within ms of every rewrite. Opt-in, idempotent.
+    _install_kairos_pin_systemd(
         non_interactive=args.non_interactive,
         dry_run=args.dry_run,
     )
