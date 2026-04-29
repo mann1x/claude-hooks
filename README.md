@@ -84,8 +84,11 @@ Claude responds (knowing the prior context, deterministically)
 
 - **Local HTTP proxy** in front of `api.anthropic.com` ([`docs/proxy.md`](docs/proxy.md))
   that Claude Code hooks can't see on their own. Opt-in via
-  `config/claude-hooks.json`; systemd unit at
-  `systemd/claude-hooks-proxy.service` for long-running deployments.
+  `config/claude-hooks.json`. **`install.py` orchestrates the per-OS
+  service** — pick "Use the API proxy?" → either `[1]` install locally
+  (systemd unit on Linux, `LaunchAgent` on macOS, UAC-elevated scheduled
+  task on Windows) or `[2]` point at an existing proxy on the LAN
+  (writes `ANTHROPIC_BASE_URL` into `~/.claude/settings.json` for you).
 - **Warmup short-circuit** (`proxy.block_warmup: true`) — drops the
   subagent-Warmup token drain ([`anthropics/claude-code#47922`](https://github.com/anthropics/claude-code/issues/47922))
   without the all-or-nothing side-effects of
@@ -248,13 +251,25 @@ The installer will:
 3. Verify each server with a real MCP call
 4. Write `config/claude-hooks.json` with your server URLs
 5. Merge hook entries into `~/.claude/settings.json` (idempotent, tagged `_managedBy`)
-6. If `proxy.enabled: true`:
-   - pip-install `httpx[http2]>=0.27` into the chosen Python env
-   - On Linux with systemd, offer to install four units:
-     `claude-hooks-proxy.service`, `claude-hooks-rollup.service` +
-     `.timer`, and `claude-hooks-dashboard.service`. Templates
-     under `systemd/` are substituted with this checkout's path.
-   - Idempotent: already-installed units are left alone.
+6. Asks **"Use the API proxy?"**. On yes:
+   - **`[1]` Local install** — pip-installs `httpx[http2]>=0.27` into
+     the chosen Python env, then drops the per-OS service:
+     - **Linux** — `claude-hooks-proxy.service` + `rollup.service` +
+       `rollup.timer` + `dashboard.service` in `/etc/systemd/system/`,
+       `daemon-reload` + `enable --now`.
+     - **macOS** — `~/Library/LaunchAgents/com.claude-hooks.proxy.plist`
+       (`KeepAlive=true`, `RunAtLoad=true`), loaded via `launchctl`.
+     - **Windows** — UAC-elevated logon-triggered scheduled task
+       `claude-hooks-proxy` (pythonw + `run_proxy.py` to avoid a
+       persistent cmd window).
+     Optionally writes `ANTHROPIC_BASE_URL=http://127.0.0.1:38080` into
+     `~/.claude/settings.json` (LAN listen hosts auto-translate to loopback
+     on the client side).
+   - **`[2]` Remote URL** — prompts for the proxy URL of an existing host
+     on the LAN (e.g. `http://192.168.178.2:38080`) and writes
+     `ANTHROPIC_BASE_URL` into `~/.claude/settings.json`. No local service.
+   - Idempotent on re-run: already-installed services are detected and
+     left alone unless you confirm reinstall.
 
 ### Installer flags
 

@@ -39,31 +39,104 @@ Design + phased roadmap: [PLAN-proxy-hook.md](./PLAN-proxy-hook.md).
 
 ## Install via `install.py` (recommended)
 
-`python3 install.py` handles the whole stack when `proxy.enabled`
-is `true` in your config. Specifically it:
+`python3 install.py` orchestrates the entire setup. It first asks
+the high-level question, then dispatches to the right per-OS
+mechanism — no manual `systemctl` / `launchctl` / `schtasks` wiring
+needed.
 
-1. Checks that `httpx[http2]>=0.27` is importable in the conda env
+### Step 1 — pick the proxy mode
+
+The installer prints:
+
+```
+==> claude-hooks API proxy
+    Optional local HTTP proxy in front of api.anthropic.com.
+    Adds: real weekly-limit %, Warmup token-drain block,
+          rate-limit header capture, structured request logs.
+    Can be installed locally on this host, or you can point
+    this host at an existing proxy already running on the LAN.
+    See docs/proxy.md.
+  Use the API proxy? (current: no) [y/N]:
+```
+
+If you say **`n`**, nothing changes — `proxy.enabled` stays at
+its current value, no service is installed, no env var is touched.
+
+If you say **`y`**, you get a follow-up:
+
+```
+  Two options:
+    [1] Install the proxy on THIS host.
+        Service runs locally; Claude Code points at 127.0.0.1.
+    [2] Use an existing proxy already on the network.
+        Skip local install -- just set ANTHROPIC_BASE_URL on
+        this host to the URL you supply.
+  Choose [1/2] (default 1):
+```
+
+### Step 2a — local install (choice `1`)
+
+The installer:
+
+1. Sets `proxy.enabled = true` in `config/claude-hooks.json`.
+2. Optionally writes `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>`
+   into `~/.claude/settings.json` under `env` (asks first; defaults
+   to yes). Backs up the prior `settings.json` before overwriting.
+   `listen_host: "0.0.0.0"` translates to `127.0.0.1` for the client
+   side automatically (the proxy *binds* on all interfaces, but the
+   *client* always uses loopback when same-host).
+3. Checks that `httpx[http2]>=0.27` is importable in the conda env
    (or system python) and offers to pip-install it if not.
-2. On Linux hosts with `/etc/systemd/system` present, offers to
-   install four systemd units:
-   - `claude-hooks-proxy.service` — the forwarder
-   - `claude-hooks-rollup.service` + `claude-hooks-rollup.timer` —
-     5-minute stats ingester into `stats.db`
-   - `claude-hooks-dashboard.service` — read-only stats view on
-     port 38081
-3. Template substitution replaces `__REPO_PATH__` and `__HOME__`
-   in the unit files with this checkout's location and the current
-   user's home, then `daemon-reload` + `enable --now`.
+4. Installs the platform-native service + starts it:
 
-Idempotent: re-running skips units already installed. `--dry-run`
-prints the plan without writing anything. `--non-interactive`
-auto-accepts the prompts.
+   | OS | Mechanism | Service name |
+   |----|-----------|--------------|
+   | **Linux** (systemd) | Drops 4 units in `/etc/systemd/system/`, `daemon-reload`, `enable --now` | `claude-hooks-proxy.service` (+ `rollup.service` + `rollup.timer` + `dashboard.service`) |
+   | **macOS** (launchd) | Writes `~/Library/LaunchAgents/com.claude-hooks.proxy.plist` (KeepAlive=true), `launchctl load -w` | `com.claude-hooks.proxy` |
+   | **Windows** (Task Scheduler) | UAC-elevated `schtasks /Create /XML` for a logon-triggered task; ExecutionTimeLimit=PT0S; uses `pythonw.exe` + `run_proxy.py` to avoid a permanent cmd.exe console window | `claude-hooks-proxy` |
 
-Windows / macOS / hosts without systemd: the installer detects
-this and skips the systemd step cleanly; run the proxy manually
-with `bin/claude-hooks-proxy` or the `.cmd` shim.
+   Linux ships the full proxy + rollup + dashboard stack; macOS and
+   Windows install just the proxy itself. The rollup/dashboard
+   services are Linux conveniences and run fine standalone on the
+   other OSes via `python -m claude_hooks.proxy.dashboard` etc. when
+   you want them.
 
-## Enable
+5. Template substitution replaces `__REPO_PATH__`, `__HOME__`, and
+   (Windows) `__USER__` in the unit / plist / XML files before they
+   land on disk.
+
+### Step 2b — remote URL (choice `2`)
+
+You're prompted for the URL of the existing proxy
+(e.g. `http://192.168.178.2:38080`). The installer:
+
+1. Sets `proxy.enabled = false` in `config/claude-hooks.json` so the
+   per-OS service installer stays a no-op on this host.
+2. Writes `ANTHROPIC_BASE_URL=<your-url>` into `~/.claude/settings.json`.
+3. Trailing slashes are stripped; the URL must start with
+   `http://` or `https://` (re-prompted otherwise).
+
+This is the right path for multi-host setups where one machine
+hosts the proxy and other machines just point at it.
+
+### Idempotency, dry-run, non-interactive
+
+- Re-running `install.py` is idempotent: existing service files /
+  scheduled tasks are detected and left alone (re-installation is
+  offered as an opt-in for the daemon; the proxy is leave-as-is by
+  default to preserve any drop-in overrides).
+- `--dry-run` prints the plan without writing anything.
+- `--non-interactive` is a **silent no-op for the orchestrator** —
+  config is preserved as-is so CI / automated installs don't flip
+  someone's proxy mode unexpectedly. Per-OS service installers in
+  non-interactive mode auto-accept their `[Y/n]` prompts when their
+  config gate is already true.
+
+## Manual install (escape hatch)
+
+The orchestrator above is the path to take. This section is for when
+you're managing the lifecycle yourself — packaging, debugging, or
+running on an OS that doesn't fit one of the auto-detected patterns.
 
 1. Edit `config/claude-hooks.json` (copy the `proxy` block from
    `config/claude-hooks.example.json` if missing):
@@ -83,7 +156,7 @@ with `bin/claude-hooks-proxy` or the `.cmd` shim.
    }
    ```
 
-2. Start the proxy (foreground — `Ctrl-C` to stop):
+2. Run the proxy in the foreground (`Ctrl-C` to stop):
 
    ```bash
    # POSIX shim (prefers conda env's python)
@@ -91,9 +164,12 @@ with `bin/claude-hooks-proxy` or the `.cmd` shim.
 
    # Or directly
    python3 -m claude_hooks.proxy
-   ```
 
-   On Windows: `bin\claude-hooks-proxy.cmd`.
+   # Windows
+   bin\claude-hooks-proxy.cmd
+   # ...or via the windowless launcher (mirrors what the scheduled task uses)
+   pythonw run_proxy.py
+   ```
 
 3. Point Claude Code at it via `~/.claude/settings.json`:
 
@@ -104,6 +180,13 @@ with `bin/claude-hooks-proxy` or the `.cmd` shim.
      }
    }
    ```
+
+   For multi-host (LAN-shared) setups, point each client's
+   `ANTHROPIC_BASE_URL` at the host running the proxy
+   (e.g. `http://192.168.178.2:38080`) and set
+   `listen_host: "0.0.0.0"` on the host. The orchestrator's
+   choice `2` ("use an existing proxy") sets exactly this URL on the
+   client side without installing anything locally.
 
 4. Open a new Claude Code session. Every request is now logged under
    `~/.claude/claude-hooks-proxy/YYYY-MM-DD.jsonl`.

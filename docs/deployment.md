@@ -84,9 +84,16 @@ on every turn.
 
 ## 4. Enable the proxy
 
-### Server-side
+`install.py` orchestrates the proxy setup on Linux/macOS/Windows
+(see [`docs/proxy.md`](proxy.md#install-via-installpy-recommended)
+for the full prompt walkthrough). Two flows depending on the role
+this host should play.
 
-Edit `config/claude-hooks.json`:
+### Server-side (the host running the proxy)
+
+If you want to share the proxy with other machines on the LAN, edit
+`config/claude-hooks.json` first so `listen_host` is the LAN
+interface (and any other tweaks you want), then run the installer:
 
 ```json
 "proxy": {
@@ -103,37 +110,59 @@ Edit `config/claude-hooks.json`:
 }
 ```
 
-Swap `listen_host` for `127.0.0.1` if you don't want LAN exposure.
+Then `python3 install.py`:
 
-### Install the systemd unit
+- Pick **`y`** when asked "Use the API proxy?".
+- Pick **`1`** when asked local-vs-remote (you ARE the local host).
+- Optionally accept the `ANTHROPIC_BASE_URL=http://127.0.0.1:38080`
+  prompt — `0.0.0.0` / LAN IP listen hosts translate to `127.0.0.1`
+  on the client side automatically.
+
+The installer drops the right per-OS service:
+
+| OS | What gets installed |
+|----|---------------------|
+| Linux | `claude-hooks-proxy.service` + `rollup.service` + `rollup.timer` + `dashboard.service` in `/etc/systemd/system/`, `daemon-reload` + `enable --now` |
+| macOS | `~/Library/LaunchAgents/com.claude-hooks.proxy.plist` (KeepAlive=true), `launchctl load -w` |
+| Windows | UAC-elevated logon-triggered scheduled task `claude-hooks-proxy` (pythonw + `run_proxy.py` to avoid a permanent cmd window) |
+
+Single-host setup: leave `listen_host: "127.0.0.1"`. LAN-shared
+setup: use the LAN IP and make sure your firewall lets the port
+through for the subnet you want to expose.
+
+Verify (Linux):
 
 ```bash
-sudo install -m644 systemd/claude-hooks-proxy.service \
-    /etc/systemd/system/claude-hooks-proxy.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now claude-hooks-proxy
-```
-
-Verify:
-
-```bash
-systemctl is-active claude-hooks-proxy              # should print: active
-journalctl -u claude-hooks-proxy -n 5 --no-pager    # first 5 log lines
+systemctl is-active claude-hooks-proxy              # active
+journalctl -u claude-hooks-proxy -n 5 --no-pager
 curl -s -o /dev/null -w "%{http_code}\n" \
-    http://192.168.178.2:38080/                     # should print: 404
-                                                    # (upstream rejects bare /, means proxy is alive)
+    http://192.168.178.2:38080/                     # 404 = proxy alive
 ```
 
-### Firewall
+Verify (macOS):
+```bash
+launchctl print gui/$(id -u)/com.claude-hooks.proxy | head
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:38080/
+```
 
-The proxy binds to the LAN address; make sure your firewall lets the
-port through for the subnet you want to expose. On a single-host
-setup keep `listen_host: 127.0.0.1` and skip this step entirely.
+Verify (Windows):
+```cmd
+schtasks /Query /TN claude-hooks-proxy /V /FO LIST
+curl http://127.0.0.1:38080/ -s -o NUL -w "%{http_code}\n"
+```
 
 ## 5. Wire each client
 
-For every Claude Code host that should route through the proxy,
-edit `~/.claude/settings.json` and add under `env`:
+For every other Claude Code host that should route through the
+shared proxy, run `python3 install.py` on that host and pick
+**choice `2`** ("use an existing proxy already on the network")
+when asked. The installer prompts for the URL
+(e.g. `http://192.168.178.2:38080`) and writes
+`ANTHROPIC_BASE_URL` into `~/.claude/settings.json` for you. No
+local proxy service is installed on these clients.
+
+If you'd rather wire it by hand, edit `~/.claude/settings.json` and
+add under `env`:
 
 ```json
 {
@@ -145,7 +174,8 @@ edit `~/.claude/settings.json` and add under `env`:
 
 Restart Claude Code. On the very next turn the proxy's JSONL log
 gains a row, and (if rate-limit headers are present) the state
-file at `~/.claude/claude-hooks-proxy/ratelimit-state.json` appears.
+file at `~/.claude/claude-hooks-proxy/ratelimit-state.json` appears
+on the **server**.
 
 ## 6. Optional: statusline segment
 
