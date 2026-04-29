@@ -1433,6 +1433,34 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
         print("  Fix the DSN and re-run install.py — leaving pgvector disabled.")
         return
 
+    # 2b. Probe target tables; create the qwen3 + KG schema if missing.
+    # The migration script (scripts/migrate_to_pgvector.py) is the source
+    # of truth for the per-model DDL — we reuse its
+    # ``schema_sql_for_model`` so install.py and the migration stay in
+    # sync. The shared kg_entities + kg_relations tables aren't in that
+    # function (the migration assumes they exist), so we ship their DDL
+    # inline here.
+    table_name = (cfg.get("providers") or {}).get("pgvector", {}).get("table") or "memories_qwen3"
+    if not _pgvector_tables_present(dsn, table_name):
+        if non_interactive:
+            print(f"  Tables missing → auto-initializing qwen3 + KG schema…")
+            do_init = True
+        else:
+            ans = input(
+                f"  Schema {table_name!r} missing. Initialize qwen3 + KG schema now? [Y/n]: "
+            ).strip().lower()
+            do_init = ans in ("", "y", "yes")
+        if do_init and not dry_run:
+            _init_pgvector_schema(dsn)
+            print("  Schema initialized.")
+        elif do_init and dry_run:
+            print("  [dry-run] Would CREATE EXTENSION vector + pg_trgm; "
+                  "create kg_entities/kg_relations + memories_qwen3/kg_observations_qwen3.")
+        else:
+            print("  Skipped schema init. The provider auto-creates a "
+                  "single-table fallback on first store(); KG tools will "
+                  "fail until you run scripts/migrate_to_pgvector.py.")
+
     # 3. Drop the launcher script. PYTHONPATH baked in is the repo root
     # (HERE) so the launcher works without a pip install of claude-hooks.
     py_path = find_conda_env_python()
@@ -1555,6 +1583,103 @@ def _register_pgvector_mcp_in_claude_json(launcher_path: Path) -> None:
 def _now_ts() -> str:
     import datetime
     return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def _pgvector_tables_present(dsn: str, table_name: str) -> bool:
+    """Return True iff ``table_name`` exists. Used to gate auto-init.
+
+    Probing only the primary memories table is enough — if it exists
+    we treat the schema as initialized. The shared kg_entities /
+    kg_relations / kg_observations_<model> get audited inside
+    ``_init_pgvector_schema`` (every CREATE is idempotent).
+    """
+    try:
+        import psycopg  # type: ignore
+    except ImportError:
+        return False
+    try:
+        with psycopg.connect(dsn, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM information_schema.tables WHERE table_name = %s",
+                    (table_name,),
+                )
+                return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+# Shared (model-agnostic) DDL — kg_entities + kg_relations + the
+# trigger function kg_entities uses to keep updated_at honest. Matches
+# the live solidpc schema we built earlier; idempotent on every line.
+_PGVECTOR_SHARED_DDL = """
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+CREATE OR REPLACE FUNCTION touch_updated_at() RETURNS trigger AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TABLE IF NOT EXISTS kg_entities (
+    id          BIGSERIAL PRIMARY KEY,
+    name        TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    metadata    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT kg_entities_name_unique UNIQUE (name)
+);
+CREATE INDEX IF NOT EXISTS kg_entities_type_idx ON kg_entities (entity_type);
+CREATE INDEX IF NOT EXISTS kg_entities_name_trgm
+    ON kg_entities USING gin (name gin_trgm_ops);
+
+DROP TRIGGER IF EXISTS kg_entities_touch_updated_at ON kg_entities;
+CREATE TRIGGER kg_entities_touch_updated_at
+    BEFORE UPDATE ON kg_entities
+    FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+
+CREATE TABLE IF NOT EXISTS kg_relations (
+    id              BIGSERIAL PRIMARY KEY,
+    from_entity_id  BIGINT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+    to_entity_id    BIGINT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+    relation_type   TEXT NOT NULL,
+    metadata        JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT kg_relations_unique UNIQUE (from_entity_id, to_entity_id, relation_type)
+);
+CREATE INDEX IF NOT EXISTS kg_relations_from_idx ON kg_relations (from_entity_id);
+CREATE INDEX IF NOT EXISTS kg_relations_to_idx ON kg_relations (to_entity_id);
+CREATE INDEX IF NOT EXISTS kg_relations_type_idx ON kg_relations (relation_type);
+"""
+
+
+def _init_pgvector_schema(dsn: str, *, model: str = "qwen3") -> None:
+    """Create the shared KG tables + per-model memories/kg_observations.
+
+    Idempotent: every CREATE has IF NOT EXISTS, the trigger uses
+    DROP+CREATE, and CREATE OR REPLACE on the touch_updated_at function.
+    Re-running on a populated DB is a no-op.
+
+    The per-model DDL is delegated to
+    ``scripts.migrate_to_pgvector.schema_sql_for_model`` so install.py
+    and the bulk migration stay in lock-step on table layout, indexes,
+    and constraints — drift between them silently breaks recall.
+    """
+    import psycopg  # type: ignore
+    sys.path.insert(0, str(HERE / "scripts"))
+    try:
+        from migrate_to_pgvector import MODELS, schema_sql_for_model  # type: ignore
+    finally:
+        sys.path.pop(0)
+    spec = MODELS[model]
+    with psycopg.connect(dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(_PGVECTOR_SHARED_DDL)
+            cur.execute(schema_sql_for_model(spec))
+        conn.commit()
 
 
 def _ensure_proxy_deps(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:

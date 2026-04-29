@@ -33,15 +33,27 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "store_mode": "auto",        # auto | off
             "timeout": 5.0,
         },
-        # --- Experimental scaffolds: disabled by default ---
+        # --- pgvector — Postgres-backed memory + KG ---
+        # Defaults target the qwen3 schema (memories_qwen3 +
+        # kg_observations_qwen3 + shared kg_entities/kg_relations) that
+        # ``install.py`` creates via ``_init_pgvector_schema``. The
+        # qwen3-embedding:0.6b model fits 32k tokens of context per
+        # embed, which beats nomic on long-form recall and matches
+        # arctic on factual queries while being half the size. Users
+        # who want the simpler legacy single-table setup can override
+        # ``table`` / ``embedder`` in ``config/claude-hooks.json``.
         "pgvector": {
             "enabled": False,
             "dsn": "",                   # postgres://user:pass@host:5432/db
-            "table": "claude_hooks_memory",
+            "table": "memories_qwen3",
+            "additional_tables": ["kg_observations_qwen3"],
             "embedder": "ollama",        # see claude_hooks/embedders.py
             "embedder_options": {
                 "url": "http://localhost:11434/api/embeddings",
-                "model": "nomic-embed-text",
+                "model": "qwen3-embedding:0.6b",
+                "timeout": 30.0,
+                "num_ctx": 32768,
+                "max_chars": 30000,
             },
             "recall_k": 5,
             "store_mode": "auto",
