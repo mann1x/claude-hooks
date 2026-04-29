@@ -24,6 +24,15 @@ classifiers = [
 [project.urls]
 Repository = "https://github.com/mann1x/claude-hooks"
 
+[project.scripts]
+# System-wide stdio MCP launcher for the pgvector store. Installed by
+# ``pip install claude-hooks`` (or ``pip install -e .`` from the repo)
+# so any MCP-aware tool — Claude Code, Cursor, Codex, OpenWebUI — can
+# spawn the same server independently of where the repo lives. The
+# installer also drops a hand-rolled wrapper at ~/.local/bin/pgvector-mcp
+# for users who run install.py without a pip install of the package.
+pgvector-mcp = "claude_hooks.pgvector_mcp.__main__:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "coverage>=7.0"]
 pgvector = ["psycopg[binary]"]

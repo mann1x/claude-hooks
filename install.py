@@ -1354,6 +1354,209 @@ def _install_daemon_windows_steps(
             return
 
 
+def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
+    """Ask if pgvector is available and set up the system-wide MCP server.
+
+    "System-wide" means we drop a launcher at ``~/.local/bin/pgvector-mcp``
+    (POSIX) or ``%LOCALAPPDATA%/claude-hooks/bin/pgvector-mcp.cmd``
+    (Windows) so any MCP-aware client — Claude Code, Cursor, Codex,
+    OpenWebUI, etc. — can spawn the server independently of the
+    claude-hooks repo location. The launcher just execs
+    ``python -m claude_hooks.pgvector_mcp`` against the resolved
+    interpreter and PYTHONPATH baked in at install time.
+
+    Steps when the user answers "yes":
+
+    1. Probe Postgres + pgvector reachability via the existing
+       ``PgvectorProvider.verify`` (uses the DSN already in cfg, or
+       prompts for a new one).
+    2. Drop the launcher script with the resolved interpreter and
+       PYTHONPATH baked in.
+    3. Update ``cfg.providers.pgvector.enabled = true`` and the DSN.
+    4. Register ``mcpServers.pgvector`` in ``~/.claude.json`` (root
+       level — visible to every project) pointing at the launcher.
+    5. Backup the prior ``~/.claude.json`` before mutating.
+
+    Skipped silently when the user answers "no" or in non-interactive
+    mode without a DSN already configured. Idempotent — re-running
+    upgrades the launcher in place.
+    """
+    pcfg = (cfg.get("providers") or {}).get("pgvector") or {}
+    existing_dsn = pcfg.get("dsn") or ""
+
+    print("\n--- pgvector ---")
+    print("  Optional: persistent memory + KG store backed by Postgres + pgvector.")
+    print("  When enabled, claude-hooks installs a system-wide MCP server")
+    print("  (`pgvector-mcp`) so other tools (Cursor, Codex, OpenWebUI, …)")
+    print("  can recall/store from the same memory.")
+
+    if non_interactive:
+        if not existing_dsn:
+            print("  --non-interactive and no DSN configured → skipping pgvector setup.")
+            return
+        ans = "y"
+        print("  --non-interactive: assuming yes (DSN already in config).")
+    else:
+        default = "Y" if existing_dsn else "N"
+        ans = input(f"  Set up pgvector? [{default}/{'n' if default == 'Y' else 'y'}]: ").strip().lower()
+        if not ans:
+            ans = default.lower()
+        if ans not in ("y", "yes"):
+            print("  Skipped.")
+            return
+
+    # 1. DSN.
+    dsn = existing_dsn
+    if not non_interactive:
+        prompt_default = f" [{dsn}]" if dsn else " (e.g. postgresql://user:pass@127.0.0.1:5432/memory)"
+        new_dsn = input(f"  Postgres DSN{prompt_default}: ").strip()
+        if new_dsn:
+            dsn = new_dsn
+    if not dsn:
+        print("  No DSN provided → skipping pgvector setup.")
+        return
+
+    # 2. Verify the DSN reaches a Postgres with the pgvector extension.
+    try:
+        from claude_hooks.providers.pgvector import PgvectorProvider
+        from claude_hooks.providers import ServerCandidate
+    except ImportError as e:
+        print(f"  Cannot import pgvector provider: {e}")
+        return
+    candidate = ServerCandidate(server_key="pgvector", url=dsn,
+                                source="installer", confidence="manual")
+    print("  Probing Postgres + pgvector extension…", end=" ", flush=True)
+    ok = PgvectorProvider.verify(candidate)
+    print("OK" if ok else "FAILED")
+    if not ok:
+        print("  Couldn't reach pgvector with that DSN.")
+        print("  Fix the DSN and re-run install.py — leaving pgvector disabled.")
+        return
+
+    # 3. Drop the launcher script. PYTHONPATH baked in is the repo root
+    # (HERE) so the launcher works without a pip install of claude-hooks.
+    py_path = find_conda_env_python()
+    py = str(py_path) if py_path.exists() else sys.executable
+    launcher_path = _pgvector_launcher_path()
+    if dry_run:
+        print(f"  [dry-run] Would write launcher: {launcher_path}")
+        print(f"  [dry-run] Would point ~/.claude.json mcpServers.pgvector → {launcher_path}")
+    else:
+        _write_pgvector_launcher(launcher_path, py=py, repo=str(HERE))
+        print(f"  Launcher: {launcher_path}")
+
+    # 4. Update claude-hooks config.
+    cfg.setdefault("providers", {}).setdefault("pgvector", {})
+    cfg["providers"]["pgvector"]["enabled"] = True
+    cfg["providers"]["pgvector"]["dsn"] = dsn
+    # Preserve user's table / embedder config when present; only fill
+    # defaults if nothing is set.
+    cfg["providers"]["pgvector"].setdefault("table", "memories_qwen3")
+    cfg["providers"]["pgvector"].setdefault("additional_tables", ["kg_observations_qwen3"])
+    cfg["providers"]["pgvector"].setdefault("embedder", "ollama")
+    cfg["providers"]["pgvector"].setdefault("embedder_options", {
+        "url": "http://192.168.178.2:11433/api/embeddings",
+        "model": "qwen3-embedding:0.6b",
+        "timeout": 30.0,
+        "num_ctx": 32768,
+        "max_chars": 30000,
+    })
+    cfg["providers"]["pgvector"].setdefault("recall_k", 5)
+    cfg["providers"]["pgvector"].setdefault("store_mode", "auto")
+
+    # 5. Register in ~/.claude.json mcpServers (root level so it's
+    # visible to every project — this is the user-installed shape).
+    if dry_run:
+        print(f"  [dry-run] Would register mcpServers.pgvector in ~/.claude.json")
+    else:
+        _register_pgvector_mcp_in_claude_json(launcher_path)
+        print(f"  ~/.claude.json: registered mcpServers.pgvector → {launcher_path}")
+
+    print(f"  Done. After Claude Code restart, tools surface as:")
+    print(f"    mcp__pgvector__pgvector-find / -find-hybrid / -store / -count")
+    print(f"    mcp__pgvector__pgvector-kg-search / -kg-create / -kg-observe / -kg-relate")
+
+
+def _pgvector_launcher_path() -> Path:
+    """Choose the system-wide install location for the launcher script.
+
+    POSIX: ``~/.local/bin/pgvector-mcp``. Almost universally on PATH on
+    modern desktops; users without it get a one-line warning.
+    Windows: ``%LOCALAPPDATA%/claude-hooks/bin/pgvector-mcp.cmd``. Not
+    on PATH by default but still discoverable as an absolute path —
+    Claude Code's mcpServers entry uses the absolute path so PATH
+    membership doesn't matter for the primary use case.
+    """
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local"))
+        return base / "claude-hooks" / "bin" / "pgvector-mcp.cmd"
+    return Path(os.path.expanduser("~/.local/bin/pgvector-mcp"))
+
+
+def _write_pgvector_launcher(path: Path, *, py: str, repo: str) -> None:
+    """Write the launcher script with interpreter + PYTHONPATH baked in.
+
+    POSIX: a tiny POSIX sh that exports PYTHONPATH and execs the
+    interpreter with ``-m claude_hooks.pgvector_mcp``. Windows: an
+    equivalent .cmd that does the same with %ERRORLEVEL%-correct exit.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        body = (
+            "@echo off\r\n"
+            "REM pgvector-mcp launcher (claude-hooks) — generated by install.py\r\n"
+            f'set PYTHONPATH={repo};%PYTHONPATH%\r\n'
+            f'"{py}" -m claude_hooks.pgvector_mcp %*\r\n'
+            "exit /b %ERRORLEVEL%\r\n"
+        )
+        path.write_text(body, encoding="utf-8")
+    else:
+        body = (
+            "#!/usr/bin/env sh\n"
+            "# pgvector-mcp launcher (claude-hooks) — generated by install.py\n"
+            f'PYTHONPATH="{repo}:${{PYTHONPATH:-}}" exec "{py}" -m claude_hooks.pgvector_mcp "$@"\n'
+        )
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+    # Warn if the dir isn't on PATH so the user sees `pgvector-mcp` from
+    # other tools without an absolute path.
+    if str(path.parent) not in (os.environ.get("PATH") or "").split(os.pathsep):
+        print(f"  [!] {path.parent} is not in PATH — only Claude Code can find it (absolute path).")
+        print(f"      Add to PATH if you want Cursor/Codex/etc. to spawn `pgvector-mcp` by name.")
+
+
+def _register_pgvector_mcp_in_claude_json(launcher_path: Path) -> None:
+    """Register ``mcpServers.pgvector`` at the root of ``~/.claude.json``.
+
+    Root-level so the server is visible to every project. Per-project
+    filtering (companion_integration's per_project_mcp_filter) decides
+    which projects emit the SessionStart hint, but the server itself is
+    always available. Backs up the existing config first.
+    """
+    p = Path(os.path.expanduser("~/.claude.json"))
+    if not p.exists():
+        # Fresh install — write a minimal scaffold.
+        p.write_text("{}", encoding="utf-8")
+    raw = p.read_text(encoding="utf-8")
+    ts = _now_ts()
+    bak = p.with_suffix(f".json.bak-{ts}-pgvector-mcp")
+    bak.write_text(raw, encoding="utf-8")
+    cfg = json.loads(raw)
+    mcps = cfg.setdefault("mcpServers", {})
+    mcps["pgvector"] = {
+        "type": "stdio",
+        "command": str(launcher_path),
+        "args": [],
+        "env": {},
+    }
+    p.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+
+def _now_ts() -> str:
+    import datetime
+    return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
 def _ensure_proxy_deps(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
     """Verify httpx + h2 are available when the proxy is enabled.
 
@@ -1622,11 +1825,18 @@ def main() -> int:
     # For each provider, ask the user to pick (or skip).
     chosen: dict[str, Optional[ServerCandidate]] = {}
     for cls in REGISTRY:
+        # pgvector has bespoke setup (we own its MCP server, install
+        # the launcher system-wide, configure DSN+embedder). Handled
+        # by ``_setup_pgvector_mcp`` after the standard pick loop.
+        if cls.name == "pgvector":
+            continue
         chosen[cls.name] = pick_provider(cls, report, args.non_interactive)
 
     # Verify each chosen provider.
     print("\n==> Verifying chosen servers...")
     for cls in REGISTRY:
+        if cls.name == "pgvector":
+            continue
         candidate = chosen.get(cls.name)
         pcfg = (cfg.get("providers") or {}).get(cls.name) or {}
         if not candidate:
@@ -1643,6 +1853,15 @@ def main() -> int:
             if candidate.headers:
                 pcfg["headers"] = candidate.headers
             cfg.setdefault("providers", {})[cls.name] = pcfg
+
+    # pgvector: ask if available, install system-wide launcher, register
+    # in mcpServers. Self-contained — no detect/verify path through the
+    # generic loop above.
+    _setup_pgvector_mcp(
+        cfg,
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
 
     # Save config.
     if args.dry_run:

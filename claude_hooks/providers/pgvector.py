@@ -89,7 +89,33 @@ class PgvectorProvider(Provider):
 
     @classmethod
     def detect(cls, claude_config: dict) -> list[ServerCandidate]:
-        return []
+        """Detect a system-installed ``pgvector-mcp`` launcher.
+
+        The launcher is dropped by ``install.py`` to ``~/.local/bin``
+        (POSIX) or ``%LOCALAPPDATA%/claude-hooks/bin`` (Windows) and made
+        available on PATH so any MCP-aware tool — Claude Code, Cursor,
+        Codex, OpenWebUI — can spawn the same server. Detection here
+        finds it via ``shutil.which`` and reports back as a candidate
+        the installer can register in ``mcpServers``.
+
+        Returns an empty list when no launcher is present — that path
+        means the user hasn't run the pgvector setup step yet (or
+        chose to skip it). Detection ignores the PgvectorProvider's
+        own DSN config; that's verified separately by ``verify``.
+        """
+        import shutil
+        path = shutil.which("pgvector-mcp")
+        if not path:
+            return []
+        return [
+            ServerCandidate(
+                server_key="pgvector",
+                url=path,
+                source="system-binary",
+                confidence="high",
+                notes="system-installed pgvector-mcp launcher",
+            ),
+        ]
 
     @classmethod
     def verify(cls, server: ServerCandidate, *, timeout: float = 5.0) -> bool:
