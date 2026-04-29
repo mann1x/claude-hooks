@@ -1433,6 +1433,37 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
         print("  Fix the DSN and re-run install.py — leaving pgvector disabled.")
         return
 
+    # 2c. Ensure the embedder model is pulled. Talks to the Ollama
+    # instance the embedder is configured against — derives the base
+    # URL from the embedder endpoint, so it works against a local
+    # daemon AND a remote / proxied Ollama. Skipped silently when the
+    # endpoint isn't an Ollama-shaped URL or when the request fails;
+    # the user gets a clear "pull manually" breadcrumb either way.
+    embedder_opts = cfg["providers"]["pgvector"].get("embedder_options") or {}
+    embed_url = embedder_opts.get("url") or ""
+    model = embedder_opts.get("model") or ""
+    if model and embed_url:
+        base = _ollama_base_from_embed_url(embed_url)
+        print(f"  Probing Ollama at {base} for {model}…", end=" ", flush=True)
+        present = _ollama_model_present(base, model)
+        print("present" if present else "missing")
+        if not present:
+            if non_interactive:
+                do_pull = True
+                print(f"  --non-interactive: pulling {model}")
+            else:
+                ans = input(f"  Pull {model} now via {base}? [Y/n]: ").strip().lower()
+                do_pull = ans in ("", "y", "yes")
+            if do_pull and not dry_run:
+                ok = _ollama_pull(base, model)
+                if not ok:
+                    print(f"  Pull manually: ollama pull {model}  "
+                          f"(or POST {{\"name\":\"{model}\"}} to {base}/api/pull)")
+            elif do_pull and dry_run:
+                print(f"  [dry-run] Would POST /api/pull {{\"name\":\"{model}\"}} to {base}")
+            else:
+                print(f"  Skipped. Pull manually: ollama pull {model}")
+
     # 2b. Probe target tables; create the qwen3 + KG schema if missing.
     # The migration script (scripts/migrate_to_pgvector.py) is the source
     # of truth for the per-model DDL — we reuse its
@@ -1583,6 +1614,95 @@ def _register_pgvector_mcp_in_claude_json(launcher_path: Path) -> None:
 def _now_ts() -> str:
     import datetime
     return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def _ollama_base_from_embed_url(url: str) -> str:
+    """Strip the path off a configured embedder URL to get the daemon root.
+
+    The provider config points at ``http://host:port/api/embeddings``;
+    Ollama's ``/api/tags`` and ``/api/pull`` live at the same host on
+    the same port, so we just chop the path.
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return url.rstrip("/")
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _ollama_model_present(base: str, model: str) -> bool:
+    """Return True iff the model appears in ``/api/tags``.
+
+    Match is exact on the full ``name`` (e.g. ``qwen3-embedding:0.6b``).
+    Returns False on any HTTP / decode error so the caller offers to
+    pull — failing safe is the right default here; an extra ollama
+    pull on an already-present model is a near-instant no-op.
+    """
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{base}/api/tags", timeout=5) as r:
+            data = json.loads(r.read().decode("utf-8") or "{}")
+    except Exception:
+        return False
+    for m in (data.get("models") or []):
+        if m.get("name") == model or m.get("model") == model:
+            return True
+    return False
+
+
+def _ollama_pull(base: str, model: str) -> bool:
+    """POST ``/api/pull`` and stream progress to stdout.
+
+    Ollama responds with a stream of NDJSON status lines; we print
+    each new ``status`` value (one line per phase, e.g.
+    ``pulling manifest`` → ``pulling 5fa7e35e…`` → ``verifying
+    sha256 digest`` → ``writing manifest`` → ``success``). Pull is
+    idempotent — already-present models stream a one-shot
+    ``status: success`` and exit immediately.
+
+    Returns True on a clean ``success``; False on any error, network
+    timeout, or non-success terminal status.
+    """
+    import urllib.error
+    import urllib.request
+    body = json.dumps({"name": model}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base}/api/pull", data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    last_status = ""
+    success = False
+    try:
+        # 30 min hard cap — embed models are 100MB-1GB so even slow
+        # connections finish well under this. Streaming is open-ended
+        # so we lean on urlopen's per-read deadline rather than a wall
+        # clock.
+        with urllib.request.urlopen(req, timeout=1800) as r:
+            for line in r:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line.decode("utf-8"))
+                except Exception:
+                    continue
+                if obj.get("error"):
+                    print(f"    error: {obj['error']}")
+                    return False
+                status = obj.get("status") or ""
+                if status and status != last_status:
+                    print(f"    {status}")
+                    last_status = status
+                if status == "success":
+                    success = True
+    except urllib.error.URLError as e:
+        print(f"    pull failed: {e.reason}")
+        return False
+    except Exception as e:
+        print(f"    pull failed: {e}")
+        return False
+    return success
 
 
 def _pgvector_tables_present(dsn: str, table_name: str) -> bool:
