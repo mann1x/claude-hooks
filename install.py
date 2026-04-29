@@ -590,7 +590,7 @@ def _install_claude_hooks_daemon(
 
     # Detect existing autostart entry BEFORE the install prompt so we
     # can show the right question. Without this, a re-run of install.py
-    # always asks "Install + enable…?" even when the task / unit / plist
+    # always asks "Install + enable...?" even when the task / unit / plist
     # is already in place — confusing because the install has already
     # happened.
     already = _detect_existing_daemon_entry()
@@ -612,7 +612,7 @@ def _install_claude_hooks_daemon(
             # branch will do the delete + recreate + verify.
             pass
         else:
-            # Default ("", "v", "verify") → ping; start if not running.
+            # Default ("", "v", "verify") -> ping; start if not running.
             _verify_and_start_daemon()
             return
     else:
@@ -1387,12 +1387,12 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
     print("\n--- pgvector ---")
     print("  Optional: persistent memory + KG store backed by Postgres + pgvector.")
     print("  When enabled, claude-hooks installs a system-wide MCP server")
-    print("  (`pgvector-mcp`) so other tools (Cursor, Codex, OpenWebUI, …)")
+    print("  (`pgvector-mcp`) so other tools (Cursor, Codex, OpenWebUI, ...)")
     print("  can recall/store from the same memory.")
 
     if non_interactive:
         if not existing_dsn:
-            print("  --non-interactive and no DSN configured → skipping pgvector setup.")
+            print("  --non-interactive and no DSN configured -> skipping pgvector setup.")
             return
         ans = "y"
         print("  --non-interactive: assuming yes (DSN already in config).")
@@ -1413,7 +1413,7 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
         if new_dsn:
             dsn = new_dsn
     if not dsn:
-        print("  No DSN provided → skipping pgvector setup.")
+        print("  No DSN provided -> skipping pgvector setup.")
         return
 
     # 2. Verify the DSN reaches a Postgres with the pgvector extension.
@@ -1425,7 +1425,7 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
         return
     candidate = ServerCandidate(server_key="pgvector", url=dsn,
                                 source="installer", confidence="manual")
-    print("  Probing Postgres + pgvector extension…", end=" ", flush=True)
+    print("  Probing Postgres + pgvector extension...", end=" ", flush=True)
     ok = PgvectorProvider.verify(candidate)
     print("OK" if ok else "FAILED")
     if not ok:
@@ -1444,7 +1444,7 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
     model = embedder_opts.get("model") or ""
     if model and embed_url:
         base = _ollama_base_from_embed_url(embed_url)
-        print(f"  Probing Ollama at {base} for {model}…", end=" ", flush=True)
+        print(f"  Probing Ollama at {base} for {model}...", end=" ", flush=True)
         present = _ollama_model_present(base, model)
         print("present" if present else "missing")
         if not present:
@@ -1474,7 +1474,7 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
     table_name = (cfg.get("providers") or {}).get("pgvector", {}).get("table") or "memories_qwen3"
     if not _pgvector_tables_present(dsn, table_name):
         if non_interactive:
-            print(f"  Tables missing → auto-initializing qwen3 + KG schema…")
+            print(f"  Tables missing -> auto-initializing qwen3 + KG schema...")
             do_init = True
         else:
             ans = input(
@@ -1499,7 +1499,7 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
     launcher_path = _pgvector_launcher_path()
     if dry_run:
         print(f"  [dry-run] Would write launcher: {launcher_path}")
-        print(f"  [dry-run] Would point ~/.claude.json mcpServers.pgvector → {launcher_path}")
+        print(f"  [dry-run] Would point ~/.claude.json mcpServers.pgvector -> {launcher_path}")
     else:
         _write_pgvector_launcher(launcher_path, py=py, repo=str(HERE))
         print(f"  Launcher: {launcher_path}")
@@ -1529,7 +1529,7 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
         print(f"  [dry-run] Would register mcpServers.pgvector in ~/.claude.json")
     else:
         _register_pgvector_mcp_in_claude_json(launcher_path)
-        print(f"  ~/.claude.json: registered mcpServers.pgvector → {launcher_path}")
+        print(f"  ~/.claude.json: registered mcpServers.pgvector -> {launcher_path}")
 
     print(f"  Done. After Claude Code restart, tools surface as:")
     print(f"    mcp__pgvector__pgvector-find / -find-hybrid / -store / -count")
@@ -1655,8 +1655,8 @@ def _ollama_pull(base: str, model: str) -> bool:
 
     Ollama responds with a stream of NDJSON status lines; we print
     each new ``status`` value (one line per phase, e.g.
-    ``pulling manifest`` → ``pulling 5fa7e35e…`` → ``verifying
-    sha256 digest`` → ``writing manifest`` → ``success``). Pull is
+    ``pulling manifest`` -> ``pulling 5fa7e35e...`` -> ``verifying
+    sha256 digest`` -> ``writing manifest`` -> ``success``). Pull is
     idempotent — already-present models stream a one-shot
     ``status: success`` and exit immediately.
 
@@ -1837,7 +1837,7 @@ def _ensure_proxy_deps(cfg: dict, *, non_interactive: bool, dry_run: bool) -> No
         return
 
     if non_interactive:
-        print("  --non-interactive: installing httpx[http2]…")
+        print("  --non-interactive: installing httpx[http2]...")
     else:
         ans = input("  Install httpx[http2] now? [Y/n]: ").strip().lower()
         if ans not in ("", "y", "yes"):
@@ -1925,7 +1925,7 @@ def _ensure_code_graph_extras(*, non_interactive: bool, dry_run: bool) -> None:
             continue
 
         if non_interactive:
-            print("    --non-interactive: installing…")
+            print("    --non-interactive: installing...")
         else:
             ans = input(f"    Install? [Y/n]: ").strip().lower()
             if ans not in ("", "y", "yes"):
