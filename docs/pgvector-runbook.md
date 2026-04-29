@@ -21,26 +21,34 @@ embedder pick.
 
 ## TL;DR
 
-```bash
-# 0. Install the pgvector Python deps
-pip install -r requirements.txt -r requirements-pgvector.txt
+The fast path — `install.py` handles everything from step 2 onward
+(probes the DSN, pulls the embedder, creates the qwen3 + KG schema,
+drops the system-wide `pgvector-mcp` launcher, registers it in
+`~/.claude.json`):
 
-# 1. Bring up the docker stack
+```bash
+# 0. Bring up the pgvector docker stack
 cd /shared/config/mcp-pgvector
 cp .env.example .env && ${EDITOR} .env       # set POSTGRES_PASSWORD
 docker compose up -d
 docker exec mcp-pgvector psql -U claude -d memory -c "\dx"   # vector 0.8.x present?
 
-# 2. Migrate Qdrant + Memory-KG into pgvector
+# 1. Run the claude-hooks installer — it'll prompt for the DSN,
+#    everything else uses sensible defaults (qwen3-embedding:0.6b,
+#    memories_qwen3, kg_observations_qwen3, local Ollama).
 cd /srv/dev-disk-by-label-opt/dev/claude-hooks
-python scripts/migrate_to_pgvector.py --embedder nomic --source all
+python install.py
+```
 
-# 3. Benchmark (optional — only needed when changing embedder)
-python scripts/bench_recall.py --warm 3 --repeat 8
+That's it for fresh installs. The runbook below covers the
+manual / advanced paths: bulk-migrating existing Qdrant + Memory-KG
+data, swapping the embedder, and the hard cutover playbook.
 
-# 4. Wire it up: copy the pgvector block from
-#    config/claude-hooks.example.json into your config/claude-hooks.json,
-#    set the dsn + ollama url, set "enabled": true.
+```bash
+# Manual / advanced — only when install.py's auto-flow doesn't fit.
+pip install -r requirements.txt -r requirements-pgvector.txt
+python scripts/migrate_to_pgvector.py --embedder qwen3 --source all
+python scripts/bench_recall.py --warm 3 --repeat 8     # benchmark before swapping models
 ```
 
 ---
@@ -255,6 +263,85 @@ models *share* a dim — qwen3 and arctic are both 1024 — so a
 `model=snowflake-arctic-embed2` query against `memories_qwen3` returns
 rows without error, but cosine distances are meaningless because the
 vector spaces don't align. Re-embed before swapping.
+
+### MCP server (recommended)
+
+The repo ships a stdio JSON-RPC MCP server at
+`claude_hooks.pgvector_mcp` that wraps `PgvectorProvider` and exposes
+recall + store + KG ops as first-class MCP tools. After `install.py`
+runs, the server is reachable from any MCP-aware client (Claude Code,
+Cursor, Codex, OpenWebUI, …) without going through the hook
+injection path.
+
+What `install.py` does in `_setup_pgvector_mcp`:
+
+1. Probes Postgres + the `vector` extension via the existing
+   `PgvectorProvider.verify` (DSN already in your config, or prompts
+   for one).
+2. Probes Ollama for the configured embedder model (`qwen3-embedding:0.6b`
+   by default); offers to `/api/pull` it if missing.
+3. Initializes the qwen3 + KG schema if `memories_qwen3` doesn't
+   exist (CREATE EXTENSION vector + pg_trgm; create kg_entities,
+   kg_relations, memories_qwen3, kg_observations_qwen3 — all
+   idempotent, re-running is a no-op).
+4. Drops a launcher at `~/.local/bin/pgvector-mcp` (POSIX) or
+   `%LOCALAPPDATA%/claude-hooks/bin/pgvector-mcp.cmd` (Windows). The
+   launcher bakes in PYTHONPATH + the resolved Python interpreter so
+   the server works from any cwd, no pip install of claude-hooks
+   required.
+5. Registers `mcpServers.pgvector` at the root of `~/.claude.json`
+   pointing at the launcher (root-level so every project sees it).
+   Backs up the existing config first.
+
+Tools exposed (visible after Claude Code restart as
+`mcp__pgvector__<name>`):
+
+| Tool | Purpose |
+|---|---|
+| `pgvector-find` | Pure cosine-distance vector recall |
+| `pgvector-find-hybrid` | RRF blend of vector + BM25 keyword (best for factual queries) |
+| `pgvector-store` | Insert one memory; idempotent on content_hash |
+| `pgvector-count` | Row count of the configured primary table |
+| `pgvector-kg-search` | Search KG entities by name (trigram) + observations (hybrid) |
+| `pgvector-kg-create` | Bulk-create entities; idempotent on name |
+| `pgvector-kg-observe` | Add observations to existing entities |
+| `pgvector-kg-relate` | Create relations between entities |
+
+#### Manual install / pip path
+
+If you `pip install claude-hooks`, the `pgvector-mcp` console script
+is registered automatically (via `[project.scripts]` in
+`pyproject.toml`). Then add it to your client's MCP config:
+
+```jsonc
+// ~/.claude.json (or ~/.cursor/settings.json, ~/.codex/config.json, …)
+{
+  "mcpServers": {
+    "pgvector": {
+      "type": "stdio",
+      "command": "pgvector-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}
+```
+
+Without a pip install, point `command` at the launcher path the
+installer wrote — `~/.local/bin/pgvector-mcp` or the equivalent
+Windows `.cmd`.
+
+#### Verifying the server is alive
+
+```bash
+printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}\n' | pgvector-mcp
+# -> {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05",
+#     "capabilities":{"tools":{}},"serverInfo":{"name":"claude-hooks-pgvector","version":"0.1.0"}}}
+```
+
+A clean handshake means the launcher resolved Python correctly,
+`claude_hooks.pgvector_mcp` imports, and the provider opens against
+your DSN. Any failure prints to stderr.
 
 ### Running pgvector alongside Qdrant + Memory KG
 

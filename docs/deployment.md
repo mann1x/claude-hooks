@@ -14,9 +14,16 @@ Three ways to run claude-hooks:
 
 | Mode | Memory backends | Proxy | Good for |
 |------|-----------------|-------|---------|
-| **Minimal** | Qdrant + Memory KG MCP | off | single host, standard recall + storage |
+| **Minimal** | Qdrant + Memory KG MCP, OR pgvector single-backend (replaces both) | off | single host, standard recall + storage |
 | **Single-host proxy** | + local proxy on `127.0.0.1` | on | want Warmup blocked, live weekly-% in statusline |
 | **LAN-shared proxy** | proxy on `<server>:38080` | on | multi-host — one proxy, many Claude Code clients |
+
+**pgvector mode (recommended for new installs):** one Postgres
+database replaces Qdrant + Memory KG. `install.py` brings up the
+schema, drops a system-wide `pgvector-mcp` stdio server, and
+registers it so other MCP-aware clients (Cursor, Codex, OpenWebUI)
+can share the same memory + KG. See
+[pgvector-runbook.md](pgvector-runbook.md) for the full setup.
 
 The rest of this doc walks the LAN-shared setup (the most complex).
 Scale down as needed.
@@ -48,7 +55,19 @@ The installer:
 3. Writes `config/claude-hooks.json`.
 4. Merges hook entries into `~/.claude/settings.json` (idempotent;
    entries are tagged `_managedBy: claude-hooks`).
-5. Optionally prompts for env-var recommendations (`CLAUDE_CODE_
+5. **pgvector setup (optional)** — asks once whether to enable
+   pgvector. On yes, prompts for the DSN, probes Postgres + the
+   `vector` extension, offers to `ollama pull` the embedder model
+   (`qwen3-embedding:0.6b` by default) if missing, initializes the
+   qwen3 + KG schema (`memories_qwen3`, `kg_observations_qwen3`,
+   shared `kg_entities` + `kg_relations`) when not present, drops a
+   system-wide launcher at `~/.local/bin/pgvector-mcp` (POSIX) or
+   `%LOCALAPPDATA%\claude-hooks\bin\pgvector-mcp.cmd` (Windows), and
+   registers it in `~/.claude.json`'s `mcpServers` so any MCP-aware
+   client — Claude Code, Cursor, Codex, OpenWebUI — can recall +
+   store + query the KG via `mcp__pgvector__*` tools. See
+   [pgvector-runbook.md §4 "MCP server"](pgvector-runbook.md).
+6. Optionally prompts for env-var recommendations (`CLAUDE_CODE_
    DISABLE_BACKGROUND_TASKS`, the bcherny stack). **Default = No**
    for everything — the proxy is the better fix for Warmup drain,
    and the bcherny stack caused more harm than good in our field

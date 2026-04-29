@@ -200,7 +200,7 @@ multi-language coverage) when present.
 |---|---|---|---|
 | **Qdrant** (HTTP MCP) | Run `mcp-server-qdrant` (we ship a patched version under `vendor/mcp-qdrant/`) | none | mature vector search; the historical default |
 | **Memory KG** (HTTP MCP) | Run `mcp-memory` (npm `@modelcontextprotocol/server-memory`) | none | typed entity graph + observation keyword search |
-| **Postgres + pgvector** | Local docker stack — see [`docs/pgvector-runbook.md`](docs/pgvector-runbook.md) | `pip install -r requirements-pgvector.txt` | single SQL backend that replaces both Qdrant + Memory KG; hybrid recall |
+| **Postgres + pgvector** | Local docker stack — see [`docs/pgvector-runbook.md`](docs/pgvector-runbook.md). `install.py` handles DSN probe, schema init, embedder pull, and registers a system-wide `pgvector-mcp` stdio server in `~/.claude.json` so other MCP clients (Cursor/Codex/OpenWebUI) can use the same store. | `pip install -r requirements-pgvector.txt` | single SQL backend that replaces both Qdrant + Memory KG; hybrid recall (vector + BM25 RRF); native KG entities/relations/observations |
 | **sqlite-vec** | Standalone SQLite file at `~/.claude/claude-hooks-memory.db` | `pip install -r requirements-sqlite-vec.txt` | zero-server, single-file, low-footprint |
 
 ### Conda env + dependency files
