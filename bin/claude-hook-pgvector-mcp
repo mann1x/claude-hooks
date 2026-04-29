@@ -1,0 +1,17 @@
+#!/usr/bin/env sh
+# claude-hook-pgvector-mcp — POSIX entry point for the pgvector MCP
+# stdio server. Spawned by Claude Code per session as an mcpServers
+# entry. Reads JSON-RPC messages on stdin and writes responses on
+# stdout. Stays alive for the lifetime of the session.
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+
+. "$HERE/_resolve_python.sh"
+
+# No python — exit silently. Claude Code will mark the server as failed
+# and continue without our tools, which beats a noisy crash loop.
+[ -z "$PY" ] && exit 0
+
+cd "$REPO"
+exec "$PY" -m claude_hooks.pgvector_mcp "$@" || exit 0
