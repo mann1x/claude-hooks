@@ -74,7 +74,7 @@ _CONDA_PY_CACHE: Optional[Path] = None
 def find_conda_env_pythonw(env_name: str = CONDA_ENV_NAME) -> Optional[Path]:
     """Return ``pythonw.exe`` from the named conda env, or None if missing.
 
-    ``pythonw.exe`` runs without a console window — used by the Windows
+    ``pythonw.exe`` runs without a console window -- used by the Windows
     daemon scheduled task so it doesn't flash a permanent cmd.exe box on
     the user's desktop. Sits alongside ``python.exe`` in the same env;
     we just swap the filename rather than re-running the env-list probe.
@@ -93,14 +93,14 @@ def find_conda_env_pythonw(env_name: str = CONDA_ENV_NAME) -> Optional[Path]:
         pyw_alt = py.parent / "pythonw.exe"
         if pyw_alt.exists():
             return pyw_alt
-    # Layout 3: ``...\envs\<name>\bin\python`` (POSIX) — no pythonw on POSIX.
+    # Layout 3: ``...\envs\<name>\bin\python`` (POSIX) -- no pythonw on POSIX.
     return None
 
 
 def find_conda_env_python(env_name: str = CONDA_ENV_NAME) -> Path:
     """Locate the Python interpreter inside the named conda env.
 
-    Probes hardcoded common layouts first (fast — no subprocess), then
+    Probes hardcoded common layouts first (fast -- no subprocess), then
     falls back to ``conda env list --json`` and walks the prefixes it
     reports. Returns the platform-default fallback path when nothing is
     found, so callers can still ``.exists()``-check on it.
@@ -111,7 +111,7 @@ def find_conda_env_python(env_name: str = CONDA_ENV_NAME) -> Path:
     if _CONDA_PY_CACHE is not None and _CONDA_PY_CACHE.exists():
         return _CONDA_PY_CACHE
 
-    # Step 1 — try common install paths without spawning conda. Covers:
+    # Step 1 -- try common install paths without spawning conda. Covers:
     #   - Linux:   ~/anaconda3, ~/miniconda3, /opt/conda
     #   - Windows: ~/Anaconda3, ~/Miniconda3 (capitalised), ~/anaconda3
     #   - Both:    bin/python (POSIX) and python.exe / Scripts/python.exe (Win)
@@ -137,7 +137,7 @@ def find_conda_env_python(env_name: str = CONDA_ENV_NAME) -> Path:
             _CONDA_PY_CACHE = c
             return c
 
-    # Step 2 — ask conda where it thinks the env lives.
+    # Step 2 -- ask conda where it thinks the env lives.
     conda_bin = _find_conda()
     if conda_bin:
         try:
@@ -226,7 +226,7 @@ HOOK_TEMPLATE = {
     ],
 }
 
-# PreToolUse is opt-in — added only if the user enabled it in config.
+# PreToolUse is opt-in -- added only if the user enabled it in config.
 PRE_TOOL_USE_TEMPLATE = {
     "PreToolUse": [
         {
@@ -297,7 +297,7 @@ def _install_proxy_stack_systemd(
     """Install the proxy + rollup-timer + dashboard systemd units
     when ``proxy.enabled`` is true.
 
-    Linux-only (systemd). Idempotent — skips units that already
+    Linux-only (systemd). Idempotent -- skips units that already
     exist. Substitutes ``__REPO_PATH__`` / ``__HOME__`` into the
     template files under ``systemd/`` before writing to
     ``/etc/systemd/system/``.
@@ -339,11 +339,11 @@ def _install_proxy_stack_systemd(
     for src_name, install_name, is_timer in _PROXY_STACK_UNITS:
         dest = Path("/etc/systemd/system") / install_name
         if dest.exists():
-            print(f"  · {install_name} already installed — leaving as-is")
+            print(f"  · {install_name} already installed -- leaving as-is")
             continue
         src = src_dir / src_name
         if not src.exists():
-            print(f"  [!!] {src} missing — skipping")
+            print(f"  [!!] {src} missing -- skipping")
             continue
         content = src.read_text(encoding="utf-8")
         content = content.replace("__REPO_PATH__", repo_path)
@@ -379,7 +379,7 @@ def _install_caliber_proxy_systemd(
 ) -> None:
     """Install the caliber-grounding-proxy systemd unit when
     ``caliber_proxy.enabled`` is true in config. Linux-only;
-    idempotent — skips if the unit is already installed.
+    idempotent -- skips if the unit is already installed.
 
     The proxy binds 127.0.0.1:38090 by default and routes caliber's
     OpenAI-compatible calls to a local Ollama upstream, injecting
@@ -396,11 +396,11 @@ def _install_caliber_proxy_systemd(
     src = HERE / "systemd" / _CALIBER_PROXY_UNIT
     dest = Path("/etc/systemd/system") / _CALIBER_PROXY_UNIT
     if dest.exists():
-        return  # idempotent — leave existing unit alone
+        return  # idempotent -- leave existing unit alone
 
     print("\n==> caliber-grounding-proxy systemd unit")
     if not src.exists():
-        print(f"  [!!] {src} missing — skipping")
+        print(f"  [!!] {src} missing -- skipping")
         return
     print(f"  Will install to {dest} with __REPO_PATH__ = {HERE}")
     if dry_run:
@@ -495,7 +495,7 @@ def _install_axon_host_systemd(
 
     print("\n==> axon-host systemd unit")
     if not src.exists():
-        print(f"  [!!] {src} missing — skipping")
+        print(f"  [!!] {src} missing -- skipping")
         return
     print(f"  Will install to {dest} with __AXON_BIN__ = {axon_bin}")
     print(f"  Will create cwd {_AXON_HOST_CWD} with placeholder file")
@@ -551,7 +551,7 @@ def _install_claude_hooks_daemon(
     """Install the long-lived hook executor (Tier 3.8 latency reduction).
 
     The daemon owns the Python interpreter, providers, HyDE cache, and
-    other per-process state across hook invocations — saves ~150-300 ms
+    other per-process state across hook invocations -- saves ~150-300 ms
     per hook compared with the per-invocation interpreter spawn the
     bin/claude-hook shim does without it.
 
@@ -568,19 +568,19 @@ def _install_claude_hooks_daemon(
       to register the daemon as a logon-triggered scheduled task. We
       don't run it automatically because it needs an elevated prompt.
 
-    The daemon itself is OPTIONAL — installs that skip this step still
+    The daemon itself is OPTIONAL -- installs that skip this step still
     work because the client falls back to in-process dispatch when the
     daemon isn't running. So this prompt always defaults to "yes" but
     a "no" is harmless.
     """
     cfg_section = (cfg.get("hooks") or {}).get("daemon") or {}
     if cfg_section.get("enabled") is False:
-        # Explicit opt-out via config — respect it without prompting.
+        # Explicit opt-out via config -- respect it without prompting.
         return
 
     print("\n==> claude-hooks-daemon (long-lived hook executor)")
     print("    Owns providers, HyDE cache, and Python interpreter across")
-    print("    hook calls — saves ~150-300 ms per hook.")
+    print("    hook calls -- saves ~150-300 ms per hook.")
     print("    OPTIONAL: hooks fall back to in-process dispatch when the")
     print("    daemon isn't running, so skipping this is safe.")
 
@@ -591,7 +591,7 @@ def _install_claude_hooks_daemon(
     # Detect existing autostart entry BEFORE the install prompt so we
     # can show the right question. Without this, a re-run of install.py
     # always asks "Install + enable...?" even when the task / unit / plist
-    # is already in place — confusing because the install has already
+    # is already in place -- confusing because the install has already
     # happened.
     already = _detect_existing_daemon_entry()
     if already:
@@ -657,7 +657,7 @@ def _detect_existing_daemon_entry() -> Optional[str]:
         if _windows_task_exists(_DAEMON_TASK_NAME):
             return f"Windows scheduled task '{_DAEMON_TASK_NAME}'"
         return None
-    # systemd unit file is the strongest signal on Linux — even if the
+    # systemd unit file is the strongest signal on Linux -- even if the
     # service is currently stopped, the autostart is "installed".
     if (Path("/etc/systemd/system") / _DAEMON_UNIT).exists():
         return f"systemd unit /etc/systemd/system/{_DAEMON_UNIT}"
@@ -671,7 +671,7 @@ def _start_daemon_via_platform() -> None:
     """Trigger the daemon via the platform's autostart manager.
 
     Used by the verify-only path when the autostart entry exists but
-    the daemon isn't currently listening — e.g. the task is registered
+    the daemon isn't currently listening -- e.g. the task is registered
     but hasn't fired since the last logon, or the systemd service was
     manually stopped. Best-effort: failures are reported, never raised.
     """
@@ -726,7 +726,7 @@ def _verify_and_start_daemon() -> bool:
         print("  · daemon responding on 127.0.0.1:47018")
         return True
 
-    print("  · daemon not running — attempting to start it...")
+    print("  · daemon not running -- attempting to start it...")
     _start_daemon_via_platform()
     if _wait_for_daemon(timeout=15.0):
         print("  · daemon started and responding on 127.0.0.1:47018")
@@ -775,10 +775,10 @@ def _install_daemon_systemd(
             try:
                 dest.unlink()
             except OSError as e:
-                print(f"  [!!] could not remove {dest}: {e} — leaving as-is")
+                print(f"  [!!] could not remove {dest}: {e} -- leaving as-is")
                 return
         else:
-            print(f"  · leaving {_DAEMON_UNIT} as-is — verifying it's responding")
+            print(f"  · leaving {_DAEMON_UNIT} as-is -- verifying it's responding")
             if _wait_for_daemon(timeout=5.0):
                 print(f"  · daemon responding on 127.0.0.1:47018")
             else:
@@ -789,7 +789,7 @@ def _install_daemon_systemd(
             return
 
     if not src.exists():
-        print(f"  [!!] {src} missing — skipping")
+        print(f"  [!!] {src} missing -- skipping")
         return
     repo_path = str(HERE.resolve())
     home_path = str(Path.home())
@@ -864,10 +864,10 @@ def _install_daemon_launchd(
             try:
                 dest.unlink()
             except OSError as e:
-                print(f"  [!!] could not remove {dest}: {e} — leaving as-is")
+                print(f"  [!!] could not remove {dest}: {e} -- leaving as-is")
                 return
         else:
-            print(f"  · leaving {dest.name} as-is — verifying daemon")
+            print(f"  · leaving {dest.name} as-is -- verifying daemon")
             if _wait_for_daemon(timeout=5.0):
                 print("  · daemon responding on 127.0.0.1:47018")
             else:
@@ -905,21 +905,21 @@ _DAEMON_TASK_NAME = "claude-hooks-daemon"
 # Windows scheduled-task XML. Imported via ``schtasks /Create /XML`` so we
 # can override defaults that the CLI form can't reach:
 #
-#   * ExecutionTimeLimit = PT0S — the default 72 h cap stops a long-lived
+#   * ExecutionTimeLimit = PT0S -- the default 72 h cap stops a long-lived
 #     daemon mid-session. PT0S means "no limit".
-#   * DisallowStartIfOnBatteries / StopIfGoingOnBatteries = false — laptops
+#   * DisallowStartIfOnBatteries / StopIfGoingOnBatteries = false -- laptops
 #     should keep the daemon running on battery; the user explicitly asked
 #     for this.
-#   * StartWhenAvailable = true — if the user wasn't logged in at logon
+#   * StartWhenAvailable = true -- if the user wasn't logged in at logon
 #     time, fire as soon as we are.
-#   * MultipleInstancesPolicy = IgnoreNew — duplicate /Run requests don't
+#   * MultipleInstancesPolicy = IgnoreNew -- duplicate /Run requests don't
 #     spawn a second daemon (port-bind would fail anyway).
 #
 # UTF-16 encoded on disk because that's what schtasks /XML expects.
 _DAEMON_TASK_XML = """<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>claude-hooks-daemon — long-lived hook executor (Tier 3.8)</Description>
+    <Description>claude-hooks-daemon -- long-lived hook executor (Tier 3.8)</Description>
     <Author>claude-hooks installer</Author>
   </RegistrationInfo>
   <Triggers>
@@ -1033,7 +1033,7 @@ def _write_daemon_task_xml(
         arguments=_xml_escape(arguments),
         workdir=_xml_escape(workdir),
     )
-    import tempfile  # noqa: PLC0415 — Windows-only path
+    import tempfile  # noqa: PLC0415 -- Windows-only path
     fd, path = tempfile.mkstemp(prefix="claude-hooks-daemon-", suffix=".xml")
     os.close(fd)
     Path(path).write_bytes(xml.encode("utf-16"))
@@ -1051,7 +1051,7 @@ def _wait_for_daemon(*, timeout: float = 15.0) -> bool:
       - systemd / launchd may delay the spawn behind dependencies
       - Windows Task Scheduler /Run is async
       - the daemon's first action is ``ensure_secret`` which creates
-        ``~/.claude/claude-hooks-daemon-secret`` — only after that
+        ``~/.claude/claude-hooks-daemon-secret`` -- only after that
         does it bind the listener
     """
     try:
@@ -1064,7 +1064,7 @@ def _wait_for_daemon(*, timeout: float = 15.0) -> bool:
         try:
             if ping(timeout=1.0):
                 return True
-        except Exception:  # pragma: no cover — defensive
+        except Exception:  # pragma: no cover -- defensive
             pass
         _time.sleep(0.5)
     return False
@@ -1073,7 +1073,7 @@ def _wait_for_daemon(*, timeout: float = 15.0) -> bool:
 def _is_windows_admin() -> bool:
     """Return True iff the current process has admin rights on Windows."""
     try:
-        import ctypes  # noqa: PLC0415 — Windows-only path
+        import ctypes  # noqa: PLC0415 -- Windows-only path
         return bool(ctypes.windll.shell32.IsUserAnAdmin())  # type: ignore[attr-defined]
     except (AttributeError, OSError):
         return False
@@ -1127,7 +1127,7 @@ def _run_schtasks_elevated(argstr: str, argv: list) -> bool:
         print(f"  [!!] Failed to launch elevated process: {e}")
         return False
     # Start-Process -Wait returns once the elevated child exits but
-    # hides its rc — the caller verifies via /Query (or the calling
+    # hides its rc -- the caller verifies via /Query (or the calling
     # context's own check, e.g. _wait_for_daemon).
     return True
 
@@ -1140,12 +1140,12 @@ def _install_daemon_windows(
 
     Three failure / re-entry modes:
 
-    1. Task already exists — ask whether to delete + reinstall +
+    1. Task already exists -- ask whether to delete + reinstall +
        re-verify, or just leave as-is (and verify ping). When the
        outer caller passes ``force_reinstall=True`` (because it
        already collected that decision), skip the inner prompt.
-    2. /Create succeeded but daemon didn't come up — retry /Run + ping.
-    3. UAC declined — retry the elevation or skip.
+    2. /Create succeeded but daemon didn't come up -- retry /Run + ping.
+    3. UAC declined -- retry the elevation or skip.
 
     Mirrors clink's self-update flow: one UAC prompt per elevated
     operation, installer itself stays unprivileged.
@@ -1155,7 +1155,7 @@ def _install_daemon_windows(
     workdir = str(HERE.resolve())
 
     # Prefer pythonw.exe (no console window) over the .cmd shim. Falls
-    # back to the .cmd only if pythonw isn't available — at the cost of
+    # back to the .cmd only if pythonw isn't available -- at the cost of
     # a visible cmd window flash, which is the historical behaviour.
     pyw = find_conda_env_pythonw()
     if pyw is not None:
@@ -1164,13 +1164,13 @@ def _install_daemon_windows(
     else:
         cmd_path = (HERE / "bin" / "claude-hooks-daemon.cmd").resolve()
         print(
-            "  [!] pythonw.exe not found — falling back to the .cmd shim. "
+            "  [!] pythonw.exe not found -- falling back to the .cmd shim. "
             "A console window will be visible while the daemon runs."
         )
         exec_command = str(cmd_path)
         exec_arguments = ""
 
-    # XML generation is deferred until we're actually about to /Create —
+    # XML generation is deferred until we're actually about to /Create --
     # see _write_xml_now() inside _install_daemon_windows_inner. The
     # verify-only / declined-skip / already-exists-leave-alone paths
     # don't need XML at all and would otherwise pay the whoami cost.
@@ -1255,7 +1255,7 @@ def _install_daemon_windows_steps(
         elif non_interactive:
             print(
                 f"  · task '{task_name}' already exists "
-                f"(--non-interactive — leaving as-is)"
+                f"(--non-interactive -- leaving as-is)"
             )
             ans = "n"
         else:
@@ -1268,7 +1268,7 @@ def _install_daemon_windows_steps(
         if ans in ("y", "yes"):
             print(f"  Deleting existing task '{task_name}'...")
             if not _run_schtasks_elevated(delete_argstr, delete_argv):
-                print("  [!!] could not delete existing task — leaving as-is")
+                print("  [!!] could not delete existing task -- leaving as-is")
                 return
             # Fall through to fresh-install loop.
         else:
@@ -1316,7 +1316,7 @@ def _install_daemon_windows_steps(
             _run_schtasks_elevated(create_argstr, create_argv)
             if not _windows_task_exists(task_name):
                 print(
-                    "  [!!] task not detected after /Create — UAC declined "
+                    "  [!!] task not detected after /Create -- UAC declined "
                     "or schtasks errored."
                 )
                 retry = input("  Retry? [Y/n]: ").strip().lower()
@@ -1326,7 +1326,7 @@ def _install_daemon_windows_steps(
             print(f"  · task '{task_name}' registered")
 
         # Step 2: trigger the task now (ONLOGON only fires at next logon
-        # otherwise — and the user wants the daemon up immediately).
+        # otherwise -- and the user wants the daemon up immediately).
         _run_schtasks_elevated(run_argstr, run_argv)
 
         # Step 3: confirm the daemon is actually answering on its port.
@@ -1359,8 +1359,8 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
 
     "System-wide" means we drop a launcher at ``~/.local/bin/pgvector-mcp``
     (POSIX) or ``%LOCALAPPDATA%/claude-hooks/bin/pgvector-mcp.cmd``
-    (Windows) so any MCP-aware client — Claude Code, Cursor, Codex,
-    OpenWebUI, etc. — can spawn the server independently of the
+    (Windows) so any MCP-aware client -- Claude Code, Cursor, Codex,
+    OpenWebUI, etc. -- can spawn the server independently of the
     claude-hooks repo location. The launcher just execs
     ``python -m claude_hooks.pgvector_mcp`` against the resolved
     interpreter and PYTHONPATH baked in at install time.
@@ -1374,11 +1374,11 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
        PYTHONPATH baked in.
     3. Update ``cfg.providers.pgvector.enabled = true`` and the DSN.
     4. Register ``mcpServers.pgvector`` in ``~/.claude.json`` (root
-       level — visible to every project) pointing at the launcher.
+       level -- visible to every project) pointing at the launcher.
     5. Backup the prior ``~/.claude.json`` before mutating.
 
     Skipped silently when the user answers "no" or in non-interactive
-    mode without a DSN already configured. Idempotent — re-running
+    mode without a DSN already configured. Idempotent -- re-running
     upgrades the launcher in place.
     """
     pcfg = (cfg.get("providers") or {}).get("pgvector") or {}
@@ -1430,11 +1430,11 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
     print("OK" if ok else "FAILED")
     if not ok:
         print("  Couldn't reach pgvector with that DSN.")
-        print("  Fix the DSN and re-run install.py — leaving pgvector disabled.")
+        print("  Fix the DSN and re-run install.py -- leaving pgvector disabled.")
         return
 
     # 2c. Ensure the embedder model is pulled. Talks to the Ollama
-    # instance the embedder is configured against — derives the base
+    # instance the embedder is configured against -- derives the base
     # URL from the embedder endpoint, so it works against a local
     # daemon AND a remote / proxied Ollama. Skipped silently when the
     # endpoint isn't an Ollama-shaped URL or when the request fails;
@@ -1466,7 +1466,7 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
 
     # 2b. Probe target tables; create the qwen3 + KG schema if missing.
     # The migration script (scripts/migrate_to_pgvector.py) is the source
-    # of truth for the per-model DDL — we reuse its
+    # of truth for the per-model DDL -- we reuse its
     # ``schema_sql_for_model`` so install.py and the migration stay in
     # sync. The shared kg_entities + kg_relations tables aren't in that
     # function (the migration assumes they exist), so we ship their DDL
@@ -1524,7 +1524,7 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
     cfg["providers"]["pgvector"].setdefault("store_mode", "auto")
 
     # 5. Register in ~/.claude.json mcpServers (root level so it's
-    # visible to every project — this is the user-installed shape).
+    # visible to every project -- this is the user-installed shape).
     if dry_run:
         print(f"  [dry-run] Would register mcpServers.pgvector in ~/.claude.json")
     else:
@@ -1542,7 +1542,7 @@ def _pgvector_launcher_path() -> Path:
     POSIX: ``~/.local/bin/pgvector-mcp``. Almost universally on PATH on
     modern desktops; users without it get a one-line warning.
     Windows: ``%LOCALAPPDATA%/claude-hooks/bin/pgvector-mcp.cmd``. Not
-    on PATH by default but still discoverable as an absolute path —
+    on PATH by default but still discoverable as an absolute path --
     Claude Code's mcpServers entry uses the absolute path so PATH
     membership doesn't matter for the primary use case.
     """
@@ -1563,7 +1563,7 @@ def _write_pgvector_launcher(path: Path, *, py: str, repo: str) -> None:
     if os.name == "nt":
         body = (
             "@echo off\r\n"
-            "REM pgvector-mcp launcher (claude-hooks) — generated by install.py\r\n"
+            "REM pgvector-mcp launcher (claude-hooks) -- generated by install.py\r\n"
             f'set PYTHONPATH={repo};%PYTHONPATH%\r\n'
             f'"{py}" -m claude_hooks.pgvector_mcp %*\r\n'
             "exit /b %ERRORLEVEL%\r\n"
@@ -1572,7 +1572,7 @@ def _write_pgvector_launcher(path: Path, *, py: str, repo: str) -> None:
     else:
         body = (
             "#!/usr/bin/env sh\n"
-            "# pgvector-mcp launcher (claude-hooks) — generated by install.py\n"
+            "# pgvector-mcp launcher (claude-hooks) -- generated by install.py\n"
             f'PYTHONPATH="{repo}:${{PYTHONPATH:-}}" exec "{py}" -m claude_hooks.pgvector_mcp "$@"\n'
         )
         path.write_text(body, encoding="utf-8")
@@ -1580,7 +1580,7 @@ def _write_pgvector_launcher(path: Path, *, py: str, repo: str) -> None:
     # Warn if the dir isn't on PATH so the user sees `pgvector-mcp` from
     # other tools without an absolute path.
     if str(path.parent) not in (os.environ.get("PATH") or "").split(os.pathsep):
-        print(f"  [!] {path.parent} is not in PATH — only Claude Code can find it (absolute path).")
+        print(f"  [!] {path.parent} is not in PATH -- only Claude Code can find it (absolute path).")
         print(f"      Add to PATH if you want Cursor/Codex/etc. to spawn `pgvector-mcp` by name.")
 
 
@@ -1594,7 +1594,7 @@ def _register_pgvector_mcp_in_claude_json(launcher_path: Path) -> None:
     """
     p = Path(os.path.expanduser("~/.claude.json"))
     if not p.exists():
-        # Fresh install — write a minimal scaffold.
+        # Fresh install -- write a minimal scaffold.
         p.write_text("{}", encoding="utf-8")
     raw = p.read_text(encoding="utf-8")
     ts = _now_ts()
@@ -1635,7 +1635,7 @@ def _ollama_model_present(base: str, model: str) -> bool:
 
     Match is exact on the full ``name`` (e.g. ``qwen3-embedding:0.6b``).
     Returns False on any HTTP / decode error so the caller offers to
-    pull — failing safe is the right default here; an extra ollama
+    pull -- failing safe is the right default here; an extra ollama
     pull on an already-present model is a near-instant no-op.
     """
     import urllib.request
@@ -1657,7 +1657,7 @@ def _ollama_pull(base: str, model: str) -> bool:
     each new ``status`` value (one line per phase, e.g.
     ``pulling manifest`` -> ``pulling 5fa7e35e...`` -> ``verifying
     sha256 digest`` -> ``writing manifest`` -> ``success``). Pull is
-    idempotent — already-present models stream a one-shot
+    idempotent -- already-present models stream a one-shot
     ``status: success`` and exit immediately.
 
     Returns True on a clean ``success``; False on any error, network
@@ -1674,7 +1674,7 @@ def _ollama_pull(base: str, model: str) -> bool:
     last_status = ""
     success = False
     try:
-        # 30 min hard cap — embed models are 100MB-1GB so even slow
+        # 30 min hard cap -- embed models are 100MB-1GB so even slow
         # connections finish well under this. Streaming is open-ended
         # so we lean on urlopen's per-read deadline rather than a wall
         # clock.
@@ -1708,7 +1708,7 @@ def _ollama_pull(base: str, model: str) -> bool:
 def _pgvector_tables_present(dsn: str, table_name: str) -> bool:
     """Return True iff ``table_name`` exists. Used to gate auto-init.
 
-    Probing only the primary memories table is enough — if it exists
+    Probing only the primary memories table is enough -- if it exists
     we treat the schema as initialized. The shared kg_entities /
     kg_relations / kg_observations_<model> get audited inside
     ``_init_pgvector_schema`` (every CREATE is idempotent).
@@ -1729,7 +1729,7 @@ def _pgvector_tables_present(dsn: str, table_name: str) -> bool:
         return False
 
 
-# Shared (model-agnostic) DDL — kg_entities + kg_relations + the
+# Shared (model-agnostic) DDL -- kg_entities + kg_relations + the
 # trigger function kg_entities uses to keep updated_at honest. Matches
 # the live solidpc schema we built earlier; idempotent on every line.
 _PGVECTOR_SHARED_DDL = """
@@ -1786,7 +1786,7 @@ def _init_pgvector_schema(dsn: str, *, model: str = "qwen3") -> None:
     The per-model DDL is delegated to
     ``scripts.migrate_to_pgvector.schema_sql_for_model`` so install.py
     and the bulk migration stay in lock-step on table layout, indexes,
-    and constraints — drift between them silently breaks recall.
+    and constraints -- drift between them silently breaks recall.
     """
     import psycopg  # type: ignore
     sys.path.insert(0, str(HERE / "scripts"))
@@ -1896,7 +1896,7 @@ def _ensure_code_graph_extras(*, non_interactive: bool, dry_run: bool) -> None:
     """Probe the conda env for each code_graph optional extra; offer to install.
 
     Mirrors :func:`_ensure_proxy_deps`. Each extra is gated by an import
-    probe — if it imports cleanly we move on; otherwise we describe what
+    probe -- if it imports cleanly we move on; otherwise we describe what
     the user gains by installing and ask. Defaults to ``Y`` to keep the
     installer feeling forward.
     """
@@ -1904,7 +1904,7 @@ def _ensure_code_graph_extras(*, non_interactive: bool, dry_run: bool) -> None:
     py = str(conda_py) if conda_py.exists() else sys.executable
 
     print("\n==> code_graph optional extras")
-    print("    code_graph runs without these — they unlock additional features.")
+    print("    code_graph runs without these -- they unlock additional features.")
     print(f"    Target Python: {py}")
 
     for extra in CODE_GRAPH_EXTRAS:
@@ -1959,11 +1959,11 @@ def _check_conda_env(*, non_interactive: bool, dry_run: bool) -> None:
         print(f"Hook runtime:   {conda_py}")
         return
 
-    # Env doesn't exist — offer to create it.
+    # Env doesn't exist -- offer to create it.
     print("Conda env:      NOT FOUND")
     conda_bin = _find_conda()
     if not conda_bin:
-        print("  conda not found on this system — skipping env setup.")
+        print("  conda not found on this system -- skipping env setup.")
         print("  Hooks will fall back to system python3.\n")
         print(f"Hook runtime:   system python3")
         return
@@ -2006,7 +2006,7 @@ def _check_conda_env(*, non_interactive: bool, dry_run: bool) -> None:
             )
 
     if conda_py.exists():
-        print(f"  Done — conda env ready.")
+        print(f"  Done -- conda env ready.")
         print(f"Hook runtime:   {conda_py}")
     else:
         print(f"  Warning: env created but python not found at {conda_py}")
@@ -2019,7 +2019,7 @@ def main() -> int:
     ap.add_argument(
         "--non-interactive",
         action="store_true",
-        help="never prompt — fail if a decision is needed",
+        help="never prompt -- fail if a decision is needed",
     )
     ap.add_argument("--uninstall", action="store_true", help="remove claude-hooks from settings.json")
     ap.add_argument("--probe", action="store_true", help="force tool-probe detection")
@@ -2100,7 +2100,7 @@ def main() -> int:
             cfg.setdefault("providers", {})[cls.name] = pcfg
 
     # pgvector: ask if available, install system-wide launcher, register
-    # in mcpServers. Self-contained — no detect/verify path through the
+    # in mcpServers. Self-contained -- no detect/verify path through the
     # generic loop above.
     _setup_pgvector_mcp(
         cfg,
@@ -2129,7 +2129,7 @@ def main() -> int:
     )
 
     # Offer to install the proxy + rollup-timer + dashboard systemd
-    # units (Linux only; idempotent — skips units already installed).
+    # units (Linux only; idempotent -- skips units already installed).
     _install_proxy_stack_systemd(
         cfg,
         non_interactive=args.non_interactive,
@@ -2159,7 +2159,7 @@ def main() -> int:
     # Offer to install the long-lived hook executor (Tier 3.8). When
     # enabled, the bin/claude-hook shim sends events to the running
     # daemon over an HMAC-authenticated TCP localhost socket instead of
-    # spinning up a fresh interpreter — saves 150-300 ms per hook. The
+    # spinning up a fresh interpreter -- saves 150-300 ms per hook. The
     # client falls back to in-process dispatch automatically when the
     # daemon isn't running, so this step is strictly optional.
     _install_claude_hooks_daemon(
@@ -2285,7 +2285,7 @@ def install_hooks(
     settings.setdefault("hooks", {})
     for event, blocks in template.items():
         existing = settings["hooks"].get(event) or []
-        # Drop ALL previous claude-hooks entries — by _managedBy tag OR
+        # Drop ALL previous claude-hooks entries -- by _managedBy tag OR
         # by command containing "claude-hook" (catches manually installed ones).
         cleaned: list[dict] = []
         for blk in existing:
@@ -2316,7 +2316,7 @@ def uninstall(*, dry_run: bool) -> int:
     print("==> claude-hooks uninstall")
     settings_path = user_settings_path()
     if not settings_path.exists():
-        print(f"  No settings at {settings_path} — nothing to do.")
+        print(f"  No settings at {settings_path} -- nothing to do.")
         return 0
     settings = _load_json(settings_path)
     hooks = settings.get("hooks") or {}
@@ -2372,7 +2372,7 @@ def build_command(repo_path: Path) -> str:
     """
     repo_path = repo_path.resolve()
     cmd = str(repo_path / "bin" / "claude-hook")
-    # Windows paths use backslashes — convert to forward slashes so bash
+    # Windows paths use backslashes -- convert to forward slashes so bash
     # can parse the path correctly.
     return cmd.replace("\\", "/")
 
@@ -2639,7 +2639,7 @@ def _setup_episodic(cfg: dict, cfg_path: Path, args, *, dry_run: bool) -> None:
         if current_mode == "client":
             print(f"  Server URL: {ep_cfg.get('server_url', '?')}")
     else:
-        # Not configured — mention availability.
+        # Not configured -- mention availability.
         print(f"\n  Episodic memory: not configured (use --episodic-server or --episodic-client URL)")
 
 
@@ -2653,7 +2653,7 @@ def _fix_plugin_paths() -> None:
     plugins_dir = Path(os.path.expanduser("~/.claude/plugins"))
     total_fixed = 0
 
-    # Fix installed_plugins.json — installPath entries.
+    # Fix installed_plugins.json -- installPath entries.
     installed_json = plugins_dir / "installed_plugins.json"
     if installed_json.exists():
         try:
@@ -2682,7 +2682,7 @@ def _fix_plugin_paths() -> None:
         except (json.JSONDecodeError, OSError):
             pass
 
-    # Fix known_marketplaces.json — installLocation entries.
+    # Fix known_marketplaces.json -- installLocation entries.
     markets_json = plugins_dir / "known_marketplaces.json"
     if markets_json.exists():
         try:
@@ -2800,7 +2800,7 @@ def _prompt_env_vars(
     dry_run: bool,
 ) -> None:
     """Offer to inject opt-in Claude Code env-var recommendations into
-    ~/.claude/settings.json. Defaults to No — nothing is applied without
+    ~/.claude/settings.json. Defaults to No -- nothing is applied without
     explicit user consent.
 
     Covers:
@@ -2808,7 +2808,7 @@ def _prompt_env_vars(
         drain; see docs/issue-warmup-token-drain.md + #47922).
       - The "bcherny stack" (DISABLE_ADAPTIVE_THINKING +
         MAX_THINKING_TOKENS + AUTO_COMPACT_WINDOW +
-        AUTOCOMPACT_PCT_OVERRIDE). Default No — per our field test it
+        AUTOCOMPACT_PCT_OVERRIDE). Default No -- per our field test it
         introduced more trivial mistakes on this project. Presented so
         users can opt in if they saw it recommended elsewhere.
 
@@ -2873,7 +2873,7 @@ def _prompt_env_vars(
 
     env = settings.setdefault("env", {})
     if not isinstance(env, dict):
-        print(f"  [!!] Existing settings.json 'env' is not an object — aborting.")
+        print(f"  [!!] Existing settings.json 'env' is not an object -- aborting.")
         return
     for k, v in to_set.items():
         env[k] = v
