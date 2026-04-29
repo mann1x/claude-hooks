@@ -120,13 +120,26 @@ payload.
 
 ## Key directories
 
-- `bin/` — POSIX + Windows entry-point shims
-- `claude_hooks/hooks/` — one handler per event (recall, store, classify, etc.)
-- `claude_hooks/providers/` — one file per memory backend (qdrant, memory_kg, pgvector, sqlite_vec)
-- `claude_hooks/` — shared modules: `recall.py`, `hyde.py`, `decay.py`, `dedup.py`, `instincts.py`, `reflect.py`, `consolidate.py`, `openwolf.py`, plus opt-in `stop_guard.py`, `safety_scan.py` + `safety_patterns.py`, `rtk_rewrite.py`
-- `config/` — `claude-hooks.json` (gitignored) + example
+- `bin/` — POSIX + Windows entry-point shims (`claude-hook`, `claude-hooks-daemon-ctl`, `claude-hooks-proxy`, `claude-hook-pgvector-mcp`, `caliber-grounding-proxy`, `caliber-smart`)
+- `claude_hooks/hooks/` — one handler per event (`session_start`, `user_prompt_submit`, `pre_tool_use`, `stop`, `session_end`)
+- `claude_hooks/providers/` — one file per memory backend (`qdrant`, `memory_kg`, `pgvector`, `sqlite_vec`)
+- `claude_hooks/` — shared recall + memory modules:
+  - **Recall pipeline**: `recall.py`, `hyde.py`, `hyde_cache.py`, `decay.py`, `dedup.py`
+  - **Stop pipeline**: `instincts.py`, `reflect.py`, `consolidate.py`, `store_async.py` (Tier 1.3 detached store)
+  - **Daemon stack**: `daemon.py`, `daemon_client.py`, `daemon_ctl.py` (Tier 3.8 long-lived hook executor)
+  - **Concurrency / utility**: `_parallel.py` (provider fan-out), `mcp_client.py`, `embedders.py`
+  - **Companion integrations**: `openwolf.py`, `axon_integration.py`, `gitnexus_integration.py`, `companion_integration.py`
+  - **Opt-in advisory**: `stop_guard.py`, `safety_scan.py` + `safety_patterns.py`, `rtk_rewrite.py`
+  - **Index management**: `claudemem_reindex.py`
+- `claude_hooks/code_graph/` — built-in stdlib `ast`-based code graph (`builder.py`, `impact.py`, `mermaid.py`, `mcp_server.py`, …)
+- `claude_hooks/proxy/` — opt-in HTTP proxy in front of `api.anthropic.com` (`server.py`, `metadata.py`, `stats_db.py`, `dashboard.py`)
+- `claude_hooks/caliber_proxy/` — Caliber grounding proxy (`server.py`, `tools.py`, `prompt.py`, `ollama.py`)
+- `claude_hooks/pgvector_mcp/` — system-wide stdio MCP server exposing pgvector recall + KG ops to any MCP-aware client
+- `episodic_server/` — HTTP front-end for [obra/episodic-memory](https://github.com/obra/episodic-memory) (`server.py`, `Dockerfile`, systemd unit)
+- `systemd/` — service templates (`claude-hooks-daemon`, `claude-hooks-proxy`, `caliber-grounding-proxy`, `episodic-server`)
+- `config/` — `claude-hooks.json` (gitignored) + `claude-hooks.example.json`
 - `patches/` — project-specific patches for third-party npm globals (e.g. `apply-caliber-patch.sh`)
-- `docs/` — integration plans (e.g. `PLAN-code-factory-integration.md`)
+- `docs/` — runbooks + integration plans (`daemon.md`, `proxy.md`, `hyde.md`, `caliber-proxy.md`, `episodic-server.md`, `pgvector-runbook.md`, `deployment.md`, `env-vars.md`, `PLAN-*.md`)
 - `tests/` — unittest-based, run with `pytest`
 
 ---

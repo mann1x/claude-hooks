@@ -134,3 +134,100 @@ isolates issues quickly.
 The daemon's logger is `claude_hooks.daemon` at INFO level; raise to
 DEBUG by editing `daemon.py:367` if you need per-connection signing
 trace.
+
+## Latency tiers and `detach_store`
+
+The daemon (Tier 3.8) is the biggest single latency lever, but it's
+not the only one. Two orthogonal mechanisms shave time off the Stop
+hook even when the daemon is off:
+
+| Tier | Mechanism | Savings | Default |
+|---|---|---|---|
+| 1.2 | HyDE expansion cache (`hyde_cache.py`) | 0.5–4 s on `UserPromptSubmit` cache hits | on (when HyDE is on) |
+| 1.3 | Detached store (`store_async.py`) | 200–500 ms per noteworthy turn on `Stop` | off |
+| 3.8 | Long-lived daemon (`daemon.py`) | 100–300 ms per hook invocation | opt-in via installer |
+
+Tier 1.3 — detached store — is the focus of this section. It's
+opt-in via `hooks.stop.detach_store: true` in
+`config/claude-hooks.json`.
+
+### Why the Stop hook is slow
+
+When the assistant turn is "noteworthy" (it called `Bash`, `Edit`,
+`Write`, …), Stop summarises the turn and writes it to every provider
+whose `store_mode` is `auto`. The cost per provider:
+
+- `provider.recall(summary[:500], k=3)` for dedup (skip if a
+  near-duplicate already exists) — one MCP `tools/call` round-trip.
+- `provider.store(summary, metadata)` — another round-trip.
+
+Both are network calls to the MCP server. Two providers ⇒ four
+calls. Even on a healthy localhost setup that's ~200–500 ms, and
+Claude Code is blocked on it.
+
+### What `detach_store` does
+
+When `hooks.stop.detach_store: true`, Stop forks a detached
+`python -m claude_hooks.store_async` subprocess
+(`subprocess.Popen` with `start_new_session=True`, stdio piped to
+`DEVNULL`), pipes the payload (config + summary + metadata + provider
+allow-list) to its stdin, and returns immediately. Claude Code
+unblocks ~200–500 ms sooner. The child runs the same dedup-and-store
+fan-out the inline path would have run, logging to the same
+`~/.claude/claude-hooks.log` file.
+
+Failures in the child are logged but **never surfaced** to Claude
+Code — by the time the child finishes, the parent has already
+returned. That's the price of the detach: errors are quieter.
+
+### When to enable it
+
+Turn it on when:
+
+- Stop latency is visible (multi-provider config, slow MCP server,
+  remote provider).
+- You don't need the systemMessage to reflect the actual store
+  result — the message says `[claude-hooks] storing to <providers>
+  (async)` and is correct as long as the spawn succeeded.
+
+Leave it off when:
+
+- You're running tests that pass `FakeProvider` instances directly
+  to `stop.handle()` — they can't survive an interpreter boundary,
+  so the child rebuilds providers from config and the test's fakes
+  vanish. Tests asserting on store side-effects must run inline.
+- You want a hard guarantee the store completed before the next
+  turn (e.g. interactive debugging where you'd recall what you just
+  stored). Race condition: the next `UserPromptSubmit` could race
+  the in-flight detached store.
+
+### Interaction with the daemon
+
+Both can be on at once and they compose:
+
+- The daemon owns the hook-dispatch path → `Stop` runs in the
+  long-lived daemon process, no interpreter startup tax.
+- Inside the daemon's Stop handler, `detach_store: true` still forks
+  a fresh `python -m claude_hooks.store_async` for the actual store.
+  The daemon can return its response to the client immediately and
+  the slow MCP work happens in the child.
+
+In practice once the daemon is in place the savings from Tier 1.3
+shrink (the daemon already eliminated interpreter startup), but
+they're still real because the daemon's Stop handler would otherwise
+sit in the network-call serial path. Net stack: the daemon answers
+the Stop hook in milliseconds, the spawned child does the actual
+store independently.
+
+### Failure modes
+
+- Subprocess spawn fails (rare — out of FDs, broken interpreter,
+  stdin closed before write) → `store_async.spawn()` returns
+  `False`, Stop logs at DEBUG and falls back to **inline** dedup +
+  store. The user sees the inline systemMessage.
+- Child dies after spawn — payload is half-stored, no signal back
+  to the parent. The next turn will re-run dedup against whatever
+  did land, so duplicates are still avoided.
+- Payload not JSON-serialisable (custom objects in metadata) →
+  spawn returns `False` early, falls back to inline.
+

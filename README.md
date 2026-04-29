@@ -52,7 +52,7 @@ Claude responds (knowing the prior context, deterministically)
 ## Features
 
 ### Core (v0.1)
-- **Stdlib only** for the core. No `pip install` needed.
+- **Stdlib only** for the core (Qdrant + Memory KG providers, hooks, dispatcher) — no `pip install` needed. Optional features (pgvector, sqlite-vec, code-graph, MCP server, clustering) pull in their own deps via the `[code-graph]` / `[clustering]` / `[mcp-server]` extras.
 - **Python 3.9+**, runs identically on Linux, macOS, and Windows.
 - **Auto-detection** of MCP servers from `~/.claude.json`
 - **Plugin model**: each memory backend is one file (qdrant, memory_kg, pgvector, sqlite_vec)
@@ -122,6 +122,17 @@ Claude responds (knowing the prior context, deterministically)
   can filter by type without prose parsing.
 - **Metadata-gated rerank** — `hooks.user_prompt_submit.metadata_filter`
   filters candidates by cwd / type / age / tags before vector rerank.
+- **Caliber grounding proxy** ([`docs/caliber-proxy.md`](docs/caliber-proxy.md))
+  — local OpenAI-compat HTTP server that augments [caliber](https://github.com/caliber-ai-org/ai-setup)
+  with project grounding so `caliber init`/`refresh` cite real `path:line`
+  references instead of hallucinated ones. Paired with `bin/caliber-smart`
+  as a drop-in `caliber` wrapper that falls back to claude-cli when the
+  proxy is down.
+
+  > ⚠️ The shipped `bin/caliber-grounding-proxy` defaults
+  > `CALIBER_GROUNDING_UPSTREAM=http://192.168.178.2:11433/v1` — the
+  > author's home-LAN Ollama proxy. **Override via the systemd drop-in
+  > or shell environment** for your install (see the linked doc).
 
 ### Code graph (v0.6+)
 
@@ -283,6 +294,11 @@ Full schema with all options: [`config/claude-hooks.example.json`](config/claude
 | Instinct extraction | `hooks.stop.extract_instincts` | `false` | Auto-creates markdown "instinct" files from bug-fix patterns |
 | /reflect synthesis | `reflect.enabled` | `true` | Requires Ollama. Analyzes memory patterns and generates CLAUDE.md rules |
 | Consolidation | `consolidate.enabled` | `false` | Requires Ollama. Deduplicates, compresses, and prunes old memories |
+| Auto-consolidation | `consolidate.trigger` | `"manual"` | `"session_start"` runs `consolidate()` automatically every `min_sessions_between_runs` (default 10) sessions. CLI invocation always works regardless. |
+| PreToolUse memory warn | `hooks.pre_tool_use.warn_on_tools` / `warn_on_patterns` | `["Bash","Edit","Write"]` / `["rm ","DROP TABLE","git reset --hard"]` | Match a tool + a substring in its args; recall against that command and inject as advisory `additionalContext`. Never blocks. |
+| PreToolUse file-read gate | `hooks.pre_tool_use.file_read_gate` / `file_read_gate_tools` | `false` / `["Read","Edit","MultiEdit"]` | Port 5 from thedotmack/claude-mem. When `Read`/`Edit`/`MultiEdit` touches a path with prior memories, inject those memories regardless of `warn_on_patterns`. |
+| Detached store | `hooks.stop.detach_store` | `false` | Fork the dedup-and-store fan-out into a detached subprocess so Stop returns immediately. ~200–500 ms saved per noteworthy turn. See [`docs/daemon.md`](docs/daemon.md#latency-tiers-and-detach_store). |
+| Daemon (long-lived hook executor) | `hooks.daemon.enabled` (auto via installer) | platform-dependent | Single Python process owns providers + config across hook invocations. Each hook answers in milliseconds instead of 100–300 ms. See [`docs/daemon.md`](docs/daemon.md). |
 
 ### HyDE model
 
@@ -562,6 +578,15 @@ If raw recall finds nothing (garbage query), grounded mode short-circuits
 and skips HyDE entirely — cheaper than an ungrounded hallucinated
 expansion.
 
+**Precedence with `metadata_filter`** — when both are enabled, the
+metadata filter applies first: each provider returns
+`recall_k * over_fetch_factor` candidates, the filter trims by
+cwd/type/age/tags, and only the survivors form HyDE's grounding pool.
+So a too-narrow filter will silently disable grounded HyDE (zero raw
+hits ⇒ no grounding ⇒ HyDE skipped). Loosen the filter before
+suspecting HyDE quality. See [`docs/hyde.md`](docs/hyde.md) for the
+full pipeline.
+
 ### Per-provider `dedup_threshold`
 
 On `Stop`, providers that expose cosine similarity (qdrant, pgvector,
@@ -577,6 +602,13 @@ above the given cosine threshold. Set on the provider entry:
 `0.0` disables (the default for most providers). `0.85` is a sensible
 floor for "don't bother, we already have this." Higher = stricter.
 
+The threshold is a **cosine similarity** (range 0.0–1.0, higher = more
+similar), computed via the provider's own embedding model on the
+truncated summary (first 500 chars). Don't confuse with `1 - distance`
+in some pgvector queries — claude-hooks normalises providers to
+similarity-space internally so `dedup_threshold` always means "skip
+storing if any existing memory has cosine ≥ this value."
+
 ### `classify_observations` and instincts extraction (Stop hook)
 
 The Stop hook tags each stored memory with an `observation_type`
@@ -587,6 +619,45 @@ tooling can filter. Toggle with `hooks.stop.classify_observations`.
 heuristic to pull persistent rules from the assistant's message and
 write them to `hooks.stop.instincts_dir` (default `~/.claude/instincts`)
 as a sidecar you can promote to CLAUDE.md manually. Experimental.
+
+### `summary_format`: markdown vs XML
+
+`hooks.stop.summary_format` controls the layout of stored memories:
+
+- `"markdown"` (default) — backward-compatible plain-text bullet list.
+  What every Qdrant corpus written before v0.5 contains.
+- `"xml"` — structured `<observation>` block (port from
+  thedotmack/claude-mem). Each field is addressable, so downstream
+  recall can filter by type without prose parsing:
+
+  ```xml
+  <observation ts="2026-04-29T12:34:56Z">
+    <type>fix</type>
+    <title>bcache make-bcache --wipe-bcache rebuild</title>
+    <subtitle>/srv/dev-disk-by-label-opt/dev/claude-hooks</subtitle>
+    <cwd>/srv/dev-disk-by-label-opt/dev/claude-hooks</cwd>
+    <prompt>...truncated 600 chars...</prompt>
+    <result>...truncated 1200 chars...</result>
+    <files_modified>
+      <file>/etc/fstab</file>
+      <file>/etc/bcache.conf</file>
+    </files_modified>
+    <files_read>...</files_read>
+    <commands>
+      <command>make-bcache --wipe-bcache /dev/sda3</command>
+    </commands>
+  </observation>
+  ```
+
+  When `summary_format: "xml"` is on, the Stop hook also reads the
+  `<type>` tag back to seed `metadata.observation_type` directly
+  (skipping the heuristic classifier when the model has already
+  declared it).
+
+Mixing formats inside one corpus works but mucks up search ranking —
+pick one per corpus and stick with it. The format the entry was
+written with is recorded in `metadata.summary_format` so you can
+filter or re-write later.
 
 ### Claudemem auto-reindex
 
@@ -728,7 +799,9 @@ Branch coverage gate (target ≥ 80 %):
 ```bash
 coverage run -m pytest tests/
 coverage report
-# Last measured: ~90 % branch coverage on claude_hooks/
+# Phase 8 (test_coverage_phase8.py) brought branch coverage on
+# claude_hooks/ from ~81 % to ~92 %. Re-run `coverage report` for
+# the current figure — the number drifts as new modules ship.
 ```
 
 ### Test-file map
