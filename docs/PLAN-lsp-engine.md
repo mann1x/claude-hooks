@@ -39,6 +39,32 @@ The four decision points raised in this spec have been resolved:
    drift risk if cclsp upstream changes its config shape — we never
    write to that file.
 
+5. **Multi-session edit-buffer contention: session affinity locks.**
+   First session to `didChange` a file owns it for a debounce
+   window (default 30s, configurable). Other sessions touching the
+   same file get queued — their `didChange` waits, their queries
+   block briefly until the lock releases or times out. No
+   per-session shadow buffers (rejected: cost of swap-in/swap-out
+   per query was the costly path). UX degrades when two sessions
+   are *actively* editing the same file in parallel, but that's
+   rare on a single shared checkout — branch/worktree workflows
+   already give each session its own working tree (and its own
+   engine, since the daemon keys on absolute project root).
+   Concrete protocol:
+   - On `didChange(file)` from session S, engine acquires lock on
+     file → S, sets expiry = now + 30s.
+   - On subsequent `didChange(file)` from session T while lock is S:
+     queue the change, do not forward to LSP.
+   - On query from S while lock is S: forward immediately.
+   - On query from T while lock is S: block until lock releases or
+     500 ms timeout, then forward (returns stale-but-S's view —
+     acceptable since T hasn't actually edited yet).
+   - On `didChange` from S that touches the file again: extend
+     expiry. On idle expiry: drain T's queued change, forward to
+     LSP, lock is now T's.
+   - On session disconnect: release all locks owned by that session
+     immediately.
+
 These decisions reshape the architecture sketch and phasing below.
 
 **Goal:** give the PostToolUse hook (and any future hook that wants
@@ -252,8 +278,9 @@ need it.
 
 ## Open questions
 
-(Q1 / Q4 / preload / config are now locked — see Decisions section
-at the top. The remaining genuinely open items:)
+(Q1 / Q4 / preload / config / multi-session contention are now
+locked — see Decisions section at the top. The remaining genuinely
+open items:)
 
 1. **How does the engine know when to STOP indexing?** Even with
    adaptive preload, the lazy long-tail path can blow up on 1 M-LOC
@@ -277,13 +304,6 @@ at the top. The remaining genuinely open items:)
    equivalent. Tests already isolate platform-specific code (see
    memory entry on platform-test isolation), so the architecture
    transfers — just more `if os.name == "nt"` branches.
-
-5. **Multi-session contention on shared engine.** Two sessions
-   editing the same file concurrently each send `didChange`. Last
-   write wins at the LSP level, but we need a session-tagged edit
-   buffer so each session's *next query* sees its own latest
-   intent rather than the other session's clobber. Investigate in
-   Phase 1.
 
 ## How this slots into the existing repo
 
@@ -319,10 +339,13 @@ compile-aware in Phase 3, layered config.)
    → diagnostics` round-trips work against a fake LSP.
 2. **Phase 1 — daemon lifecycle + IPC** (2 days, +1 vs original).
    Per-project shared daemon under `~/.claude/lsp-engine/<project>/`,
-   lock file, attach/detach protocol, session-id-tagged edit buffer
-   (resolves Q5 above). UNIX socket server. SessionStart attach,
-   SessionEnd detach (last detach reaps). End-to-end: two sessions
-   editing the same file see consistent diagnostics.
+   process lock file, attach/detach protocol, **per-file session
+   affinity locks** (30s debounce default, see Decision 5).
+   UNIX socket server. SessionStart attach, SessionEnd detach
+   (last detach reaps). End-to-end: two sessions editing different
+   files run concurrently with no contention; two sessions editing
+   the *same* file serialize via the affinity lock with the second
+   session's `didChange` queued until lock releases.
 3. **Phase 2 — adaptive preload + git awareness** (1.5 days). Walk
    the existing `code_graph` for top-200 hot files, eager-didOpen
    those, lazy on the rest. HEAD watcher + bulk re-didOpen on
