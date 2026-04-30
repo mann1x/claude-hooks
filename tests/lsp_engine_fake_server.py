@@ -52,9 +52,12 @@ def _write_frame(stream, msg: dict) -> None:
     stream.flush()
 
 
-def _publish_for(stream, uri: str, content: str) -> None:
+def _publish_for(stream, uri: str, version: int, content: str) -> None:
     """Emit a single synthetic diagnostic so tests can assert that
     ``content`` (the latest text the server saw) round-tripped.
+
+    Includes the document ``version`` so the client can drop stale
+    publishes that arrive after a newer didChange.
     """
     _write_frame(
         stream,
@@ -63,6 +66,7 @@ def _publish_for(stream, uri: str, content: str) -> None:
             "method": "textDocument/publishDiagnostics",
             "params": {
                 "uri": uri,
+                "version": version,
                 "diagnostics": [
                     {
                         "range": {
@@ -109,13 +113,23 @@ def main() -> int:
         elif method == "textDocument/didOpen":
             params = msg.get("params") or {}
             doc = params.get("textDocument") or {}
-            _publish_for(stdout, doc.get("uri", ""), doc.get("text", ""))
+            _publish_for(
+                stdout,
+                doc.get("uri", ""),
+                int(doc.get("version", 1)),
+                doc.get("text", ""),
+            )
         elif method == "textDocument/didChange":
             params = msg.get("params") or {}
             doc = params.get("textDocument") or {}
             changes = params.get("contentChanges") or []
             text = changes[-1].get("text", "") if changes else ""
-            _publish_for(stdout, doc.get("uri", ""), text)
+            _publish_for(
+                stdout,
+                doc.get("uri", ""),
+                int(doc.get("version", 1)),
+                text,
+            )
         elif method == "textDocument/didClose":
             pass
         elif method == "shutdown":

@@ -140,6 +140,12 @@ class LspClient:
         self._diag_lock = threading.Lock()
 
         self._open_versions: dict[str, int] = {}
+        # Drop publishDiagnostics whose ``version`` is older than the
+        # last did_change we sent. Without this guard, a delayed
+        # publish for didOpen v1 can land *after* we reset for
+        # didChange v2 and pollute state with stale len-5 diagnostics
+        # the test thread then reads.
+        self._diag_min_version: dict[str, int] = {}
 
     # ─── lifecycle ───────────────────────────────────────────────────
 
@@ -234,7 +240,7 @@ class LspClient:
         uri = path_to_uri(path)
         version = self._open_versions.get(uri, 0) + 1
         self._open_versions[uri] = version
-        self._reset_diagnostics(uri)
+        self._reset_diagnostics(uri, expected_version=version)
         self._send_notification(
             "textDocument/didOpen",
             {
@@ -254,11 +260,12 @@ class LspClient:
                 f"did_change before did_open: {uri}",
             )
         self._open_versions[uri] += 1
-        self._reset_diagnostics(uri)
+        version = self._open_versions[uri]
+        self._reset_diagnostics(uri, expected_version=version)
         self._send_notification(
             "textDocument/didChange",
             {
-                "textDocument": {"uri": uri, "version": self._open_versions[uri]},
+                "textDocument": {"uri": uri, "version": version},
                 "contentChanges": [{"text": content}],
             },
         )
@@ -298,9 +305,10 @@ class LspClient:
         with self._diag_lock:
             return list(self._diagnostics.get(uri, []))
 
-    def _reset_diagnostics(self, uri: str) -> None:
+    def _reset_diagnostics(self, uri: str, *, expected_version: int) -> None:
         with self._diag_lock:
             self._diagnostics.pop(uri, None)
+            self._diag_min_version[uri] = expected_version
             event = self._diagnostics_event.get(uri)
             if event is not None:
                 event.clear()
@@ -431,6 +439,16 @@ class LspClient:
         uri = params.get("uri")
         if not isinstance(uri, str):
             return
+        # Drop publishes for stale versions (delayed didOpen v1
+        # arriving after didChange v2 reset). Servers that don't send
+        # a version field land here as None and we can't filter — same
+        # as before the fix, but real LSPs (and our fake server) do.
+        publish_version = params.get("version")
+        if isinstance(publish_version, int):
+            with self._diag_lock:
+                expected = self._diag_min_version.get(uri)
+            if expected is not None and publish_version < expected:
+                return
         diags_raw = params.get("diagnostics") or []
         diags: list[Diagnostic] = []
         for d in diags_raw:
