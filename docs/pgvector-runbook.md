@@ -343,6 +343,85 @@ A clean handshake means the launcher resolved Python correctly,
 `claude_hooks.pgvector_mcp` imports, and the provider opens against
 your DSN. Any failure prints to stderr.
 
+#### HTTP transport — Claude Desktop and other remote clients
+
+Stdio is fine for Claude Code on the same machine, but Claude Desktop
+running on a different host (or any client that wants HTTP) needs an
+HTTP/Streamable-HTTP endpoint. The same module serves both transports
+— pass `--http` and the dispatcher runs behind a stdlib
+`ThreadingHTTPServer` instead of stdin/stdout.
+
+```bash
+# Manual smoke test:
+python -m claude_hooks.pgvector_mcp --http --port 32775
+```
+
+Defaults: `0.0.0.0:32775`, override via env:
+
+| Env | Default | Notes |
+|---|---|---|
+| `PGVECTOR_MCP_HTTP_HOST` | `0.0.0.0` | Set to `127.0.0.1` to lock to loopback |
+| `PGVECTOR_MCP_HTTP_PORT` | `32775` | Slots into the `32769–32774` block alongside the other compose-managed MCPs |
+
+The recommended deployment is the systemd unit shipped at
+`systemd/claude-hooks-pgvector-mcp.service`. `install.py` offers to
+install + enable it whenever `providers.pgvector.enabled` is true:
+
+```
+==> claude-hooks-pgvector-mcp systemd unit
+  Will install to /etc/systemd/system/claude-hooks-pgvector-mcp.service ...
+  Install pgvector MCP HTTP unit (port 32775)? [Y/n]: y
+  + wrote claude-hooks-pgvector-mcp.service
+  · enabled + started claude-hooks-pgvector-mcp.service
+    URL: http://<host>:32775/mcp  (Streamable-HTTP MCP)
+```
+
+Manual install if you skipped the prompt:
+
+```bash
+sudo cp systemd/claude-hooks-pgvector-mcp.service /etc/systemd/system/
+sudo sed -i "s|__REPO_PATH__|$(pwd)|g" \
+  /etc/systemd/system/claude-hooks-pgvector-mcp.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now claude-hooks-pgvector-mcp.service
+```
+
+Verify the HTTP endpoint:
+
+```bash
+curl -sX POST http://192.168.178.2:32775/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
+  | python -m json.tool
+```
+
+Wire it into Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`
+on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
+
+```jsonc
+{
+  "mcpServers": {
+    "pgvector": {
+      "type": "http",
+      "url": "http://<solidpc-ip>:32775/mcp"
+    }
+  }
+}
+```
+
+Security note: the unit binds `0.0.0.0` by default — anyone on the
+LAN who can reach port 32775 has read/write access to the memory
+store. If that's not what you want, drop a systemd override at
+`/etc/systemd/system/claude-hooks-pgvector-mcp.service.d/override.conf`:
+
+```ini
+[Service]
+Environment=PGVECTOR_MCP_HTTP_HOST=127.0.0.1
+```
+
+…and put a TLS-terminating reverse proxy (nginx, traefik, swag) in
+front when you do want it on the LAN.
+
 ### Running pgvector alongside Qdrant + Memory KG
 
 All three providers can be enabled simultaneously. The dispatcher

@@ -878,6 +878,74 @@ def _install_caliber_proxy_systemd(
         print(f"  [!!] enable failed:\n{rc.stderr.strip()[-300:]}")
 
 
+_PGVECTOR_MCP_UNIT = "claude-hooks-pgvector-mcp.service"
+
+
+def _install_pgvector_mcp_systemd(
+    cfg: dict, *, non_interactive: bool, dry_run: bool,
+) -> None:
+    """Install the pgvector MCP HTTP-frontend systemd unit when the
+    pgvector provider is enabled. Linux-only; idempotent -- skips if
+    the unit is already installed.
+
+    The HTTP server binds 0.0.0.0:32775 and exposes the same JSON-RPC
+    surface as the stdio launcher (``bin/claude-hook-pgvector-mcp``)
+    so Claude Desktop and any other remote MCP client can reach the
+    pgvector store at ``http://<host>:32775/mcp``. Stdio remains the
+    default for local Claude Code sessions; this unit only adds the
+    HTTP frontend on top, it does not replace the stdio launcher.
+    """
+    if os.name == "nt":
+        return
+    if not Path("/etc/systemd/system").is_dir():
+        return
+    pgvector_cfg = (cfg.get("providers") or {}).get("pgvector") or {}
+    if not pgvector_cfg.get("enabled", False):
+        return
+
+    src = HERE / "systemd" / _PGVECTOR_MCP_UNIT
+    dest = Path("/etc/systemd/system") / _PGVECTOR_MCP_UNIT
+    if dest.exists():
+        return  # idempotent -- leave existing unit alone
+
+    print("\n==> claude-hooks-pgvector-mcp systemd unit")
+    if not src.exists():
+        print(f"  [!!] {src} missing -- skipping")
+        return
+    print(f"  Will install to {dest} with __REPO_PATH__ = {HERE}")
+    if dry_run:
+        print("  [dry-run] skipping write.")
+        return
+    if non_interactive:
+        print("  --non-interactive: proceeding.")
+    else:
+        ans = input(
+            "  Install pgvector MCP HTTP unit (port 32775)? [Y/n]: ",
+        ).strip().lower()
+        if ans not in ("", "y", "yes"):
+            print("  Skipped.")
+            return
+
+    content = src.read_text(encoding="utf-8")
+    content = content.replace("__REPO_PATH__", str(HERE.resolve()))
+    try:
+        dest.write_text(content, encoding="utf-8")
+    except OSError as e:
+        print(f"  [!!] Failed to write {dest}: {e}")
+        return
+    print(f"  + wrote {_PGVECTOR_MCP_UNIT}")
+    subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
+    rc = subprocess.run(
+        ["systemctl", "enable", "--now", _PGVECTOR_MCP_UNIT],
+        capture_output=True, text=True,
+    )
+    if rc.returncode == 0:
+        print(f"  · enabled + started {_PGVECTOR_MCP_UNIT}")
+        print("    URL: http://<host>:32775/mcp  (Streamable-HTTP MCP)")
+    else:
+        print(f"  [!!] enable failed:\n{rc.stderr.strip()[-300:]}")
+
+
 _AXON_HOST_UNIT = "axon-host.service"
 _AXON_HOST_CWD = Path("/var/lib/axon-host")
 _AXON_PLACEHOLDER = (
@@ -2614,6 +2682,16 @@ def main() -> int:
     # compat proxy that adds project grounding + tools to caliber calls
     # routed at Ollama. See claude_hooks/caliber_proxy/.
     _install_caliber_proxy_systemd(
+        cfg,
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
+    # Offer to install the pgvector MCP HTTP frontend (opt-in under
+    # providers.pgvector.enabled). Exposes the same JSON-RPC surface
+    # as the stdio launcher at http://<host>:32775/mcp so Claude
+    # Desktop / any remote MCP client can reach the memory store.
+    # Stdio remains the default for local Claude Code sessions.
+    _install_pgvector_mcp_systemd(
         cfg,
         non_interactive=args.non_interactive,
         dry_run=args.dry_run,
