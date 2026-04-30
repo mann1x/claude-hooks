@@ -216,6 +216,16 @@
       "rtk_timeout": 3.0,
       "rtk_log_rewrites": false,
       "rtk_scan_rewrites": true
+    },
+    "post_tool_use": {
+      "enabled": true,
+      "ruff_enabled": true,
+      "ruff_path": null,
+      "ruff_args": ["check", "--output-format=concise", "--quiet", "--no-cache"],
+      "ruff_extensions": [".py"],
+      "ruff_timeout": 5.0,
+      "max_diagnostics": 50,
+      "log_invocations": false
     }
   },
   "reflect": {

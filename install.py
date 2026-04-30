@@ -243,6 +243,27 @@ PRE_TOOL_USE_TEMPLATE = {
     ],
 }
 
+# PostToolUse runs the ruff diagnostics handler after Edit/Write/
+# MultiEdit. Matches only file-editing tools so we don't pay the
+# subprocess cost on Read/Bash/Grep. Enabled by default — the hook
+# itself early-exits on non-Python files (no ruff invocation), so
+# the cost when nothing applies is sub-millisecond.
+POST_TOOL_USE_TEMPLATE = {
+    "PostToolUse": [
+        {
+            "matcher": "Edit|Write|MultiEdit",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "{cmd} PostToolUse",
+                    "timeout": 10,
+                    "_managedBy": MANAGED_BY,
+                }
+            ],
+        }
+    ],
+}
+
 
 def _find_conda() -> Optional[str]:
     """Find the conda executable, trying common locations.
@@ -2727,6 +2748,11 @@ def main() -> int:
         settings_path,
         repo_path=HERE,
         include_pre_tool_use=bool(((cfg.get("hooks") or {}).get("pre_tool_use") or {}).get("enabled")),
+        # PostToolUse defaults to ON (the ruff hook is the user-facing
+        # quality-of-life feature; ``hooks.post_tool_use.enabled`` is
+        # true by default in the example config). Honour an explicit
+        # false in the user's config.
+        include_post_tool_use=bool(((cfg.get("hooks") or {}).get("post_tool_use") or {}).get("enabled", True)),
         dry_run=args.dry_run,
     )
 
@@ -2813,6 +2839,7 @@ def install_hooks(
     *,
     repo_path: Path,
     include_pre_tool_use: bool,
+    include_post_tool_use: bool,
     dry_run: bool,
 ) -> None:
     settings = _load_json(settings_path)
@@ -2827,6 +2854,8 @@ def install_hooks(
     template = deepcopy(HOOK_TEMPLATE)
     if include_pre_tool_use:
         template.update(deepcopy(PRE_TOOL_USE_TEMPLATE))
+    if include_post_tool_use:
+        template.update(deepcopy(POST_TOOL_USE_TEMPLATE))
 
     # Substitute the {cmd} placeholder.
     for event, blocks in template.items():

@@ -22,3 +22,10 @@
 #
 
 httpx[http2]>=0.27
+# ruff is invoked by the PostToolUse hook to lint Python files right
+# after Edit/Write/MultiEdit, injecting diagnostics into the next
+# turn's additionalContext. Ships in the core install because the
+# hook is enabled by default. The hook gracefully degrades if ruff
+# is missing on the host (logs a warning and skips), but new envs
+# get it pre-installed via this requirements line.
+ruff>=0.6
