@@ -241,6 +241,189 @@ class TestSessionAffinityE2E(unittest.TestCase):
 
 
 @unittest.skipIf(os.name == "nt", "Windows parity is Phase 4")
+class TestPhase2PreloadAndGitWatch(unittest.TestCase):
+    """Phase 2 acceptance: preload from code_graph + branch-switch
+    bulk re-didOpen.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.project = Path(self.tmp.name) / "project"
+        self.project.mkdir()
+        self.state = Path(self.tmp.name) / "state"
+
+    def _seed_files(self, files: dict[str, str]) -> None:
+        for rel, content in files.items():
+            p = self.project / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+
+    def _seed_graph(self, modules: list[tuple[str, str]],
+                    imports: list[tuple[str, str]]) -> None:
+        from claude_hooks.lsp_engine.preload import GRAPH_JSON_REL_PATH
+        nodes = [
+            {"id": mid, "type": "module", "file": file_rel}
+            for mid, file_rel in modules
+        ]
+        edges = [
+            {"source": s, "target": t, "type": "imports"}
+            for s, t in imports
+        ]
+        out = self.project / GRAPH_JSON_REL_PATH
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            json.dumps({"graph": {"nodes": nodes, "edges": edges}}),
+            encoding="utf-8",
+        )
+
+    def _seed_git(self, branch: str = "main", sha: str = "a" * 40) -> None:
+        git = self.project / ".git"
+        (git / "refs" / "heads").mkdir(parents=True, exist_ok=True)
+        (git / "HEAD").write_text(
+            f"ref: refs/heads/{branch}\n", encoding="utf-8",
+        )
+        (git / "refs" / "heads" / branch).write_text(
+            f"{sha}\n", encoding="utf-8",
+        )
+
+    def test_preload_opens_top_n_hot_files_on_start(self) -> None:
+        self._seed_files({
+            "pkg/utils.py": "U = 1\n",
+            "pkg/api.py":   "A = 1\n",
+            "pkg/cli.py":   "C = 1\n",
+        })
+        self._seed_graph(
+            modules=[
+                ("module:pkg.utils", "pkg/utils.py"),
+                ("module:pkg.api",   "pkg/api.py"),
+                ("module:pkg.cli",   "pkg/cli.py"),
+            ],
+            imports=[
+                ("module:pkg.api",  "module:pkg.utils"),
+                ("module:pkg.cli",  "module:pkg.utils"),
+                ("module:pkg.cli",  "module:pkg.api"),
+            ],
+        )
+        # Cap preload at 2 — utils + api should land, cli should not.
+        from claude_hooks.lsp_engine.config import (
+            EngineConfig,
+            PreloadConfig,
+        )
+        cfg = EngineConfig(preload=PreloadConfig(max_files=2, use_code_graph=True))
+        daemon = Daemon(
+            project_root=self.project,
+            servers=[_fake_spec()],
+            engine_config=cfg,
+            state_base=self.state,
+        )
+        daemon.start()
+        try:
+            # Wait for the preload thread to drain. It runs in
+            # background; poll the engine until the expected count
+            # appears or we time out.
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if len(daemon._engine.open_files()) >= 2:
+                    break
+                time.sleep(0.10)
+            opened_paths = daemon._engine.open_files()
+            self.assertEqual(len(opened_paths), 2)
+            opened_names = {Path(u).name for u in opened_paths}
+            self.assertEqual(opened_names, {"utils.py", "api.py"})
+        finally:
+            daemon.stop()
+
+    def test_preload_disabled_when_use_code_graph_false(self) -> None:
+        self._seed_files({"a.py": "x = 1\n"})
+        self._seed_graph(
+            modules=[("module:a", "a.py")],
+            imports=[],
+        )
+        from claude_hooks.lsp_engine.config import (
+            EngineConfig,
+            PreloadConfig,
+        )
+        cfg = EngineConfig(preload=PreloadConfig(use_code_graph=False))
+        daemon = Daemon(
+            project_root=self.project,
+            servers=[_fake_spec()],
+            engine_config=cfg,
+            state_base=self.state,
+        )
+        daemon.start()
+        try:
+            time.sleep(0.30)
+            self.assertEqual(daemon._engine.open_files(), [])
+        finally:
+            daemon.stop()
+
+    def test_branch_switch_triggers_bulk_refresh(self) -> None:
+        """Acceptance: after a branch switch, an open file's
+        diagnostics reflect the file's *new on-disk content*. The
+        fake LSP echoes ``len(content)`` so we can verify the new
+        content reached the LSP child.
+        """
+        self._seed_files({"x.py": "short"})
+        self._seed_git(branch="main")
+        daemon = Daemon(
+            project_root=self.project,
+            servers=[_fake_spec()],
+            state_base=self.state,
+            git_poll_interval=0.05,
+        )
+        daemon.start()
+        try:
+            sock = socket_path_for(self.project, base=self.state)
+            with LspEngineClient(sock, "session-A") as c:
+                target = self.project / "x.py"
+                c.did_open(target, "short")
+                diags, _ = c.diagnostics(target, diag_timeout_s=2.0)
+                self.assertEqual(diags[0]["message"], "len=5")
+
+                # Synthesize branch switch by mutating HEAD + having
+                # the on-disk content also change (as a real branch
+                # switch would).
+                target.write_text("longer-disk-content", encoding="utf-8")
+                # Add the second branch ref so HEAD switch resolves.
+                (self.project / ".git" / "refs" / "heads" / "feature").write_text(
+                    "b" * 40 + "\n", encoding="utf-8",
+                )
+                (self.project / ".git" / "HEAD").write_text(
+                    "ref: refs/heads/feature\n", encoding="utf-8",
+                )
+
+                # Wait for the watcher (poll=0.05s) to fire and
+                # refresh_open_files to send the new content.
+                deadline = time.monotonic() + 3.0
+                while time.monotonic() < deadline:
+                    diags, _ = c.diagnostics(target, diag_timeout_s=1.0)
+                    if diags and diags[0]["message"] == "len=19":
+                        break
+                    time.sleep(0.10)
+                self.assertEqual(diags[0]["message"], "len=19")
+        finally:
+            daemon.stop()
+
+    def test_non_git_project_starts_cleanly_with_inactive_watcher(self) -> None:
+        # No .git/ directory — daemon should start, watcher should
+        # silently sit out.
+        self._seed_files({"x.py": "x = 1"})
+        daemon = Daemon(
+            project_root=self.project,
+            servers=[_fake_spec()],
+            state_base=self.state,
+            git_poll_interval=0.05,
+        )
+        daemon.start()
+        try:
+            self.assertFalse(daemon._git_watcher.is_git_repo)
+            time.sleep(0.20)  # let any over-eager watcher fire if it wanted to
+        finally:
+            daemon.stop()
+
+
+@unittest.skipIf(os.name == "nt", "Windows parity is Phase 4")
 class TestConnectOrSpawn(unittest.TestCase):
     """The hook entry point — spawn the daemon if it isn't running,
     return a connected client. Uses a real subprocess for the spawn.

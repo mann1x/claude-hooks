@@ -65,10 +65,11 @@ class Engine:
         # frozen, so it's hashable) so we don't accidentally start
         # two clients for the same spec.
         self._clients: dict[LspServerSpec, LspClient] = {}
-        # uri -> spec the file is currently routed to. Lets did_change
-        # / get_diagnostics find the right client without re-resolving
-        # by extension every call.
-        self._uri_routing: dict[str, LspServerSpec] = {}
+        # uri -> (abs_path, spec) the file is currently routed to.
+        # Storing the path alongside the spec lets ``refresh_open_files``
+        # re-read content from disk without round-tripping back through
+        # ``urllib.parse`` to derive the path from the URI.
+        self._uri_routing: dict[str, tuple[str, LspServerSpec]] = {}
         self._lock = threading.RLock()
         self._stopped = False
 
@@ -111,8 +112,9 @@ class Engine:
             return False
         client = self._client_for(spec)
         uri = _path_to_uri(path)
+        abs_path = str(Path(path).resolve())
         with self._lock:
-            self._uri_routing[uri] = spec
+            self._uri_routing[uri] = (abs_path, spec)
         client.did_open(path, content)
         return True
 
@@ -125,9 +127,10 @@ class Engine:
         """
         uri = _path_to_uri(path)
         with self._lock:
-            spec = self._uri_routing.get(uri)
-        if spec is None:
+            entry = self._uri_routing.get(uri)
+        if entry is None:
             return False
+        _abs_path, spec = entry
         client = self._client_for(spec)
         client.did_change(path, content)
         return True
@@ -135,9 +138,10 @@ class Engine:
     def did_close(self, path: str | os.PathLike) -> bool:
         uri = _path_to_uri(path)
         with self._lock:
-            spec = self._uri_routing.pop(uri, None)
-        if spec is None:
+            entry = self._uri_routing.pop(uri, None)
+        if entry is None:
             return False
+        _abs_path, spec = entry
         client = self._client_for(spec)
         try:
             client.did_close(path)
@@ -153,11 +157,42 @@ class Engine:
     ) -> list[Diagnostic]:
         uri = _path_to_uri(path)
         with self._lock:
-            spec = self._uri_routing.get(uri)
-        if spec is None:
+            entry = self._uri_routing.get(uri)
+        if entry is None:
             return []
+        _abs_path, spec = entry
         client = self._client_for(spec)
         return client.get_diagnostics(path, timeout=timeout)
+
+    def refresh_open_files(self) -> int:
+        """Re-send the on-disk content of every open file to its LSP.
+
+        Used after a git branch switch when disk content has diverged
+        from the LSP's in-memory copy. Returns the count refreshed.
+        Files that no longer exist on disk (deleted by the branch
+        switch) are silently dropped from the routing so their next
+        ``did_change`` would no-op rather than error.
+        """
+        refreshed = 0
+        with self._lock:
+            snapshot = dict(self._uri_routing)
+        for uri, (abs_path, spec) in snapshot.items():
+            p = Path(abs_path)
+            if not p.is_file():
+                with self._lock:
+                    self._uri_routing.pop(uri, None)
+                continue
+            try:
+                content = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            try:
+                client = self._client_for(spec)
+                client.did_change(abs_path, content)
+                refreshed += 1
+            except LspError:  # pragma: no cover — defensive
+                log.exception("refresh: did_change failed for %s", abs_path)
+        return refreshed
 
     # ─── introspection ───────────────────────────────────────────────
 
@@ -173,6 +208,16 @@ class Engine:
     def active_servers(self) -> list[LspServerSpec]:
         with self._lock:
             return list(self._clients.keys())
+
+    def configured_extensions(self) -> set[str]:
+        """All extensions any configured server claims, lowercased and
+        no leading dot. Used by the preload step to skip files whose
+        language has no LSP attached.
+        """
+        out: set[str] = set()
+        for spec in self._servers:
+            out.update(spec.extensions)
+        return out
 
     # ─── internals ───────────────────────────────────────────────────
 

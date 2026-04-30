@@ -43,6 +43,7 @@ from claude_hooks.lsp_engine.daemon import (
     socket_path_for,
 )
 from claude_hooks.lsp_engine.engine import Engine
+from claude_hooks.lsp_engine.git_watch import GitWatcher
 from claude_hooks.lsp_engine.ipc import (
     IpcClient,
     IpcProtocolError,
@@ -51,6 +52,10 @@ from claude_hooks.lsp_engine.ipc import (
 from claude_hooks.lsp_engine.locks import (
     QueuedChange,
     SessionLockManager,
+)
+from claude_hooks.lsp_engine.preload import (
+    preload_engine,
+    rank_files_by_in_degree,
 )
 from claude_hooks.lsp_engine.lsp import (
     Diagnostic,
@@ -65,6 +70,7 @@ __all__ = [
     "Diagnostic",
     "Engine",
     "EngineConfig",
+    "GitWatcher",
     "IpcClient",
     "IpcProtocolError",
     "IpcServer",
@@ -80,7 +86,9 @@ __all__ = [
     "load_cclsp_config",
     "load_daemon_config",
     "load_engine_config",
+    "preload_engine",
     "project_dir",
+    "rank_files_by_in_degree",
     "resolve_server_for_path",
     "socket_path_for",
 ]

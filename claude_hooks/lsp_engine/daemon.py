@@ -45,11 +45,13 @@ from claude_hooks.lsp_engine.config import (
     load_engine_config,
 )
 from claude_hooks.lsp_engine.engine import Engine
+from claude_hooks.lsp_engine.git_watch import GitWatcher
 from claude_hooks.lsp_engine.ipc import IpcServer
 from claude_hooks.lsp_engine.locks import (
     QueuedChange,
     SessionLockManager,
 )
+from claude_hooks.lsp_engine.preload import preload_engine
 
 log = logging.getLogger("claude_hooks.lsp_engine.daemon")
 
@@ -99,6 +101,7 @@ class Daemon:
         state_base: Optional[Path] = None,
         startup_timeout: float = 10.0,
         request_timeout: float = 5.0,
+        git_poll_interval: float = 1.0,
     ) -> None:
         self._project_root = Path(project_root).resolve()
         self._dir = project_dir(self._project_root, base=state_base)
@@ -138,6 +141,12 @@ class Daemon:
         self._lock_fd: Optional[int] = None
         self._stopping = threading.Event()
 
+        # Phase 2 additions: adaptive preload + git watcher.
+        self._preload_thread: Optional[threading.Thread] = None
+        self._git_watcher: Optional[GitWatcher] = None
+        self._git_poll_interval = float(git_poll_interval)
+        self._refresh_lock = threading.Lock()
+
     # ─── lifecycle ───────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -157,6 +166,26 @@ class Daemon:
             daemon=True,
         )
         self._sweeper_thread.start()
+
+        # Adaptive preload (off the critical path — runs while
+        # sessions connect). Soft-fails if graph.json is missing.
+        if self._engine_config.preload.use_code_graph:
+            self._preload_thread = threading.Thread(
+                target=self._run_preload,
+                name="lsp-engine-preload",
+                daemon=True,
+            )
+            self._preload_thread.start()
+
+        # Git watcher fires the bulk-refresh on branch switches /
+        # pulls / resets. Inactive for non-git projects.
+        self._git_watcher = GitWatcher(
+            self._project_root,
+            on_change=self._on_git_change,
+            poll_interval=self._git_poll_interval,
+        )
+        self._git_watcher.start()
+
         log.info("lsp-engine daemon started for %s", self._project_root)
 
     def stop(self) -> None:
@@ -164,6 +193,12 @@ class Daemon:
             return
         self._stopping.set()
         self._sweeper_stop.set()
+        if self._git_watcher is not None:
+            try:
+                self._git_watcher.stop()
+            except Exception:  # pragma: no cover — defensive
+                log.exception("error stopping git watcher")
+            self._git_watcher = None
         try:
             self._ipc.shutdown()
         except Exception:  # pragma: no cover — defensive
@@ -171,6 +206,12 @@ class Daemon:
         if self._sweeper_thread is not None:
             self._sweeper_thread.join(timeout=2.0)
             self._sweeper_thread = None
+        if self._preload_thread is not None:
+            # Preload thread is daemon=True so it dies with the
+            # process anyway; join briefly so a fast stop() doesn't
+            # leave a thread mid-LSP-call.
+            self._preload_thread.join(timeout=2.0)
+            self._preload_thread = None
         try:
             self._engine.shutdown()
         except Exception:  # pragma: no cover — defensive
@@ -233,6 +274,46 @@ class Daemon:
         while not self._sweeper_stop.wait(timeout=SWEEPER_INTERVAL_S):
             drained = self._lock_manager.tick()
             self._apply_drained(drained)
+
+    # ─── preload + git refresh ───────────────────────────────────────
+
+    def _run_preload(self) -> None:
+        """Background thread entry point for adaptive preload.
+
+        Caps preload to extensions any configured server actually
+        claims so we don't read 200 ``.md`` files for a Python-only
+        daemon. ``preload_engine`` soft-fails on missing graph.json.
+        """
+        try:
+            cfg = self._engine_config.preload
+            extensions = self._engine.configured_extensions()
+            preload_engine(
+                self._engine,
+                self._project_root,
+                max_files=cfg.max_files,
+                extension_filter=extensions if extensions else None,
+            )
+        except Exception:  # pragma: no cover — defensive
+            log.exception("preload thread crashed")
+
+    def _on_git_change(self, reason: str) -> None:
+        """Called from the git-watcher thread on HEAD / ref changes.
+
+        Bulk-refreshes every currently-open file from disk so the LSP
+        sees the new branch's content. We *don't* clear lock state —
+        sessions with queued changes will drain naturally; if their
+        queued content is stale relative to the new branch, that's a
+        user-visible "I edited on the wrong branch" issue rather than
+        something the engine can paper over.
+        """
+        with self._refresh_lock:
+            log.info("git_watch: %s — refreshing open files", reason)
+            try:
+                refreshed = self._engine.refresh_open_files()
+            except Exception:  # pragma: no cover — defensive
+                log.exception("git_watch: refresh_open_files raised")
+                return
+            log.info("git_watch: refreshed %d open files", refreshed)
 
     def _apply_drained(self, drained: list[tuple[str, QueuedChange]]) -> None:
         """For each (path, queued_change) returned by the manager,
