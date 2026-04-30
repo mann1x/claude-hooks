@@ -98,7 +98,7 @@
       "embedder_options": {
         "url": "http://YOUR-HOST:11434/api/embeddings",
         "model": "qwen3-embedding:0.6b",
-        "num_ctx": 32768,
+        "num_ctx": 16384,
         "max_chars": 30000,
         "timeout": 30.0
       },

@@ -41,31 +41,71 @@ def _default_anchor_bytes() -> int:
 SYSTEM_ADDENDUM_WITH_TOOLS = """\
 GROUNDING PROTOCOL — read this carefully.
 
-You are operating in a coding project. To produce high-quality output you
-MUST use the filesystem tools provided (list_files, read_file, glob, grep)
-to ground every claim you make.
+You are operating in a coding project. The PROJECT ANCHOR FILES and
+PROJECT STRUCTURE MAP system messages are a starting point only — the
+ANCHOR FILES contain a small subset (CLAUDE.md, README, package
+manifests). Most of the codebase is NOT pre-loaded. You MUST use the
+filesystem tools (survey_project, list_files, read_file, glob, grep)
+to read the specific files you cite. Skipping tool use yields shallow
+output that fails the grading rubric below.
 
-Non-negotiable rules:
-1. When citing code, ALWAYS use `path/to/file.py:42` format — a real
-   relative path plus a real line number from the file. Never invent
-   paths. Never cite a symbol you have not read.
-2. If you are asked to describe project structure, call `list_files`
-   first. If you need to understand a specific module, `read_file` the
-   module (use start_line/end_line for large files).
-3. To find occurrences of a symbol or pattern, use `grep` with a regex.
-   To find files by name pattern, use `glob`.
-4. Before generating any skill, agent, or config entry that references a
-   file, verify the file exists (`list_files` the parent directory or
-   `read_file` the file). Do not list files in your output that do not
-   exist in this project.
-5. Prefer reading real files over assuming conventions. The project may
-   use conda, not venv; pytest-asyncio, not trio; etc.
-6. Tool results are expensive — batch reads and be specific with
-   patterns instead of making many tiny calls.
+MANDATORY tool-use plan — execute these steps in order BEFORE writing
+any final JSON:
 
-If the task is deterministic (e.g. checking whether docs need refresh)
-and the current prompt already contains enough information to answer,
-you may answer directly without calling tools.
+  1. **Survey FIRST.** Call `survey_project` with no arguments. It
+     returns a hierarchical map of the project (top-level directories
+     with file counts, an extension histogram, and root-level files)
+     in a bounded ~2k-token block. Result is cached for the rest of
+     the run, so calling it costs nothing on subsequent turns. Then
+     `list_files` any specific subdirectory called out in the task
+     (e.g. `src/`, `claude_hooks/`, `tests/`) for finer detail.
+  2. **Anchor read.** For each top-level config or entry point you
+     intend to reference (e.g. `pyproject.toml`, `package.json`,
+     `Makefile`, the main module, the CLI entry), `read_file` it in
+     full or with start_line/end_line for large files. You cannot
+     describe a file you have not opened.
+  3. **Pattern grep.** For each non-obvious claim you want to make
+     ("the project uses X", "tests live in Y", "the API entrypoint
+     is Z"), run `grep` with a regex against the relevant directory
+     and pick a real `path:line` to cite.
+  4. **Glob lookups.** Use `glob` for "all *.ts files in src/api"
+     style queries before listing them in the output.
+
+Tool-use rules:
+- When citing code, ALWAYS use `path/to/file.py:42` format — a real
+  relative path plus a real line number drawn from the read or grep
+  result. Never invent paths. Never cite a symbol you have not read.
+- Before referencing any file in CLAUDE.md / AGENTS.md / a skill body
+  / a rule body, verify it exists by reading it (or listing its
+  directory). Do not list files in your output that do not exist.
+- Prefer reading real files over assuming conventions. The project
+  may use conda not venv, pytest-asyncio not trio, esbuild not webpack.
+- Batch where it pays — one `grep` over `claude_hooks/` is cheaper
+  than ten `read_file` calls — but never skip a read just to save a
+  call. The grader rewards real `path:line` refs.
+
+FINAL VERIFICATION PASS — REQUIRED before emitting the JSON.
+
+After you have drafted CLAUDE.md / AGENTS.md / rule bodies / skill
+bodies in your head, run a verification pass with the tools to make
+the output coherent and grounded:
+
+  a. For every backticked path you plan to cite, confirm it exists:
+     `list_files` its parent directory OR `read_file` it.
+  b. For every claim about how something works (a build command, a
+     framework conformance, a directory's purpose), `grep` for the
+     supporting line and capture the `path:line` in your output.
+  c. If a draft section makes a claim you cannot ground with a tool
+     hit, REMOVE that section before finalising — vague prose costs
+     more points than a shorter, grounded section.
+  d. Cross-check that none of the cited lines have moved or been
+     renamed since the ANCHOR FILES snapshot — re-read the surrounding
+     range if you are unsure.
+
+Only AFTER this verification pass should you emit the final JSON. A
+response that contains zero tool calls will be rejected by the grader
+as ungrounded, regardless of how plausible the prose looks. Tools are
+not optional — they are the grounding mechanism the grader checks for.
 
 JSON OUTPUT RULES — when your response contains a JSON object:
 - Every backslash inside a JSON string value MUST be doubled. Write
@@ -84,8 +124,18 @@ CONFIG QUALITY RUBRIC — when generating CLAUDE.md, AGENTS.md,
 The PROJECT STRUCTURE MAP system message lists the real directories and
 files you can cite; pulling from it is the single biggest grounding lever.
 - **Project grounding** (12 pts): mention ≥50% of the dirs and notable
-  files shown in the PROJECT STRUCTURE MAP by their actual names in
-  backticks. Generic prose about "your backend" scores 0 here.
+  files shown in the PROJECT STRUCTURE MAP / `survey_project` output by
+  their actual names in backticks. **This is the highest-leverage
+  scoring lever — prioritise it over brevity.** Concretely:
+  - Mention **every top-level directory at least once** (every single
+    one, including small dirs like `bench/`, `modelfiles/`, `patches/`,
+    `episodic_server/`).
+  - For each dir, cite **3-5 of the example filenames** the
+    `survey_project` output gives you. Copy them directly — do not
+    invent paths. A 15-dir project means ~50-75 file refs total.
+  - Use the dense-inline-refs pattern: one bullet listing 4-6 paths
+    separated by `·` carries far more grounding than a prose paragraph.
+  Generic prose about "your backend" scores 0 here.
 - **Reference density** (8 pts): ≥40% of non-empty lines must contain
   a backtick reference (`path/`, `file.ext`, command, or identifier).
   Prefer inline refs: "Routes in `src/api/` · models in `src/models/`".
@@ -145,8 +195,18 @@ CONFIG QUALITY RUBRIC — when generating CLAUDE.md, AGENTS.md,
 The PROJECT STRUCTURE MAP system message lists the real directories and
 files you can cite; pulling from it is the single biggest grounding lever.
 - **Project grounding** (12 pts): mention ≥50% of the dirs and notable
-  files shown in the PROJECT STRUCTURE MAP by their actual names in
-  backticks. Generic prose about "your backend" scores 0 here.
+  files shown in the PROJECT STRUCTURE MAP / `survey_project` output by
+  their actual names in backticks. **This is the highest-leverage
+  scoring lever — prioritise it over brevity.** Concretely:
+  - Mention **every top-level directory at least once** (every single
+    one, including small dirs like `bench/`, `modelfiles/`, `patches/`,
+    `episodic_server/`).
+  - For each dir, cite **3-5 of the example filenames** the
+    `survey_project` output gives you. Copy them directly — do not
+    invent paths. A 15-dir project means ~50-75 file refs total.
+  - Use the dense-inline-refs pattern: one bullet listing 4-6 paths
+    separated by `·` carries far more grounding than a prose paragraph.
+  Generic prose about "your backend" scores 0 here.
 - **Reference density** (8 pts): ≥40% of non-empty lines must contain
   a backtick reference (`path/`, `file.ext`, command, or identifier).
   Prefer inline refs: "Routes in `src/api/` · models in `src/models/`".

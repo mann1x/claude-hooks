@@ -142,7 +142,7 @@ default config does).
 | `locusai/all-minilm-l6-v2` | 256 | 400 | dense text tokenises tight; truncation **does** lose information |
 | `nomic-embed-text` | 8192 | 5000 | safe headroom for code/path-heavy memories |
 | `snowflake-arctic-embed2` | 8192 | 5000 | same |
-| `qwen3-embedding:0.6b` | 32768 | 30000 | the silent-truncation problem disappears entirely; default since 2026-04-28 |
+| `qwen3-embedding:0.6b` | 16384 | 30000 | default since 2026-04-28; runs at 16k (half its native 32k) so the daemon and the caliber proxy share one KV cache |
 
 Truncation only affects the embedding — the full text is stored intact
 in the `content` column.
@@ -240,7 +240,7 @@ and set the pgvector block:
   "embedder_options": {
     "url": "http://YOUR-OLLAMA-HOST:11434/api/embeddings",
     "model": "qwen3-embedding:0.6b",
-    "num_ctx": 32768,
+    "num_ctx": 16384,
     "max_chars": 30000,
     "timeout": 30.0
   },

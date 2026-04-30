@@ -37,11 +37,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Defaults target the qwen3 schema (memories_qwen3 +
         # kg_observations_qwen3 + shared kg_entities/kg_relations) that
         # ``install.py`` creates via ``_init_pgvector_schema``. The
-        # qwen3-embedding:0.6b model fits 32k tokens of context per
-        # embed, which beats nomic on long-form recall and matches
-        # arctic on factual queries while being half the size. Users
-        # who want the simpler legacy single-table setup can override
-        # ``table`` / ``embedder`` in ``config/claude-hooks.json``.
+        # qwen3-embedding:0.6b natively supports 32k tokens, but we run
+        # it at 16k to match caliber_proxy/recall.py's hardcoded 16384 —
+        # mismatched num_ctx values force ollama to rebuild the KV cache
+        # (or full reload) every time the daemon and proxy hit the same
+        # model with different sizes. 16k is plenty for a single chunk
+        # at max_chars=30000 (~7500 tokens). Users who want the simpler
+        # legacy single-table setup can override ``table`` / ``embedder``
+        # in ``config/claude-hooks.json``.
         "pgvector": {
             "enabled": False,
             "dsn": "",                   # postgres://user:pass@host:5432/db
@@ -52,7 +55,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "url": "http://localhost:11434/api/embeddings",
                 "model": "qwen3-embedding:0.6b",
                 "timeout": 30.0,
-                "num_ctx": 32768,
+                "num_ctx": 16384,
                 "max_chars": 30000,
             },
             "recall_k": 5,

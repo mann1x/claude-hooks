@@ -93,6 +93,7 @@ class OllamaEmbedder(Embedder):
         max_chars: Optional[int] = None,
         num_ctx: Optional[int] = None,
         keep_alive: Optional[str] = None,
+        num_gpu: Optional[int] = None,
     ):
         self.url = url
         self.model = model
@@ -100,11 +101,21 @@ class OllamaEmbedder(Embedder):
         self.max_chars = max_chars if max_chars is not None else self.DEFAULT_MAX_CHARS
         self.num_ctx = num_ctx if num_ctx is not None else self.DEFAULT_NUM_CTX
         self.keep_alive = keep_alive
+        # ``num_gpu=N`` overrides the auto-detected GPU layer count.
+        # Default is None = let Ollama decide. Rarely needed; primarily
+        # useful when sharing a daemon with a much larger chat model
+        # whose VRAM headroom you want to control explicitly.
+        self.num_gpu = num_gpu
 
     def _options_payload(self) -> dict:
         out: dict = {}
+        options: dict = {}
         if self.num_ctx:
-            out["options"] = {"num_ctx": self.num_ctx}
+            options["num_ctx"] = self.num_ctx
+        if self.num_gpu is not None:
+            options["num_gpu"] = self.num_gpu
+        if options:
+            out["options"] = options
         if self.keep_alive:
             out["keep_alive"] = self.keep_alive
         return out
@@ -237,7 +248,8 @@ def make_embedder(name: str, options: Optional[dict] = None) -> Embedder:
     """
     options = options or {}
     if name == "ollama":
-        allowed = ("url", "model", "timeout", "max_chars", "num_ctx", "keep_alive")
+        allowed = ("url", "model", "timeout", "max_chars", "num_ctx",
+                   "keep_alive", "num_gpu")
         return OllamaEmbedder(**{k: v for k, v in options.items() if k in allowed})
     if name in ("openai", "openai_compatible"):
         return OpenAiCompatibleEmbedder(

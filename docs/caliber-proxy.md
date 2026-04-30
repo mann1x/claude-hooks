@@ -10,15 +10,25 @@ caliber ──POST /v1/chat/completions──► caliber-grounding-proxy
                                           ├─ prepend grounding system + anchors
                                           ├─ inject tool specs (read_file, grep,
                                           │  glob, list_files)
+                                          ├─ translate to Ollama /api/chat shape
                                           ▼
-                                       Ollama
+                                       Ollama (/api/chat)
                                           │
                                           ▼
                           finish_reason == "tool_calls":
                               execute tools locally, loop
                           else:
-                              mirror back to caliber
+                              translate back to OpenAI shape, mirror to caliber
 ```
+
+Internally the proxy talks to Ollama's native ``/api/chat`` endpoint
+rather than the OpenAI-compat ``/v1/chat/completions`` one. The latter
+silently drops Ollama-specific fields like ``options.num_ctx`` from the
+request body, so the proxy's ``CALIBER_GROUNDING_NUM_CTX`` cap had no
+effect on models with a baked-in default. Routing through ``/api/chat``
+lets that env var (and any other ``options.*`` value) actually reach
+the runtime; the OpenAI shape that caliber sends and expects is
+preserved end-to-end via translation.
 
 The proxy binds `127.0.0.1:38090` by default — local-only because
 another host can't see your project files anyway. When it's running
@@ -96,9 +106,14 @@ All optional; defaults shown.
 | `CALIBER_GROUNDING_CWD` | `$(pwd)` | The project to ground against. **Must be set if you run the proxy from a different dir than the project** (e.g. as a systemd service). |
 | `CALIBER_GROUNDING_MAX_ITER` | `35` | Cap on tool-call rounds before the proxy strips tools and forces an answer |
 | `CALIBER_GROUNDING_FORCE_ANSWER_AFTER` | `5` | After this many tool rounds, drop `tools` / `tool_choice` so the model commits |
+| `CALIBER_GROUNDING_FORCE_FIRST_TOOL_CALL` | `1` | When set, iteration 0 of the agent loop pins `tool_choice="required"`. Ollama's native `/api/chat` ignores `tool_choice`, so the proxy *also* injects a corrective user message and retries once if the model returned no tool calls on iter 0. Caps at one retry — better to ship ungrounded JSON than to spin forever. Set `0` to disable for templates where tool use is genuinely optional. |
+| `CALIBER_GROUNDING_PRESEED_SURVEY` | `0` | **Off by default.** Pre-inject a synthetic `survey_project` assistant turn + tool result before the model's first iteration. Conceptually this saves the model an iteration since `force_first` is what triggers the survey anyway. **Empirical regression on gemma4-98e**: the model treats the pre-completed tool result as "task already done" and returns a brief `{"status": "ready"}` summary (~500 chars) instead of the rich rubric-targeted JSON caliber expects (~3-5 KB). The act of *deciding* to call the tool appears to be part of how the model engages with the audit task, and shortcutting it suppresses the engagement. Skill-generation phases tolerate the shortcut fine, but caliber doesn't separate phases on the wire. Kept opt-in (`=1`) for further experimentation on different model templates. When on, sets `has_called_tool=True` so the `force_first` retry path stays dormant. |
 | `CALIBER_GROUNDING_MAX_TOOL_CALLS_PER_TURN` | `8` | Cap parallel tool calls in one assistant turn — guards against Gemma's 800-call looping mode |
 | `CALIBER_GROUNDING_THINK` | `false` | Maps to Ollama's `think` field — accepts `false`, `true`, `low`, `medium`, `high`. Gemma4 left unconstrained burns context on overthinking; `medium` is a safe ceiling for grounding tasks |
 | `CALIBER_GROUNDING_HTTP_TIMEOUT` | `1800` | Per-request timeout to Ollama (seconds) |
+| `CALIBER_GROUNDING_SSE_HEARTBEAT_SECONDS` | `20` | When `stream: true`, emit `: heartbeat` SSE comments at this cadence while the agent loop runs. Caliber's OpenAI Node SDK wraps undici, whose `bodyTimeout` defaults to 5 min — without heartbeats, long audit prompts (140k tokens, 4-6 min on local Ollama) abort with "Request timed out." before the loop returns. |
+| `CALIBER_GROUNDING_RECALL_EMBED_TIMEOUT` | `180` | Per-call timeout (seconds) for pgvector / sqlite_vec embed requests. Cold-loading `qwen3-embedding:0.6b` after Ollama auto-evicted it has been observed at 1m45s on a 24 GB GPU; lower defaults produce recurring `ollama unreachable: timed out` warnings. The proxy also pre-warms once at startup so steady-state calls rarely need more than a few seconds. |
+| `CALIBER_GROUNDING_PREHEAT` | `1` | Pre-warm the embedder(s) at proxy startup with a `embed("warmup")` call per provider, in a background thread. Set `0` to skip. |
 | `CALIBER_GROUNDING_LOG_LEVEL` | `INFO` | `DEBUG` to see prompt assembly + tool dispatch |
 
 `bin/caliber-grounding-proxy` defaults `CALIBER_GROUNDING_UPSTREAM` to
@@ -208,7 +223,10 @@ Common failure shapes:
 | `caliber-smart: grounding proxy down at http://127.0.0.1:38090 — using claude-cli` | Service not running | `systemctl start caliber-grounding-proxy` (or `bin/caliber-grounding-proxy &`) |
 | Caliber output cites paths that don't exist | `CALIBER_GROUNDING_CWD` points at the wrong project | Override the env var in the systemd drop-in to match your project root |
 | Tool calls loop forever, never produce a final answer | Model template buggy on `tool_choice` | Lower `CALIBER_GROUNDING_FORCE_ANSWER_AFTER` (e.g. to `3`) so tools get stripped sooner |
+| Model returns ungrounded JSON, never invokes any tool | Ollama's native `/api/chat` strips `tool_choice="required"` (Ollama has no equivalent), and the model template ignores prose-based "MANDATORY tool use" instructions | Already on by default: `CALIBER_GROUNDING_FORCE_FIRST_TOOL_CALL=1` triggers a one-shot retry with a corrective user message if the model skipped tools on iter 0. If retries fire on every small request (ping/eligibility checks), that's expected — the cost is one extra fast inference per call |
+| Proxy uses old prompt / missing tools after edits to `claude_hooks/` | Python imported `claude_hooks` from the cwd at startup, not from the live source tree | Start the proxy from `/path/to/claude-hooks/` AND pass `PYTHONPATH=/path/to/claude-hooks/`, OR run via the systemd unit which sets `WorkingDirectory` correctly. Reproducer: `cwd: <test-fixture-dir>` in the proxy boot log instead of the live repo path |
 | `bind: address already in use` | Another process on `:38090` | Override `CALIBER_GROUNDING_PORT` |
+| Caliber gives up on long audit with `Request timed out.` even though the proxy eventually returned | Some odd network in front of caliber strips SSE comments | Raise heartbeat cadence — set `CALIBER_GROUNDING_SSE_HEARTBEAT_SECONDS=10` so something arrives more often than any intermediate's idle timer |
 
 ## Disable
 

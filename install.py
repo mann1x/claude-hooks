@@ -1962,7 +1962,7 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
         "url": "http://192.168.178.2:11433/api/embeddings",
         "model": "qwen3-embedding:0.6b",
         "timeout": 30.0,
-        "num_ctx": 32768,
+        "num_ctx": 16384,
         "max_chars": 30000,
     })
     cfg["providers"]["pgvector"].setdefault("recall_k", 5)
