@@ -1,0 +1,30 @@
+[Unit]
+Description=claude-hooks pgvector MCP — HTTP streamable JSON-RPC frontend for the pgvector memory store (Claude Desktop and any remote MCP client)
+Documentation=https://github.com/mann1x/claude-hooks/blob/main/claude_hooks/pgvector_mcp/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# install.py substitutes __REPO_PATH__ on install; edit here only if
+# you manage the unit yourself. Override defaults in a drop-in file
+# under /etc/systemd/system/claude-hooks-pgvector-mcp.service.d/*.conf
+User=root
+WorkingDirectory=__REPO_PATH__
+Environment=PGVECTOR_MCP_HTTP_HOST=0.0.0.0
+Environment=PGVECTOR_MCP_HTTP_PORT=32775
+ExecStart=__REPO_PATH__/bin/claude-hook-pgvector-mcp --http
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=10s
+SendSIGKILL=yes
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__REPO_PATH__
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

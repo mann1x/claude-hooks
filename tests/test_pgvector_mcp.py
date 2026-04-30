@@ -344,3 +344,175 @@ class TestFormatters:
         assert "  - o2" in out
         assert "# swag (service)" in out
         assert "(no observations)" in out
+
+
+# --------------------------------------------------------------------- #
+# HTTP transport — exercise serve_http via a real socket on a free port
+# --------------------------------------------------------------------- #
+
+
+class TestHttpTransport:
+    """Spin the HTTP server in a thread, hit it with urllib, assert
+    behaviour. Uses port 0 so the kernel picks a free port — avoids
+    flakes on machines that already have :32775 in use.
+    """
+
+    @pytest.fixture
+    def http_server(self):
+        import socket
+        import threading
+        from http.server import ThreadingHTTPServer
+        from claude_hooks.pgvector_mcp.server import McpServer, _build_http_handler
+
+        provider = FakePgvectorProvider()
+        server = McpServer(provider)  # type: ignore[arg-type]
+        handler_cls = _build_http_handler(server)
+        # Bind explicitly to ipv4 loopback + port 0 (kernel picks).
+        # ThreadingHTTPServer.server_bind would do this for "0.0.0.0"
+        # too, but loopback keeps the test off the LAN.
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+        port = httpd.server_address[1]
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield {"port": port, "provider": provider, "server": server,
+                   "url": f"http://127.0.0.1:{port}/mcp"}
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=2)
+            assert not thread.is_alive(), "http server thread did not exit cleanly"
+
+    @staticmethod
+    def _post(url: str, body: Any, headers: Optional[dict] = None):
+        import json as _json
+        from urllib import request as _req
+        data = _json.dumps(body).encode("utf-8")
+        req = _req.Request(url, data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+        for k, v in (headers or {}).items():
+            req.add_header(k, v)
+        try:
+            with _req.urlopen(req, timeout=5) as resp:
+                return resp.status, resp.headers, resp.read()
+        except Exception as e:
+            # Surface the HTTPError so tests can inspect status codes.
+            if hasattr(e, "code"):
+                return e.code, e.headers, b""
+            raise
+
+    def test_initialize_round_trip(self, http_server):
+        import json as _json
+        status, _headers, body = self._post(http_server["url"], {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "http-test", "version": "0"},
+            },
+        })
+        assert status == 200
+        resp = _json.loads(body)
+        assert resp["jsonrpc"] == "2.0"
+        assert resp["id"] == 1
+        assert resp["result"]["serverInfo"]["name"] == "claude-hooks-pgvector"
+
+    def test_tools_call_dispatches_to_provider(self, http_server):
+        import json as _json
+        status, _headers, body = self._post(http_server["url"], {
+            "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            "params": {
+                "name": "pgvector-find",
+                "arguments": {"query": "bcache fix", "k": 3},
+            },
+        })
+        assert status == 200
+        resp = _json.loads(body)
+        assert resp["result"]["isError"] is False
+        assert "hit-vec for" in resp["result"]["content"][0]["text"]
+        assert http_server["provider"].recall_calls == [("bcache fix", 3)]
+
+    def test_notification_returns_202_no_body(self, http_server):
+        # JSON-RPC notifications (no ``id``) → 202, empty body.
+        status, _headers, body = self._post(http_server["url"], {
+            "jsonrpc": "2.0", "method": "notifications/initialized",
+        })
+        assert status == 202
+        assert body == b""
+
+    def test_batch_request_returns_array_dropping_notifications(self, http_server):
+        import json as _json
+        status, _headers, body = self._post(http_server["url"], [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "pgvector-count", "arguments": {}}},
+        ])
+        assert status == 200
+        arr = _json.loads(body)
+        assert isinstance(arr, list)
+        # Notification dropped → 2 responses.
+        assert len(arr) == 2
+        ids = {r["id"] for r in arr}
+        assert ids == {1, 2}
+
+    def test_malformed_json_returns_parse_error(self, http_server):
+        from urllib import request as _req
+        req = _req.Request(http_server["url"], data=b"{not valid json",
+                            method="POST")
+        req.add_header("Content-Type", "application/json")
+        try:
+            _req.urlopen(req, timeout=3)
+            assert False, "expected HTTPError 400"
+        except Exception as e:
+            assert getattr(e, "code", None) == 400
+
+    def test_get_on_mcp_returns_405(self, http_server):
+        from urllib import request as _req
+        req = _req.Request(http_server["url"], method="GET")
+        try:
+            _req.urlopen(req, timeout=3)
+            assert False, "expected HTTPError 405"
+        except Exception as e:
+            assert getattr(e, "code", None) == 405
+
+    def test_post_on_unknown_path_returns_404(self, http_server):
+        port = http_server["port"]
+        from urllib import request as _req
+        req = _req.Request(f"http://127.0.0.1:{port}/random",
+                           data=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+                           method="POST")
+        req.add_header("Content-Type", "application/json")
+        try:
+            _req.urlopen(req, timeout=3)
+            assert False, "expected HTTPError 404"
+        except Exception as e:
+            assert getattr(e, "code", None) == 404
+
+    def test_options_preflight_returns_204_with_cors(self, http_server):
+        from urllib import request as _req
+        req = _req.Request(http_server["url"], method="OPTIONS")
+        with _req.urlopen(req, timeout=3) as resp:
+            assert resp.status == 204
+            assert resp.headers.get("Access-Control-Allow-Origin") == "*"
+            assert "POST" in resp.headers.get("Access-Control-Allow-Methods", "")
+
+    def test_oversized_body_returns_413(self, http_server):
+        # Build a request claiming 100 MB Content-Length without
+        # actually sending the body — the server should bail before
+        # reading it.
+        import socket as _socket
+        s = _socket.create_connection(("127.0.0.1", http_server["port"]),
+                                       timeout=3)
+        try:
+            s.sendall(
+                b"POST /mcp HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: 104857600\r\n"
+                b"\r\n",
+            )
+            data = s.recv(4096)
+        finally:
+            s.close()
+        assert b" 413 " in data, data[:200]

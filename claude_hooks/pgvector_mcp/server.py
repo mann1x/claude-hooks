@@ -1,4 +1,6 @@
-"""Stdio JSON-RPC MCP server wrapping ``PgvectorProvider``.
+"""JSON-RPC MCP server wrapping ``PgvectorProvider``. Serves stdio
+(default — for local Claude Code over a launcher script) or HTTP
+streamable (Claude Desktop on another host, or any HTTP MCP client).
 
 Implements the minimum slice of the MCP protocol Claude Code expects:
 
@@ -23,8 +25,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import traceback
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 
 from claude_hooks.config import load_config
@@ -357,4 +361,151 @@ def serve_stdio(provider: Optional[Provider] = None) -> int:
         if resp is not None:
             sys.stdout.write(json.dumps(resp) + "\n")
             sys.stdout.flush()
+    return 0
+
+
+# -- HTTP transport --------------------------------------------------- #
+DEFAULT_HTTP_PORT = 32775
+DEFAULT_HTTP_HOST = "0.0.0.0"
+
+
+def _build_http_handler(server: "McpServer"):
+    """Closure over a single ``McpServer`` instance — every request goes
+    through the same dispatcher so the provider's connection pool stays
+    warm for the life of the process. ThreadingHTTPServer dispatches
+    each request on its own thread; ``McpServer.handle`` is read-mostly
+    and the underlying ``PgvectorProvider`` already serialises DB writes
+    inside its own lock, so per-request locking is unnecessary here.
+    """
+
+    class _Handler(BaseHTTPRequestHandler):
+        # Quiet the default access log (one line per request to stderr
+        # would drown out the actual log on a chatty client).
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: ARG002
+            log.debug("%s - %s", self.address_string(), format % args)
+
+        def _write_json(self, status: int, body: Any) -> None:
+            data = json.dumps(body).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            # Streamable-HTTP MCP clients sometimes send Origin; mirror
+            # the simple CORS the other compose-managed MCPs do.
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _write_status(self, status: int) -> None:
+            self.send_response(status)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_OPTIONS(self) -> None:  # noqa: N802
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+            self.send_header(
+                "Access-Control-Allow-Headers",
+                "Content-Type, Accept, Mcp-Session-Id, Mcp-Protocol-Version",
+            )
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_GET(self) -> None:  # noqa: N802
+            # Streamable-HTTP optionally allows GET for SSE; we don't
+            # support push notifications yet, so any GET is a 405.
+            if self.path.rstrip("/") == "/mcp":
+                self._write_status(405)
+            else:
+                self._write_status(404)
+
+        def do_POST(self) -> None:  # noqa: N802
+            if self.path.rstrip("/") != "/mcp":
+                self._write_status(404)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                self._write_status(400)
+                return
+            if length <= 0 or length > 16 * 1024 * 1024:
+                # 16 MB is way more than any tools/call payload should
+                # ever be; reject silly large bodies up front.
+                self._write_status(413 if length > 0 else 400)
+                return
+            body = self.rfile.read(length)
+            try:
+                msg = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._write_json(400, {
+                    "jsonrpc": "2.0", "id": None,
+                    "error": {"code": -32700, "message": "Parse error"},
+                })
+                return
+            # JSON-RPC supports batch arrays. Dispatch each, drop the
+            # ``None`` returns (notifications), and emit the rest.
+            if isinstance(msg, list):
+                resps = [r for r in (server.handle(m) for m in msg) if r is not None]
+                if not resps:
+                    # Notifications-only batch — protocol says 202.
+                    self._write_status(202)
+                    return
+                self._write_json(200, resps)
+                return
+            if not isinstance(msg, dict):
+                self._write_json(400, {
+                    "jsonrpc": "2.0", "id": None,
+                    "error": {"code": -32600, "message": "Invalid Request"},
+                })
+                return
+            resp = server.handle(msg)
+            if resp is None:
+                self._write_status(202)
+                return
+            self._write_json(200, resp)
+
+    return _Handler
+
+
+def serve_http(provider: Optional[Provider] = None,
+               host: Optional[str] = None,
+               port: Optional[int] = None) -> int:
+    """Run the MCP dispatcher behind an HTTP/JSON-RPC server. Listens on
+    ``host:port`` (default ``0.0.0.0:32775``) and accepts ``POST /mcp``
+    with a single JSON-RPC message or batch array.
+
+    Returns 0 on clean SIGTERM/SIGINT, 1 on init failure.
+    """
+    if host is None:
+        host = os.environ.get("PGVECTOR_MCP_HTTP_HOST", DEFAULT_HTTP_HOST)
+    if port is None:
+        try:
+            port = int(os.environ.get("PGVECTOR_MCP_HTTP_PORT",
+                                      str(DEFAULT_HTTP_PORT)))
+        except ValueError:
+            port = DEFAULT_HTTP_PORT
+    if provider is None:
+        cfg = load_config()
+        providers = build_providers(cfg)
+        provider = next(
+            (p for p in providers if isinstance(p, PgvectorProvider)), None,
+        )
+        if provider is None:
+            sys.stderr.write("pgvector provider not configured / not enabled\n")
+            return 1
+    server = McpServer(provider)  # type: ignore[arg-type]
+    handler_cls = _build_http_handler(server)
+    httpd = ThreadingHTTPServer((host, port), handler_cls)
+    sys.stderr.write(
+        f"{SERVER_NAME} HTTP listening on http://{host}:{port}/mcp "
+        f"(protocol={PROTOCOL_VERSION})\n",
+    )
+    sys.stderr.flush()
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.server_close()
     return 0
