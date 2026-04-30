@@ -424,6 +424,133 @@ class TestPhase2PreloadAndGitWatch(unittest.TestCase):
 
 
 @unittest.skipIf(os.name == "nt", "Windows parity is Phase 4")
+class TestPhase3CompileAware(unittest.TestCase):
+    """Compile-aware mode merges compile-side diagnostics into the
+    same ``diagnostics`` op response the LSPs feed. Verified end to
+    end with a fake compile command that emits text-format output."""
+
+    def setUp(self) -> None:
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.project = Path(self.tmp.name) / "project"
+        self.project.mkdir()
+        self.state = Path(self.tmp.name) / "state"
+
+    def _fake_compile_command(self, file_rel: str, message: str) -> tuple:
+        """Build a python -c command that emits one text-format
+        diagnostic for ``file_rel`` against the project root."""
+        return (
+            sys.executable, "-c",
+            f"print({file_rel!r} + ':1:1: error: ' + {message!r})",
+        )
+
+    def test_disabled_by_default(self) -> None:
+        """Sanity: with compile_aware off (the default), the daemon
+        starts cleanly and never spawns compile processes even with
+        a non-empty commands map."""
+        from claude_hooks.lsp_engine.config import (
+            CompileAwareConfig,
+            EngineConfig,
+        )
+        cfg = EngineConfig(
+            compile_aware=CompileAwareConfig(
+                enabled=False,
+                commands={"py": ("python", "-c", "print('should not run')")},
+            ),
+        )
+        daemon = Daemon(
+            project_root=self.project,
+            servers=[_fake_spec()],
+            engine_config=cfg,
+            state_base=self.state,
+        )
+        daemon.start()
+        try:
+            self.assertIsNone(daemon._compile)
+        finally:
+            daemon.stop()
+
+    def test_enabled_but_empty_commands_no_orchestrator(self) -> None:
+        """Edge case: enabled=true but empty commands dict — daemon
+        should NOT construct an orchestrator (avoids confusing
+        half-active state)."""
+        from claude_hooks.lsp_engine.config import (
+            CompileAwareConfig,
+            EngineConfig,
+        )
+        cfg = EngineConfig(
+            compile_aware=CompileAwareConfig(enabled=True, commands={}),
+        )
+        daemon = Daemon(
+            project_root=self.project,
+            servers=[_fake_spec()],
+            engine_config=cfg,
+            state_base=self.state,
+        )
+        daemon.start()
+        try:
+            self.assertIsNone(daemon._compile)
+        finally:
+            daemon.stop()
+
+    def test_compile_diagnostics_merged_with_lsp_diagnostics(self) -> None:
+        """The acceptance criterion. did_open a Python file → fake
+        LSP emits len=N diagnostic; fake compile emits an "oh no"
+        diagnostic. The diagnostics op response includes both, with
+        distinct ``source`` fields.
+        """
+        from claude_hooks.lsp_engine.config import (
+            CompileAwareConfig,
+            EngineConfig,
+        )
+        target_rel = "x.py"
+        target_abs = self.project / target_rel
+        target_abs.write_text("hello\n", encoding="utf-8")
+
+        cfg = EngineConfig(
+            compile_aware=CompileAwareConfig(
+                enabled=True,
+                commands={
+                    "py": self._fake_compile_command(
+                        str(target_abs), "compile-side issue",
+                    ),
+                },
+            ),
+        )
+        daemon = Daemon(
+            project_root=self.project,
+            servers=[_fake_spec()],
+            engine_config=cfg,
+            state_base=self.state,
+        )
+        daemon.start()
+        try:
+            sock = socket_path_for(self.project, base=self.state)
+            with LspEngineClient(sock, "session-A") as c:
+                c.did_open(target_abs, "hello")
+                # Force a compile run immediately rather than waiting
+                # the default 1.5s debounce.
+                daemon._compile.force_run_all()
+                # Poll until the compile diagnostic shows up.
+                deadline = time.monotonic() + 5.0
+                merged: list[dict] = []
+                while time.monotonic() < deadline:
+                    diags, _ = c.diagnostics(target_abs, diag_timeout_s=2.0)
+                    sources = {d["source"] for d in diags}
+                    if "fake-lsp" in sources and "python" in sources:
+                        merged = diags
+                        break
+                    time.sleep(0.10)
+                self.assertTrue(merged, "compile + LSP diagnostics did not merge")
+                lsp_d = next(d for d in merged if d["source"] == "fake-lsp")
+                cmp_d = next(d for d in merged if d["source"] == "python")
+                self.assertEqual(lsp_d["message"], "len=5")
+                self.assertEqual(cmp_d["message"], "compile-side issue")
+        finally:
+            daemon.stop()
+
+
+@unittest.skipIf(os.name == "nt", "Windows parity is Phase 4")
 class TestConnectOrSpawn(unittest.TestCase):
     """The hook entry point — spawn the daemon if it isn't running,
     return a connected client. Uses a real subprocess for the spawn.

@@ -38,6 +38,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from claude_hooks.lsp_engine.compile import CompileOrchestrator
 from claude_hooks.lsp_engine.config import (
     EngineConfig,
     LspServerSpec,
@@ -147,6 +148,18 @@ class Daemon:
         self._git_poll_interval = float(git_poll_interval)
         self._refresh_lock = threading.Lock()
 
+        # Phase 3: opt-in compile-aware orchestrator. Only constructed
+        # when the user has explicitly turned it on in config — the
+        # default-off invariant is enforced here, not at the runner
+        # layer (so misconfigured users see "compile_aware: false"
+        # behaviour, not a half-active orchestrator).
+        self._compile: Optional[CompileOrchestrator] = None
+        if cfg.compile_aware.enabled and cfg.compile_aware.commands:
+            self._compile = CompileOrchestrator.from_engine_config(
+                self._project_root,
+                cfg.compile_aware.commands,
+            )
+
     # ─── lifecycle ───────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -186,6 +199,9 @@ class Daemon:
         )
         self._git_watcher.start()
 
+        if self._compile is not None:
+            self._compile.start()
+
         log.info("lsp-engine daemon started for %s", self._project_root)
 
     def stop(self) -> None:
@@ -212,6 +228,12 @@ class Daemon:
             # leave a thread mid-LSP-call.
             self._preload_thread.join(timeout=2.0)
             self._preload_thread = None
+        if self._compile is not None:
+            try:
+                self._compile.stop()
+            except Exception:  # pragma: no cover — defensive
+                log.exception("error stopping compile orchestrator")
+            self._compile = None
         try:
             self._engine.shutdown()
         except Exception:  # pragma: no cover — defensive
@@ -403,6 +425,8 @@ class Daemon:
         opened = False
         if forward:
             opened = self._engine.did_open(path, content)
+            if opened and self._compile is not None:
+                self._compile.notify_change(path)
         return {"id": rid, "ok": True, "opened": opened}
 
     def _op_did_change(self, rid, session, req: dict) -> dict:
@@ -420,6 +444,8 @@ class Daemon:
                 # attaches mid-edit on a file from disk.
                 self._engine.did_open(path, content)
                 forwarded = True
+            if self._compile is not None:
+                self._compile.notify_change(path)
             return {"id": rid, "ok": True, "forwarded": True, "queued_behind": None}
         owner = self._lock_manager.owner_of(path)
         return {
@@ -450,6 +476,12 @@ class Daemon:
         self._apply_drained(drained)
         stale = not can_forward  # we forward anyway per Decision 5
         diags = self._engine.get_diagnostics(path, timeout=diag_timeout_s)
+        # Merge compile-aware diagnostics on top, distinguished by
+        # ``Diagnostic.source`` so the consumer can filter (cargo /
+        # tsc / mypy show up as their tool name; the LSP entries
+        # carry pyright / rust-analyzer / etc).
+        if self._compile is not None:
+            diags = list(diags) + self._compile.get_diagnostics(path)
         return {
             "id": rid,
             "ok": True,

@@ -28,6 +28,13 @@ from claude_hooks.lsp_engine.client import (
     connect_or_spawn,
     daemon_pid,
 )
+from claude_hooks.lsp_engine.compile import (
+    CompileOrchestrator,
+    CompileRunner,
+    CompileSpec,
+    parse_cargo_json_output,
+    parse_text_output,
+)
 from claude_hooks.lsp_engine.config import (
     EngineConfig,
     LspServerSpec,
@@ -65,6 +72,9 @@ from claude_hooks.lsp_engine.lsp import (
 )
 
 __all__ = [
+    "CompileOrchestrator",
+    "CompileRunner",
+    "CompileSpec",
     "Daemon",
     "DaemonAlreadyRunning",
     "Diagnostic",
@@ -86,6 +96,8 @@ __all__ = [
     "load_cclsp_config",
     "load_daemon_config",
     "load_engine_config",
+    "parse_cargo_json_output",
+    "parse_text_output",
     "preload_engine",
     "project_dir",
     "rank_files_by_in_degree",
