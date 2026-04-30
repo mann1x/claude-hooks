@@ -1,6 +1,45 @@
 # Plan: session-scoped LSP engine — non-MCP, real-time, project-aware
 
-**Status:** SPEC. No code. Open for design discussion / refinement.
+**Status:** SPEC. No code. Decisions locked 2026-04-30 (see Decisions
+section below). Phase 0 ready when implementation begins.
+
+## Decisions (locked 2026-04-30)
+
+The four decision points raised in this spec have been resolved:
+
+1. **Engine lifecycle: shared per-project, per-session views.** One
+   engine process per project (not per session). Sessions attach via
+   the IPC socket like `axon-host` does for the code graph. Memory
+   stays flat regardless of how many Claude Code sessions are open
+   on the same repo. Cost: the engine is now a small daemon with
+   lock-file + attach/detach protocol, with session-id scoping for
+   `didChange` notifications so two sessions editing the same file
+   don't fight.
+
+2. **Compile-aware mode: Phase 3, opt-in only.** Build the
+   `cargo check` / `tsc --noEmit` orchestration in Phase 3 per the
+   original schedule, but ship it **disabled by default** with a
+   per-project config flag. Surfaces the daemon-vs-one-shot design
+   pressure early without forcing every user onto the slow path.
+
+3. **Preload: adaptive (code_graph hot set).** SessionStart walks
+   the existing `code_graph` to find the top-N most-imported files,
+   `didOpen` those eagerly, and lazy-loads the rest on first edit.
+   Best ergonomics-per-cost ratio. Hard dependency on the built-in
+   code_graph being present (it always is in claude-hooks projects).
+   Soft cap: top-200 files by in-degree, configurable.
+
+4. **Config: layered on cclsp.json.** `cclsp.json` is the canonical
+   source for LSP commands + extensions — the engine reads it
+   directly so a user with cclsp already configured gets the engine
+   for free. Engine-specific knobs (preload size, compile commands,
+   debounce intervals, opt-in flags) live in
+   `.claude-hooks/lsp-engine.toml` (per-project) or the global
+   `config/claude-hooks.json` under `hooks.lsp_engine`. No schema
+   drift risk if cclsp upstream changes its config shape — we never
+   write to that file.
+
+These decisions reshape the architecture sketch and phasing below.
 
 **Goal:** give the PostToolUse hook (and any future hook that wants
 semantic info) a sub-50 ms answer to "is this code valid?", "where is
@@ -213,33 +252,38 @@ need it.
 
 ## Open questions
 
-1. **Is one engine per session right, or one per project?** A user
-   working on three projects in three Claude Code sessions would
-   have three engines, each indexing the same files independently.
-   Pros: total isolation (a crash in one doesn't bleed). Cons:
-   3× memory. A "shared engine, per-session views" architecture
-   could fix that — like `axon-host` does for the code graph. Worth
-   prototyping both.
+(Q1 / Q4 / preload / config are now locked — see Decisions section
+at the top. The remaining genuinely open items:)
 
-2. **How does the engine know when to STOP indexing?** A 1 M-LOC
-   monorepo would never finish `preload_globs`. Need a soft cap +
-   a fallback to lazy indexing. The cap should adapt to LSP
-   memory pressure (rust-analyzer uses ~100 MB / 10 K LOC).
+1. **How does the engine know when to STOP indexing?** Even with
+   adaptive preload, the lazy long-tail path can blow up on 1 M-LOC
+   monorepos when the user opens enough files. Need a soft cap +
+   per-language memory budget (rust-analyzer uses ~100 MB / 10 K LOC).
+   Decided in Phase 0 as a config flag with sane defaults.
 
-3. **Does the engine speak LSP back?** Future Claude Code IDE
+2. **Does the engine speak LSP back?** Future Claude Code IDE
    integration might want raw LSP. Worth keeping the LSP surface
-   intact internally even if hooks see the trimmed JSON.
+   intact internally even if hooks see the trimmed JSON. Easy to
+   add later — non-blocking.
 
-4. **Compile-aware mode — daemon or one-shot?** A persistent
+3. **Compile-aware mode — daemon or one-shot?** A persistent
    `cargo check --watch` would beat re-spawning, but cargo doesn't
    ship a watch mode. Third-party `cargo-watch` exists but is one
-   more dep. Trade-off worth measuring before committing.
+   more dep. Trade-off worth measuring during Phase 3 prototyping;
+   ship the simpler one-shot first since the feature is opt-in.
 
-5. **Windows parity.** UNIX sockets aren't available; named pipes
+4. **Windows parity.** UNIX sockets aren't available; named pipes
    work. `inotify` isn't either; `ReadDirectoryChangesW` is the
    equivalent. Tests already isolate platform-specific code (see
    memory entry on platform-test isolation), so the architecture
    transfers — just more `if os.name == "nt"` branches.
+
+5. **Multi-session contention on shared engine.** Two sessions
+   editing the same file concurrently each send `didChange`. Last
+   write wins at the LSP level, but we need a session-tagged edit
+   buffer so each session's *next query* sees its own latest
+   intent rather than the other session's clobber. Investigate in
+   Phase 1.
 
 ## How this slots into the existing repo
 
@@ -266,30 +310,46 @@ need it.
 
 ## Phasing
 
-1. **Phase 0 — config schema + LSP wrapper** (1-2 days). Just the
-   per-language LSP child management; no IPC, no engine yet. Tests
-   prove `didOpen → didChange → diagnostics` round-trips work.
-2. **Phase 1 — engine lifecycle + IPC** (1-2 days). SessionStart
-   spawn / SessionEnd teardown. UNIX socket server. Hook-side
-   client. End-to-end: edit a file via Write → diagnostics returned
-   to the next turn.
-3. **Phase 2 — git awareness** (1 day). HEAD watcher + bulk
-   re-didOpen on branch switch.
-4. **Phase 3 — opt-in compile-check** (1 day). `cargo check` /
-   `tsc --noEmit` / etc. Debouncing, output merge.
+(Reflects locked decisions: shared daemon, adaptive preload, opt-in
+compile-aware in Phase 3, layered config.)
+
+1. **Phase 0 — config schema + LSP wrapper** (1-2 days). cclsp.json
+   reader, `.claude-hooks/lsp-engine.toml` schema, per-language LSP
+   child management. No daemon yet. Tests prove `didOpen → didChange
+   → diagnostics` round-trips work against a fake LSP.
+2. **Phase 1 — daemon lifecycle + IPC** (2 days, +1 vs original).
+   Per-project shared daemon under `~/.claude/lsp-engine/<project>/`,
+   lock file, attach/detach protocol, session-id-tagged edit buffer
+   (resolves Q5 above). UNIX socket server. SessionStart attach,
+   SessionEnd detach (last detach reaps). End-to-end: two sessions
+   editing the same file see consistent diagnostics.
+3. **Phase 2 — adaptive preload + git awareness** (1.5 days). Walk
+   the existing `code_graph` for top-200 hot files, eager-didOpen
+   those, lazy on the rest. HEAD watcher + bulk re-didOpen on
+   branch switch.
+4. **Phase 3 — opt-in compile-check** (1 day, opt-in only).
+   `cargo check` / `tsc --noEmit` / etc, gated behind
+   `lsp_engine.compile_aware: true`. Debouncing, output merge.
+   Default off.
 5. **Phase 4 — Windows parity + benchmarks** (1-2 days). Named
-   pipes, perf measurement against LSP-MCP cclsp baseline.
+   pipes (`\\.\pipe\lsp-engine-<project>`), perf measurement
+   against the cclsp baseline + the ruff-only baseline.
 
-Total estimated effort: ~7 days of focused work, fits in a
-two-week sprint.
+Total estimated effort: ~7.5 days of focused work, fits in a
+two-week sprint. The +1 day in Phase 1 is the shared-daemon
+overhead vs the per-session simpler design we ruled out.
 
-## Decision points needing your input before Phase 0
+## Decision points — RESOLVED
 
-- One engine per session vs shared engine (Q1 above)
-- Compile-aware mode in Phase 3 or push to Phase 5? (Q4 above)
-- Default preload aggressiveness — start scan-everything, or
-  always lazy?
-- Reuse `cclsp.json` (one config for both MCP and engine) or
-  separate `lsp-engine.toml`?
+All four blocking decisions are now locked (see the Decisions
+section at the top of this doc). Phase 0 can begin.
+
+Phase 0 entry checklist:
+- [ ] Skeleton `claude_hooks/lsp_engine/` package
+- [ ] `cclsp.json` reader (canonical source for LSP wiring)
+- [ ] `.claude-hooks/lsp-engine.toml` schema + loader (engine knobs)
+- [ ] Per-language LSP child management (spawn, didOpen, shutdown)
+- [ ] Daemon entry point + lock file (shared per-project mode)
+- [ ] Tests: fake LSP server, didOpen → didChange → diagnostics
 
 When you've answered those, Phase 0 can start.

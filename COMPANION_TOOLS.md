@@ -395,6 +395,43 @@ and use `npm i -g gitnexus@latest`.
 
 ---
 
+## 8. cclsp -- Multi-Language LSP via MCP (RECOMMENDED)
+
+**Importance: HIGH** -- Pairs with the built-in `PostToolUse` ruff hook
+to give Claude Code real IDE-grade context: hover, go-to-definition,
+find-references, and type diagnostics across Python / Go / Rust / C/C++ /
+C#. Where ruff is the always-on synchronous layer (Python only), cclsp
+is the multi-language on-demand layer the model can call between edits.
+
+**Why cclsp over one-MCP-per-language:**
+- One MCP entry in `~/.claude.json` fronts every configured LSP child.
+- Lazy spawn — language servers only start when a file in their extension
+  list is touched. A Python-only session never pays the rust-analyzer
+  cold-start.
+- One config file (`cclsp.json`) to keep in sync across machines.
+
+**Quick install (Linux):**
+```bash
+npm i -g pyright cclsp
+go install golang.org/x/tools/gopls@latest
+rustup component add rust-analyzer
+sudo apt install -y clangd
+# OmniSharp via upstream zip — see docs/lsp-mcp.md for details
+```
+
+**Config:** see [`docs/lsp-mcp.md`](docs/lsp-mcp.md) for the full
+Linux + Windows recipe, the `cclsp.json` template, the C# / OmniSharp
+binary install (csharp-ls upstream is broken), and the
+`mcpServers.lsp` block to drop into `~/.claude.json`.
+
+**Relationship to the LSP-engine plan:** cclsp is the recommended
+multi-language layer **today**. A session-scoped engine
+([PLAN-lsp-engine.md](docs/PLAN-lsp-engine.md)) is in design — it would
+replace cclsp for the synchronous-on-every-edit path while keeping
+cclsp around for slower on-demand queries.
+
+---
+
 ## Summary
 
 | Tool | Importance | Slash commands | Terminal commands |
@@ -407,6 +444,7 @@ and use `npm i -g gitnexus@latest`.
 | **gitnexus** | MEDIUM | (via `mcp__gitnexus__*` tools) | `gitnexus init/analyze/mcp` |
 | **claude-code-organizer** | LOW | `/cco` | `npx @mcpware/claude-code-organizer` |
 | **code-analysis** | HIGH (extract!) | `/code-analysis--*` | `python3 extract_plugin.py` |
+| **cclsp** | HIGH | (via `mcp__lsp__*` tools) | `cclsp` (multi-LSP MCP wrapper) |
 
 All tools are optional. claude-hooks works fully without any of them.
 

@@ -188,6 +188,31 @@ The built-in `code_graph` always runs as the floor; the companions
 upgrade specific dimensions (live MCP queries, dead-code detection,
 multi-language coverage) when present.
 
+### IDE-style feedback loop (v0.7+)
+
+Closes the "I didn't notice the import error until I ran the code"
+gap. Two complementary layers:
+
+- **`PostToolUse` ruff hook** (built-in, on by default) — runs `ruff
+  check` on every Python file Claude Code edits with `Edit` / `Write` /
+  `MultiEdit`. Diagnostics are injected as
+  `hookSpecificOutput.additionalContext` so the model sees them in the
+  very next prompt — before claiming the change is done. ~50 ms cold,
+  catches undefined names, unused imports, syntax errors, etc. Config
+  under `hooks.post_tool_use` in `config/claude-hooks.json`.
+- **cclsp** (recommended companion, opt-in) — multi-language LSP
+  wrapper that fronts pyright / gopls / rust-analyzer / clangd /
+  OmniSharp via a single MCP server. Gives Claude Code on-demand
+  hover, go-to-definition, find-references, and type diagnostics
+  across Python / Go / Rust / C/C++ / C#. See [`docs/lsp-mcp.md`](docs/lsp-mcp.md)
+  for the install + Linux/Windows config. Pairs with the ruff hook:
+  ruff is the cheap synchronous Python layer, cclsp is the
+  multi-language on-demand layer.
+
+A session-scoped engine that would replace cclsp for the
+synchronous-on-every-edit path is in design — see
+[`docs/PLAN-lsp-engine.md`](docs/PLAN-lsp-engine.md).
+
 ### Scripts
 
 | Script | What |
