@@ -30,7 +30,9 @@ Config (``hooks.post_tool_use``):
     "ruff_extensions": [".py"],
     "ruff_timeout": 5.0,
     "max_diagnostics": 50,                  # truncate at this many lines
-    "log_invocations": false                # debug-level by default
+    "log_invocations": false,               # debug-level by default
+    "toml_comment_advisor_enabled": true,   # remind to add # comments on TOML edits
+    "toml_comment_advisor_paths": [".claude-hooks/", "lsp-engine.toml"]
 
 Failure modes (all silent — never block the user's next turn):
 - ``ruff`` not found on PATH and no ``ruff_path``: log warning, skip.
@@ -69,6 +71,14 @@ DEFAULT_RUFF_EXTENSIONS = (".py",)
 DEFAULT_RUFF_TIMEOUT = 5.0
 DEFAULT_MAX_DIAGNOSTICS = 50
 
+# TOML files Claude is *most likely* hand-editing for behaviour
+# control. We only nag on these — pyproject.toml and other
+# tooling-owned TOMLs already have their own conventions and don't
+# need a reminder. Match by substring against the relative path so
+# both ``.claude-hooks/lsp-engine.toml`` (per-project) and a bare
+# ``lsp-engine.toml`` at the project root get caught.
+DEFAULT_TOML_ADVISOR_PATHS = (".claude-hooks/", "lsp-engine.toml")
+
 
 def handle(*, event: dict, config: dict,
            providers: list[Provider]) -> Optional[dict]:  # noqa: ARG001
@@ -97,6 +107,16 @@ def handle(*, event: dict, config: dict,
     # Ruff stage — Python files only by default.
     if hook_cfg.get("ruff_enabled", True):
         block = _run_ruff(abs_path, hook_cfg, project_cwd=cwd)
+        if block:
+            blocks.append(block)
+
+    # TOML-comment advisor — when Claude edits a hand-edited TOML
+    # config (``.claude-hooks/*.toml`` or ``lsp-engine.toml``),
+    # remind it that the *whole point* of TOML over JSON is the
+    # ``# reason: ...`` comment. Future sessions need the *why*
+    # behind a non-default value, not just the *what*.
+    if hook_cfg.get("toml_comment_advisor_enabled", True):
+        block = _toml_comment_advisor(abs_path, hook_cfg, project_cwd=cwd)
         if block:
             blocks.append(block)
 
@@ -229,6 +249,41 @@ def _run_ruff(path: str, hook_cfg: dict,
         f"```\n{body}\n```{suffix}\n\n"
         f"_Fix these before claiming the edit is done. Suppress per-line "
         f"with `# noqa: <code>` only when intentional._"
+    )
+
+
+def _toml_comment_advisor(abs_path: str, hook_cfg: dict,
+                          project_cwd: str = "") -> Optional[str]:
+    """Inject a one-paragraph reminder when Claude edits a
+    hand-edited TOML config, asking it to leave a ``# reason: ...``
+    line above any non-default value.
+
+    The advisor only fires for paths whose substring match one of
+    ``toml_comment_advisor_paths`` — by default
+    ``.claude-hooks/`` and ``lsp-engine.toml``. We deliberately do
+    NOT advise on every TOML edit (pyproject.toml, cargo.toml, etc):
+    those have their own conventions and a generic reminder there
+    would be noise.
+    """
+    if not abs_path.endswith(".toml"):
+        return None
+
+    rel = _shorten_path(abs_path, project_cwd)
+    needle_paths = tuple(
+        hook_cfg.get("toml_comment_advisor_paths") or DEFAULT_TOML_ADVISOR_PATHS
+    )
+    rel_normalized = rel.replace("\\", "/")
+    if not any(needle in rel_normalized for needle in needle_paths):
+        return None
+
+    return (
+        f"## TOML edit reminder — `{rel}`\n\n"
+        f"This is a hand-edited config file. The reason it's TOML "
+        f"and not JSON is the `# ...` comment syntax — for any "
+        f"non-default value you set or change, leave a one-line "
+        f"comment above explaining **why** (e.g. "
+        f"`# 50 instead of 200 because monorepo`). Future sessions "
+        f"reading this file need the rationale, not just the value."
     )
 
 

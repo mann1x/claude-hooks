@@ -225,7 +225,9 @@
       "ruff_extensions": [".py"],
       "ruff_timeout": 5.0,
       "max_diagnostics": 50,
-      "log_invocations": false
+      "log_invocations": false,
+      "toml_comment_advisor_enabled": true,
+      "toml_comment_advisor_paths": [".claude-hooks/", "lsp-engine.toml"]
     }
   },
   "reflect": {

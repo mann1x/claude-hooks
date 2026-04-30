@@ -148,9 +148,11 @@ class TestLoadEngineConfig(unittest.TestCase):
 
     def test_per_project_overrides_global(self) -> None:
         with TemporaryDirectory() as tmp:
-            project_cfg = Path(tmp) / "lsp-engine.json"
+            project_cfg = Path(tmp) / "lsp-engine.toml"
             project_cfg.write_text(
-                json.dumps({"preload": {"max_files": 999}}),
+                "[preload]\n"
+                "# 999 because monorepo — comment proves TOML is doing its job\n"
+                "max_files = 999\n",
                 encoding="utf-8",
             )
             cfg = load_engine_config(
@@ -179,19 +181,48 @@ class TestLoadEngineConfig(unittest.TestCase):
         )
         self.assertEqual(cfg.compile_aware.commands["ts"], ("tsc", "--noEmit"))
 
-    def test_invalid_project_json_raises(self) -> None:
+    def test_invalid_project_toml_raises(self) -> None:
         with TemporaryDirectory() as tmp:
-            bad = Path(tmp) / "lsp-engine.json"
-            bad.write_text("not json", encoding="utf-8")
-            with self.assertRaises(CclspConfigError):
+            bad = Path(tmp) / "lsp-engine.toml"
+            bad.write_text("[unclosed_table\n", encoding="utf-8")
+            with self.assertRaises(CclspConfigError) as ctx:
                 load_engine_config(project_path=bad)
+            self.assertIn("invalid TOML", str(ctx.exception))
 
     def test_missing_project_file_falls_back_to_global(self) -> None:
         cfg = load_engine_config(
-            project_path="/no/such/path.json",
+            project_path="/no/such/path.toml",
             global_block={"session_locks": {"debounce_seconds": 5.5}},
         )
         self.assertEqual(cfg.session_locks.debounce_seconds, 5.5)
+
+    def test_toml_with_inline_compile_commands(self) -> None:
+        """Reality check: a hand-edited TOML with comments parses
+        cleanly and the comment annotations survive (they're stripped
+        during parse but the values are intact)."""
+        with TemporaryDirectory() as tmp:
+            project_cfg = Path(tmp) / "lsp-engine.toml"
+            project_cfg.write_text(
+                "# disable compile_aware until rust-analyzer settles\n"
+                "[compile_aware]\n"
+                "enabled = false\n"
+                "\n"
+                "[compile_aware.commands]\n"
+                "# match-format=json so we can structured-parse\n"
+                'rs = ["cargo", "check", "--message-format=json"]\n'
+                'ts = ["tsc", "--noEmit"]\n'
+                "\n"
+                "[session_locks]\n"
+                "debounce_seconds = 15.0  # short because we ship single-session in P1\n",
+                encoding="utf-8",
+            )
+            cfg = load_engine_config(project_path=project_cfg)
+            self.assertFalse(cfg.compile_aware.enabled)
+            self.assertEqual(
+                cfg.compile_aware.commands["rs"],
+                ("cargo", "check", "--message-format=json"),
+            )
+            self.assertEqual(cfg.session_locks.debounce_seconds, 15.0)
 
 
 if __name__ == "__main__":

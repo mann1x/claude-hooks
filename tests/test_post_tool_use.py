@@ -391,3 +391,104 @@ class TestRealRuff:
             providers=[],
         )
         assert out is None
+
+
+# --------------------------------------------------------------------- #
+# TOML comment advisor
+# --------------------------------------------------------------------- #
+
+
+class TestTomlCommentAdvisor:
+    """Hand-edited TOML configs under .claude-hooks/ get a one-paragraph
+    reminder pointing Claude at the comment syntax. Other TOML files
+    (pyproject.toml etc) are left alone — they have their own
+    conventions and a generic nag would be noise.
+    """
+
+    def _write_and_call(self, tmp_path: Path, rel_path: str,
+                        cfg_overrides: dict | None = None) -> dict | None:
+        target = tmp_path / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("[preload]\nmax_files = 50\n", encoding="utf-8")
+        cfg = _cfg(**(cfg_overrides or {}))
+        return post_tool_use.handle(
+            event=_event(file_path=rel_path, cwd=str(tmp_path)),
+            config=cfg,
+            providers=[],
+        )
+
+    def test_dot_claude_hooks_toml_emits_reminder(self, tmp_path: Path):
+        out = self._write_and_call(tmp_path, ".claude-hooks/lsp-engine.toml")
+        assert out is not None
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        assert "TOML edit reminder" in ctx
+        assert "# ..." in ctx or "comment" in ctx.lower()
+        assert ".claude-hooks/lsp-engine.toml" in ctx.replace("\\", "/")
+
+    def test_root_lsp_engine_toml_emits_reminder(self, tmp_path: Path):
+        out = self._write_and_call(tmp_path, "lsp-engine.toml")
+        assert out is not None
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        assert "TOML edit reminder" in ctx
+
+    def test_pyproject_toml_does_not_emit_reminder(self, tmp_path: Path):
+        out = self._write_and_call(tmp_path, "pyproject.toml")
+        # pyproject.toml has its own conventions — we leave it alone.
+        # Result is None because no other stage fires either (no Python
+        # file, no advisor match).
+        assert out is None
+
+    def test_disabled_via_config_skips_advisor(self, tmp_path: Path):
+        out = self._write_and_call(
+            tmp_path,
+            ".claude-hooks/lsp-engine.toml",
+            cfg_overrides={"toml_comment_advisor_enabled": False},
+        )
+        assert out is None
+
+    def test_custom_advisor_paths_replace_defaults(self, tmp_path: Path):
+        """If the user sets toml_comment_advisor_paths, only those
+        match — the defaults no longer fire."""
+        out = self._write_and_call(
+            tmp_path,
+            ".claude-hooks/lsp-engine.toml",
+            cfg_overrides={"toml_comment_advisor_paths": ["custom-config/"]},
+        )
+        # No match against custom-config/, so no advisor block.
+        assert out is None
+
+        out2 = self._write_and_call(
+            tmp_path,
+            "custom-config/something.toml",
+            cfg_overrides={"toml_comment_advisor_paths": ["custom-config/"]},
+        )
+        assert out2 is not None
+        assert "TOML edit reminder" in out2["hookSpecificOutput"]["additionalContext"]
+
+    def test_non_toml_extension_is_skipped(self, tmp_path: Path):
+        # A .json file under .claude-hooks/ should NOT trigger the
+        # TOML advisor (the substring match alone isn't enough).
+        target = tmp_path / ".claude-hooks" / "lsp-engine.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("{}", encoding="utf-8")
+        out = post_tool_use.handle(
+            event=_event(file_path=".claude-hooks/lsp-engine.json",
+                         cwd=str(tmp_path)),
+            config=_cfg(),
+            providers=[],
+        )
+        assert out is None
+
+    def test_advisor_runs_alongside_ruff_for_separate_files(self, tmp_path: Path):
+        """Sanity: the advisor only inspects the current edit's path.
+        A .py edit doesn't trigger the advisor; a .toml edit doesn't
+        trigger ruff. They never stack on the same call (different files)."""
+        py = tmp_path / "x.py"
+        py.write_text("x = 1\n")
+        out = post_tool_use.handle(
+            event=_event(file_path="x.py", cwd=str(tmp_path)),
+            config=_cfg(),
+            providers=[],
+        )
+        # Clean .py — no ruff hits, no advisor (wrong extension).
+        assert out is None

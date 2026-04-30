@@ -29,3 +29,7 @@ httpx[http2]>=0.27
 # is missing on the host (logs a warning and skips), but new envs
 # get it pre-installed via this requirements line.
 ruff>=0.6
+# tomli on Python <3.11 for claude_hooks.lsp_engine — the per-project
+# .claude-hooks/lsp-engine.toml needs a TOML parser. 3.11+ uses the
+# stdlib tomllib, no extra dep needed.
+tomli>=2.0; python_version < "3.11"

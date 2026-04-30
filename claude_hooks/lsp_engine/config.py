@@ -5,14 +5,17 @@ Two files, layered:
 1. ``cclsp.json`` — canonical source for LSP commands and extensions.
    The same file ``cclsp`` (the multi-LSP MCP wrapper) reads, so a user
    who already has cclsp configured gets the engine for free. We never
-   write to this file; only read.
+   write to this file; only read. Stays JSON because that's cclsp's
+   format upstream.
 
-2. ``.claude-hooks/lsp-engine.json`` (per-project, optional) or the
+2. ``.claude-hooks/lsp-engine.toml`` (per-project, optional) or the
    ``hooks.lsp_engine`` block in ``config/claude-hooks.json`` (global,
    optional) — engine-specific knobs that have no place in cclsp.json:
    preload size, compile commands, debounce intervals, opt-in flags.
-   JSON instead of TOML so we stay stdlib-only on Python 3.9 (tomllib
-   landed in 3.11).
+   TOML for the per-project file because users hand-edit it and the
+   ``# reason: ...`` comment affordance is the whole point — JSON has
+   no comment syntax, and a config that drifts from its rationale
+   rots fast.
 
 Resolution rule for engine knobs: per-project overrides global; missing
 keys fall back to the dataclass defaults below. Both files are
@@ -24,9 +27,21 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover — exercised only on 3.9 / 3.10
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ImportError as _e:
+        raise ImportError(
+            "claude_hooks.lsp_engine requires `tomli` on Python <3.11 "
+            "(pip install tomli). 3.11+ has tomllib in the stdlib."
+        ) from _e
 
 
 @dataclass(frozen=True)
@@ -149,7 +164,7 @@ def load_engine_config(
 ) -> EngineConfig:
     """Load engine knobs from per-project + global config, layered.
 
-    ``project_path`` points at ``.claude-hooks/lsp-engine.json`` (the
+    ``project_path`` points at ``.claude-hooks/lsp-engine.toml`` (the
     full path, not the project root). Missing file is fine.
     ``global_block`` is the ``hooks.lsp_engine`` dict from the main
     ``config/claude-hooks.json``; pass ``None`` to skip it.
@@ -163,9 +178,9 @@ def load_engine_config(
         p = Path(project_path)
         if p.is_file():
             try:
-                merged = _deep_merge(merged, json.loads(p.read_text(encoding="utf-8")))
-            except json.JSONDecodeError as e:
-                raise CclspConfigError(f"{p}: invalid JSON: {e}") from e
+                merged = _deep_merge(merged, tomllib.loads(p.read_text(encoding="utf-8")))
+            except tomllib.TOMLDecodeError as e:
+                raise CclspConfigError(f"{p}: invalid TOML: {e}") from e
 
     return EngineConfig(
         preload=PreloadConfig(
