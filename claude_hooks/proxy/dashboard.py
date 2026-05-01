@@ -840,12 +840,31 @@ function renderSpEffortTable(rows) {
 }
 const LEGEND_SP_EFFORT = `
   <div class="legend">
-    Stop-phrase hits per 1k <code>main</code> requests, split by
-    <code>effort</code>. Cells turn warn/bad at ≥5 / ≥20 per 1k.
+    All rate columns are <strong>hits per 1k <code>main</code> requests</strong>
+    (warmups and sub-agents excluded). Cells turn warn/bad at
+    ≥5 / ≥20 per 1k.<br>
+    <code>date</code> UTC date ·
+    <code>effort</code> Claude Code effort level
+      (<code>low</code>/<code>medium</code>/<code>high</code>/<code>xhigh</code>;
+      <code>(unset)</code> = one-shot CLI probes with no persona) ·
+    <code>reqs</code> total main requests for that day+effort ·
+    <code>ownD</code> <em>ownership-dodging</em>
+      ("I cannot do that", "this is beyond my ability") ·
+    <code>permS</code> <em>permission-seeking</em>
+      ("should I proceed?", "let me know if you'd like") ·
+    <code>premS</code> <em>premature-stopping</em>
+      ("I've reached a stopping point", "let me pause here") ·
+    <code>simpF</code> <em>simplest-fix bias</em>
+      ("the simplest fix is…", short-circuit reasoning) ·
+    <code>revrs</code> <em>reasoning-reversal</em>
+      (mid-thought direction flips) ·
+    <code>admit</code> <em>self-admitted error</em>
+      ("I made a mistake", "you're right, I was wrong").<br>
     A sharp jump on one effort while the other stays clean signals a
     route-specific regression — e.g. on 2026-05-01 xhigh ownership-dodging
-    went from 0 to 55+/1k while medium stayed at 0. Source: same
-    <code>sp_*</code> columns as the behavior canary card.
+    went from 0 to 55+/1k while medium stayed at 0. Same
+    <code>sp_*</code> source columns as the behavior canary card;
+    enable via <code>proxy.scan_stop_phrases: true</code>.
   </div>
 `;
 function renderBetas(rows) {
