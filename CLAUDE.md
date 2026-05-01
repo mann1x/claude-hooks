@@ -124,8 +124,14 @@ payload.
 
 ## Key directories
 
-- `bin/` — POSIX + Windows entry-point shims (`claude-hook`, `claude-hooks-daemon-ctl`, `claude-hooks-proxy`, `claude-hook-pgvector-mcp`, `caliber-grounding-proxy`, `caliber-smart`)
-- `claude_hooks/hooks/` — one handler per event (`session_start`, `user_prompt_submit`, `pre_tool_use`, `stop`, `session_end`)
+- `bin/` — POSIX + Windows entry-point shims:
+  - Hook dispatcher: `claude-hook`
+  - Daemon: `claude-hooks-daemon`, `claude-hooks-daemon-ctl`
+  - Proxy stack: `claude-hooks-proxy`, `claude-hooks-dashboard`, `claude-hooks-rollup`
+  - Caliber: `caliber-grounding-proxy`, `caliber-smart`
+  - System-wide MCP: `claude-hook-pgvector-mcp`
+  - Internal: `_resolve_python.sh` (sourced by every shim to find the right Python)
+- `claude_hooks/hooks/` — one handler per event (`session_start`, `user_prompt_submit`, `pre_tool_use`, `post_tool_use`, `stop`, `session_end`)
 - `claude_hooks/providers/` — one file per memory backend (`qdrant`, `memory_kg`, `pgvector`, `sqlite_vec`)
 - `claude_hooks/` — shared recall + memory modules:
   - **Recall pipeline**: `recall.py`, `hyde.py`, `hyde_cache.py`, `decay.py`, `dedup.py`
@@ -135,15 +141,17 @@ payload.
   - **Companion integrations**: `openwolf.py`, `axon_integration.py`, `gitnexus_integration.py`, `companion_integration.py`
   - **Opt-in advisory**: `stop_guard.py`, `safety_scan.py` + `safety_patterns.py`, `rtk_rewrite.py`
   - **Index management**: `claudemem_reindex.py`
-- `claude_hooks/code_graph/` — built-in stdlib `ast`-based code graph (`builder.py`, `impact.py`, `mermaid.py`, `mcp_server.py`, …)
-- `claude_hooks/proxy/` — opt-in HTTP proxy in front of `api.anthropic.com` (`server.py`, `metadata.py`, `stats_db.py`, `dashboard.py`)
-- `claude_hooks/caliber_proxy/` — Caliber grounding proxy (`server.py`, `tools.py`, `prompt.py`, `ollama.py`)
+- `claude_hooks/code_graph/` — built-in stdlib `ast`-based code graph (`builder.py`, `impact.py`, `mermaid.py`, `inject.py`, `symbol_lookup.py`, `mcp_server.py`, `clustering.py`, …)
+- `claude_hooks/lsp_engine/` — session-scoped LSP daemon (`config.py`, `lsp.py`, `engine.py`, `daemon.py`, `ipc.py`, `locks.py`, `preload.py`, `compile.py`, `git_watch.py`, `client.py`)
+- `claude_hooks/proxy/` — opt-in HTTP proxy in front of `api.anthropic.com` (`server.py`, `forwarder.py`, `metadata.py`, `stats_db.py`, `dashboard.py`, `sse.py`, `stop_phrase_guard.py`, `ratelimit_state.py`)
+- `claude_hooks/caliber_proxy/` — Caliber grounding proxy (`server.py`, `tools.py`, `prompt.py`, `ollama.py`, `recall.py`)
 - `claude_hooks/pgvector_mcp/` — system-wide stdio MCP server exposing pgvector recall + KG ops to any MCP-aware client
 - `episodic_server/` — HTTP front-end for [obra/episodic-memory](https://github.com/obra/episodic-memory) (`server.py`, `Dockerfile`, systemd unit)
-- `systemd/` — service templates (`claude-hooks-daemon`, `claude-hooks-proxy`, `caliber-grounding-proxy`, `episodic-server`)
-- `config/` — `claude-hooks.json` (gitignored) + `claude-hooks.example.json`
+- `systemd/` — service templates: `claude-hooks-proxy`, `claude-hooks-dashboard`, `claude-hooks-rollup{.service,.timer}`, `claude-hooks-health{.service,.timer}`, `claude-hooks-daemon`, `claude-hooks-pgvector-mcp`, `caliber-grounding-proxy`, `axon-host`
+- `config/` — `claude-hooks.json` (gitignored) + `claude-hooks.example.json` + `stop_phrases.yaml` (canary phrases for the in-stream stop_phrase_guard)
 - `patches/` — project-specific patches for third-party npm globals (e.g. `apply-caliber-patch.sh`)
-- `docs/` — runbooks + integration plans (`daemon.md`, `proxy.md`, `hyde.md`, `caliber-proxy.md`, `episodic-server.md`, `pgvector-runbook.md`, `deployment.md`, `env-vars.md`, `PLAN-*.md`)
+- `docs/` — runbooks (`daemon.md`, `proxy.md`, `hyde.md`, `caliber-proxy.md`, `episodic-server.md`, `pgvector-runbook.md`, `deployment.md`, `env-vars.md`, `lsp-engine.md`, `lsp-mcp.md`, `gemma4-tool-use-notes.md`), plans (`PLAN-*.md`), issue drafts (`issue-warmup-token-drain.md`, `cc-xhigh-regression-issue.md`, `openwolf-managedby-issue.md`), and the audit at `doc-audit-2026-05-01.md`
+- `scripts/` — operator tooling (`proxy_rollup.py`, `proxy_health_oneliner.py`, `proxy_stats.py`, `bench_recall.py`, `bench_lsp_engine.py`, `migrate_to_pgvector.py`, `weekly_token_usage.py`, `statusline_*.py`, …)
 - `tests/` — unittest-based, run with `pytest`
 
 ---

@@ -1,6 +1,12 @@
 # PLAN — Proxy stats SQLite rollup + metric expansion
 
-**Status:** researched, not implemented. Come back end of April 2026.
+**Status:** ✅ shipped (schemas v1–v5). Stats DB lives at
+`~/.claude/claude-hooks-proxy/stats.db`; `scripts/proxy_rollup.py`
+(driven by `claude-hooks-rollup.timer`, every 5 min) ingests the
+daily JSONL files. The dashboard at port 38081 reads the rollups
+plus per-request `requests` rows for the live cards. The plan below
+is kept as context; treat the "future phases" section at the bottom
+as the canonical to-do list.
 
 **Context:** the proxy writes per-request JSONL (`~/.claude/claude-hooks-proxy/YYYY-MM-DD.jsonl`).
 We want persistent, queryable stats — not ad-hoc `proxy_stats.py` runs.

@@ -1,6 +1,14 @@
 # Plan: claude-hooks proxy mode (optional, opt-in)
 
-**Status:** draft, not started.
+**Status:** ✅ shipped. The proxy is live (`claude_hooks/proxy/`),
+the SQLite rollup is shipped (see `docs/PLAN-stats-sqlite.md` for the
+sibling plan), the read-only dashboard runs on port 38081, and the
+in-stream `stop_phrase_guard` canary plus the daily
+`claude-hooks-health.timer` are operational. Operator runbook lives
+at [`docs/proxy.md`](proxy.md). The plan below is preserved as the
+original design rationale — treat anything in the doc that contradicts
+the runbook as historical.
+
 **Motivation:** observability + selective mitigation of behaviours
 the Claude Code hook surface can't reach.
 

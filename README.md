@@ -1038,6 +1038,51 @@ See [COMPANION_TOOLS.md](COMPANION_TOOLS.md) for detailed install
 instructions, descriptions, and importance rankings for tools that
 complement claude-hooks.
 
+## Documentation map
+
+Runbooks (`docs/`):
+
+- [`deployment.md`](docs/deployment.md) — full install playbook (LAN-shared proxy, systemd, statusline, monitoring, uninstall)
+- [`env-vars.md`](docs/env-vars.md) — curated reference of `CLAUDE_CODE_*` env vars the framework reads or writes
+- [`daemon.md`](docs/daemon.md) — long-lived hook executor: latency tiers, session lock, control protocol
+- [`proxy.md`](docs/proxy.md) — `claude_hooks/proxy/` runbook: schema, dashboard routes, Warmup detection, stop_phrase_guard config
+- [`pgvector-runbook.md`](docs/pgvector-runbook.md) — Postgres + pgvector backend setup + system-wide MCP server registration
+- [`hyde.md`](docs/hyde.md) — HyDE query expansion configuration and tuning
+- [`caliber-proxy.md`](docs/caliber-proxy.md) — Caliber grounding proxy: native-tools agent, `survey_project`, `recall`
+- [`gemma4-tool-use-notes.md`](docs/gemma4-tool-use-notes.md) — empirical notes on small grounding models for the caliber proxy
+- [`episodic-server.md`](docs/episodic-server.md) — HTTP front-end for [obra/episodic-memory](https://github.com/obra/episodic-memory)
+- [`lsp-engine.md`](docs/lsp-engine.md) — LSP engine user guide
+- [`lsp-mcp.md`](docs/lsp-mcp.md) — cclsp MCP companion install and Linux/Windows config
+
+Plans (`docs/PLAN-*.md`):
+
+- [`PLAN-lsp-engine.md`](docs/PLAN-lsp-engine.md) — locked design for the v0.7 LSP engine (Phases 0–4 shipped)
+- [`PLAN-stats-sqlite.md`](docs/PLAN-stats-sqlite.md) — proxy SQLite rollup design (✅ shipped)
+- [`PLAN-proxy-hook.md`](docs/PLAN-proxy-hook.md) — original proxy mode design (✅ shipped)
+- [`PLAN-pgvector-migration.md`](docs/PLAN-pgvector-migration.md) — Qdrant/Memory-KG → pgvector migration design
+- [`PLAN-test-coverage.md`](docs/PLAN-test-coverage.md) — branch-coverage closure plan
+- [`PLAN-code-factory-integration.md`](docs/PLAN-code-factory-integration.md) — code-factory integration design
+
+Issue drafts (`docs/`, mirrored to upstream trackers):
+
+- [`issue-warmup-token-drain.md`](docs/issue-warmup-token-drain.md) — anthropics/claude-code Warmup detection / mitigation evidence
+- [`cc-xhigh-regression-issue.md`](docs/cc-xhigh-regression-issue.md) — anthropics/claude-code#55301 (xhigh quality regression filed 2026-05-01)
+- [`openwolf-managedby-issue.md`](docs/openwolf-managedby-issue.md) — cytostack/openwolf#31 / PR #32 (`_managedBy` tag)
+- [`doc-audit-2026-05-01.md`](docs/doc-audit-2026-05-01.md) — this round's documentation gap report
+
+## Where the system listens
+
+Default ports the framework introduces or expects. All bind to `127.0.0.1`
+by default; the proxy supports a LAN-listen mode for shared installs.
+
+| Port | Service | Configurable as |
+|------|---------|-----------------|
+| 38080 | API proxy | `proxy.listen_port` |
+| 38081 | Stats dashboard | `proxy_dashboard.listen_port` |
+| 38090 | Caliber grounding proxy | `caliber_proxy.listen_port` |
+| 11435 | Episodic-memory HTTP server | `episodic_server.listen_port` (see [`docs/episodic-server.md`](docs/episodic-server.md)) |
+| 11433 | (host-specific) Ollama upstream — used as `CALIBER_GROUNDING_UPSTREAM` default; **override for your install** | env / systemd drop-in |
+
 ## License
 
 [MIT](LICENSE)

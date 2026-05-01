@@ -11,16 +11,36 @@ on every prompt and stores noteworthy turns back.
 - **Providers**: `claude_hooks/providers/` — memory backends (qdrant, memory_kg, pgvector, sqlite_vec)
 - **Config**: `config/claude-hooks.json` (gitignored), deep-merged over defaults in `claude_hooks/config.py`
 
-## v0.2 Intelligence Modules
+## Intelligence Modules
 
+Recall (UserPromptSubmit) pipeline:
 - `recall.py` — shared recall pipeline with HyDE, decay, progressive disclosure
-- `hyde.py` — query expansion via local Ollama (gemma4:e2b)
+- `hyde.py`, `hyde_cache.py` — query expansion via local Ollama (default `gemma4:e2b`) with disk cache
 - `decay.py` — attention decay scoring for recalled memories
 - `dedup.py` — near-duplicate detection before store
+
+Stop pipeline:
 - `instincts.py` — auto-extracts bug-fix patterns as reusable instinct files
 - `reflect.py` — synthesizes recent memories into CLAUDE.md rules
 - `consolidate.py` — memory compression and pruning
+- `store_async.py` — Tier 1.3 detached store (fork-and-return so the Stop hook doesn't block on provider writes)
+
+Daemon stack (Tier 3.8 long-lived hook executor):
+- `daemon.py`, `daemon_client.py`, `daemon_ctl.py` — single Python process owns providers + config across hook invocations; each hook answers in milliseconds instead of paying the 100–300 ms Python cold-start
+
+LSP engine (v0.7+, opt-in, session-scoped):
+- `lsp_engine/config.py`, `lsp.py`, `engine.py` — TOML config, per-language LSP child wrapper, multi-LSP routing
+- `lsp_engine/daemon.py`, `ipc.py`, `locks.py`, `client.py` — daemon lifecycle, UNIX socket IPC (POSIX) / named pipes (Windows), per-file session-affinity locks, hook-side client + spawn helper
+- `lsp_engine/preload.py`, `git_watch.py` — adaptive preload from code-graph hot set; polling git watcher for branch-switch refresh
+- `lsp_engine/compile.py` — opt-in compile-aware orchestrator that merges `cargo check` / `tsc --noEmit` / `mypy` / `go vet` diagnostics on top of the LSP layer
+
+Concurrency / utility:
+- `_parallel.py` (provider fan-out), `mcp_client.py`, `embedders.py`
+
+Companion integrations (opt-in):
 - `openwolf.py` — reads .wolf/ project data (cerebrum, buglog)
+- `axon_integration.py`, `gitnexus_integration.py`, `companion_integration.py` — companion code-graph engines
+- `claudemem_reindex.py` — auto-reindex hook for [claudemem](https://github.com/cmcl/claudemem)
 
 ## Optional PreToolUse / Stop Hooks (opt-in)
 
