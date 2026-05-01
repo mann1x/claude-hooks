@@ -181,6 +181,15 @@ def _spawn_daemon(
 ) -> None:
     """Fork-and-exec a detached daemon. Returns immediately; the
     caller then polls for the socket via ``_wait_for_socket``.
+
+    Detachment differs by platform:
+
+    - POSIX: ``start_new_session=True`` puts the child in its own
+      session/process-group so a SIGHUP to the parent doesn't
+      cascade.
+    - Windows: ``DETACHED_PROCESS | CREATE_NO_WINDOW`` flags so the
+      daemon doesn't inherit the parent's console (no ``cmd.exe``
+      flash, no shutdown-on-parent-exit).
     """
     cmd = [
         sys.executable,
@@ -202,16 +211,27 @@ def _spawn_daemon(
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_fd = open(log_path, "ab")  # noqa: SIM115 — caller owns lifecycle
 
-    try:
-        subprocess.Popen(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=log_fd if log_fd else subprocess.DEVNULL,
-            stderr=log_fd if log_fd else subprocess.DEVNULL,
-            start_new_session=True,
-            env=env,
-            close_fds=True,
+    popen_kwargs: dict = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": log_fd if log_fd else subprocess.DEVNULL,
+        "stderr": log_fd if log_fd else subprocess.DEVNULL,
+        "env": env,
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        # ``DETACHED_PROCESS`` detaches from the parent's console;
+        # ``CREATE_NO_WINDOW`` suppresses any new one. Constants live
+        # under subprocess on Windows but are guarded by getattr so a
+        # POSIX import path never references them.
+        popen_kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
         )
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    try:
+        subprocess.Popen(cmd, **popen_kwargs)
     finally:
         # Popen dups the fd into the child; closing here doesn't
         # affect the daemon's open log file.

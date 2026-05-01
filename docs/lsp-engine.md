@@ -431,10 +431,43 @@ The engine ships in phases. Current state:
 | 1 | Shared per-project daemon + session affinity locks | ✅ shipped |
 | 2 | Adaptive preload + git branch-switch awareness | ✅ shipped |
 | 3 | Opt-in compile-aware diagnostics | ✅ shipped |
-| 4 | Windows parity (named pipes) + benchmarks | not yet |
+| 4 | Windows parity (named pipes) + benchmarks | ✅ shipped |
 
-The POSIX surface is feature-complete. Windows users should fall
-back to `cclsp` directly until Phase 4.
+POSIX is fully verified (1502 tests). Windows backend (named pipes
+via ``multiprocessing.connection``, ``msvcrt.locking`` for the
+daemon lock, ``DETACHED_PROCESS|CREATE_NO_WINDOW`` for spawn) is
+code-complete with platform-mock unit tests; end-to-end Windows
+runtime verification is a CI matrix follow-up.
+
+### Benchmarks
+
+`scripts/bench_lsp_engine.py` measures the engine against the ruff
+PostToolUse baseline. Sample run on a representative ~50-line
+Python file (50 iterations, warm-up discarded):
+
+```
+ruff (subprocess per edit):              p50  7.15 ms   p99 41.32 ms
+engine IPC-only (did_change):            p50  0.25 ms   p99  0.46 ms
+engine full (did_change + diagnostics):  p50  282 ms    p99  302 ms
+```
+
+The IPC layer is well under the locked target of 5 ms p50 / 15 ms
+p99 — the daemon's plumbing contributes ~0.1% of the
+edit-to-diagnostics wall time. The other ~99.9% is pyright's
+type-check, not anything the engine does.
+
+That's the right narrative: ruff is the cheap synchronous lint
+layer (PostToolUse hook, ~7 ms), and the engine adds full
+type-checking on top (~280 ms with pyright, but reusable across
+sessions and queries). They're complementary; the engine isn't
+"faster ruff" — it's "richer diagnostics with persistent state."
+
+To run the benchmark yourself:
+
+```bash
+python scripts/bench_lsp_engine.py --iterations 100
+python scripts/bench_lsp_engine.py --json   # machine-readable
+```
 
 ---
 

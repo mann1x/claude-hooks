@@ -28,7 +28,6 @@ Lifecycle:
 from __future__ import annotations
 
 import errno
-import fcntl
 import hashlib
 import logging
 import os
@@ -37,6 +36,16 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional
+
+# fcntl exists on POSIX only; msvcrt.locking is the Windows equivalent.
+# Both are stdlib. We import lazily-by-platform so neither import
+# failure breaks the cross-platform module load.
+if os.name == "nt":
+    import msvcrt  # type: ignore[import-not-found]
+    fcntl = None  # sentinel; daemon._acquire_lock_file picks the right path
+else:
+    import fcntl  # type: ignore[no-redef]
+    msvcrt = None  # sentinel
 
 from claude_hooks.lsp_engine.compile import CompileOrchestrator
 from claude_hooks.lsp_engine.config import (
@@ -47,7 +56,7 @@ from claude_hooks.lsp_engine.config import (
 )
 from claude_hooks.lsp_engine.engine import Engine
 from claude_hooks.lsp_engine.git_watch import GitWatcher
-from claude_hooks.lsp_engine.ipc import IpcServer
+from claude_hooks.lsp_engine.ipc import IpcServer, windows_pipe_name_for
 from claude_hooks.lsp_engine.locks import (
     QueuedChange,
     SessionLockManager,
@@ -75,7 +84,16 @@ def project_dir(project_root: str | os.PathLike, base: Optional[Path] = None) ->
     return base / digest
 
 
-def socket_path_for(project_root: str | os.PathLike, base: Optional[Path] = None) -> Path:
+def socket_path_for(project_root: str | os.PathLike, base: Optional[Path] = None):
+    """Return the IPC address for ``project_root``.
+
+    POSIX: a ``Path`` to ``daemon.sock`` inside the per-project state
+    directory.
+    Windows: a ``str`` named pipe like ``\\\\.\\pipe\\claude-hooks-lsp-engine-<hash>``
+    (no filesystem entry — pipes live in the kernel's pipe namespace).
+    """
+    if os.name == "nt":
+        return windows_pipe_name_for(project_root)
     return project_dir(project_root, base=base) / "daemon.sock"
 
 
@@ -255,15 +273,30 @@ class Daemon:
         finally:
             self.stop()
 
-    # ─── lock file (POSIX flock) ─────────────────────────────────────
+    # ─── lock file (POSIX flock / Windows msvcrt.locking) ────────────
 
     def _acquire_lock_file(self) -> None:
         fd = os.open(str(self._lock_path), os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if os.name == "nt":
+                # ``msvcrt.locking`` locks ``length`` bytes from the
+                # current file pointer. We lock the first byte
+                # (``length=1``) which is enough to mark the file as
+                # held — Windows file locks are advisory across
+                # processes the same way ``flock`` is.
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)  # type: ignore[union-attr]
+            else:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[union-attr]
         except OSError as e:
             os.close(fd)
-            if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+            # Windows raises ``OSError`` with errno=EACCES when the
+            # range is already locked; POSIX raises EAGAIN/EWOULDBLOCK.
+            if e.errno in (
+                errno.EWOULDBLOCK,
+                errno.EAGAIN,
+                errno.EACCES,
+                errno.EDEADLK,
+            ):
                 raise DaemonAlreadyRunning(
                     f"another daemon already holds {self._lock_path}",
                 ) from e
@@ -277,7 +310,14 @@ class Daemon:
         if self._lock_fd is None:
             return
         try:
-            fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+            if os.name == "nt":
+                # Seek to 0 — ``msvcrt.locking`` operates from the
+                # current file pointer, and we wrote past it after
+                # acquiring.
+                os.lseek(self._lock_fd, 0, os.SEEK_SET)
+                msvcrt.locking(self._lock_fd, msvcrt.LK_UNLCK, 1)  # type: ignore[union-attr]
+            else:
+                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)  # type: ignore[union-attr]
         except OSError:  # pragma: no cover — defensive
             pass
         try:
@@ -287,7 +327,12 @@ class Daemon:
         self._lock_fd = None
         try:
             self._lock_path.unlink()
-        except FileNotFoundError:
+        except (FileNotFoundError, PermissionError):
+            # Windows refuses to unlink a file held open by *any*
+            # process; the lock-fd close above usually solves it but
+            # leftover handles from a half-shutdown can keep it
+            # around. Leaving the file is harmless — next start
+            # truncates it.
             pass
 
     # ─── sweeper ─────────────────────────────────────────────────────

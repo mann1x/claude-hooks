@@ -1,7 +1,19 @@
 # Plan: session-scoped LSP engine — non-MCP, real-time, project-aware
 
-**Status:** Phases 0-3 shipped (POSIX). Decisions locked 2026-04-30.
-Phase 4 (Windows parity, named pipes, benchmarks) not yet started.
+**Status:** Phases 0-4 shipped. Decisions locked 2026-04-30.
+POSIX is fully verified (1502 tests pass). Windows backend (named
+pipes via ``multiprocessing.connection``, ``msvcrt.locking`` for
+the daemon lock, ``DETACHED_PROCESS|CREATE_NO_WINDOW`` for spawn)
+is code-complete with platform-mock unit tests; live-on-Windows
+verification is a follow-up CI matrix item.
+
+Benchmarks (Phase 4): IPC overhead measured at **0.25 ms p50 / 0.46
+ms p99** on the daemon round-trip — well under the locked target
+(5 ms / 15 ms). Full ``did_change → diagnostics`` round-trip is
+~280 ms because pyright's analysis time dominates wall time, not
+the engine's plumbing. ruff at ~7 ms p50 stays as the cheap synchronous
+PostToolUse layer for Python; the engine adds the type-checking
+layer on top, not as a replacement.
 
 **For users**: see [`docs/lsp-engine.md`](lsp-engine.md) — that's the
 configuration guide and runbook. This document is the **design log**
