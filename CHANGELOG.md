@@ -16,8 +16,17 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-_(work in progress on the `dev` branch — see `git log v1.0.0..origin/dev`
+_(work in progress on the `dev` branch — see `git log v1.0.1..origin/dev`
 for landed but not-yet-released commits.)_
+
+## [1.0.1] — 2026-05-01
+
+> Note on the version bump: by the SemVer rules in
+> `docs/RELEASING.md`, "new opt-in subsystem" is normally a **MINOR**
+> bump. v1.0.1 was chosen here as a deliberate exercise of the
+> release workflow on a small, low-risk delta — treat this as
+> precedent for "first follow-up release after the 1.0 cut," not
+> as a recategorization of the SemVer rules.
 
 ### Added
 
@@ -48,7 +57,7 @@ for landed but not-yet-released commits.)_
 ### Fixed
 
 - `claude_hooks/__init__.py` `__version__` was stale at `0.4.0`;
-  bumped to `1.0.0` to match the package release.
+  bumped to match the package release (1.0.1).
 
 ## [1.0.0] — 2026-05-01
 
@@ -134,5 +143,6 @@ prior tag. From any unreleased checkout, just `git pull` on `main`
 once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
-[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/mann1x/claude-hooks/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/mann1x/claude-hooks/releases/tag/v1.0.0
