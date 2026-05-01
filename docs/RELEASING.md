@@ -7,15 +7,23 @@ wins.
 ## Branch model
 
 ```
-                              tag: v1.0.0
-                                  │
-   main   ────●────●────●────●────●────●────●─►   (release branch)
-              ▲                   ▲
-              │  merge on cut     │  merge on cut
-              │                   │
-   dev    ────●────●────●─────────●────────────►  (working branch)
+                          merge   release   tag: v1.0.1
+                          commit   prep         │
+                            │       │           │
+   main   ────●────●────●───◆───────●───────────●─►  (release branch)
+              ▲   ╱             ╱
+              │  ╱  --no-ff    ╱  --no-ff
+              │ ╱             ╱
+              │╱             ╱
+   dev    ────●────●────●───●─────────●────────────►  (working branch)
                   feature/fix/exp commits land here
 ```
+
+Step 2 of the cut uses `git merge --no-ff dev`, which forces a
+merge commit (◆) even when the branch could fast-forward. The
+release prep commit (`release: vX.Y.Z`) and the annotated tag
+follow on `main`. The result is a clearly visible boundary in
+`git log --graph` for every release.
 
 - **`main`** — release branch. Every commit on `main` is shippable.
   Tags live here. CI (when added) gates merges to `main`.
@@ -61,17 +69,24 @@ release at most. Update it during the same cut.
 
    No failing tests; collect count noted for the CHANGELOG.
 
-2. **Merge `dev` → `main` (fast-forward when possible)**
+2. **Merge `dev` → `main` (always `--no-ff`)**
 
    ```bash
    git checkout main
    git pull --ff-only
-   git merge --ff-only dev || git merge --no-ff dev
+   git merge --no-ff dev -m "merge: dev -> main for vX.Y.Z release"
    ```
 
-   Use `--ff-only` when `main` has not diverged. If it has,
-   `--no-ff` produces a single merge commit so the release boundary
-   is visible in `git log`.
+   `--no-ff` always produces a merge commit, even when the branch
+   could fast-forward. This makes the release boundary explicit in
+   `git log --graph`: every release shows up as a visible "merge
+   dev" commit followed by the `release: vX.Y.Z` prep commit and
+   the `vX.Y.Z` tag. Without this, ff-merged releases collapse into
+   the linear history and you lose the visual cue of where one
+   release ended and the next started.
+
+   Tag the release prep commit (step 5), not the merge commit, so
+   the GitHub release archive contains the version-bumped state.
 
 3. **Bump the version on `main`**
 
@@ -130,8 +145,12 @@ release at most. Update it during the same cut.
    git push origin dev
    ```
 
-   `dev` is now `main + (possibly a "release: vX.Y.Z" merge commit)`
-   — ready for the next round of work.
+   With the `--no-ff` policy from step 2, `main` is now ahead of
+   `dev` by exactly two commits: the merge commit
+   (`merge: dev -> main for vX.Y.Z release`) and the release prep
+   (`release: vX.Y.Z`). Fast-forwarding `dev` absorbs both so the
+   two branches land at the same commit again, ready for the next
+   round of work.
 
 ## Hotfix procedure
 
