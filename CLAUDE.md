@@ -15,9 +15,13 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v0.4.0** — 58 tests pass (42 unit + 16 integration). Installer is
-> functional and idempotent. Episodic-memory sync and cross-platform plugin
-> management included. See `tests/` and `install.py`.
+> Status: **v0.7.0** — ~1.5k tests pass (run `pytest --collect-only -q | tail -1`
+> for the current count). Installer is functional and idempotent. v0.5+ ships
+> a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
+> dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
+> v0.6+ adds an in-process AST code-graph + MCP server. v0.7+ adds the LSP
+> engine (per-project session-scoped daemon, Windows parity, sub-ms IPC,
+> opt-in compile-aware diagnostics) and the PostToolUse ruff hook.
 
 ---
 
@@ -146,16 +150,24 @@ payload.
 
 ## Hook events used
 
-From the 26 events Claude Code currently exposes, we use 4 by default and
-have 1 more available as opt-in:
+Claude Code currently exposes 28+ hook events. We wire the following:
 
 | Event              | Why                                                              | Default |
 |--------------------|------------------------------------------------------------------|---------|
-| `SessionStart`     | Inject "you have N memories about this project" status line     | on      |
-| `UserPromptSubmit` | Recall from all providers, inject as `additionalContext`         | on      |
-| `Stop`             | Summarize the turn, optionally write to providers                | on      |
-| `SessionEnd`       | Final flush of any buffered observations                         | on      |
-| `PreToolUse`       | Match `Bash`/`Edit` and warn on patterns flagged in past mistakes | off    |
+| `SessionStart`     | Inject "you have N memories about this project" status line + code-graph map  | on   |
+| `UserPromptSubmit` | Recall from all providers (HyDE-expanded), inject as `additionalContext`      | on   |
+| `Stop`             | Summarize the turn, optionally write to providers (auto-noteworthy heuristic) | on   |
+| `SessionEnd`       | Final flush of any buffered observations + episodic push                      | on   |
+| `PostToolUse`      | After `Edit`/`Write`/`MultiEdit`: run `ruff check` on Python files and inject diagnostics; advise on hand-edited TOMLs (`toml_comment_advisor`) | on |
+| `PreToolUse`       | Memory-recall warn on match (`warn_on_tools` / `warn_on_patterns`); opt-in advisory layers below | off (recall) / on (advisory) |
+
+PreToolUse advisory layers (all opt-in via `hooks.pre_tool_use.*`):
+
+| Layer | Config flag | Behavior |
+|-------|-------------|----------|
+| `safety_scan` | `safety_scan_enabled` | Pattern-scan dangerous Bash commands; logs to `~/.claude/permission-scanner/` |
+| `rtk_rewrite` | `rtk_rewrite_enabled` | Shell out to the `rtk` binary to rewrite the command; safety_scan still runs on the rewritten output by default |
+| `stop_guard`  | `stop_guard.enabled`  | Block premature stops mid-task by injecting a system reminder |
 
 ### What gets injected (UserPromptSubmit)
 

@@ -5,8 +5,12 @@ on every prompt and write findings back at the end of the turn.
 
 Install once at the **user level** and every Claude Code session gets
 deterministic memory recall + storage — no per-project init, no model
-forgetting. v0.4.0 adds episodic-memory sync, cross-platform plugin
-management, and plugin extraction utilities.
+forgetting. Beyond the core, v0.5+ ships a transparent
+`api.anthropic.com` proxy with stats DB + dashboard + behavior canaries,
+v0.6+ adds an in-process Python AST code-graph (with optional
+tree-sitter / MCP-server / clustering extras), and v0.7+ closes the
+IDE feedback loop with a session-scoped LSP engine and an opt-in ruff
+PostToolUse hook.
 
 ---
 
@@ -840,17 +844,18 @@ This adds a `PM2` entry under
 
 ```bash
 pip install -r requirements-dev.txt   # pytest + coverage
-python -m pytest tests/ -q            # 524 passed, 16 skipped (≈10 s)
+python -m pytest tests/ -q            # ~1.5k tests, mostly unit + a handful of integration
 ```
+
+The exact pass count drifts as new modules ship — `pytest --collect-only -q | tail -1` for the current total. Run with `pytest -k <module>` to scope.
 
 Branch coverage gate (target ≥ 80 %):
 
 ```bash
 coverage run -m pytest tests/
 coverage report
-# Phase 8 (test_coverage_phase8.py) brought branch coverage on
-# claude_hooks/ from ~81 % to ~92 %. Re-run `coverage report` for
-# the current figure — the number drifts as new modules ship.
+# Re-run `coverage report` for the current figure — the number
+# drifts as new modules ship.
 ```
 
 ### Test-file map
