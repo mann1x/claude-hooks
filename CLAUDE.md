@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v0.7.0** — ~1.5k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.0.0** — ~1.5k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -455,6 +455,34 @@ The 4 methods a provider must implement (`detect`, `verify`, `recall`,
 
   The extracted skills survive plugin updates. Re-run after a plugin version
   bump to pick up new skills.
+
+## Branch & Release Workflow
+
+As of **v1.0.0** (2026-05-01), claude-hooks uses a two-branch model:
+
+- **`main`** — release branch. Every commit shippable. Tags (`vX.Y.Z`)
+  live here. Do NOT push experimental work directly to `main`.
+- **`dev`** — working branch. All feature work, fixes, refactors,
+  doc changes land here first. Push freely.
+
+**For day-to-day work:** check out `dev`, commit there, push to
+`origin/dev`. Cut a release only when the work is stable and the
+test suite passes.
+
+**Authoritative version sources** — keep these in sync at every cut:
+1. `pyproject.toml` → `version = "X.Y.Z"`
+2. `CHANGELOG.md` → top entry `## [X.Y.Z] — YYYY-MM-DD`
+3. `CLAUDE.md` → status banner near the top of this file
+
+**Full procedure:** see [`docs/RELEASING.md`](docs/RELEASING.md). It
+covers SemVer rules, the cut command sequence, hotfix flow, and what
+NOT to do (don't tag from `dev`, don't force-push `main`, don't
+delete published tags).
+
+**For a new Claude Code session:** if the user asks to add a
+feature, fix a bug, or do exploratory work, ensure you are on `dev`
+before committing (`git checkout dev` if needed). Use `main` only
+during a release cut.
 
 <!-- caliber:managed:pre-commit -->
 ## Before Committing

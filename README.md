@@ -33,6 +33,13 @@ Check `~/.claude/claude-hooks.log` to confirm hooks are firing.
 For the full playbook — LAN-shared proxy setup, systemd unit, statusline
 wiring, monitoring, uninstall — see [`docs/deployment.md`](docs/deployment.md).
 
+### Releases & versioning
+
+- Current version: **v1.0.0** — see [CHANGELOG.md](CHANGELOG.md) for the full history.
+- Tagged releases live on [GitHub Releases](https://github.com/mann1x/claude-hooks/releases) with auto-generated `Source code (zip / tar.gz)` archives.
+- Branch model: `main` is the release branch (every commit shippable, tags live here); `dev` is the working branch (feature work + fixes land here first). See [`docs/RELEASING.md`](docs/RELEASING.md) for the cut procedure.
+- To track unreleased work: `git log v1.0.0..origin/dev` after fetching.
+
 ---
 
 ## What it does
@@ -1053,6 +1060,7 @@ Runbooks (`docs/`):
 - [`episodic-server.md`](docs/episodic-server.md) — HTTP front-end for [obra/episodic-memory](https://github.com/obra/episodic-memory)
 - [`lsp-engine.md`](docs/lsp-engine.md) — LSP engine user guide
 - [`lsp-mcp.md`](docs/lsp-mcp.md) — cclsp MCP companion install and Linux/Windows config
+- [`RELEASING.md`](docs/RELEASING.md) — versioning, branch model, cut procedure, hotfix flow
 
 Plans (`docs/PLAN-*.md`):
 

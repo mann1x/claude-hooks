@@ -1,6 +1,6 @@
 [project]
 name = "claude-hooks"
-version = "0.7.0"
+version = "1.0.0"
 description = "Cross-platform Claude Code hooks for deterministic memory recall and storage"
 readme = "README.md"
 license = "MIT"
