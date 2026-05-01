@@ -208,10 +208,19 @@ gap. Two complementary layers:
   for the install + Linux/Windows config. Pairs with the ruff hook:
   ruff is the cheap synchronous Python layer, cclsp is the
   multi-language on-demand layer.
-
-A session-scoped engine that would replace cclsp for the
-synchronous-on-every-edit path is in design — see
-[`docs/PLAN-lsp-engine.md`](docs/PLAN-lsp-engine.md).
+- **LSP engine** (opt-in) — a session-scoped daemon that loads
+  language servers once per project, follows edits in real time
+  via UNIX-socket IPC, and answers diagnostics queries in
+  single-digit milliseconds. Per-file session-affinity locks
+  serialise multi-session edits cleanly; adaptive preload of the
+  code-graph hot set warms the LSP index before the first query;
+  a polling git watcher bulk-refreshes open files on branch
+  switch; opt-in compile-aware mode merges `cargo check` /
+  `tsc --noEmit` / `mypy` diagnostics on top of the LSP layer.
+  See [`docs/lsp-engine.md`](docs/lsp-engine.md) for the user
+  guide and [`docs/PLAN-lsp-engine.md`](docs/PLAN-lsp-engine.md)
+  for the design rationale. Run `/setup-compile-aware` for a
+  guided proposal of the per-language compile commands.
 
 ### Scripts
 

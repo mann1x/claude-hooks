@@ -424,11 +424,18 @@ Linux + Windows recipe, the `cclsp.json` template, the C# / OmniSharp
 binary install (csharp-ls upstream is broken), and the
 `mcpServers.lsp` block to drop into `~/.claude.json`.
 
-**Relationship to the LSP-engine plan:** cclsp is the recommended
-multi-language layer **today**. A session-scoped engine
-([PLAN-lsp-engine.md](docs/PLAN-lsp-engine.md)) is in design — it would
-replace cclsp for the synchronous-on-every-edit path while keeping
-cclsp around for slower on-demand queries.
+**Relationship to the LSP engine:** the in-tree
+[`claude_hooks.lsp_engine`](docs/lsp-engine.md) is a session-scoped
+daemon that loads language servers once per project, follows edits
+in real time, and answers diagnostics in single-digit ms. It pairs
+with cclsp rather than replacing it: cclsp covers on-demand MCP
+calls (hover, definition, references) for lightweight use; the
+engine covers persistent multi-session edit tracking with
+per-file affinity locks, adaptive code-graph preload, git
+branch-switch refresh, and opt-in `cargo check` / `tsc` /
+`mypy` compile-aware diagnostics. POSIX-ready (Phases 0-3 shipped);
+Windows parity is Phase 4. Use the `/setup-compile-aware` skill for
+a guided proposal of the per-language compile commands.
 
 ---
 

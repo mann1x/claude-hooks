@@ -1,7 +1,12 @@
 # Plan: session-scoped LSP engine — non-MCP, real-time, project-aware
 
-**Status:** SPEC. No code. Decisions locked 2026-04-30 (see Decisions
-section below). Phase 0 ready when implementation begins.
+**Status:** Phases 0-3 shipped (POSIX). Decisions locked 2026-04-30.
+Phase 4 (Windows parity, named pipes, benchmarks) not yet started.
+
+**For users**: see [`docs/lsp-engine.md`](lsp-engine.md) — that's the
+configuration guide and runbook. This document is the **design log**
+covering the why (decisions, alternatives considered, open questions
+that informed the implementation).
 
 ## Decisions (locked 2026-04-30)
 
