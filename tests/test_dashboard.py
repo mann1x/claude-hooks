@@ -194,6 +194,55 @@ class TestEndpoints:
         assert len(rows) == 1
         assert rows[0]["date"] == TODAY
 
+    def test_sp_effort_per_1k_rates(self, running_dashboard, seeded_db):
+        """sp_effort endpoint should split stop-phrase counts by
+        (date, effort) and emit per-1k-request rates. The user's
+        2026-04-30 → 2026-05-01 case (xhigh ownership-dodging spiking
+        while medium stays clean) is the failure mode this exists to
+        surface, so we check both the split and the rate math.
+        """
+        db, _ = seeded_db
+        # Hand-seed two effort buckets on TODAY:
+        #   xhigh: 100 main reqs, 5 ownership-dodging hits → 50.0 per 1k
+        #   medium: 200 main reqs, 0 hits → 0.0 per 1k
+        conn = sqlite3.connect(str(db))
+        try:
+            for i in range(100):
+                conn.execute("""
+                    INSERT INTO requests(
+                        ts, date, source_file, source_line, method, path, status,
+                        is_warmup, warmup_blocked, synthetic, request_class, effort,
+                        sp_ownership_dodging, sp_permission_seeking
+                    ) VALUES (?, ?, 'sp.jsonl', ?, 'POST', '/v1/messages', 200,
+                             0, 0, 0, 'main', 'xhigh', ?, 0)
+                """, (TODAY_TS_10, TODAY, 100 + i, 1 if i < 5 else 0))
+            for i in range(200):
+                conn.execute("""
+                    INSERT INTO requests(
+                        ts, date, source_file, source_line, method, path, status,
+                        is_warmup, warmup_blocked, synthetic, request_class, effort,
+                        sp_ownership_dodging, sp_permission_seeking
+                    ) VALUES (?, ?, 'sp.jsonl', ?, 'POST', '/v1/messages', 200,
+                             0, 0, 0, 'main', 'medium', 0, 0)
+                """, (TODAY_TS_10, TODAY, 1000 + i))
+            conn.commit()
+        finally:
+            conn.close()
+
+        status, _, body = _get(running_dashboard + "/api/sp_effort.json?days=14")
+        assert status == 200
+        rows = json.loads(body)
+        by_eff = {r["effort"]: r for r in rows if r["date"] == TODAY}
+        assert "xhigh" in by_eff and "medium" in by_eff, (
+            f"missing effort buckets: {sorted(by_eff)}"
+        )
+        assert by_eff["xhigh"]["n"] == 100
+        assert by_eff["xhigh"]["sp_ownership_dodging"] == 5
+        assert abs(by_eff["xhigh"]["sp_ownership_dodging_per_1k"] - 50.0) < 1e-6
+        assert by_eff["medium"]["n"] == 200
+        assert by_eff["medium"]["sp_ownership_dodging"] == 0
+        assert by_eff["medium"]["sp_ownership_dodging_per_1k"] == 0.0
+
     def test_betas_flattened(self, running_dashboard):
         status, _, body = _get(running_dashboard + "/api/betas.json")
         assert status == 200

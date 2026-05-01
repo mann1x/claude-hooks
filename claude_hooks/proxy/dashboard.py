@@ -158,6 +158,54 @@ def _query_models(conn: sqlite3.Connection, date: str) -> list[dict[str, Any]]:
     return [_row_to_dict(r) for r in rows]
 
 
+def _query_sp_effort(conn: sqlite3.Connection, days: int = 14) -> list[dict[str, Any]]:
+    """Stop-phrase rates broken down by (date, effort), last ``days``
+    days. Surfaces route-specific quality regressions — e.g. xhigh
+    ownership-dodging spiking while medium stays clean would otherwise
+    hide inside the daily aggregate.
+
+    Returns one row per (date, effort) with raw counts and per-1k-request
+    rates. Restricted to ``request_class='main'`` so warmups and
+    sub-agent fan-out don't dilute the signal.
+    """
+    today = _utc_today()
+    rows = conn.execute(
+        """
+        SELECT
+          date,
+          COALESCE(effort, '(unset)') AS effort,
+          COUNT(*) AS n,
+          SUM(sp_ownership_dodging)        AS sp_ownership_dodging,
+          SUM(sp_permission_seeking)       AS sp_permission_seeking,
+          SUM(sp_premature_stopping)       AS sp_premature_stopping,
+          SUM(sp_known_limitation_labeling) AS sp_known_limitation_labeling,
+          SUM(sp_session_length_excuses)   AS sp_session_length_excuses,
+          SUM(sp_simplest_fix)             AS sp_simplest_fix,
+          SUM(sp_reasoning_reversal)       AS sp_reasoning_reversal,
+          SUM(sp_self_admitted_error)      AS sp_self_admitted_error
+        FROM requests
+        WHERE date >= date(?, ?) AND request_class='main'
+        GROUP BY date, effort
+        ORDER BY date DESC, effort
+        """,
+        (today, f"-{max(1, days) - 1} days"),
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = _row_to_dict(r)
+        n = d.get("n") or 0
+        for k in (
+            "sp_ownership_dodging", "sp_permission_seeking",
+            "sp_premature_stopping", "sp_known_limitation_labeling",
+            "sp_session_length_excuses", "sp_simplest_fix",
+            "sp_reasoning_reversal", "sp_self_admitted_error",
+        ):
+            v = d.get(k) or 0
+            d[k + "_per_1k"] = (1000.0 * v / n) if n > 0 else None
+        out.append(d)
+    return out
+
+
 def _query_betas(conn: sqlite3.Connection, limit: int = 200) -> list[dict[str, Any]]:
     """All distinct beta-feature tokens observed, with first/last-seen
     timestamps. Good for catching feature rollouts (metric B8).
@@ -309,6 +357,9 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(lambda conn: _query_models(conn, date))
             elif parsed.path == "/api/betas.json":
                 self._send_json(lambda conn: _query_betas(conn))
+            elif parsed.path == "/api/sp_effort.json":
+                days = int(qs.get("days", ["14"])[0])
+                self._send_json(lambda conn: _query_sp_effort(conn, days))
             elif parsed.path == "/api/ratelimit.json":
                 state = _load_ratelimit_state(self.ratelimit_path)
                 self._send_plain_json({
@@ -471,6 +522,8 @@ _HTML = r"""<!doctype html>
 </div>
 
 <div class="card" style="margin-top:12px"><h2>per day (last 14)</h2><div id="daily-table">…</div></div>
+
+<div class="card" style="margin-top:12px"><h2>stop-phrases × effort × date (last 14)</h2><div id="sp-effort-table">…</div></div>
 
 <div class="grid" style="margin-top:12px">
   <div class="card"><h2>agents today</h2><div id="agents-table">…</div></div>
@@ -747,6 +800,54 @@ function renderModelsTable(rows) {
   const th = `<tr><th>model</th><th class="num">reqs</th><th class="num">in</th><th class="num">out</th><th class="num">cr</th></tr>`;
   return `<table><thead>${th}</thead><tbody>${trs}</tbody></table>` + LEGEND_MODELS;
 }
+function renderSpEffortTable(rows) {
+  if (!rows || !rows.length) return "<div class='muted'>no data</div>" + LEGEND_SP_EFFORT;
+  // Column rate cells get coloured the same way ratelimit util does:
+  // 0–5 OK, 5–20 warn, >20 bad — calibrated against historical spread
+  // (typical xhigh ownD/1k = 4-7 baseline; >20 = sharp regression).
+  function cls(rate) {
+    if (rate == null) return "";
+    if (rate >= 20) return "pct-bad";
+    if (rate >= 5)  return "pct-warn";
+    return "pct-ok";
+  }
+  function cell(rate) {
+    if (rate == null) return `<td class="num muted">—</td>`;
+    return `<td class="num"><span class="pct ${cls(rate)}">${rate.toFixed(1)}</span></td>`;
+  }
+  const trs = rows.map(r => `
+    <tr>
+      <td>${r.date}</td>
+      <td>${r.effort}</td>
+      <td class="num">${fmt(r.n)}</td>
+      ${cell(r.sp_ownership_dodging_per_1k)}
+      ${cell(r.sp_permission_seeking_per_1k)}
+      ${cell(r.sp_premature_stopping_per_1k)}
+      ${cell(r.sp_simplest_fix_per_1k)}
+      ${cell(r.sp_reasoning_reversal_per_1k)}
+      ${cell(r.sp_self_admitted_error_per_1k)}
+    </tr>`).join("");
+  const th = `<tr>
+    <th>date</th><th>effort</th><th class="num">reqs</th>
+    <th class="num" title="ownership dodging">ownD</th>
+    <th class="num" title="permission seeking">permS</th>
+    <th class="num" title="premature stopping">premS</th>
+    <th class="num" title="simplest-fix">simpF</th>
+    <th class="num" title="reasoning reversal">revrs</th>
+    <th class="num" title="self-admitted error">admit</th>
+  </tr>`;
+  return `<table><thead>${th}</thead><tbody>${trs}</tbody></table>` + LEGEND_SP_EFFORT;
+}
+const LEGEND_SP_EFFORT = `
+  <div class="legend">
+    Stop-phrase hits per 1k <code>main</code> requests, split by
+    <code>effort</code>. Cells turn warn/bad at ≥5 / ≥20 per 1k.
+    A sharp jump on one effort while the other stays clean signals a
+    route-specific regression — e.g. on 2026-05-01 xhigh ownership-dodging
+    went from 0 to 55+/1k while medium stayed at 0. Source: same
+    <code>sp_*</code> columns as the behavior canary card.
+  </div>
+`;
 function renderBetas(rows) {
   if (!rows || !rows.length) return "<div class='muted'>no beta features seen yet</div>";
   const tags = rows.map(r =>
@@ -756,12 +857,13 @@ function renderBetas(rows) {
 }
 async function load() {
   try {
-    const [summary, daily, agents, models, betas] = await Promise.all([
+    const [summary, daily, agents, models, betas, spEffort] = await Promise.all([
       j("/api/summary.json"),
       j("/api/daily.json?days=14"),
       j("/api/agents.json"),
       j("/api/models.json"),
       j("/api/betas.json"),
+      j("/api/sp_effort.json?days=14"),
     ]);
     document.getElementById("today-card").innerHTML = renderToday(summary.today);
     document.getElementById("seven-card").innerHTML = renderSeven(summary.last_7d);
@@ -773,6 +875,7 @@ async function load() {
     document.getElementById("agents-table").innerHTML = renderAgentsTable(agents);
     document.getElementById("models-table").innerHTML = renderModelsTable(models);
     document.getElementById("betas-block").innerHTML = renderBetas(betas);
+    document.getElementById("sp-effort-table").innerHTML = renderSpEffortTable(spEffort);
     document.getElementById("last-load").textContent = "loaded " + new Date().toLocaleTimeString();
   } catch (e) {
     document.getElementById("last-load").innerHTML = `<span class="err">${e.message}</span>`;

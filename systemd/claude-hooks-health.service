@@ -1,0 +1,20 @@
+[Unit]
+Description=claude-hooks proxy health — daily one-line summary
+Documentation=https://github.com/mann1x/claude-hooks/blob/main/scripts/proxy_health_oneliner.py
+After=claude-hooks-rollup.service
+Wants=claude-hooks-rollup.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/srv/dev-disk-by-label-opt/dev/claude-hooks
+Environment=CLAUDE_HOOKS_REPO=/srv/dev-disk-by-label-opt/dev/claude-hooks
+# Append the line to a stable file the user (or any tail/notify pipeline)
+# can watch. journalctl also captures it via stdout.
+ExecStart=/bin/sh -c '/root/anaconda3/envs/claude-hooks/bin/python scripts/proxy_health_oneliner.py | tee -a /root/.claude/proxy-health-daily.log'
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/root/.claude
+PrivateTmp=yes

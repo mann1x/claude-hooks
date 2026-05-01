@@ -1,0 +1,14 @@
+[Unit]
+Description=claude-hooks proxy health — daily one-line summary
+Documentation=https://github.com/mann1x/claude-hooks/blob/main/scripts/proxy_health_oneliner.py
+
+[Timer]
+# Fire once at 09:07 UTC every day. After the rollup service has had
+# the morning's traffic to digest. Persistent=true so a missed tick
+# (laptop sleep, host reboot) triggers once on wake.
+OnCalendar=*-*-* 09:07:00 UTC
+Persistent=true
+Unit=claude-hooks-health.service
+
+[Install]
+WantedBy=timers.target
