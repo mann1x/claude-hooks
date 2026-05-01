@@ -141,6 +141,68 @@ Claude responds (knowing the prior context, deterministically)
   > author's home-LAN Ollama proxy. **Override via the systemd drop-in
   > or shell environment** for your install (see the linked doc).
 
+  Caliber-proxy listens on **port 38090** by default
+  (`caliber_proxy.listen_port` in `config/claude-hooks.json`). The
+  matching `bin/caliber-smart` wrapper makes `caliber refresh` /
+  `caliber init` use the proxy when it's up and fall through to a
+  vanilla `caliber` invocation otherwise. The native-tools agent
+  loop is in `claude_hooks/caliber_proxy/server.py`; design notes for
+  picking a small grounding model live in
+  [`docs/gemma4-tool-use-notes.md`](docs/gemma4-tool-use-notes.md).
+
+#### Stats DB + dashboard + behavior canaries
+
+The proxy is more than a forwarder. Every request is parsed for
+metadata (`effort`, `model_requested`, `model_delivered`, `service_tier`,
+`beta_features`, thinking signature bytes, per-tool counts) and rolled
+up into a SQLite stats DB. A read-only HTTP dashboard renders the
+state, and an opt-in stop-phrase scanner adds behavior-quality canaries
+on top:
+
+- **Stats DB** — schema v5 at `~/.claude/claude-hooks-proxy/stats.db`,
+  populated by `scripts/proxy_rollup.py` running every 5 min
+  (`claude-hooks-rollup.timer`). Per-request `requests` table feeds
+  daily / session / model / agent rollups; the same path persists S3
+  thinking-depth and S4 per-tool-name canary counts.
+- **Dashboard** — read-only HTTP view on **port 38081** (config:
+  `proxy_dashboard.listen_port`). Renders today's request count,
+  cache hit-rate, rate-limit utilisation, thinking metrics, tool-use
+  canaries, behavior canaries, per-day rollups, agent / model
+  breakdowns, beta-feature drift, and the
+  **`stop-phrases × effort × date`** table that pinned the 2026-05-01
+  `xhigh` quality regression in [`docs/cc-xhigh-regression-issue.md`](docs/cc-xhigh-regression-issue.md):
+
+  ![sp-effort dashboard panel](docs/images/sp-effort-xhigh-regression-2026-05-01.png)
+
+  Run `bin/claude-hooks-dashboard` for a one-shot start, or install
+  the `claude-hooks-dashboard.service` systemd unit (the proxy
+  installer wires it for you). Restart with `systemctl restart
+  claude-hooks-dashboard.service` after a code change.
+- **In-stream `stop_phrase_guard`** (`proxy.scan_stop_phrases: true`)
+  — scans every assistant turn against the
+  [stellaraccident #42796](https://github.com/anthropics/claude-code/issues/42796)
+  canary phrases (`config/stop_phrases.yaml`, ~8 categories:
+  ownership-dodging, permission-seeking, premature-stopping,
+  known-limitation labeling, session-length excuses, simplest-fix
+  bias, reasoning-reversal, self-admitted error). Hits land in the
+  `sp_*` columns of the stats DB and roll up by day, by effort, and
+  by category. Rates per-1k requests show whether a route or a model
+  variant has drifted in quality without you noticing the symptoms
+  one turn at a time.
+- **Daily health line** — `claude-hooks-health.timer` fires once a
+  day (default 09:07 UTC, after rollups have digested the morning's
+  traffic) and runs `scripts/proxy_health_oneliner.py`. The script
+  emits a single line summarising request counts, 5xx / 429 totals,
+  and per-effort `ownD` / `permS` rates with a `↑` arrow when today
+  is ≥ 2× the prior 7-day baseline. Output appended to
+  `~/.claude/proxy-health-daily.log` and the journal.
+
+For the full schema, query patterns, and dashboard route inventory
+see [`docs/proxy.md`](docs/proxy.md). For the upstream-facing PR /
+incident drafts that came out of the proxy data, see
+[`docs/issue-warmup-token-drain.md`](docs/issue-warmup-token-drain.md)
+and [`docs/cc-xhigh-regression-issue.md`](docs/cc-xhigh-regression-issue.md).
+
 ### Code graph (v0.6+)
 
 A built-in, file-based code-structure graph (`graphify-out/graph.json`
@@ -195,7 +257,7 @@ multi-language coverage) when present.
 ### IDE-style feedback loop (v0.7+)
 
 Closes the "I didn't notice the import error until I ran the code"
-gap. Two complementary layers:
+gap. Three complementary layers — pick one or stack them:
 
 - **`PostToolUse` ruff hook** (built-in, on by default) — runs `ruff
   check` on every Python file Claude Code edits with `Edit` / `Write` /
@@ -203,7 +265,13 @@ gap. Two complementary layers:
   `hookSpecificOutput.additionalContext` so the model sees them in the
   very next prompt — before claiming the change is done. ~50 ms cold,
   catches undefined names, unused imports, syntax errors, etc. Config
-  under `hooks.post_tool_use` in `config/claude-hooks.json`.
+  under `hooks.post_tool_use` in `config/claude-hooks.json`. Pairs
+  with a `toml_comment_advisor` that nudges Claude to leave a
+  `# why: …` line above any non-default value when editing
+  hand-edited TOMLs (`.claude-hooks/`, `lsp-engine.toml`) — config
+  under `hooks.post_tool_use.toml_comment_advisor_enabled` (default
+  on) and `toml_comment_advisor_paths` (default
+  `[".claude-hooks/", "lsp-engine.toml"]`).
 - **cclsp** (recommended companion, opt-in) — multi-language LSP
   wrapper that fronts pyright / gopls / rust-analyzer / clangd /
   OmniSharp via a single MCP server. Gives Claude Code on-demand
@@ -212,19 +280,38 @@ gap. Two complementary layers:
   for the install + Linux/Windows config. Pairs with the ruff hook:
   ruff is the cheap synchronous Python layer, cclsp is the
   multi-language on-demand layer.
-- **LSP engine** (opt-in) — a session-scoped daemon that loads
-  language servers once per project, follows edits in real time
-  via UNIX-socket IPC, and answers diagnostics queries in
-  single-digit milliseconds. Per-file session-affinity locks
-  serialise multi-session edits cleanly; adaptive preload of the
-  code-graph hot set warms the LSP index before the first query;
-  a polling git watcher bulk-refreshes open files on branch
-  switch; opt-in compile-aware mode merges `cargo check` /
-  `tsc --noEmit` / `mypy` diagnostics on top of the LSP layer.
-  See [`docs/lsp-engine.md`](docs/lsp-engine.md) for the user
-  guide and [`docs/PLAN-lsp-engine.md`](docs/PLAN-lsp-engine.md)
-  for the design rationale. Run `/setup-compile-aware` for a
-  guided proposal of the per-language compile commands.
+
+#### LSP engine (opt-in, v0.7+)
+
+A session-scoped daemon that loads language servers **once per
+project** and follows Claude Code's edits in real time, so
+diagnostics queries return in single-digit milliseconds instead of
+the 1–3 s pyright cold-start every cclsp call pays. Phases 0–4
+shipped (config + lifecycle, daemon + session-affinity locks,
+adaptive preload + git watcher, opt-in compile-aware diagnostics,
+Windows IPC parity). See [`docs/lsp-engine.md`](docs/lsp-engine.md)
+for the user guide and [`docs/PLAN-lsp-engine.md`](docs/PLAN-lsp-engine.md)
+for the locked design.
+
+| Phase | What |
+|-------|------|
+| **Foundations (P0)** | TOML config (`.claude-hooks/lsp-engine.toml`), per-language `LspChild` wrapper, schema validation. Per-project + per-language opt-in. |
+| **Daemon + locks (P1)** | Long-lived `claude_hooks.lsp_engine.daemon` per project. UNIX socket IPC (POSIX) / named pipes (Windows). Per-file session-affinity locks serialise multi-session edits cleanly. |
+| **Preload + git (P2)** | Adaptive preload of the code-graph hot set warms the LSP index before the first query. Polling git watcher bulk-refreshes open files on branch switch. |
+| **Compile-aware (P3)** | Opt-in `[compile_aware.commands]` block merges `cargo check` / `tsc --noEmit` / `mypy` / `go vet` diagnostics on top of the LSP layer. Run `/setup-compile-aware` for a guided proposal of the per-language commands. |
+| **Windows parity + bench (P4)** | `multiprocessing.connection.Listener(family="AF_PIPE")` backend, `msvcrt.locking` daemon lock, latency benchmarks. **0.25 ms p50 IPC**, ~13 ms p99 — IPC overhead is 0.1 % of pyright's 280 ms analysis time. Run `python scripts/bench_lsp_engine.py` for a fresh measurement. |
+
+The engine is independent of the `PostToolUse` ruff hook and the
+`cclsp` MCP server; you can run all three or any subset.
+
+### Slash command — `/setup-compile-aware`
+
+Proposes a `[compile_aware.commands]` block for
+`.claude-hooks/lsp-engine.toml` by detecting build tools in the
+current project (Cargo.toml → `cargo`, tsconfig.json → `tsc`,
+pyproject.toml + mypy → `mypy`, go.mod → `go vet`, Makefile, …).
+Run this once after enabling the engine to wire the compile-aware
+layer; it asks for explicit confirmation before writing.
 
 ### Scripts
 
@@ -233,8 +320,53 @@ gap. Two complementary layers:
 | `scripts/status.py` | At-a-glance dashboard: systemd state, current rate-limit %, today's Warmup-blocked count. `--json` for scripting. |
 | `scripts/weekly_token_usage.py` | Per-day token breakdown against a custom weekly-reset window (default Fri 10:00 CEST). Auto-populates `%Limit` from the proxy. `--show-sidechain` reveals the Warmup share. |
 | `scripts/proxy_stats.py` | Ad-hoc proxy-log summaries (per-day requests, Warmup-blocked savings, synthetic-rate-limit detection, per-model counts). `--json` for scripting. |
+| `scripts/proxy_rollup.py` | Ingest the proxy's daily JSONL files into `stats.db` (rollups + per-request rows). Driven by `claude-hooks-rollup.timer` (every 5 min, persistent across reboots). |
+| `scripts/proxy_health_oneliner.py` | One-line daily health summary: per-effort `ownD`/`permS` rates, model divergences, 4xx/5xx, with `↑` arrows for ≥2× baseline regressions. Driven by `claude-hooks-health.timer`. |
 | `scripts/statusline_usage.py` | Compact statusline segment showing live 5h / 7d %. Safe-by-design (never crashes the caller). |
+| `scripts/statusline_compose.py` | Stitches the statusline pieces (model, weekly %, recall hit count, …) into the single string Claude Code reads from `statusLine.command`. |
+| `scripts/bench_recall.py` | End-to-end recall latency benchmark across the configured providers. p50/p90/p99 + per-stage breakdown. |
+| `scripts/bench_lsp_engine.py` | LSP engine vs ruff-only baseline. Measures `did_change` IPC-only and full round-trip (with diagnostics). Use after a new pyright / engine release. |
+| `scripts/migrate_to_pgvector.py` | One-shot dump-and-load from Qdrant or Memory KG into the pgvector backend, with delta sync. See [`docs/pgvector-runbook.md`](docs/pgvector-runbook.md). |
+| `scripts/install-caliber-hook.sh` | Installs the Caliber pre-commit hook into the current repo so agent configs stay in sync. |
 | `scripts/openwolfstatus.{py,sh,bat}` | OpenWolf status utility. |
+
+### `bin/` shim reference
+
+The `bin/` directory ships small entry-point shims that auto-detect
+the conda env and fall back to system Python. Use these from
+`settings.json` hooks, systemd `ExecStart` lines, or the shell.
+
+| Shim | What |
+|---|---|
+| `bin/claude-hook` | Hook dispatcher. Called from `~/.claude/settings.json` for every event; routes to the matching handler under `claude_hooks/hooks/`. POSIX (`claude-hook`) and Windows (`claude-hook.cmd`) variants. |
+| `bin/claude-hooks-daemon` | Foreground entry to the long-lived hook executor (`claude_hooks.daemon`). Use under systemd or for debugging. |
+| `bin/claude-hooks-daemon-ctl` | Daemon ctl: `status` / `restart` / `kill` against the live daemon socket. |
+| `bin/claude-hooks-proxy` | Foreground entry to the API proxy (`claude_hooks.proxy.server`). |
+| `bin/claude-hooks-dashboard` | Foreground entry to the read-only stats dashboard (port 38081). |
+| `bin/claude-hooks-rollup` | One-shot proxy-log → stats.db ingester. Wired to `claude-hooks-rollup.timer`. |
+| `bin/claude-hook-pgvector-mcp` | System-wide stdio MCP server that exposes pgvector recall + KG ops. Lets Cursor / Codex / OpenWebUI use the same Postgres store as Claude Code. Registered in `~/.claude.json` by `install.py` when pgvector is enabled. |
+| `bin/caliber-grounding-proxy` | Foreground entry to the Caliber grounding proxy (port 38090). |
+| `bin/caliber-smart` | Drop-in `caliber` wrapper that uses the proxy when up, falls through otherwise. |
+| `bin/_resolve_python.sh` | Internal helper sourced by every shim to find the right Python. |
+
+### systemd unit reference
+
+`systemd/` ships the unit templates the proxy installer drops into
+`/etc/systemd/system/`. Each is `User=root` by default; adjust the
+`User=` and `WorkingDirectory=` lines for your install. Linux only;
+macOS uses `LaunchAgents`, Windows uses scheduled tasks (the
+installer handles all three).
+
+| Unit | What |
+|---|---|
+| `claude-hooks-proxy.service` | Long-running proxy on port 38080 (configurable). |
+| `claude-hooks-dashboard.service` | Read-only stats dashboard on port 38081. |
+| `claude-hooks-rollup.service` + `.timer` | Ingests daily JSONL files into `stats.db` every 5 min, plus a 1-min boot delay. `Persistent=true` so a missed tick triggers once on wake. |
+| `claude-hooks-health.service` + `.timer` | Daily one-line health summary (default 09:07 UTC). Appends to `~/.claude/proxy-health-daily.log` and the journal. |
+| `claude-hooks-daemon.service` | Long-lived per-session hook executor — lets each hook answer in milliseconds instead of paying the 100–300 ms Python cold-start. |
+| `claude-hooks-pgvector-mcp.service` | System-wide stdio MCP server fronting pgvector. Useful when other clients (Cursor, Codex, OpenWebUI) want the same Postgres recall as Claude Code. |
+| `caliber-grounding-proxy.service` | Caliber grounding proxy (port 38090) with project-aware tools (`survey_project`, `recall`). |
+| `axon-host.service` | Optional Axon code-graph engine companion (Python, Neo4j-based). See [`COMPANION_TOOLS.md`](COMPANION_TOOLS.md). |
 
 ## Requirements
 
@@ -375,6 +507,7 @@ command in the Claude Code prompt.
 | `/save-learning` | -- | Save a user instruction/preference as a persistent learning |
 | `/find-skills` | caliber | Search the public skill registry for community skills |
 | `/setup-caliber` | caliber | Set up Caliber pre-commit hooks for config drift detection |
+| `/setup-compile-aware` | LSP engine | Detect build tools in the current project and propose a `[compile_aware.commands]` block for `.claude-hooks/lsp-engine.toml`. Asks for confirmation before writing. |
 
 ### CLI commands (outside Claude Code)
 
