@@ -26,6 +26,7 @@ from claude_hooks.lsp_engine.compile import (
     parse_cargo_json_output,
     parse_text_output,
 )
+from claude_hooks.lsp_engine.lsp import path_to_uri
 
 
 class TestParseTextOutput(unittest.TestCase):
@@ -72,7 +73,13 @@ class TestParseTextOutput(unittest.TestCase):
                 "src/lib.py:1:1: error: x", project_root=root,
             )
             self.assertEqual(len(out), 1)
-            self.assertIn(str(root / "src" / "lib.py"), out[0].uri.replace("file://", ""))
+            # Compare URIs canonically. Stringifying the path on Windows
+            # produces backslashes (`C:\…\src\lib.py`) while the URI uses
+            # forward slashes with a leading `/` (`/C:/…/src/lib.py`),
+            # so a substring check fails even though both name the
+            # same file. path_to_uri normalises both into RFC 8089 form.
+            expected = path_to_uri(root / "src" / "lib.py")
+            self.assertEqual(out[0].uri, expected)
 
     def test_absolute_path_preserved(self) -> None:
         out = parse_text_output(
@@ -221,7 +228,9 @@ class TestCompileRunnerExecution(unittest.TestCase):
             self._wait_for_run(runner, deadline=time.monotonic() + 3.0)
             diags = runner.get_diagnostics(str((self.root / "src/lib.rs").resolve()))
             self.assertEqual(len(diags), 1)
-            self.assertEqual(diags[0].source, "python")  # script name as source
+            # Source is the binary name (`python` on POSIX, `python.exe`
+            # on Windows). Strip the suffix before comparing.
+            self.assertEqual(Path(diags[0].source).stem, "python")
             self.assertEqual(diags[0].message, "borrow checker blew up")
         finally:
             runner.stop()
