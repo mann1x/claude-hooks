@@ -260,8 +260,9 @@ class CompileRunner:
         self._trigger_event.set()
 
     def get_diagnostics(self, abs_path: str) -> list[Diagnostic]:
+        key = path_to_uri(abs_path)
         with self._diag_lock:
-            return list(self._diagnostics.get(abs_path, []))
+            return list(self._diagnostics.get(key, []))
 
     def all_diagnostics(self) -> dict[str, list[Diagnostic]]:
         with self._diag_lock:
@@ -336,14 +337,15 @@ class CompileRunner:
         self._last_stderr = (proc.stderr or "")[-2000:]
 
         diags = self._parse_output(proc.stdout or "", proc.stderr or "")
+        # Key by the URI itself (not a path string) to avoid
+        # path-shape ambiguity on Windows: ``_uri_to_path_str`` returns
+        # ``/C:/foo/bar`` on Windows but callers query with native
+        # ``C:\foo\bar``, and the two miss each other in the dict
+        # despite naming the same file. URIs are canonical — pyright
+        # and friends already use them as the source of truth.
         new_map: dict[str, list[Diagnostic]] = {}
         for d in diags:
-            # Normalise URI back to abs path string for indexing.
-            try:
-                abs_path = _uri_to_path_str(d.uri)
-            except ValueError:
-                continue
-            new_map.setdefault(abs_path, []).append(d)
+            new_map.setdefault(d.uri, []).append(d)
         with self._diag_lock:
             self._diagnostics = new_map
         log.info(

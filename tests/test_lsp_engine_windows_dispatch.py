@@ -82,6 +82,12 @@ class TestAddressHelpers(unittest.TestCase):
             self.assertIsInstance(addr, str)
             self.assertTrue(addr.startswith("\\\\.\\pipe\\"))
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "POSIX-direction assertion: patching os.name='posix' on a Windows host "
+        "trips pathlib's PosixPath guard. The Windows-direction test covers "
+        "the inverse, and the Windows host never reaches this dispatch in real use.",
+    )
     def test_socket_path_for_returns_path_on_posix(self) -> None:
         with TemporaryDirectory() as tmp:
             with patch.object(os, "name", "posix"):
@@ -93,6 +99,12 @@ class TestAddressHelpers(unittest.TestCase):
 class TestIpcServerDispatch(unittest.TestCase):
     """``IpcServer`` should pick its backend based on ``os.name``."""
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "POSIX-direction assertion: patching os.name='posix' on a Windows host "
+        "trips pathlib's PosixPath guard. test_nt_platform_picks_pipe_backend "
+        "covers the inverse, and address-based detection is platform-agnostic.",
+    )
     def test_posix_picks_unix_socket_backend(self) -> None:
         with TemporaryDirectory() as tmp:
             with patch.object(os, "name", "posix"):
@@ -126,6 +138,12 @@ class TestIpcServerDispatch(unittest.TestCase):
 
 
 class TestIpcClientDispatch(unittest.TestCase):
+    @unittest.skipIf(
+        os.name == "nt",
+        "POSIX-direction assertion: patching os.name='posix' on a Windows host "
+        "trips pathlib's PosixPath guard. test_nt_platform_picks_pipe_client "
+        "covers the inverse, and address-based detection is platform-agnostic.",
+    )
     def test_posix_picks_unix_socket_client(self) -> None:
         with TemporaryDirectory() as tmp:
             with patch.object(os, "name", "posix"):
