@@ -328,12 +328,34 @@ def serve(
     secret = ensure_secret(secret_path)
     server = DaemonServer(host, port, secret=secret, replay_window=replay_window)
     log.info("claude-hooks-daemon listening on %s:%d", host, port)
+
+    # Background update-check thread: re-reads config on every tick so
+    # the user can flip ``update_check.enabled`` at runtime without
+    # restarting the daemon. The thread is a daemon-thread and shares
+    # ``server.stop_event`` so it dies cleanly on shutdown.
+    update_thread = None
+    try:
+        from claude_hooks.update_check import UpdateCheckThread
+        from claude_hooks.config import load_config
+
+        update_thread = UpdateCheckThread(
+            config_loader=load_config,
+            stop_event=server.stop_event,
+        )
+        update_thread.start()
+    except Exception as e:
+        log.debug("update_check thread not started: %s", e)
+
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
         log.info("shutting down on Ctrl-C")
     finally:
         server.server_close()
+        if update_thread is not None:
+            # The thread reads stop_event already; just give it a
+            # moment to wake from sleep before we return.
+            update_thread.join(timeout=2.0)
     return 0
 
 

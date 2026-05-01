@@ -5,4 +5,4 @@ Multiple backends can run simultaneously — the dispatcher fans out recall in
 parallel and merges the result blocks into the prompt.
 """
 
-__version__ = "0.4.0"
+__version__ = "1.0.0"

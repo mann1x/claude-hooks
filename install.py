@@ -437,6 +437,57 @@ def _set_settings_env_vars(
               ", ".join(f"{k}={v}" for k, v in vars_to_set.items()))
 
 
+def _setup_update_check(cfg: dict, *, non_interactive: bool) -> None:
+    """Ask the user whether to enable the daily release-check.
+
+    Writes ``cfg["update_check"]["enabled"]`` in-place. The check
+    itself runs on the long-lived ``claude-hooks-daemon``, so we
+    warn the user when the daemon is disabled — without it the
+    feature can't poll.
+    """
+    uc_cfg = cfg.setdefault("update_check", {})
+    if non_interactive:
+        # Default-off in non-interactive runs to preserve current behaviour.
+        uc_cfg.setdefault("enabled", False)
+        return
+
+    print("\n==> Self-update check")
+    current = uc_cfg.get("enabled", False)
+    default_hint = "Y/n" if current else "y/N"
+    ans = input(
+        f"  Do you want to automatically check every 24 hours for a new "
+        f"release? [{default_hint}]: "
+    ).strip().lower()
+
+    if ans in ("y", "yes"):
+        enabled = True
+    elif ans in ("n", "no"):
+        enabled = False
+    else:
+        # Empty input = keep current value.
+        enabled = bool(current)
+
+    uc_cfg["enabled"] = enabled
+    if enabled:
+        print(
+            "  Update check ENABLED. Polls "
+            f"{uc_cfg.get('github_repo', 'mann1x/claude-hooks')} once per 24h. "
+            "Disable at runtime: set update_check.enabled to false in "
+            "config/claude-hooks.json."
+        )
+        daemon_cfg = (cfg.get("hooks") or {}).get("daemon") or {}
+        if not daemon_cfg.get("enabled", True):
+            print(
+                "  WARNING: hooks.daemon.enabled is false. The update "
+                "check runs on the daemon thread; without the daemon "
+                "running, no checks will fire and the Stop hook will "
+                "never surface a notice. Re-enable the daemon to use "
+                "this feature."
+            )
+    else:
+        print("  Update check disabled.")
+
+
 def _setup_proxy_orchestrator(
     cfg: dict, settings_path: Path, *,
     non_interactive: bool, dry_run: bool,
@@ -2654,6 +2705,11 @@ def main() -> int:
         non_interactive=args.non_interactive,
         dry_run=args.dry_run,
     )
+
+    # Self-update check: opt-in. The check itself runs on the
+    # long-lived claude-hooks-daemon thread, so the Stop hook never
+    # blocks on network I/O.
+    _setup_update_check(cfg, non_interactive=args.non_interactive)
 
     # Save config.
     if args.dry_run:

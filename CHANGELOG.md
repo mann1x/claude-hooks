@@ -16,8 +16,39 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-_(work in progress on the `dev` branch — see `git log dev..main` for
-landed but not-yet-released commits.)_
+_(work in progress on the `dev` branch — see `git log v1.0.0..origin/dev`
+for landed but not-yet-released commits.)_
+
+### Added
+
+- **Self-update check** — opt-in periodic poll of GitHub
+  `releases/latest`. The daemon thread runs the check at most once
+  every 24 hours (configurable). The Stop hook surfaces a
+  `[claude-hooks] update available: vX.Y.Z` notice in its
+  `systemMessage` when a newer tag is published.
+  - Runs on the long-lived `claude-hooks-daemon` thread so the
+    Stop hook never blocks on network I/O.
+  - Failed checks retry up to 5 times at 5-minute intervals, then
+    defer to the next 24-hour window.
+  - Notification budget: the notice surfaces at most 10 times per
+    discovered release before going silent until the next check
+    finds a newer tag.
+  - Silent on failure: timeouts, DNS errors, and HTTP errors all
+    resolve to "no update" without raising or logging at info level.
+  - Disable at runtime by setting `update_check.enabled` to `false`
+    in `config/claude-hooks.json` — both the daemon poll and the
+    Stop-hook notice stop immediately, no restart needed.
+  - State persists in `~/.claude/claude-hooks-update-state.json`.
+  - 35 unit tests in `tests/test_update_check.py`.
+- **`install.py` self-update prompt** — installer asks
+  "Do you want to automatically check every 24 hours for a new
+  release?" and persists the answer to `update_check.enabled`.
+  Warns when the daemon is disabled (the feature requires it).
+
+### Fixed
+
+- `claude_hooks/__init__.py` `__version__` was stale at `0.4.0`;
+  bumped to `1.0.0` to match the package release.
 
 ## [1.0.0] — 2026-05-01
 

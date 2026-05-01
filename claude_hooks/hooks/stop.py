@@ -26,6 +26,29 @@ from claude_hooks.providers import Provider
 log = logging.getLogger("claude_hooks.hooks.stop")
 
 
+def _with_update_notice(result: Optional[dict], config: dict) -> Optional[dict]:
+    """Augment the Stop hook return value with a "new release available"
+    line when the daemon's update_check has flagged one and the
+    notification budget hasn't been exhausted.
+
+    Silent on any failure — the update path must never break Stop.
+    """
+    try:
+        from claude_hooks import update_check
+        msg = update_check.pending_notification(config)
+        if not msg:
+            return result
+        update_check.consume_notification(config)
+        if result is None:
+            return {"systemMessage": msg}
+        existing = result.get("systemMessage", "")
+        result["systemMessage"] = f"{existing}\n{msg}" if existing else msg
+        return result
+    except Exception as e:
+        log.debug("update notice attach failed: %s", e)
+        return result
+
+
 def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[dict]:
     hook_cfg = (config.get("hooks") or {}).get("stop") or {}
     if not hook_cfg.get("enabled", True):
@@ -114,17 +137,17 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
 
     threshold = (hook_cfg.get("store_threshold") or "noteworthy").lower()
     if threshold == "off":
-        return None
+        return _with_update_notice(None, config)
 
     if threshold == "noteworthy":
         if not _is_noteworthy(transcript):
             log.debug("turn not noteworthy — skipping store")
-            return None
+            return _with_update_notice(None, config)
 
     summary_format = str(hook_cfg.get("summary_format", "markdown")).lower()
     summary = _build_summary(event, transcript, fmt=summary_format)
     if not summary:
-        return None
+        return _with_update_notice(None, config)
 
     # NOTE: We deliberately DO NOT append OpenWolf cerebrum/buglog
     # contents to per-turn stores. Doing so duplicated the same
@@ -178,7 +201,10 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
             })
             if ok:
                 names = ", ".join(p.name for p in auto_providers)
-                return {"systemMessage": f"[claude-hooks] storing to {names} (async)"}
+                return _with_update_notice(
+                    {"systemMessage": f"[claude-hooks] storing to {names} (async)"},
+                    config,
+                )
             log.debug("store_async spawn returned False — falling back to inline")
         except Exception as e:
             log.debug("store_async spawn raised — falling back to inline: %s", e)
@@ -241,14 +267,17 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
             log.debug("instinct extraction skipped: %s", e)
 
     if not stored and not failed:
-        return None
+        return _with_update_notice(None, config)
 
     parts = []
     if stored:
         parts.append(f"stored to {', '.join(stored)}")
     if failed:
         parts.append(f"failed: {', '.join(n for n, _ in failed)}")
-    return {"systemMessage": f"[claude-hooks] {' · '.join(parts)}"}
+    return _with_update_notice(
+        {"systemMessage": f"[claude-hooks] {' · '.join(parts)}"},
+        config,
+    )
 
 
 # ---------------------------------------------------------------------- #

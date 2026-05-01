@@ -395,6 +395,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # P3 (not yet): short-circuit Warmup requests. Leave false in P0.
         "block_warmup": False,
     },
+    "update_check": {
+        # Periodic GitHub release poll. Runs on the long-lived
+        # ``claude-hooks-daemon`` thread so the Stop hook never blocks
+        # on network I/O. Disable at runtime by flipping ``enabled`` to
+        # false — both the daemon poll and the Stop-hook notice stop
+        # immediately, no restart needed.
+        "enabled": False,                     # opted in by install.py
+        "interval_seconds": 86400,            # 24h between attempts
+        "retry_pause_seconds": 300,           # 5min between retries
+        "max_retries": 5,                     # then defer to next 24h window
+        "github_repo": "mann1x/claude-hooks", # owner/name on github.com
+        "timeout_seconds": 5,                 # network timeout per request
+        "max_notifications": 10,              # Stop-hook notice budget
+    },
     "logging": {
         "path": "~/.claude/claude-hooks.log",
         "level": "info",

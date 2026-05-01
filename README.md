@@ -39,6 +39,15 @@ wiring, monitoring, uninstall — see [`docs/deployment.md`](docs/deployment.md)
 - Tagged releases live on [GitHub Releases](https://github.com/mann1x/claude-hooks/releases) with auto-generated `Source code (zip / tar.gz)` archives.
 - Branch model: `main` is the release branch (every commit shippable, tags live here); `dev` is the working branch (feature work + fixes land here first). See [`docs/RELEASING.md`](docs/RELEASING.md) for the cut procedure.
 - To track unreleased work: `git log v1.0.0..origin/dev` after fetching.
+- **Optional self-update check** (opt-in via `install.py` or
+  `update_check.enabled = true`): the daemon polls
+  `https://api.github.com/repos/mann1x/claude-hooks/releases/latest`
+  at most once every 24 hours and the Stop hook surfaces a one-line
+  notice when a newer tag is available. Fails silently on timeouts,
+  retries 5× at 5-minute intervals before deferring to the next
+  24-hour window, caps notifications at 10 per release, and can be
+  disabled at runtime by flipping `update_check.enabled` in
+  `config/claude-hooks.json`.
 
 ---
 
