@@ -267,6 +267,7 @@ def _hyde_expand(query: str, hook_cfg: dict) -> str:
             timeout=float(hook_cfg.get("hyde_timeout", 30.0)),
             max_tokens=int(hook_cfg.get("hyde_max_tokens", 150)),
             keep_alive=str(hook_cfg.get("hyde_keep_alive", "15m")),
+            num_ctx=int(hook_cfg.get("hyde_num_ctx", 16384)),
             cache_enabled=bool(hook_cfg.get("hyde_cache_enabled", True)),
             cache_ttl_seconds=int(hook_cfg.get("hyde_cache_ttl_seconds", 86400)),
         )
@@ -288,6 +289,7 @@ def _hyde_expand_grounded(query: str, memories: list[str], hook_cfg: dict) -> st
             timeout=float(hook_cfg.get("hyde_timeout", 30.0)),
             max_tokens=int(hook_cfg.get("hyde_max_tokens", 150)),
             keep_alive=str(hook_cfg.get("hyde_keep_alive", "15m")),
+            num_ctx=int(hook_cfg.get("hyde_num_ctx", 16384)),
             max_context_chars=int(hook_cfg.get("hyde_ground_max_chars", 1500)),
             cache_enabled=bool(hook_cfg.get("hyde_cache_enabled", True)),
             cache_ttl_seconds=int(hook_cfg.get("hyde_cache_ttl_seconds", 86400)),

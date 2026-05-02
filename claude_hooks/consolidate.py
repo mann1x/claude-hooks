@@ -82,9 +82,10 @@ def consolidate(
     # Compress long memories.
     model = con_cfg.get("ollama_model", "gemma4:e2b")
     url = con_cfg.get("ollama_url", "http://localhost:11434/api/generate")
+    num_ctx = int(con_cfg.get("num_ctx", 16384))
     for mem in all_mems:
         if len(mem.text) > 1000:
-            compressed = _compress(mem.text, model=model, url=url)
+            compressed = _compress(mem.text, model=model, url=url, num_ctx=num_ctx)
             if compressed and len(compressed) < len(mem.text) * 0.7:
                 result.compressed += 1
                 if not dry_run:
@@ -160,15 +161,20 @@ def _find_merge_candidates(
     return pairs
 
 
-def _compress(text: str, *, model: str, url: str) -> Optional[str]:
+def _compress(
+    text: str, *, model: str, url: str, num_ctx: int = 16384,
+) -> Optional[str]:
     """Use Ollama to compress a long memory into a shorter summary."""
+    options: dict = {"num_predict": 300}
+    if num_ctx and num_ctx > 0:
+        options["num_ctx"] = int(num_ctx)
     body = json.dumps({
         "model": model,
         "system": "Compress this memory entry to under half its length while keeping all key facts.",
         "prompt": text[:2000],
         "stream": False,
         "think": False,
-        "options": {"num_predict": 300},
+        "options": options,
     }).encode("utf-8")
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
     try:

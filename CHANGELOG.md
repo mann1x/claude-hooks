@@ -19,6 +19,73 @@ release with the auto-generated source archive
 _(work in progress on the `dev` branch — see `git log v1.0.1..origin/dev`
 for landed but not-yet-released commits.)_
 
+### Added
+
+- **PreCompact hook → wrap-up synthesiser** — new
+  `claude_hooks/hooks/pre_compact.py` handler fires before Claude
+  Code auto-compacts the conversation. Reads the session transcript,
+  produces a deterministic eight-section `/wrapup`-shaped summary
+  (mechanically-extractable parts filled in; model-judgment parts
+  marked as `needs model`), persists it to disk (preferring `.wolf/`
+  → `docs/wrapup/` → `~/.claude/wrapup-pre-compact/`), and emits the
+  markdown as `additionalContext` so it lands inside the compaction
+  window. Self-gates on (1) `hooks.pre_compact.enabled` (default
+  true) and (2) the `/wrapup` skill being installed at
+  `~/.claude/skills/wrapup/SKILL.md`. 17 unit tests in
+  `tests/test_pre_compact.py`.
+- **`/wrapup` skill: last-line file pointer** — the skill now always
+  saves a copy to disk and ends its output with the exact pointer
+  `**State summary saved to:** <abs-path> — Read this file to
+  recover full session state.` Auto-compaction sometimes drops the
+  inline output before the next session can read it; the file on
+  disk is the only fully reliable carrier across the boundary, and
+  the last-line position maximises the odds the post-compaction
+  assistant sees the path. Edit applied to the canonical
+  `.claude/skills/wrapup/SKILL.md` in the repo (deployed via
+  `install.py`).
+
+### Changed
+
+- **Dispatcher table** — `PreCompact` event now routes to the new
+  `pre_compact` handler.
+- **`install.py`** — new `PRE_COMPACT_TEMPLATE` wires the hook into
+  `~/.claude/settings.json`; `install_hooks()` gains
+  `include_pre_compact` (defaults true).
+
+### Fixed
+
+- **Daemon stdout race in concurrent dispatches** — the daemon's
+  `_run_handler` redirected the process-global `sys.stdout` to a
+  per-call StringIO buffer and ran `dispatch()` to capture output.
+  Because the daemon is multi-threaded (`ThreadingTCPServer`), two
+  concurrent hook calls clobbered each other's redirects — one
+  thread's handler output landed in the other thread's buffer.
+  Symptom on the user side: a `Stop` hook receiving a
+  UserPromptSubmit recall payload (`hookEventName: "UserPromptSubmit"`),
+  rejected by Claude Code with "Hook returned incorrect event name:
+  expected 'Stop' but got 'UserPromptSubmit'". Refactored
+  `dispatcher.py` to expose `dispatch_capture(event, payload) -> dict`
+  that returns the handler output directly without touching
+  `sys.stdout`; the daemon now calls that. The legacy
+  `dispatch(event, payload)` (stdout-write) is retained for the
+  inline `run.py` single-process path. Two new regression tests in
+  `tests/test_dispatcher.py` (`TestDispatchCaptureThreadSafety`)
+  pin the contract — one asserts `dispatch_capture` never touches
+  `sys.stdout`, the other runs UserPromptSubmit + Stop concurrently
+  20× and asserts neither thread receives the other's payload.
+- **Ollama `num_ctx` for gemma4 callers** — HyDE (`hyde.py`),
+  `/reflect` (`reflect.py`), and `/consolidate` (`consolidate.py`)
+  all use `gemma4:e2b` but none set `num_ctx` in the request body.
+  Ollama keeps the FIRST loader's `num_ctx` sticky for the
+  duration the model stays resident, so on a cold load the model
+  inherited the 4k Modelfile default — and a different caller
+  passing a different value would force a full reload + KV-cache
+  rebuild. All three callers now pass `num_ctx=16384` (matching
+  the pgvector embedder's existing 16k pin), with config knobs
+  `user_prompt_submit.hyde_num_ctx`, `reflect.num_ctx`, and
+  `consolidate.num_ctx` for overrides. Set them in lockstep —
+  mismatched values across the three thrash the resident model.
+
 ## [1.0.1] — 2026-05-01
 
 > Note on the version bump: by the SemVer rules in

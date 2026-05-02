@@ -120,15 +120,35 @@ Include anything project-specific that primes the mental model.
 
 ## Output location
 
-By default, the summary goes **inline in the chat** so the user sees
-it before the context is compacted. Do NOT write it to a file unless
-the user asks for one — the whole point is that it lives in the next
-session's context.
+The summary goes **inline in the chat** so the user sees it before the
+context is compacted. **Always also save a copy to disk** — auto-compaction
+sometimes drops the inline output before the next session can read it,
+and a file on disk is the only fully reliable carrier across the boundary.
 
-If the user does ask for a file, save to
-`.wolf/wrapup-YYYY-MM-DDTHH-MM.md` (inside the OpenWolf dir if one
-exists, otherwise `docs/wrapup/YYYY-MM-DDTHH-MM.md`). Prefix the
-filename with the session branch if on a feature branch.
+Default file location:
+- `.wolf/wrapup-YYYY-MM-DDTHH-MM.md` if a `.wolf/` directory exists in cwd
+- otherwise `docs/wrapup/YYYY-MM-DDTHH-MM.md` (create the directory if missing)
+- otherwise (cwd not writable) `~/.claude/wrapup/<session>-YYYY-MM-DDTHH-MM.md`
+
+Prefix the filename with the session branch if on a feature branch.
+
+### Last-line file pointer (MANDATORY)
+
+After printing the inline summary, the **last line** of your output
+must be a single sentence pointing at the saved file, in this exact
+shape so post-compaction Claude can find it reliably:
+
+```
+**State summary saved to:** `<absolute-path-to-file>` — Read this file to recover full session state.
+```
+
+Why the last line: post-compaction the assistant sees recent context
+most clearly, and a file pointer at the very end is the most likely
+fragment to survive any further trimming. Without this, the next
+session often asks "where's the wrap-up?" and can't find it.
+
+Do not bury the pointer mid-output, do not skip it because the
+inline output looks complete, and do not put anything after it.
 
 ## Tone and format
 

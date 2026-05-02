@@ -207,20 +207,22 @@ class TestClientServerRoundTrip:
         assert resp.get("code") == 401
 
     def test_dispatched_event_returns_handler_output(self, running_daemon, monkeypatch):
-        """Daemon should run the dispatcher and return its JSON output."""
+        """Daemon should run the dispatcher and return its JSON output.
+
+        The daemon calls :func:`dispatcher.dispatch_capture` (which
+        returns a dict directly) rather than the legacy stdout-writing
+        :func:`dispatcher.dispatch` — that's what makes concurrent
+        dispatches thread-safe (see TestDispatchCaptureThreadSafety in
+        test_dispatcher.py for the regression coverage).
+        """
         host, port, secret_path = running_daemon
 
-        # Patch the dispatcher to write a known JSON body.
         from claude_hooks import dispatcher
-        orig_dispatch = dispatcher.dispatch
 
-        def fake_dispatch(event_name, event):
-            import sys, json as _json
-            sys.stdout.write(_json.dumps({"hook": event_name, "got": event}))
-            sys.stdout.write("\n")
-            return 0
+        def fake_dispatch_capture(event_name, event):
+            return {"hook": event_name, "got": event}
 
-        monkeypatch.setattr(dispatcher, "dispatch", fake_dispatch)
+        monkeypatch.setattr(dispatcher, "dispatch_capture", fake_dispatch_capture)
 
         resp = daemon_client.call(
             "Stop", {"session_id": "abc"},
@@ -236,7 +238,7 @@ class TestClientServerRoundTrip:
         host, port, secret_path = running_daemon
         from claude_hooks import dispatcher
         monkeypatch.setattr(
-            dispatcher, "dispatch", lambda event_name, event: 0,
+            dispatcher, "dispatch_capture", lambda event_name, event: None,
         )
         resp = daemon_client.call(
             "SessionEnd", {},

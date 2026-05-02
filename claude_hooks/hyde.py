@@ -60,6 +60,7 @@ def expand_query(
     timeout: float = 30.0,
     max_tokens: int = 150,
     keep_alive: str = "15m",
+    num_ctx: int = 16384,
     cache_enabled: bool = True,
     cache_ttl_seconds: int = 86400,
 ) -> str:
@@ -95,6 +96,7 @@ def expand_query(
             timeout=timeout,
             max_tokens=max_tokens,
             keep_alive=keep_alive,
+            num_ctx=num_ctx,
         )
         if result:
             log.debug("hyde expanded with %s: %s", m, result[:80])
@@ -120,6 +122,7 @@ def expand_query_with_context(
     timeout: float = 30.0,
     max_tokens: int = 150,
     keep_alive: str = "15m",
+    num_ctx: int = 16384,
     max_context_chars: int = 1500,
     cache_enabled: bool = True,
     cache_ttl_seconds: int = 86400,
@@ -169,6 +172,7 @@ def expand_query_with_context(
             timeout=timeout,
             max_tokens=max_tokens,
             keep_alive=keep_alive,
+            num_ctx=num_ctx,
         )
         if result:
             log.debug("hyde (grounded) expanded with %s: %s", m, result[:80])
@@ -211,12 +215,24 @@ def _call_ollama(
     timeout: float,
     max_tokens: int,
     keep_alive: str = "15m",
+    num_ctx: int = 16384,
 ) -> str:
     """Call Ollama generate API. Returns the response text or empty string on failure.
 
     keep_alive: how long Ollama should keep the model resident after this call.
     "15m" = stays loaded for 15 minutes after last use. "-1" = never unload.
+
+    num_ctx: context-window size in tokens. Ollama keeps the FIRST loader's
+    num_ctx sticky for the duration the model stays resident; setting this
+    explicitly on every call ensures consistent behaviour across hosts and
+    avoids the 4k Modelfile-default trap on cold loads. Default 16k matches
+    reflect/consolidate so all three gemma4:e2b callers share one resident
+    instance — mismatched values force Ollama to rebuild the KV cache or
+    fully unload the model on every flip.
     """
+    options: dict = {"num_predict": max_tokens}
+    if num_ctx and num_ctx > 0:
+        options["num_ctx"] = int(num_ctx)
     body = json.dumps({
         "model": model,
         "system": system_prompt,
@@ -224,7 +240,7 @@ def _call_ollama(
         "stream": False,
         "think": False,
         "keep_alive": keep_alive,
-        "options": {"num_predict": max_tokens},
+        "options": options,
     }).encode("utf-8")
 
     req = urllib.request.Request(

@@ -139,6 +139,7 @@
       "hyde_timeout": 30.0,
       "hyde_max_tokens": 150,
       "hyde_keep_alive": "15m",
+      "hyde_num_ctx": 16384,
       "progressive": false,
       "decay_enabled": false,
       "decay_file": "~/.claude/claude-hooks-decay.json",
@@ -236,7 +237,8 @@
     "min_pattern_count": 3,
     "output_path": "~/.claude/CLAUDE.md",
     "ollama_model": "gemma4:e2b",
-    "ollama_url": "http://localhost:11434/api/generate"
+    "ollama_url": "http://localhost:11434/api/generate",
+    "num_ctx": 16384
   },
   "consolidate": {
     "enabled": false,
@@ -247,7 +249,8 @@
     "merge_similarity_threshold": 0.8,
     "prune_stale_days": 90,
     "ollama_model": "gemma4:e2b",
-    "ollama_url": "http://localhost:11434/api/generate"
+    "ollama_url": "http://localhost:11434/api/generate",
+    "num_ctx": 16384
   },
   "episodic": {
     "mode": "off",

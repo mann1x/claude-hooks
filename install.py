@@ -264,6 +264,27 @@ POST_TOOL_USE_TEMPLATE = {
     ],
 }
 
+# PreCompact synthesises a /wrapup-shaped summary just before
+# Claude Code auto-compacts the conversation. The handler self-gates
+# on (1) hooks.pre_compact.enabled and (2) the wrapup skill being
+# installed, so the wired entry is harmless when either condition
+# is false. Timeout is generous because we read the full transcript.
+PRE_COMPACT_TEMPLATE = {
+    "PreCompact": [
+        {
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "{cmd} PreCompact",
+                    "timeout": 20,
+                    "_managedBy": MANAGED_BY,
+                }
+            ],
+        }
+    ],
+}
+
 
 def _find_conda() -> Optional[str]:
     """Find the conda executable, trying common locations.
@@ -2809,6 +2830,10 @@ def main() -> int:
         # true by default in the example config). Honour an explicit
         # false in the user's config.
         include_post_tool_use=bool(((cfg.get("hooks") or {}).get("post_tool_use") or {}).get("enabled", True)),
+        # PreCompact also defaults to ON. The handler self-gates on
+        # the wrapup skill being installed, so a wired entry is a
+        # cheap no-op when the skill is absent.
+        include_pre_compact=bool(((cfg.get("hooks") or {}).get("pre_compact") or {}).get("enabled", True)),
         dry_run=args.dry_run,
     )
 
@@ -2896,6 +2921,7 @@ def install_hooks(
     repo_path: Path,
     include_pre_tool_use: bool,
     include_post_tool_use: bool,
+    include_pre_compact: bool = True,
     dry_run: bool,
 ) -> None:
     settings = _load_json(settings_path)
@@ -2912,6 +2938,8 @@ def install_hooks(
         template.update(deepcopy(PRE_TOOL_USE_TEMPLATE))
     if include_post_tool_use:
         template.update(deepcopy(POST_TOOL_USE_TEMPLATE))
+    if include_pre_compact:
+        template.update(deepcopy(PRE_COMPACT_TEMPLATE))
 
     # Substitute the {cmd} placeholder.
     for event, blocks in template.items():
