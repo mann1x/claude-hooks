@@ -40,6 +40,17 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     else:
         log.debug("prompt too short (%d < %d) — skipping recall", len(prompt), min_chars)
 
+    # Prepend a pointer to any recent pre-compact wrap-up file, so
+    # the post-compaction assistant reliably picks up the saved
+    # state summary even when the inline additionalContext gets
+    # trimmed across the compaction boundary.
+    from claude_hooks.wrapup_recovery import format_recovery_block
+    recovery = format_recovery_block(event.get("cwd", ""), config)
+    if recovery:
+        additional_context = (
+            f"{recovery}\n\n{additional_context}" if additional_context else recovery
+        )
+
     # Prepend the "## Now" block so the model has a fresh, local-TZ
     # timestamp every turn — anchors ETAs and scheduled-trigger
     # reasoning that would otherwise drift on UTC-only datetime.now().

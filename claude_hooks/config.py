@@ -204,6 +204,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "save_to_file": True,
             "wrapup_skill_path": None,  # null = default ~/.claude/skills/wrapup/SKILL.md
         },
+        "wrapup_recovery": {
+            # On every UserPromptSubmit, scan the wrap-up output dirs
+            # (.wolf/, docs/wrapup/, ~/.claude/wrapup-pre-compact/) for
+            # any pre-compact summary modified within max_age_seconds.
+            # If one is found, prepend a pointer block to additionalContext
+            # so the post-compaction assistant can find and read the
+            # saved state summary even when the inline summary gets
+            # trimmed across the compaction boundary.
+            "enabled": True,
+            "max_age_seconds": 86400,
+        },
         "daemon": {
             # Long-lived hook executor (Tier 3.8). When the daemon is
             # running, bin/claude-hook sends events to it over an

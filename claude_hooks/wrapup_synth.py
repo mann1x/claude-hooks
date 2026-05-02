@@ -62,6 +62,33 @@ def read_transcript(path: str) -> list[dict]:
 
 
 _PLAN_RX = re.compile(r"docs/PLAN-[A-Za-z0-9_-]+\.md")
+# Capture http(s) URLs and ws(s) URLs. Stop on whitespace, quotes,
+# closing brackets, and common markdown trailers.
+_URL_RX = re.compile(r"\b(?:https?|wss?)://[^\s'\"<>)\]}`]+")
+# Bare IPv4 (with optional :port). Excludes octets > 255 via the
+# alternation. Anchored on word boundaries so we don't pick stuff up
+# inside paths like /16/2026.
+_IPV4_RX = re.compile(
+    r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}"
+    r"(?:25[0-5]|2[0-4]\d|[01]?\d?\d)"
+    r"(?::\d{1,5})?\b"
+)
+# Best-effort pod / instance / container ID heuristic. Targets the
+# patterns that show up in remote-compute platforms: RunPod
+# ("vh4z3xq8mn-8888.proxy.runpod.net"), Modal, Vast.ai, etc. Looks
+# for a 8-15 alphanumeric token followed by dash-port or .proxy. /
+# .runpod. / .modal. / .vast. domain. Generic enough to catch most
+# pod-style endpoints without false-matching arbitrary text.
+_POD_ID_RX = re.compile(
+    r"\b([a-z0-9]{8,15})-?\d{0,5}?\.(?:proxy\.)?"
+    r"(?:runpod|modal|vast|lambdalabs|paperspace)\.[a-z.]+",
+    re.IGNORECASE,
+)
+# IPv6 — coarse pattern, dotted form. Skips loopback ::1 and unspec.
+_IPV6_RX = re.compile(
+    r"\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}\b",
+    re.IGNORECASE,
+)
 
 
 def _msg_content(msg: dict) -> list:
@@ -142,6 +169,59 @@ def collect_ssh_targets(bash_commands: list[str]) -> list[str]:
             if host and "@" in host or (host and re.match(r"^[\w.-]+$", host)):
                 out[host] = None
     return list(out.keys())
+
+
+def collect_endpoints(transcript: list[dict],
+                      bash_commands: list[str]) -> dict[str, list[str]]:
+    """Extract everything that looks like a remote endpoint or
+    connection identifier from the transcript: URLs, IPv4/IPv6
+    addresses, and pod-style hostnames.
+
+    Sweeps BOTH text blocks (where the assistant or user mentioned
+    URLs/pod IDs in prose) AND bash commands (where curl / wget /
+    ssh-tunnel targets live). The previous synth only looked at
+    ``ssh`` bash commands, which missed everything that wasn't an
+    interactive ssh session — most notably RunPod / Modal proxy URLs
+    and any IP mentioned in connection strings.
+
+    Returns a dict with keys ``urls``, ``ips``, ``pod_ids`` —
+    dedup-preserving order, capped per category to keep the synth
+    readable.
+    """
+    urls: dict[str, None] = {}
+    ips: dict[str, None] = {}
+    pods: dict[str, None] = {}
+
+    def _scan(text: str):
+        if not text:
+            return
+        for m in _URL_RX.finditer(text):
+            url = m.group(0).rstrip(".,;:!?")
+            urls[url] = None
+        for m in _IPV4_RX.finditer(text):
+            ips[m.group(0)] = None
+        for m in _IPV6_RX.finditer(text):
+            v = m.group(0)
+            # Skip pure-digit timestamps and other false matches: an
+            # IPv6 address must contain at least 2 colons.
+            if v.count(":") >= 2:
+                ips[v] = None
+        for m in _POD_ID_RX.finditer(text):
+            # Capture both the bare id and the full hostname so the
+            # next session sees the connection target verbatim.
+            pods[m.group(0)] = None
+
+    for txt in _iter_text_blocks(transcript):
+        _scan(txt)
+    for cmd in bash_commands:
+        _scan(cmd)
+    # Pod-style hostnames are also URLs — make sure they're surfaced
+    # even when the prose mentioned them as bare hostnames.
+    return {
+        "urls": list(urls.keys())[:30],
+        "ips": list(ips.keys())[:30],
+        "pod_ids": list(pods.keys())[:15],
+    }
 
 
 def collect_plan_references(transcript: list[dict]) -> list[str]:
@@ -271,6 +351,7 @@ def synthesize_markdown(
     ssh_hosts = collect_ssh_targets(bash)
     plans = collect_plan_references(transcript)
     bg = collect_background_tasks(transcript)
+    endpoints = collect_endpoints(transcript, bash)
 
     out: list[str] = []
     out.append(f"# Pre-compact wrap-up ({ts_human})")
@@ -354,15 +435,37 @@ def synthesize_markdown(
         out.append("_(no Monitor / ScheduleWakeup / CronCreate / background Bash detected)_")
         out.append("")
 
-    # 7 — Pods / remote hosts
-    out.append("## 7. Pods / remote hosts touched")
+    # 7 — Connection state (pods, hosts, URLs, IPs)
+    out.append("## 7. Connection state (re-attach targets)")
     out.append("")
-    if ssh_hosts:
-        for h in ssh_hosts:
-            out.append(f"- `{h}` (seen in `ssh` commands)")
+    has_any = bool(ssh_hosts or endpoints["urls"] or endpoints["ips"]
+                   or endpoints["pod_ids"])
+    if endpoints["pod_ids"]:
+        out.append("**Pod / instance hostnames:**")
         out.append("")
-    else:
-        out.append("_(no ssh commands detected — nothing to re-attach to)_")
+        for h in endpoints["pod_ids"]:
+            out.append(f"- `{h}`")
+        out.append("")
+    if ssh_hosts:
+        out.append("**SSH targets:**")
+        out.append("")
+        for h in ssh_hosts:
+            out.append(f"- `{h}`")
+        out.append("")
+    if endpoints["urls"]:
+        out.append("**URLs mentioned:**")
+        out.append("")
+        for u in endpoints["urls"]:
+            out.append(f"- {u}")
+        out.append("")
+    if endpoints["ips"]:
+        out.append("**IP addresses:**")
+        out.append("")
+        for ip in endpoints["ips"]:
+            out.append(f"- `{ip}`")
+        out.append("")
+    if not has_any:
+        out.append("_(no remote endpoints, ssh targets, URLs, or IPs detected)_")
         out.append("")
 
     # 8 — Restore checklist (boilerplate)

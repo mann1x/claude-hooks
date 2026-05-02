@@ -21,6 +21,27 @@ for landed but not-yet-released commits.)_
 
 ### Added
 
+- **Wrap-up recovery + endpoint extraction** — two-part fix for the
+  failure mode the user hit on the backup_models pod after auto-
+  compaction (lost the training pod ID/IP and didn't read the saved
+  state summary file):
+  1. `claude_hooks/wrapup_synth.collect_endpoints()` now sweeps both
+     transcript text blocks AND bash commands for URLs, IPv4/IPv6
+     addresses, and pod-style hostnames (RunPod / Modal / Vast.ai /
+     Lambda Labs / Paperspace). The previous synth only looked at
+     `ssh` bash commands, which missed RunPod proxy URLs and any IP
+     mentioned only in prose. Section 7 of the synthesised wrap-up
+     is now "Connection state (re-attach targets)" with separate
+     subsections for pod hostnames, ssh targets, URLs, and IPs.
+  2. New `claude_hooks/wrapup_recovery.py` scans the three known
+     wrap-up output dirs (`<cwd>/.wolf/`, `<cwd>/docs/wrapup/`,
+     `~/.claude/wrapup-pre-compact/`) on every `UserPromptSubmit`
+     and prepends a short pointer block to `additionalContext` if a
+     pre-compact summary was modified within the last 24h. Survives
+     the compaction boundary even when the inline context gets
+     trimmed. Knobs: `hooks.wrapup_recovery.enabled` (default true),
+     `hooks.wrapup_recovery.max_age_seconds` (default 86400). 16
+     unit tests in `tests/test_wrapup_recovery.py`.
 - **`## Now` block injection** — every `UserPromptSubmit` and
   `SessionStart` now prepends a one-line markdown block with the
   current local-TZ timestamp, IANA zone, UTC offset, and weekday.
