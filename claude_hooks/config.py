@@ -447,6 +447,23 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "timeout_seconds": 5,                 # network timeout per request
         "max_notifications": 10,              # Stop-hook notice budget
     },
+    "system": {
+        # "## Now" markdown block prepended to UserPromptSubmit and
+        # SessionStart additionalContext. Costs ~30 tokens per turn
+        # and gives the model a fresh, local-TZ timestamp to anchor
+        # ETAs and scheduled-trigger reasoning on — without it the
+        # model often defaults to UTC (because most internal code
+        # uses datetime.now(timezone.utc)) or to stale timestamps
+        # from earlier tool output.
+        "now_block": {
+            "enabled": True,
+            # IANA zone name override. null = use the host's
+            # /etc/localtime. Set this only if the daemon runs on a
+            # host whose system TZ differs from where the user
+            # actually is.
+            "timezone": None,
+        },
+    },
     "logging": {
         "path": "~/.claude/claude-hooks.log",
         "level": "info",

@@ -19,6 +19,24 @@ release with the auto-generated source archive
 _(work in progress on the `dev` branch — see `git log v1.0.2..origin/dev`
 for landed but not-yet-released commits.)_
 
+### Added
+
+- **`## Now` block injection** — every `UserPromptSubmit` and
+  `SessionStart` now prepends a one-line markdown block with the
+  current local-TZ timestamp, IANA zone, UTC offset, and weekday.
+  Reason: the assistant has no internal clock, and most of our
+  internal code uses `datetime.now(timezone.utc)` (correct for
+  storage but UTC leaks into user-facing output); ETAs and
+  scheduled-trigger times also drifted because the model anchored
+  on stale timestamps from earlier tool output. The injected line
+  becomes the authoritative "now" for the turn. ~30 tokens per
+  surface. New module `claude_hooks/now_block.py`; config knobs
+  `system.now_block.enabled` (default true) and
+  `system.now_block.timezone` (default null = host
+  `/etc/localtime`). 16 unit tests in `tests/test_now_block.py`
+  plus integration coverage in `tests/test_handlers.py` and
+  `tests/test_dispatcher.py`.
+
 ## [1.0.2] — 2026-05-02
 
 Soak release for the PreCompact wrap-up synth + the operational
