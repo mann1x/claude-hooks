@@ -93,6 +93,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "hyde_timeout": 30.0,
             "hyde_max_tokens": 150,
             "hyde_keep_alive": "15m",
+            # Context-window for the HyDE Ollama call. Ollama keeps the
+            # FIRST loader's num_ctx sticky for the duration the model
+            # stays resident, so omitting this leaves the model at the
+            # Modelfile default (4k for gemma4:e2b) and triggers a
+            # reload+rebuild whenever a different num_ctx hits the same
+            # model. 16k matches reflect.num_ctx and consolidate.num_ctx
+            # so all three gemma4:e2b callers share one resident
+            # instance — set them in lockstep when overriding.
+            "hyde_num_ctx": 16384,
             "progressive": False,
             "decay_enabled": False,
             "decay_file": "~/.claude/claude-hooks-decay.json",
@@ -371,6 +380,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "output_path": "~/.claude/CLAUDE.md",
         "ollama_model": "gemma4:e2b",
         "ollama_url": "http://localhost:11434/api/generate",
+        # Match user_prompt_submit.hyde_num_ctx and consolidate.num_ctx —
+        # all three load the same gemma4:e2b model, and a value mismatch
+        # forces Ollama to rebuild the KV cache on every flip.
+        "num_ctx": 16384,
     },
     "consolidate": {
         "enabled": False,
@@ -382,6 +395,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "prune_stale_days": 90,
         "ollama_model": "gemma4:e2b",
         "ollama_url": "http://localhost:11434/api/generate",
+        # Keep in lockstep with hyde_num_ctx and reflect.num_ctx (same
+        # model on the same Ollama instance — mismatched values thrash
+        # the resident model).
+        "num_ctx": 16384,
     },
     "episodic": {
         "mode": "off",                  # off | server | client

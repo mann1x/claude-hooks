@@ -64,10 +64,33 @@ class TestCallOllama:
                 self._b.close()
 
         with patch("claude_hooks.hyde.urllib.request.urlopen", side_effect=_capture):
-            _call_ollama(keep_alive="30m", **_args())
+            _call_ollama(keep_alive="30m", num_ctx=16384, **_args())
         assert captured["body"]["keep_alive"] == "30m"
         assert captured["body"]["think"] is False
         assert captured["body"]["options"]["num_predict"] == 50
+        # num_ctx must land in options so Ollama loads the model with
+        # the requested context size (avoids the 4k Modelfile-default
+        # trap and keeps the resident model consistent across callers).
+        assert captured["body"]["options"]["num_ctx"] == 16384
+
+    def test_num_ctx_zero_or_negative_omits_key(self):
+        captured = {}
+
+        def _capture(req, timeout):
+            import json
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            from io import BytesIO
+            class _R:
+                def read(self_inner, *a, **kw): return b'{"response": "long enough"}'
+                def __enter__(self_inner): return self_inner
+                def __exit__(self_inner, *a): pass
+            return _R()
+
+        with patch("claude_hooks.hyde.urllib.request.urlopen", side_effect=_capture):
+            _call_ollama(keep_alive="15m", num_ctx=0, **_args())
+        assert "num_ctx" not in captured["body"]["options"], (
+            "num_ctx=0 should be treated as 'leave default' and omit the key"
+        )
 
 
 class TestExpandQuery:

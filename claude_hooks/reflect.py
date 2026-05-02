@@ -79,7 +79,8 @@ def reflect(
     # Call Ollama to find patterns.
     model = reflect_cfg.get("ollama_model", "gemma4:e2b")
     url = reflect_cfg.get("ollama_url", "http://localhost:11434/api/generate")
-    rules = _call_ollama_reflect(text_block, model=model, url=url)
+    num_ctx = int(reflect_cfg.get("num_ctx", 16384))
+    rules = _call_ollama_reflect(text_block, model=model, url=url, num_ctx=num_ctx)
 
     if not rules:
         log.info("reflect: no patterns found")
@@ -144,15 +145,20 @@ def _format_for_analysis(grouped: dict[str, list[Memory]]) -> str:
     return "\n".join(parts)
 
 
-def _call_ollama_reflect(text: str, *, model: str, url: str) -> list[str]:
+def _call_ollama_reflect(
+    text: str, *, model: str, url: str, num_ctx: int = 16384,
+) -> list[str]:
     """Call Ollama to find patterns and return rules."""
+    options: dict = {"num_predict": 500}
+    if num_ctx and num_ctx > 0:
+        options["num_ctx"] = int(num_ctx)
     body = json.dumps({
         "model": model,
         "system": _REFLECT_SYSTEM,
         "prompt": f"Analyze these memory entries:\n\n{text}",
         "stream": False,
         "think": False,
-        "options": {"num_predict": 500},
+        "options": options,
     }).encode("utf-8")
 
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")

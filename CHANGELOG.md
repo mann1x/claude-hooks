@@ -52,6 +52,21 @@ for landed but not-yet-released commits.)_
   `~/.claude/settings.json`; `install_hooks()` gains
   `include_pre_compact` (defaults true).
 
+### Fixed
+
+- **Ollama `num_ctx` for gemma4 callers** — HyDE (`hyde.py`),
+  `/reflect` (`reflect.py`), and `/consolidate` (`consolidate.py`)
+  all use `gemma4:e2b` but none set `num_ctx` in the request body.
+  Ollama keeps the FIRST loader's `num_ctx` sticky for the
+  duration the model stays resident, so on a cold load the model
+  inherited the 4k Modelfile default — and a different caller
+  passing a different value would force a full reload + KV-cache
+  rebuild. All three callers now pass `num_ctx=16384` (matching
+  the pgvector embedder's existing 16k pin), with config knobs
+  `user_prompt_submit.hyde_num_ctx`, `reflect.num_ctx`, and
+  `consolidate.num_ctx` for overrides. Set them in lockstep —
+  mismatched values across the three thrash the resident model.
+
 ## [1.0.1] — 2026-05-01
 
 > Note on the version bump: by the SemVer rules in
