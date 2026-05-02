@@ -54,6 +54,25 @@ for landed but not-yet-released commits.)_
 
 ### Fixed
 
+- **Daemon stdout race in concurrent dispatches** — the daemon's
+  `_run_handler` redirected the process-global `sys.stdout` to a
+  per-call StringIO buffer and ran `dispatch()` to capture output.
+  Because the daemon is multi-threaded (`ThreadingTCPServer`), two
+  concurrent hook calls clobbered each other's redirects — one
+  thread's handler output landed in the other thread's buffer.
+  Symptom on the user side: a `Stop` hook receiving a
+  UserPromptSubmit recall payload (`hookEventName: "UserPromptSubmit"`),
+  rejected by Claude Code with "Hook returned incorrect event name:
+  expected 'Stop' but got 'UserPromptSubmit'". Refactored
+  `dispatcher.py` to expose `dispatch_capture(event, payload) -> dict`
+  that returns the handler output directly without touching
+  `sys.stdout`; the daemon now calls that. The legacy
+  `dispatch(event, payload)` (stdout-write) is retained for the
+  inline `run.py` single-process path. Two new regression tests in
+  `tests/test_dispatcher.py` (`TestDispatchCaptureThreadSafety`)
+  pin the contract — one asserts `dispatch_capture` never touches
+  `sys.stdout`, the other runs UserPromptSubmit + Stop concurrently
+  20× and asserts neither thread receives the other's payload.
 - **Ollama `num_ctx` for gemma4 callers** — HyDE (`hyde.py`),
   `/reflect` (`reflect.py`), and `/consolidate` (`consolidate.py`)
   all use `gemma4:e2b` but none set `num_ctx` in the request body.

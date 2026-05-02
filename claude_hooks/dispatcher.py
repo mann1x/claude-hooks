@@ -39,8 +39,15 @@ HANDLERS = {
 }
 
 
-def dispatch(event_name: str, event: dict) -> int:
-    """Run the handler for ``event_name`` and write its output. Returns exit code."""
+def dispatch_capture(event_name: str, event: dict) -> Optional[dict]:
+    """Run the handler for ``event_name`` and RETURN its output dict (or
+    ``None``). Does not touch ``sys.stdout``.
+
+    This is the thread-safe entry point used by the multi-threaded
+    daemon — two concurrent calls now share no global mutable state.
+    The legacy stdout-write behaviour lives in :func:`dispatch`, which
+    is what the inline single-process ``run.py`` path uses.
+    """
     cfg = load_config()
     _setup_logging(cfg)
     log = logging.getLogger("claude_hooks.dispatcher")
@@ -52,12 +59,12 @@ def dispatch(event_name: str, event: dict) -> int:
     marker = cfg.get("disable_marker_filename") or ".claude-hooks-disable"
     if cwd and project_disabled(cwd, marker):
         log.info("project disabled via %s — exiting silently", marker)
-        return 0
+        return None
 
     handler_name = HANDLERS.get(event_name)
     if not handler_name:
         log.debug("no handler for event '%s' — no-op", event_name)
-        return 0
+        return None
 
     try:
         module = __import__(
@@ -66,12 +73,12 @@ def dispatch(event_name: str, event: dict) -> int:
         )
     except Exception as e:
         log.error("failed to import handler %s: %s", handler_name, e)
-        return 0
+        return None
 
     handle = getattr(module, "handle", None)
     if not callable(handle):
         log.error("handler %s has no handle() function", handler_name)
-        return 0
+        return None
 
     providers = build_providers(cfg)
 
@@ -79,17 +86,29 @@ def dispatch(event_name: str, event: dict) -> int:
         output = handle(event=event, config=cfg, providers=providers)
     except Exception:
         log.error("handler %s crashed:\n%s", handler_name, traceback.format_exc())
-        return 0
+        return None
 
+    return output if isinstance(output, dict) else None
+
+
+def dispatch(event_name: str, event: dict) -> int:
+    """Run the handler for ``event_name`` and write its output to
+    ``sys.stdout``. Returns exit code (always 0 — hooks must never
+    block Claude Code).
+
+    Used by the inline single-process ``run.py`` entry point. The
+    daemon uses :func:`dispatch_capture` instead to avoid clobbering
+    the global ``sys.stdout`` from concurrent threads.
+    """
+    output = dispatch_capture(event_name, event)
     if output:
+        log = logging.getLogger("claude_hooks.dispatcher")
         try:
             sys.stdout.write(json.dumps(output))
             sys.stdout.write("\n")
             sys.stdout.flush()
         except Exception as e:
             log.error("failed to write output: %s", e)
-            return 0
-
     return 0
 
 

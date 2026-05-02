@@ -241,7 +241,15 @@ class _RequestHandler(socketserver.StreamRequestHandler):
         self._reply_ok(rid, result)
 
     def _run_handler(self, event: str, payload: dict) -> Optional[dict]:
-        """Invoke the dispatcher and capture its stdout output."""
+        """Invoke the dispatcher and return the handler output dict.
+
+        Uses :func:`dispatcher.dispatch_capture` rather than redirecting
+        ``sys.stdout`` because the daemon is multi-threaded
+        (``ThreadingTCPServer``); the previous implementation mutated
+        process-global ``sys.stdout`` and let two concurrent requests
+        cross-write into each other's buffers (the symptom was a Stop
+        hook receiving a UserPromptSubmit recall payload — see #199).
+        """
         # Special protocol-only ops first.
         if event == "_ping":
             return {"protocol": PROTOCOL_VERSION, "pid": os.getpid()}
@@ -249,25 +257,8 @@ class _RequestHandler(socketserver.StreamRequestHandler):
             self.server.request_shutdown()  # type: ignore[attr-defined]
             return {"shutdown": True}
 
-        # Real hook events go through the existing dispatcher. The dispatcher
-        # currently writes its output to stdout; capture it via a temporary
-        # redirect so we can return it as our JSON-RPC ``result``.
-        from io import StringIO
-        from claude_hooks.dispatcher import dispatch
-        buf = StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = buf
-        try:
-            dispatch(event, payload)
-        finally:
-            sys.stdout = old_stdout
-        out = buf.getvalue().strip()
-        if not out:
-            return None
-        try:
-            return json.loads(out)
-        except ValueError:
-            return {"raw": out}
+        from claude_hooks.dispatcher import dispatch_capture
+        return dispatch_capture(event, payload)
 
     def _reply_ok(self, rid: int, result) -> None:
         self._send({"id": rid, "ok": True, "result": result})
