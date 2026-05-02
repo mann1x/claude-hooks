@@ -16,8 +16,15 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-_(work in progress on the `dev` branch — see `git log v1.0.1..origin/dev`
+_(work in progress on the `dev` branch — see `git log v1.0.2..origin/dev`
 for landed but not-yet-released commits.)_
+
+## [1.0.2] — 2026-05-02
+
+Soak release for the PreCompact wrap-up synth + the operational
+fixes that surfaced while exercising it on solidpc and pandorum.
+Per the precedent set in v1.0.1, the bump stays PATCH for low-risk
+opt-in additions plus stability fixes.
 
 ### Added
 
@@ -210,6 +217,7 @@ prior tag. From any unreleased checkout, just `git pull` on `main`
 once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
-[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/mann1x/claude-hooks/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/mann1x/claude-hooks/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/mann1x/claude-hooks/releases/tag/v1.0.0

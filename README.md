@@ -35,10 +35,10 @@ wiring, monitoring, uninstall — see [`docs/deployment.md`](docs/deployment.md)
 
 ### Releases & versioning
 
-- Current version: **v1.0.1** — see [CHANGELOG.md](CHANGELOG.md) for the full history.
+- Current version: **v1.0.2** — see [CHANGELOG.md](CHANGELOG.md) for the full history.
 - Tagged releases live on [GitHub Releases](https://github.com/mann1x/claude-hooks/releases) with auto-generated `Source code (zip / tar.gz)` archives.
 - Branch model: `main` is the release branch (every commit shippable, tags live here); `dev` is the working branch (feature work + fixes land here first). See [`docs/RELEASING.md`](docs/RELEASING.md) for the cut procedure.
-- To track unreleased work: `git log v1.0.1..origin/dev` after fetching.
+- To track unreleased work: `git log v1.0.2..origin/dev` after fetching.
 - **Optional self-update check** (opt-in via `install.py` or
   `update_check.enabled = true`): the daemon polls
   `https://api.github.com/repos/mann1x/claude-hooks/releases/latest`

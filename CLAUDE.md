@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.0.1** — ~1.5k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.0.2** — ~1.5k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
