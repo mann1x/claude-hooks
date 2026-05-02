@@ -19,6 +19,39 @@ release with the auto-generated source archive
 _(work in progress on the `dev` branch — see `git log v1.0.1..origin/dev`
 for landed but not-yet-released commits.)_
 
+### Added
+
+- **PreCompact hook → wrap-up synthesiser** — new
+  `claude_hooks/hooks/pre_compact.py` handler fires before Claude
+  Code auto-compacts the conversation. Reads the session transcript,
+  produces a deterministic eight-section `/wrapup`-shaped summary
+  (mechanically-extractable parts filled in; model-judgment parts
+  marked as `needs model`), persists it to disk (preferring `.wolf/`
+  → `docs/wrapup/` → `~/.claude/wrapup-pre-compact/`), and emits the
+  markdown as `additionalContext` so it lands inside the compaction
+  window. Self-gates on (1) `hooks.pre_compact.enabled` (default
+  true) and (2) the `/wrapup` skill being installed at
+  `~/.claude/skills/wrapup/SKILL.md`. 17 unit tests in
+  `tests/test_pre_compact.py`.
+- **`/wrapup` skill: last-line file pointer** — the skill now always
+  saves a copy to disk and ends its output with the exact pointer
+  `**State summary saved to:** <abs-path> — Read this file to
+  recover full session state.` Auto-compaction sometimes drops the
+  inline output before the next session can read it; the file on
+  disk is the only fully reliable carrier across the boundary, and
+  the last-line position maximises the odds the post-compaction
+  assistant sees the path. Edit applied to the canonical
+  `.claude/skills/wrapup/SKILL.md` in the repo (deployed via
+  `install.py`).
+
+### Changed
+
+- **Dispatcher table** — `PreCompact` event now routes to the new
+  `pre_compact` handler.
+- **`install.py`** — new `PRE_COMPACT_TEMPLATE` wires the hook into
+  `~/.claude/settings.json`; `install_hooks()` gains
+  `include_pre_compact` (defaults true).
+
 ## [1.0.1] — 2026-05-01
 
 > Note on the version bump: by the SemVer rules in

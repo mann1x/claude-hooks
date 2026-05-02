@@ -35,6 +35,7 @@ HANDLERS = {
     "SessionEnd": "session_end",
     "PreToolUse": "pre_tool_use",
     "PostToolUse": "post_tool_use",
+    "PreCompact": "pre_compact",
 }
 
 

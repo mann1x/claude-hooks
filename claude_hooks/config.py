@@ -174,6 +174,27 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "session_end": {
             "enabled": True,
         },
+        "pre_compact": {
+            # Auto-synthesise a /wrapup-shaped summary just before
+            # Claude Code auto-compacts the conversation. The summary
+            # is written to disk (preferring .wolf/, then docs/wrapup/,
+            # falling back to ~/.claude/wrapup-pre-compact/) and emitted
+            # as additionalContext so it lands inside the compaction
+            # window. Mechanically-extractable sections (commits, files
+            # modified, plans referenced, ssh hosts, monitorings) are
+            # filled in deterministically; sections needing model
+            # judgment (open items, next items, narrative) are explicitly
+            # marked so the next session knows to invoke /wrapup to fill
+            # in the gaps.
+            #
+            # Activates only when BOTH:
+            #   1. enabled is true (this flag, default true)
+            #   2. ~/.claude/skills/wrapup/SKILL.md exists
+            #      (override path via wrapup_skill_path)
+            "enabled": True,
+            "save_to_file": True,
+            "wrapup_skill_path": None,  # null = default ~/.claude/skills/wrapup/SKILL.md
+        },
         "daemon": {
             # Long-lived hook executor (Tier 3.8). When the daemon is
             # running, bin/claude-hook sends events to it over an
