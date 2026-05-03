@@ -16,8 +16,17 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-_(work in progress on the `dev` branch — see `git log v1.0.2..origin/dev`
+_(work in progress on the `dev` branch — see `git log v1.0.3..origin/dev`
 for landed but not-yet-released commits.)_
+
+## [1.0.3] — 2026-05-03
+
+Continuation of the v1.0.2 soak: the PreCompact wrap-up surfaced two
+gaps in the field (lost connection state after auto-compaction; the
+post-compaction model didn't pick up the saved state file), plus a
+token-cost regression from the always-on `## Now` block + wrap-up
+recovery pointer. PATCH bump per the project precedent for opt-in
+additions and perf fixes.
 
 ### Changed
 
@@ -273,7 +282,8 @@ prior tag. From any unreleased checkout, just `git pull` on `main`
 once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
-[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.0.3...HEAD
+[1.0.3]: https://github.com/mann1x/claude-hooks/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/mann1x/claude-hooks/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/mann1x/claude-hooks/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/mann1x/claude-hooks/releases/tag/v1.0.0
