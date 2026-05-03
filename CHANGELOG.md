@@ -21,6 +21,17 @@ for landed but not-yet-released commits.)_
 
 ### Added
 
+- **pgvector backup-validity canary** — new
+  `claude-hooks-pgvector-backup-check.{service,timer}` runs every
+  Monday at 02:43 local and walks each retention tier
+  (daily/weekly/monthly), validating the most recent dump in two
+  layers: (1) `pg_restore -l` for the TOC + metadata, (2)
+  `pg_restore -f /dev/null` for a full byte-read of the archive
+  (catches mid-file corruption that the TOC scan misses). Both
+  layers run inside the `mcp-pgvector` container so the
+  pg_restore version always matches whatever wrote the dump.
+  Exits non-zero on any failure → wireable into `OnFailure=`.
+  New script: `scripts/pgvector_backup_check.sh`.
 - **pgvector daily backup timer** — new
   `claude-hooks-pgvector-backup.{service,timer}` runs
   `pg_dump -Fc` inside the `mcp-pgvector` container at 01:17 local

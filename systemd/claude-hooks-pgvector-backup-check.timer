@@ -1,0 +1,16 @@
+[Unit]
+Description=claude-hooks pgvector backup canary — weekly Mon 02:43 local
+Documentation=https://github.com/mann1x/claude-hooks/blob/main/docs/pgvector-runbook.md
+
+[Timer]
+# Mon 02:43 local. Lands ~1.5h after the daily backup at 01:17 so the
+# fresh dump is on disk and any Sunday weekly-promotion has settled.
+# Off-peak minute (:43) to avoid stamping the host's :00/:30 cron tide.
+# Persistent=true so a missed tick (host downtime) catches up on next
+# boot.
+OnCalendar=Mon *-*-* 02:43:00
+Persistent=true
+Unit=claude-hooks-pgvector-backup-check.service
+
+[Install]
+WantedBy=timers.target

@@ -975,6 +975,8 @@ _PGVECTOR_MCP_UNIT = "claude-hooks-pgvector-mcp.service"
 _PGVECTOR_BACKUP_UNITS = (
     "claude-hooks-pgvector-backup.service",
     "claude-hooks-pgvector-backup.timer",
+    "claude-hooks-pgvector-backup-check.service",
+    "claude-hooks-pgvector-backup-check.timer",
 )
 
 
@@ -1074,6 +1076,7 @@ def _install_pgvector_backup_systemd(
     print(f"  Missing: {', '.join(missing)}")
     print(f"  Will install to /etc/systemd/system/ with __REPO_PATH__ = {HERE}")
     print("  Default schedule: daily at 01:17 local; retain 7 daily / 4 weekly / 3 monthly.")
+    print("  Includes weekly canary (Mon 02:43) that runs pg_restore -l + full-read on each tier.")
     if dry_run:
         print("  [dry-run] skipping write.")
         return
@@ -1113,14 +1116,15 @@ def _install_pgvector_backup_systemd(
     if not wrote:
         return
     subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
-    timer_unit = next((u for u in wrote if u.endswith(".timer")), None)
-    if timer_unit:
+    for u in wrote:
+        if not u.endswith(".timer"):
+            continue
         rc = subprocess.run(
-            ["systemctl", "enable", "--now", timer_unit],
+            ["systemctl", "enable", "--now", u],
             capture_output=True, text=True,
         )
         if rc.returncode == 0:
-            print(f"  · enabled + started {timer_unit}")
+            print(f"  · enabled + started {u}")
         else:
             print(f"  [!!] enable failed:\n{rc.stderr.strip()[-300:]}")
 

@@ -667,6 +667,26 @@ sudo scripts/pgvector_restore.sh /shared/config/mcp-pgvector/backups/weekly/pgve
 sudo FORCE=1 scripts/pgvector_restore.sh latest_daily
 ```
 
+#### Validity canary
+
+`claude-hooks-pgvector-backup-check.timer` runs every Monday at 02:43
+local and walks each retention tier, running:
+
+1. `pg_restore -l` on the most recent dump (TOC + metadata scan).
+2. `pg_restore -f /dev/null` on the same dump (full byte-read of the
+   archive — emits all SQL to /dev/null without touching any DB,
+   catches mid-file corruption that the TOC scan misses).
+
+Logs to journal as `claude-hooks-pgvector-backup-check.service`. Exits
+non-zero on any failure, so you can wire `OnFailure=` to a notification
+unit if desired. Tunables: `CONTAINER`, `BACKUP_DIR`, `CHECK_TIERS`,
+`FAIL_ON_EMPTY`. Run on demand:
+
+```bash
+sudo systemctl start claude-hooks-pgvector-backup-check.service
+sudo journalctl -u claude-hooks-pgvector-backup-check.service -n 20
+```
+
 #### Manual one-shot
 
 ```bash

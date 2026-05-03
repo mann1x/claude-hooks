@@ -1,0 +1,35 @@
+[Unit]
+Description=claude-hooks pgvector backup canary — TOC + full-read validation
+Documentation=https://github.com/mann1x/claude-hooks/blob/main/docs/pgvector-runbook.md
+Requires=docker.service
+After=docker.service claude-hooks-pgvector-backup.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=__REPO_PATH__
+
+Environment=CONTAINER=mcp-pgvector
+Environment=BACKUP_DIR=/shared/config/mcp-pgvector/backups
+Environment="CHECK_TIERS=daily weekly monthly"
+Environment=FAIL_ON_EMPTY=0
+
+# Polite I/O — full-read of the dumps is mostly cache-warm but on a
+# cold cache the larger weekly/monthly archives can pressure disk.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+ExecStart=__REPO_PATH__/scripts/pgvector_backup_check.sh
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# Read-only access to the backup dir is enough — the canary doesn't
+# write anything. Use the resolved /srv/... path because systemd
+# expands the OMV /shared -> /srv/... symlink at unit start.
+ReadOnlyPaths=/srv/dev-disk-by-label-opt/config/mcp-pgvector/backups
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
