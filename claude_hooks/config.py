@@ -204,6 +204,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "save_to_file": True,
             "wrapup_skill_path": None,  # null = default ~/.claude/skills/wrapup/SKILL.md
         },
+        "wrapup_recovery": {
+            # On every UserPromptSubmit, scan the wrap-up output dirs
+            # (.wolf/, docs/wrapup/, ~/.claude/wrapup-pre-compact/) for
+            # any pre-compact summary modified within max_age_seconds.
+            # If one is found, prepend a pointer block to additionalContext
+            # so the post-compaction assistant can find and read the
+            # saved state summary even when the inline summary gets
+            # trimmed across the compaction boundary.
+            "enabled": True,
+            "max_age_seconds": 86400,
+        },
         "daemon": {
             # Long-lived hook executor (Tier 3.8). When the daemon is
             # running, bin/claude-hook sends events to it over an
@@ -446,6 +457,23 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "github_repo": "mann1x/claude-hooks", # owner/name on github.com
         "timeout_seconds": 5,                 # network timeout per request
         "max_notifications": 10,              # Stop-hook notice budget
+    },
+    "system": {
+        # "## Now" markdown block prepended to UserPromptSubmit and
+        # SessionStart additionalContext. Costs ~30 tokens per turn
+        # and gives the model a fresh, local-TZ timestamp to anchor
+        # ETAs and scheduled-trigger reasoning on — without it the
+        # model often defaults to UTC (because most internal code
+        # uses datetime.now(timezone.utc)) or to stale timestamps
+        # from earlier tool output.
+        "now_block": {
+            "enabled": True,
+            # IANA zone name override. null = use the host's
+            # /etc/localtime. Set this only if the daemon runs on a
+            # host whose system TZ differs from where the user
+            # actually is.
+            "timezone": None,
+        },
     },
     "logging": {
         "path": "~/.claude/claude-hooks.log",

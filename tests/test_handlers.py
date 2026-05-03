@@ -30,7 +30,13 @@ class TestUserPromptSubmitHandler:
         assert r is None
 
     def test_short_prompt_returns_none(self, base_config, fake_provider):
-        cfg = base_config(hooks={"user_prompt_submit": {"min_prompt_chars": 50}})
+        """With the always-on ## Now block, even short prompts get a
+        timestamp injection. Disable now_block in this test so we
+        keep verifying the original 'recall is skipped' behaviour."""
+        cfg = base_config(
+            hooks={"user_prompt_submit": {"min_prompt_chars": 50}},
+            system={"now_block": {"enabled": False}},
+        )
         r = user_prompt_submit.handle(
             event={"prompt": "tiny"},
             config=cfg,
@@ -38,13 +44,40 @@ class TestUserPromptSubmitHandler:
         )
         assert r is None
 
+    def test_short_prompt_emits_now_block_only(self, base_config, fake_provider):
+        """Mirror of the above — confirms the now-block fires when
+        recall is skipped (default config has now_block enabled)."""
+        cfg = base_config(hooks={"user_prompt_submit": {"min_prompt_chars": 50}})
+        r = user_prompt_submit.handle(
+            event={"prompt": "tiny"},
+            config=cfg,
+            providers=[fake_provider()],
+        )
+        assert r is not None
+        ac = r["hookSpecificOutput"]["additionalContext"]
+        assert "## Now" in ac
+        assert "## Recalled memory" not in ac
+
     def test_no_providers_returns_none(self, base_config):
+        cfg = base_config(system={"now_block": {"enabled": False}})
+        r = user_prompt_submit.handle(
+            event={"prompt": "long enough prompt to exceed min_chars"},
+            config=cfg,
+            providers=[],
+        )
+        assert r is None
+
+    def test_no_providers_still_emits_now_block(self, base_config):
+        """Even with zero providers (so recall returns nothing), the
+        now-block must surface so the model gets a fresh timestamp."""
         r = user_prompt_submit.handle(
             event={"prompt": "long enough prompt to exceed min_chars"},
             config=base_config(),
             providers=[],
         )
-        assert r is None
+        assert r is not None
+        ac = r["hookSpecificOutput"]["additionalContext"]
+        assert "## Now" in ac
 
     def test_happy_path_emits_additional_context(self, base_config, fake_provider):
         from claude_hooks.providers.base import Memory

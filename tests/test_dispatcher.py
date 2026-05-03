@@ -75,8 +75,33 @@ class TestDispatcher(unittest.TestCase):
         self.assertIn("recalled: tell me", parsed["hookSpecificOutput"]["additionalContext"])
 
     def test_user_prompt_submit_short_prompt_skipped(self):
+        """Short prompts skip recall (the expensive provider fan-out)
+        but still surface the always-on ## Now block — the model
+        needs a fresh local-TZ timestamp every turn regardless of
+        prompt length."""
         from copy import deepcopy
         cfg = deepcopy(DEFAULT_CONFIG)
+        from claude_hooks import dispatcher as disp
+        with patch.object(disp, "load_config", return_value=cfg), \
+             patch.object(disp, "build_providers", return_value=[make_fake()]):
+            captured = io.StringIO()
+            with patch("sys.stdout", captured):
+                rc = dispatch("UserPromptSubmit", {"prompt": "hi", "cwd": "/tmp"})
+        self.assertEqual(rc, 0)
+        out = captured.getvalue().strip()
+        self.assertTrue(out, "now-block should still surface on short prompts")
+        parsed = json.loads(out)
+        ac = parsed["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("## Now", ac)
+        # Recall was skipped → no "Recalled memory" header.
+        self.assertNotIn("## Recalled memory", ac)
+
+    def test_user_prompt_submit_short_prompt_no_now_block_returns_none(self):
+        """When the now-block is disabled AND recall is skipped,
+        the handler must return None (no spurious output)."""
+        from copy import deepcopy
+        cfg = deepcopy(DEFAULT_CONFIG)
+        cfg.setdefault("system", {}).setdefault("now_block", {})["enabled"] = False
         from claude_hooks import dispatcher as disp
         with patch.object(disp, "load_config", return_value=cfg), \
              patch.object(disp, "build_providers", return_value=[make_fake()]):

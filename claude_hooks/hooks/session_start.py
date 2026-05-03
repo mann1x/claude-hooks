@@ -124,7 +124,9 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
                 cwd=cwd,
             )
             if recalled:
-                parts = [status_line, recalled]
+                from claude_hooks.now_block import format_now_block
+                now = format_now_block(config)
+                parts = [p for p in [now, status_line, recalled] if p]
                 if cg_block:
                     parts.append(cg_block)
                 return {
@@ -137,7 +139,11 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
             log.warning("compact recall failed: %s", e)
 
     show_status = hook_cfg.get("show_status_line", True)
+    from claude_hooks.now_block import format_now_block
+    now = format_now_block(config)
     parts = []
+    if now:
+        parts.append(now)
     if show_status:
         parts.append(status_line)
     if cg_block:
