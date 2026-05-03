@@ -1,0 +1,44 @@
+[Unit]
+Description=claude-hooks pgvector backup — daily pg_dump with weekly + monthly promotion
+Documentation=https://github.com/mann1x/claude-hooks/blob/main/docs/pgvector-runbook.md
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=__REPO_PATH__
+
+# Tunables (override via systemctl edit if needed):
+Environment=CONTAINER=mcp-pgvector
+Environment=PG_USER=claude
+Environment=PG_DB=memory
+Environment=BACKUP_DIR=/shared/config/mcp-pgvector/backups
+Environment=KEEP_DAILY=7
+Environment=KEEP_WEEKLY=4
+Environment=KEEP_MONTHLY=3
+Environment=WEEKLY_DOW=7
+
+# Be a polite neighbour: the dump is non-blocking on locks but it's I/O
+# and CPU. Lower priority so the hook recall + embedder pipeline keep
+# their latency budget if a UserPromptSubmit lands during the backup.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+ExecStart=__REPO_PATH__/scripts/pgvector_backup.sh
+
+# Hardening — backup script reads docker socket + writes BACKUP_DIR.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# systemd resolves symlinks in ReadWritePaths and requires the target
+# to exist at unit start. Use the pre-created /srv/... path; the
+# /shared/config -> /srv/dev-disk-by-label-opt/config symlink is the
+# OMV convention on solidpc.
+ReadWritePaths=/srv/dev-disk-by-label-opt/config/mcp-pgvector/backups
+ExecStartPre=/bin/mkdir -p /srv/dev-disk-by-label-opt/config/mcp-pgvector/backups
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

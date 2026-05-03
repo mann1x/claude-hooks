@@ -972,6 +972,10 @@ def _install_caliber_proxy_systemd(
 
 
 _PGVECTOR_MCP_UNIT = "claude-hooks-pgvector-mcp.service"
+_PGVECTOR_BACKUP_UNITS = (
+    "claude-hooks-pgvector-backup.service",
+    "claude-hooks-pgvector-backup.timer",
+)
 
 
 def _install_pgvector_mcp_systemd(
@@ -1037,6 +1041,88 @@ def _install_pgvector_mcp_systemd(
         print("    URL: http://<host>:32775/mcp  (Streamable-HTTP MCP)")
     else:
         print(f"  [!!] enable failed:\n{rc.stderr.strip()[-300:]}")
+
+
+def _install_pgvector_backup_systemd(
+    cfg: dict, *, non_interactive: bool, dry_run: bool,
+) -> None:
+    """Install the pgvector daily-backup timer when the pgvector
+    provider is enabled.
+
+    Linux + Docker only. Idempotent. The script and timer assume the
+    container is named ``mcp-pgvector`` (override via
+    ``systemctl edit`` after install). Backups land in
+    ``/shared/config/mcp-pgvector/backups/`` (resolved through any
+    symlinks at install time).
+    """
+    if os.name == "nt":
+        return
+    if not Path("/etc/systemd/system").is_dir():
+        return
+    pgvector_cfg = (cfg.get("providers") or {}).get("pgvector") or {}
+    if not pgvector_cfg.get("enabled", False):
+        return
+
+    missing = [
+        u for u in _PGVECTOR_BACKUP_UNITS
+        if not (Path("/etc/systemd/system") / u).exists()
+    ]
+    if not missing:
+        return
+
+    print("\n==> claude-hooks-pgvector-backup systemd units")
+    print(f"  Missing: {', '.join(missing)}")
+    print(f"  Will install to /etc/systemd/system/ with __REPO_PATH__ = {HERE}")
+    print("  Default schedule: daily at 01:17 local; retain 7 daily / 4 weekly / 3 monthly.")
+    if dry_run:
+        print("  [dry-run] skipping write.")
+        return
+    if non_interactive:
+        print("  --non-interactive: proceeding.")
+    else:
+        ans = input(
+            "  Install pgvector backup timer? [Y/n]: ",
+        ).strip().lower()
+        if ans not in ("", "y", "yes"):
+            print("  Skipped.")
+            return
+
+    repo_path = str(HERE.resolve())
+    home_path = str(Path.home())
+    wrote: list[str] = []
+    for unit in _PGVECTOR_BACKUP_UNITS:
+        src = HERE / "systemd" / unit
+        dest = Path("/etc/systemd/system") / unit
+        if dest.exists():
+            print(f"  · {unit} already installed -- leaving as-is")
+            continue
+        if not src.exists():
+            print(f"  [!!] {src} missing -- skipping")
+            continue
+        content = src.read_text(encoding="utf-8")
+        content = content.replace("__REPO_PATH__", repo_path)
+        content = content.replace("__HOME__", home_path)
+        try:
+            dest.write_text(content, encoding="utf-8")
+        except OSError as e:
+            print(f"  [!!] Failed to write {dest}: {e}")
+            continue
+        wrote.append(unit)
+        print(f"  + wrote {unit}")
+
+    if not wrote:
+        return
+    subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
+    timer_unit = next((u for u in wrote if u.endswith(".timer")), None)
+    if timer_unit:
+        rc = subprocess.run(
+            ["systemctl", "enable", "--now", timer_unit],
+            capture_output=True, text=True,
+        )
+        if rc.returncode == 0:
+            print(f"  · enabled + started {timer_unit}")
+        else:
+            print(f"  [!!] enable failed:\n{rc.stderr.strip()[-300:]}")
 
 
 _AXON_HOST_UNIT = "axon-host.service"
@@ -2790,6 +2876,15 @@ def main() -> int:
     # Desktop / any remote MCP client can reach the memory store.
     # Stdio remains the default for local Claude Code sessions.
     _install_pgvector_mcp_systemd(
+        cfg,
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
+    # Offer to install the daily pgvector backup timer (opt-in under
+    # providers.pgvector.enabled). Default: 01:17 local, 7 daily / 4
+    # weekly / 3 monthly retention, dumps in
+    # /shared/config/mcp-pgvector/backups/.
+    _install_pgvector_backup_systemd(
         cfg,
         non_interactive=args.non_interactive,
         dry_run=args.dry_run,

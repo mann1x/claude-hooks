@@ -19,6 +19,23 @@ release with the auto-generated source archive
 _(work in progress on the `dev` branch — see `git log v1.0.3..origin/dev`
 for landed but not-yet-released commits.)_
 
+### Added
+
+- **pgvector daily backup timer** — new
+  `claude-hooks-pgvector-backup.{service,timer}` runs
+  `pg_dump -Fc` inside the `mcp-pgvector` container at 01:17 local
+  every day and writes to `/shared/config/mcp-pgvector/backups/`
+  with three retention tiers: 7 daily, 4 weekly (promoted on
+  Sunday by hardlink), 3 monthly (promoted on day 1 by hardlink).
+  `pg_dump` takes only `ACCESS SHARE` locks so reads + writes are
+  not blocked during the backup. New scripts:
+  `scripts/pgvector_backup.sh` (the worker) and
+  `scripts/pgvector_restore.sh` (interactive restore helper with
+  `latest_daily` / `latest_weekly` / `latest_monthly` shortcuts).
+  Wired into `install.py` — installed when `providers.pgvector.enabled`
+  is true. Tunables: `CONTAINER`, `PG_USER`, `PG_DB`, `BACKUP_DIR`,
+  `KEEP_DAILY`, `KEEP_WEEKLY`, `KEEP_MONTHLY`, `WEEKLY_DOW`.
+
 ## [1.0.3] — 2026-05-03
 
 Continuation of the v1.0.2 soak: the PreCompact wrap-up surfaced two

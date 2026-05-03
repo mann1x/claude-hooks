@@ -1,0 +1,15 @@
+[Unit]
+Description=claude-hooks pgvector backup — daily 01:17 local
+Documentation=https://github.com/mann1x/claude-hooks/blob/main/docs/pgvector-runbook.md
+
+[Timer]
+# Daily at 01:17 local time. Off-peak; avoids the round :00 / :30
+# cron-stampede minutes the rest of the host's automation tends to
+# pick. Persistent=true so a missed tick (host downtime) catches up
+# on next boot.
+OnCalendar=*-*-* 01:17:00
+Persistent=true
+Unit=claude-hooks-pgvector-backup.service
+
+[Install]
+WantedBy=timers.target

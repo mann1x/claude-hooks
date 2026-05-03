@@ -625,10 +625,52 @@ schema change, drop the affected tables and re-run the migration.
 
 ### Backups
 
-`data/` is a host-mounted volume. Standard Postgres backup applies:
+The `claude-hooks-pgvector-backup.timer` systemd unit runs a daily
+`pg_dump -Fc` (custom binary, internally compressed) inside the
+container and writes to `/shared/config/mcp-pgvector/backups/` with
+three retention tiers:
+
+| Tier | Schedule | Retain | Path |
+|------|----------|--------|------|
+| daily   | every day at 01:17 local         | 7 | `daily/pgvector-YYYY-MM-DD.dump` |
+| weekly  | promoted on Sunday (`WEEKLY_DOW=7`) | 4 | `weekly/pgvector-YYYY-Www.dump` |
+| monthly | promoted on day 1                  | 3 | `monthly/pgvector-YYYY-MM.dump` |
+
+Promotion is by hardlink so weekly/monthly do not double the storage
+footprint. `pg_dump` takes only `ACCESS SHARE` locks, so reads + writes
+proceed unblocked during the dump.
+
+The unit is installed by `install.py` when the pgvector provider is
+enabled. Override defaults with
+`systemctl edit claude-hooks-pgvector-backup.service` and a drop-in
+such as:
+
+```
+[Service]
+Environment=KEEP_DAILY=14
+Environment=BACKUP_DIR=/path/to/elsewhere
+```
+
+Tunables: `CONTAINER`, `PG_USER`, `PG_DB`, `BACKUP_DIR`, `KEEP_DAILY`,
+`KEEP_WEEKLY`, `KEEP_MONTHLY`, `WEEKLY_DOW` (1=Mon … 7=Sun).
+
+#### Restore
 
 ```bash
-docker exec mcp-pgvector pg_dump -U claude memory > /backup/pgvector_$(date +%F).sql
+# Restore the most recent daily (overwrites the live DB; asks YES first)
+sudo scripts/pgvector_restore.sh latest_daily
+
+# Or a specific dump
+sudo scripts/pgvector_restore.sh /shared/config/mcp-pgvector/backups/weekly/pgvector-2026-W18.dump
+
+# Skip the prompt (CI / scripted)
+sudo FORCE=1 scripts/pgvector_restore.sh latest_daily
+```
+
+#### Manual one-shot
+
+```bash
+docker exec mcp-pgvector pg_dump -U claude memory -Fc > /tmp/pgvector.dump
 ```
 
 ### Resetting
