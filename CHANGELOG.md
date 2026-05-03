@@ -19,6 +19,23 @@ release with the auto-generated source archive
 _(work in progress on the `dev` branch — see `git log v1.0.2..origin/dev`
 for landed but not-yet-released commits.)_
 
+### Changed
+
+- **Now-block + wrap-up recovery: ~90% token reduction.** Both blocks
+  were stacking on every `UserPromptSubmit` (now-block ~59 tok, recovery
+  pointer ~103 tok), and `additionalContext` from prior turns stays in
+  the conversation history forever — so the cost compounded across the
+  session (≈14k tokens after 85 turns). Two cuts:
+  1. Now-block dropped its inline anchor reminder (the rule lives in
+     the user's feedback memory, no need to repeat it every turn) —
+     59 → ~16 tok/turn.
+  2. Recovery pointer is now one-shot per wrap-up file via a `.seen`
+     sidecar marker written next to the file on first surfacing —
+     103 tok × every turn for 24h → ~26 tok exactly once. Also shorter:
+     just heading + path instead of the full rationale.
+  Combined: ~163 tok/turn (compounding) → 16 tok/turn ongoing + 26
+  once. Knobs unchanged.
+
 ### Added
 
 - **Wrap-up recovery + endpoint extraction** — two-part fix for the

@@ -138,9 +138,37 @@ class WrapupRecoveryTests(unittest.TestCase):
             f = wolf / "wrapup-pre-compact-fresh.md"
             f.write_text("# wrapup")
             cfg = {"hooks": {"wrapup_recovery": {"enabled": True}}}
-            block = wr.format_recovery_block(td, cfg)
-            self.assertIn("Pre-compact wrap-up available", block)
+            block = wr.format_recovery_block(td, cfg, mark=False)
+            self.assertIn("Pre-compact wrap-up", block)
             self.assertIn(str(f), block)
+            # Compact form — bound the size to prevent regression.
+            self.assertLess(len(block), 200,
+                            "recovery block must stay compact")
+
+    def test_format_block_writes_seen_marker_then_skips(self):
+        with tempfile.TemporaryDirectory() as td:
+            wolf = Path(td) / ".wolf"
+            wolf.mkdir()
+            f = wolf / "wrapup-pre-compact-once.md"
+            f.write_text("x")
+            cfg = {"hooks": {"wrapup_recovery": {"enabled": True}}}
+            first = wr.format_recovery_block(td, cfg)
+            self.assertNotEqual(first, "")
+            # Sidecar should now exist.
+            self.assertTrue((wolf / "wrapup-pre-compact-once.md.seen").exists())
+            # Second call must be empty — already-seen.
+            second = wr.format_recovery_block(td, cfg)
+            self.assertEqual(second, "")
+
+    def test_seen_marker_skipped_in_find(self):
+        with tempfile.TemporaryDirectory() as td:
+            wolf = Path(td) / ".wolf"
+            wolf.mkdir()
+            f = wolf / "wrapup-pre-compact-seen.md"; f.write_text("x")
+            (wolf / "wrapup-pre-compact-seen.md.seen").write_text("")
+            self.assertIsNone(wr.find_recent_wrapup(td))
+            # But skip_seen=False still finds it.
+            self.assertEqual(wr.find_recent_wrapup(td, skip_seen=False), f)
 
     def test_non_md_files_skipped(self):
         with tempfile.TemporaryDirectory() as td:

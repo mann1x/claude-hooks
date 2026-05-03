@@ -45,11 +45,22 @@ def _candidate_dirs(cwd: str) -> list[Path]:
     return out
 
 
+def _seen_marker_for(path: Path) -> Path:
+    """Sidecar path used to mark a wrap-up file as already-surfaced."""
+    return path.with_suffix(path.suffix + ".seen")
+
+
 def find_recent_wrapup(cwd: str, *,
                        max_age_seconds: int = _DEFAULT_MAX_AGE_SECONDS,
-                       now: Optional[float] = None) -> Optional[Path]:
+                       now: Optional[float] = None,
+                       skip_seen: bool = True) -> Optional[Path]:
     """Return the most recently-modified pre-compact wrap-up file
-    found in any candidate directory, or None if nothing fresh."""
+    found in any candidate directory, or None if nothing fresh.
+
+    When ``skip_seen`` is True (default), files with a ``.seen``
+    sidecar marker are ignored — the recovery pointer is one-shot
+    per wrap-up file, so we don't re-inject it on every turn.
+    """
     now = now if now is not None else time.time()
     cutoff = now - max_age_seconds
     best: Optional[tuple[float, Path]] = None
@@ -65,6 +76,9 @@ def find_recent_wrapup(cwd: str, *,
                     continue
                 if not name.endswith(".md"):
                     continue
+                p = Path(entry.path)
+                if skip_seen and _seen_marker_for(p).exists():
+                    continue
                 try:
                     mtime = entry.stat().st_mtime
                 except OSError:
@@ -72,10 +86,21 @@ def find_recent_wrapup(cwd: str, *,
                 if mtime < cutoff:
                     continue
                 if best is None or mtime > best[0]:
-                    best = (mtime, Path(entry.path))
+                    best = (mtime, p)
         except OSError as e:
             log.debug("wrapup_recovery: scandir(%s) failed: %s", d, e)
     return best[1] if best else None
+
+
+def mark_seen(path: Path) -> bool:
+    """Create the ``.seen`` sidecar so we don't re-inject the pointer
+    for this wrap-up file. Best-effort — silent on failure."""
+    try:
+        _seen_marker_for(path).write_text("", encoding="utf-8")
+        return True
+    except OSError as e:
+        log.debug("wrapup_recovery: mark_seen(%s) failed: %s", path, e)
+        return False
 
 
 def get_cfg(config: dict) -> dict:
@@ -87,21 +112,26 @@ def get_cfg(config: dict) -> dict:
 
 
 def format_recovery_block(cwd: str, config: dict, *,
-                          now: Optional[float] = None) -> str:
+                          now: Optional[float] = None,
+                          mark: bool = True) -> str:
     """Return a short markdown pointer block, or empty string when
-    disabled or no recent wrap-up file exists."""
+    disabled or no recent wrap-up file exists.
+
+    On a hit, by default writes a ``.seen`` sidecar next to the
+    wrap-up file so subsequent UserPromptSubmit calls skip it — the
+    pointer is one-shot per file. Pass ``mark=False`` to inspect
+    without consuming.
+    """
     cfg = get_cfg(config)
     if not cfg["enabled"]:
         return ""
     path = find_recent_wrapup(cwd, max_age_seconds=cfg["max_age_seconds"], now=now)
     if path is None:
         return ""
-    return (
-        "## Pre-compact wrap-up available\n\n"
-        f"A pre-compact state summary was saved to `{path}`. "
-        "If this is a freshly-resumed session after auto-compaction, "
-        "**read that file first** to recover open items, in-progress work, "
-        "pod / host connection state, and next steps. The inline "
-        "`additionalContext` from the PreCompact hook may have been "
-        "trimmed; the file on disk is authoritative."
-    )
+    if mark:
+        mark_seen(path)
+    # Compact form. The full rationale (why-trimmed, what-to-recover)
+    # used to be inline but stacked ~100 tokens across every turn for
+    # 24h. The shorter form costs ~25 tokens and the file path itself
+    # tells the model what to do.
+    return f"## Pre-compact wrap-up\n\nResume state: `{path}` — read first."

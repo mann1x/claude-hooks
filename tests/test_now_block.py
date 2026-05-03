@@ -29,8 +29,11 @@ class FormatNowBlockTests(unittest.TestCase):
         # Date and weekday shown.
         self.assertIn("2026-05-02", out)
         self.assertIn("Saturday", out)
-        # Anchor reminder is the whole point of this block.
-        self.assertIn("Anchor any time-dependent reasoning", out)
+        # Compact form: heading + timestamp line only. The anchor
+        # reminder used to be inline but was moved to feedback memory
+        # (~40 tok/turn savings). Bound the size so a future regression
+        # that re-adds prose to this block fails this test.
+        self.assertLess(len(out), 200, "now-block must stay compact")
 
     def test_local_offset_format(self):
         cfg = {"system": {"now_block": {"enabled": True, "timezone": "Europe/Berlin"}}}

@@ -101,13 +101,12 @@ def format_now_block(config: dict, *, now: Optional[datetime] = None) -> str:
     paren_bits.append(now.strftime("%A"))
     line = parts[0] + " (" + ", ".join(paren_bits) + ")"
 
-    return (
-        "## Now\n\n"
-        f"{line}\n"
-        "_Anchor any time-dependent reasoning (ETAs, cron / loop / "
-        "monitor / scheduled-wakeup fire times, \"in N minutes\") on "
-        "this line, NOT on stale timestamps from tool output._"
-    )
+    # Compact form: heading + timestamp line only. The anchor-on-this-
+    # line rule lives in the user's feedback memory
+    # (feedback_local_time_anchor.md) which is always in context, so
+    # we don't need to repeat it on every turn — that reminder was
+    # ~40 tokens and stacked across the conversation history.
+    return f"## Now\n\n{line}"
 
 
 def _detect_iana_zone() -> Optional[str]:
