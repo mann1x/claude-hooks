@@ -19,6 +19,22 @@ release with the auto-generated source archive
 _(work in progress on the `dev` branch — see `git log v1.0.3..origin/dev`
 for landed but not-yet-released commits.)_
 
+### Fixed
+
+- **PreCompact: stop emitting hookSpecificOutput** — Claude Code's
+  PreCompact event schema does NOT accept `hookSpecificOutput`
+  (only the universal `continue` / `stopReason` / `suppressOutput`
+  envelope). Returning the wrap-up markdown as
+  `hookSpecificOutput.additionalContext` failed CC's JSON validator
+  with `(root): Invalid input` — the disk write succeeded but the
+  hook was reported as failed every time the user resumed a session
+  that had auto-compacted. The wrap-up file on disk is the sole
+  delivery channel; `wrapup_recovery` already surfaces the pointer
+  on the next post-compaction `UserPromptSubmit`, so dropping the
+  inline context loses nothing. Handler now returns `None` on
+  success. Existing `test_pre_compact.py` updated to pin the new
+  contract.
+
 ### Added
 
 - **stop_guard: stall-after-commitment check** — catches a new failure
