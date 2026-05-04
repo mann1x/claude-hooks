@@ -335,3 +335,160 @@ def check_message(
             return None
 
     return first_match[1]
+
+
+# --------------------------------------------------------------------------- #
+# Stall-after-commitment check
+# --------------------------------------------------------------------------- #
+#
+# Detects the failure mode where the model writes a paragraph ending with
+# an action-commitment phrase ("Diving in now.", "Writing the script
+# now.") and then ends the turn WITHOUT calling any tool. The commitment
+# is genuine — the model intends to act — but a training-data boundary
+# kicks in and the model emits ``stop_reason=end_turn`` before producing
+# the tool call. Observed in the wild on claude-opus-4-7 (1M context)
+# after a long planning narration.
+#
+# The check is much more conservative than the prose-pattern guard above
+# because the conditions stack: it only fires when ALL of these are true
+# in the last assistant turn:
+#
+#   1. ``stop_reason`` is ``end_turn`` (not ``tool_use``, not ``max_tokens``)
+#   2. zero ``tool_use`` blocks in the message content
+#   3. one of the commitment phrases below appears in the LAST paragraph
+#      (last ~250 chars after the final newline-pair) — not earlier in
+#      a longer message where the model said "I'll start with X" then
+#      moved to a different topic and ended on it
+#
+# Together these are very specific to the stall pattern. A normal turn
+# that uses tools would fail (2). A turn that commits early then ends on
+# a different paragraph would fail (3).
+
+# Patterns are intentionally tight — unambiguous immediate-action
+# phrasing only. Common words like "I'll proceed" without a "now"-style
+# qualifier are too easy to false-positive on conditional reasoning.
+COMMITMENT_PATTERNS: list[str] = [
+    r"\bdiving in(?:\s+now)?\b",
+    # writing/implementing/building/creating/wiring/setting up the …
+    r"\b(?:writing|implementing|building|creating|wiring|setting up)\s+(?:the|that|it|this|them)?\s*(?:script|code|tests?|fix|implementation|sweep|pipeline|now|right now)\b",
+    # kicking [it/that/this] off [now] — optional infix object
+    r"\bkicking(?:\s+(?:it|that|this))?\s+off(?:\s+now|\s+right now|\s+immediately)?\b",
+    # firing [it/that] off [now]
+    r"\bfiring(?:\s+(?:it|that|this))?\s+off(?:\s+now|\s+right now|\s+immediately)?\b",
+    r"\blet me (?:start|begin|kick (?:off|that off)|fire (?:it|that) off)\b",
+    r"\b(?:starting|proceeding|going ahead|getting (?:on it|started))\s+(?:now|right now|immediately|with (?:it|this|the implementation))\b",
+    r"\bi'?ll\s+(?:start|begin|kick (?:off|that)|proceed|implement|write|build|fire)\s+(?:now|right now|immediately|it|the\b)",
+    r"\bon it\.?\s*$",  # bare "On it." at end of message
+    r"\b(?:executing|running)(?:\s+it)?\s+now\b",
+]
+
+_COMMITMENT_REGEX_CACHE: Optional[re.Pattern] = None
+
+
+def _commitment_regex() -> re.Pattern:
+    """Compile the commitment patterns into a single alternation. Cached."""
+    global _COMMITMENT_REGEX_CACHE
+    if _COMMITMENT_REGEX_CACHE is None:
+        joined = "|".join(f"(?:{p})" for p in COMMITMENT_PATTERNS)
+        _COMMITMENT_REGEX_CACHE = re.compile(joined, re.IGNORECASE)
+    return _COMMITMENT_REGEX_CACHE
+
+
+def reset_commitment_cache() -> None:
+    """Drop the compiled commitment regex (test hook)."""
+    global _COMMITMENT_REGEX_CACHE
+    _COMMITMENT_REGEX_CACHE = None
+
+
+# How much of the message tail to scan for the commitment phrase. 250
+# chars is roughly the last paragraph for typical assistant narration;
+# tightening this further misses commitments wrapped onto an earlier
+# line, loosening it false-positives on early "I'll start with..."
+# phrasing that the model abandoned.
+_TAIL_SCAN_CHARS = 250
+
+STALL_CORRECTION = (
+    "You committed to action (e.g. \"Diving in now\", \"Writing the script now\") "
+    "but ended the turn without calling any tool. Either execute the action you "
+    "described — call the tool you implied — or, if you actually need information "
+    "before proceeding, ask a specific question. Do NOT end the turn after a bare "
+    "action-commitment phrase."
+)
+
+
+def check_stall_after_commitment(
+    last_assistant_msg: Optional[dict],
+    *,
+    last_user_message: Optional[str] = None,
+    skip_on_user_wrap_up: bool = True,
+    user_wrap_up_markers: Optional[tuple[str, ...]] = None,
+) -> Optional[str]:
+    """Return :data:`STALL_CORRECTION` if the last assistant turn matches
+    the stall-after-commitment pattern, else None.
+
+    ``last_assistant_msg`` is the full assistant message dict from the
+    transcript (``{"message": {...}}`` envelope is unwrapped if present).
+    The function inspects ``content`` (must contain no ``tool_use``
+    blocks) and ``stop_reason`` (must be ``end_turn``), then scans the
+    tail of the concatenated text for a commitment phrase.
+
+    Honours the same ``skip_on_user_wrap_up`` escape as
+    :func:`check_message` — when the user explicitly asked the
+    assistant to wrap up / save state / compact, a closing narration
+    is intentional and must not be blocked.
+    """
+    if not last_assistant_msg:
+        return None
+
+    # USER wrap-up intent beats this check too — same as check_message.
+    if skip_on_user_wrap_up and last_user_message:
+        markers = (
+            user_wrap_up_markers
+            if user_wrap_up_markers is not None
+            else DEFAULT_USER_WRAP_UP_MARKERS
+        )
+        if _contains_user_wrap_up(last_user_message, markers):
+            return None
+
+    inner = last_assistant_msg.get("message") or last_assistant_msg
+    if not isinstance(inner, dict):
+        return None
+    if inner.get("role") not in (None, "assistant"):
+        return None
+
+    stop_reason = inner.get("stop_reason")
+    # Tighten to ``end_turn`` only. ``tool_use`` stop_reason means the
+    # model DID call a tool — not a stall. ``max_tokens`` / ``stop_sequence``
+    # are rare and likely indicate a different issue we shouldn't paper
+    # over with this check.
+    if stop_reason is not None and stop_reason != "end_turn":
+        return None
+
+    content = inner.get("content") or []
+    if not isinstance(content, list):
+        return None
+
+    text_parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        # Any tool call → not a stall.
+        if btype == "tool_use":
+            return None
+        if btype == "text":
+            t = block.get("text") or ""
+            if t:
+                text_parts.append(t)
+        # ``thinking`` blocks are ignored — the user-visible text is
+        # what matters for the commitment-phrase test.
+
+    text = "\n\n".join(text_parts).strip()
+    if not text:
+        return None
+
+    tail = text[-_TAIL_SCAN_CHARS:] if len(text) > _TAIL_SCAN_CHARS else text
+    if not _commitment_regex().search(tail):
+        return None
+
+    return STALL_CORRECTION

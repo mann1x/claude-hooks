@@ -988,12 +988,16 @@ def _run_stop_guard(
     """
     if not transcript:
         return None
-    # Find the last assistant text block.
+    # Find the last assistant turn — keep both the full message dict
+    # (the stall-after-commitment check needs stop_reason + tool_use
+    # presence) and the extracted text (the prose-pattern guard).
+    last_assistant_msg: Optional[dict] = None
     last_text = ""
     for msg in reversed(transcript):
         if isinstance(msg, dict) and _msg_role(msg) == "assistant":
             text = _extract_text(msg)
             if text:
+                last_assistant_msg = msg
                 last_text = text
                 break
     if not last_text:
@@ -1009,7 +1013,11 @@ def _run_stop_guard(
                 break
 
     try:
-        from claude_hooks.stop_guard import check_message, load_patterns
+        from claude_hooks.stop_guard import (
+            check_message,
+            check_stall_after_commitment,
+            load_patterns,
+        )
         patterns = load_patterns(guard_cfg.get("patterns") or [])
         skip_meta = bool(guard_cfg.get("skip_meta_context", True))
         meta_cfg = guard_cfg.get("meta_markers") or []
@@ -1017,7 +1025,8 @@ def _run_stop_guard(
         skip_wrapup = bool(guard_cfg.get("skip_on_user_wrap_up", True))
         wrapup_cfg = guard_cfg.get("user_wrap_up_markers") or []
         wrapup_markers = tuple(str(m) for m in wrapup_cfg) or None
-        return check_message(
+        # First: the prose-pattern guard.
+        correction = check_message(
             last_text,
             patterns=patterns,
             skip_meta_context=skip_meta,
@@ -1026,6 +1035,21 @@ def _run_stop_guard(
             skip_on_user_wrap_up=skip_wrapup,
             user_wrap_up_markers=wrapup_markers,
         )
+        if correction:
+            return correction
+        # Second: stall-after-commitment. Default on; opt out via
+        # hooks.stop_guard.stall_check_enabled = false. The check is
+        # very specific (no tool_use + end_turn + commitment phrase in
+        # tail) so false-positive risk is low, but it's the louder of
+        # the two corrections so users may want it off in noisy turns.
+        if guard_cfg.get("stall_check_enabled", True):
+            return check_stall_after_commitment(
+                last_assistant_msg,
+                last_user_message=last_user_text,
+                skip_on_user_wrap_up=skip_wrapup,
+                user_wrap_up_markers=wrapup_markers,
+            )
+        return None
     except Exception as e:
         log.debug("stop_guard check failed: %s", e)
         return None

@@ -21,6 +21,25 @@ for landed but not-yet-released commits.)_
 
 ### Added
 
+- **stop_guard: stall-after-commitment check** — catches a new failure
+  mode observed on `claude-opus-4-7` (1M context): the model writes a
+  paragraph ending with an action-commitment phrase ("Diving in now",
+  "Writing the script now", "On it.") and then ends the turn WITHOUT
+  calling any tool. The user has to nudge the session to unstall it.
+  Three independent conditions stack so false-positive risk is low:
+  (1) `stop_reason=end_turn`, (2) zero `tool_use` blocks in the
+  message content, (3) one of the commitment phrases appears in the
+  last ~250 chars of the message text. The Stop hook returns
+  `decision=block` with a correction asking the model to either
+  execute the action it described or ask a specific question. Honours
+  the same user-wrap-up bypass as the prose-pattern guard so an
+  "All done. On it." closing after the user said "wrap up" doesn't
+  trigger. Default on when stop_guard itself is enabled; opt out via
+  `hooks.stop_guard.stall_check_enabled = false`. New module entry
+  points: `claude_hooks.stop_guard.check_stall_after_commitment`,
+  `COMMITMENT_PATTERNS`, `STALL_CORRECTION`. 15 unit tests in
+  `tests/test_stop_guard.py::StallAfterCommitmentTests` plus an
+  end-to-end smoke through `_run_stop_guard`.
 - **pgvector backup-validity canary** — new
   `claude-hooks-pgvector-backup-check.{service,timer}` runs every
   Monday at 02:43 local and walks each retention tier

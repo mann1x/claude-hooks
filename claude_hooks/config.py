@@ -179,6 +179,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "skip_on_user_wrap_up": True,
             # Empty list = use claude_hooks.stop_guard.DEFAULT_USER_WRAP_UP_MARKERS.
             "user_wrap_up_markers": [],
+            # Stall-after-commitment check: catches the failure mode
+            # where the model writes a paragraph ending with an
+            # action-commitment phrase ("Diving in now", "Writing the
+            # script now") and then ends the turn WITHOUT calling any
+            # tool. Stacks three independent conditions
+            # (stop_reason=end_turn + zero tool_use + commitment phrase
+            # in last paragraph) so false-positive risk is low. Default
+            # on when stop_guard itself is enabled — set to false to
+            # suppress just this sub-check while keeping the prose
+            # pattern guard active.
+            "stall_check_enabled": True,
         },
         "session_end": {
             "enabled": True,
