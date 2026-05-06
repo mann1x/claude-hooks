@@ -553,9 +553,18 @@ def _setup_proxy_orchestrator(
     proxy_cfg = cfg.setdefault("proxy", {})
     currently_enabled = bool(proxy_cfg.get("enabled", False))
 
+    # Default the prompt to the current state — empty input keeps
+    # things as they are, which matches every other re-install
+    # prompt in this script. The previous version showed `[y/N]`
+    # regardless of state, so a re-run with proxy already enabled
+    # would silently switch it off if the user just hit Enter.
+    suffix = "[Y/n]" if currently_enabled else "[y/N]"
     ans = input(
-        f"  Use the API proxy? (current: {'yes' if currently_enabled else 'no'}) [y/N]: "
+        f"  Use the API proxy? (current: "
+        f"{'yes' if currently_enabled else 'no'}) {suffix}: "
     ).strip().lower()
+    if not ans:
+        ans = "y" if currently_enabled else "n"
     if ans not in ("y", "yes"):
         # Don't flip an already-true value to false silently -- if the
         # user has it on, they probably want to keep it. Only set the
@@ -2061,6 +2070,81 @@ def _install_daemon_windows_steps(
             return
 
 
+_PGVECTOR_VERIFY_SCRIPT = r"""
+import json, sys
+try:
+    import psycopg
+except ImportError as e:
+    print(json.dumps({"ok": False,
+                       "reason": "psycopg not importable: " + str(e)}))
+    sys.exit(0)
+try:
+    with psycopg.connect(sys.argv[1], connect_timeout=5) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+            cur.execute("SELECT 1 FROM pg_extension WHERE extname='vector'")
+            if cur.fetchone() is None:
+                print(json.dumps({"ok": False,
+                                   "reason": "pgvector extension not "
+                                             "installed in target DB"}))
+                sys.exit(0)
+    print(json.dumps({"ok": True, "reason": "ok"}))
+except Exception as e:
+    print(json.dumps({"ok": False,
+                       "reason": type(e).__name__ + ": " + str(e)}))
+"""
+
+
+def _verify_pgvector_dsn(dsn: str) -> tuple[bool, str]:
+    """Probe Postgres for the pgvector extension. Returns (ok, reason).
+
+    Uses the conda env's python via subprocess when psycopg isn't
+    importable in the current interpreter. install.py is often
+    invoked with whatever ``python`` is on PATH (system py3,
+    sometimes a different env), and pinning the verify call to the
+    claude-hooks env's python — where psycopg IS installed — gives
+    accurate reachability info instead of a misleading "FAILED".
+    """
+    # Fast path: psycopg available in this interpreter.
+    try:
+        import psycopg  # type: ignore  # noqa: F401, PLC0415
+        from claude_hooks.providers.pgvector import PgvectorProvider  # noqa: PLC0415
+        from claude_hooks.providers import ServerCandidate  # noqa: PLC0415
+        candidate = ServerCandidate(server_key="pgvector", url=dsn,
+                                    source="installer", confidence="manual")
+        if PgvectorProvider.verify(candidate):
+            return True, "ok"
+        return False, "verify returned false (see logs)"
+    except ImportError:
+        pass
+
+    # Fallback: shell out to the conda env's python where psycopg
+    # is expected to be installed.
+    conda_py = find_conda_env_python()
+    if not conda_py.exists():
+        return False, ("psycopg not in current python AND "
+                       f"conda env not found at {conda_py}")
+
+    try:
+        rc = subprocess.run(
+            [str(conda_py), "-c", _PGVECTOR_VERIFY_SCRIPT, dsn],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, f"subprocess failed: {e}"
+
+    out = (rc.stdout or "").strip().splitlines()
+    if not out:
+        return False, (f"verify subprocess produced no output "
+                       f"(rc={rc.returncode}, stderr={rc.stderr.strip()[:200]})")
+    try:
+        result = json.loads(out[-1])
+    except json.JSONDecodeError:
+        return False, f"verify subprocess output not JSON: {out[-1][:200]}"
+    return bool(result.get("ok")), str(result.get("reason") or "")
+
+
 def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
     """Ask if pgvector is available and set up the system-wide MCP server.
 
@@ -2124,19 +2208,11 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
         return
 
     # 2. Verify the DSN reaches a Postgres with the pgvector extension.
-    try:
-        from claude_hooks.providers.pgvector import PgvectorProvider
-        from claude_hooks.providers import ServerCandidate
-    except ImportError as e:
-        print(f"  Cannot import pgvector provider: {e}")
-        return
-    candidate = ServerCandidate(server_key="pgvector", url=dsn,
-                                source="installer", confidence="manual")
     print("  Probing Postgres + pgvector extension...", end=" ", flush=True)
-    ok = PgvectorProvider.verify(candidate)
-    print("OK" if ok else "FAILED")
+    ok, reason = _verify_pgvector_dsn(dsn)
+    print("OK" if ok else f"FAILED ({reason})")
     if not ok:
-        print("  Couldn't reach pgvector with that DSN.")
+        print(f"  Couldn't reach pgvector with that DSN: {reason}")
         print("  Fix the DSN and re-run install.py -- leaving pgvector disabled.")
         return
 
