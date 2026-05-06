@@ -40,6 +40,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 
+from claude_hooks.agent_loop import runner as agent_loop_runner
 from claude_hooks.caliber_proxy import ollama, prompt, recall, tools
 
 log = logging.getLogger("claude_hooks.caliber_proxy.server")
@@ -279,20 +280,10 @@ def _cwd_for_request() -> str:
 
 # -- Agent loop ------------------------------------------------------- #
 def _merge_tools(existing: Optional[list[dict]]) -> list[dict]:
-    """Combine caliber's tool list (usually none) with ours. Caller tools
-    win by name on collision — we stay out of the way if caliber ever
-    starts sending its own."""
-    our_specs = tools.openai_tool_specs()
-    if not existing:
-        return our_specs
-    existing_names = {
-        t.get("function", {}).get("name") for t in existing
-        if isinstance(t, dict)
-    }
-    return list(existing) + [
-        s for s in our_specs
-        if s["function"]["name"] not in existing_names
-    ]
+    """Combine caliber's tool list (usually none) with ours. Thin shim
+    around ``agent_loop.runner.merge_tools`` — kept for backward compat
+    with existing tests that may patch this symbol."""
+    return agent_loop_runner.merge_tools(existing, tools.openai_tool_specs())
 
 
 def _inject_grounding(messages: list[dict], cwd: str,
@@ -333,248 +324,65 @@ def _inject_grounding(messages: list[dict], cwd: str,
 def _execute_tool_calls(tool_calls: list[dict], cwd: str,
                          seen: dict[str, str]) -> list[dict]:
     """Run each tool and return the resulting ``role: tool`` messages.
+    Thin shim around ``agent_loop.runner.execute_tool_calls`` — kept for
+    backward compat with existing tests."""
+    return agent_loop_runner.execute_tool_calls(
+        tool_calls, cwd, seen, tools.execute,
+    )
 
-    Duplicate (name+args) calls within a single agent loop return a
-    short stub pointing the model back at the prior result. Models
-    (notably gemma4-98e) will otherwise loop on the same tool call
-    dozens of times, exploding context and wall time.
-    """
-    results = []
-    for tc in tool_calls:
-        tc_id = tc.get("id") or ""
-        fn = tc.get("function") or {}
-        name = fn.get("name") or ""
-        args_str = fn.get("arguments") or "{}"
-        # Tool calls can come as dicts OR stringified JSON — handle both.
-        if isinstance(args_str, dict):
-            args_str = json.dumps(args_str)
-        key = f"{name}|{args_str}"
-        if key in seen:
-            output = (
-                f"(duplicate: you already called {name}({args_str[:80]}). "
-                "Use that prior result and continue. Do not repeat this call.)"
-            )
-            log.info("tool %s(%s) -> DEDUP stub", name, args_str[:80])
-        else:
-            t0 = time.monotonic()
-            output = tools.execute(name, args_str, cwd)
-            dt_ms = int((time.monotonic() - t0) * 1000)
-            log.info(
-                "tool %s(%s) -> %d chars in %d ms",
-                name, args_str[:80], len(output), dt_ms,
-            )
-            seen[key] = output
-        results.append({
-            "role": "tool",
-            "tool_call_id": tc_id,
-            "name": name,
-            "content": output,
-        })
-    return results
+
+def _caliber_preseed_builder(cwd: str) -> Optional[tuple[list[dict], str, str]]:
+    """Bridge ``_build_preseed_survey_pair`` into the runner's preseed
+    contract. Returns ``([assistant_msg, tool_msg], dedup_key, dedup_content)``
+    or ``None`` if the survey can't be built or the env flag is off."""
+    if not _preseed_survey_enabled():
+        return None
+    pair = _build_preseed_survey_pair(cwd)
+    if pair is None:
+        return None
+    msgs, content = pair
+    return msgs, "survey_project|{}", content
 
 
 def run_agent_loop(payload: dict, cwd: str,
                    max_iterations: Optional[int] = None) -> dict:
     """Drive the tool-use loop until the model stops calling tools or the
     iteration cap is hit. Returns the final Ollama chat-completion JSON.
-    """
-    if max_iterations is None:
-        max_iterations = _max_iterations()
 
+    Thin wrapper around ``agent_loop.runner.run_loop`` that owns
+    caliber-specific concerns: env-driven config, grounding+recall
+    injection, and the trailing-JSON sanitiser caliber's stream-parser
+    requires.
+    """
     tools_available = _tools_enabled()
-    force_after = _force_answer_after() if tools_available else 0
-    override = _model_override()
-    if override:
-        payload = dict(payload)
-        payload["model"] = override
-    # Constrain thinking budget. Ollama accepts both the native ``think``
-    # field and the OpenAI-style ``reasoning_effort`` — set both so we
-    # work against either endpoint path.
-    think = _think_setting()
-    if think is False:
-        payload["think"] = False
-        payload["reasoning_effort"] = "none"
-    elif think is True:
-        payload["think"] = True
-    else:
-        # "low" | "medium" | "high"
-        payload["think"] = think
-        payload["reasoning_effort"] = think
-    # Optional context-window cap. Goes under ``options.num_ctx`` —
-    # Ollama's OpenAI-compat path forwards the ``options`` block to its
-    # native runner. Don't clobber if caliber already set num_ctx; only
-    # cap if no value is present.
-    num_ctx = _num_ctx_override()
-    if num_ctx is not None:
-        opts = dict(payload.get("options") or {})
-        if "num_ctx" not in opts:
-            opts["num_ctx"] = num_ctx
-            payload["options"] = opts
-    messages = _inject_grounding(
+    cfg = agent_loop_runner.LoopConfig(
+        max_iterations=(_max_iterations() if max_iterations is None
+                        else max_iterations),
+        force_answer_after=_force_answer_after(),
+        max_tool_calls_per_turn=_max_tool_calls_per_turn(),
+        tools_available=tools_available,
+        think=_think_setting(),
+        num_ctx_override=_num_ctx_override(),
+        model_override=_model_override(),
+        force_first_tool_call=_force_first_tool_call(),
+        force_first_retry_enabled=True,
+        # Default retry message is the caliber/gemma4 nudge — keep it.
+    )
+
+    payload = dict(payload)
+    payload["messages"] = _inject_grounding(
         payload.get("messages") or [], cwd, tools_available=tools_available,
     )
-    payload = dict(payload)
-    payload["messages"] = messages
-    if tools_available:
-        payload["tools"] = _merge_tools(payload.get("tools"))
-    else:
-        # No tool injection — pre-stuffing is the only grounding. Strip
-        # any caliber-supplied tool list too so the model doesn't try to
-        # call something the proxy can't service.
-        payload.pop("tools", None)
-        payload.pop("tool_choice", None)
-    # Force non-streaming inside the loop so we can inspect tool_calls
-    # cleanly. We'll decide whether to stream the final turn back to
-    # the caller separately.
-    payload.pop("stream", None)
 
-    final: dict[str, Any] = {}
-    tools_stripped = False
-    has_called_tool = False
-    force_first = _force_first_tool_call() if tools_available else False
-    force_first_retried = False
-    seen_calls: dict[str, str] = {}
-    # Pre-inject the survey tool call + result so the model starts iter 0
-    # with the project map already in context. Keeps force_first dormant
-    # (we mark has_called_tool=True), and pre-populates the dedup table
-    # so a redundant model-side survey_project({}) is caught as a dup.
-    if tools_available and _preseed_survey_enabled():
-        preseed = _build_preseed_survey_pair(cwd)
-        if preseed is not None:
-            preseed_msgs, preseed_content = preseed
-            payload["messages"] = list(payload["messages"]) + preseed_msgs
-            seen_calls["survey_project|{}"] = preseed_content
-            has_called_tool = True
-            log.info(
-                "preseed_survey: injected synthetic survey_project tool "
-                "result (%d chars), force_first now dormant",
-                len(preseed_content),
-            )
-    for i in range(max_iterations):
-        # After N tool rounds, strip the tool list so the model stops
-        # looping on tool calls and commits to the final prose+JSON
-        # answer. Caliber's parser expects: STATUS lines, EXPLAIN:, JSON.
-        # Some templates (gemma4-98e) otherwise emit empty ```  fences.
-        if (tools_available and force_after > 0 and i >= force_after
-                and not tools_stripped):
-            log.info(
-                "force-answer: stripping tools at iter %d (after=%d)",
-                i, force_after,
-            )
-            payload.pop("tools", None)
-            payload.pop("tool_choice", None)
-            tools_stripped = True
-        # Set tool_choice based on whether we still want to force a
-        # tool call. force_first pins iter 0 to "required" until the
-        # model has actually invoked a tool, then we drop to "auto".
-        # Skipped entirely once tools have been stripped.
-        if tools_available and not tools_stripped:
-            if force_first and not has_called_tool:
-                payload["tool_choice"] = "required"
-            else:
-                payload["tool_choice"] = "auto"
-        final = ollama.chat_completions(payload)
-        choices = final.get("choices") or []
-        if not choices:
-            log.warning("ollama returned empty choices on iter %d", i)
-            break
-        choice = choices[0]
-        msg = choice.get("message") or {}
-        tool_calls = msg.get("tool_calls") or []
-        finish_reason = choice.get("finish_reason")
-        log.debug(
-            "iter %d: finish=%s, tool_calls=%d, content_len=%d",
-            i, finish_reason, len(tool_calls),
-            len((msg.get("content") or "")),
-        )
-        if finish_reason != "tool_calls" or not tool_calls:
-            # Force-first retry: Ollama's native /api/chat drops the
-            # tool_choice="required" hint we set on the OpenAI payload
-            # (Ollama has no equivalent), so we re-prompt the model
-            # explicitly when it skipped tools. Caps at ONE retry per
-            # turn to avoid an infinite loop when the model genuinely
-            # cannot/won't use tools — better to ship ungrounded JSON
-            # than to time out.
-            if (force_first and not has_called_tool and tools_available
-                    and not tools_stripped and not force_first_retried):
-                log.info(
-                    "force_first: iter %d returned no tool_calls; "
-                    "injecting corrective user message and retrying",
-                    i,
-                )
-                force_first_retried = True
-                prior_content = msg.get("content") or ""
-                payload = dict(payload)
-                payload["messages"] = list(payload["messages"]) + [
-                    {"role": "assistant", "content": prior_content},
-                    {
-                        "role": "user",
-                        "content": (
-                            "You skipped tool use on your last turn. Re-do "
-                            "your previous turn with tools: call "
-                            "`survey_project` (no arguments) first, then any "
-                            "of `read_file`, `grep`, `glob`, `list_files` you "
-                            "need to verify references. THEN, on the same "
-                            "task, emit the EXACT response format the "
-                            "original instruction asked for (the structured "
-                            "JSON object with all required fields — not a "
-                            "summary, not a question, not a status update). "
-                            "Do not ask what to do next; complete the "
-                            "original task with the tool grounding you "
-                            "skipped."
-                        ),
-                    },
-                ]
-                continue
-            break
-        # Tool was invoked — drop ``force_first`` for the next iteration.
-        has_called_tool = True
-        # Guard against runaway tool_call bursts. gemma4-98e has been
-        # observed emitting hundreds of IDENTICAL calls in one response.
-        # First collapse by unique (name, arguments), then cap. This
-        # preserves distinct calls when the model legitimately asks
-        # for several at once.
-        original_len = len(tool_calls)
-        uniq: list[dict] = []
-        seen_sigs: set[str] = set()
-        for tc in tool_calls:
-            fn = tc.get("function") or {}
-            args = fn.get("arguments") or ""
-            if isinstance(args, dict):
-                args = json.dumps(args, sort_keys=True)
-            sig = f"{fn.get('name','')}|{args}"
-            if sig in seen_sigs:
-                continue
-            seen_sigs.add(sig)
-            uniq.append(tc)
-        cap = _max_tool_calls_per_turn()
-        if len(uniq) > cap:
-            uniq = uniq[:cap]
-        if len(uniq) != original_len:
-            log.info(
-                "tool_calls %d -> %d unique (cap=%d) on iter %d",
-                original_len, len(uniq), cap, i,
-            )
-        tool_calls = uniq
-        # Normalise the assistant message: when tool_calls are present,
-        # drop any ``content`` — models sometimes emit template
-        # fragments or partial JSON alongside the structured call, and
-        # re-sending that garbage on the next turn derails generation.
-        clean_msg = dict(msg)
-        clean_msg["content"] = None
-        clean_msg["tool_calls"] = tool_calls  # already capped above
-        # Gemma4 docs: "In multi-turn conversations, the historical model
-        # output should only include the final response. Thoughts from
-        # previous model turns must not be added before the next user
-        # turn begins." Strip thinking/reasoning fields before echoing.
-        for k in ("thinking", "reasoning", "reasoning_content"):
-            clean_msg.pop(k, None)
-        payload["messages"] = list(payload["messages"]) + [clean_msg]
-        payload["messages"].extend(
-            _execute_tool_calls(tool_calls, cwd, seen_calls)
-        )
-    else:
-        log.warning("agent loop hit max_iterations=%d", max_iterations)
+    final = agent_loop_runner.run_loop(
+        payload,
+        cwd,
+        config=cfg,
+        tool_specs=tools.openai_tool_specs(),
+        chat_fn=lambda p: ollama.chat_completions(p),
+        tool_executor=tools.execute,
+        preseed_builder=_caliber_preseed_builder,
+    )
     sanitize_assistant_json(final)
     return final
 

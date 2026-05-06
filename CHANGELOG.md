@@ -37,6 +37,38 @@ for landed but not-yet-released commits.)_
 
 ### Added
 
+- **/get-advice — LLM-to-LLM advisor skill** — Claude Code can now consult
+  a configured Ollama model (default `qwen3.5:cloud`) for a multi-turn
+  second opinion via the `/get-advice <query>` skill. Three helper
+  skills (`/get-advice--model`, `/get-advice--effort`,
+  `/get-advice--tools`) configure model + ctx, effort tier (low=1
+  session / medium=3 / high=5 / max=25), and the per-tool gate
+  (CSV / `all` / `none`) without editing JSON. Settings persist to
+  `~/.claude/get-advice-config.json`. New CLI `bin/claude-advisor`
+  drives the conversation: `turn`, `reset`, `cleanup`, get/set
+  subcommands. Per-turn JSON exposes `prompt_eval_count` /
+  `eval_count` so Claude knows when to summarize and reset before the
+  advisor's context fills (default threshold 85%). Reuses caliber-proxy
+  grounding (project anchors + structure map) and the same six tools
+  (`read_file`, `grep`, `glob`, `list_files`, `survey_project`,
+  `recall_memory`) when enabled.
+
+- **agent_loop.runner — shared tool-use loop** — extracted the agent
+  loop from `claude_hooks.caliber_proxy.server.run_agent_loop` into a
+  reusable `claude_hooks.agent_loop.runner.run_loop` function with a
+  `LoopConfig` dataclass. Both the caliber grounding proxy and the new
+  `/get-advice` advisor drive their conversations through this single
+  loop, so every gemma4-era quirk (force-first-tool-call,
+  force-answer-after, tool-call burst dedup + cap, preseed survey)
+  benefits both consumers consistently. The runner is transport-
+  agnostic: callers pass their own `chat_fn` and `tool_executor`.
+  `caliber_proxy/server.py:run_agent_loop` is now a thin shim that
+  reads env vars, builds the `LoopConfig`, prepends grounding, calls
+  the runner, and applies the caliber-specific
+  `sanitize_assistant_json` post-processor. Behavior unchanged — the
+  full caliber-proxy test suite (91 tests across `TestAgentLoop` /
+  `TestPreseedSurvey` / etc.) passes against the refactored path.
+
 - **stop_guard: stall-after-commitment check** — catches a new failure
   mode observed on `claude-opus-4-7` (1M context): the model writes a
   paragraph ending with an action-commitment phrase ("Diving in now",
