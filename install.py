@@ -2824,18 +2824,450 @@ def _install_consultants(cfg: dict, cfg_path: Path, *,
                         encoding="utf-8")
     print(f"    Service mode: {service_mode}")
 
-    # Always-on: install the systemd unit (Linux only — macOS plist
-    # and Windows Task Scheduler XML are stubs we drop on disk but
-    # don't auto-load).
-    if service_mode == "always-on" and platform.system() == "Linux":
-        _install_consultants_systemd_unit(consultants_py, dry_run=dry_run)
-    elif service_mode == "smart-start":
-        print("    Smart-start: the engine will be spawned by the "
-              "consultants forwarder on first request.")
-        print("    Make sure claude-hooks-consultants-forwarder is "
-              "running (systemd unit shipped under systemd/).")
+    # Persist the engine port the install picked (currently the
+    # config default) so the verify step uses the same number the
+    # task will bind.
+    engine_port = int(consultants_cfg.get("engine_url",
+                      "http://127.0.0.1:38095").rsplit(":", 1)[-1].rstrip("/"))
+    forwarder_port = int(((smart.get("forwarder_url")
+                           or "http://127.0.0.1:38096"))
+                         .rsplit(":", 1)[-1].rstrip("/"))
+
+    # Platform autostart.
+    if platform.system() == "Linux":
+        if service_mode == "always-on":
+            _install_consultants_systemd_unit(consultants_py, dry_run=dry_run)
+        else:
+            print("    Smart-start: the engine will be spawned by the "
+                  "consultants forwarder on first request.")
+            print("    Forwarder unit ships under systemd/ — install + "
+                  "enable it to autostart on boot.")
+    elif os.name == "nt":
+        _install_consultants_windows(
+            consultants_py=consultants_py,
+            service_mode=service_mode,
+            engine_port=engine_port,
+            forwarder_port=forwarder_port,
+            non_interactive=non_interactive,
+            dry_run=dry_run,
+        )
+    elif sys.platform == "darwin":
+        _install_consultants_launchd(
+            consultants_py=consultants_py,
+            service_mode=service_mode,
+            engine_port=engine_port,
+            forwarder_port=forwarder_port,
+            non_interactive=non_interactive,
+            dry_run=dry_run,
+        )
+    else:
+        print("    No autostart manager wired for this platform — "
+              "start the engine manually with `consultants-server` or "
+              "`python -m consultants.server`.")
 
     return True
+
+
+_CONSULTANTS_TASK_NAME = "claude-hooks-consultants"
+_CONSULTANTS_FORWARDER_TASK_NAME = "claude-hooks-consultants-forwarder"
+
+# Same XML shape as ``_DAEMON_TASK_XML`` (logon trigger, no execution
+# time limit, restart on failure) — only the Description differs.
+# Templated so always-on and smart-start can share it. UTF-16 on disk
+# because that's what schtasks /XML expects.
+_CONSULTANTS_TASK_XML = """<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>{description}</Description>
+    <Author>claude-hooks installer</Author>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{user_id}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{command}</Command>
+      <Arguments>{arguments}</Arguments>
+      <WorkingDirectory>{workdir}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+def _write_consultants_task_xml(*, description: str, command: str,
+                                arguments: str, workdir: str,
+                                prefix: str) -> Path:
+    """Write a UTF-16 task XML to a temp file and return its path.
+    Caller cleans it up after schtasks consumes it."""
+    xml = _CONSULTANTS_TASK_XML.format(
+        description=_xml_escape(description),
+        user_id=_xml_escape(_windows_user_id()),
+        command=_xml_escape(command),
+        arguments=_xml_escape(arguments),
+        workdir=_xml_escape(workdir),
+    )
+    import tempfile  # noqa: PLC0415 — Windows-only path
+    fd, path = tempfile.mkstemp(prefix=prefix, suffix=".xml")
+    os.close(fd)
+    Path(path).write_bytes(xml.encode("utf-16"))
+    return Path(path)
+
+
+def _wait_for_consultants_health(port: int, *,
+                                 timeout: float = 30.0) -> bool:
+    """Poll ``http://127.0.0.1:<port>/v1/health`` until it returns
+    200 or ``timeout`` elapses. Used to confirm the engine /
+    forwarder is up after the scheduled task fires.
+
+    First-poll latency on Windows is generous (~5–10 s for the engine
+    cold start because LangChain imports take a beat); the forwarder
+    is much faster (stdlib only). 30 s default covers both with
+    headroom."""
+    import time as _time  # noqa: PLC0415
+    import urllib.error  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+    deadline = _time.monotonic() + timeout
+    url = f"http://127.0.0.1:{port}/v1/health"
+    while _time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=1.5) as r:
+                if 200 <= r.status < 300:
+                    return True
+        except (urllib.error.URLError, OSError):
+            pass
+        _time.sleep(0.5)
+    return False
+
+
+def _register_consultants_task(*, task_name: str, description: str,
+                               exec_command: str, exec_arguments: str,
+                               workdir: str, port: int,
+                               health_timeout: float,
+                               non_interactive: bool) -> bool:
+    """Generic helper: register a single Windows scheduled task,
+    /Run it, and verify health. Used for both the always-on engine
+    task and the smart-start forwarder task. Returns True iff the
+    task is registered AND health-checked at the end.
+
+    Mirrors ``_install_daemon_windows_steps`` but tighter — the
+    consultants tasks don't need the daemon's special-cases (no
+    pythonw fallback to .cmd, no first-run-port-bind dance)."""
+    delete_argstr = f'/Delete /TN "{task_name}" /F'
+    delete_argv = ["/Delete", "/TN", task_name, "/F"]
+    run_argstr = f'/Run /TN "{task_name}"'
+    run_argv = ["/Run", "/TN", task_name]
+
+    # Already-installed branch: in non-interactive mode just verify;
+    # otherwise prompt for re-install.
+    if _windows_task_exists(task_name):
+        print(f"    · scheduled task '{task_name}' already exists")
+        if non_interactive:
+            print("    · --non-interactive: leaving as-is, verifying health")
+            if _wait_for_consultants_health(port, timeout=health_timeout):
+                print(f"    · responding on 127.0.0.1:{port}")
+                return True
+            print(f"    [!!] not responding — try `schtasks {run_argstr}`")
+            return False
+        ans = input("    Re-install (delete + recreate)? [y/N]: "
+                    ).strip().lower()
+        if ans in ("y", "yes"):
+            if not _run_schtasks_elevated(delete_argstr, delete_argv):
+                print("    [!!] could not delete existing task — leaving as-is")
+                return False
+            # fall through to fresh install
+        else:
+            if _wait_for_consultants_health(port, timeout=health_timeout):
+                print(f"    · responding on 127.0.0.1:{port}")
+                return True
+            print(f"    · not currently responding — `schtasks {run_argstr}`")
+            return False
+
+    # Fresh install path. In non-interactive mode print the schtasks
+    # commands and bail (we can't fire UAC without a user).
+    xml_path = _write_consultants_task_xml(
+        description=description,
+        command=exec_command,
+        arguments=exec_arguments,
+        workdir=workdir,
+        prefix=f"{task_name}-",
+    )
+    create_argstr = f'/Create /XML "{xml_path}" /TN "{task_name}" /F'
+    create_argv = ["/Create", "/XML", str(xml_path), "/TN", task_name, "/F"]
+    try:
+        if non_interactive:
+            print("    --non-interactive: cannot prompt for UAC. "
+                  "Run from an elevated cmd:")
+            print(f"      schtasks {create_argstr}")
+            print(f"      schtasks {run_argstr}")
+            return False
+
+        print(f"    Registering '{task_name}'...")
+        print(f"      Command: {exec_command} {exec_arguments}")
+        print("      UAC prompt is scoped to one schtasks call.")
+        if not _run_schtasks_elevated(create_argstr, create_argv):
+            print("    [!!] schtasks /Create failed (UAC declined?)")
+            return False
+        if not _windows_task_exists(task_name):
+            print("    [!!] task not detected after /Create")
+            return False
+        print(f"    · task '{task_name}' registered")
+
+        # Trigger now — LogonTrigger only fires at next logon.
+        _run_schtasks_elevated(run_argstr, run_argv)
+        if _wait_for_consultants_health(port, timeout=health_timeout):
+            print(f"    · responding on 127.0.0.1:{port}")
+            return True
+        print(f"    [!!] task triggered but not responding on "
+              f"127.0.0.1:{port} within {health_timeout:.0f}s")
+        print(f"         Inspect: schtasks /Query /TN \"{task_name}\" /V /FO LIST")
+        return False
+    finally:
+        try:
+            xml_path.unlink()
+        except OSError:
+            pass
+
+
+def _install_consultants_windows(*, consultants_py: Path, service_mode: str,
+                                 engine_port: int, forwarder_port: int,
+                                 non_interactive: bool, dry_run: bool) -> None:
+    """Register the appropriate Windows scheduled task(s) for the
+    consultants engine.
+
+    - **always-on**: register a single ``claude-hooks-consultants``
+      task that runs ``<consultants-env>/pythonw.exe -m
+      consultants.server``. Engine listens on ``engine_port``.
+    - **smart-start**: register a ``claude-hooks-consultants-forwarder``
+      task running in the **main** claude-hooks env (stdlib only). The
+      forwarder spawns the engine on demand into the consultants env.
+
+    On either path we print clear `schtasks` fallback commands when
+    non-interactive (UAC can't be prompted), and clean up the temp XML
+    after schtasks consumes it. Mirrors the daemon's auto-install
+    behaviour so /consultants is a first-class Windows citizen, not a
+    CLI-only afterthought."""
+    if dry_run:
+        print("    [dry-run] would register Windows scheduled task")
+        return
+
+    workdir = str(HERE.resolve())
+
+    if service_mode == "always-on":
+        # pythonw avoids the cmd flash; fall back to console python only
+        # if pythonw is missing (rare).
+        pyw = find_conda_env_pythonw(env_name=CONSULTANTS_ENV_NAME)
+        exec_path = pyw if pyw is not None else consultants_py
+        if pyw is None:
+            print("    [!] pythonw.exe missing in consultants env — using "
+                  "python.exe; a console window will be visible.")
+        ok = _register_consultants_task(
+            task_name=_CONSULTANTS_TASK_NAME,
+            description=("claude-hooks /consultants engine — multi-agent "
+                         "council (always-on)"),
+            exec_command=str(exec_path),
+            exec_arguments=("-m consultants.server "
+                            f"--host 127.0.0.1 --port {engine_port}"),
+            workdir=workdir,
+            port=engine_port,
+            health_timeout=30.0,
+            non_interactive=non_interactive,
+        )
+        if ok:
+            print("    · always-on engine: ready")
+        return
+
+    # smart-start: forwarder runs in the MAIN claude-hooks env so we
+    # don't carry LangChain's import cost when the engine is reaped.
+    main_pyw = find_conda_env_pythonw()
+    main_py = find_conda_env_python()
+    if main_pyw is not None:
+        exec_command = str(main_pyw)
+    elif main_py.exists():
+        exec_command = str(main_py)
+    else:
+        print("    [!!] main claude-hooks env not found — can't register "
+              "the forwarder. Run `python install.py` first.")
+        return
+    forwarder_args = (
+        f"-m claude_hooks.consultants_forwarder "
+        f"--listen-port {forwarder_port} "
+        f"--engine-python \"{consultants_py}\""
+    )
+    ok = _register_consultants_task(
+        task_name=_CONSULTANTS_FORWARDER_TASK_NAME,
+        description=("claude-hooks /consultants smart-start forwarder — "
+                     "spawns engine on demand"),
+        exec_command=exec_command,
+        exec_arguments=forwarder_args,
+        workdir=workdir,
+        port=forwarder_port,
+        health_timeout=15.0,
+        non_interactive=non_interactive,
+    )
+    if ok:
+        print("    · smart-start forwarder: ready")
+
+
+# macOS launchd plist template — same shape as the daemon's, with
+# the ProgramArguments rewritten to invoke the engine / forwarder
+# directly. KeepAlive=true gives us systemd-style restart semantics.
+_CONSULTANTS_LAUNCHD_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{label}</string>
+  <key>ProgramArguments</key>
+  <array>
+{program_args_xml}
+  </array>
+  <key>WorkingDirectory</key><string>{workdir}</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>{logfile}</string>
+  <key>StandardErrorPath</key><string>{logfile}</string>
+</dict>
+</plist>
+"""
+
+
+def _consultants_launchd_plist(*, label: str, argv: list[str],
+                               workdir: str, logfile: str) -> str:
+    program_args_xml = "\n".join(
+        f"    <string>{_xml_escape(a)}</string>" for a in argv
+    )
+    return _CONSULTANTS_LAUNCHD_PLIST.format(
+        label=_xml_escape(label),
+        program_args_xml=program_args_xml,
+        workdir=_xml_escape(workdir),
+        logfile=_xml_escape(logfile),
+    )
+
+
+def _install_consultants_launchd(*, consultants_py: Path, service_mode: str,
+                                 engine_port: int, forwarder_port: int,
+                                 non_interactive: bool, dry_run: bool) -> None:
+    """Register a macOS launchd LaunchAgent for the consultants
+    engine (always-on) or smart-start forwarder. Mirrors
+    ``_install_daemon_launchd`` but with HTTP /v1/health verification
+    and a parameterised ProgramArguments so the same code handles
+    both modes."""
+    if dry_run:
+        print("    [dry-run] would write LaunchAgent plist + launchctl load")
+        return
+
+    plist_dir = Path.home() / "Library" / "LaunchAgents"
+    plist_dir.mkdir(parents=True, exist_ok=True)
+    home = str(Path.home())
+    workdir = str(HERE.resolve())
+
+    if service_mode == "always-on":
+        label = "com.claude-hooks.consultants"
+        argv = [str(consultants_py), "-m", "consultants.server",
+                "--host", "127.0.0.1", "--port", str(engine_port)]
+        port = engine_port
+        log = f"{home}/.claude/claude-hooks-consultants.log"
+        timeout = 30.0
+    else:
+        # Forwarder runs in the main env so LangChain doesn't load
+        # until the engine is actually needed.
+        main_py = find_conda_env_python()
+        if not main_py.exists():
+            print("    [!!] main claude-hooks env not found — can't wire "
+                  "the forwarder.")
+            return
+        label = "com.claude-hooks.consultants-forwarder"
+        argv = [str(main_py), "-m", "claude_hooks.consultants_forwarder",
+                "--listen-port", str(forwarder_port),
+                "--engine-python", str(consultants_py)]
+        port = forwarder_port
+        log = f"{home}/.claude/claude-hooks-consultants-forwarder.log"
+        timeout = 15.0
+
+    dest = plist_dir / f"{label}.plist"
+    if dest.exists():
+        if non_interactive:
+            print(f"    · {dest.name} already installed — "
+                  f"verifying health on 127.0.0.1:{port}")
+            if _wait_for_consultants_health(port, timeout=5.0):
+                print(f"    · responding on 127.0.0.1:{port}")
+                return
+            print(f"    [!!] not responding — try: "
+                  f"launchctl kickstart -k gui/$(id -u)/{label}")
+            return
+        ans = input(f"    {dest.name} already installed. "
+                    "Re-install + re-verify? [y/N]: ").strip().lower()
+        if ans in ("y", "yes"):
+            subprocess.run(["launchctl", "unload", "-w", str(dest)],
+                           capture_output=True)
+            try:
+                dest.unlink()
+            except OSError as e:
+                print(f"    [!!] could not remove {dest}: {e}")
+                return
+        else:
+            if _wait_for_consultants_health(port, timeout=5.0):
+                print(f"    · responding on 127.0.0.1:{port}")
+            else:
+                print(f"    [!!] not responding — try: "
+                      f"launchctl kickstart -k gui/$(id -u)/{label}")
+            return
+
+    plist_content = _consultants_launchd_plist(
+        label=label, argv=argv, workdir=workdir, logfile=log,
+    )
+    try:
+        dest.write_text(plist_content, encoding="utf-8")
+    except OSError as e:
+        print(f"    [!!] Failed to write {dest}: {e}")
+        return
+    print(f"    + wrote {dest}")
+    rc = subprocess.run(
+        ["launchctl", "load", "-w", str(dest)],
+        capture_output=True, text=True,
+    )
+    if rc.returncode != 0:
+        print(f"    [!!] launchctl load failed:\n{rc.stderr.strip()[-300:]}")
+        return
+    print("    · loaded into launchd")
+    if _wait_for_consultants_health(port, timeout=timeout):
+        print(f"    · responding on 127.0.0.1:{port}")
+    else:
+        print(f"    [!!] not responding within {timeout:.0f}s — try: "
+              f"launchctl kickstart -k gui/$(id -u)/{label}")
 
 
 def _install_consultants_systemd_unit(consultants_py: Path, *,
