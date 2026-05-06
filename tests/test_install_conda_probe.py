@@ -85,10 +85,15 @@ class TestFindCondaEnvPython:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         with patch.object(install, "_find_conda", return_value=None):
             out = install.find_conda_env_python()
-        # Fallback constants are returned so caller can ``.exists()``-check.
-        # We don't assert on the constant's existence because it may
-        # actually exist on the test host's real ~/anaconda3.
-        assert out in (install.CONDA_PY_LINUX, install.CONDA_PY_WIN)
+        # Fallback now uses Path.home() at call time AND env_name —
+        # the hardcoded CONDA_PY_LINUX/WIN constants captured the
+        # real home at module import, which doesn't follow monkeypatch
+        # (and was the bug that mis-routed the consultants install on
+        # solidpc 2026-05-06; see test_install_find_conda_env_python).
+        expected_parent = (tmp_path / "anaconda3" / "envs"
+                           / install.CONDA_ENV_NAME)
+        assert out.is_relative_to(expected_parent), out
+        assert out.name in ("python", "python.exe")
 
     def test_caches_after_first_resolve(self, tmp_path, monkeypatch):
         env = tmp_path / "anaconda3" / "envs" / "claude-hooks" / "bin"

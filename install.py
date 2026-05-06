@@ -174,10 +174,26 @@ def find_conda_env_python(env_name: str = CONDA_ENV_NAME) -> Path:
         except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
             pass
 
-    # Last resort: return the platform-default fallback. Caller will
-    # ``.exists()`` it; if it doesn't, the install path proceeds with
-    # system python3.
-    return CONDA_PY_WIN if os.name == "nt" else CONDA_PY_LINUX
+    # Last resort: return a canonical path **for the requested
+    # env_name**, NOT the hardcoded main-env constant. Caller will
+    # ``.exists()`` it; with env_name baked into the path, that check
+    # tells the truth instead of lying when a different env exists.
+    #
+    # The hardcoded ``CONDA_PY_LINUX`` / ``CONDA_PY_WIN`` constants
+    # caused a subtle bug on solidpc 2026-05-06: calling
+    # ``find_conda_env_python("claude-hooks-consultants")`` against a
+    # host that had ``claude-hooks`` (but no consultants env) returned
+    # the main env's python via the fallback. ``.exists()`` was True
+    # (because the main env IS installed), so ``_install_consultants``
+    # decided the consultants env was already there and pip-installed
+    # the heavy LangChain stack into the WRONG env. Constructing the
+    # fallback from env_name fixes it: a missing env produces a
+    # missing path, and the caller's exists() check correctly returns
+    # False.
+    home = Path.home()
+    if os.name == "nt":
+        return home / "anaconda3" / "envs" / env_name / "python.exe"
+    return home / "anaconda3" / "envs" / env_name / "bin" / "python"
 
 # Hook entries to install in ~/.claude/settings.json. Each event has its own
 # matcher block; matchers are empty strings (= match everything) for events
