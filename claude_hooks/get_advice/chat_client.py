@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
 from typing import Optional
@@ -19,14 +20,80 @@ from typing import Optional
 log = logging.getLogger("claude_hooks.get_advice.chat_client")
 
 DEFAULT_TIMEOUT_S = 600.0
+# Ollama Cloud is *very* unreliable on /api/chat — empirically about
+# 20% of calls return 5xx, and a non-trivial fraction return 400 with
+# upstream parser errors like ``"Value looks like object, but can't
+# find closing '}' symbol"`` even when the request body is verifiably
+# valid JSON (the same body retried wins seconds later). Treat 408,
+# 429, 4xx-with-known-transient-bodies, and all 5xx as retryable. The
+# retry budget is generous because cloud models can flap several
+# times in a row before settling.
+DEFAULT_MAX_RETRIES = 8
+DEFAULT_RETRY_BASE_DELAY_S = 1.5
+DEFAULT_RETRY_MAX_DELAY_S = 30.0
+RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
+# 4xx response bodies that look like transient cloud parser/validator
+# flaps rather than genuine "you sent bad data" errors. Substring
+# match against the response body. Conservative — anything not on
+# this list fails fast.
+RETRYABLE_4XX_BODY_SUBSTRINGS = (
+    "Value looks like object",       # cloud JSON validator hiccup
+    "but can't find closing",        # same
+    "unexpected end",                # truncated stream from upstream
+    "Bad Gateway",                   # 4xx body wrapping a 502 upstream
+)
+
+
+def _ollama_messages(messages: list[dict]) -> list[dict]:
+    """Translate OpenAI-shape messages into Ollama-native shape.
+
+    The one transform that matters: OpenAI tool_calls carry
+    ``function.arguments`` as a JSON-encoded **string**, while
+    Ollama's /api/chat expects an **object**. Sending the string
+    form makes Ollama Cloud return 400 with
+    ``"Value looks like object, but can't find closing '}' symbol"``
+    when it tries to read the message back from the conversation
+    history on iteration 1+. Parse and re-emit as a dict.
+    """
+    out: list[dict] = []
+    for m in messages:
+        tcs = m.get("tool_calls")
+        if not tcs:
+            out.append(m)
+            continue
+        new_tcs = []
+        for tc in tcs:
+            fn = dict(tc.get("function") or {})
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    fn["arguments"] = json.loads(args)
+                except json.JSONDecodeError:
+                    # Empty / malformed — fall back to {}.
+                    fn["arguments"] = {}
+            elif args is None:
+                fn["arguments"] = {}
+            tc2 = dict(tc)
+            tc2["function"] = fn
+            new_tcs.append(tc2)
+        m2 = dict(m)
+        m2["tool_calls"] = new_tcs
+        out.append(m2)
+    return out
 
 
 class ChatClient:
-    def __init__(self, base_url: str, *, timeout_s: float = DEFAULT_TIMEOUT_S):
+    def __init__(self, base_url: str, *, timeout_s: float = DEFAULT_TIMEOUT_S,
+                 max_retries: int = DEFAULT_MAX_RETRIES,
+                 retry_base_delay_s: float = DEFAULT_RETRY_BASE_DELAY_S,
+                 retry_max_delay_s: float = DEFAULT_RETRY_MAX_DELAY_S):
         self.base_url = base_url.rstrip("/")
         if self.base_url.endswith("/v1"):
             self.base_url = self.base_url[: -len("/v1")]
         self.timeout_s = timeout_s
+        self.max_retries = max_retries
+        self.retry_base_delay_s = retry_base_delay_s
+        self.retry_max_delay_s = retry_max_delay_s
         # Cumulative usage across calls in this client's lifetime.
         # Caller resets per-session as needed.
         self.last_usage: dict[str, int] = {
@@ -37,27 +104,87 @@ class ChatClient:
     def chat(self, payload: dict) -> dict:
         """POST /api/chat with the supplied (OpenAI-shape) payload.
         Translates the Ollama response back into OpenAI shape so the
-        agent-loop runner can consume it unchanged."""
+        agent-loop runner can consume it unchanged. Retries on
+        retryable 5xx with exponential backoff."""
         body = self._to_ollama(payload)
         url = f"{self.base_url}/api/chat"
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(body).encode(),
-            method="POST",
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
-                data = json.loads(resp.read())
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
-            log.error("ollama chat error: %s", e)
-            raise
-        return self._from_ollama(data)
+        encoded = json.dumps(body).encode()
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(self.max_retries + 1):
+            req = urllib.request.Request(
+                url,
+                data=encoded,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
+                    data = json.loads(resp.read())
+                if attempt > 0:
+                    log.info(
+                        "ollama chat: succeeded on retry %d/%d",
+                        attempt, self.max_retries,
+                    )
+                return self._from_ollama(data)
+            except urllib.error.HTTPError as e:
+                last_exc = e
+                # Read the body once — it carries the actual error
+                # detail from Ollama / cloud upstream (e.g. "context
+                # length exceeded", "model not loaded"). The default
+                # urllib repr only says "HTTP Error N: Reason".
+                try:
+                    err_body = e.read().decode(errors="replace")[:500]
+                except Exception:
+                    err_body = "<unreadable>"
+                retryable = (
+                    e.code in RETRYABLE_STATUS
+                    or (400 <= e.code < 500
+                        and any(s in err_body
+                                for s in RETRYABLE_4XX_BODY_SUBSTRINGS))
+                )
+                if retryable and attempt < self.max_retries:
+                    delay = min(
+                        self.retry_base_delay_s * (2 ** attempt),
+                        self.retry_max_delay_s,
+                    )
+                    log.warning(
+                        "ollama chat: HTTP %d on attempt %d/%d, "
+                        "retrying in %.1fs (body: %s)",
+                        e.code, attempt + 1, self.max_retries + 1, delay,
+                        err_body,
+                    )
+                    time.sleep(delay)
+                    continue
+                log.error("ollama chat: HTTP %d (giving up) body=%s",
+                          e.code, err_body)
+                raise RuntimeError(
+                    f"ollama chat HTTP {e.code}: {err_body}"
+                ) from e
+            except (urllib.error.URLError, OSError) as e:
+                last_exc = e
+                if attempt < self.max_retries:
+                    delay = min(
+                        self.retry_base_delay_s * (2 ** attempt),
+                        self.retry_max_delay_s,
+                    )
+                    log.warning(
+                        "ollama chat: %s on attempt %d/%d, retrying in %.1fs",
+                        e, attempt + 1, self.max_retries + 1, delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                log.error("ollama chat: %s (giving up)", e)
+                raise
+        # Shouldn't reach here — the loop either returns or raises.
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("ollama chat: no attempts made")
 
     def _to_ollama(self, payload: dict) -> dict:
         body: dict = {
             "model": payload.get("model"),
-            "messages": payload.get("messages") or [],
+            "messages": _ollama_messages(payload.get("messages") or []),
             "stream": False,
         }
         opts = dict(payload.get("options") or {})
@@ -76,23 +203,39 @@ class ChatClient:
         msg = dict(data.get("message") or {})
         # Ollama may return tool_calls with arguments as dict; runner
         # is fine with both, but normalize to JSON strings to match
-        # the OpenAI wire shape.
+        # the OpenAI wire shape. Also strip non-standard fields some
+        # Ollama Cloud models emit (notably ``function.index`` from
+        # qwen3.5/deepseek cloud builds — that field belongs at the
+        # tool_call level in OpenAI spec, not nested in ``function``,
+        # and echoing it back on the next turn causes the upstream
+        # JSON validator to 400 with "Value looks like object, but
+        # can't find closing '}' symbol"). Whitelist the function
+        # subobject to {name, arguments} to be safe.
         tool_calls = msg.get("tool_calls") or []
         if tool_calls:
             normalized = []
             for tc in tool_calls:
-                fn = dict(tc.get("function") or {})
-                args = fn.get("arguments")
+                raw_fn = tc.get("function") or {}
+                clean_fn: dict = {}
+                if "name" in raw_fn:
+                    clean_fn["name"] = raw_fn["name"]
+                args = raw_fn.get("arguments")
                 if isinstance(args, dict):
-                    fn["arguments"] = json.dumps(args)
-                tc2 = dict(tc)
-                tc2["function"] = fn
-                # Ollama doesn't always supply an id; fabricate one so
-                # tool_call_id round-trips cleanly.
-                if not tc2.get("id"):
+                    clean_fn["arguments"] = json.dumps(args)
+                elif args is not None:
+                    clean_fn["arguments"] = args
+                tc2: dict = {}
+                # Whitelist tool_call-level fields too.
+                if tc.get("id"):
+                    tc2["id"] = tc["id"]
+                else:
                     tc2["id"] = f"tc_{len(normalized)}"
-                if not tc2.get("type"):
-                    tc2["type"] = "function"
+                tc2["type"] = tc.get("type") or "function"
+                # ``index`` at the tool_call level IS standard (used
+                # in streaming deltas); keep it if present.
+                if "index" in tc:
+                    tc2["index"] = tc["index"]
+                tc2["function"] = clean_fn
                 normalized.append(tc2)
             msg["tool_calls"] = normalized
         finish_reason = "tool_calls" if tool_calls else "stop"

@@ -201,10 +201,15 @@ def cmd_turn(args: argparse.Namespace) -> int:
         max_iterations=int(args.max_iter),
         force_answer_after=int(args.force_answer_after),
         tools_available=tools_available,
-        # Default to no thinking budget — cloud advisor models like
-        # qwen3.5:cloud / deepseek-v4-pro:cloud already produce reasoned
-        # answers; we don't need an extra reasoning loop on top.
-        think=False,
+        # Let the advisor think. Cloud reasoning models (deepseek-v4,
+        # qwen3.5:cloud) reject ``think=false`` outright (proxy returns
+        # HTTP 500), and even where it's accepted, the whole point of
+        # asking an advisor is to get its reasoning — disabling
+        # thinking is the opposite of the skill's goal. Caliber's
+        # historical ``think=false`` default exists because gemma4
+        # over-thinks on structured-output tasks; that doesn't apply
+        # here.
+        think=True,
         # Don't force first tool: the advisor may answer cleanly from
         # context without needing tools. Caliber's force_first is for
         # gemma4 grounding-citation discipline; that's caliber's
@@ -215,11 +220,16 @@ def cmd_turn(args: argparse.Namespace) -> int:
         max_tool_calls_per_turn=int(args.max_tool_calls_per_turn),
     )
 
-    # Build the payload. ctx_max gets folded into options so Ollama
-    # allocates the right KV cache.
+    # Build the payload. Only forward ``num_ctx`` when the user
+    # explicitly pinned a value via ``/get-advice--model NAME CTX``;
+    # auto-probed values stay internal (used for the reset trigger,
+    # not for sizing the upstream KV cache). Cloud-hosted models
+    # (``:cloud`` suffix) reject explicit num_ctx with HTTP 500 when
+    # it equals their full reported context, so leaving it off is
+    # also the correct default for them.
     options: dict = {}
-    if sess.ctx_max:
-        options["num_ctx"] = sess.ctx_max
+    if cfg.ctx_max_explicit and cfg.ctx_max:
+        options["num_ctx"] = cfg.ctx_max
     payload = {
         "model": cfg.model,
         "messages": list(sess.messages),
