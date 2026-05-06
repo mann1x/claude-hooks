@@ -69,7 +69,7 @@ CONDA_PY_WIN = Path.home() / "anaconda3" / "envs" / CONDA_ENV_NAME / "python.exe
 
 # Resolved env path is cached so repeated calls during a single install
 # run don't re-spawn ``conda env list``.
-_CONDA_PY_CACHE: Optional[Path] = None
+_CONDA_PY_CACHE: dict[str, Path] = {}
 
 
 def find_conda_env_pythonw(env_name: str = CONDA_ENV_NAME) -> Optional[Path]:
@@ -106,11 +106,21 @@ def find_conda_env_python(env_name: str = CONDA_ENV_NAME) -> Path:
     reports. Returns the platform-default fallback path when nothing is
     found, so callers can still ``.exists()``-check on it.
 
-    Cached after first successful probe per process.
+    Cached per env_name after first successful probe — the cache used
+    to be a single global, which broke
+    ``find_conda_env_python('claude-hooks-consultants')`` after a prior
+    call with the default ``'claude-hooks'`` had already filled the
+    cache (it returned the wrong env's python). The bug shipped in
+    v1.0.5-dev and silently routed the consultants pip install into
+    the main env on pandorum on 2026-05-06; fix is per-env-name keying.
     """
     global _CONDA_PY_CACHE
-    if _CONDA_PY_CACHE is not None and _CONDA_PY_CACHE.exists():
-        return _CONDA_PY_CACHE
+    if not isinstance(_CONDA_PY_CACHE, dict):
+        # Migrate the legacy single-Path cache to a dict keyed by env.
+        _CONDA_PY_CACHE = {}
+    cached = _CONDA_PY_CACHE.get(env_name)
+    if cached is not None and cached.exists():
+        return cached
 
     # Step 1 -- try common install paths without spawning conda. Covers:
     #   - Linux:   ~/anaconda3, ~/miniconda3, /opt/conda
@@ -135,7 +145,7 @@ def find_conda_env_python(env_name: str = CONDA_ENV_NAME) -> Path:
         ]
     for c in candidates:
         if c.exists():
-            _CONDA_PY_CACHE = c
+            _CONDA_PY_CACHE[env_name] = c
             return c
 
     # Step 2 -- ask conda where it thinks the env lives.
@@ -159,7 +169,7 @@ def find_conda_env_python(env_name: str = CONDA_ENV_NAME) -> Path:
                         prefix / "python.exe",
                     ):
                         if layout.exists():
-                            _CONDA_PY_CACHE = layout
+                            _CONDA_PY_CACHE[env_name] = layout
                             return layout
         except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
             pass
