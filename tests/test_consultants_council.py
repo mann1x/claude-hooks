@@ -155,7 +155,11 @@ class TestPromptBuilders:
     def test_planner_messages_have_system_and_user(self):
         msgs = council.build_planner_messages("How does X work?")
         assert msgs[0]["role"] == "system"
-        assert "PLANNER" in msgs[0]["content"]
+        # The role marker now lives in the role-specific tail of
+        # the prompt (after the COUNCIL_PREAMBLE), as ``ROLE: planner``.
+        assert "ROLE: planner" in msgs[0]["content"]
+        # And the council preamble is prepended to every role.
+        assert "LLM-to-LLM council" in msgs[0]["content"]
         assert msgs[1] == {"role": "user", "content": "How does X work?"}
 
     def test_planner_strips_whitespace(self):
@@ -168,7 +172,8 @@ class TestPromptBuilders:
             "q", "1. step\n2. step", [], ground,
         )
         assert msgs[0]["content"] == "GROUNDING-BLOCK"
-        assert any("RESEARCHER" in m["content"] for m in msgs
+        # Same shape change as planner: ``ROLE: researcher`` after preamble.
+        assert any("ROLE: researcher" in m["content"] for m in msgs
                    if m["role"] == "system")
         body = msgs[-1]["content"]
         assert "USER QUESTION:\nq" in body
@@ -207,6 +212,36 @@ class TestPromptBuilders:
         msgs = council.build_synthesizer_messages("q", "p", ["r1"], None)
         body = msgs[-1]["content"]
         assert "CRITIC'S VERDICT" not in body
+
+    def test_council_preamble_prepended_to_every_role(self):
+        # Regression: every role's system message must carry the
+        # COUNCIL_PREAMBLE so the LLM-to-LLM / concise / dense /
+        # no-filler directives are inherited uniformly. The original
+        # v1 prompts had each role write its own preamble (or none),
+        # which let the synthesizer balloon to 8.5k completion tokens
+        # on a list-shaped question. Caught on solidpc 2026-05-06
+        # consultation csl-2026-05-06-2208-7f31.
+        marker = "LLM-to-LLM council"
+        for builder, args in [
+            (council.build_planner_messages, ("q",)),
+            (council.build_researcher_messages, ("q", "p", [], [])),
+            (council.build_critic_messages, ("q", "p", ["r1"])),
+            (council.build_synthesizer_messages,
+             ("q", "p", ["r1"], "DECISION: ready\nok")),
+        ]:
+            msgs = builder(*args)
+            sys_msgs = [m["content"] for m in msgs if m["role"] == "system"]
+            assert any(marker in c for c in sys_msgs), \
+                f"{builder.__name__}: missing council preamble"
+
+    def test_council_preamble_carries_density_directive(self):
+        # The preamble explicitly tells every role to prefer density
+        # over verbosity. Pin this so a future refactor can't silently
+        # drop it and re-introduce the synthesizer-bloat regression.
+        for marker in ("concise replies", "high information density",
+                       "avoid sign-offs"):
+            assert marker in council.COUNCIL_PREAMBLE, \
+                f"COUNCIL_PREAMBLE lost directive: {marker!r}"
 
 
 # ----------------------- planner_node ----------------------------- #
