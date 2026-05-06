@@ -1,0 +1,20 @@
+[Unit]
+Description=claude-hooks /consultants engine (always-on mode)
+Documentation=https://github.com/cytostack/claude-hooks
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=@WORKINGDIR@
+ExecStart=@PYTHON@ -m consultants.server --host 127.0.0.1
+Restart=on-failure
+RestartSec=5
+# Environment file is optional — drop overrides for
+# CALIBER_GROUNDING_UPSTREAM, OLLAMA_HOST etc. into
+# ~/.config/claude-hooks-consultants.env if you want them.
+EnvironmentFile=-%h/.config/claude-hooks-consultants.env
+StandardOutput=append:%h/.claude/claude-hooks-consultants.log
+StandardError=append:%h/.claude/claude-hooks-consultants.log
+
+[Install]
+WantedBy=default.target

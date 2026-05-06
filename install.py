@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -2709,6 +2710,159 @@ def _check_conda_env(*, non_interactive: bool, dry_run: bool) -> None:
         print(f"Hook runtime:   system python3")
 
 
+CONSULTANTS_ENV_NAME = "claude-hooks-consultants"
+
+
+def _install_consultants(cfg: dict, cfg_path: Path, *,
+                         non_interactive: bool, dry_run: bool) -> bool:
+    """Optional /consultants engine setup.
+
+    Returns True if the dedicated conda env is present (and any
+    service unit / config wiring requested by the user has been
+    written), False otherwise. The skills installer uses the return
+    value to decide whether to deploy the four /consultants skills.
+
+    Conda is **mandatory**: the consultants stack (LangGraph,
+    LangServe) is heavy and version-pinned, so we never fall back to
+    a bare venv or system Python. If conda is missing the function
+    prints a clear message pointing at Miniconda installation and
+    returns False.
+    """
+    print("\n==> /consultants engine")
+    consultants_py = find_conda_env_python(env_name=CONSULTANTS_ENV_NAME)
+    already_present = consultants_py.exists()
+    if already_present:
+        print(f"    {CONSULTANTS_ENV_NAME} env exists at:")
+        print(f"      {consultants_py}")
+    else:
+        print(f"    {CONSULTANTS_ENV_NAME} env not found.")
+
+    # Decide whether to (re)install. In non-interactive mode, only
+    # update the existing env; never create a new one without consent.
+    if non_interactive:
+        if not already_present:
+            print("    --non-interactive: skipping (no consent to create env).")
+            return False
+    else:
+        prompt = ("    Install /consultants engine?"
+                  if not already_present
+                  else "    Refresh /consultants engine deps?")
+        ans = input(f"{prompt} [y/N]: ").strip().lower()
+        if ans not in ("y", "yes"):
+            print("    Skipping /consultants install.")
+            return already_present
+
+    # Conda is mandatory.
+    conda_bin = _find_conda()
+    if not conda_bin:
+        print("    error: conda not found on PATH.")
+        print("    Install Miniconda from "
+              "https://docs.conda.io/projects/miniconda/ then re-run.")
+        return False
+
+    if dry_run:
+        print("    [dry-run] Would create env, install consultants, "
+              "and (optionally) install service unit.")
+        return already_present
+
+    # Service mode prompt — non-interactive defaults to always-on.
+    service_mode = "always-on"
+    if not non_interactive:
+        ans = input("    Service mode: [a]lways-on (default) or "
+                    "[s]mart-start (engine spawned on demand): ").strip().lower()
+        if ans.startswith("s"):
+            service_mode = "smart-start"
+
+    # Create env if needed.
+    if not already_present:
+        print(f"    Creating conda env '{CONSULTANTS_ENV_NAME}' "
+              "(Python 3.11)...")
+        rc = subprocess.run(
+            [conda_bin, "create", "-n", CONSULTANTS_ENV_NAME,
+             "python=3.11", "-y"],
+            capture_output=True, text=True,
+        )
+        if rc.returncode != 0:
+            print(f"    conda create failed:\n{rc.stderr[-500:]}")
+            return False
+        consultants_py = find_conda_env_python(
+            env_name=CONSULTANTS_ENV_NAME)
+        if not consultants_py.exists():
+            print(f"    error: env created but python not found at "
+                  f"{consultants_py}")
+            return False
+
+    # pip install -e consultants/ — heavy, but using the env's pip
+    # ensures all deps land in the right place.
+    print(f"    Installing consultants/ into {consultants_py.parent.name}...")
+    rc = subprocess.run(
+        [str(consultants_py), "-m", "pip", "install", "-e",
+         str(HERE / "consultants")],
+        capture_output=True, text=True,
+    )
+    if rc.returncode != 0:
+        print(f"    pip install -e consultants/ failed:\n{rc.stderr[-500:]}")
+        return False
+
+    # Wire smart-start flag into config/claude-hooks.json.
+    consultants_cfg = ((cfg.setdefault("hooks", {})
+                       .setdefault("consultants", {})))
+    smart = consultants_cfg.setdefault("smart_start", {})
+    smart["enabled"] = (service_mode == "smart-start")
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(json.dumps(cfg, indent=2) + "\n",
+                        encoding="utf-8")
+    print(f"    Service mode: {service_mode}")
+
+    # Always-on: install the systemd unit (Linux only — macOS plist
+    # and Windows Task Scheduler XML are stubs we drop on disk but
+    # don't auto-load).
+    if service_mode == "always-on" and platform.system() == "Linux":
+        _install_consultants_systemd_unit(consultants_py, dry_run=dry_run)
+    elif service_mode == "smart-start":
+        print("    Smart-start: the engine will be spawned by the "
+              "consultants forwarder on first request.")
+        print("    Make sure claude-hooks-consultants-forwarder is "
+              "running (systemd unit shipped under systemd/).")
+
+    return True
+
+
+def _install_consultants_systemd_unit(consultants_py: Path, *,
+                                      dry_run: bool) -> None:
+    """Drop the always-on systemd --user unit and reload."""
+    if dry_run:
+        print("    [dry-run] Would install claude-hooks-consultants.service")
+        return
+    unit_src = HERE / "systemd" / "claude-hooks-consultants.service"
+    if not unit_src.exists():
+        print(f"    warning: unit file missing at {unit_src}")
+        return
+    user_units = Path.home() / ".config" / "systemd" / "user"
+    user_units.mkdir(parents=True, exist_ok=True)
+    target = user_units / "claude-hooks-consultants.service"
+    text = unit_src.read_text(encoding="utf-8")
+    # Substitute placeholders the unit file uses.
+    text = text.replace("@PYTHON@", str(consultants_py))
+    text = text.replace("@WORKINGDIR@", str(HERE))
+    target.write_text(text, encoding="utf-8")
+    print(f"    Wrote {target}")
+    # Best-effort reload + enable.
+    subprocess.run(["systemctl", "--user", "daemon-reload"],
+                   capture_output=True)
+    rc = subprocess.run(
+        ["systemctl", "--user", "enable", "--now",
+         "claude-hooks-consultants.service"],
+        capture_output=True, text=True,
+    )
+    if rc.returncode == 0:
+        print("    Service enabled + started.")
+    else:
+        print(f"    systemctl enable: {rc.stderr.strip()[-300:]}")
+        print("    Run manually: "
+              "systemctl --user enable --now claude-hooks-consultants.service")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="install.py", description="claude-hooks installer")
     ap.add_argument("--dry-run", action="store_true", help="don't write any files")
@@ -2939,6 +3093,17 @@ def main() -> int:
     # Detect companion tools and install skills.
     print("\n==> Companion tools")
     installed_tools = _detect_companion_tools()
+
+    # /consultants engine — opt-in install of the dedicated conda env
+    # + service unit. Mutates installed_tools so the consultants
+    # skills only install when the env is present.
+    consultants_present = _install_consultants(
+        cfg, cfg_path,
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
+    installed_tools["claude-consultants"] = consultants_present
+
     _install_skills(installed_tools, non_interactive=args.non_interactive, dry_run=args.dry_run)
 
     # Episodic memory setup.
@@ -3190,6 +3355,16 @@ SKILLS = [
     ("get-advice--model",  None),    # config helper for /get-advice
     ("get-advice--effort", None),    # config helper for /get-advice
     ("get-advice--tools",  None),    # config helper for /get-advice
+    # /consultants — multi-agent council. The skills require the
+    # ``claude-hooks-consultants`` conda env which install.py creates
+    # on user opt-in via _install_consultants(). The "requires"
+    # marker is a sentinel checked by _install_skills against the
+    # tool-detection result; when the consultants env is missing the
+    # skills are skipped silently.
+    ("consultants",          "claude-consultants"),
+    ("consultants--list",    "claude-consultants"),
+    ("consultants--show",    "claude-consultants"),
+    ("consultants--config",  "claude-consultants"),
 ]
 
 

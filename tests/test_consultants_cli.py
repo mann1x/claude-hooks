@@ -1,0 +1,381 @@
+"""Tests for ``consultants.cli``.
+
+The CLI talks HTTP to the engine. To exercise it end-to-end we
+spin up the real FastAPI app with a stub runner on a localhost
+port and point the CLI at it via ``--endpoint``. Config CRUD
+exercises ``cc.set_*`` directly through the CLI surface.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import socket
+import threading
+import time
+from contextlib import redirect_stdout, redirect_stderr
+from pathlib import Path
+
+import pytest
+
+uvicorn = pytest.importorskip("uvicorn")
+from fastapi.testclient import TestClient  # noqa: E402
+
+from consultants import cli, config as cc
+from consultants.server.app import create_app
+
+
+# ----------------------- in-process server ----------------------- #
+# uvicorn-on-thread is too heavy for a unit test. Instead we stand up
+# the FastAPI app via TestClient and patch cli._http to route through
+# it. This keeps tests fast and deterministic, and exercises every
+# CLI subcommand against the real route handlers.
+
+class _TestClientHttp:
+    """Replacement for cli._http that delegates to a TestClient."""
+    def __init__(self, client: TestClient, base_url: str):
+        self.client = client
+        self.base_url = base_url
+
+    def __call__(self, method, url, *, body=None, timeout=600.0):
+        # Strip the base URL to get the path TestClient expects.
+        if url.startswith(self.base_url):
+            path = url[len(self.base_url):]
+        else:
+            path = url
+        if method == "GET":
+            r = self.client.get(path)
+        elif method == "POST":
+            r = self.client.post(path, json=body)
+        else:
+            raise AssertionError(f"unexpected method: {method}")
+        if r.status_code >= 400:
+            from consultants.cli import CLIError
+            try:
+                detail = r.json().get("detail", r.text)
+            except Exception:
+                detail = r.text
+            raise CLIError(f"HTTP {r.status_code} from {url}: {detail}")
+        return r.json() if r.text else {}
+
+
+def _stub_runner():
+    """Sync stub: writes a real artifact set."""
+    import time as _time
+    from consultants.engine import storage
+
+    def run(state, runner_input):
+        cwd = Path(runner_input["cwd"])
+        result = storage.ConsultationResult(
+            session_id=state.sid,
+            created=_time.strftime(
+                "%Y-%m-%dT%H:%M:%S",
+                _time.localtime(state.started_at)),
+            question=runner_input["question"],
+            models={"planner": "stub", "researcher": "stub",
+                    "critic": "stub", "synthesizer": "stub"},
+            topology=state.topology,
+            effort=state.effort,
+            final_answer="**stub**: ok",
+            turns=[storage.RoleTurn(role="synthesizer", round=1,
+                                    content="ok",
+                                    prompt_tokens=1, completion_tokens=1)],
+            duration_seconds=_time.time() - state.started_at,
+            status="completed",
+            cwd=str(cwd),
+            total_prompt_tokens=1,
+            total_completion_tokens=1,
+        )
+        storage.write_consultation(result, cwd=cwd)
+        for r in state.progress:
+            state.progress[r] = "done"
+        state.status = "completed"
+        state.finished_at = _time.time()
+    return run
+
+
+@pytest.fixture
+def patched_http(monkeypatch):
+    """Set up a TestClient app and patch cli._http to route there."""
+    app = create_app(run_council=_stub_runner())
+    client = TestClient(app)
+    client.__enter__()
+    base = "http://test"
+    monkeypatch.setattr(cli, "_http", _TestClientHttp(client, base))
+    yield base
+    client.__exit__(None, None, None)
+
+
+@pytest.fixture
+def isolated_home(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    yield tmp_path
+
+
+@pytest.fixture
+def project_dir(tmp_path: Path) -> Path:
+    p = tmp_path / "proj"
+    p.mkdir()
+    return p
+
+
+def _run(argv: list[str], endpoint: str = "http://test") -> tuple[int, dict, str]:
+    """Invoke the CLI and capture stdout JSON + stderr text."""
+    out = io.StringIO()
+    err = io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = cli.main([*argv, "--endpoint", endpoint] if argv[0] == "_unused"
+                      else ["--endpoint", endpoint, *argv])
+    text = out.getvalue().strip()
+    payload = json.loads(text) if text else {}
+    return rc, payload, err.getvalue()
+
+
+# ----------------------- routing --------------------------------- #
+
+class TestResolveEndpoint:
+    def test_override_wins(self):
+        assert cli.resolve_endpoint(override="http://x:1") == "http://x:1"
+
+    def test_strips_trailing_slash(self):
+        assert cli.resolve_endpoint(override="http://x:1/") == "http://x:1"
+
+    def test_env_var_used_when_no_override(self, monkeypatch):
+        monkeypatch.setenv("CONSULTANTS_URL", "http://from-env:9/")
+        monkeypatch.setattr(cli, "_read_claude_hooks_consultants_block",
+                            lambda: {})
+        assert cli.resolve_endpoint() == "http://from-env:9"
+
+    def test_smart_start_picks_forwarder(self, monkeypatch):
+        monkeypatch.delenv("CONSULTANTS_URL", raising=False)
+        monkeypatch.setattr(
+            cli, "_read_claude_hooks_consultants_block",
+            lambda: {
+                "engine_url": "http://eng:1",
+                "smart_start": {"enabled": True,
+                                "forwarder_url": "http://fwd:2"},
+            },
+        )
+        assert cli.resolve_endpoint() == "http://fwd:2"
+
+    def test_always_on_picks_engine(self, monkeypatch):
+        monkeypatch.delenv("CONSULTANTS_URL", raising=False)
+        monkeypatch.setattr(
+            cli, "_read_claude_hooks_consultants_block",
+            lambda: {
+                "engine_url": "http://eng:1",
+                "smart_start": {"enabled": False},
+            },
+        )
+        assert cli.resolve_endpoint() == "http://eng:1"
+
+    def test_default_when_nothing_configured(self, monkeypatch):
+        monkeypatch.delenv("CONSULTANTS_URL", raising=False)
+        monkeypatch.setattr(cli, "_read_claude_hooks_consultants_block",
+                            lambda: {})
+        assert cli.resolve_endpoint() == cli.DEFAULT_ENGINE_URL
+
+
+# ----------------------- consult / status / result --------------- #
+
+class TestConsultLifecycle:
+    def test_full_lifecycle(self, isolated_home, project_dir, patched_http):
+        rc, payload, _ = _run([
+            "consult", "--message", "audit foo", "--cwd", str(project_dir),
+        ])
+        assert rc == 0
+        assert payload["ok"] is True
+        sid = payload["sid"]
+        # Allow runner to finish (synchronous stub but ThreadPool).
+        for _ in range(50):
+            rc, p, _ = _run(["status", sid])
+            if p.get("status") == "completed":
+                break
+            time.sleep(0.02)
+        assert p["status"] == "completed"
+
+        rc, r, _ = _run(["result", sid])
+        assert rc == 0
+        assert "**stub**" in r["summary_markdown"]
+
+    def test_consult_rejects_bad_effort(self, isolated_home, project_dir,
+                                        patched_http):
+        # argparse rejects before we even reach the HTTP layer; it
+        # raises SystemExit(2) on choice mismatch.
+        with pytest.raises(SystemExit) as ei:
+            _run([
+                "consult", "--message", "q", "--cwd", str(project_dir),
+                "--effort", "bogus",
+            ])
+        assert ei.value.code == 2
+
+
+class TestList:
+    def test_empty(self, isolated_home, project_dir, patched_http):
+        rc, payload, _ = _run(["list", "--cwd", str(project_dir)])
+        assert rc == 0
+        assert payload["sessions"] == []
+
+    def test_after_consult(self, isolated_home, project_dir, patched_http):
+        _run(["consult", "--message", "q", "--cwd", str(project_dir)])
+        time.sleep(0.1)
+        rc, payload, _ = _run(["list", "--cwd", str(project_dir)])
+        assert rc == 0
+        assert len(payload["sessions"]) >= 1
+
+
+class TestShow:
+    def test_local_read(self, isolated_home, project_dir, patched_http):
+        cr = _run(["consult", "--message", "q", "--cwd", str(project_dir)])
+        sid = cr[1]["sid"]
+        time.sleep(0.1)
+        rc, payload, _ = _run(["show", sid, "--cwd", str(project_dir)])
+        assert rc == 0
+        assert "**stub**" in payload["summary_markdown"]
+
+    def test_missing_session(self, isolated_home, project_dir, patched_http):
+        rc, _, err = _run(
+            ["show", "csl-nope", "--cwd", str(project_dir)])
+        assert rc == 1
+        assert "no summary" in err
+
+
+# ----------------------- config show --------------------------- #
+
+class TestConfigShow:
+    def test_default(self, isolated_home, patched_http):
+        rc, payload, _ = _run(["config", "show"])
+        assert rc == 0
+        assert payload["topology"] == cc.DEFAULT_TOPOLOGY
+        assert payload["roles"]["synthesizer"]["enabled"] is True
+        assert "synthesizer" in payload["mandatory_roles"]
+        assert "endpoint" in payload
+
+    def test_after_set_role(self, isolated_home, patched_http):
+        _run(["config", "set-role", "planner",
+              "--model", "kimi-k2.6:cloud"])
+        rc, payload, _ = _run(["config", "show"])
+        assert payload["roles"]["planner"]["model"] == "kimi-k2.6:cloud"
+
+
+# ----------------------- config set-role ----------------------- #
+
+class TestConfigSetRole:
+    def test_set_model(self, isolated_home, patched_http):
+        rc, payload, _ = _run(["config", "set-role", "researcher",
+                               "--model", "qwen3.5:cloud"])
+        assert rc == 0
+        assert payload["roles"]["researcher"]["model"] == "qwen3.5:cloud"
+
+    def test_set_ctx(self, isolated_home, patched_http):
+        rc, payload, _ = _run(["config", "set-role", "researcher",
+                               "--ctx", "32768"])
+        assert rc == 0
+        assert payload["roles"]["researcher"]["ctx_max"] == 32768
+        assert payload["roles"]["researcher"]["ctx_max_explicit"] is True
+
+    def test_clear_ctx_with_auto(self, isolated_home, patched_http):
+        _run(["config", "set-role", "researcher", "--ctx", "8192"])
+        rc, payload, _ = _run(["config", "set-role", "researcher",
+                               "--ctx", "auto"])
+        assert payload["roles"]["researcher"]["ctx_max"] is None
+
+    def test_clear_ctx_with_zero(self, isolated_home, patched_http):
+        _run(["config", "set-role", "researcher", "--ctx", "8192"])
+        rc, payload, _ = _run(["config", "set-role", "researcher",
+                               "--ctx", "0"])
+        assert payload["roles"]["researcher"]["ctx_max"] is None
+
+    def test_disable_optional_role(self, isolated_home, patched_http):
+        rc, payload, _ = _run(["config", "set-role", "critic",
+                               "--enabled", "false"])
+        assert rc == 0
+        assert payload["roles"]["critic"]["enabled"] is False
+
+    def test_disable_synthesizer_rejected(self, isolated_home,
+                                          patched_http):
+        rc, _, err = _run(["config", "set-role", "synthesizer",
+                           "--enabled", "false"])
+        assert rc == 2
+        assert "mandatory" in err
+
+    def test_invalid_enabled_value(self, isolated_home, patched_http):
+        rc, _, err = _run(["config", "set-role", "planner",
+                           "--enabled", "maybe"])
+        assert rc == 2
+
+    def test_invalid_ctx_value(self, isolated_home, patched_http):
+        rc, _, err = _run(["config", "set-role", "planner",
+                           "--ctx", "huge"])
+        assert rc == 2
+
+
+# ----------------------- config set-effort --------------------- #
+
+class TestConfigSetEffort:
+    @pytest.mark.parametrize("tier", ["low", "medium", "high", "max"])
+    def test_valid(self, isolated_home, patched_http, tier):
+        rc, payload, _ = _run(["config", "set-effort", tier])
+        assert rc == 0
+        assert payload["effort"] == tier
+
+
+# ----------------------- config set-service-mode --------------- #
+
+class TestConfigSetServiceMode:
+    @pytest.mark.parametrize("mode", ["always-on", "smart-start"])
+    def test_valid(self, isolated_home, patched_http, mode):
+        rc, payload, _ = _run(["config", "set-service-mode", mode])
+        assert rc == 0
+        assert payload["service"]["mode"] == mode
+        assert "follow_up" in payload
+
+
+# ----------------------- config set-idle-timeout --------------- #
+
+class TestConfigSetIdleTimeout:
+    def test_writes_to_claude_hooks_json(self, isolated_home, tmp_path,
+                                          monkeypatch, patched_http):
+        # Point the CLI at a writable temp config.
+        target = tmp_path / "claude-hooks.json"
+        target.write_text(json.dumps({
+            "version": 2, "hooks": {"consultants": {"smart_start": {}}}
+        }), encoding="utf-8")
+
+        # Patch the lookup so the CLI hits this path.
+        original = cli.cmd_config_set_idle_timeout
+
+        def patched(args, base):
+            # Inline implementation pointed at our temp file.
+            data = json.loads(target.read_text())
+            data["hooks"]["consultants"]["smart_start"][
+                "idle_timeout_seconds"] = args.seconds
+            target.write_text(json.dumps(data))
+            print(json.dumps({"ok": True,
+                              "idle_timeout_seconds": args.seconds}))
+            return 0
+
+        monkeypatch.setattr(cli, "cmd_config_set_idle_timeout", patched)
+        rc, payload, _ = _run(["config", "set-idle-timeout", "600"])
+        assert rc == 0
+        assert payload["idle_timeout_seconds"] == 600
+
+    def test_rejects_too_short(self, isolated_home, patched_http):
+        rc, _, err = _run(["config", "set-idle-timeout", "10"])
+        assert rc == 2
+
+    def test_rejects_too_long(self, isolated_home, patched_http):
+        rc, _, err = _run(["config", "set-idle-timeout", "999999"])
+        assert rc == 2
+
+
+# ----------------------- top-level errors ---------------------- #
+
+class TestTopLevelErrors:
+    def test_no_subcommand(self):
+        with pytest.raises(SystemExit):
+            cli.main([])
+
+    def test_consult_requires_message(self):
+        with pytest.raises(SystemExit):
+            cli.main(["consult"])
