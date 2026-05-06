@@ -161,9 +161,21 @@ def _write_failed_artifacts(state, cwd: str, question: str,
 
 def default_ollama_url() -> str:
     """Pick the Ollama base URL the consultants service should use.
-    Mirrors the precedence /get-advice and caliber-proxy use."""
-    return (
-        os.environ.get("CALIBER_GROUNDING_UPSTREAM")
-        or os.environ.get("OLLAMA_HOST")
-        or "http://192.168.178.2:11433"
-    )
+
+    Precedence:
+      1. ``CALIBER_GROUNDING_UPSTREAM`` — canonical proxy URL across
+         claude-hooks. If set, we trust it verbatim.
+      2. ``OLLAMA_HOST`` — only when it looks like a real URL
+         (``http://`` / ``https://`` prefix). It's frequently set to a
+         bare bind address (``0.0.0.0`` on pandorum) for the local
+         Ollama daemon, which is not a valid base URL — silently
+         ignore those.
+      3. The cluster-default proxy at 192.168.178.2:11433.
+    """
+    upstream = os.environ.get("CALIBER_GROUNDING_UPSTREAM")
+    if upstream:
+        return upstream
+    ollama_host = os.environ.get("OLLAMA_HOST")
+    if ollama_host and ollama_host.startswith(("http://", "https://")):
+        return ollama_host
+    return "http://192.168.178.2:11433"
