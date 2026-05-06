@@ -36,5 +36,13 @@ test = [
 claude-consultants = "consultants.cli:main"
 consultants-server = "consultants.server.__main__:main"
 
-[tool.setuptools.packages.find]
-include = ["consultants*"]
+# The pyproject lives INSIDE the package directory (claude-hooks's
+# main pyproject.toml occupies the repo root, so we can't put this
+# one a level up). Map every package back to its on-disk path: the
+# ``consultants`` top-level package is ``.`` (the dir holding this
+# file), and the two subpackages live in ``engine`` / ``server``
+# relative to it. Explicit packages list avoids find-packages
+# misinterpreting ``engine`` / ``server`` as top-level modules.
+[tool.setuptools]
+packages = ["consultants", "consultants.engine", "consultants.server"]
+package-dir = { "consultants" = ".", "consultants.engine" = "engine", "consultants.server" = "server" }
