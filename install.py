@@ -3179,13 +3179,17 @@ COMPANION_TOOLS = [
 # Skills shipped with the repo and what they require.
 # requirement: None = always install, or a tool binary name.
 SKILLS = [
-    ("reflect",       None),         # built-in: uses claude-hooks reflect module
-    ("consolidate",   None),         # built-in: uses claude-hooks consolidate module
-    ("save-learning", None),         # standalone
-    ("find-skills",   None),         # standalone
-    ("setup-caliber", "caliber"),    # needs caliber installed
-    ("episodic",      None),         # queries remote episodic-server API
-    ("wrapup",        None),         # session state summary for hand-off / compact
+    ("reflect",            None),    # built-in: uses claude-hooks reflect module
+    ("consolidate",        None),    # built-in: uses claude-hooks consolidate module
+    ("save-learning",      None),    # standalone
+    ("find-skills",        None),    # standalone
+    ("setup-caliber",      "caliber"),  # needs caliber installed
+    ("episodic",           None),    # queries remote episodic-server API
+    ("wrapup",             None),    # session state summary for hand-off / compact
+    ("get-advice",         None),    # LLM-to-LLM advisor (uses bin/claude-advisor)
+    ("get-advice--model",  None),    # config helper for /get-advice
+    ("get-advice--effort", None),    # config helper for /get-advice
+    ("get-advice--tools",  None),    # config helper for /get-advice
 ]
 
 
