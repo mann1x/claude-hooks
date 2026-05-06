@@ -138,3 +138,107 @@ class TestSubprocessFallback:
                 "postgresql://x@127.0.0.1/db")
         assert ok is False
         assert "subprocess failed" in reason
+
+
+# ----------------------- _pgvector_tables_present ----------------- #
+# Same fallback shape as the verify function — without it, install.py
+# running on system py3 returned False here even when the table
+# existed, re-prompting schema init on every re-run (bug observed on
+# solidpc 2026-05-06).
+
+class TestTablesPresent:
+    def test_subprocess_present_true(self, tmp_path, monkeypatch):
+        fake_py = tmp_path / "envs" / "claude-hooks" / "bin" / "python"
+        fake_py.parent.mkdir(parents=True, exist_ok=True)
+        fake_py.write_text("")
+        monkeypatch.setitem(sys.modules, "psycopg", None)
+        rc = MagicMock(returncode=0,
+                       stdout=json.dumps({"present": True}) + "\n",
+                       stderr="")
+        with patch("install.find_conda_env_python", return_value=fake_py), \
+             patch("install.subprocess.run", return_value=rc) as run:
+            ok = install._pgvector_tables_present(
+                "postgresql://x@127.0.0.1/db", "memories_qwen3")
+        assert ok is True
+        # Confirm we called the conda env's python with both the dsn
+        # and the table name.
+        args = run.call_args.args[0]
+        assert args[0] == str(fake_py)
+        assert args[-2] == "postgresql://x@127.0.0.1/db"
+        assert args[-1] == "memories_qwen3"
+
+    def test_subprocess_present_false(self, tmp_path, monkeypatch):
+        fake_py = tmp_path / "envs" / "claude-hooks" / "bin" / "python"
+        fake_py.parent.mkdir(parents=True, exist_ok=True)
+        fake_py.write_text("")
+        monkeypatch.setitem(sys.modules, "psycopg", None)
+        rc = MagicMock(returncode=0,
+                       stdout=json.dumps({"present": False}) + "\n",
+                       stderr="")
+        with patch("install.find_conda_env_python", return_value=fake_py), \
+             patch("install.subprocess.run", return_value=rc):
+            ok = install._pgvector_tables_present(
+                "postgresql://x@127.0.0.1/db", "missing_table")
+        assert ok is False
+
+    def test_no_conda_env_returns_false(self, tmp_path, monkeypatch):
+        missing = tmp_path / "no" / "such" / "python"
+        monkeypatch.setitem(sys.modules, "psycopg", None)
+        with patch("install.find_conda_env_python", return_value=missing):
+            ok = install._pgvector_tables_present(
+                "postgresql://x@127.0.0.1/db", "memories_qwen3")
+        assert ok is False
+
+    def test_subprocess_garbage_returns_false(self, tmp_path, monkeypatch):
+        fake_py = tmp_path / "envs" / "claude-hooks" / "bin" / "python"
+        fake_py.parent.mkdir(parents=True, exist_ok=True)
+        fake_py.write_text("")
+        monkeypatch.setitem(sys.modules, "psycopg", None)
+        rc = MagicMock(returncode=0, stdout="banana\n", stderr="")
+        with patch("install.find_conda_env_python", return_value=fake_py), \
+             patch("install.subprocess.run", return_value=rc):
+            ok = install._pgvector_tables_present(
+                "postgresql://x@127.0.0.1/db", "x")
+        assert ok is False
+
+
+# ----------------------- _init_pgvector_schema ------------------- #
+
+class TestInitSchema:
+    def test_subprocess_path_pipes_ddl_via_stdin(
+            self, tmp_path, monkeypatch):
+        fake_py = tmp_path / "envs" / "claude-hooks" / "bin" / "python"
+        fake_py.parent.mkdir(parents=True, exist_ok=True)
+        fake_py.write_text("")
+        monkeypatch.setitem(sys.modules, "psycopg", None)
+        rc = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("install.find_conda_env_python", return_value=fake_py), \
+             patch("install.subprocess.run", return_value=rc) as run:
+            install._init_pgvector_schema(
+                "postgresql://x@127.0.0.1/db", model="qwen3")
+        kwargs = run.call_args.kwargs
+        # DDL flows in via stdin, dsn via argv.
+        assert "CREATE EXTENSION" in (kwargs.get("input") or "")
+        args = run.call_args.args[0]
+        assert args[0] == str(fake_py)
+        assert args[-1] == "postgresql://x@127.0.0.1/db"
+
+    def test_subprocess_failure_raises(self, tmp_path, monkeypatch):
+        fake_py = tmp_path / "envs" / "claude-hooks" / "bin" / "python"
+        fake_py.parent.mkdir(parents=True, exist_ok=True)
+        fake_py.write_text("")
+        monkeypatch.setitem(sys.modules, "psycopg", None)
+        rc = MagicMock(returncode=1, stdout="", stderr="oh no")
+        with patch("install.find_conda_env_python", return_value=fake_py), \
+             patch("install.subprocess.run", return_value=rc):
+            with pytest.raises(RuntimeError, match="schema init failed"):
+                install._init_pgvector_schema(
+                    "postgresql://x@127.0.0.1/db", model="qwen3")
+
+    def test_no_conda_env_raises(self, tmp_path, monkeypatch):
+        missing = tmp_path / "no" / "such" / "python"
+        monkeypatch.setitem(sys.modules, "psycopg", None)
+        with patch("install.find_conda_env_python", return_value=missing):
+            with pytest.raises(RuntimeError, match="conda env not found"):
+                install._init_pgvector_schema(
+                    "postgresql://x@127.0.0.1/db", model="qwen3")

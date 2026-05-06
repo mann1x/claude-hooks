@@ -2495,20 +2495,61 @@ def _pgvector_tables_present(dsn: str, table_name: str) -> bool:
     we treat the schema as initialized. The shared kg_entities /
     kg_relations / kg_observations_<model> get audited inside
     ``_init_pgvector_schema`` (every CREATE is idempotent).
+
+    Like ``_verify_pgvector_dsn``, falls back to a conda-env
+    subprocess when the calling interpreter lacks psycopg — without
+    this fallback, install.py running on system py3 (which has no
+    psycopg) returns False here and silently re-prompts schema init
+    on every re-run, making the user think the existing schema has
+    vanished.
     """
+    # Fast path.
     try:
-        import psycopg  # type: ignore
+        import psycopg  # type: ignore  # noqa: PLC0415
+        try:
+            with psycopg.connect(dsn, connect_timeout=5) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_name = %s",
+                        (table_name,),
+                    )
+                    return cur.fetchone() is not None
+        except Exception:
+            return False
     except ImportError:
+        pass
+
+    # Subprocess fallback via the conda env's python.
+    conda_py = find_conda_env_python()
+    if not conda_py.exists():
+        return False
+    script = (
+        "import json, sys\n"
+        "try:\n"
+        "    import psycopg\n"
+        "    with psycopg.connect(sys.argv[1], connect_timeout=5) as conn:\n"
+        "        with conn.cursor() as cur:\n"
+        "            cur.execute("
+        "'SELECT 1 FROM information_schema.tables WHERE table_name = %s', "
+        "(sys.argv[2],))\n"
+        "            print(json.dumps({'present': cur.fetchone() is not None}))\n"
+        "except Exception as e:\n"
+        "    print(json.dumps({'present': False, 'error': str(e)}))\n"
+    )
+    try:
+        rc = subprocess.run(
+            [str(conda_py), "-c", script, dsn, table_name],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    out = (rc.stdout or "").strip().splitlines()
+    if not out:
         return False
     try:
-        with psycopg.connect(dsn, connect_timeout=5) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT 1 FROM information_schema.tables WHERE table_name = %s",
-                    (table_name,),
-                )
-                return cur.fetchone() is not None
-    except Exception:
+        return bool(json.loads(out[-1]).get("present"))
+    except json.JSONDecodeError:
         return False
 
 
@@ -2570,19 +2611,58 @@ def _init_pgvector_schema(dsn: str, *, model: str = "qwen3") -> None:
     ``scripts.migrate_to_pgvector.schema_sql_for_model`` so install.py
     and the bulk migration stay in lock-step on table layout, indexes,
     and constraints -- drift between them silently breaks recall.
+
+    Falls back to the conda env's python when the calling interpreter
+    lacks psycopg, mirroring ``_verify_pgvector_dsn`` and
+    ``_pgvector_tables_present``. The DDL is piped via stdin (it's a
+    few KB so argv would be cramped).
     """
-    import psycopg  # type: ignore
+    # Build the full DDL once so both code paths use identical text.
     sys.path.insert(0, str(HERE / "scripts"))
     try:
         from migrate_to_pgvector import MODELS, schema_sql_for_model  # type: ignore
     finally:
         sys.path.pop(0)
     spec = MODELS[model]
-    with psycopg.connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute(_PGVECTOR_SHARED_DDL)
-            cur.execute(schema_sql_for_model(spec))
-        conn.commit()
+    full_sql = _PGVECTOR_SHARED_DDL + "\n" + schema_sql_for_model(spec)
+
+    # Fast path: psycopg in this interpreter.
+    try:
+        import psycopg  # type: ignore  # noqa: PLC0415
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(full_sql)
+            conn.commit()
+        return
+    except ImportError:
+        pass
+
+    # Subprocess fallback.
+    conda_py = find_conda_env_python()
+    if not conda_py.exists():
+        raise RuntimeError(
+            "psycopg not in current python and conda env not found at "
+            f"{conda_py}; cannot initialize pgvector schema. "
+            "Activate the conda env or install psycopg in your shell."
+        )
+    script = (
+        "import sys\n"
+        "import psycopg\n"
+        "ddl = sys.stdin.read()\n"
+        "with psycopg.connect(sys.argv[1]) as conn:\n"
+        "    with conn.cursor() as cur:\n"
+        "        cur.execute(ddl)\n"
+        "    conn.commit()\n"
+    )
+    rc = subprocess.run(
+        [str(conda_py), "-c", script, dsn],
+        input=full_sql, capture_output=True, text=True, timeout=60,
+    )
+    if rc.returncode != 0:
+        raise RuntimeError(
+            f"pgvector schema init failed (rc={rc.returncode}): "
+            f"{rc.stderr.strip()[-500:]}"
+        )
 
 
 def _ensure_proxy_deps(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
