@@ -30,10 +30,41 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, TypedDict
 
 from consultants.engine import council
 from consultants.config import ROLES
+
+
+# ----------------------- state schema --------------------------- #
+# LangGraph's StateGraph treats every declared key as a channel; only
+# channels are preserved across node hops. ``StateGraph(dict)`` with
+# no schema works for trivial graphs but silently strips keys the
+# graph hasn't seen as node return values — including the initial
+# state — which is how the v1 deploy ate ``question`` between
+# ``invoke()`` and the first ``planner_node`` call. Declare the full
+# state shape as a TypedDict so every key the council uses is a
+# preserved channel.
+
+class CouncilState(TypedDict, total=False):
+    question: str
+    cwd: str
+    models: dict
+    topology: str
+    effort: str
+    plan: str
+    research: list
+    critique: Optional[str]
+    critic_decision: Optional[str]
+    final_answer: str
+    turns: list
+    research_rounds_used: int
+    critic_reroutes_used: int
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    retries_by_role: dict
+    error: Optional[str]
+    _role_failed: Optional[str]
 
 log = logging.getLogger("consultants.engine.graph")
 
@@ -174,7 +205,7 @@ def build_council_graph(deps: GraphDeps,
     if "synthesizer" not in enabled:
         raise ValueError("synthesizer must be enabled")
 
-    sg = StateGraph(dict)
+    sg = StateGraph(CouncilState)
 
     # Wrappers per role (closures over deps).
     if "planner" in enabled:
