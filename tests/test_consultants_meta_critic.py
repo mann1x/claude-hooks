@@ -479,3 +479,135 @@ class TestGraphTopologyMultiCritic:
         )
         graph = compiled.get_graph()
         assert "meta_critic" not in graph.nodes
+
+    def test_xmax_with_critic_extras_includes_research_barrier(self):
+        # Phase 10a regression: the fan-out conditional edge from
+        # researcher fires per-Send-invocation, not per-barrier.
+        # Without the research_barrier pass-through node, N×M
+        # researcher lanes would each trigger their own critic
+        # fan-out, spawning N×M×C critic invocations instead of C.
+        # The fix inserts a single-invocation pass-through node
+        # whose unconditional edge from researcher barriers cleanly,
+        # so the downstream conditional fan-out fires exactly once.
+        compiled = self._try_build(
+            effort="xmax",
+            researcher_extras=["a:cloud", "b:cloud"],
+            critic_extras=["c:cloud", "d:cloud"],
+        )
+        graph = compiled.get_graph()
+        assert "research_barrier" in graph.nodes
+        assert "meta_critic" in graph.nodes
+
+    def test_xmax_critic_invocation_count_equals_critic_models(self):
+        # End-to-end count invariant: regardless of how many
+        # researcher lanes fan out, the critic fires exactly
+        # 1 + len(critic_extras) times. Caught on the first live
+        # xmax smoke (csl-...-2a8f) where 6 researcher lanes
+        # produced 18 critic invocations instead of 3.
+        pytest.importorskip("langgraph")
+        from consultants.engine.graph import (
+            GraphDeps, build_council_graph,
+        )
+
+        # Track how many times each ROLE NODE fires. The meta_critic
+        # node shares the critic's ChatClient (by design — meta-
+        # critic IS the primary critic model), so we can't just
+        # count chat calls; we have to distinguish via the system
+        # prompt's "ROLE:" header which build_critic_messages and
+        # build_meta_critic_messages set differently.
+        critic_calls = {"count": 0}
+        meta_critic_calls = {"count": 0}
+        researcher_calls = {"count": 0}
+
+        class _CountingChat:
+            def __init__(self, role: str):
+                self.role = role
+
+            def chat(self, payload):
+                if self.role == "critic":
+                    # Distinguish meta_critic from critic via system
+                    # message — both use this same ChatClient.
+                    sys_msg = next(
+                        (m["content"] for m in payload.get("messages", [])
+                         if m.get("role") == "system"),
+                        "",
+                    )
+                    if "meta-critic" in sys_msg.lower() \
+                            or "ROLE: meta-critic" in sys_msg:
+                        meta_critic_calls["count"] += 1
+                    else:
+                        critic_calls["count"] += 1
+                    text = "DECISION: ready\nLooks good."
+                elif self.role == "researcher":
+                    researcher_calls["count"] += 1
+                    text = "research finding for this lane"
+                elif self.role == "planner":
+                    # Emit 3 plan items so fan-out triggers.
+                    text = "1. step a\n2. step b\n3. step c"
+                else:  # synthesizer
+                    text = "final synthesizer answer"
+                return {
+                    "choices": [{
+                        "message": {"content": text},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 1,
+                              "completion_tokens": 1},
+                }
+
+        deps = GraphDeps(
+            chat_clients={
+                r: _CountingChat(role=r) for r in
+                ("planner", "researcher", "critic", "synthesizer")
+            },
+            models={
+                "planner": "p:cloud",
+                "researcher": "r-primary:cloud",
+                "critic": "c-primary:cloud",
+                "synthesizer": "s:cloud",
+            },
+            enabled_roles=("planner", "researcher", "critic", "synthesizer"),
+            cwd="/p",
+            tool_executor=lambda *a, **k: "",
+            extra_models_by_role={
+                # 2 researcher models × 3 plan items = 6 lanes.
+                "researcher": ["r-extra-1:cloud", "r-extra-2:cloud"],
+                # 3 critic models = 3 critic invocations expected.
+                "critic": ["c-extra-1:cloud", "c-extra-2:cloud"],
+            },
+        )
+        compiled = build_council_graph(deps)
+        # Fire the graph against a minimal initial state — we don't
+        # care about the answer, only the invocation counts.
+        from consultants.engine import council
+        initial = council.initial_state(
+            question="q", cwd="/p",
+            models=deps.models,
+            topology="council", effort="xmax",
+        )
+        # Drain the stream.
+        for _ in compiled.stream(initial):
+            pass
+
+        # Critic must fire exactly C times = 1 (primary) + 2 extras = 3.
+        # The pre-fix code would have produced 6 × 3 = 18 (or higher
+        # depending on how many researcher lanes the dispatcher
+        # multiplied across).
+        assert critic_calls["count"] == 3, (
+            f"critic fired {critic_calls['count']} times, expected 3 "
+            f"(1 primary + 2 extras). Researcher fan-out should not "
+            f"multiply critic invocations — that's the Phase 10a fix."
+        )
+        # Meta-critic fires exactly once, regardless of how many
+        # critics ran or how many re-routes happened.
+        assert meta_critic_calls["count"] == 1, (
+            f"meta_critic fired {meta_critic_calls['count']} times, "
+            f"expected 1."
+        )
+        # Sanity: researcher actually fanned out. 3 plan items × 3
+        # models (primary + 2 extras) = 9 invocations.
+        assert researcher_calls["count"] >= 6, (
+            f"researcher fired {researcher_calls['count']} times, "
+            f"expected >= 6 (>= 3 plan items × 2 models). If this "
+            f"fails, the test setup is wrong, not Phase 10a."
+        )

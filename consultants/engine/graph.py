@@ -556,18 +556,42 @@ def build_council_graph(deps: GraphDeps,
         )
 
     if multi_critic_active and critic_predecessor is not None:
-        # Predecessor -> [Send to critic] × C
+        # Phase 10a fix: insert a pass-through barrier node between
+        # the (Send-multiplexed) researcher and the critic-fanout
+        # dispatcher. LangGraph's add_conditional_edges fires
+        # ONCE PER UPSTREAM INVOCATION when its source is
+        # Send-multiplexed — wiring it directly to ``researcher``
+        # (which has N×M parallel invocations from Phase 9 fan-out)
+        # means the conditional fires N×M times, each emitting C
+        # Sends → N×M×C critic invocations instead of C.
+        #
+        # An UNCONDITIONAL edge from a Send-multiplexed source DOES
+        # barrier-merge before the next node fires. So we:
+        #   researcher (×N×M) ─unconditional, barriers─▶ research_barrier (1 fire)
+        #   research_barrier ─conditional fan-out─▶ critic (×C)
+        # The barrier node itself returns {} — pure pass-through.
+        # Detected on the first live xmax smoke (csl-...-2a8f) where
+        # 6 researcher lanes spawned 18 critic invocations.
+        def _research_barrier(state: dict) -> dict:
+            return {}
+        sg.add_node("research_barrier", _research_barrier)
+
+        # Unconditional edge from the predecessor barriers any
+        # upstream Send fan-out (researcher).
         pred_node = START if critic_predecessor == "START" else critic_predecessor
+        sg.add_edge(pred_node, "research_barrier")
+
+        # Conditional fan-out from the single-invocation barrier
+        # node fires exactly once → exactly C critic Sends.
         sg.add_conditional_edges(
-            pred_node,
+            "research_barrier",
             critic_fanout_router,
             ["critic"],
         )
-        # critic (×C, barrier) -> meta_critic. LangGraph waits for
-        # all C parallel returns before firing this edge; the
+        # critic (×C, barrier) -> meta_critic. Unconditional edge
+        # already barriers — by the time meta_critic runs, the
         # additive reducer on ``turns`` has merged C critic
-        # critiques into state["turns"] by the time meta_critic
-        # runs.
+        # critiques into state["turns"].
         sg.add_edge("critic", "meta_critic")
 
     # Critic's conditional edge: needs_more_research -> researcher,
