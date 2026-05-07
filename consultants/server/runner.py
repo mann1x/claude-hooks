@@ -45,21 +45,26 @@ def make_runner(*, ollama_base_url: str):
         question: str = runner_input["question"]
         enabled = tuple(cc.enabled_roles(cfg))
 
-        # Effort-based critic merge: at low/medium, the synthesizer
-        # takes critic duty internally (saves a full LLM round; on
-        # 2026-05-07 trace that was 192s on a smoke and 14s on a
-        # hard query). High/max keep the dedicated critic. The
-        # user's role.critic.enabled config is unchanged — we just
-        # don't wire the node into the graph for this run.
-        synthesizer_self_critic = (
-            cfg.effort in ("low", "medium") and "critic" in enabled
-        )
-        if synthesizer_self_critic:
+        # Effort-based critic strategy:
+        # - low: drop critic AND drop synthesizer self-critic. Bare
+        #   pipeline planner -> researcher -> decisive synthesizer.
+        #   Cheapest, fastest, no critique step.
+        # - medium: drop critic AND drop synthesizer self-critic.
+        #   Same as low but with the medium iter caps + fan-out.
+        #   The 2026-05-07 audit v5 trace showed self-critic adding
+        #   ~3.5 min on the synthesizer node for diminishing returns.
+        # - high|max: keep dedicated critic; standard synthesizer.
+        #   Quality-first; user explicitly opted in to the cost.
+        if cfg.effort in ("low", "medium") and "critic" in enabled:
             enabled = tuple(r for r in enabled if r != "critic")
             log.info(
-                "effort=%s: dropping critic node, synthesizer takes "
-                "self-critic duty (saves one LLM round)", cfg.effort,
+                "effort=%s: dropping critic node (cost > value at "
+                "this tier)", cfg.effort,
             )
+        # Self-critic synthesizer is now off by default at every
+        # tier. The infrastructure stays (SYNTHESIZER_SELF_CRITIC_SYSTEM)
+        # so it can be re-enabled per-config in a future PR.
+        synthesizer_self_critic = False
 
         # Per-session tracer. No-op when both the per-request flag is
         # unset and the env var ``CONSULTANTS_TRACE`` is off, so

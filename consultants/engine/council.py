@@ -57,18 +57,17 @@ class EffortCaps:
 
 
 EFFORT_CAPS: dict[str, EffortCaps] = {
-    # Trace 2026-05-07 (csl-...-b9d0) showed the researcher hitting
-    # 10 iters with diminishing returns past iter 6 (output 92, 237,
-    # 317, 293, 251 tokens iters 5-9 vs 830 closing tokens at iter 10).
-    # Tightened caps below shave 2-3 iters off typical runs without
-    # affecting answer quality. force_answer_after kicks in one
-    # iteration before max so the researcher always has a clean
-    # closing-summary turn with tools stripped.
+    # Tuned from the 2026-05-07 trace battery (csl-...-b9d0,
+    # csl-...-bee0). Diminishing returns past iter 6; with the
+    # empty-output fallback in researcher_node, even tighter caps
+    # remain reliable. Send-API fan-out at medium runs 3 lanes in
+    # parallel so per-lane iter budget multiplies effective
+    # exploration.
     #
     # low: planner -> ≤4 researcher iters -> synthesizer (no critic)
     "low":    EffortCaps(1, 0,  4, 3),
-    # medium: full council, 1 round, ≤1 reroute, ≤6 iters
-    "medium": EffortCaps(1, 1,  6, 5),
+    # medium: 3 fan-out lanes × 4 iters each, 1 round, ≤1 reroute
+    "medium": EffortCaps(1, 1,  4, 3),
     # high: full council, ≤3 rounds, ≤2 reroutes, ≤10 iters
     "high":   EffortCaps(3, 2, 10,  8),
     # max: large but bounded — token spend caps in practice
