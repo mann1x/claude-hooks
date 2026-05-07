@@ -297,6 +297,46 @@ def parse_plan_items(plan_text: str) -> list[str]:
 # outweighs the parallelism win for a single lane.
 FANOUT_MIN_ITEMS = 2
 
+# Maximum number of parallel lanes. The cloud upstream
+# (kimi-k2.6:cloud through the 192.168.178.2:11433 proxy)
+# serializes concurrent calls to ~2-3 slots, so fan-out beyond 3
+# lanes pays redundant per-lane work without true parallelism. The
+# 2026-05-07 audit v4 trace measured 6 lanes at 19.7 min cumulative
+# LLM time / 2.5x effective parallelism = 9.6 min researcher wall —
+# WORSE than the un-fanned 3.1 min baseline. Capped to 3 lanes,
+# items beyond the first are folded back into earlier lanes.
+FANOUT_MAX_LANES = 3
+
+
+def group_items_into_lanes(items: list[str], max_lanes: int) -> list[list[str]]:
+    """Distribute ``items`` across at most ``max_lanes`` lanes.
+
+    Round-robin chunking — earlier lanes get the larger group when
+    the count doesn't divide evenly. Returns a list of sub-lists,
+    each non-empty. With ``len(items) <= max_lanes`` returns one
+    item per lane.
+    """
+    if not items:
+        return []
+    n = min(len(items), max(1, max_lanes))
+    # Ceiling division so earlier lanes are at most one item heavier.
+    base = len(items) // n
+    extra = len(items) % n
+    lanes: list[list[str]] = []
+    pos = 0
+    for i in range(n):
+        size = base + (1 if i < extra else 0)
+        lanes.append(items[pos:pos + size])
+        pos += size
+    return [g for g in lanes if g]
+
+
+def join_lane_items(lane_items: list[str]) -> str:
+    """Render a lane's grouped plan items back into a numbered list
+    that the researcher can execute as a focused sub-plan.
+    """
+    return "\n".join(f"{i + 1}. {it}" for i, it in enumerate(lane_items))
+
 
 # ----------------------- critic decision parser ------------------- #
 

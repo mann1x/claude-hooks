@@ -350,6 +350,11 @@ def build_council_graph(deps: GraphDeps,
             items = state.get("plan_items") or []
             if len(items) < council.FANOUT_MIN_ITEMS:
                 return "researcher"
+            # Cap at FANOUT_MAX_LANES; group items into balanced
+            # lanes when the planner emits more than the cap.
+            lanes = council.group_items_into_lanes(
+                items, council.FANOUT_MAX_LANES,
+            )
             return [
                 Send(
                     "researcher",
@@ -362,7 +367,10 @@ def build_council_graph(deps: GraphDeps,
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),
-                        "plan_item": item,
+                        # Lane sees its grouped items as a focused
+                        # numbered sub-plan. Researcher reads
+                        # ``plan_item`` (string).
+                        "plan_item": council.join_lane_items(lane_items),
                         "lane_idx": idx,
                         # Empty research/turns so the lane's delta is
                         # additive only with no double-count.
@@ -373,7 +381,7 @@ def build_council_graph(deps: GraphDeps,
                         "total_completion_tokens": 0,
                     },
                 )
-                for idx, item in enumerate(items)
+                for idx, lane_items in enumerate(lanes)
             ]
         fanout_router = _fanout_after_planner
 

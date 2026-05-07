@@ -154,6 +154,48 @@ class TestParsePlanItems:
         assert council.FANOUT_MIN_ITEMS == 2
 
 
+class TestGroupItemsIntoLanes:
+    def test_below_cap_returns_one_per_lane(self):
+        items = ["a", "b", "c"]
+        lanes = council.group_items_into_lanes(items, max_lanes=5)
+        assert lanes == [["a"], ["b"], ["c"]]
+
+    def test_at_cap_returns_one_per_lane(self):
+        items = ["a", "b", "c"]
+        lanes = council.group_items_into_lanes(items, max_lanes=3)
+        assert lanes == [["a"], ["b"], ["c"]]
+
+    def test_above_cap_groups_balanced(self):
+        # 6 items, 3 lanes: 2 + 2 + 2
+        items = ["a", "b", "c", "d", "e", "f"]
+        lanes = council.group_items_into_lanes(items, max_lanes=3)
+        assert lanes == [["a", "b"], ["c", "d"], ["e", "f"]]
+
+    def test_above_cap_unbalanced_earlier_heavier(self):
+        # 7 items, 3 lanes: 3 + 2 + 2 (earlier lanes take the extra)
+        items = ["a", "b", "c", "d", "e", "f", "g"]
+        lanes = council.group_items_into_lanes(items, max_lanes=3)
+        assert lanes == [["a", "b", "c"], ["d", "e"], ["f", "g"]]
+
+    def test_empty_input(self):
+        assert council.group_items_into_lanes([], max_lanes=3) == []
+
+    def test_max_lanes_clamped_to_at_least_one(self):
+        # Defensive: max_lanes=0 still returns one lane with everything.
+        items = ["a", "b"]
+        lanes = council.group_items_into_lanes(items, max_lanes=0)
+        assert lanes == [["a", "b"]]
+
+    def test_join_lane_items_renumbers(self):
+        text = council.join_lane_items(["foo", "bar"])
+        assert text == "1. foo\n2. bar"
+
+    def test_fanout_max_lanes_constant(self):
+        # 3 lanes is the cloud-serialization-effective cap on
+        # 192.168.178.2:11433. Bumping requires re-measuring.
+        assert council.FANOUT_MAX_LANES == 3
+
+
 # ----------------------- routing ---------------------------------- #
 
 class TestRouteAfterCritic:
