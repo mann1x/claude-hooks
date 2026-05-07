@@ -504,6 +504,58 @@ def researcher_node(state: dict, *,
     text = _extract_text(final)
     pt, ct = _usage_from(final)
 
+    # Defensive fallback: if the loop hit max_iterations while the
+    # model was still emitting tool_calls (or hallucinated tool calls
+    # with empty content after tools were stripped), the final
+    # response has no textual report. We saw this in the 2026-05-07
+    # audit run (all 6 fan-out lanes returned ""). Force one more
+    # tool-stripped call asking for an explicit summary so the
+    # synthesizer always sees a real report.
+    if not text.strip():
+        log.warning(
+            "researcher: empty final text after %d iters — forcing "
+            "summary call (lane=%s)",
+            (cfg.max_iterations if cfg else -1),
+            state.get("lane_idx"),
+        )
+        summary_msgs = list(payload["messages"]) + [{
+            "role": "user",
+            "content": (
+                "Write your findings now as a focused report. One "
+                "bullet per finding with `path:line` reference. Do "
+                "NOT call tools. If your prior tool calls produced "
+                "no useful evidence, say so explicitly with one "
+                "sentence — never return empty."
+            ),
+        }]
+        try:
+            follow_up = chat_client.chat({
+                "model": model,
+                "messages": summary_msgs,
+                "stream": False,
+                "think": think,
+            })
+            text2 = _extract_text(follow_up)
+            pt2, ct2 = _usage_from(follow_up)
+            pt += pt2
+            ct += ct2
+            if text2.strip():
+                text = text2
+            else:
+                # Both attempts empty — emit a stub so the synthesizer
+                # at least sees that this lane found nothing concrete.
+                text = (
+                    "(researcher lane produced no findings within the "
+                    "iteration budget; gaps remain — see plan)"
+                )
+        except Exception as e:  # pragma: no cover — defensive
+            log.exception(
+                "researcher summary fallback failed: %s; emitting stub", e,
+            )
+            text = (
+                "(researcher lane failed to produce a written report)"
+            )
+
     # Walk the run_loop's transcript-equivalent to summarize tool usage.
     # run_loop returns only the final response, so we don't have the
     # full tool trace here — that's fine for the summary; the full
