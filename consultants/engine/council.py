@@ -414,17 +414,53 @@ def _usage_from(response: dict) -> tuple[int, int]:
 
 
 def _single_shot(chat_client, model: str, messages: list[dict],
-                 *, think: Any = True) -> tuple[str, int, int]:
+                 *, think: Any = True,
+                 recorder=None, role: Optional[str] = None,
+                 round: int = 1,
+                 lane_idx: Optional[int] = None) -> tuple[str, int, int]:
     """Run a one-call chat (no tools, no loop). Returns
-    (text, prompt_tokens, completion_tokens)."""
+    (text, prompt_tokens, completion_tokens).
+
+    When ``recorder`` is provided, the call (success or failure) is
+    appended to the recorder's ``events`` table as one ``llm_call``
+    row. ``role`` is required for recording — pass it from the
+    caller's node identity. Errors are re-raised after recording so
+    the existing tombstone branches still fire.
+    """
     payload = {
         "model": model,
         "messages": messages,
         "stream": False,
         "think": think,
     }
-    response = chat_client.chat(payload)
-    return (_extract_text(response), *_usage_from(response))
+    t0 = time.monotonic()
+    try:
+        response = chat_client.chat(payload)
+    except Exception as exc:
+        if recorder is not None and role is not None:
+            try:
+                recorder.record_llm(
+                    role=role, round=round, lane_idx=lane_idx, model=model,
+                    request=payload, response=None,
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            except Exception:  # pragma: no cover — recorder must not mask
+                log.exception("recorder.record_llm raised; ignored")
+        raise
+    dt_ms = int((time.monotonic() - t0) * 1000)
+    pt, ct = _usage_from(response)
+    if recorder is not None and role is not None:
+        try:
+            recorder.record_llm(
+                role=role, round=round, lane_idx=lane_idx, model=model,
+                request=payload, response=response,
+                prompt_tokens=pt, completion_tokens=ct,
+                duration_ms=dt_ms,
+            )
+        except Exception:  # pragma: no cover
+            log.exception("recorder.record_llm raised; ignored")
+    return (_extract_text(response), pt, ct)
 
 
 # ----------------------- node implementations -------------------- #
@@ -434,11 +470,19 @@ def _single_shot(chat_client, model: str, messages: list[dict],
 # can plug these in directly.
 
 def planner_node(state: dict, *, chat_client, model: str,
-                 think: Any = True) -> dict:
+                 think: Any = True, recorder=None) -> dict:
     t0 = time.monotonic()
+    if recorder is not None:
+        try:
+            recorder.record_node(role="planner", kind="node_enter")
+        except Exception:  # pragma: no cover
+            log.exception("recorder.record_node raised; ignored")
     msgs = build_planner_messages(state["question"])
     try:
-        plan, pt, ct = _single_shot(chat_client, model, msgs, think=think)
+        plan, pt, ct = _single_shot(
+            chat_client, model, msgs, think=think,
+            recorder=recorder, role="planner", round=1,
+        )
     except Exception as e:
         log.exception("planner_node failed: %s", e)
         # Tombstone return: keep the graph progressing with a
@@ -466,6 +510,14 @@ def planner_node(state: dict, *, chat_client, model: str,
         prompt_tokens=pt, completion_tokens=ct, duration_seconds=dt,
     )
     plan_items = parse_plan_items(plan)
+    if recorder is not None:
+        try:
+            recorder.record_node(
+                role="planner", kind="node_exit",
+                duration_ms=int(dt * 1000),
+            )
+        except Exception:  # pragma: no cover
+            log.exception("recorder.record_node raised; ignored")
     # Delta-only return — additive reducers in CouncilState merge
     # ``turns``, ``total_*_tokens``, ``research_rounds_used`` across
     # parallel fan-out lanes.
@@ -486,7 +538,8 @@ def researcher_node(state: dict, *,
                     model: str,
                     cwd: str,
                     think: Any = True,
-                    loop_runner=None) -> dict:
+                    loop_runner=None,
+                    recorder=None) -> dict:
     """Researcher uses agent_loop.runner.run_loop for a tool sub-loop.
 
     ``loop_runner`` defaults to ``claude_hooks.agent_loop.runner.run_loop``
@@ -507,6 +560,15 @@ def researcher_node(state: dict, *,
     rounds_used = int(state.get("research_rounds_used") or 0)
     this_round = rounds_used + 1
     prior_rounds: list[str] = list(state.get("research") or [])
+    lane_idx = state.get("lane_idx")
+    if recorder is not None:
+        try:
+            recorder.record_node(
+                role="researcher", kind="node_enter",
+                round=this_round, lane_idx=lane_idx,
+            )
+        except Exception:  # pragma: no cover
+            log.exception("recorder.record_node raised; ignored")
 
     # Fan-out path: when invoked via Send with a ``plan_item``, work
     # only on that sub-question. The single-researcher path (no
@@ -543,15 +605,53 @@ def researcher_node(state: dict, *,
             force_first_tool_call=False,
         )
 
+    # Bind recorder callbacks to the loop_runner so per-iteration LLM
+    # calls AND tool executions land in the events table. Both
+    # callbacks are no-ops when recorder is None (legacy / test path).
+    on_iter_cb = None
+    on_tool_cb = None
+    if recorder is not None:
+        def _on_iter(_idx: int, req: dict, resp: dict, dt_ms: int) -> None:
+            pt_l, ct_l = _usage_from(resp)
+            recorder.record_llm(
+                role="researcher", round=this_round, lane_idx=lane_idx,
+                model=model, request=req, response=resp,
+                prompt_tokens=pt_l, completion_tokens=ct_l,
+                duration_ms=dt_ms,
+            )
+
+        def _on_tool(name: str, args: str, output: str,
+                     dt_ms: int, err: Optional[str]) -> None:
+            recorder.record_tool(
+                role="researcher", round=this_round, lane_idx=lane_idx,
+                tool=name, args=args, output=output,
+                duration_ms=dt_ms, error=err,
+            )
+        on_iter_cb = _on_iter
+        on_tool_cb = _on_tool
+
     t0 = time.monotonic()
     try:
-        final = loop_runner(
-            payload, cwd,
+        # Tests pass a stub loop_runner; inspect its signature so we
+        # only forward the new callbacks when the runner accepts them.
+        # Default `claude_hooks.agent_loop.runner.run_loop` does.
+        loop_kwargs = dict(
             config=cfg,
             tool_specs=tool_specs,
             chat_fn=chat_client.chat,
             tool_executor=tool_executor,
         )
+        if on_iter_cb is not None or on_tool_cb is not None:
+            try:
+                import inspect
+                sig = inspect.signature(loop_runner)
+                if "on_iter" in sig.parameters:
+                    loop_kwargs["on_iter"] = on_iter_cb
+                if "on_tool" in sig.parameters:
+                    loop_kwargs["on_tool"] = on_tool_cb
+            except (TypeError, ValueError):
+                pass
+        final = loop_runner(payload, cwd, **loop_kwargs)
     except Exception as e:
         log.exception("researcher_node failed: %s", e)
         # Tombstone return so the additive reducers record the
@@ -611,14 +711,27 @@ def researcher_node(state: dict, *,
             ),
         }]
         try:
-            follow_up = chat_client.chat({
+            fb_t0 = time.monotonic()
+            fb_payload = {
                 "model": model,
                 "messages": summary_msgs,
                 "stream": False,
                 "think": think,
-            })
+            }
+            follow_up = chat_client.chat(fb_payload)
             text2 = _extract_text(follow_up)
             pt2, ct2 = _usage_from(follow_up)
+            if recorder is not None:
+                try:
+                    recorder.record_llm(
+                        role="researcher", round=this_round,
+                        lane_idx=lane_idx, model=model,
+                        request=fb_payload, response=follow_up,
+                        prompt_tokens=pt2, completion_tokens=ct2,
+                        duration_ms=int((time.monotonic() - fb_t0) * 1000),
+                    )
+                except Exception:  # pragma: no cover
+                    log.exception("recorder.record_llm (fallback) raised; ignored")
             pt += pt2
             ct += ct2
             if text2.strip():
@@ -655,6 +768,15 @@ def researcher_node(state: dict, *,
     # ``research_rounds_used`` and ``total_*_tokens`` similarly use
     # additive reducers so concurrent fan-out lanes' counts merge.
     # ``turns`` likewise.
+    if recorder is not None:
+        try:
+            recorder.record_node(
+                role="researcher", kind="node_exit",
+                round=this_round, lane_idx=lane_idx,
+                duration_ms=int(dt * 1000),
+            )
+        except Exception:  # pragma: no cover
+            log.exception("recorder.record_node raised; ignored")
     return {
         "research": [text],
         "research_rounds_used": 1,
@@ -665,13 +787,26 @@ def researcher_node(state: dict, *,
 
 
 def critic_node(state: dict, *, chat_client, model: str,
-                think: Any = True) -> dict:
+                think: Any = True, recorder=None) -> dict:
+    rounds_used_pre = int(state.get("research_rounds_used") or 0)
+    if recorder is not None:
+        try:
+            recorder.record_node(
+                role="critic", kind="node_enter",
+                round=max(rounds_used_pre, 1),
+            )
+        except Exception:  # pragma: no cover
+            log.exception("recorder.record_node raised; ignored")
     msgs = build_critic_messages(
         state["question"], state["plan"], state.get("research") or [],
     )
     t0 = time.monotonic()
     try:
-        text, pt, ct = _single_shot(chat_client, model, msgs, think=think)
+        text, pt, ct = _single_shot(
+            chat_client, model, msgs, think=think,
+            recorder=recorder, role="critic",
+            round=max(rounds_used_pre, 1),
+        )
     except Exception as e:
         log.exception("critic_node failed: %s", e)
         # On critic failure default to "ready" so the council still
@@ -702,6 +837,15 @@ def critic_node(state: dict, *, chat_client, model: str,
         role="critic", round=max(rounds_used, 1), content=text,
         prompt_tokens=pt, completion_tokens=ct, duration_seconds=dt,
     )
+    if recorder is not None:
+        try:
+            recorder.record_node(
+                role="critic", kind="node_exit",
+                round=max(rounds_used, 1),
+                duration_ms=int(dt * 1000),
+            )
+        except Exception:  # pragma: no cover
+            log.exception("recorder.record_node raised; ignored")
     return {
         "critique": text,
         "critic_decision": decision,
@@ -714,7 +858,13 @@ def critic_node(state: dict, *, chat_client, model: str,
 
 def synthesizer_node(state: dict, *, chat_client, model: str,
                      think: Any = True,
-                     self_critic: bool = False) -> dict:
+                     self_critic: bool = False,
+                     recorder=None) -> dict:
+    if recorder is not None:
+        try:
+            recorder.record_node(role="synthesizer", kind="node_enter")
+        except Exception:  # pragma: no cover
+            log.exception("recorder.record_node raised; ignored")
     msgs = build_synthesizer_messages(
         state["question"], state.get("plan", ""),
         state.get("research") or [],
@@ -723,7 +873,10 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
     )
     t0 = time.monotonic()
     try:
-        text, pt, ct = _single_shot(chat_client, model, msgs, think=think)
+        text, pt, ct = _single_shot(
+            chat_client, model, msgs, think=think,
+            recorder=recorder, role="synthesizer", round=1,
+        )
     except Exception as e:
         log.exception("synthesizer_node failed: %s", e)
         # Synthesizer failure is terminal — propagate as an error
@@ -750,6 +903,14 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
         role="synthesizer", round=1, content=text,
         prompt_tokens=pt, completion_tokens=ct, duration_seconds=dt,
     )
+    if recorder is not None:
+        try:
+            recorder.record_node(
+                role="synthesizer", kind="node_exit",
+                duration_ms=int(dt * 1000),
+            )
+        except Exception:  # pragma: no cover
+            log.exception("recorder.record_node raised; ignored")
     return {
         "final_answer": text,
         "turns": [turn],

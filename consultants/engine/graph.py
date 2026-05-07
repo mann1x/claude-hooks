@@ -117,6 +117,11 @@ class GraphDeps:
     # Skip the per-node InMemoryCache. Runner sets at effort=high|max
     # so power runs always exercise every node fresh.
     disable_cache: bool = False
+    # Optional MessageRecorder (Phase 1 SQLite-backed event recorder).
+    # When set, every llm_call / tool_call / node_enter / node_exit
+    # lands in <cwd>/.claude-hooks/consultants/<sid>/transcript.db.
+    # None for unit tests that don't care about the transcript.
+    recorder: Optional[Any] = None
 
 
 # ----------------------- node wrappers --------------------------- #
@@ -138,6 +143,7 @@ def _wrap_planner(deps: GraphDeps):
             chat_client=deps.chat_clients["planner"],
             model=deps.models["planner"],
             think=_think_for(deps, "planner"),
+            recorder=deps.recorder,
         )
     return _node
 
@@ -153,6 +159,7 @@ def _wrap_researcher(deps: GraphDeps):
             model=deps.models["researcher"],
             cwd=deps.cwd,
             think=_think_for(deps, "researcher"),
+            recorder=deps.recorder,
         )
     return _node
 
@@ -164,6 +171,7 @@ def _wrap_critic(deps: GraphDeps):
             chat_client=deps.chat_clients["critic"],
             model=deps.models["critic"],
             think=_think_for(deps, "critic"),
+            recorder=deps.recorder,
         )
     return _node
 
@@ -176,6 +184,7 @@ def _wrap_synthesizer(deps: GraphDeps):
             model=deps.models["synthesizer"],
             think=_think_for(deps, "synthesizer"),
             self_critic=deps.synthesizer_self_critic,
+            recorder=deps.recorder,
         )
     return _node
 

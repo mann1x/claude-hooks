@@ -74,6 +74,21 @@ ChatFn = Callable[[dict], dict]
 #   ([assistant_msg, tool_msg], dedup_key, dedup_content)
 PreseedBuilder = Callable[[str], Optional[tuple[list[dict], str, str]]]
 
+# Optional observability callbacks. Both default to None — caliber +
+# advisor pass nothing; consultants' MessageRecorder hooks them up.
+#
+# OnIter fires AFTER each chat_fn(payload) returns. The callback gets
+# the iteration index, the request payload that was sent (mutations
+# from earlier iterations are reflected), the response dict, and the
+# elapsed wall-clock in ms.
+#
+# OnTool fires once per tool invocation in execute_tool_calls.
+# duration_ms is 0 for dedup stubs (no actual tool work happened).
+# error is None on success, or the exception string when the
+# tool_executor raised.
+OnIter = Callable[[int, dict, dict, int], None]
+OnTool = Callable[[str, str, str, int, Optional[str]], None]
+
 
 def merge_tools(existing: Optional[list[dict]],
                 our_specs: list[dict]) -> list[dict]:
@@ -94,13 +109,20 @@ def merge_tools(existing: Optional[list[dict]],
 
 def execute_tool_calls(tool_calls: list[dict], cwd: str,
                        seen: dict[str, str],
-                       tool_executor: ToolExecutor) -> list[dict]:
+                       tool_executor: ToolExecutor,
+                       *,
+                       on_tool: Optional[OnTool] = None) -> list[dict]:
     """Run each tool and return ``role: tool`` messages.
 
     Duplicate (name+args) calls within a single agent loop return a
     short stub pointing the model back at the prior result. Models
     (notably gemma4-98e) will otherwise loop on the same tool call
     dozens of times, exploding context and wall time.
+
+    When ``on_tool`` is set, it fires once per tool call (real and
+    deduped) with ``(name, args_str, output, duration_ms, error)``.
+    Callback exceptions are swallowed so a misbehaving recorder
+    can't crash the loop.
     """
     results: list[dict] = []
     for tc in tool_calls:
@@ -111,21 +133,38 @@ def execute_tool_calls(tool_calls: list[dict], cwd: str,
         if isinstance(args_str, dict):
             args_str = json.dumps(args_str)
         key = f"{name}|{args_str}"
+        err: Optional[str] = None
         if key in seen:
             output = (
                 f"(duplicate: you already called {name}({args_str[:80]}). "
                 "Use that prior result and continue. Do not repeat this call.)"
             )
+            dt_ms = 0
             log.info("tool %s(%s) -> DEDUP stub", name, args_str[:80])
         else:
             t0 = time.monotonic()
-            output = tool_executor(name, args_str, cwd)
+            try:
+                output = tool_executor(name, args_str, cwd)
+            except Exception as exc:  # surface to recorder; re-raise
+                dt_ms = int((time.monotonic() - t0) * 1000)
+                err = f"{type(exc).__name__}: {exc}"
+                if on_tool is not None:
+                    try:
+                        on_tool(name, args_str, "", dt_ms, err)
+                    except Exception:
+                        log.exception("on_tool callback raised; ignored")
+                raise
             dt_ms = int((time.monotonic() - t0) * 1000)
             log.info(
                 "tool %s(%s) -> %d chars in %d ms",
                 name, args_str[:80], len(output), dt_ms,
             )
             seen[key] = output
+        if on_tool is not None:
+            try:
+                on_tool(name, args_str, output, dt_ms, err)
+            except Exception:
+                log.exception("on_tool callback raised; ignored")
         results.append({
             "role": "tool",
             "tool_call_id": tc_id,
@@ -144,6 +183,8 @@ def run_loop(
     chat_fn: ChatFn,
     tool_executor: ToolExecutor,
     preseed_builder: Optional[PreseedBuilder] = None,
+    on_iter: Optional[OnIter] = None,
+    on_tool: Optional[OnTool] = None,
 ) -> dict:
     """Drive the tool-use loop until the model stops calling tools or
     the iteration cap is hit. Returns the final upstream response dict.
@@ -227,7 +268,14 @@ def run_loop(
                 payload["tool_choice"] = "required"
             else:
                 payload["tool_choice"] = "auto"
+        t_iter = time.monotonic()
         final = chat_fn(payload)
+        iter_ms = int((time.monotonic() - t_iter) * 1000)
+        if on_iter is not None:
+            try:
+                on_iter(i, payload, final, iter_ms)
+            except Exception:
+                log.exception("on_iter callback raised; ignored")
         choices = final.get("choices") or []
         if not choices:
             log.warning("upstream returned empty choices on iter %d", i)
@@ -297,7 +345,10 @@ def run_loop(
             clean_msg.pop(k, None)
         payload["messages"] = list(payload["messages"]) + [clean_msg]
         payload["messages"].extend(
-            execute_tool_calls(tool_calls, cwd, seen_calls, tool_executor)
+            execute_tool_calls(
+                tool_calls, cwd, seen_calls, tool_executor,
+                on_tool=on_tool,
+            )
         )
     else:
         log.warning("agent loop hit max_iterations=%d", config.max_iterations)

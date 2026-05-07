@@ -780,3 +780,204 @@ class TestInitialState:
         assert s["critic_reroutes_used"] == 0
         assert s["total_prompt_tokens"] == 0
         assert s["turns"] == []
+
+
+# ----------------------- recorder integration --------------------- #
+# Phase 2 of the v1.1 message-history plan: every role node records
+# llm_call / tool_call / node_enter / node_exit events into a
+# MessageRecorder when one is supplied. Tests use the real recorder
+# (stdlib SQLite) because it has no network or graph deps.
+
+class TestRecorderIntegration:
+    @staticmethod
+    def _new_recorder(tmp_path):
+        from consultants.engine.recorder import MessageRecorder, RecorderMeta
+        meta = RecorderMeta(
+            sid="csl-rec-001", cwd=str(tmp_path),
+            question="why is the sky blue?", effort="medium",
+            topology="council",
+            models={"planner": "m", "researcher": "m",
+                    "critic": "m", "synthesizer": "m"},
+        )
+        return MessageRecorder(tmp_path / "transcript.db", meta=meta)
+
+    @staticmethod
+    def _query_events(rec):
+        import sqlite3
+        conn = sqlite3.connect(str(rec.db_path))
+        rows = conn.execute(
+            "SELECT kind, role, round, lane_idx, model, prompt_tokens, "
+            "completion_tokens, tool, output_chars FROM events ORDER BY ts"
+        ).fetchall()
+        conn.close()
+        return rows
+
+    def test_planner_records_node_boundaries_and_llm_call(self, tmp_path):
+        rec = self._new_recorder(tmp_path)
+        try:
+            client = FakeChatClient([_completion(
+                "1. read foo.py\n2. grep bar",
+                prompt_tokens=42, completion_tokens=11,
+            )])
+            state = council.initial_state(
+                question="q", cwd="/p", models={"planner": "m"},
+                topology="council", effort="medium",
+            )
+            council.planner_node(
+                state, chat_client=client, model="m", recorder=rec,
+            )
+            rows = self._query_events(rec)
+            kinds = [(r[0], r[1]) for r in rows]
+            assert ("node_enter", "planner") in kinds
+            assert ("node_exit", "planner") in kinds
+            assert ("llm_call", "planner") in kinds
+            llm = next(r for r in rows if r[0] == "llm_call")
+            assert llm[4] == "m"           # model
+            assert llm[5] == 42            # prompt_tokens
+            assert llm[6] == 11            # completion_tokens
+        finally:
+            rec.close()
+
+    def test_critic_records_under_correct_round(self, tmp_path):
+        rec = self._new_recorder(tmp_path)
+        try:
+            client = FakeChatClient([
+                _completion("DECISION: ready\nlgtm")
+            ])
+            state = council.initial_state(
+                question="q", cwd="/p", models={"critic": "m"},
+                topology="council", effort="medium",
+            )
+            state["plan"] = "p"
+            state["research"] = ["r1"]
+            state["research_rounds_used"] = 2
+            council.critic_node(
+                state, chat_client=client, model="m", recorder=rec,
+            )
+            rows = self._query_events(rec)
+            critic_rows = [r for r in rows if r[1] == "critic"]
+            assert len(critic_rows) >= 3  # node_enter + llm_call + node_exit
+            assert all(r[2] == 2 for r in critic_rows)  # round = rounds_used
+        finally:
+            rec.close()
+
+    def test_synthesizer_records_llm_call(self, tmp_path):
+        rec = self._new_recorder(tmp_path)
+        try:
+            client = FakeChatClient([_completion(
+                "final answer", prompt_tokens=300, completion_tokens=120,
+            )])
+            state = council.initial_state(
+                question="q", cwd="/p", models={"synthesizer": "m"},
+                topology="council", effort="medium",
+            )
+            state["plan"] = "p"
+            state["research"] = ["r1"]
+            council.synthesizer_node(
+                state, chat_client=client, model="m", recorder=rec,
+            )
+            rows = self._query_events(rec)
+            llm = [r for r in rows if r[0] == "llm_call" and r[1] == "synthesizer"]
+            assert len(llm) == 1
+            assert llm[0][5] == 300
+            assert llm[0][6] == 120
+        finally:
+            rec.close()
+
+    def test_researcher_records_per_iter_and_per_tool(self, tmp_path):
+        # Stub loop_runner that simulates the real run_loop's behavior:
+        # invokes on_iter once per round and on_tool per tool call.
+        # The real run_loop is integration-tested separately; here we
+        # only assert the binding from researcher_node -> loop_runner
+        # callbacks -> recorder rows.
+        rec = self._new_recorder(tmp_path)
+        try:
+            def fake_loop(payload, cwd, *, config, tool_specs, chat_fn,
+                          tool_executor, on_iter=None, on_tool=None,
+                          preseed_builder=None):
+                # Simulate two iterations: first calls a tool, second
+                # produces a final answer.
+                if on_iter is not None:
+                    on_iter(0, dict(payload), {"choices": [{"finish_reason": "tool_calls"}]}, 50)
+                if on_tool is not None:
+                    on_tool("read_file", '{"path":"foo.py"}', "line1\nline2", 7, None)
+                if on_iter is not None:
+                    on_iter(1, dict(payload),
+                            _completion("found X at foo.py:1",
+                                        prompt_tokens=200, completion_tokens=80),
+                            120)
+                return _completion("found X at foo.py:1",
+                                   prompt_tokens=200, completion_tokens=80)
+
+            state = council.initial_state(
+                question="q", cwd="/p", models={"researcher": "m"},
+                topology="council", effort="medium",
+            )
+            state["plan"] = "p"
+            state["lane_idx"] = 3
+            state["plan_item"] = "lane finding"
+            council.researcher_node(
+                state, chat_client=FakeChatClient([]),
+                tool_executor=lambda *a, **k: "",
+                tool_specs=[], grounding_msgs=[], model="m", cwd="/p",
+                loop_runner=fake_loop, recorder=rec,
+            )
+            rows = self._query_events(rec)
+            llm_rows = [r for r in rows if r[0] == "llm_call" and r[1] == "researcher"]
+            tool_rows = [r for r in rows if r[0] == "tool_call" and r[1] == "researcher"]
+            assert len(llm_rows) == 2
+            assert len(tool_rows) == 1
+            # lane_idx propagates from state
+            assert all(r[3] == 3 for r in llm_rows)
+            assert tool_rows[0][3] == 3
+            assert tool_rows[0][7] == "read_file"
+            assert tool_rows[0][8] == len("line1\nline2")  # output_chars
+        finally:
+            rec.close()
+
+    def test_recorder_failure_does_not_crash_node(self, tmp_path):
+        # Misbehaving recorder must not bring the council down — the
+        # nodes log + swallow exceptions raised by record_*. Use a
+        # stub that raises on every call.
+        class BadRecorder:
+            def record_llm(self, **kw):
+                raise RuntimeError("disk full")
+            def record_tool(self, **kw):
+                raise RuntimeError("disk full")
+            def record_node(self, **kw):
+                raise RuntimeError("disk full")
+
+        client = FakeChatClient([_completion("plan")])
+        state = council.initial_state(
+            question="q", cwd="/p", models={"planner": "m"},
+            topology="council", effort="medium",
+        )
+        update = council.planner_node(
+            state, chat_client=client, model="m", recorder=BadRecorder(),
+        )
+        assert update["plan"] == "plan"
+
+    def test_single_shot_records_failure(self, tmp_path):
+        rec = self._new_recorder(tmp_path)
+        try:
+            class Boom:
+                def chat(self, payload):
+                    raise RuntimeError("upstream 500")
+            with pytest.raises(RuntimeError):
+                council._single_shot(
+                    Boom(), "m", [{"role": "user", "content": "x"}],
+                    recorder=rec, role="planner",
+                )
+            rows = self._query_events(rec)
+            llm_rows = [r for r in rows if r[0] == "llm_call"]
+            assert len(llm_rows) == 1
+            # Confirm error column populated.
+            import sqlite3
+            conn = sqlite3.connect(str(rec.db_path))
+            err = conn.execute(
+                "SELECT error FROM events WHERE kind='llm_call'"
+            ).fetchone()[0]
+            conn.close()
+            assert "upstream 500" in err
+        finally:
+            rec.close()

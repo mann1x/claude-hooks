@@ -364,3 +364,129 @@ class TestMergeTools:
         out = runner.merge_tools(existing, TOOL_SPECS)
         names = [t["function"]["name"] for t in out]
         assert "other" in names and "echo" in names
+
+
+# ----------------------- Phase 2 callbacks -------------------------- #
+# `on_iter` and `on_tool` were added so consultants' MessageRecorder
+# can listen to every chat call + tool execution. Both default to None
+# for backward compatibility — caliber + advisor pass nothing.
+
+class TestCallbacks:
+    def test_on_iter_fires_per_chat_call(self):
+        responses = [_tool("echo", '{"a":1}'), _stop("done")]
+        seen: list[tuple[int, dict]] = []
+
+        def chat(p):
+            return responses.pop(0)
+
+        runner.run_loop(
+            {"model": "m", "messages": [{"role": "user", "content": "go"}]},
+            cwd="/tmp",
+            config=runner.LoopConfig(force_first_tool_call=False),
+            tool_specs=TOOL_SPECS,
+            chat_fn=chat,
+            tool_executor=lambda n, a, c: "out",
+            on_iter=lambda i, req, resp, dt: seen.append((i, resp)),
+        )
+        assert [s[0] for s in seen] == [0, 1]
+        assert seen[0][1]["choices"][0]["finish_reason"] == "tool_calls"
+        assert seen[1][1]["choices"][0]["message"]["content"] == "done"
+
+    def test_on_tool_fires_per_tool_call_with_duration(self):
+        responses = [_tool("echo", '{"x":1}'), _stop("done")]
+        events: list[tuple] = []
+
+        def chat(p):
+            return responses.pop(0)
+
+        runner.run_loop(
+            {"model": "m", "messages": [{"role": "user", "content": "go"}]},
+            cwd="/tmp",
+            config=runner.LoopConfig(force_first_tool_call=False),
+            tool_specs=TOOL_SPECS,
+            chat_fn=chat,
+            tool_executor=lambda n, a, c: "result-for-x",
+            on_tool=lambda *a: events.append(a),
+        )
+        assert len(events) == 1
+        name, args, output, dt_ms, err = events[0]
+        assert name == "echo"
+        assert args == '{"x":1}'
+        assert output == "result-for-x"
+        assert dt_ms >= 0
+        assert err is None
+
+    def test_on_tool_dedup_fires_with_zero_duration(self):
+        # Same tool+args called twice — second call hits the dedup
+        # stub. Both should fire on_tool.
+        responses = [_tool("echo", '{"x":1}', tc_id="t1"),
+                     _tool("echo", '{"x":1}', tc_id="t2"),
+                     _stop("done")]
+        events: list[tuple] = []
+
+        def chat(p):
+            return responses.pop(0)
+
+        runner.run_loop(
+            {"model": "m", "messages": [{"role": "user", "content": "go"}]},
+            cwd="/tmp",
+            config=runner.LoopConfig(force_first_tool_call=False),
+            tool_specs=TOOL_SPECS,
+            chat_fn=chat,
+            tool_executor=lambda n, a, c: "real",
+            on_tool=lambda *a: events.append(a),
+        )
+        assert len(events) == 2
+        # First fires with real output + nonzero (or zero on fast clocks) ms
+        assert events[0][2] == "real"
+        # Second is the dedup stub: dt_ms == 0, output starts with "(duplicate"
+        assert events[1][3] == 0
+        assert events[1][2].startswith("(duplicate")
+
+    def test_callback_exceptions_swallowed(self):
+        # A misbehaving callback must NOT crash the loop. Caliber +
+        # advisor would otherwise see hard failures from a downstream
+        # observability bug.
+        responses = [_stop("ok")]
+
+        def chat(p):
+            return responses.pop(0)
+
+        def bad_iter(*a):
+            raise RuntimeError("recorder offline")
+
+        out = runner.run_loop(
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            cwd="/tmp",
+            config=runner.LoopConfig(force_first_tool_call=False),
+            tool_specs=TOOL_SPECS,
+            chat_fn=chat,
+            tool_executor=lambda n, a, c: "",
+            on_iter=bad_iter,
+        )
+        assert out["choices"][0]["message"]["content"] == "ok"
+
+    def test_on_tool_records_executor_failure_and_reraises(self):
+        responses = [_tool("echo", '{"x":1}')]
+        events: list[tuple] = []
+
+        def chat(p):
+            return responses.pop(0)
+
+        def bad_executor(name, args, cwd):
+            raise RuntimeError("network error")
+
+        with pytest.raises(RuntimeError, match="network error"):
+            runner.run_loop(
+                {"model": "m", "messages": [{"role": "user", "content": "go"}]},
+                cwd="/tmp",
+                config=runner.LoopConfig(force_first_tool_call=False),
+                tool_specs=TOOL_SPECS,
+                chat_fn=chat,
+                tool_executor=bad_executor,
+                on_tool=lambda *a: events.append(a),
+            )
+        assert len(events) == 1
+        # error column populated, output empty
+        assert "network error" in events[0][4]
+        assert events[0][2] == ""
