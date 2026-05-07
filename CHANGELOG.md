@@ -28,10 +28,37 @@ backs both caliber and the advisor, the stop_guard stall check, a
 full pgvector backup + canary stack, and the v1.1 of the
 `/consultants` agentic engine — full per-role LLM message-history
 persistence so a session closed and reopened from disk produces
-identical follow-up answers to a warm one. Eight phases on `dev`
-(`9f71c9d`..`d1741f0`) plus the planning commit (`5cb6738`).
+identical follow-up answers to a warm one, plus multi-model
+researcher (xmedium / xhigh) and multi-critic + meta-critic
+(xmax) fan-out tiers for hard architectural questions where
+diverse cloud-model perspectives matter. Ten phases on `dev`
+(`9f71c9d`..`cdea074`) plus the planning commit (`5cb6738`).
 
 ### Added
+
+- **/consultants v1.1 — multi-model x-tiers (xmedium / xhigh / xmax)**
+  — three new effort tiers that fan out fan-outable roles across
+  multiple Ollama models per plan-item lane, so the synthesizer
+  (or meta-critic at xmax) sees diverse perspectives from
+  different model trainings on the same evidence. Configured via
+  per-role `extra_models = [...]` in the role's TOML block;
+  silently ignored at every base tier (a benchmark labeled
+  `high` is never accidentally 3× the cost — opting into x-tiers
+  requires the explicit tier name). xmedium / xhigh only fan
+  out the researcher; xmax additionally fans out the critic and
+  adds a meta-critic node that synthesizes the C parallel-critic
+  verdicts into one consolidated decision (anonymized as
+  `Critic 1` / `Critic 2` / ... in the prompt to avoid biasing
+  toward a model the meta-critic "knows" performs better; the
+  recorder's per-row `model` column is the audit map). Cost-of-
+  fan-out warning fires once at consultation start with the
+  expected token-cost multiplier. Skill (`/consultants--config`)
+  gains a "Manage extra models" sub-action under researcher /
+  critic; CLI gains `set-role <role> --add-model X --remove-model
+  Y --clear-extras`. Live-verified on solidpc — xmax with 2
+  researcher models and 3 critic models produces 3 distinct
+  critic verdicts (one per model) that the meta-critic
+  consolidates. Ten phases on `dev` (`9f71c9d`..`cdea074`).
 
 - **/consultants v1.1 — full message-history persistence** — every
   consultation now produces a SQLite `transcript.db` sidecar at
@@ -143,6 +170,49 @@ identical follow-up answers to a warm one. Eight phases on `dev`
   `KEEP_DAILY`, `KEEP_WEEKLY`, `KEEP_MONTHLY`, `WEEKLY_DOW`.
 
 ### Fixed
+
+- **/consultants xmax — critic-fanout 6× cost overshoot** — the
+  Phase 10 multi-critic dispatcher wired its conditional fan-out
+  edge directly to `researcher`, which is itself Send-multiplexed
+  by the Phase 9 researcher fan-out (N×M parallel invocations at
+  x-tiers). LangGraph's `add_conditional_edges` from a
+  Send-multiplexed source fires PER UPSTREAM SEND INVOCATION,
+  not per-barrier-merge — so 6 researcher lanes spawned 6 ×
+  C critic invocations instead of C. Caught on the first live
+  xmax smoke (`csl-2026-05-07-1707-2a8f`): 18 critic LLM calls
+  against an intended 3. Correctness wasn't affected — every
+  critic still saw the same merged research and meta-critic
+  consolidated correctly — but token cost was 6× the design.
+  Fix inserts a single-invocation pass-through `research_barrier`
+  node between researcher and the critic-fanout dispatcher.
+  Unconditional edges from Send-multiplexed sources DO barrier-
+  merge (this is how the legacy single-critic edge always worked),
+  so routing through the barrier node forces the conditional
+  fan-out to fire exactly once. Same question post-fix: 3 critic
+  invocations, wall time 374s → 174s (54% faster). Test pins the
+  count invariant: regardless of how many researcher lanes fan
+  out, the critic fires exactly `1 + len(extra_models)` times.
+
+- **axon-host crash-loop after host restart** — two compounding
+  issues that put the unit into a 5s `Restart=on-failure` loop
+  forever. (1) `/root/.axon` had been deleted between installs;
+  the unit's `ReadWritePaths=/root/.axon` directive failed
+  systemd's namespace bind-mount with `status=226/NAMESPACE`
+  ("Failed to set up mount namespacing"). (2) The `claude-hooks`
+  conda env had drifted — `uvicorn`, `httpx-sse`,
+  `pydantic-settings`, and `sse-starlette` were silently dropped
+  (likely from a partial reinstall during another env's build),
+  and once the namespace bug was fixed axon crashed on import
+  with `ModuleNotFoundError: No module named 'uvicorn'`. The
+  loop just moved one step deeper. install.py now does two
+  pre-flight checks before enabling the unit: `_ensure_axon_
+  registry_dir` mkdir's `~/.axon/repos/` so the bind-mount has a
+  target, and `_ensure_axon_deps` probes the env's import
+  surface and pip-installs `requirements-axon.txt` (new file
+  pinning the runtime deps) when anything is missing. Refuses to
+  enable the unit when either pre-flight fails, so future drift
+  becomes a clear `install.py` re-run rather than a silent
+  service-loop.
 
 - **PreCompact: stop emitting hookSpecificOutput** — Claude Code's
   PreCompact event schema does NOT accept `hookSpecificOutput`
