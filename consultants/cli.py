@@ -145,6 +145,42 @@ def cmd_status(args, base: str) -> int:
     return 0
 
 
+def cmd_follow_up(args, base: str) -> int:
+    """Live-session iteration: spawn a follow-up that reuses
+    the prior session's plan + research + warm ChatClients.
+    Returns a NEW sid; poll it just like a fresh consult."""
+    body = {"message": args.message}
+    if args.effort:
+        body["effort"] = args.effort
+    if args.trace is True:
+        body["trace"] = True
+    elif args.trace is False:
+        body["trace"] = False
+    out = _http("POST",
+                f"{base}/v1/consult/{args.parent_sid}/follow-up",
+                body=body)
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
+
+
+def cmd_close(args, base: str) -> int:
+    """Explicitly release a session's warm ChatClients. The on-disk
+    artifacts stay; only in-memory state is dropped."""
+    out = _http("POST", f"{base}/v1/consult/{args.sid}/close",
+                body={})
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
+
+
+def cmd_list_open(args, base: str) -> int:
+    """List all in-memory sessions (running + completed-not-yet-closed).
+    Closed sessions linger briefly for late polls but don't show
+    here."""
+    out = _http("GET", f"{base}/v1/sessions/open")
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
+
+
 def cmd_result(args, base: str) -> int:
     out = _http("GET", f"{base}/v1/consult/{args.sid}/result")
     print(json.dumps({"ok": True, **out}, indent=2))
@@ -408,6 +444,42 @@ def build_parser() -> argparse.ArgumentParser:
                        "summary + metadata.")
     r.add_argument("sid")
     r.set_defaults(fn=cmd_result)
+
+    # follow-up — live-session iteration. Returns a NEW sid.
+    fu = sub.add_parser(
+        "follow-up",
+        help="Live-session iteration: spawn a follow-up that reuses "
+             "the parent's plan, research, and warm ChatClients.")
+    fu.add_argument("parent_sid",
+                    help="The sid of the prior consultation. Must "
+                         "still be in memory (not closed / reaped).")
+    fu.add_argument("--message", required=True,
+                    help="The focused follow-up question.")
+    fu.add_argument("--effort", choices=tuple(cc.EFFORT_BUDGETS),
+                    help="Override effort for this follow-up "
+                         "(default: same as parent).")
+    fu.add_argument("--trace", dest="trace",
+                    action="store_true", default=None,
+                    help="Force tracing on for this follow-up.")
+    fu.add_argument("--no-trace", dest="trace", action="store_false",
+                    help="Force tracing off, overriding "
+                         "CONSULTANTS_TRACE.")
+    fu.set_defaults(fn=cmd_follow_up)
+
+    # close — explicit release of warm ChatClients.
+    cl = sub.add_parser(
+        "close",
+        help="Close an in-memory session, releasing its warm engine "
+             "handles. Future follow-ups against this sid 410.")
+    cl.add_argument("sid")
+    cl.set_defaults(fn=cmd_close)
+
+    # list-open — what sessions are alive in the engine right now?
+    lo = sub.add_parser(
+        "list-open",
+        help="List in-memory sessions (warm or recently completed). "
+             "Closed sessions don't appear here.")
+    lo.set_defaults(fn=cmd_list_open)
 
     # list
     l_ = sub.add_parser("list", help="List sessions for a project.")

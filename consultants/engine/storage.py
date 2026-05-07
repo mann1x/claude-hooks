@@ -70,6 +70,11 @@ class ConsultationResult:
     total_completion_tokens: int = 0
     # Per-role retry counts (cloud flaps).
     retries_by_role: dict[str, int] = field(default_factory=dict)
+    # Live-session iteration: when set, this consultation is a
+    # follow-up that reused parent_sid's plan + research + warm
+    # ChatClients. The chain is reconstructable by walking
+    # parent_sid pointers.
+    parent_sid: Optional[str] = None
 
 
 # ----------------------- YAML front-matter writer -------------------- #
@@ -110,6 +115,8 @@ def _yaml_front_matter(result: ConsultationResult) -> str:
         lines.append(f"error: {_yaml_str(result.error)}")
     if result.cwd:
         lines.append(f"cwd: {_yaml_str(result.cwd)}")
+    if result.parent_sid:
+        lines.append(f"parent_sid: {_yaml_str(result.parent_sid)}")
     lines.append("---")
     return "\n".join(lines) + "\n"
 

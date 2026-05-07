@@ -39,7 +39,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         from consultants.server.app import create_app
-        from consultants.server.runner import make_runner, default_ollama_url
+        from consultants.server.runner import (
+            make_runner, make_follow_up_runner, default_ollama_url,
+        )
         import uvicorn
     except ImportError as e:
         print(f"error: missing dependency ({e}). Run "
@@ -47,8 +49,10 @@ def main(argv: list[str] | None = None) -> int:
               f"claude-hooks-consultants conda env.", file=sys.stderr)
         return 2
 
-    runner = make_runner(ollama_base_url=default_ollama_url())
-    app = create_app(run_council=runner)
+    base_url = default_ollama_url()
+    runner = make_runner(ollama_base_url=base_url)
+    follow_up_runner = make_follow_up_runner(ollama_base_url=base_url)
+    app = create_app(run_council=runner, run_follow_up=follow_up_runner)
 
     uvicorn.run(app, host=args.host, port=port, log_config=None)
     return 0

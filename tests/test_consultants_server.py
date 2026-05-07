@@ -24,9 +24,24 @@ from consultants.server.app import create_app, SessionState
 
 # ----------------------- stub runner ----------------------------- #
 
+class _FakeChatClient:
+    """Stand-in for claude_hooks ChatClient that the follow-up
+    tests use to assert warm-handle reuse."""
+    def __init__(self, tag: str = "stub"):
+        self.tag = tag
+        self.calls = 0
+
+    def chat(self, payload):  # pragma: no cover — not exercised by stubs
+        self.calls += 1
+        return {"choices": [{"message": {"content": "stub"}}]}
+
+
 def make_stub_runner(*, fail: bool = False, sleep: float = 0.0):
     """Return a synchronous stub runner that writes legitimate
-    artifacts. ``fail=True`` simulates a graph crash."""
+    artifacts. ``fail=True`` simulates a graph crash. Also
+    populates the live-session fields on SessionState so the
+    follow-up tests have something to reuse (matches what the
+    production runner does in consultants.server.runner)."""
 
     def run_council(state: SessionState, runner_input: dict) -> None:
         if sleep > 0:
@@ -62,10 +77,75 @@ def make_stub_runner(*, fail: bool = False, sleep: float = 0.0):
         storage.write_consultation(result, cwd=cwd)
         for r in state.progress:
             state.progress[r] = "done"
+        # Populate live-session fields so follow-up tests can reuse.
+        state.plan = "1. stub plan item one\n2. stub plan item two"
+        state.plan_items = ["stub plan item one", "stub plan item two"]
+        state.research = ["stub research finding"]
+        state.critique = "stub critique"
+        state.final_answer = "**Verdict**: stub answer."
+        state.models = dict(result.models)
+        state._chat_clients = {
+            r: _FakeChatClient(tag=f"warm-{r}") for r in state.progress
+        }
         state.status = "completed"
         state.finished_at = time.time()
+        state.bump_activity()
 
     return run_council
+
+
+def make_stub_follow_up_runner(*, fail: bool = False):
+    """Stub follow-up runner. Asserts the parent_state was passed
+    in (the real runner reads parent.research / _chat_clients) and
+    writes a child consultation tagged with parent_sid."""
+
+    def run_follow_up(state: SessionState, runner_input: dict) -> None:
+        parent_state = runner_input.get("parent_state")
+        if parent_state is None:
+            state.status = "failed"
+            state.error = "stub follow-up: no parent_state"
+            state.finished_at = time.time()
+            return
+        if fail:
+            state.status = "failed"
+            state.error = "stub follow-up crash"
+            state.finished_at = time.time()
+            return
+        cwd = Path(runner_input["cwd"])
+        result = storage.ConsultationResult(
+            session_id=state.sid,
+            created=time.strftime(
+                "%Y-%m-%dT%H:%M:%S",
+                time.localtime(state.started_at)),
+            question=runner_input["question"],
+            models=dict(parent_state.models or {"researcher": "stub"}),
+            topology=state.topology,
+            effort=state.effort,
+            final_answer="**Follow-up verdict**: stub child answer.",
+            turns=[
+                storage.RoleTurn(role="synthesizer", round=1,
+                                 content="child", prompt_tokens=3,
+                                 completion_tokens=2),
+            ],
+            duration_seconds=time.time() - state.started_at,
+            status="completed",
+            cwd=str(cwd),
+            total_prompt_tokens=3,
+            total_completion_tokens=2,
+            parent_sid=state.parent_sid,
+        )
+        storage.write_consultation(result, cwd=cwd)
+        for r in state.progress:
+            state.progress[r] = "done"
+        state.research = list(parent_state.research) + ["child finding"]
+        state.final_answer = result.final_answer
+        state.models = dict(result.models)
+        state._chat_clients = parent_state._chat_clients  # inherit
+        state.status = "completed"
+        state.finished_at = time.time()
+        state.bump_activity()
+
+    return run_follow_up
 
 
 @pytest.fixture
@@ -295,3 +375,283 @@ class TestRunnerFailure:
                 time.sleep(0.02)
             assert p["status"] == "failed"
             assert "stub crash" in (p["error"] or "")
+
+
+# ----------------------- follow-up endpoint --------------------- #
+# Live-session iteration: Claude evaluates the synthesizer's answer
+# and may dispatch a focused follow-up that reuses the parent's
+# plan + research + warm ChatClients. The skill loops until the
+# answer is decisive or the effort_budget is exhausted.
+
+def _wait_for_status(client, sid: str, target: str = "completed",
+                     iters: int = 50) -> dict:
+    for _ in range(iters):
+        p = client.get(f"/v1/consult/{sid}").json()
+        if p["status"] == target:
+            return p
+        time.sleep(0.02)
+    raise AssertionError(f"sid {sid} never reached status={target}")
+
+
+class TestFollowUp:
+    def test_503_when_no_follow_up_runner(self, isolated_home,
+                                          project_dir):
+        app = create_app(run_council=make_stub_runner())
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_for_status(client, sid)
+            r = client.post(f"/v1/consult/{sid}/follow-up",
+                            json={"message": "more on Y"})
+            assert r.status_code == 503
+
+    def test_404_when_parent_unknown(self, isolated_home, project_dir):
+        app = create_app(run_council=make_stub_runner(),
+                         run_follow_up=make_stub_follow_up_runner())
+        with TestClient(app) as client:
+            r = client.post(
+                "/v1/consult/csl-does-not-exist/follow-up",
+                json={"message": "more"},
+            )
+            assert r.status_code == 404
+
+    def test_409_when_parent_running(self, isolated_home, project_dir):
+        app = create_app(run_council=make_stub_runner(sleep=0.5),
+                         run_follow_up=make_stub_follow_up_runner())
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q", "cwd": str(project_dir),
+            }).json()["sid"]
+            r = client.post(f"/v1/consult/{sid}/follow-up",
+                            json={"message": "more"})
+            assert r.status_code == 409
+            _wait_for_status(client, sid)  # cleanup
+
+    def test_400_on_empty_message(self, isolated_home, project_dir):
+        app = create_app(run_council=make_stub_runner(),
+                         run_follow_up=make_stub_follow_up_runner())
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_for_status(client, sid)
+            r = client.post(f"/v1/consult/{sid}/follow-up",
+                            json={"message": "  "})
+            assert r.status_code == 400
+
+    def test_400_on_bad_effort(self, isolated_home, project_dir):
+        app = create_app(run_council=make_stub_runner(),
+                         run_follow_up=make_stub_follow_up_runner())
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_for_status(client, sid)
+            r = client.post(f"/v1/consult/{sid}/follow-up",
+                            json={"message": "x", "effort": "xtreme"})
+            assert r.status_code == 400
+
+    def test_returns_new_sid_with_parent(self, isolated_home,
+                                         project_dir):
+        app = create_app(run_council=make_stub_runner(),
+                         run_follow_up=make_stub_follow_up_runner())
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q1", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_for_status(client, sid)
+            r = client.post(f"/v1/consult/{sid}/follow-up",
+                            json={"message": "more on Y"})
+            assert r.status_code == 200
+            body = r.json()
+            assert body["parent_sid"] == sid
+            assert body["sid"] != sid
+            assert body["sid"].startswith("csl-")
+            child_sid = body["sid"]
+            child_state = _wait_for_status(client, child_sid)
+            # Parent should now record the child in follow_up_sids.
+            parent_state = client.get(f"/v1/consult/{sid}").json()
+            assert child_sid in parent_state["follow_up_sids"]
+            assert child_state["parent_sid"] == sid
+
+    def test_follow_up_chains(self, isolated_home, project_dir):
+        # follow-up of a follow-up: chain length 3 (root → A → B).
+        app = create_app(run_council=make_stub_runner(),
+                         run_follow_up=make_stub_follow_up_runner())
+        with TestClient(app) as client:
+            root = client.post("/v1/consult", json={
+                "message": "root", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_for_status(client, root)
+            a = client.post(f"/v1/consult/{root}/follow-up",
+                            json={"message": "a"}).json()["sid"]
+            _wait_for_status(client, a)
+            b = client.post(f"/v1/consult/{a}/follow-up",
+                            json={"message": "b"}).json()["sid"]
+            _wait_for_status(client, b)
+            chain = [client.get(f"/v1/consult/{x}").json()
+                     for x in (root, a, b)]
+            assert chain[0]["parent_sid"] is None
+            assert chain[1]["parent_sid"] == root
+            assert chain[2]["parent_sid"] == a
+
+    def test_410_when_parent_closed(self, isolated_home, project_dir):
+        app = create_app(run_council=make_stub_runner(),
+                         run_follow_up=make_stub_follow_up_runner())
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_for_status(client, sid)
+            client.post(f"/v1/consult/{sid}/close")
+            r = client.post(f"/v1/consult/{sid}/follow-up",
+                            json={"message": "x"})
+            assert r.status_code == 410
+
+
+# ----------------------- close endpoint ------------------------- #
+
+class TestClose:
+    def test_404_unknown_sid(self):
+        app = create_app(run_council=make_stub_runner())
+        with TestClient(app) as client:
+            r = client.post("/v1/consult/csl-bogus/close")
+            assert r.status_code == 404
+
+    def test_409_when_running(self, isolated_home, project_dir):
+        app = create_app(run_council=make_stub_runner(sleep=0.5))
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q", "cwd": str(project_dir),
+            }).json()["sid"]
+            r = client.post(f"/v1/consult/{sid}/close")
+            assert r.status_code == 409
+            _wait_for_status(client, sid)  # cleanup
+
+    def test_close_ok(self, isolated_home, project_dir):
+        app = create_app(run_council=make_stub_runner())
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_for_status(client, sid)
+            r = client.post(f"/v1/consult/{sid}/close")
+            assert r.status_code == 200
+            body = r.json()
+            assert body["sid"] == sid
+            assert body["already_closed"] is False
+            assert body["closed_at"] is not None
+
+    def test_close_idempotent(self, isolated_home, project_dir):
+        app = create_app(run_council=make_stub_runner())
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_for_status(client, sid)
+            client.post(f"/v1/consult/{sid}/close")
+            r = client.post(f"/v1/consult/{sid}/close")
+            assert r.status_code == 200
+            assert r.json()["already_closed"] is True
+
+    def test_close_releases_chat_clients(self, isolated_home,
+                                         project_dir):
+        # The session entry stays in app.state.sessions for the
+        # grace period, but its warm ChatClients are released so we
+        # don't pin per-instance memos.
+        app = create_app(run_council=make_stub_runner())
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_for_status(client, sid)
+            assert app.state.sessions[sid]._chat_clients is not None
+            client.post(f"/v1/consult/{sid}/close")
+            assert app.state.sessions[sid]._chat_clients is None
+            assert app.state.sessions[sid].closed is True
+
+
+# ----------------------- list-open endpoint --------------------- #
+
+class TestListOpen:
+    def test_empty_initially(self):
+        app = create_app(run_council=make_stub_runner())
+        with TestClient(app) as client:
+            r = client.get("/v1/sessions/open")
+            assert r.status_code == 200
+            assert r.json()["open_sessions"] == []
+
+    def test_includes_completed_session(self, isolated_home,
+                                        project_dir):
+        app = create_app(run_council=make_stub_runner())
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_for_status(client, sid)
+            r = client.get("/v1/sessions/open")
+            sids = [s["sid"] for s in r.json()["open_sessions"]]
+            assert sid in sids
+
+    def test_excludes_closed(self, isolated_home, project_dir):
+        app = create_app(run_council=make_stub_runner())
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_for_status(client, sid)
+            client.post(f"/v1/consult/{sid}/close")
+            sids = [
+                s["sid"]
+                for s in client.get("/v1/sessions/open").json()
+                                 ["open_sessions"]
+            ]
+            assert sid not in sids
+
+
+# ----------------------- reaper -------------------------------- #
+
+class TestReaper:
+    def test_idle_session_gets_closed(self, isolated_home, project_dir):
+        # Tight timings so the test runs in well under a second.
+        app = create_app(run_council=make_stub_runner(),
+                         idle_timeout_s=0.05,
+                         reaper_interval_s=0.02)
+        try:
+            with TestClient(app) as client:
+                sid = client.post("/v1/consult", json={
+                    "message": "q", "cwd": str(project_dir),
+                }).json()["sid"]
+                _wait_for_status(client, sid)
+                # Wait long enough for at least 2 reaper ticks.
+                deadline = time.time() + 1.0
+                while time.time() < deadline:
+                    if app.state.sessions[sid].closed:
+                        break
+                    time.sleep(0.02)
+                assert app.state.sessions[sid].closed is True
+        finally:
+            app.state.reaper_stop.set()
+
+    def test_active_polling_keeps_alive(self, isolated_home,
+                                        project_dir):
+        # Polling bumps last_activity_at, so a session being
+        # iterated on shouldn't get reaped under us.
+        app = create_app(run_council=make_stub_runner(),
+                         idle_timeout_s=0.20,
+                         reaper_interval_s=0.02)
+        try:
+            with TestClient(app) as client:
+                sid = client.post("/v1/consult", json={
+                    "message": "q", "cwd": str(project_dir),
+                }).json()["sid"]
+                _wait_for_status(client, sid)
+                end = time.time() + 0.40
+                # Poll faster than the reaper kills.
+                while time.time() < end:
+                    client.get(f"/v1/consult/{sid}")
+                    time.sleep(0.05)
+                assert app.state.sessions[sid].closed is False
+        finally:
+            app.state.reaper_stop.set()

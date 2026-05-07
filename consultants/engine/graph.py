@@ -427,3 +427,76 @@ def build_council_graph(deps: GraphDeps,
     if cache is not None:
         return sg.compile(checkpointer=checkpointer, cache=cache)
     return sg.compile(checkpointer=checkpointer)
+
+
+# ----------------------- follow-up builder ----------------------- #
+# Live-session iteration: a follow-up reuses the parent's plan +
+# research + critique + warm ChatClients. The graph is a SHORTENED
+# variant — no planner (parent's plan stands), no researcher
+# fan-out (one focused lane), critic only at high/max effort. This
+# is what makes a follow-up cheap relative to a fresh consult: we
+# do at most one researcher round + one synthesizer round, with
+# the parent's evidence already merged into initial state.
+
+def build_follow_up_graph(deps: GraphDeps,
+                          *, checkpointer: Optional[Any] = None,
+                          tracer: Optional[Any] = None):
+    """Compile the SHORTENED follow-up graph.
+
+    Topology (same conventions as ``build_council_graph``):
+
+        START → researcher → synthesizer → END               (low/medium)
+        START → researcher → critic → ?                      (high/max)
+                                  │
+                                  +─ ready ──────→ synthesizer
+                                  │
+                                  +─ needs_more ─→ researcher  (loop)
+
+    The researcher's input state is pre-populated by the runner
+    with the parent's plan + research as ``prior_rounds`` and the
+    follow-up question as ``plan_item``. Synthesizer produces a
+    fresh ``final_answer`` based on the merged evidence.
+    """
+    try:
+        from langgraph.graph import StateGraph, START, END
+    except ImportError as e:  # pragma: no cover
+        raise RuntimeError(
+            "langgraph is not installed. The /consultants engine "
+            "requires the dedicated `claude-hooks-consultants` conda "
+            f"env. Underlying error: {e}"
+        ) from e
+
+    enabled = tuple(deps.enabled_roles)
+    if "synthesizer" not in enabled:
+        raise ValueError("synthesizer must be enabled for follow-up")
+    if "researcher" not in enabled:
+        raise ValueError("researcher must be enabled for follow-up")
+
+    def _wrap(role: str, fn):
+        if tracer is None:
+            return fn
+        from consultants.engine.trace import traced_node
+        return traced_node(fn, role=role, tracer=tracer)
+
+    sg = StateGraph(CouncilState)
+    sg.add_node("researcher", _wrap("researcher", _wrap_researcher(deps)))
+    if "critic" in enabled:
+        sg.add_node("critic", _wrap("critic", _wrap_critic(deps)))
+    sg.add_node("synthesizer", _wrap("synthesizer", _wrap_synthesizer(deps)))
+
+    sg.add_edge(START, "researcher")
+    if "critic" in enabled:
+        sg.add_edge("researcher", "critic")
+        sg.add_conditional_edges(
+            "critic",
+            council.route_after_critic,
+            {
+                council.ROUTE_RESEARCHER: "researcher",
+                council.ROUTE_SYNTHESIZER: "synthesizer",
+            },
+        )
+    else:
+        sg.add_edge("researcher", "synthesizer")
+    sg.add_edge("synthesizer", END)
+
+    return sg.compile(checkpointer=checkpointer)

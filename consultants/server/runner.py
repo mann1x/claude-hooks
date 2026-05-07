@@ -198,6 +198,28 @@ def make_runner(*, ollama_base_url: str):
         )
         storage.write_consultation(result, cwd=Path(cwd))
 
+        # Live-session retention: copy the consultation's plan +
+        # research + critique + final_answer + models + warm
+        # ChatClients onto the SessionState so a future follow-up
+        # POST /v1/consult/<sid>/follow-up can reuse them without
+        # re-loading from disk or re-probing /api/show.
+        #
+        # Store the RAW ChatClient instances (TracedChat._client),
+        # not the TracedChat wrappers — the follow-up creates its
+        # own tracer and wraps them fresh, so the warm
+        # _probed_think / _unsupported_think caches survive while
+        # the per-call trace plumbing rebinds correctly.
+        state.plan = final_state.get("plan") or ""
+        state.plan_items = list(final_state.get("plan_items") or [])
+        state.research = list(final_state.get("research") or [])
+        state.critique = final_state.get("critique")
+        state.final_answer = final_state.get("final_answer") or ""
+        state.models = dict(models)
+        state._chat_clients = {
+            r: getattr(c, "_client", c) for r, c in chat_clients.items()
+        }
+        state.bump_activity()
+
         state.status = terminal_status
         state.error = node_error
         state.finished_at = time.time()
@@ -206,6 +228,229 @@ def make_runner(*, ollama_base_url: str):
                         node_failed)
 
     return run_council
+
+
+def make_follow_up_runner(*, ollama_base_url: str):
+    """Return a ``run_follow_up(child_state, runner_input)`` callable.
+
+    Mirrors ``make_runner`` but uses the SHORTENED follow-up graph
+    (researcher → [critic at high] → synthesizer → END). Reuses the
+    parent SessionState's warm ``_chat_clients`` when present so
+    /api/show probes don't re-fire and the per-model
+    ``_unsupported_think`` cache carries over. Falls back to
+    creating fresh ChatClients if the parent's are gone (e.g. the
+    parent was reaped between completion and follow-up).
+    """
+    from claude_hooks.get_advice.chat_client import ChatClient
+    from claude_hooks.caliber_proxy.tools import (
+        openai_tool_specs, execute as tool_execute,
+    )
+    from claude_hooks.caliber_proxy.prompt import build_grounding_messages
+    from consultants.engine.graph import GraphDeps, build_follow_up_graph
+    from consultants.engine.trace import (
+        Tracer, TracedChat, traced_tool, traced_node,
+    )
+
+    def run_follow_up(state, runner_input: dict) -> None:
+        cfg: cc.ConsultantsConfig = runner_input["config"]
+        cwd: str = runner_input["cwd"]
+        question: str = runner_input["question"]
+        parent_state = runner_input.get("parent_state")
+
+        # Topology: researcher + synthesizer always; critic only at
+        # high/max effort (matches the main runner's gate). The
+        # parent's ``enabled_roles`` may have included critic but
+        # the follow-up topology decides independently based on
+        # this follow-up's effort.
+        enabled = ["researcher", "synthesizer"]
+        if cfg.effort in ("high", "max") and "critic" in cc.enabled_roles(cfg):
+            enabled = ["researcher", "critic", "synthesizer"]
+        enabled_t = tuple(enabled)
+
+        tracer = Tracer.for_session(
+            state.sid, enabled=runner_input.get("trace"),
+        )
+
+        # Reuse the parent's warm raw ChatClients if available.
+        warm_clients = (
+            parent_state._chat_clients
+            if parent_state is not None
+            and parent_state._chat_clients is not None
+            else {}
+        )
+        chat_clients = {}
+        for role in enabled_t:
+            raw = warm_clients.get(role)
+            if raw is None:
+                # Parent's clients went away (closed, reaped, or
+                # the parent didn't run that role). Cold-start —
+                # the follow-up still works but pays the
+                # /api/show probe cost on first use.
+                raw = ChatClient(ollama_base_url)
+                log.info(
+                    "follow-up %s: cold ChatClient for role=%s "
+                    "(no warm parent client)", state.sid, role,
+                )
+            chat_clients[role] = TracedChat(raw, role=role, tracer=tracer)
+
+        # Models: prefer parent's recorded models so the follow-up
+        # talks to the same models the parent used. Falls back to
+        # current cfg.roles[role].model when parent didn't record.
+        parent_models = (parent_state.models
+                         if parent_state is not None else {})
+        models = {
+            r: parent_models.get(r) or cfg.roles[r].model
+            for r in enabled_t
+        }
+
+        grounding_msgs = build_grounding_messages(
+            cwd, tools_available=True,
+        )
+
+        # Per-role think values from current cfg (parent_state
+        # didn't capture think). Defaults are role-specific so this
+        # is fine.
+        think_by_role = {r: cc.role_think(cfg, r) for r in enabled_t}
+
+        deps = GraphDeps(
+            chat_clients=chat_clients,
+            models=models,
+            enabled_roles=enabled_t,
+            cwd=cwd,
+            tool_executor=traced_tool(tool_execute, tracer=tracer),
+            tool_specs=openai_tool_specs(),
+            grounding_msgs=grounding_msgs,
+            think_by_role=think_by_role,
+            synthesizer_self_critic=False,  # follow-ups never
+            disable_cache=True,             # caching not useful here
+        )
+        compiled = build_follow_up_graph(deps, tracer=tracer)
+
+        # Initial state for the follow-up. Pre-populates the
+        # parent's plan + research as ``prior_rounds`` so the
+        # researcher node sees them; ``plan_item`` carries the
+        # focused follow-up question; the parent's final_answer is
+        # appended as a ``Prior synthesizer answer:`` block so the
+        # researcher knows what's already been said.
+        prior_research: list[str] = []
+        if parent_state is not None:
+            prior_research = list(parent_state.research or [])
+            if parent_state.final_answer:
+                prior_research.append(
+                    "## Prior synthesizer answer\n\n"
+                    + parent_state.final_answer.strip()
+                )
+
+        initial = council_mod.initial_state(
+            question=question, cwd=cwd, models=models,
+            topology=cfg.topology, effort=cfg.effort,
+        )
+        initial["plan"] = (
+            parent_state.plan
+            if parent_state is not None and parent_state.plan
+            else "(follow-up: focus on the question above)"
+        )
+        initial["plan_item"] = question
+        initial["lane_idx"] = 0
+        initial["research"] = prior_research
+
+        if enabled:
+            state.progress[enabled[0]] = "in_progress"
+
+        # Same dual-mode streaming pattern as run_council.
+        final_state: dict = dict(initial)
+        try:
+            for mode, payload in compiled.stream(
+                    initial, stream_mode=["updates", "values"]):
+                if mode == "values" and isinstance(payload, dict):
+                    final_state = payload
+                    continue
+                if mode != "updates" or not isinstance(payload, dict):
+                    continue
+                for node, partial in payload.items():
+                    if node in state.progress:
+                        state.progress[node] = "done"
+                        try:
+                            idx = enabled.index(node)
+                            for i in range(idx + 1, len(enabled)):
+                                if state.progress.get(enabled[i]) == "pending":
+                                    state.progress[enabled[i]] = "in_progress"
+                                    break
+                        except ValueError:
+                            pass
+        except Exception as e:
+            log.exception("follow-up graph invocation failed: %s", e)
+            state.status = "failed"
+            state.error = f"graph crashed: {e}"
+            state.finished_at = time.time()
+            _write_failed_artifacts(state, cwd, question, e)
+            return
+
+        for r in enabled:
+            if state.progress.get(r) != "done":
+                state.progress[r] = "done"
+
+        node_error = final_state.get("error")
+        node_failed = final_state.get("_role_failed")
+        terminal_status = "failed" if node_error else "completed"
+
+        # Persist artifacts for the FOLLOW-UP (its own sid + dir).
+        # parent_sid is recorded in metadata so the chain is
+        # reconstructable from disk.
+        result = storage.ConsultationResult(
+            session_id=state.sid,
+            created=time.strftime(
+                "%Y-%m-%dT%H:%M:%S",
+                time.localtime(state.started_at)),
+            question=question,
+            models=models,
+            topology=cfg.topology,
+            effort=cfg.effort,
+            final_answer=final_state.get("final_answer", ""),
+            turns=list(final_state.get("turns") or []),
+            duration_seconds=time.time() - state.started_at,
+            status=terminal_status,
+            error=node_error,
+            cwd=cwd,
+            total_prompt_tokens=int(final_state.get(
+                "total_prompt_tokens") or 0),
+            total_completion_tokens=int(final_state.get(
+                "total_completion_tokens") or 0),
+            retries_by_role=dict(final_state.get(
+                "retries_by_role") or {}),
+            parent_sid=state.parent_sid,
+        )
+        storage.write_consultation(result, cwd=Path(cwd))
+
+        # Inherit warm clients onto the follow-up's state so the
+        # next follow-up in the chain (follow-up of follow-up)
+        # also reuses them.
+        state.plan = final_state.get("plan") or initial["plan"]
+        state.plan_items = list(final_state.get("plan_items") or [])
+        state.research = list(final_state.get("research") or [])
+        state.critique = final_state.get("critique")
+        state.final_answer = final_state.get("final_answer") or ""
+        state.models = dict(models)
+        state._chat_clients = {
+            r: getattr(c, "_client", c) for r, c in chat_clients.items()
+        }
+        state.bump_activity()
+        # Also bump the parent so an active iteration chain keeps
+        # the whole lineage warm.
+        if parent_state is not None:
+            parent_state.bump_activity()
+
+        state.status = terminal_status
+        state.error = node_error
+        state.finished_at = time.time()
+        if node_failed:
+            log.warning(
+                "follow-up finished with role failure: %s (sid=%s "
+                "parent=%s)",
+                node_failed, state.sid, state.parent_sid,
+            )
+
+    return run_follow_up
 
 
 def _write_failed_artifacts(state, cwd: str, question: str,
