@@ -247,10 +247,18 @@ def cmd_list(args, base: str) -> int:
 
 def cmd_show(args, base: str) -> int:
     """Local read of a session's summary.md — does not hit the
-    engine. Useful when the service is down."""
+    engine. Useful when the service is down.
+
+    With ``--raw``, dumps the structured event log from
+    ``transcript.db`` (one row per line as JSON) instead of the
+    rendered summary. Optional ``--filter role=researcher`` and
+    ``--filter kind=tool_call`` add WHERE clauses; ``--limit N``
+    caps the number of rows."""
     cwd = Path(args.cwd or os.getcwd()).resolve()
     from consultants.engine import storage
     sdir = storage.session_dir(cwd, args.sid)
+    if getattr(args, "raw", False):
+        return _cmd_show_raw(args, sdir)
     summary_path = sdir / storage.SUMMARY_FILENAME
     metadata_path = sdir / storage.METADATA_FILENAME
     if not summary_path.exists():
@@ -263,6 +271,96 @@ def cmd_show(args, base: str) -> int:
                      if metadata_path.exists() else None),
     }
     print(json.dumps(out, indent=2))
+    return 0
+
+
+# Whitelist of WHERE-clause columns acceptable from --filter. Anything
+# outside this set is rejected so we never interpolate user input into
+# SQL — only the value side is parameterized.
+_RAW_FILTER_COLUMNS = (
+    "role", "kind", "model", "tool", "round", "lane_idx",
+)
+
+
+def _parse_raw_filters(filters: list[str]) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for f in filters or []:
+        if "=" not in f:
+            raise CLIError(
+                f"--filter must be key=value, got {f!r} "
+                f"(e.g. --filter role=researcher)"
+            )
+        k, _, v = f.partition("=")
+        k = k.strip()
+        if k not in _RAW_FILTER_COLUMNS:
+            raise CLIError(
+                f"unknown --filter column {k!r}. Allowed: "
+                + ", ".join(_RAW_FILTER_COLUMNS)
+            )
+        out.append((k, v.strip()))
+    return out
+
+
+def _cmd_show_raw(args, sdir: Path) -> int:
+    """Implementation of ``show --raw`` — dumps the events table as
+    one JSON object per line ordered by ts. Tolerates partial /
+    in-flight db files (mode=ro, fall back gracefully on missing
+    columns)."""
+    import sqlite3
+    from consultants.engine import storage as _storage
+    db_path = sdir / _storage.TRANSCRIPT_DB_FILENAME
+    if not db_path.is_file():
+        raise CLIError(
+            f"no transcript.db for sid {args.sid} under {sdir}. "
+            f"Older v1.0 sessions don't have one — show --raw is "
+            f"only meaningful for v1.1+ sessions."
+        )
+    pairs = _parse_raw_filters(getattr(args, "filter", None) or [])
+    where_sql = ""
+    params: list = []
+    if pairs:
+        clauses = []
+        for col, val in pairs:
+            clauses.append(f"{col} = ?")
+            # Coerce integers for numeric columns; sqlite3 binds
+            # bare strings as TEXT which won't match an INTEGER row.
+            if col in ("round", "lane_idx"):
+                try:
+                    params.append(int(val))
+                except ValueError:
+                    raise CLIError(
+                        f"--filter {col} expects an integer, "
+                        f"got {val!r}"
+                    )
+            else:
+                params.append(val)
+        where_sql = " WHERE " + " AND ".join(clauses)
+    limit = int(getattr(args, "limit", 0) or 0)
+    limit_sql = f" LIMIT {limit}" if limit > 0 else ""
+
+    try:
+        conn = sqlite3.connect(
+            f"file:{db_path}?mode=ro", uri=True, timeout=5.0,
+        )
+    except sqlite3.OperationalError as e:
+        raise CLIError(f"could not open {db_path}: {e}")
+    try:
+        cur = conn.execute(
+            "SELECT event_id, ts, kind, role, round, lane_idx, "
+            "model, prompt_tokens, completion_tokens, "
+            "tool, args, output, output_chars, duration_ms, error "
+            "FROM events" + where_sql
+            + " ORDER BY ts" + limit_sql,
+            params,
+        )
+        cols = [d[0] for d in cur.description]
+        for row in cur:
+            ev = dict(zip(cols, row))
+            print(json.dumps(ev, ensure_ascii=False, default=str))
+    except sqlite3.DatabaseError as e:
+        raise CLIError(f"transcript.db query failed: {e}")
+    finally:
+        conn.close()
     return 0
 
 
@@ -554,10 +652,31 @@ def build_parser() -> argparse.ArgumentParser:
     l_.set_defaults(fn=cmd_list)
 
     # show
-    sh = sub.add_parser("show", help="Print a stored session's summary "
-                        "(no engine call).")
+    sh = sub.add_parser(
+        "show",
+        help="Print a stored session's summary (no engine call). With "
+             "--raw, dump the events table from transcript.db as one "
+             "JSON object per line.",
+    )
     sh.add_argument("sid")
     sh.add_argument("--cwd", help="Project root (default: cwd).")
+    sh.add_argument(
+        "--raw", action="store_true",
+        help="Dump the events table from transcript.db instead of "
+             "rendering summary.md. Output is one JSON object per "
+             "line, ordered by ts.",
+    )
+    sh.add_argument(
+        "--filter", action="append", default=None, metavar="COL=VAL",
+        help="Filter --raw output by column. Repeatable. Allowed "
+             "columns: role, kind, model, tool, round, lane_idx. "
+             "Examples: --filter role=researcher --filter kind=tool_call",
+    )
+    sh.add_argument(
+        "--limit", type=int, default=0,
+        help="Cap the number of rows in --raw output. 0 (default) "
+             "= unlimited.",
+    )
     sh.set_defaults(fn=cmd_show)
 
     # config
