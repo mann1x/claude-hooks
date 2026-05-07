@@ -441,8 +441,25 @@ def planner_node(state: dict, *, chat_client, model: str,
         plan, pt, ct = _single_shot(chat_client, model, msgs, think=think)
     except Exception as e:
         log.exception("planner_node failed: %s", e)
-        return {"error": f"planner failed: {e}",
-                "_role_failed": "planner"}
+        # Tombstone return: keep the graph progressing with a
+        # visible failure marker. ``plan`` is non-additive so the
+        # err_text replaces the empty initial value, which the
+        # researcher will see as its plan; ``plan_items`` stays
+        # empty so the fan-out router falls through to the
+        # single-researcher path; ``turns`` (additive reducer)
+        # records the failure so the transcript shows it.
+        err_text = f"(planner failed: {e})"
+        return {
+            "error": f"planner failed: {e}",
+            "_role_failed": "planner",
+            "plan": err_text,
+            "plan_items": [],
+            "turns": [RoleTurn(
+                role="planner", round=1, content=err_text,
+                prompt_tokens=0, completion_tokens=0,
+                duration_seconds=0.0,
+            )],
+        }
     dt = time.monotonic() - t0
     turn = RoleTurn(
         role="planner", round=1, content=plan,
@@ -537,8 +554,23 @@ def researcher_node(state: dict, *,
         )
     except Exception as e:
         log.exception("researcher_node failed: %s", e)
-        return {"error": f"researcher failed: {e}",
-                "_role_failed": "researcher"}
+        # Tombstone return so the additive reducers record the
+        # failure visibly. Without this, a crashed lane silently
+        # contributes nothing — the synthesizer never sees the gap
+        # and writes a confidently-degraded answer over the surviving
+        # lanes. This was the audit-high (csl-...-faa2) finding.
+        err_text = f"(researcher lane failed: {e})"
+        return {
+            "error": f"researcher failed: {e}",
+            "_role_failed": "researcher",
+            "research": [err_text],
+            "research_rounds_used": 1,
+            "turns": [RoleTurn(
+                role="researcher", round=this_round, content=err_text,
+                prompt_tokens=0, completion_tokens=0,
+                duration_seconds=0.0,
+            )],
+        }
     dt = time.monotonic() - t0
     text = _extract_text(final)
     pt, ct = _usage_from(final)
@@ -643,10 +675,23 @@ def critic_node(state: dict, *, chat_client, model: str,
     except Exception as e:
         log.exception("critic_node failed: %s", e)
         # On critic failure default to "ready" so the council still
-        # produces an answer rather than stalling forever.
-        return {"error": f"critic failed: {e}",
-                "_role_failed": "critic",
-                "critic_decision": "ready"}
+        # produces an answer rather than stalling forever. Tombstone
+        # the critique so the synthesizer sees the failure note and
+        # the transcript records it.
+        err_text = f"(critic failed: {e}; defaulting to ready)"
+        rounds_used = int(state.get("research_rounds_used") or 0)
+        return {
+            "error": f"critic failed: {e}",
+            "_role_failed": "critic",
+            "critic_decision": "ready",
+            "critique": err_text,
+            "turns": [RoleTurn(
+                role="critic", round=max(rounds_used, 1),
+                content=err_text,
+                prompt_tokens=0, completion_tokens=0,
+                duration_seconds=0.0,
+            )],
+        }
     dt = time.monotonic() - t0
     decision = parse_critic_decision(text)
     # critic_reroutes_used uses the additive reducer; we contribute
@@ -683,13 +728,22 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
         log.exception("synthesizer_node failed: %s", e)
         # Synthesizer failure is terminal — propagate as an error
         # but produce a placeholder final_answer so storage still
-        # writes something readable.
+        # writes something readable. Tombstone the turn so the
+        # transcript records the failure (the artifact reader at
+        # storage.py iterates ``turns`` and would otherwise drop
+        # this lane).
+        err_text = f"(synthesizer failed: {e})"
         return {
             "error": f"synthesizer failed: {e}",
             "_role_failed": "synthesizer",
             "final_answer": (
                 f"(consultation incomplete: synthesizer error: {e})"
             ),
+            "turns": [RoleTurn(
+                role="synthesizer", round=1, content=err_text,
+                prompt_tokens=0, completion_tokens=0,
+                duration_seconds=0.0,
+            )],
         }
     dt = time.monotonic() - t0
     turn = RoleTurn(

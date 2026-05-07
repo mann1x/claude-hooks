@@ -372,6 +372,26 @@ class TestPlannerNode:
         assert "planner failed" in update["error"]
         assert update["_role_failed"] == "planner"
 
+    def test_planner_failure_emits_tombstone(self):
+        # Hardening: planner failure must populate ``plan`` (so the
+        # researcher sees a failure marker), zero out ``plan_items``
+        # (so the fan-out router falls back to the single-researcher
+        # path), and contribute a turn record.
+        class BoomClient:
+            def chat(self, payload):
+                raise RuntimeError("planner upstream 503")
+        state = council.initial_state(
+            question="q", cwd="/tmp", models={"planner": "m"},
+            topology="council", effort="medium",
+        )
+        update = council.planner_node(state, chat_client=BoomClient(),
+                                      model="m")
+        assert "planner failed" in update["plan"]
+        assert update["plan_items"] == []
+        assert len(update["turns"]) == 1
+        assert update["turns"][0].role == "planner"
+        assert "planner failed" in update["turns"][0].content
+
     def test_token_totals_accumulate(self):
         # Post-fanout: nodes return DELTA-only values; LangGraph's
         # additive reducers in CouncilState concat/sum across
@@ -508,6 +528,38 @@ class TestResearcherNode:
         )
         assert "researcher failed" in update["error"]
 
+    def test_loop_failure_emits_tombstone_research(self):
+        # Hardening from audit-high (csl-...-faa2): the except branch
+        # MUST contribute to the additive reducers so the synthesizer
+        # sees a visible failure marker rather than silently
+        # producing a degraded answer over the surviving lanes.
+        def boom(payload, cwd, **kw):
+            raise RuntimeError("HTTP timeout exhausted retries")
+        state = council.initial_state(
+            question="q", cwd="/proj",
+            models={"researcher": "m"},
+            topology="council", effort="medium",
+        )
+        state["plan"] = "p"
+        update = council.researcher_node(
+            state, chat_client=FakeChatClient([]),
+            tool_executor=lambda *a, **k: "",
+            tool_specs=[], grounding_msgs=[], model="m", cwd="/proj",
+            loop_runner=boom,
+        )
+        # Tombstone in research (additive reducer concats this).
+        assert "research" in update
+        assert isinstance(update["research"], list)
+        assert len(update["research"]) == 1
+        assert "researcher lane failed" in update["research"][0]
+        assert "HTTP timeout" in update["research"][0]
+        # Turn record so the transcript shows the failure.
+        assert "turns" in update
+        assert len(update["turns"]) == 1
+        assert update["turns"][0].role == "researcher"
+        # research_rounds_used += 1 (additive).
+        assert update["research_rounds_used"] == 1
+
 
 # ----------------------- critic_node ------------------------------ #
 
@@ -556,6 +608,26 @@ class TestCriticNode:
         assert update["critic_decision"] == "ready"
         assert "critic failed" in update["error"]
 
+    def test_failure_emits_tombstone_critique_and_turn(self):
+        # Hardening: critic failure must populate ``critique`` (so
+        # the synthesizer sees the failure note) and add a turn so
+        # the transcript records it.
+        class BoomClient:
+            def chat(self, payload):
+                raise RuntimeError("critic upstream 502")
+        state = council.initial_state(
+            question="q", cwd="/p", models={"critic": "m"},
+            topology="council", effort="medium",
+        )
+        state["plan"] = "p"
+        state["research"] = ["r1"]
+        update = council.critic_node(state, chat_client=BoomClient(),
+                                     model="m")
+        assert "critic failed" in update["critique"]
+        assert "defaulting to ready" in update["critique"]
+        assert len(update["turns"]) == 1
+        assert update["turns"][0].role == "critic"
+
 
 # ----------------------- synthesizer_node ------------------------- #
 
@@ -586,6 +658,23 @@ class TestSynthesizerNode:
                                           model="m")
         assert "consultation incomplete" in update["final_answer"]
         assert update["_role_failed"] == "synthesizer"
+
+    def test_failure_emits_tombstone_turn(self):
+        # Hardening: synthesizer failure must record a turn so the
+        # storage.py transcript writer (which iterates result.turns)
+        # shows the failure rather than silently dropping it.
+        class BoomClient:
+            def chat(self, payload):
+                raise RuntimeError("synth upstream 504")
+        state = council.initial_state(
+            question="q", cwd="/p", models={"synthesizer": "m"},
+            topology="council", effort="medium",
+        )
+        update = council.synthesizer_node(state, chat_client=BoomClient(),
+                                          model="m")
+        assert len(update["turns"]) == 1
+        assert update["turns"][0].role == "synthesizer"
+        assert "synthesizer failed" in update["turns"][0].content
 
 
 # ----------------------- topology builder ------------------------- #
