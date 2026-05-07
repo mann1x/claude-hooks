@@ -66,7 +66,7 @@ runs published for the label; per [`EVALUATION.md`](EVALUATION.md)
 
 | Label | Model | Effort scheme | Runs | Smoke | Audit-med | Audit-hi | Total c-tok | Verdict |
 |---|---|---|---|---|---|---|---|---|
-| [`kimi-k2.6-cloud-2026-05-07`](kimi-k2.6-cloud-2026-05-07/results.md) | `kimi-k2.6:cloud` (every role) | medium / medium / high | 1/3 | (re-running) | 213s · 12.3k · A | 787s · 34.3k · A | 46.6k+ | PROD-READY (single-run; smoke re-run pending) |
+| [`kimi-k2.6-cloud-2026-05-07`](kimi-k2.6-cloud-2026-05-07/results.md) | `kimi-k2.6:cloud` (every role) | medium / medium / high | 1/3 | 257s · 4.1k · PASS | 213s · 12.3k · A | 787s · 34.3k · A | 50.7k | PROD-READY (single-run) |
 
 ### Role-suitability matrix
 

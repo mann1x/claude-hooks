@@ -1,8 +1,8 @@
 # Benchmark — `kimi-k2.6-cloud-2026-05-07`
 
-Generated 2026-05-07T09:23:48+02:00 on solidpc.
-Engine HEAD (`/srv/dev-disk-by-label-opt/dev/claude-hooks`): `7f5e08e`
-Subject baseline: `bench-baseline-2026-05-07` (commit `f309436`) — frozen worktree at `/tmp/claude-hooks-bench-bench-baseline-2026-05-07-ce1r`
+Generated 2026-05-07T09:39:21+02:00 on solidpc.
+Engine HEAD (`/srv/dev-disk-by-label-opt/dev/claude-hooks`): `83cfd3b`
+Subject baseline: `bench-baseline-2026-05-07` (commit `83cfd3b`) — frozen worktree at `/srv/dev-disk-by-label-opt/dev/claude-hooks`
 Cloud model snapshot: see `models.json`.
 
 Model pin: per-role config (no override). Snapshot of `claude-consultants config show`:
@@ -69,7 +69,7 @@ Model pin: per-role config (no override). Snapshot of `claude-consultants config
 
 | Query | Effort | Status | Wall | Prompt tok | Completion tok | LLM calls | Tool calls | sid |
 |---|---|---|---|---|---|---|---|---|
-| smoke | medium | completed | 394s | 24040 | 11260 | 14 | 22 | `csl-2026-05-07-0900-18fc` |
+| smoke | medium | completed | 257s | 66107 | 4052 | 14 | 12 | `csl-2026-05-07-0934-9ec3` |
 | audit-medium | medium | completed | 213s | 61745 | 12257 | 17 | 27 | `csl-2026-05-07-0907-5644` |
 | audit-high | high | completed | 787s | 112656 | 34320 | 23 | 37 | `csl-2026-05-07-0910-c184` |
 
@@ -83,9 +83,9 @@ totals include cloud-model reasoning tokens.
 
 | Role | Wall | LLM calls | Prompt tok | Completion tok | Tool calls |
 |---|---|---|---|---|---|
-| planner | 1.8m | 1 | 237 | 2315 | 0 |
-| researcher | 5.2m | 12 | 44265 | 7930 | 22 |
-| synthesizer | 1.8m | 1 | 1076 | 3212 | 0 |
+| planner | 1.7m | 1 | 245 | 1879 | 0 |
+| researcher | 3.0m | 12 | 95894 | 2056 | 12 |
+| synthesizer | 58.1s | 1 | 801 | 1035 | 0 |
 
 ### audit-medium
 
@@ -131,27 +131,23 @@ Per-query artifacts in this directory:
 
 | Query | Grade | Notes |
 |---|---|---|
-| smoke        | (pending re-run with code-only smoke) | original liveness-check smoke broke under worktree pinning — re-running with the 2026-05-07 baseline's code-only variant |
+| smoke        | PASS | "The four roles are planner, researcher, critic, and synthesizer (`consultants/config.py:40`; `tests/test_consultants_config.py:27`)." All four roles, cited, no hedging |
 | audit-medium | A    | All 6 ground-truth unprotected sites cited with correct verdicts; correctly omitted install.py protected/inline-script sites; no false positives |
-| audit-high   | A    | All 4 required claims present and cited with `path:line`; recommendation cites the new tombstone code (council.py:562-566) and notes the remaining `status=failed` mismatch as a degraded-answer footgun |
+| audit-high   | A    | All 4 required claims present and cited with `path:line`; recommendation cites the new tombstone code (`council.py:562-566`) and notes the remaining `status=failed` mismatch as a degraded-answer footgun |
 
 ## Per-role grades (manual, per [`EVALUATION.md`](../EVALUATION.md) §3.5)
 
-Aggregated across audit-medium + audit-high transcripts (smoke
-re-run pending; per-role grades stable enough to lock in now and
-re-confirm after the smoke re-run).
+Aggregated across all three queries' transcripts.
 
 | Role | Grade | One-sentence justification |
 |---|---|---|
 | planner     | A | 6-7 numbered items per query, each pointing at a concrete file/path or verification step ("Show the diff of commit `4e67dc2`", "Run `git grep -n -E 'import psycopg\\|from psycopg'`") — no vague items |
-| researcher  | A | Path:line citations on every finding; tool calls batched (audit-medium iter 2 had 5 parallel tools); audit-high lane was sharp enough to read its own hardening fix at council.py:562-566 |
+| researcher  | A | Path:line citations on every finding; tool calls batched (audit-medium iter 2 had 5 parallel tools); audit-high lane was sharp enough to read its own hardening fix at `council.py:562-566` |
 | critic      | A | Audit-high critic produced parseable `DECISION:` line in concise reasoning; one re-route used productively |
-| synthesizer | A | Audit-medium nailed all 6 ground-truth sites; audit-high produced a working trace with explicit hardening recommendation including a code-shaped diff; bottom-line-first format throughout |
+| synthesizer | A | Smoke nailed all four roles in one sentence with `path:line`; audit-medium nailed all 6 ground-truth sites; audit-high produced a working trace with explicit hardening recommendation including a code-shaped diff |
 
 **Mix string:** `P:A R:A C:A S:A`
 
-**Mix string:** `P:_ R:_ C:_ S:_`
+**Verdict:** PROD-READY (single-run; pending N=3 confirmation per [§5](../EVALUATION.md#5-multi-run-requirement))
 
-**Verdict:** _PROD-READY / EVALUATED-ONLY / UNSTABLE_
-
-**Commentary:** _one paragraph — what role(s) this model wins at vs prior labels, which role(s) it should NOT be used for, whether you'd build a heterogeneous mix around it_
+**Commentary:** Single-run, but the answers are decisive across the board. The audit-high run notably caught the new tombstone code introduced in this very commit and reasoned over it correctly — exactly the frontier-model bar Q3 was designed to test. No role this model is unsuitable for; if I were composing a heterogeneous mix to lower cost, I'd try a cheaper model on planner first (its job is the most structured) and keep kimi everywhere else.

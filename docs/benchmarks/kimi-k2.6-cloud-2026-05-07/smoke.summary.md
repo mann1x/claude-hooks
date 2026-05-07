@@ -1,16 +1,16 @@
 ---
-session_id: csl-2026-05-07-0900-18fc
-created: "2026-05-07T09:00:34"
-question: Confirm the consultants pipeline is live by responding with one short sentence.
+session_id: csl-2026-05-07-0934-9ec3
+created: "2026-05-07T09:34:07"
+question: From the code in this repository, name the four roles of the consultants council in a single short sentence.
 models:
   planner: "kimi-k2.6:cloud"
   researcher: "kimi-k2.6:cloud"
   synthesizer: "kimi-k2.6:cloud"
 topology: council
 effort: medium
-duration_seconds: 384.25
+duration_seconds: 247.80
 status: completed
-cwd: /tmp/claude-hooks-bench-bench-baseline-2026-05-07-ce1r
+cwd: /tmp/claude-hooks-bench-bench-baseline-2026-05-07-WxNc
 ---
 
-The consultants pipeline cannot be confirmed live because no CI/CD configs, deployment manifests, health endpoints, or orchestrator definitions were found in the repository, and only a local systemd service unit exists (`systemd/claude-hooks-consultants.service:9`).
+The four roles are planner, researcher, critic, and synthesizer (`consultants/config.py:40`; `tests/test_consultants_config.py:27`).
