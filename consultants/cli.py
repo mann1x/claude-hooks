@@ -148,7 +148,11 @@ def cmd_status(args, base: str) -> int:
 def cmd_follow_up(args, base: str) -> int:
     """Live-session iteration: spawn a follow-up that reuses
     the prior session's plan + research + warm ChatClients.
-    Returns a NEW sid; poll it just like a fresh consult."""
+    Returns a NEW sid; poll it just like a fresh consult.
+
+    The engine auto-reopens the parent if it was closed or
+    evicted — pass ``--cwd`` to enable the disk-fallback path
+    when the engine no longer has the parent in memory."""
     body = {"message": args.message}
     if args.effort:
         body["effort"] = args.effort
@@ -156,6 +160,10 @@ def cmd_follow_up(args, base: str) -> int:
         body["trace"] = True
     elif args.trace is False:
         body["trace"] = False
+    # Always include cwd so cold-path follow-ups (parent evicted /
+    # service restarted) can reopen from disk without a separate
+    # reopen call.
+    body["cwd"] = str(Path(args.cwd or os.getcwd()).resolve())
     out = _http("POST",
                 f"{base}/v1/consult/{args.parent_sid}/follow-up",
                 body=body)
@@ -163,9 +171,32 @@ def cmd_follow_up(args, base: str) -> int:
     return 0
 
 
+def cmd_reopen(args, base: str) -> int:
+    """Restore a closed / evicted session to the in-memory pool.
+
+    Three paths the engine can take, all return 200:
+      - already warm  → no-op (``already_open: true``)
+      - closed in memory → flip closed=False (``source: in-memory-reopen``)
+      - evicted but on disk → reconstruct from artifacts under cwd
+        (``source: disk``)
+
+    Pass ``--cwd`` to point at the project; defaults to the current
+    directory.
+    """
+    body = {
+        "cwd": str(Path(args.cwd or os.getcwd()).resolve()),
+    }
+    out = _http("POST", f"{base}/v1/consult/{args.sid}/reopen",
+                body=body)
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
+
+
 def cmd_close(args, base: str) -> int:
-    """Explicitly release a session's warm ChatClients. The on-disk
-    artifacts stay; only in-memory state is dropped."""
+    """Explicitly release a session's warm ChatClients. On-disk
+    artifacts are preserved, so a later ``follow-up`` or
+    ``reopen`` against this sid auto-reloads the session at the
+    cost of one /api/show probe per role on the first call."""
     out = _http("POST", f"{base}/v1/consult/{args.sid}/close",
                 body={})
     print(json.dumps({"ok": True, **out}, indent=2))
@@ -464,13 +495,30 @@ def build_parser() -> argparse.ArgumentParser:
     fu.add_argument("--no-trace", dest="trace", action="store_false",
                     help="Force tracing off, overriding "
                          "CONSULTANTS_TRACE.")
+    fu.add_argument("--cwd",
+                    help="Project root for disk-fallback when the "
+                         "parent isn't in engine memory (default: "
+                         "current dir). Always sent so closed / "
+                         "evicted parents auto-reopen.")
     fu.set_defaults(fn=cmd_follow_up)
+
+    # reopen — disk-fallback to restore a closed / evicted session.
+    ro = sub.add_parser(
+        "reopen",
+        help="Restore a closed or evicted session to the engine's "
+             "in-memory pool. Auto-runs on follow-up; this exposes "
+             "the same path explicitly for inspect-before-iterate.")
+    ro.add_argument("sid")
+    ro.add_argument("--cwd",
+                    help="Project root (default: current dir).")
+    ro.set_defaults(fn=cmd_reopen)
 
     # close — explicit release of warm ChatClients.
     cl = sub.add_parser(
         "close",
         help="Close an in-memory session, releasing its warm engine "
-             "handles. Future follow-ups against this sid 410.")
+             "handles. Reversible — a later `follow-up` or "
+             "`reopen` re-loads the session from disk artifacts.")
     cl.add_argument("sid")
     cl.set_defaults(fn=cmd_close)
 

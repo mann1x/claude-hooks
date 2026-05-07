@@ -406,13 +406,30 @@ class TestFollowUp:
                             json={"message": "more on Y"})
             assert r.status_code == 503
 
-    def test_404_when_parent_unknown(self, isolated_home, project_dir):
+    def test_400_when_parent_unknown_and_no_cwd(self, isolated_home,
+                                                 project_dir):
+        # Without a cwd hint, the engine can't find the artifact; the
+        # caller has to supply cwd for the disk-fallback path. We
+        # return 400 (not 404) because the request is incomplete.
         app = create_app(run_council=make_stub_runner(),
                          run_follow_up=make_stub_follow_up_runner())
         with TestClient(app) as client:
             r = client.post(
                 "/v1/consult/csl-does-not-exist/follow-up",
                 json={"message": "more"},
+            )
+            assert r.status_code == 400
+            assert "cwd" in r.json()["detail"].lower()
+
+    def test_404_when_cwd_given_but_no_artifact(self, isolated_home,
+                                                project_dir):
+        # cwd provided but no metadata.json under it for that sid.
+        app = create_app(run_council=make_stub_runner(),
+                         run_follow_up=make_stub_follow_up_runner())
+        with TestClient(app) as client:
+            r = client.post(
+                "/v1/consult/csl-does-not-exist/follow-up",
+                json={"message": "more", "cwd": str(project_dir)},
             )
             assert r.status_code == 404
 
@@ -496,7 +513,11 @@ class TestFollowUp:
             assert chain[1]["parent_sid"] == root
             assert chain[2]["parent_sid"] == a
 
-    def test_410_when_parent_closed(self, isolated_home, project_dir):
+    def test_auto_reopens_closed_parent(self, isolated_home, project_dir):
+        # A closed parent is silently reopened in place (the data is
+        # still in app.state.sessions, just with closed=True). The
+        # follow-up proceeds normally and the parent flips back to
+        # closed=False.
         app = create_app(run_council=make_stub_runner(),
                          run_follow_up=make_stub_follow_up_runner())
         with TestClient(app) as client:
@@ -505,9 +526,156 @@ class TestFollowUp:
             }).json()["sid"]
             _wait_for_status(client, sid)
             client.post(f"/v1/consult/{sid}/close")
+            assert app.state.sessions[sid].closed is True
             r = client.post(f"/v1/consult/{sid}/follow-up",
                             json={"message": "x"})
-            assert r.status_code == 410
+            assert r.status_code == 200
+            child_sid = r.json()["sid"]
+            _wait_for_status(client, child_sid)
+            # Parent should be open again.
+            assert app.state.sessions[sid].closed is False
+
+    def test_auto_loads_evicted_parent_from_disk(self, isolated_home,
+                                                 project_dir):
+        # Parent completed, then was evicted from app.state.sessions
+        # entirely (simulating a service restart or reaper eviction
+        # past the grace window). With a cwd hint, the follow-up
+        # endpoint reconstructs the SessionState from disk
+        # artifacts and proceeds.
+        app = create_app(run_council=make_stub_runner(),
+                         run_follow_up=make_stub_follow_up_runner())
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_for_status(client, sid)
+            # Hard-evict (not via close — simulate a full restart).
+            with app.state.sessions_lock:
+                app.state.sessions.pop(sid)
+            assert sid not in app.state.sessions
+
+            # Without cwd → 400.
+            r = client.post(f"/v1/consult/{sid}/follow-up",
+                            json={"message": "x"})
+            assert r.status_code == 400
+
+            # With cwd → 200, reconstructed in app.state.sessions.
+            r = client.post(
+                f"/v1/consult/{sid}/follow-up",
+                json={"message": "x", "cwd": str(project_dir)},
+            )
+            assert r.status_code == 200
+            assert sid in app.state.sessions
+            reopened = app.state.sessions[sid]
+            # Reconstructed plan + research came from the stub
+            # runner's turn payload.
+            assert "stub" in reopened.plan.lower() or \
+                   reopened.final_answer.startswith("**Verdict**")
+            assert reopened.closed is False
+            child_sid = r.json()["sid"]
+            _wait_for_status(client, child_sid)
+
+
+# ----------------------- reopen endpoint ----------------------- #
+
+class TestReopen:
+    def test_warm_session_returns_already_open(self, isolated_home,
+                                               project_dir):
+        app = create_app(run_council=make_stub_runner())
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_for_status(client, sid)
+            r = client.post(f"/v1/consult/{sid}/reopen", json={})
+            assert r.status_code == 200
+            body = r.json()
+            assert body["already_open"] is True
+            assert body["source"] == "warm"
+
+    def test_in_memory_closed_session_reopens(self, isolated_home,
+                                              project_dir):
+        app = create_app(run_council=make_stub_runner())
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_for_status(client, sid)
+            client.post(f"/v1/consult/{sid}/close")
+            r = client.post(f"/v1/consult/{sid}/reopen", json={})
+            assert r.status_code == 200
+            assert r.json()["source"] == "in-memory-reopen"
+            assert app.state.sessions[sid].closed is False
+
+    def test_evicted_session_loads_from_disk(self, isolated_home,
+                                             project_dir):
+        app = create_app(run_council=make_stub_runner())
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_for_status(client, sid)
+            with app.state.sessions_lock:
+                app.state.sessions.pop(sid)
+            r = client.post(
+                f"/v1/consult/{sid}/reopen",
+                json={"cwd": str(project_dir)},
+            )
+            assert r.status_code == 200
+            body = r.json()
+            assert body["source"] == "disk"
+            assert body["already_open"] is False
+            assert body["research_turns"] >= 0  # stub runner emits 1
+            assert sid in app.state.sessions
+
+    def test_400_no_cwd_when_evicted(self, isolated_home, project_dir):
+        app = create_app(run_council=make_stub_runner())
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_for_status(client, sid)
+            with app.state.sessions_lock:
+                app.state.sessions.pop(sid)
+            r = client.post(f"/v1/consult/{sid}/reopen", json={})
+            assert r.status_code == 400
+            assert "cwd" in r.json()["detail"].lower()
+
+    def test_404_when_no_artifact(self, isolated_home, project_dir):
+        app = create_app(run_council=make_stub_runner())
+        with TestClient(app) as client:
+            r = client.post(
+                "/v1/consult/csl-does-not-exist/reopen",
+                json={"cwd": str(project_dir)},
+            )
+            assert r.status_code == 404
+
+    def test_reconstructed_session_has_plan_and_research(
+            self, isolated_home, project_dir):
+        # The stub runner emits a structured turn list; the
+        # reconstructor must extract plan from the planner turn
+        # and research from the researcher turn.
+        app = create_app(run_council=make_stub_runner())
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_for_status(client, sid)
+            with app.state.sessions_lock:
+                app.state.sessions.pop(sid)
+            client.post(f"/v1/consult/{sid}/reopen",
+                        json={"cwd": str(project_dir)})
+            state = app.state.sessions[sid]
+            # Stub runner only emits a synthesizer turn, so plan
+            # and research are empty but the field shapes are
+            # right and final_answer carries through.
+            assert isinstance(state.plan, str)
+            assert isinstance(state.research, list)
+            assert state.final_answer == "**Verdict**: stub answer."
+            assert state.models == {
+                "planner": "stub", "researcher": "stub",
+                "critic": "stub", "synthesizer": "stub",
+            }
 
 
 # ----------------------- close endpoint ------------------------- #

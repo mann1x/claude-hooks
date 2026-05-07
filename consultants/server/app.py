@@ -317,32 +317,22 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
                 status_code=503,
                 detail="follow-up runner not configured",
             )
-        parent = app.state.sessions.get(sid)
-        if parent is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"session not found in memory: {sid}. "
-                       "Closed sessions cannot be followed up; "
-                       "re-issue the original /consultants instead.",
-            )
-        if parent.closed:
-            raise HTTPException(
-                status_code=410,
-                detail=f"session {sid} is closed; re-issue "
-                       "/consultants to start a fresh session.",
-            )
-        if parent.status == "running":
-            raise HTTPException(
-                status_code=409,
-                detail=f"parent session {sid} is still running; "
-                       "wait for completion before following up.",
-            )
+        # _resolve_parent_for_follow_up handles all four cases:
+        #   warm + ready  → return as-is
+        #   warm + closed → flip closed=False in place
+        #   cold + cwd    → load from disk and register
+        #   cold + no cwd → 400
+        # And 409 when parent is still running. 410 (was emitted by
+        # the original implementation when the parent was closed)
+        # no longer occurs — closed parents auto-reopen.
         message = (body.get("message") or "").strip()
         if not message:
             raise HTTPException(
                 status_code=400,
                 detail="message is required",
             )
+        cwd_hint = body.get("cwd")  # optional; needed only for cold path
+        parent = _resolve_parent_for_follow_up(app, sid, cwd_hint)
         cwd_path = Path(parent.cwd)
         cfg = cc.load_config(cwd_path)
         # Effort override per follow-up; defaults to parent's effort.
@@ -444,6 +434,65 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             "ok": True, "sid": sid,
             "closed_at": state.closed_at,
             "already_closed": False,
+        }
+
+    # ----------------------- reopen ------------------------------ #
+    # Restore a closed / evicted session to the in-memory pool.
+    # Same disk-fallback path as follow-up's auto-reopen, exposed
+    # explicitly for the inspect-before-iterate use case (the user
+    # can `reopen` then `list-open` to confirm the chain before
+    # firing a follow-up).
+    @app.post("/v1/consult/{sid}/reopen")
+    def reopen(sid: str, body: Optional[dict] = None) -> dict:
+        body = body or {}
+        existing = app.state.sessions.get(sid)
+        if existing is not None and not existing.closed:
+            # Already warm — nothing to do beyond bumping activity.
+            existing.bump_activity()
+            return {
+                "ok": True, "sid": sid,
+                "source": "warm",
+                "already_open": True,
+            }
+        if existing is not None and existing.closed:
+            existing.closed = False
+            existing.closed_at = None
+            existing.bump_activity()
+            log.info("reopened session %s in place (was closed)", sid)
+            return {
+                "ok": True, "sid": sid,
+                "source": "in-memory-reopen",
+                "already_open": False,
+            }
+        # Cold path: load from disk.
+        cwd_hint = body.get("cwd")
+        if not cwd_hint:
+            raise HTTPException(
+                status_code=400,
+                detail=f"session {sid} not in memory; provide cwd "
+                       "to load from disk artifacts.",
+            )
+        cwd_path = Path(cwd_hint).resolve()
+        if not cwd_path.is_dir():
+            raise HTTPException(
+                status_code=400,
+                detail=f"cwd does not exist: {cwd_path}",
+            )
+        state = _load_session_from_artifacts(sid, cwd_path)
+        if state is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"no artifact for sid {sid} under {cwd_path}.",
+            )
+        with app.state.sessions_lock:
+            app.state.sessions[sid] = state
+        return {
+            "ok": True, "sid": sid,
+            "source": "disk",
+            "already_open": False,
+            "cwd": str(cwd_path),
+            "research_turns": len(state.research),
+            "parent_sid": state.parent_sid,
         }
 
     # ----------------------- list open --------------------------- #
@@ -586,6 +635,184 @@ def _run_with_state(run_council: RunCouncilFn,
             )
         except Exception as e:  # pragma: no cover
             log.warning("sessions_index update failed: %s", e)
+
+
+def _load_session_from_artifacts(sid: str,
+                                 cwd: Path) -> Optional[SessionState]:
+    """Reconstruct a SessionState from on-disk artifacts.
+
+    Reads ``<cwd>/.claude-hooks/consultants/<sid>/metadata.json`` and
+    extracts plan / research / critique from the structured ``turns``
+    list, plus ``final_answer`` / ``models`` / ``parent_sid`` from
+    top-level fields. Returns ``None`` when the directory or
+    metadata file isn't present.
+
+    What CANNOT be recovered from disk:
+    - ``_chat_clients`` (runtime-only) — caller's first follow-up
+      against a reopened sid will rebuild cold ChatClients. The
+      ``_probed_think`` / ``_unsupported_think`` caches re-warm on
+      that first call.
+    - ``follow_up_sids`` (no global child-index in storage). The
+      chain still works through ``parent_sid`` pointers; this is a
+      lossy field on reopen.
+
+    The reconstructed state has ``closed=False`` and
+    ``last_activity_at=now`` so the reaper doesn't immediately
+    re-evict it.
+    """
+    sdir = storage.session_dir(cwd, sid)
+    md_path = sdir / storage.METADATA_FILENAME
+    if not md_path.is_file():
+        return None
+    try:
+        meta = json.loads(md_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        log.warning("metadata.json for %s is not valid JSON", sid)
+        return None
+
+    turns = meta.get("turns") or []
+    # Walk turns to reconstruct the role-specific fields. ``plan``
+    # is the planner's content; ``research`` accumulates every
+    # researcher turn (one per fan-out lane plus any re-routes);
+    # ``critique`` is the critic's content (last one wins if there
+    # were re-routes — the most recent critique is what the
+    # synthesizer would have seen).
+    plan_text = ""
+    research_list: list[str] = []
+    critique_text: Optional[str] = None
+    for turn in turns:
+        role = turn.get("role")
+        content = turn.get("content") or ""
+        if role == "planner" and not plan_text:
+            plan_text = content
+        elif role == "researcher":
+            if content.strip():
+                research_list.append(content)
+        elif role == "critic":
+            critique_text = content
+
+    # plan_items is parsed from plan text so the original fan-out
+    # router decision is reproducible (though follow-ups don't
+    # fan out, so this is mostly informational).
+    try:
+        from consultants.engine import council
+        plan_items = list(council.parse_plan_items(plan_text))
+    except Exception:  # pragma: no cover — defensive
+        plan_items = []
+
+    # progress is purely cosmetic at this point (consultation is
+    # done); set every model role to "done" for consistent shape.
+    models = meta.get("models") or {}
+    progress = {role: "done" for role in models}
+
+    started = float(meta.get("started_at") or 0.0)
+    if not started:
+        # Fall back to created (ISO) — convert to epoch for the
+        # SessionState.started_at field; failure-tolerant.
+        try:
+            from datetime import datetime
+            created_iso = meta.get("created") or ""
+            if created_iso:
+                started = datetime.fromisoformat(
+                    created_iso.replace("Z", "+00:00")
+                ).timestamp()
+        except Exception:
+            pass
+    duration = float(meta.get("duration_seconds") or 0.0)
+    finished = (started + duration) if started and duration else None
+
+    state = SessionState(
+        sid=sid,
+        cwd=str(cwd),
+        question=meta.get("question") or "",
+        effort=meta.get("effort") or "medium",
+        topology=meta.get("topology") or "council",
+        status=meta.get("status") or "completed",
+        started_at=started or time.time(),
+        finished_at=finished,
+        error=meta.get("error"),
+        progress=progress,
+        plan=plan_text,
+        plan_items=plan_items,
+        research=research_list,
+        critique=critique_text,
+        final_answer=meta.get("final_answer") or "",
+        models=dict(models),
+        parent_sid=meta.get("parent_sid"),
+        follow_up_sids=[],   # NOT recoverable; lossy on reopen
+        closed=False,
+        closed_at=None,
+        last_activity_at=time.time(),
+        _chat_clients=None,  # rebuilt cold on first follow-up
+    )
+    log.info(
+        "reopened session %s from disk (cwd=%s, %d research turns)",
+        sid, cwd, len(research_list),
+    )
+    return state
+
+
+def _resolve_parent_for_follow_up(
+    app, sid: str, cwd_hint: Optional[str],
+) -> SessionState:
+    """Return a parent SessionState usable for a follow-up.
+
+    Resolution order:
+      1. In memory and not closed → use as-is.
+      2. In memory and closed → reopen in place (clear ``closed``
+         flag, bump ``last_activity_at``). ``_chat_clients`` was
+         released on close; the runner's cold-client fallback
+         rebuilds them.
+      3. Not in memory but ``cwd_hint`` given → load from disk via
+         ``_load_session_from_artifacts``; register in
+         ``app.state.sessions`` so subsequent calls are warm.
+      4. Otherwise raise ``HTTPException`` so the route can return
+         the right status code.
+    """
+    state = app.state.sessions.get(sid)
+    if state is not None:
+        if state.status == "running":
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=409,
+                detail=f"parent session {sid} is still running; "
+                       "wait for completion before following up.",
+            )
+        if state.closed:
+            # In-memory reopen — fields are still here, just flip
+            # the closed flag back. _chat_clients was released; the
+            # follow-up runner will build cold clients.
+            state.closed = False
+            state.closed_at = None
+            state.bump_activity()
+            log.info("reopened session %s in place (was closed)", sid)
+        return state
+
+    # Not in memory — disk fallback.
+    if not cwd_hint:
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=400,
+            detail=f"session {sid} not in memory; provide cwd to "
+                   "load it from disk artifacts.",
+        )
+    cwd_path = Path(cwd_hint).resolve()
+    if not cwd_path.is_dir():
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=400,
+            detail=f"cwd does not exist: {cwd_path}",
+        )
+    reopened = _load_session_from_artifacts(sid, cwd_path)
+    if reopened is None:
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=404,
+            detail=f"no artifact for sid {sid} under {cwd_path}.",
+        )
+    with app.state.sessions_lock:
+        app.state.sessions[sid] = reopened
+    return reopened
 
 
 def _close_session(app, sid: str, *, reason: str) -> None:
