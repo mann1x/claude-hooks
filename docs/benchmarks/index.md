@@ -66,7 +66,7 @@ runs published for the label; per [`EVALUATION.md`](EVALUATION.md)
 
 | Label | Model | Effort scheme | Runs | Smoke | Audit-med | Audit-hi | Total c-tok | Verdict |
 |---|---|---|---|---|---|---|---|---|
-| [`kimi-k2.6-cloud-2026-05-07`](kimi-k2.6-cloud-2026-05-07/results.md) | `kimi-k2.6:cloud` (every role) | medium / medium / high | 1/3 | 212s · 10.9k · PASS | 167s · 12.6k · A | 1030s · 38.9k · A | 62.4k | PROD-READY (single-run) |
+| [`kimi-k2.6-cloud-2026-05-07`](kimi-k2.6-cloud-2026-05-07/results.md) | `kimi-k2.6:cloud` (every role) | medium / medium / high | 1/3 | (re-running) | 213s · 12.3k · A | 787s · 34.3k · A | 46.6k+ | PROD-READY (single-run; smoke re-run pending) |
 
 ### Role-suitability matrix
 
@@ -81,4 +81,4 @@ invocations / parallel lanes). Use this to compose mixes:
 
 | Label | Planner | Researcher | Critic | Synthesizer | Mix string |
 |---|---|---|---|---|---|
-| `kimi-k2.6-cloud-2026-05-07` | _ungraded_ | _ungraded_ | _ungraded_ | _ungraded_ | _pending_ |
+| `kimi-k2.6-cloud-2026-05-07` | A | A | A | A | `P:A R:A C:A S:A` |

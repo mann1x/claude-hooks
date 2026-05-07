@@ -63,13 +63,17 @@ Derived KPIs:
 
 ## 3. Quality criteria — per query
 
-### Q1 (smoke)
+### Q1 (smoke — code-only as of 2026-05-07 baseline)
+
+The smoke asks the council to name the four roles of the
+consultants council from the codebase. Ground truth: `planner`,
+`researcher`, `critic`, `synthesizer`.
 
 | Grade | Criterion |
 |---|---|
-| **PASS** | Status `completed`, answer ≤ 3 sentences, contains "live" / "active" / "running" / "active session", no hedging language ("I cannot", "insufficient", "unable") |
-| **WEAK** | Status `completed`, answer is correct but verbose (>3 sentences) or buried under preamble |
-| **FAIL** | Status `failed`, OR answer claims insufficient information, OR contains hallucinated session id / file path |
+| **PASS** | Status `completed`, answer names all four roles, ≤ 3 sentences, no hedging language |
+| **WEAK** | Status `completed`, answer names 3 of 4 roles, OR is verbose (> 3 sentences) but otherwise correct |
+| **FAIL** | Status `failed`, OR fewer than 3 roles named, OR fabricates roles ("synthesizer / critic / orchestrator / executor"), OR refuses to answer |
 
 ### Q2 (audit-medium, psycopg ground truth)
 

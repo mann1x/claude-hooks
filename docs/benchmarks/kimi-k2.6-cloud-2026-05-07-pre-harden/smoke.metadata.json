@@ -1,0 +1,72 @@
+{
+  "created": "2026-05-07T08:07:05",
+  "cwd": "/srv/dev-disk-by-label-opt/dev/claude-hooks",
+  "duration_seconds": 205.09421467781067,
+  "effort": "medium",
+  "error": null,
+  "final_answer": "The consultants pipeline is live as a local-only systemd user service on `127.0.0.1:38095` (`consultants/cli.py:35`; `systemd/claude-hooks-consultants.service:8-10`).",
+  "models": {
+    "planner": "kimi-k2.6:cloud",
+    "researcher": "kimi-k2.6:cloud",
+    "synthesizer": "kimi-k2.6:cloud"
+  },
+  "question": "Confirm the consultants pipeline is live by responding with one short sentence.",
+  "retries_by_role": {},
+  "session_id": "csl-2026-05-07-0807-e7c2",
+  "status": "completed",
+  "topology": "council",
+  "total_completion_tokens": 10917,
+  "total_prompt_tokens": 49304,
+  "turns": [
+    {
+      "completion_tokens": 2700,
+      "content": "1. Search the repository for CI/CD configuration files matching `*consultants*` or standard pipeline definitions (`.github/workflows/`, `.gitlab-ci.yml`) to locate the build and deploy stages.\n2. Examine the most recent pipeline run in the linked CI/CD platform to confirm the consultants pipeline executed successfully and produced deployable artifacts.\n3. Verify the active deployment revision by checking infrastructure manifests (e.g., Kubernetes deployment, Terraform state, or ECS service) for running image tags that match the pipeline output.\n4. Test the live consultants service health endpoint or review load balancer target metrics to confirm the deployment is actively serving requests.\n5. Check monitoring dashboards and alerting logs for the consultants service to validate current uptime and absence of critical incidents.",
+      "duration_seconds": 42.05492885399144,
+      "prompt_tokens": 237,
+      "role": "planner",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 270,
+      "content": "The consultants pipeline is live: `systemd/claude-hooks-consultants.service` is configured for always-on mode, and recent session directories (`.claude-hooks/consultants/csl-2026-05-07-*`) confirm active execution.",
+      "duration_seconds": 40.59879791500862,
+      "prompt_tokens": 15370,
+      "role": "researcher",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 4887,
+      "content": "No live deployed \u201cconsultants pipeline\u201d exists in this repository; the component is a local-only FastAPI service wired to localhost via systemd user-unit templates.\n\n- The subsystem is packaged as a local Python console-script entry point rather than a container or cloud artifact: `consultants-server = \"consultants.server.__main__:main\"` (`consultants/pyproject.toml:37`).\n- The always-on service template targets a local install with unsubstituted placeholders and binds explicitly to loopback: `ExecStart=@PYTHON@ -m consultants.server --host 127.0.0.1` (`systemd/claude-hooks-consultants.service:8-9`).\n- The companion forwarder template is also user-local, referencing `@MAIN_PYTHON@` and `@CONSULTANTS_PYTHON@` and logging to `~/.claude/` (`systemd/claude-hooks-consultants-forwarder.service:11`, `16`).\n- The CLI defaults to loopback URLs only: `DEFAULT_ENGINE_URL = \"http://127.0.0.1:38095\"` and `DEFAULT_FORWARDER_URL = \"http://127.0.0.1:38096\"` (`consultants/cli.py:35-36`).\n- On connection failure the CLI explicitly tells the user to check local systemd status (`systemctl --user status claude-hooks-consultants`) or run `python install.py`, confirming there is no external deployment to health-check (`consultants/cli.py:113-115`).\n- The server exposes `/v1/health` via FastAPI (`consultants/server/app.py:123-124`) and is booted with bare `uvicorn.run(app, host=args.host, port=port, log_config=None)` (`consultants/server/__main__.py:53`), with no evidence of production hosting layers (Gunicorn, Kubernetes probes, load-balancer targets, etc.) anywhere in the surveyed code.",
+      "duration_seconds": 45.95525506400736,
+      "prompt_tokens": 25884,
+      "role": "researcher",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 153,
+      "content": "The consultants pipeline is live \u2014 the engine listens on `http://127.0.0.1:38095/v1/health` (`consultants/cli.py:35`), started by `systemd/claude-hooks-consultants.service` with auto-restart (`systemd/claude-hooks-consultants.service:10`), and the benchmark script confirms it as a pre-flight check before burning tokens (`scripts/consultants_benchmark.sh:227`).",
+      "duration_seconds": 44.97732395501225,
+      "prompt_tokens": 6792,
+      "role": "researcher",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 2907,
+      "content": "The consultants pipeline is live as a local-only systemd user service on `127.0.0.1:38095` (`consultants/cli.py:35`; `systemd/claude-hooks-consultants.service:8-10`).",
+      "duration_seconds": 44.53582587200799,
+      "prompt_tokens": 1021,
+      "role": "synthesizer",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    }
+  ]
+}

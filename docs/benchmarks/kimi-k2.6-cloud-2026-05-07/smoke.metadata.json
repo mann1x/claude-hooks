@@ -1,0 +1,72 @@
+{
+  "created": "2026-05-07T09:00:34",
+  "cwd": "/tmp/claude-hooks-bench-bench-baseline-2026-05-07-ce1r",
+  "duration_seconds": 384.2484784126282,
+  "effort": "medium",
+  "error": null,
+  "final_answer": "The consultants pipeline cannot be confirmed live because no CI/CD configs, deployment manifests, health endpoints, or orchestrator definitions were found in the repository, and only a local systemd service unit exists (`systemd/claude-hooks-consultants.service:9`).",
+  "models": {
+    "planner": "kimi-k2.6:cloud",
+    "researcher": "kimi-k2.6:cloud",
+    "synthesizer": "kimi-k2.6:cloud"
+  },
+  "question": "Confirm the consultants pipeline is live by responding with one short sentence.",
+  "retries_by_role": {},
+  "session_id": "csl-2026-05-07-0900-18fc",
+  "status": "completed",
+  "topology": "council",
+  "total_completion_tokens": 11260,
+  "total_prompt_tokens": 24040,
+  "turns": [
+    {
+      "completion_tokens": 2315,
+      "content": "1. Search CI/CD configs (e.g., `.github/workflows/`, `.gitlab-ci.yml`, `Jenkinsfile`) for consultants-related jobs and verify the latest run succeeded.\n2. Inspect deployment manifests (e.g., `k8s/`, `helm/`, `terraform/`, `docker-compose.yml`) for the consultants service and confirm the deployed image or commit matches the latest artifact.\n3. Locate the consultants service health endpoint in its code or ingress config and probe it to confirm a success response with a current timestamp.\n4. Check pipeline orchestrator definitions (e.g., `dags/`, `prefect/flows/`, `cron/`) for the consultants flow and verify the most recent execution state is success or actively running.\n5. Review application logs or metrics for the consultants pipeline and confirm activity within the last expected cycle with no critical alerts.",
+      "duration_seconds": 110.84469635999994,
+      "prompt_tokens": 237,
+      "role": "planner",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 3814,
+      "content": "- Searches for CI/CD configuration returned no matches: `glob` queries for `.github/workflows/`, `.gitlab-ci.yml`, and `Jenkinsfile` all produced empty result sets, so no automated build or deployment pipeline exists for the consultants service.\n- No Kubernetes, Helm, or Terraform deployment manifests are present in the repository for the consultants service.\n- The `episodic_server/docker-compose.yaml:1` file defines an unrelated `episodic-server` service (`build: .` at line 3) with no reference to consultants images or commits.\n- The `vendor/mcp-qdrant/docker-compose.example.yaml:1` file defines a `qdrant` vector database and `mcp-qdrant` proxy (`image: mcp-qdrant-proxy:latest` at line 14), unrelated to consultants deployment.\n- The consultants engine is deployed as a local systemd service: `systemd/claude-hooks-consultants.service:9` sets `ExecStart=@PYTHON@ -m consultants.server --host 127.0.0.1`, indicating always-on local execution.\n- A companion forwarder service spawns the engine on demand: `systemd/claude-hooks-consultants-forwarder.service:11` sets `ExecStart=@MAIN_PYTHON@ -m claude_hooks.consultants_forwarder --engine-python @CONSULTANTS_PYTHON@`.\n- Local benchmark and trace tooling confirms a manual verification workflow: `scripts/consultants_benchmark.sh:3` runs canonical queries, `scripts/consultants_trace_summary.py:2` parses `~/.claude/consultants-traces/<sid>.jsonl`, and `scripts/consultants_bench_row.py:30` renders benchmark rows.\n- The Windows entry point `bin/claude-consultants.cmd:1` resolves a local conda env python executable and runs `consultants.cli`, reinforcing that the consultants \"pipeline\" is a local environment/systemd stack with no CI/CD artifact promotion.",
+      "duration_seconds": 94.10158514298382,
+      "prompt_tokens": 11108,
+      "role": "researcher",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 1716,
+      "content": "- The tool outputs above are purely directory listings from `survey_project` and `list_files`; no files were opened, so no `path:line` references exist to cite.  \n- Relevant consultants artifacts were located (`consultants/cli.py`, `consultants/engine/council.py`, `consultants/server/`, `systemd/claude-hooks-consultants.service`, `scripts/consultants_bench_row.py`), but their contents\u2014and any health endpoint or orchestrator state\u2014remain unread.  \n- Because no ingress config, health endpoint, DAG definition, or execution timestamp was returned, the consultants pipeline cannot be confirmed live from the available data.",
+      "duration_seconds": 28.051043169019977,
+      "prompt_tokens": 7650,
+      "role": "researcher",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 203,
+      "content": "The consultants pipeline is live: a session is currently running according to `.claude-hooks/consultants/sessions.json`.",
+      "duration_seconds": 68.09834012101055,
+      "prompt_tokens": 3969,
+      "role": "researcher",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 3212,
+      "content": "The consultants pipeline cannot be confirmed live because no CI/CD configs, deployment manifests, health endpoints, or orchestrator definitions were found in the repository, and only a local systemd service unit exists (`systemd/claude-hooks-consultants.service:9`).",
+      "duration_seconds": 106.05913822600269,
+      "prompt_tokens": 1076,
+      "role": "synthesizer",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    }
+  ]
+}

@@ -16,24 +16,33 @@ These run via `scripts/consultants_benchmark.sh <label>` which:
 
 ## Q1 — Smoke (`effort=medium`)
 
-Trivial liveness check. Every working pipeline returns a one-line
-"yes the pipeline is live" answer. Used to:
+Cheapest end-to-end exercise of all four roles. Used to:
 
 - Detect catastrophic regressions (engine down, all roles failing).
 - Measure per-role wall floor on a model — how slow is the model
   before any real work happens?
 - Validate the empty-output fallback (small prompts often hit cap).
 
-Pass criteria: completes; answer mentions "live" / "active" /
-"running"; total wall < 600 s.
+**The query is code-only.** It must be answerable from the frozen
+worktree alone, with no dependence on live filesystem state
+(running services, recent session files, etc.). The original
+liveness-check smoke gave different answers depending on whether
+the bench ran from the live repo or a worktree (different ambient
+filesystem state), which made it useless as a reproducibility
+anchor — fixed in the 2026-05-07 baseline by re-framing as
+code-only.
+
+Pass criteria: completes; answer names all four roles
+(`planner`, `researcher`, `critic`, `synthesizer`); ≤ 3
+sentences; no hedging.
 
 <!-- BENCH-Q: smoke -->
 ```text
-Confirm the consultants pipeline is live by responding with one short sentence.
+From the code in this repository, name the four roles of the consultants council in a single short sentence.
 ```
 
-Baseline expectation (kimi-k2.6:cloud, 2026-05-07): ~250 s wall,
-~0.25 USD-equivalent in cloud tokens.
+Baseline expectation (kimi-k2.6:cloud, 2026-05-07): ~200-400 s
+wall depending on cloud variability.
 
 ## Q2 — Medium audit (`effort=medium`)
 
