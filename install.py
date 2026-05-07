@@ -1176,6 +1176,38 @@ _AXON_PLACEHOLDER = (
 )
 
 
+def _ensure_axon_registry_dir(*, dry_run: bool) -> bool:
+    """Ensure ``~/.axon/repos/`` exists.
+
+    The axon-host unit declares ``ReadWritePaths=/root/.axon`` so
+    systemd can bind-mount it into the service's namespace. If the
+    directory is missing at unit start, systemd fails namespace
+    setup with ``status=226/NAMESPACE`` and the unit crash-loops
+    every 5s (the ``Restart=on-failure`` cadence). Caught
+    2026-05-07 after a host restart left ``/root/.axon`` missing.
+
+    The ``repos/`` subdir is the registry path axon's host walks at
+    startup to enumerate served projects.
+
+    Returns True on success, False if creation failed (e.g.
+    permission). dry-run prints the would-do without writing.
+    """
+    base = Path.home() / ".axon"
+    repos = base / "repos"
+    if repos.is_dir():
+        return True
+    if dry_run:
+        print(f"  [dry-run] Would: mkdir -p {repos}")
+        return True
+    try:
+        repos.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"  [!!] Failed to create {repos}: {e}")
+        return False
+    print(f"  + ensured {repos} exists (axon registry path)")
+    return True
+
+
 def _install_axon_host_systemd(
     cfg: dict, *, non_interactive: bool, dry_run: bool,
 ) -> None:
@@ -1197,6 +1229,15 @@ def _install_axon_host_systemd(
         import resolver.
       * ``MemoryMax=8G`` / ``MemoryHigh=6G`` so a future runaway can
         not OOM the host.
+
+    Two pre-flight checks added 2026-05-07 (post-loop incident):
+      * ``_ensure_axon_registry_dir`` mkdir's ``/root/.axon/repos/``
+        before enable; missing dir blocks systemd's namespace
+        bind-mount.
+      * ``_ensure_axon_deps`` probes the env's axon import surface
+        and pip-installs ``requirements-axon.txt`` when anything
+        (uvicorn / sse-starlette / pydantic-settings / httpx-sse)
+        has drifted out of the env.
     """
     if os.name == "nt":
         return
@@ -1207,6 +1248,24 @@ def _install_axon_host_systemd(
     if not axon_host_cfg.get("enabled", False):
         return
 
+    print("\n==> axon-host systemd unit")
+
+    # Pre-flight 1 — ensure the registry dir exists. If we skip this
+    # and the dir is missing, systemd fails namespace setup
+    # (status=226/NAMESPACE) on every restart attempt.
+    if not _ensure_axon_registry_dir(dry_run=dry_run):
+        print("  Skipped: registry dir setup failed.")
+        return
+
+    # Pre-flight 2 — ensure the env has axon's runtime deps. Without
+    # this, the unit boots, ModuleNotFoundError-crashes on import,
+    # and Restart=on-failure loops the service forever.
+    if not _ensure_axon_deps(
+        non_interactive=non_interactive, dry_run=dry_run,
+    ):
+        print("  Skipped: axon dep check failed. Fix env then re-run.")
+        return
+
     axon_bin = shutil.which("axon")
     if axon_bin is None:
         # Fall back to the conda env claude-hooks itself uses, mirroring
@@ -1215,17 +1274,18 @@ def _install_axon_host_systemd(
         if candidate.is_file():
             axon_bin = str(candidate)
     if axon_bin is None:
-        print("\n==> axon-host systemd unit")
         print("  axon binary not found on PATH or in ~/anaconda3/envs/claude-hooks/bin/")
-        print("  Skipped. Run `pip install axoniq` and re-run install.py.")
+        print("  Skipped. Run `pip install -r requirements-axon.txt` and re-run install.py.")
         return
 
     src = HERE / "systemd" / _AXON_HOST_UNIT
     dest = Path("/etc/systemd/system") / _AXON_HOST_UNIT
     if dest.exists():
-        return  # idempotent
+        # Pre-flight checks above already ran (registry dir + deps),
+        # so an existing unit is now safe to leave alone. Idempotent.
+        print(f"  · unit already at {dest} — pre-flight ran, leaving as-is.")
+        return
 
-    print("\n==> axon-host systemd unit")
     if not src.exists():
         print(f"  [!!] {src} missing -- skipping")
         return
@@ -2733,6 +2793,83 @@ def _ensure_proxy_deps(cfg: dict, *, non_interactive: bool, dry_run: bool) -> No
     else:
         print(f"  pip install failed:\n{rc.stderr[-500:]}")
         print(f"  Run manually: {' '.join(pip_cmd)}")
+
+
+def _ensure_axon_deps(*, non_interactive: bool, dry_run: bool) -> bool:
+    """Verify axon's runtime deps in the claude-hooks conda env.
+
+    axon is installed via the upstream ``axoniq`` pip package and
+    transitively needs uvicorn / httpx-sse / pydantic-settings /
+    sse-starlette to serve its HTTP MCP. The conda env we hit on
+    2026-05-07 had drifted — uvicorn et al. were dropped, axon
+    crash-looped under systemd with ModuleNotFoundError, and the
+    /root/.axon registry dir was missing so systemd's namespace
+    setup failed every restart.
+
+    This helper probes the env, and if anything's missing offers to
+    pip-install ``requirements-axon.txt`` in one shot. Returns True
+    when axon is importable after the run (or already was), False
+    on any failure / user-declined install.
+    """
+    conda_py = find_conda_env_python()
+    py = str(conda_py) if conda_py.exists() else sys.executable
+
+    probe = subprocess.run(
+        [py, "-c",
+         "import axon, uvicorn, httpx_sse, pydantic_settings, "
+         "sse_starlette; print(axon.__version__ if hasattr(axon, "
+         "'__version__') else 'ok')"],
+        capture_output=True, text=True,
+    )
+    if probe.returncode == 0:
+        print(f"\nAxon deps:      OK ({probe.stdout.strip()})")
+        return True
+
+    # Surface the actual failing import so the operator knows what
+    # broke. The probe's stderr ends with "ModuleNotFoundError: ...".
+    err_tail = (probe.stderr or "").strip().splitlines()
+    last_line = err_tail[-1] if err_tail else "(no error output)"
+    print("\nAxon deps:      INCOMPLETE")
+    print(f"  Probe failed: {last_line}")
+    print("  axon needs uvicorn / httpx-sse / pydantic-settings / sse-starlette")
+    print("  to serve its HTTP MCP at :8420.")
+
+    req_axon = HERE / "requirements-axon.txt"
+    if not req_axon.is_file():
+        print(f"  [!!] {req_axon} missing — cannot auto-install.")
+        return False
+
+    if dry_run:
+        print(f"  [dry-run] Would: {py} -m pip install -r {req_axon}")
+        return False
+
+    if non_interactive:
+        print("  --non-interactive: installing axon deps...")
+    else:
+        ans = input("  Install axon deps now? [Y/n]: ").strip().lower()
+        if ans not in ("", "y", "yes"):
+            print("  Skipped. The axon-host systemd unit will crash-")
+            print("  loop on import until installed manually:")
+            print(f"    {py} -m pip install -r {req_axon}")
+            return False
+
+    pip_bin = str(Path(py).parent / ("pip.exe" if os.name == "nt" else "pip"))
+    pip_cmd = [pip_bin, "install", "-r", str(req_axon)] \
+        if Path(pip_bin).exists() \
+        else [py, "-m", "pip", "install", "-r", str(req_axon)]
+    rc = subprocess.run(pip_cmd, capture_output=True, text=True)
+    if rc.returncode != 0:
+        print(f"  pip install failed:\n{rc.stderr[-500:]}")
+        print(f"  Run manually: {' '.join(pip_cmd)}")
+        return False
+    print("  Installed.")
+    # Re-probe so the caller knows the env is actually ready.
+    re_probe = subprocess.run(
+        [py, "-c",
+         "import axon, uvicorn, httpx_sse, pydantic_settings, sse_starlette"],
+        capture_output=True, text=True,
+    )
+    return re_probe.returncode == 0
 
 
 CODE_GRAPH_EXTRAS = (
