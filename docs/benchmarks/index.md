@@ -50,6 +50,12 @@ graded). Keep the per-label `results.md` files as raw data.
 
 ## Existing labels
 
-| Label | Model | Effort scheme | Smoke | Audit-med | Audit-hi | Verdict |
-|---|---|---|---|---|---|---|
-| [`kimi-k2.6-cloud-2026-05-07`](kimi-k2.6-cloud-2026-05-07/results.md) | `kimi-k2.6:cloud` (every role) | medium / medium / high | 212s · PASS | 167s · A | 1030s · A | PROD-READY (single-run) |
+Each query cell is `wall · completion-tok · grade`. Completion
+tokens include the cloud model's reasoning chain (often dominant
+on thinking models like kimi-k2.6:cloud). Total completion is the
+column on the right — useful as a coarse cost proxy when comparing
+labels at the same effort scheme.
+
+| Label | Model | Effort scheme | Smoke | Audit-med | Audit-hi | Total c-tok | Verdict |
+|---|---|---|---|---|---|---|---|
+| [`kimi-k2.6-cloud-2026-05-07`](kimi-k2.6-cloud-2026-05-07/results.md) | `kimi-k2.6:cloud` (every role) | medium / medium / high | 212s · 10.9k · PASS | 167s · 12.6k · A | 1030s · 38.9k · A | 62.4k | PROD-READY (single-run) |
