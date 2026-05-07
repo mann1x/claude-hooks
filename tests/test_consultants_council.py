@@ -957,6 +957,160 @@ class TestRecorderIntegration:
         )
         assert update["plan"] == "plan"
 
+    def test_researcher_uses_prior_messages_when_set(self, tmp_path):
+        # Phase 5 (v1.1): when prior_messages is provided, the
+        # researcher feeds (prior_thread + follow_up_user_msg) into
+        # the loop_runner as messages, NOT a freshly built shape
+        # from build_researcher_messages. Verify the loop sees the
+        # parent's tool messages so it can reuse them without
+        # re-fetching.
+        rec = self._new_recorder(tmp_path)
+        try:
+            captured: dict = {}
+
+            def fake_loop(payload, cwd, *, config, tool_specs, chat_fn,
+                          tool_executor, on_iter=None, on_tool=None,
+                          preseed_builder=None):
+                captured["msgs"] = list(payload["messages"])
+                return _completion(
+                    "found foo at foo.py:1", prompt_tokens=200,
+                    completion_tokens=80,
+                )
+
+            prior = [
+                {"role": "system", "content": "RESEARCHER_SYSTEM"},
+                {"role": "user", "content": "ORIGINAL TASK: find foo"},
+                {"role": "assistant", "tool_calls": [{
+                    "id": "t1", "function": {
+                        "name": "read_file",
+                        "arguments": '{"path": "foo.py"}',
+                    },
+                }]},
+                {"role": "tool", "tool_call_id": "t1",
+                 "content": "def foo():\n    pass\n"},
+                {"role": "assistant",
+                 "content": "found foo at foo.py:1 (parent)"},
+            ]
+            state = council.initial_state(
+                question="what does foo do?", cwd="/p",
+                models={"researcher": "m"},
+                topology="council", effort="medium",
+            )
+            state["plan"] = "p"
+            council.researcher_node(
+                state, chat_client=FakeChatClient([]),
+                tool_executor=lambda *a, **k: "",
+                tool_specs=[], grounding_msgs=[], model="m", cwd="/p",
+                loop_runner=fake_loop,
+                recorder=rec,
+                prior_messages=prior,
+            )
+            sent = captured["msgs"]
+            # The prior thread's 5 messages survive verbatim; we
+            # appended one user message with the follow-up question.
+            assert sent[:5] == prior
+            assert sent[-1]["role"] == "user"
+            assert "what does foo do?" in sent[-1]["content"]
+            assert "FOLLOW-UP QUESTION" in sent[-1]["content"]
+            # Critically: the parent's tool result message is
+            # preserved so the model can reference it without
+            # re-calling read_file.
+            assert any(m.get("role") == "tool"
+                       and "def foo()" in m.get("content", "")
+                       for m in sent)
+        finally:
+            rec.close()
+
+    def test_researcher_falls_back_when_prior_messages_none(self, tmp_path):
+        # Backward-compat: prior_messages=None → existing
+        # build_researcher_messages path runs.
+        captured: dict = {}
+
+        def fake_loop(payload, cwd, *, config, tool_specs, chat_fn,
+                      tool_executor, on_iter=None, on_tool=None,
+                      preseed_builder=None):
+            captured["msgs"] = list(payload["messages"])
+            return _completion("finding")
+
+        state = council.initial_state(
+            question="why is the sky blue?", cwd="/p",
+            models={"researcher": "m"},
+            topology="council", effort="medium",
+        )
+        state["plan"] = "1. measure\n2. infer"
+        council.researcher_node(
+            state, chat_client=FakeChatClient([]),
+            tool_executor=lambda *a, **k: "",
+            tool_specs=[], grounding_msgs=[], model="m", cwd="/p",
+            loop_runner=fake_loop,
+            prior_messages=None,
+        )
+        # Existing path: USER QUESTION + PLAN headers in the user
+        # message body.
+        user = next(m for m in captured["msgs"] if m["role"] == "user")
+        assert "USER QUESTION" in user["content"]
+        assert "PLAN FROM PLANNER" in user["content"]
+
+    def test_synthesizer_uses_prior_messages_when_set(self, tmp_path):
+        rec = self._new_recorder(tmp_path)
+        try:
+            client = FakeChatClient([_completion(
+                "follow-up answer with new finding",
+                prompt_tokens=100, completion_tokens=40,
+            )])
+            prior = [
+                {"role": "system", "content": "SYNTHESIZER_SYSTEM"},
+                {"role": "user", "content": "ORIGINAL TASK: explain X"},
+                {"role": "assistant",
+                 "content": "X works because of Y, see foo.py:10"},
+            ]
+            state = council.initial_state(
+                question="and what about Z?", cwd="/p",
+                models={"synthesizer": "m"},
+                topology="council", effort="medium",
+            )
+            state["research"] = ["follow-up turn researcher: Z is W"]
+            update = council.synthesizer_node(
+                state, chat_client=client, model="m", recorder=rec,
+                prior_messages=prior,
+            )
+            sent = client.calls[0]["messages"]
+            # Prior thread preserved; one user message appended.
+            assert sent[:3] == prior
+            assert sent[-1]["role"] == "user"
+            content = sent[-1]["content"]
+            assert "FOLLOW-UP QUESTION" in content
+            assert "and what about Z?" in content
+            # The follow-up's NEW research delta is surfaced under a
+            # clearly-labeled section.
+            assert "NEW RESEARCHER REPORT" in content
+            assert "Z is W" in content
+            # Final answer threaded through.
+            assert update["final_answer"].startswith("follow-up answer")
+        finally:
+            rec.close()
+
+    def test_synthesizer_falls_back_when_prior_messages_none(self, tmp_path):
+        # Backward-compat: prior_messages=None → existing
+        # build_synthesizer_messages path runs.
+        client = FakeChatClient([_completion("answer")])
+        state = council.initial_state(
+            question="q", cwd="/p", models={"synthesizer": "m"},
+            topology="council", effort="medium",
+        )
+        state["plan"] = "1. step"
+        state["research"] = ["finding"]
+        council.synthesizer_node(
+            state, chat_client=client, model="m",
+            prior_messages=None,
+        )
+        sent = client.calls[0]["messages"]
+        # Existing 2-message shape: system + structured user.
+        assert len(sent) == 2
+        assert sent[0]["role"] == "system"
+        assert "USER QUESTION" in sent[1]["content"]
+        assert "PLANNER'S PLAN" in sent[1]["content"]
+
     def test_single_shot_records_failure(self, tmp_path):
         rec = self._new_recorder(tmp_path)
         try:

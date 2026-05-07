@@ -539,7 +539,8 @@ def researcher_node(state: dict, *,
                     cwd: str,
                     think: Any = True,
                     loop_runner=None,
-                    recorder=None) -> dict:
+                    recorder=None,
+                    prior_messages: Optional[list[dict]] = None) -> dict:
     """Researcher uses agent_loop.runner.run_loop for a tool sub-loop.
 
     ``loop_runner`` defaults to ``claude_hooks.agent_loop.runner.run_loop``
@@ -570,23 +571,51 @@ def researcher_node(state: dict, *,
         except Exception:  # pragma: no cover
             log.exception("recorder.record_node raised; ignored")
 
-    # Fan-out path: when invoked via Send with a ``plan_item``, work
-    # only on that sub-question. The single-researcher path (no
-    # plan_item) — used for critic re-routes and unfanned topologies
-    # — uses the full plan + prior research rounds for context.
-    plan_item = state.get("plan_item")
-    if plan_item:
-        focused_plan = (
-            f"Sub-research lane {state.get('lane_idx', 0) + 1}: "
-            f"{plan_item}"
-        )
-        msgs = build_researcher_messages(
-            state["question"], focused_plan, [], grounding_msgs,
-        )
+    # Phase 5 (v1.1): when the parent's researcher message thread is
+    # available (set by the follow-up runner from
+    # parent_state._role_messages), extend it with the follow-up
+    # question instead of rebuilding from scratch. The prior thread
+    # already contains grounding + system + the original user task +
+    # the parent researcher's assistant turns + tool results; the
+    # run_loop's next iter sees the conversation as a natural
+    # continuation and can reuse prior tool results without
+    # re-fetching them. ``state["question"]`` carries the focused
+    # follow-up question (the runner sets it).
+    #
+    # Falls back to today's build_researcher_messages path when
+    # prior_messages is None (warm-parent-without-recorder, v1.0
+    # artifacts, or first turn of a fresh consultation).
+    if prior_messages is not None:
+        follow_up_q = (state.get("question") or "").strip() or "Continue."
+        msgs = list(prior_messages) + [{
+            "role": "user",
+            "content": (
+                "FOLLOW-UP QUESTION:\n" + follow_up_q + "\n\n"
+                "You may reuse the tool results above; do not re-fetch "
+                "files you've already read unless they have changed. "
+                "If your prior findings already cover this question, "
+                "summarize them; otherwise extend research as needed."
+            ),
+        }]
     else:
-        msgs = build_researcher_messages(
-            state["question"], state["plan"], prior_rounds, grounding_msgs,
-        )
+        # Fan-out path: when invoked via Send with a ``plan_item``,
+        # work only on that sub-question. The single-researcher path
+        # (no plan_item) — used for critic re-routes and unfanned
+        # topologies — uses the full plan + prior research rounds
+        # for context.
+        plan_item = state.get("plan_item")
+        if plan_item:
+            focused_plan = (
+                f"Sub-research lane {state.get('lane_idx', 0) + 1}: "
+                f"{plan_item}"
+            )
+            msgs = build_researcher_messages(
+                state["question"], focused_plan, [], grounding_msgs,
+            )
+        else:
+            msgs = build_researcher_messages(
+                state["question"], state["plan"], prior_rounds, grounding_msgs,
+            )
     caps = caps_for(state.get("effort") or "medium")
 
     payload = {
@@ -859,18 +888,56 @@ def critic_node(state: dict, *, chat_client, model: str,
 def synthesizer_node(state: dict, *, chat_client, model: str,
                      think: Any = True,
                      self_critic: bool = False,
-                     recorder=None) -> dict:
+                     recorder=None,
+                     prior_messages: Optional[list[dict]] = None) -> dict:
     if recorder is not None:
         try:
             recorder.record_node(role="synthesizer", kind="node_enter")
         except Exception:  # pragma: no cover
             log.exception("recorder.record_node raised; ignored")
-    msgs = build_synthesizer_messages(
-        state["question"], state.get("plan", ""),
-        state.get("research") or [],
-        state.get("critique"),
-        self_critic=self_critic,
-    )
+    # Phase 5: same prior-thread-reuse pattern as researcher. The
+    # parent's synthesizer thread is [system, user, assistant]; we
+    # append the follow-up question and any new researcher findings
+    # for THIS follow-up turn so the synthesizer sees a clean
+    # multi-turn chat. Falls back to build_synthesizer_messages when
+    # prior_messages is None (fresh consultation or v1.0 parent).
+    #
+    # Contract with the follow-up runner: when prior_messages is
+    # set, the runner does NOT pre-seed ``state["research"]`` with
+    # the parent's research — those rounds are already in
+    # prior_messages. So everything in ``state.get("research")``
+    # here is THIS follow-up turn's evidence delta.
+    if prior_messages is not None:
+        follow_up_q = (state.get("question") or "").strip() or "Continue."
+        new_research = [
+            r for r in (state.get("research") or [])
+            if isinstance(r, str) and r.strip()
+        ]
+        user_parts = ["FOLLOW-UP QUESTION:\n" + follow_up_q]
+        for i, rep in enumerate(new_research, start=1):
+            user_parts.append(
+                f"\nNEW RESEARCHER REPORT (this follow-up, round {i}):"
+                f"\n{rep.strip()}",
+            )
+        if state.get("critique"):
+            user_parts.append(
+                f"\nCRITIC'S VERDICT:\n{state['critique'].strip()}"
+            )
+        user_parts.append(
+            "\nWrite the answer to the follow-up question. Reuse "
+            "the prior reasoning above where it still applies; only "
+            "rewrite what the follow-up actually changes."
+        )
+        msgs = list(prior_messages) + [{
+            "role": "user", "content": "\n".join(user_parts),
+        }]
+    else:
+        msgs = build_synthesizer_messages(
+            state["question"], state.get("plan", ""),
+            state.get("research") or [],
+            state.get("critique"),
+            self_critic=self_critic,
+        )
     t0 = time.monotonic()
     try:
         text, pt, ct = _single_shot(

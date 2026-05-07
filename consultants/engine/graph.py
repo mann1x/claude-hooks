@@ -122,6 +122,17 @@ class GraphDeps:
     # lands in <cwd>/.claude-hooks/consultants/<sid>/transcript.db.
     # None for unit tests that don't care about the transcript.
     recorder: Optional[Any] = None
+    # Phase 5 (v1.1): per-role parent threads to extend in a follow-up.
+    # Keys: 'researcher' / 'synthesizer'. Values: the prior LLM
+    # message threads loaded by load_role_messages and attached by
+    # the follow-up runner. When a key is present, the corresponding
+    # node uses that thread + the follow-up question as its message
+    # base instead of building from scratch via
+    # build_*_messages(). Empty / missing keys -> existing build
+    # path (fresh consultation, v1.0 parent without transcript.db).
+    prior_messages_by_role: dict[str, list[dict]] = field(
+        default_factory=dict,
+    )
 
 
 # ----------------------- node wrappers --------------------------- #
@@ -160,6 +171,7 @@ def _wrap_researcher(deps: GraphDeps):
             cwd=deps.cwd,
             think=_think_for(deps, "researcher"),
             recorder=deps.recorder,
+            prior_messages=deps.prior_messages_by_role.get("researcher"),
         )
     return _node
 
@@ -185,6 +197,7 @@ def _wrap_synthesizer(deps: GraphDeps):
             think=_think_for(deps, "synthesizer"),
             self_critic=deps.synthesizer_self_critic,
             recorder=deps.recorder,
+            prior_messages=deps.prior_messages_by_role.get("synthesizer"),
         )
     return _node
 

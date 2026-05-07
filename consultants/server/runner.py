@@ -344,6 +344,20 @@ def make_follow_up_runner(*, ollama_base_url: str):
             models=models, parent_sid=state.parent_sid,
         )
 
+        # Phase 5 (v1.1): if the parent has per-role message threads
+        # (warm completion or disk-reopened), pass them through so
+        # the follow-up's researcher and synthesizer extend the
+        # parent's conversation rather than rebuild from scratch.
+        # ``_role_messages`` is None for v1.0 parents — fall back to
+        # today's behavior cleanly in that case.
+        prior_messages_by_role: dict[str, list[dict]] = {}
+        if (parent_state is not None
+                and parent_state._role_messages is not None):
+            for role in ("researcher", "synthesizer"):
+                thread = parent_state._role_messages.get(role)
+                if thread:
+                    prior_messages_by_role[role] = thread
+
         deps = GraphDeps(
             chat_clients=chat_clients,
             models=models,
@@ -356,24 +370,24 @@ def make_follow_up_runner(*, ollama_base_url: str):
             synthesizer_self_critic=False,  # follow-ups never
             disable_cache=True,             # caching not useful here
             recorder=recorder,
+            prior_messages_by_role=prior_messages_by_role,
         )
         compiled = build_follow_up_graph(deps, tracer=tracer)
 
-        # Initial state for the follow-up. Pre-populates the
-        # parent's plan + research as ``prior_rounds`` so the
-        # researcher node sees them; ``plan_item`` carries the
-        # focused follow-up question; the parent's final_answer is
-        # appended as a ``Prior synthesizer answer:`` block so the
-        # researcher knows what's already been said.
-        prior_research: list[str] = []
-        if parent_state is not None:
-            prior_research = list(parent_state.research or [])
-            if parent_state.final_answer:
-                prior_research.append(
-                    "## Prior synthesizer answer\n\n"
-                    + parent_state.final_answer.strip()
-                )
-
+        # Initial state for the follow-up. Two cases:
+        #
+        # (A) prior_messages_by_role populated (Phase 5 path) — the
+        #     parent's research and final answer are ALREADY inlined
+        #     in the per-role threads we'll feed via GraphDeps. We
+        #     deliberately leave initial["research"] empty so the
+        #     follow-up's researcher delta isn't mixed with stale
+        #     parent rounds; the synthesizer's prior_messages branch
+        #     only surfaces THIS turn's research.
+        #
+        # (B) prior_messages_by_role empty (v1.0 parent without a
+        #     transcript.db, or recorder-disabled run) — fall back
+        #     to the original behavior: pre-seed parent's research +
+        #     a "## Prior synthesizer answer" block as plan_item.
         initial = council_mod.initial_state(
             question=question, cwd=cwd, models=models,
             topology=cfg.topology, effort=cfg.effort,
@@ -385,7 +399,18 @@ def make_follow_up_runner(*, ollama_base_url: str):
         )
         initial["plan_item"] = question
         initial["lane_idx"] = 0
-        initial["research"] = prior_research
+        if prior_messages_by_role:
+            initial["research"] = []
+        else:
+            prior_research: list[str] = []
+            if parent_state is not None:
+                prior_research = list(parent_state.research or [])
+                if parent_state.final_answer:
+                    prior_research.append(
+                        "## Prior synthesizer answer\n\n"
+                        + parent_state.final_answer.strip()
+                    )
+            initial["research"] = prior_research
 
         if enabled:
             state.progress[enabled[0]] = "in_progress"

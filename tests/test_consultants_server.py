@@ -784,6 +784,180 @@ class TestReopen:
             # And other reopen behavior still works.
             assert state.final_answer == "**Verdict**: stub answer."
 
+    def test_follow_up_runner_threads_prior_messages_through_graph_deps(
+            self, isolated_home, project_dir, monkeypatch):
+        # Phase 5 (v1.1): the production follow-up runner picks
+        # parent_state._role_messages off the parent and passes it
+        # through GraphDeps.prior_messages_by_role to the council
+        # nodes. We test the runner code directly (not the FastAPI
+        # /follow-up route, which uses a stub) by mocking
+        # build_follow_up_graph to capture the GraphDeps it gets.
+        from consultants.server import runner as prod_runner
+        from consultants.server.app import SessionState
+        from consultants import config as cc
+
+        # Mocked compiled graph — yields no events (the runner's
+        # streaming loop is then a no-op), but lets us return cleanly.
+        class _FakeCompiled:
+            def stream(self, initial, *, stream_mode):
+                # Behave like the real langgraph: yield ("values",
+                # state) at the end so the runner picks up
+                # final_state == initial.
+                yield ("values", dict(initial))
+
+        captured_deps: dict = {}
+
+        def fake_build_follow_up_graph(deps, *, tracer=None):
+            captured_deps["deps"] = deps
+            return _FakeCompiled()
+
+        # Reach into the lazy import location used inside
+        # make_follow_up_runner. The runner imports
+        # build_follow_up_graph from consultants.engine.graph at
+        # runner construction time (the closure body), so we
+        # monkeypatch the module attribute before building it.
+        from consultants.engine import graph as graph_mod
+        monkeypatch.setattr(
+            graph_mod, "build_follow_up_graph",
+            fake_build_follow_up_graph,
+        )
+
+        run_follow_up = prod_runner.make_follow_up_runner(
+            ollama_base_url="http://x:1234",
+        )
+
+        # Build a parent SessionState with v1.1-shape role messages.
+        parent = SessionState(
+            sid="csl-parent-001", cwd=str(project_dir),
+            question="why?", effort="medium", topology="council",
+            status="completed",
+            plan="1. step", research=[], critique=None,
+            final_answer="parent answer",
+            models={"researcher": "qwen3.5:cloud",
+                    "synthesizer": "kimi-k2.6:cloud"},
+        )
+        parent._role_messages = {
+            "researcher": [
+                {"role": "system", "content": "RESEARCHER_SYSTEM"},
+                {"role": "user", "content": "ORIGINAL TASK"},
+                {"role": "assistant", "content": "parent finding"},
+            ],
+            "synthesizer": [
+                {"role": "system", "content": "SYNTHESIZER_SYSTEM"},
+                {"role": "user", "content": "ORIGINAL Q"},
+                {"role": "assistant", "content": "parent answer"},
+            ],
+        }
+
+        # Child state for the follow-up.
+        child = SessionState(
+            sid="csl-child-001", cwd=str(project_dir),
+            question="follow-up question", effort="medium",
+            topology="council", status="running",
+            parent_sid="csl-parent-001",
+        )
+        child.progress = {
+            r: "pending" for r in
+            ("researcher", "synthesizer")
+        }
+
+        run_follow_up(child, {
+            "config": cc.ConsultantsConfig(
+                topology="council", effort="medium",
+            ),
+            "cwd": str(project_dir),
+            "question": "follow-up question",
+            "parent_state": parent,
+        })
+
+        # GraphDeps captured: prior_messages_by_role carries BOTH
+        # researcher and synthesizer threads from parent._role_messages.
+        deps = captured_deps["deps"]
+        assert "researcher" in deps.prior_messages_by_role
+        assert "synthesizer" in deps.prior_messages_by_role
+        assert deps.prior_messages_by_role["researcher"][-1]["content"] \
+            == "parent finding"
+        assert deps.prior_messages_by_role["synthesizer"][-1]["content"] \
+            == "parent answer"
+
+    def test_follow_up_runner_empty_when_parent_has_no_role_messages(
+            self, isolated_home, project_dir, monkeypatch):
+        # Backward-compat: when parent_state._role_messages is None
+        # (v1.0 parent without a transcript.db, or recorder-disabled),
+        # prior_messages_by_role is empty. The follow-up runner then
+        # pre-seeds initial["research"] with the parent's research +
+        # final answer the legacy way.
+        from consultants.server import runner as prod_runner
+        from consultants.server.app import SessionState
+        from consultants import config as cc
+
+        class _FakeCompiled:
+            def stream(self, initial, *, stream_mode):
+                yield ("values", dict(initial))
+
+        captured_deps: dict = {}
+        captured_initial: dict = {}
+
+        class _RecordingCompiled:
+            def stream(self, initial, *, stream_mode):
+                captured_initial.update(initial)
+                yield ("values", dict(initial))
+
+        def fake_build_follow_up_graph(deps, *, tracer=None):
+            captured_deps["deps"] = deps
+            return _RecordingCompiled()
+
+        from consultants.engine import graph as graph_mod
+        monkeypatch.setattr(
+            graph_mod, "build_follow_up_graph",
+            fake_build_follow_up_graph,
+        )
+
+        run_follow_up = prod_runner.make_follow_up_runner(
+            ollama_base_url="http://x:1234",
+        )
+
+        parent = SessionState(
+            sid="csl-v10-parent", cwd=str(project_dir),
+            question="why?", effort="medium", topology="council",
+            status="completed",
+            plan="1. step",
+            research=["round-1 finding from parent"],
+            critique=None,
+            final_answer="parent answer",
+            models={"researcher": "m", "synthesizer": "m"},
+        )
+        # _role_messages stays None — v1.0 shape.
+        assert parent._role_messages is None
+
+        child = SessionState(
+            sid="csl-v10-child", cwd=str(project_dir),
+            question="follow-up", effort="medium",
+            topology="council", status="running",
+            parent_sid="csl-v10-parent",
+        )
+        child.progress = {
+            r: "pending" for r in ("researcher", "synthesizer")
+        }
+
+        run_follow_up(child, {
+            "config": cc.ConsultantsConfig(
+                topology="council", effort="medium",
+            ),
+            "cwd": str(project_dir),
+            "question": "follow-up",
+            "parent_state": parent,
+        })
+
+        # No prior thread reuse.
+        deps = captured_deps["deps"]
+        assert deps.prior_messages_by_role == {}
+        # Legacy pre-seed: parent rounds + final answer block in
+        # initial["research"].
+        seeded = captured_initial.get("research") or []
+        assert "round-1 finding from parent" in seeded
+        assert any("Prior synthesizer answer" in r for r in seeded)
+
     def test_reopen_tolerates_corrupt_transcript_db(
             self, isolated_home, project_dir):
         # If transcript.db exists but isn't a valid SQLite database
