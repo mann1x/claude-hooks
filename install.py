@@ -2629,21 +2629,108 @@ def _install_bin_shim_wrappers(repo_path: Path, *, dry_run: bool) -> None:
             print(f"    {s}")
         if len(skipped) > 5:
             print(f"    ... and {len(skipped) - 5} more")
-    # PATH-membership warning -- mirrors the pgvector-mcp pattern. On
-    # POSIX users almost always have ~/.local/bin on PATH; on Windows
-    # %LOCALAPPDATA%\claude-hooks\bin almost never is, so the warning
-    # is the actionable nudge to add it.
+    # PATH-membership: on Windows we MUST get the wrapper dir into the
+    # user's persistent PATH because Claude Code's bash subprocess
+    # inherits its PATH from the parent process, so a skill calling
+    # ``claude-consultants`` by bare name fails until the dir is in
+    # User PATH (HKCU\Environment). On POSIX ``~/.local/bin`` is
+    # almost always already on the user's interactive PATH, but if
+    # not we just print a clear shell-rc hint -- modifying shell rc
+    # files non-interactively is too invasive.
     path_dirs = (os.environ.get("PATH") or "").split(os.pathsep)
-    if str(wrapper_dir) not in path_dirs:
+    if str(wrapper_dir) in path_dirs:
+        return
+    if os.name == "nt":
+        _ensure_windows_user_path_includes(wrapper_dir)
+    else:
         print(f"  [!] {wrapper_dir} is not in PATH for this shell.")
-        if os.name == "nt":
-            print(f"      To enable bare-name skill CLIs (claude-consultants, claude-advisor, ...):")
-            print(f'        setx PATH "{wrapper_dir};%PATH%"')
-            print(f"      Then open a new shell (or restart Claude Code).")
-        else:
-            print(f"      To enable bare-name skill CLIs (claude-consultants, claude-advisor, ...):")
-            print(f'        echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.bashrc  # or ~/.zshrc')
-            print(f"      Then open a new shell (or restart Claude Code).")
+        print(f"      To enable bare-name skill CLIs (claude-consultants, claude-advisor, ...):")
+        print(f'        echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.bashrc  # or ~/.zshrc')
+        print(f"      Then open a new shell (or restart Claude Code).")
+
+
+def _read_windows_user_path() -> Optional[str]:
+    """Read HKCU\\Environment\\PATH via reg query.
+
+    Returns the raw User PATH string (REG_EXPAND_SZ or REG_SZ), or
+    ``None`` if the value is missing or unreadable. Reading via reg
+    avoids the system+user merge that ``%PATH%`` and Python's
+    ``os.environ`` see, which would lead us to ADD a dir that is
+    already on system PATH (harmless but noisy) or skip a dir that
+    is on system PATH but not user PATH (broken result).
+    """
+    try:
+        out = subprocess.check_output(
+            ["reg", "query", "HKCU\\Environment", "/v", "PATH"],
+            stderr=subprocess.STDOUT, text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    # Output shape:
+    #   HKEY_CURRENT_USER\Environment
+    #       PATH    REG_EXPAND_SZ    C:\foo;C:\bar
+    for line in out.splitlines():
+        line = line.strip()
+        if line.upper().startswith("PATH"):
+            # Split on whitespace, drop name + type, rejoin remainder.
+            parts = line.split(None, 2)
+            if len(parts) >= 3:
+                return parts[2]
+    return None
+
+
+def _ensure_windows_user_path_includes(wrapper_dir: Path) -> None:
+    """Prepend ``wrapper_dir`` to HKCU\\Environment\\PATH if missing.
+
+    Uses ``reg add`` rather than ``setx`` because ``setx`` silently
+    truncates PATH to 1024 chars, which on a developer machine with
+    a long user PATH is destructive. ``reg add`` writes the literal
+    bytes we hand it, capped only by the registry's REG_EXPAND_SZ
+    limit (~32 KB).
+
+    Idempotent. Skips with a warning if the resulting PATH would be
+    absurdly long (>= 16 KB) -- defensive guard, you'd have to be
+    deliberately abusing user PATH to hit it.
+    """
+    target = str(wrapper_dir)
+    cur = _read_windows_user_path()
+    cur_dirs = (cur or "").split(";") if cur else []
+    cur_dirs_norm = [d.lower().rstrip("\\") for d in cur_dirs if d]
+    if target.lower().rstrip("\\") in cur_dirs_norm:
+        # Already there but not visible to this shell -- the next
+        # shell spawn (or Claude Code restart) will pick it up.
+        print(f"  [info] {wrapper_dir} already on User PATH (open a new shell to see it).")
+        return
+    new_path = (target + ";" + cur) if cur else target
+    if len(new_path) > 16384:
+        print(f"  [warn] User PATH would exceed 16 KB; refusing to extend it.")
+        print(f"         Add manually if you need it: {wrapper_dir}")
+        return
+    try:
+        subprocess.check_output(
+            ["reg", "add", "HKCU\\Environment", "/v", "PATH",
+             "/t", "REG_EXPAND_SZ", "/d", new_path, "/f"],
+            stderr=subprocess.STDOUT, text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"  [warn] reg add failed: {e}")
+        print(f"         Add manually:   setx PATH \"{wrapper_dir};%PATH%\"")
+        return
+    # Notify Explorer so future processes pick up the new PATH without
+    # logoff. Best-effort: a one-shot SendMessageTimeoutW broadcast.
+    try:
+        import ctypes
+        HWND_BROADCAST = 0xFFFF
+        WM_SETTINGCHANGE = 0x001A
+        SMTO_ABORTIFHUNG = 0x0002
+        ctypes.windll.user32.SendMessageTimeoutW(
+            HWND_BROADCAST, WM_SETTINGCHANGE, 0,
+            ctypes.c_wchar_p("Environment"), SMTO_ABORTIFHUNG, 5000, None,
+        )
+    except Exception:
+        pass
+    print(f"  [ok] Prepended {wrapper_dir} to User PATH (HKCU\\Environment).")
+    print(f"       Open a new shell or restart Claude Code to pick it up.")
 
 
 def _remove_bin_shim_wrappers(*, dry_run: bool) -> int:
