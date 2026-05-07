@@ -16,8 +16,33 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-_(work in progress on the `dev` branch — see `git log v1.1.0..origin/dev`
-for landed but not-yet-released commits.)_
+### Fixed
+
+- **install.py — bin/* shim PATH wrappers (cross-platform)** —
+  skill CLIs (`claude-consultants`, `claude-advisor`, …) invoked by
+  bare name from a `/consultants--config` or `/get-advice` skill
+  failed with `command not found` because Claude Code's bash
+  subprocess does not include the repo's `bin/` on PATH on any
+  platform. Symlinks don't fix it either: the shims resolve `REPO`
+  via `dirname "$0"`, which through a symlink points at the symlink
+  dir (e.g. `/usr/local/bin/..`) and the helper sourcing breaks.
+  Installer now drops thin exec-wrappers in a known PATH-friendly
+  location for all 11 shims (`claude-hook`, `claude-consultants`,
+  `claude-advisor`, `claude-hooks-daemon`, `claude-hooks-daemon-ctl`,
+  `claude-hooks-proxy`, `claude-hooks-dashboard`,
+  `claude-hooks-rollup`, `caliber-grounding-proxy`, `caliber-smart`,
+  `claude-hook-pgvector-mcp`):
+  - **POSIX (Linux + macOS)**: `~/.local/bin/<shim>` — POSIX sh
+    wrapper that `exec`s the absolute repo path.
+  - **Windows**: `%LOCALAPPDATA%\claude-hooks\bin\<shim>` (POSIX sh
+    for the MSYS bash that Claude Code uses) plus a `.cmd` sibling
+    for native cmd / PowerShell users.
+  Wrappers carry an install-time tag in their first comment line,
+  so `python install.py` is fully idempotent and won't clobber a
+  hand-rolled wrapper. `python install.py --uninstall` removes only
+  tagged wrappers. Same root cause as the 2026-05-02 ruff PATH fix
+  — once the wrappers land, every bare-name invocation from a skill
+  resolves on every platform.
 
 ## [1.1.0] — 2026-05-07
 
