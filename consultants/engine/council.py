@@ -57,14 +57,22 @@ class EffortCaps:
 
 
 EFFORT_CAPS: dict[str, EffortCaps] = {
-    # low: planner -> 1 researcher round -> synthesizer (no critic)
-    "low":    EffortCaps(1, 0,  6, 4),
-    # medium: full council, 1 round, ≤1 reroute
-    "medium": EffortCaps(1, 1, 10, 6),
-    # high: full council, ≤3 rounds, ≤2 reroutes
-    "high":   EffortCaps(3, 2, 16, 10),
+    # Trace 2026-05-07 (csl-...-b9d0) showed the researcher hitting
+    # 10 iters with diminishing returns past iter 6 (output 92, 237,
+    # 317, 293, 251 tokens iters 5-9 vs 830 closing tokens at iter 10).
+    # Tightened caps below shave 2-3 iters off typical runs without
+    # affecting answer quality. force_answer_after kicks in one
+    # iteration before max so the researcher always has a clean
+    # closing-summary turn with tools stripped.
+    #
+    # low: planner -> ≤4 researcher iters -> synthesizer (no critic)
+    "low":    EffortCaps(1, 0,  4, 3),
+    # medium: full council, 1 round, ≤1 reroute, ≤6 iters
+    "medium": EffortCaps(1, 1,  6, 5),
+    # high: full council, ≤3 rounds, ≤2 reroutes, ≤10 iters
+    "high":   EffortCaps(3, 2, 10,  8),
     # max: large but bounded — token spend caps in practice
-    "max":    EffortCaps(8, 5, 35, 20),
+    "max":    EffortCaps(8, 5, 25, 18),
 }
 
 
@@ -122,6 +130,11 @@ RESEARCHER_SYSTEM = _role_prompt(
     "survey_project, recall_memory). Cite findings as `path:line`. "
     "When the plan suggests a line number, verify it with grep first "
     "before trusting — line numbers in the prompt may be stale.\n\n"
+    "BATCH TOOL CALLS. When you need multiple files / patterns, "
+    "request them all in ONE turn's tool_calls list — sequential "
+    "single-tool turns waste 20-40s of cloud round-trip per turn. "
+    "Concretely: if the plan says 'read foo.py and grep for bar', "
+    "emit both calls in one assistant turn, not two.\n\n"
     "After tool calls, write a focused report: one short bullet per "
     "finding, each with a `path:line` reference. Do NOT speculate "
     "beyond evidence. Do NOT answer the user's question — that's "
@@ -146,6 +159,31 @@ SYNTHESIZER_SYSTEM = _role_prompt(
     "consuming the planner's plan, researcher's report(s), and "
     "critic's verdict. Lead with the bottom line on the first line. "
     "Cite `path:line` for every codebase-dependent claim.\n\n"
+    "Output budget: match the question's shape. List-shaped "
+    "questions get a bulleted list, no preamble. Yes/no questions "
+    "get one decisive sentence + one short justification paragraph. "
+    "Do NOT mention the council, the roles, or the process — the "
+    "user only wants the answer. Do NOT restate the question. Do "
+    "NOT add markdown headings unless the answer genuinely has 3+ "
+    "distinct sections."
+)
+
+# Self-critic variant — used at effort=low/medium when the critic
+# node is dropped from the graph to save a full LLM round (192s on
+# the 2026-05-07 trace's smoke). The synthesizer does the
+# critic-duty internally before producing the answer. At effort=high
+# the dedicated critic stays. Keep this prompt short — the
+# synthesizer's reasoning chain handles the actual self-critique;
+# the prompt just authorizes it.
+SYNTHESIZER_SELF_CRITIC_SYSTEM = _role_prompt(
+    "ROLE: synthesizer (with self-critic). Write the final answer "
+    "the user will see, consuming the planner's plan and "
+    "researcher's report(s). There is no separate critic in this "
+    "run — before answering, internally identify the weakest "
+    "claim in the research and either bolster it from the "
+    "evidence or downgrade it to a labeled uncertainty in your "
+    "output. Lead with the bottom line. Cite `path:line` for "
+    "every codebase-dependent claim.\n\n"
     "Output budget: match the question's shape. List-shaped "
     "questions get a bulleted list, no preamble. Yes/no questions "
     "get one decisive sentence + one short justification paragraph. "
@@ -207,7 +245,8 @@ def build_critic_messages(question: str, plan: str,
 
 def build_synthesizer_messages(question: str, plan: str,
                                research_rounds: list[str],
-                               critique: Optional[str]) -> list[dict]:
+                               critique: Optional[str],
+                               *, self_critic: bool = False) -> list[dict]:
     parts = [
         f"USER QUESTION:\n{question.strip()}",
         f"\nPLANNER'S PLAN:\n{plan.strip()}",
@@ -220,10 +259,43 @@ def build_synthesizer_messages(question: str, plan: str,
         "\nNow write the final answer for the user. Direct, concrete, "
         "cite `path:line` for any code-dependent claim."
     )
+    sys_prompt = (SYNTHESIZER_SELF_CRITIC_SYSTEM
+                  if self_critic else SYNTHESIZER_SYSTEM)
     return [
-        {"role": "system", "content": SYNTHESIZER_SYSTEM},
+        {"role": "system", "content": sys_prompt},
         {"role": "user", "content": "\n".join(parts)},
     ]
+
+
+# ----------------------- plan parser ------------------------------ #
+# Extract numbered items from the planner's output so the researcher
+# can fan-out one sub-research lane per item via LangGraph's Send API.
+# The planner's prompt asks for a numbered list; tolerate variants
+# like "1.", "1)", "(1)", and bullets "- ", "* ". An item ends at the
+# next item start or end-of-string.
+
+_PLAN_ITEM_RX = re.compile(
+    r"^\s*(?:\(?\d+[\.\)]|[-*])\s+(.+?)(?=^\s*(?:\(?\d+[\.\)]|[-*])\s+|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def parse_plan_items(plan_text: str) -> list[str]:
+    """Return the numbered/bulleted items in ``plan_text``, in order.
+
+    Each item is one logical step (multi-line allowed). Empty / whitespace
+    items are dropped. Strips trailing blank lines.
+    """
+    if not plan_text:
+        return []
+    items = [m.group(1).strip() for m in _PLAN_ITEM_RX.finditer(plan_text)]
+    return [it for it in items if it]
+
+
+# Minimum number of plan items below which we don't bother
+# fanning out — overhead of separate sub-researcher invocations
+# outweighs the parallelism win for a single lane.
+FANOUT_MIN_ITEMS = 2
 
 
 # ----------------------- critic decision parser ------------------- #
@@ -322,11 +394,12 @@ def _single_shot(chat_client, model: str, messages: list[dict],
 # merged into state; we follow the same convention here so graph.py
 # can plug these in directly.
 
-def planner_node(state: dict, *, chat_client, model: str) -> dict:
+def planner_node(state: dict, *, chat_client, model: str,
+                 think: Any = True) -> dict:
     t0 = time.monotonic()
     msgs = build_planner_messages(state["question"])
     try:
-        plan, pt, ct = _single_shot(chat_client, model, msgs)
+        plan, pt, ct = _single_shot(chat_client, model, msgs, think=think)
     except Exception as e:
         log.exception("planner_node failed: %s", e)
         return {"error": f"planner failed: {e}",
@@ -336,12 +409,16 @@ def planner_node(state: dict, *, chat_client, model: str) -> dict:
         role="planner", round=1, content=plan,
         prompt_tokens=pt, completion_tokens=ct, duration_seconds=dt,
     )
+    plan_items = parse_plan_items(plan)
+    # Delta-only return — additive reducers in CouncilState merge
+    # ``turns``, ``total_*_tokens``, ``research_rounds_used`` across
+    # parallel fan-out lanes.
     return {
         "plan": plan,
-        "turns": (state.get("turns") or []) + [turn],
-        "total_prompt_tokens": (state.get("total_prompt_tokens") or 0) + pt,
-        "total_completion_tokens":
-            (state.get("total_completion_tokens") or 0) + ct,
+        "plan_items": plan_items,
+        "turns": [turn],
+        "total_prompt_tokens": pt,
+        "total_completion_tokens": ct,
     }
 
 
@@ -352,6 +429,7 @@ def researcher_node(state: dict, *,
                     grounding_msgs: list[dict],
                     model: str,
                     cwd: str,
+                    think: Any = True,
                     loop_runner=None) -> dict:
     """Researcher uses agent_loop.runner.run_loop for a tool sub-loop.
 
@@ -374,9 +452,23 @@ def researcher_node(state: dict, *,
     this_round = rounds_used + 1
     prior_rounds: list[str] = list(state.get("research") or [])
 
-    msgs = build_researcher_messages(
-        state["question"], state["plan"], prior_rounds, grounding_msgs,
-    )
+    # Fan-out path: when invoked via Send with a ``plan_item``, work
+    # only on that sub-question. The single-researcher path (no
+    # plan_item) — used for critic re-routes and unfanned topologies
+    # — uses the full plan + prior research rounds for context.
+    plan_item = state.get("plan_item")
+    if plan_item:
+        focused_plan = (
+            f"Sub-research lane {state.get('lane_idx', 0) + 1}: "
+            f"{plan_item}"
+        )
+        msgs = build_researcher_messages(
+            state["question"], focused_plan, [], grounding_msgs,
+        )
+    else:
+        msgs = build_researcher_messages(
+            state["question"], state["plan"], prior_rounds, grounding_msgs,
+        )
     caps = caps_for(state.get("effort") or "medium")
 
     payload = {
@@ -391,7 +483,7 @@ def researcher_node(state: dict, *,
             max_iterations=caps.researcher_loop_iters,
             force_answer_after=caps.researcher_force_answer_after,
             tools_available=True,
-            think=True,
+            think=think,
             force_first_tool_call=False,
         )
 
@@ -421,23 +513,31 @@ def researcher_node(state: dict, *,
         role="researcher", round=this_round, content=text,
         prompt_tokens=pt, completion_tokens=ct, duration_seconds=dt,
     )
+    # ``research`` uses an additive reducer in CouncilState so
+    # parallel sub-researchers fanned out via Send merge their
+    # findings cleanly. Return the DELTA only (this report's text)
+    # — the reducer concatenates with prior entries.
+    #
+    # ``research_rounds_used`` and ``total_*_tokens`` similarly use
+    # additive reducers so concurrent fan-out lanes' counts merge.
+    # ``turns`` likewise.
     return {
-        "research": prior_rounds + [text],
-        "research_rounds_used": this_round,
-        "turns": (state.get("turns") or []) + [turn],
-        "total_prompt_tokens": (state.get("total_prompt_tokens") or 0) + pt,
-        "total_completion_tokens":
-            (state.get("total_completion_tokens") or 0) + ct,
+        "research": [text],
+        "research_rounds_used": 1,
+        "turns": [turn],
+        "total_prompt_tokens": pt,
+        "total_completion_tokens": ct,
     }
 
 
-def critic_node(state: dict, *, chat_client, model: str) -> dict:
+def critic_node(state: dict, *, chat_client, model: str,
+                think: Any = True) -> dict:
     msgs = build_critic_messages(
         state["question"], state["plan"], state.get("research") or [],
     )
     t0 = time.monotonic()
     try:
-        text, pt, ct = _single_shot(chat_client, model, msgs)
+        text, pt, ct = _single_shot(chat_client, model, msgs, think=think)
     except Exception as e:
         log.exception("critic_node failed: %s", e)
         # On critic failure default to "ready" so the council still
@@ -447,9 +547,9 @@ def critic_node(state: dict, *, chat_client, model: str) -> dict:
                 "critic_decision": "ready"}
     dt = time.monotonic() - t0
     decision = parse_critic_decision(text)
-    reroutes_used = int(state.get("critic_reroutes_used") or 0)
-    if decision == "needs_more_research":
-        reroutes_used += 1
+    # critic_reroutes_used uses the additive reducer; we contribute
+    # +1 for a re-route or 0 for ready, and the merge concatenates.
+    rerouted_delta = 1 if decision == "needs_more_research" else 0
     rounds_used = int(state.get("research_rounds_used") or 0)
     turn = RoleTurn(
         role="critic", round=max(rounds_used, 1), content=text,
@@ -458,23 +558,25 @@ def critic_node(state: dict, *, chat_client, model: str) -> dict:
     return {
         "critique": text,
         "critic_decision": decision,
-        "critic_reroutes_used": reroutes_used,
-        "turns": (state.get("turns") or []) + [turn],
-        "total_prompt_tokens": (state.get("total_prompt_tokens") or 0) + pt,
-        "total_completion_tokens":
-            (state.get("total_completion_tokens") or 0) + ct,
+        "critic_reroutes_used": rerouted_delta,
+        "turns": [turn],
+        "total_prompt_tokens": pt,
+        "total_completion_tokens": ct,
     }
 
 
-def synthesizer_node(state: dict, *, chat_client, model: str) -> dict:
+def synthesizer_node(state: dict, *, chat_client, model: str,
+                     think: Any = True,
+                     self_critic: bool = False) -> dict:
     msgs = build_synthesizer_messages(
         state["question"], state.get("plan", ""),
         state.get("research") or [],
         state.get("critique"),
+        self_critic=self_critic,
     )
     t0 = time.monotonic()
     try:
-        text, pt, ct = _single_shot(chat_client, model, msgs)
+        text, pt, ct = _single_shot(chat_client, model, msgs, think=think)
     except Exception as e:
         log.exception("synthesizer_node failed: %s", e)
         # Synthesizer failure is terminal — propagate as an error
@@ -494,10 +596,9 @@ def synthesizer_node(state: dict, *, chat_client, model: str) -> dict:
     )
     return {
         "final_answer": text,
-        "turns": (state.get("turns") or []) + [turn],
-        "total_prompt_tokens": (state.get("total_prompt_tokens") or 0) + pt,
-        "total_completion_tokens":
-            (state.get("total_completion_tokens") or 0) + ct,
+        "turns": [turn],
+        "total_prompt_tokens": pt,
+        "total_completion_tokens": ct,
     }
 
 

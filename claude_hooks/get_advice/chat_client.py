@@ -43,6 +43,23 @@ RETRYABLE_4XX_BODY_SUBSTRINGS = (
     "Bad Gateway",                   # 4xx body wrapping a 502 upstream
 )
 
+# Substrings in a 4xx body that mean "this model doesn't accept the
+# ``think`` / ``reasoning_effort`` field." Hit on a non-reasoning model
+# (older qwen, llama2, gemma2 etc.) when the consultants config asks
+# for a reasoning level. We strip the field, retry once, and remember
+# the model so subsequent calls skip the field too. Keep substrings
+# specific so we don't accidentally swallow legitimate validation
+# errors.
+THINK_UNSUPPORTED_4XX_BODY_SUBSTRINGS = (
+    '"think"',                       # explicit JSON key in error
+    "'think'",
+    "reasoning_effort",
+    "does not support thinking",
+    "thinking is not supported",
+    "unknown field",
+    "unrecognized field",
+)
+
 
 def _ollama_messages(messages: list[dict]) -> list[dict]:
     """Translate OpenAI-shape messages into Ollama-native shape.
@@ -100,13 +117,94 @@ class ChatClient:
             "prompt_eval_count": 0,
             "eval_count": 0,
         }
+        # Per-instance memo of model tags that 400'd on the ``think``
+        # field. We strip ``think`` / ``reasoning_effort`` from
+        # subsequent calls to that model so non-reasoning models
+        # (older qwen, llama2, gemma2 …) don't pay the round-trip
+        # cost of repeatedly being told no. Populated proactively
+        # via ``_probe_supports_think`` (one ``/api/show`` call per
+        # model) and reactively from 400 responses.
+        self._unsupported_think: set[str] = set()
+        # Models we already probed via /api/show — short-circuits the
+        # second call. ``None`` value = probe is unknown / failed and
+        # we should fall back to the reactive (400-based) path.
+        self._probed_think: dict[str, Optional[bool]] = {}
+
+    def _probe_supports_think(self, model: str) -> Optional[bool]:
+        """Ask ``/api/show`` whether ``model`` advertises the
+        ``thinking`` capability. Returns ``True`` / ``False`` / ``None``
+        (unknown — endpoint failed or didn't return capabilities).
+        Cached for the life of the ChatClient so each model is
+        probed at most once per role.
+        """
+        if model in self._probed_think:
+            return self._probed_think[model]
+        url = f"{self.base_url}/api/show"
+        encoded = json.dumps({"model": model}).encode()
+        req = urllib.request.Request(
+            url, data=encoded, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10.0) as resp:
+                data = json.loads(resp.read())
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError,
+                json.JSONDecodeError) as e:
+            log.info(
+                "ollama show: probe failed for %s (%s) — relying on "
+                "reactive 400 fallback for think support",
+                model, e,
+            )
+            self._probed_think[model] = None
+            return None
+        # /api/show returns ``{"capabilities": ["completion", "tools",
+        # "thinking", "vision", ...]}`` on supported builds. Some
+        # cloud builds omit the field entirely; treat that as unknown.
+        caps = data.get("capabilities")
+        if not isinstance(caps, list):
+            self._probed_think[model] = None
+            return None
+        supports = "thinking" in caps
+        self._probed_think[model] = supports
+        if not supports:
+            self._unsupported_think.add(model)
+            log.info(
+                "ollama show: model %s does not advertise 'thinking' "
+                "capability (caps=%s); will skip 'think' field",
+                model, caps,
+            )
+        return supports
 
     def chat(self, payload: dict) -> dict:
         """POST /api/chat with the supplied (OpenAI-shape) payload.
         Translates the Ollama response back into OpenAI shape so the
         agent-loop runner can consume it unchanged. Retries on
-        retryable 5xx with exponential backoff."""
-        body = self._to_ollama(payload)
+        retryable 5xx with exponential backoff.
+
+        Graceful ``think`` degrade: if the model returned 400 on a
+        prior call with a body that names ``think`` /
+        ``reasoning_effort`` / "unknown field", strip those fields up
+        front so we don't waste a round-trip. If the field is sent
+        anyway and we get a fresh 400 of that shape, strip + retry
+        immediately (no retry-budget cost) and remember the model.
+        """
+        # Decide whether to forward ``think``. Three layers, cheapest
+        # first: (1) prior reactive fallback already marked this
+        # model unsupported -> strip; (2) proactive ``/api/show``
+        # probe says ``thinking`` is not in capabilities -> strip;
+        # (3) probe says yes or is unknown -> send and rely on the
+        # reactive 400 path as a safety net.
+        model_tag = (payload or {}).get("model") or ""
+        strip_think = model_tag in self._unsupported_think
+        if (not strip_think
+                and "think" in (payload or {})
+                and model_tag
+                and model_tag not in self._probed_think):
+            probe = self._probe_supports_think(model_tag)
+            if probe is False:
+                strip_think = True
+
+        body = self._to_ollama(payload, strip_think=strip_think)
         url = f"{self.base_url}/api/chat"
         encoded = json.dumps(body).encode()
 
@@ -137,6 +235,32 @@ class ChatClient:
                     err_body = e.read().decode(errors="replace")[:500]
                 except Exception:
                     err_body = "<unreadable>"
+                # First-class: model rejected ``think``. Strip it,
+                # remember the model, retry once outside the normal
+                # retry budget so a stale config doesn't burn 9 round
+                # trips. Only triggers when we DID send think on this
+                # call.
+                think_rejected = (
+                    e.code in (400, 422)
+                    and "think" in body
+                    and any(s in err_body
+                            for s in THINK_UNSUPPORTED_4XX_BODY_SUBSTRINGS)
+                )
+                if think_rejected:
+                    log.warning(
+                        "ollama chat: model %s rejected 'think' field "
+                        "(HTTP %d). Stripping and retrying once. "
+                        "Future calls to this model will skip the "
+                        "field. Body: %s",
+                        model_tag, e.code, err_body,
+                    )
+                    self._unsupported_think.add(model_tag)
+                    body = self._to_ollama(payload, strip_think=True)
+                    encoded = json.dumps(body).encode()
+                    # Don't count this against retry budget; loop
+                    # back into the same attempt index.
+                    continue
+
                 retryable = (
                     e.code in RETRYABLE_STATUS
                     or (400 <= e.code < 500
@@ -181,7 +305,7 @@ class ChatClient:
             raise last_exc
         raise RuntimeError("ollama chat: no attempts made")
 
-    def _to_ollama(self, payload: dict) -> dict:
+    def _to_ollama(self, payload: dict, *, strip_think: bool = False) -> dict:
         body: dict = {
             "model": payload.get("model"),
             "messages": _ollama_messages(payload.get("messages") or []),
@@ -194,8 +318,10 @@ class ChatClient:
             body["tools"] = payload["tools"]
         if "tool_choice" in payload:
             body["tool_choice"] = payload["tool_choice"]
-        # think is accepted natively by Ollama
-        if "think" in payload:
+        # think is accepted natively by Ollama. Strip when the model
+        # is known to reject it (graceful degrade for non-reasoning
+        # models). Accepts bool or "low" | "medium" | "high".
+        if "think" in payload and not strip_think:
             body["think"] = payload["think"]
         return body
 

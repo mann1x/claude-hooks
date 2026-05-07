@@ -99,6 +99,61 @@ class TestParseCriticDecision:
         assert council.parse_critic_decision(text) == "ready"
 
 
+# ----------------------- plan parser ----------------------------- #
+
+
+class TestParsePlanItems:
+    def test_numbered_dot_format(self):
+        plan = (
+            "1. read foo.py\n"
+            "2. grep for bar in src/\n"
+            "3. verify baz at qux.py:42\n"
+        )
+        items = council.parse_plan_items(plan)
+        assert len(items) == 3
+        assert items[0] == "read foo.py"
+        assert items[1] == "grep for bar in src/"
+        assert items[2] == "verify baz at qux.py:42"
+
+    def test_numbered_paren_format(self):
+        plan = "1) first\n2) second\n3) third\n"
+        items = council.parse_plan_items(plan)
+        assert items == ["first", "second", "third"]
+
+    def test_bulleted_format(self):
+        plan = "- step one\n- step two\n* step three\n"
+        items = council.parse_plan_items(plan)
+        assert items == ["step one", "step two", "step three"]
+
+    def test_multi_line_items(self):
+        # An item can span multiple lines until the next marker.
+        plan = (
+            "1. inspect alpha\n"
+            "   the alpha module is complex\n"
+            "2. inspect beta\n"
+        )
+        items = council.parse_plan_items(plan)
+        assert len(items) == 2
+        assert "alpha" in items[0]
+        assert items[1] == "inspect beta"
+
+    def test_empty_plan(self):
+        assert council.parse_plan_items("") == []
+        assert council.parse_plan_items("\n\n") == []
+
+    def test_unparseable_plan_returns_empty(self):
+        # Free-prose plans without numbered/bulleted markers yield
+        # zero items, which downstream falls through to the
+        # single-researcher path (no fan-out).
+        plan = "Just dive in and look at the code, see what makes sense."
+        assert council.parse_plan_items(plan) == []
+
+    def test_fanout_min_items_is_two(self):
+        # Documenting the gate constant — graph.py uses this to
+        # decide whether to fan out or run a single researcher.
+        assert council.FANOUT_MIN_ITEMS == 2
+
+
 # ----------------------- routing ---------------------------------- #
 
 class TestRouteAfterCritic:
@@ -276,6 +331,10 @@ class TestPlannerNode:
         assert update["_role_failed"] == "planner"
 
     def test_token_totals_accumulate(self):
+        # Post-fanout: nodes return DELTA-only values; LangGraph's
+        # additive reducers in CouncilState concat/sum across
+        # parallel lanes. Here we just assert the node emits the
+        # delta (this call's tokens), not the running total.
         client = FakeChatClient([_completion("p", prompt_tokens=100,
                                              completion_tokens=50)])
         state = council.initial_state(
@@ -285,8 +344,9 @@ class TestPlannerNode:
         state["total_prompt_tokens"] = 5
         state["total_completion_tokens"] = 7
         update = council.planner_node(state, chat_client=client, model="m")
-        assert update["total_prompt_tokens"] == 105
-        assert update["total_completion_tokens"] == 57
+        # Delta only — reducer adds to the running total in graph state.
+        assert update["total_prompt_tokens"] == 100
+        assert update["total_completion_tokens"] == 50
 
 
 # ----------------------- researcher_node -------------------------- #
@@ -324,6 +384,11 @@ class TestResearcherNode:
         assert update["total_prompt_tokens"] == 200
 
     def test_subsequent_round_increments_count(self):
+        # Post-fanout: researcher_node returns delta-only.
+        # LangGraph's additive reducers concat across lanes / rounds;
+        # the node just emits this round's findings + counts. We
+        # assert the delta semantics here; merge correctness is
+        # covered by graph-level integration tests.
         def fake_loop(payload, cwd, **kw):
             return _completion("round 2 findings")
 
@@ -341,9 +406,48 @@ class TestResearcherNode:
             tool_specs=[], grounding_msgs=[], model="m", cwd="/proj",
             loop_runner=fake_loop,
         )
-        assert update["research"] == ["round 1 prior", "round 2 findings"]
-        assert update["research_rounds_used"] == 2
+        # Delta-only: this round's text + +1 round counter.
+        assert update["research"] == ["round 2 findings"]
+        assert update["research_rounds_used"] == 1
+        # Round number on the turn record reflects the prior count + 1.
         assert update["turns"][0].round == 2
+
+    def test_plan_item_focuses_on_single_lane(self):
+        # Send fan-out: the researcher gets a per-lane plan_item;
+        # the prompt should reflect ONE sub-question, not the whole
+        # plan, and prior_rounds should be ignored (each lane starts
+        # fresh).
+        captured: dict = {}
+
+        def fake_loop(payload, cwd, **kw):
+            captured["msgs"] = payload["messages"]
+            return _completion("lane finding")
+
+        state = council.initial_state(
+            question="q", cwd="/proj",
+            models={"researcher": "m"},
+            topology="council", effort="medium",
+        )
+        state["plan"] = "1. lane A\n2. lane B\n3. lane C"
+        state["plan_item"] = "lane B"
+        state["lane_idx"] = 1
+        state["research"] = ["should be ignored"]
+        update = council.researcher_node(
+            state, chat_client=FakeChatClient([]),
+            tool_executor=lambda *a, **k: "",
+            tool_specs=[], grounding_msgs=[], model="m", cwd="/proj",
+            loop_runner=fake_loop,
+        )
+        # The user-message body should mention the lane number and the
+        # specific item but NOT the other lanes' content.
+        user_msg = captured["msgs"][-1]["content"]
+        assert "lane B" in user_msg
+        assert "lane A" not in user_msg
+        assert "lane C" not in user_msg
+        assert "Sub-research lane 2" in user_msg
+        # And the prior research rounds are not echoed for a fan-out lane.
+        assert "should be ignored" not in user_msg
+        assert update["research"] == ["lane finding"]
 
     def test_loop_failure_returns_error(self):
         def boom(payload, cwd, **kw):

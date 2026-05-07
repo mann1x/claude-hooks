@@ -45,6 +45,22 @@ def make_runner(*, ollama_base_url: str):
         question: str = runner_input["question"]
         enabled = tuple(cc.enabled_roles(cfg))
 
+        # Effort-based critic merge: at low/medium, the synthesizer
+        # takes critic duty internally (saves a full LLM round; on
+        # 2026-05-07 trace that was 192s on a smoke and 14s on a
+        # hard query). High/max keep the dedicated critic. The
+        # user's role.critic.enabled config is unchanged — we just
+        # don't wire the node into the graph for this run.
+        synthesizer_self_critic = (
+            cfg.effort in ("low", "medium") and "critic" in enabled
+        )
+        if synthesizer_self_critic:
+            enabled = tuple(r for r in enabled if r != "critic")
+            log.info(
+                "effort=%s: dropping critic node, synthesizer takes "
+                "self-critic duty (saves one LLM round)", cfg.effort,
+            )
+
         # Per-session tracer. No-op when both the per-request flag is
         # unset and the env var ``CONSULTANTS_TRACE`` is off, so
         # production runs pay zero overhead.
@@ -66,6 +82,17 @@ def make_runner(*, ollama_base_url: str):
             cwd, tools_available=True,
         ) if "researcher" in enabled else []
 
+        # Per-role think values: cfg.roles[role].think wins when set,
+        # else DEFAULT_THINK_BY_ROLE. cc.role_think() does both.
+        think_by_role = {r: cc.role_think(cfg, r) for r in enabled}
+
+        # At high/max effort, skip the planner/synthesizer cache so
+        # the user always gets fresh reasoning on the same question.
+        # At low/medium, the in-memory cache de-dupes within a single
+        # session (mostly defensive — the council doesn't usually
+        # re-enter planner/synthesizer with identical state).
+        disable_cache = cfg.effort in ("high", "max")
+
         deps = GraphDeps(
             chat_clients=chat_clients,
             models=models,
@@ -74,6 +101,9 @@ def make_runner(*, ollama_base_url: str):
             tool_executor=traced_tool(tool_execute, tracer=tracer),
             tool_specs=openai_tool_specs(),
             grounding_msgs=grounding_msgs,
+            think_by_role=think_by_role,
+            synthesizer_self_critic=synthesizer_self_critic,
+            disable_cache=disable_cache,
         )
         compiled = build_council_graph(deps, tracer=tracer)
 
@@ -86,10 +116,37 @@ def make_runner(*, ollama_base_url: str):
         if enabled:
             state.progress[enabled[0]] = "in_progress"
 
-        # Run the graph. LangGraph's compiled.invoke returns the final
-        # merged state.
+        # Run the graph in streaming mode so per-role progress flips
+        # in real time. We use BOTH stream modes:
+        #   "updates" -> {node_name: partial} per node fire;
+        #                used to flip state.progress[role].
+        #   "values"  -> full merged state after each superstep;
+        #                used as final_state for artifact writing
+        #                so additive reducers (research, turns,
+        #                tokens) merge correctly across parallel
+        #                fan-out lanes.
+        # LangGraph yields (mode, payload) tuples when stream_mode
+        # is a list.
+        final_state: dict = dict(initial)
         try:
-            final_state = compiled.invoke(initial)
+            for mode, payload in compiled.stream(
+                    initial, stream_mode=["updates", "values"]):
+                if mode == "values" and isinstance(payload, dict):
+                    final_state = payload
+                    continue
+                if mode != "updates" or not isinstance(payload, dict):
+                    continue
+                for node, partial in payload.items():
+                    if node in state.progress:
+                        state.progress[node] = "done"
+                        try:
+                            idx = enabled.index(node)
+                            for i in range(idx + 1, len(enabled)):
+                                if state.progress.get(enabled[i]) == "pending":
+                                    state.progress[enabled[i]] = "in_progress"
+                                    break
+                        except ValueError:
+                            pass
         except Exception as e:
             log.exception("council graph invocation failed: %s", e)
             state.status = "failed"
@@ -98,11 +155,13 @@ def make_runner(*, ollama_base_url: str):
             _write_failed_artifacts(state, cwd, question, e)
             return
 
-        # Mark all enabled roles done (LangGraph doesn't fire an
-        # incremental progress callback in v1; we get done-state at
-        # the end).
+        # Belt-and-braces: any role still marked in_progress after
+        # the stream drained gets flipped to done so the final poll
+        # reflects reality even if a node never emitted an update
+        # (shouldn't happen with LangGraph but cheap to guard).
         for r in enabled:
-            state.progress[r] = "done"
+            if state.progress.get(r) != "done":
+                state.progress[r] = "done"
 
         # Detect mid-pipeline errors recorded by individual nodes.
         node_error = final_state.get("error")

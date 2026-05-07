@@ -27,7 +27,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 try:
     import tomllib  # Python 3.11+
@@ -66,6 +66,41 @@ class RoleConfig:
     model: str = DEFAULT_MODEL
     ctx_max: Optional[int] = None
     ctx_max_explicit: bool = False
+    # Reasoning effort. ``None`` -> fall back to DEFAULT_THINK_BY_ROLE
+    # for the role; ``False`` -> explicitly disable reasoning (good
+    # for non-reasoning models or when the role doesn't need it);
+    # ``"low" | "medium" | "high" | True`` -> pass through to the
+    # upstream model. The chat client gracefully degrades to no-think
+    # if the model returns 400 on the ``think`` field.
+    think: Any = None
+
+
+# Per-role think defaults. Tuned from the 2026-05-07 trace
+# (csl-...-647b smoke = 488s wall, 100% LLM time): the planner
+# spends 84s producing a 1481-token plan that's mostly cloud
+# reasoning tokens; the critic spends 192s on a smoke prompt for
+# 5 lines of decisive output. Lowering reasoning effort on
+# decomposition + routing roles cuts wall time without affecting
+# the visible answer. Researcher and synthesizer keep ``high``
+# because they actually use the reasoning chain.
+DEFAULT_THINK_BY_ROLE: dict[str, Any] = {
+    "planner":     "medium",
+    "researcher":  "high",
+    "critic":      "medium",
+    "synthesizer": "high",
+}
+
+
+def role_think(cfg: "ConsultantsConfig", role: str) -> Any:
+    """Return the effective ``think`` value for a role.
+
+    Priority: explicit role.think (when not None) -> per-role
+    default -> ``True`` (Ollama's "reasoning on" sentinel).
+    """
+    rc = cfg.roles.get(role)
+    if rc is not None and rc.think is not None:
+        return rc.think
+    return DEFAULT_THINK_BY_ROLE.get(role, True)
 
 
 @dataclass
@@ -123,6 +158,7 @@ def _merge_role(base: RoleConfig, override: dict) -> RoleConfig:
         model=base.model,
         ctx_max=base.ctx_max,
         ctx_max_explicit=base.ctx_max_explicit,
+        think=base.think,
     )
     if "enabled" in override:
         out.enabled = bool(override["enabled"])
@@ -136,6 +172,18 @@ def _merge_role(base: RoleConfig, override: dict) -> RoleConfig:
             out.ctx_max = None
     if "ctx_max_explicit" in override:
         out.ctx_max_explicit = bool(override["ctx_max_explicit"])
+    # ``think`` accepts: bool, "low" | "medium" | "high", or None to
+    # clear and fall back to DEFAULT_THINK_BY_ROLE. Anything else is
+    # ignored silently (TOML can't really emit None, so missing is
+    # the usual "no override").
+    if "think" in override:
+        v = override["think"]
+        if isinstance(v, bool):
+            out.think = v
+        elif isinstance(v, str) and v.lower() in ("low", "medium", "high"):
+            out.think = v.lower()
+        elif v is None:
+            out.think = None
     return out
 
 
