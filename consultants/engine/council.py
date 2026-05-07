@@ -76,6 +76,14 @@ EFFORT_CAPS: dict[str, EffortCaps] = {
 
 
 def caps_for(effort: str) -> EffortCaps:
+    """Return the budget caps for an effort tier. Phase 9 x-prefixed
+    tiers (xmedium / xhigh / xmax) inherit caps from their base tier
+    — the engine still respects the same per-lane iter limits and
+    re-route count; the multi-model fan-out happens orthogonally
+    via ``deps.extra_models_by_role``.
+    """
+    if effort.startswith("x") and effort[1:] in EFFORT_CAPS:
+        effort = effort[1:]
     return EFFORT_CAPS.get(effort, EFFORT_CAPS["medium"])
 
 
@@ -562,6 +570,14 @@ def researcher_node(state: dict, *,
     this_round = rounds_used + 1
     prior_rounds: list[str] = list(state.get("research") or [])
     lane_idx = state.get("lane_idx")
+    # Phase 9: per-lane multi-model fan-out. The dispatcher sets
+    # ``state["model_override"]`` on each Send so different lanes
+    # talk to different Ollama models. Falls back to the role's
+    # configured primary when absent (single-model fan-out, the
+    # base-tier path).
+    model_override = state.get("model_override")
+    if isinstance(model_override, str) and model_override.strip():
+        model = model_override.strip()
     if recorder is not None:
         try:
             recorder.record_node(

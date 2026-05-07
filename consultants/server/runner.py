@@ -109,6 +109,28 @@ def make_runner(*, ollama_base_url: str):
             models=models, parent_sid=None,
         )
 
+        # Phase 9 (v1.1) — multi-model x-tier fan-out. ``extras_active``
+        # is True only at xmedium/xhigh/xmax, so ``extra_models`` is
+        # silently ignored at every base tier. Researcher gets the
+        # multi-model machinery now; critic lands in Phase 10 with
+        # xmax. Cost-of-fan-out warning fires when the primary plus
+        # extras would expand each lane to >= 2 models, which is the
+        # whole point of opting in but worth telegraphing once at
+        # consultation start so token bills aren't surprises.
+        extra_models_by_role: dict[str, list[str]] = {}
+        if cc.extras_active(cfg.effort):
+            researcher_extras = list(
+                cfg.roles["researcher"].extra_models or []
+            )
+            if researcher_extras:
+                extra_models_by_role["researcher"] = researcher_extras
+                _warn_extras_cost(
+                    role="researcher",
+                    primary=cfg.roles["researcher"].model,
+                    extras=researcher_extras,
+                    effort=cfg.effort,
+                )
+
         deps = GraphDeps(
             chat_clients=chat_clients,
             models=models,
@@ -121,6 +143,7 @@ def make_runner(*, ollama_base_url: str):
             synthesizer_self_critic=synthesizer_self_critic,
             disable_cache=disable_cache,
             recorder=recorder,
+            extra_models_by_role=extra_models_by_role,
         )
         compiled = build_council_graph(deps, tracer=tracer)
 
@@ -552,6 +575,22 @@ def _build_recorder(*, sid: str, cwd: str, question: str,
             "consultation will run without transcript.db", sid, exc,
         )
         return None
+
+
+def _warn_extras_cost(*, role: str, primary: str,
+                      extras: list[str], effort: str) -> None:
+    """One-line cost-of-fan-out heads-up at consultation start.
+    Fires only at x-prefixed effort tiers when the role has at
+    least one extra model. The warning is logged at WARNING level
+    so engine operators see it without verbose-level scraping."""
+    total = 1 + len(extras)
+    base = effort[1:] if effort.startswith("x") else effort
+    log.warning(
+        "%s: %d %s models per plan-item lane (primary=%s, "
+        "extras=%s) — expect ~%dx the %s-tier %s token cost.",
+        effort, total, role, primary, ", ".join(extras),
+        total, base, role,
+    )
 
 
 def _populate_role_messages(state, recorder) -> None:

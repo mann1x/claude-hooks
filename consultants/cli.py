@@ -389,9 +389,15 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
                 "model": cfg.roles[r].model,
                 "ctx_max": cfg.roles[r].ctx_max,
                 "ctx_max_explicit": cfg.roles[r].ctx_max_explicit,
+                # Phase 9 — multi-model fan-out at x-tiers. Empty
+                # for every base-tier-only configuration; the skill
+                # uses presence to decide whether to render the
+                # extras list.
+                "extra_models": list(cfg.roles[r].extra_models),
             }
             for r in cc.ROLES
         },
+        "extras_active": cc.extras_active(cfg.effort),
         "mandatory_roles": sorted(cc.MANDATORY_ROLES),
         "valid_efforts": sorted(cc.EFFORT_BUDGETS),
         "valid_service_modes": sorted(cc.VALID_SERVICE_MODES),
@@ -432,12 +438,23 @@ def cmd_config_set_role(args, base: str) -> int:
                     f"--ctx must be integer or 'auto', got {args.ctx!r}",
                     exit_code=2,
                 ) from None
+    # Phase 9: extras mutators. Validate at the CLI layer so the
+    # JSON error-shape stays consistent with the rest of the CLI.
+    add_extra = getattr(args, "add_model", None)
+    remove_extra = getattr(args, "remove_model", None)
+    clear_extras = bool(getattr(args, "clear_extras", False))
+    if add_extra is not None and not add_extra.strip():
+        raise CLIError("--add-model must be a non-empty model tag",
+                       exit_code=2)
     try:
         cfg = cc.set_role(
             args.role,
             model=args.model,
             ctx_max=ctx_max,
             enabled=enabled,
+            add_extra_model=add_extra,
+            remove_extra_model=remove_extra,
+            clear_extras=clear_extras,
             scope="project" if args.project else "user",
             cwd=Path(args.cwd or os.getcwd()).resolve()
             if args.project else None,
@@ -700,6 +717,22 @@ def build_parser() -> argparse.ArgumentParser:
                          "instead of user-global.")
     cr.add_argument("--cwd",
                     help="Project root (only used with --project).")
+    # Phase 9 — multi-model fan-out at x-prefixed effort tiers.
+    # extra_models is silently ignored at base tiers (low/medium/
+    # high/max) so a benchmark labeled `high` is never accidentally
+    # multi-model. Researcher and critic are the fan-outable roles;
+    # planner / synthesizer accept these flags for symmetry but
+    # the engine doesn't consult their extras at runtime.
+    cr.add_argument("--add-model", dest="add_model", default=None,
+                    help="Append an Ollama tag to extra_models. Used "
+                         "by xmedium/xhigh/xmax to fan out the role "
+                         "across multiple models per lane. Idempotent "
+                         "and dedup'd against the primary model.")
+    cr.add_argument("--remove-model", dest="remove_model", default=None,
+                    help="Remove an Ollama tag from extra_models.")
+    cr.add_argument("--clear-extras", dest="clear_extras",
+                    action="store_true",
+                    help="Empty extra_models for this role.")
     cr.set_defaults(fn=cmd_config_set_role)
 
     ce = cfg_sub.add_parser("set-effort", help="Set effort tier.")

@@ -133,6 +133,17 @@ class GraphDeps:
     prior_messages_by_role: dict[str, list[dict]] = field(
         default_factory=dict,
     )
+    # Phase 9 (v1.1): multi-model fan-out at x-prefixed effort tiers.
+    # Keys: 'researcher' (Phase 9) / 'critic' (Phase 10). Values:
+    # additional Ollama tags (already dedup'd against the primary by
+    # the config loader). When non-empty, the planner->researcher
+    # dispatcher spawns one researcher per [primary] + extras combo
+    # per plan-item lane, and the per-lane state slice carries
+    # ``model_override`` so the role node uses the right model.
+    # Empty or missing key -> classic single-model fan-out.
+    extra_models_by_role: dict[str, list[str]] = field(
+        default_factory=dict,
+    )
 
 
 # ----------------------- node wrappers --------------------------- #
@@ -366,45 +377,71 @@ def build_council_graph(deps: GraphDeps,
     # spawn one parallel researcher invocation per step via
     # LangGraph's ``Send``. Otherwise fall through to a single
     # researcher pass with the full plan (existing behavior).
+    #
+    # Phase 9 (v1.1) — multi-model x-tier: when
+    # ``deps.extra_models_by_role["researcher"]`` is non-empty (set
+    # by the runner only when effort starts with ``x``), each lane
+    # spawns ``1 + len(extras)`` parallel researchers, each using a
+    # different model. Lanes interleave a stable
+    # (item_lane, model_index) -> global lane_idx so the recorder's
+    # transcript.db rows are uniquely identifiable. The primary
+    # model is always lane index 0 within each plan-item slice.
     fanout_router = None
     if "planner" in enabled and "researcher" in enabled:
+        researcher_extras = list(
+            deps.extra_models_by_role.get("researcher") or []
+        )
+
         def _fanout_after_planner(state: dict) -> Any:
             items = state.get("plan_items") or []
             if len(items) < council.FANOUT_MIN_ITEMS:
+                # Below fan-out threshold: single researcher with the
+                # full plan. The non-fan-out path doesn't attempt
+                # multi-model; the user opted into x-tier expecting
+                # multi-perspective per-lane evidence, not parallel
+                # full-plan replays. (This path only fires when the
+                # planner produces 1-2 items, which is rare.)
                 return "researcher"
-            # Cap at FANOUT_MAX_LANES; group items into balanced
-            # lanes when the planner emits more than the cap.
             lanes = council.group_items_into_lanes(
                 items, council.FANOUT_MAX_LANES,
             )
-            return [
-                Send(
-                    "researcher",
-                    {
-                        # Inherit the parent state fields the
-                        # researcher needs and add the lane payload.
-                        "question": state.get("question"),
-                        "plan": state.get("plan", ""),
-                        "cwd": state.get("cwd"),
-                        "effort": state.get("effort"),
-                        "models": state.get("models", {}),
-                        "topology": state.get("topology"),
-                        # Lane sees its grouped items as a focused
-                        # numbered sub-plan. Researcher reads
-                        # ``plan_item`` (string).
-                        "plan_item": council.join_lane_items(lane_items),
-                        "lane_idx": idx,
-                        # Empty research/turns so the lane's delta is
-                        # additive only with no double-count.
-                        "research": [],
-                        "turns": [],
-                        "research_rounds_used": 0,
-                        "total_prompt_tokens": 0,
-                        "total_completion_tokens": 0,
-                    },
-                )
-                for idx, lane_items in enumerate(lanes)
-            ]
+            primary = deps.models.get("researcher", "")
+            models_per_lane: list[str] = [primary] + researcher_extras
+            sends: list[Send] = []
+            global_idx = 0
+            for item_idx, lane_items in enumerate(lanes):
+                joined = council.join_lane_items(lane_items)
+                for model_idx, model_tag in enumerate(models_per_lane):
+                    sends.append(Send(
+                        "researcher",
+                        {
+                            "question": state.get("question"),
+                            "plan": state.get("plan", ""),
+                            "cwd": state.get("cwd"),
+                            "effort": state.get("effort"),
+                            "models": state.get("models", {}),
+                            "topology": state.get("topology"),
+                            "plan_item": joined,
+                            # Globally-unique lane_idx so recorder
+                            # rows + per-lane reconstruction in
+                            # load_role_messages stay clean. The
+                            # original per-item lane is implied by
+                            # `global_idx // len(models_per_lane)`.
+                            "lane_idx": global_idx,
+                            # Phase 9: per-lane model selection.
+                            # researcher_node reads this and falls
+                            # back to deps.models["researcher"] when
+                            # absent (legacy fan-out path).
+                            "model_override": model_tag,
+                            "research": [],
+                            "turns": [],
+                            "research_rounds_used": 0,
+                            "total_prompt_tokens": 0,
+                            "total_completion_tokens": 0,
+                        },
+                    ))
+                    global_idx += 1
+            return sends
         fanout_router = _fanout_after_planner
 
     # Unconditional edges from plan_topology — skip the

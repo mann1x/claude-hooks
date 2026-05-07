@@ -49,7 +49,35 @@ EFFORT_BUDGETS: dict[str, int] = {
     "medium": 3,
     "high": 5,
     "max": 25,
+    # x-prefixed tiers (Phase 9): same follow-up budget as the base
+    # tier but the consultation runs each researcher lane against
+    # every configured ``roles.researcher.extra_models`` model in
+    # parallel. xmax (Phase 10) additionally fans out the critic
+    # across ``roles.critic.extra_models`` with a meta-critic
+    # combine. Extras are silently ignored at non-x tiers, so a
+    # benchmark labeled ``high`` is never accidentally 3× the cost.
+    "xmedium": 3,
+    "xhigh": 5,
+    "xmax": 25,
 }
+
+
+def base_effort(effort: str) -> str:
+    """Strip the ``x`` prefix from x-tiers; returns the base tier
+    whose caps and budget should be used. ``"xhigh"`` -> ``"high"``;
+    ``"high"`` -> ``"high"``."""
+    if effort.startswith("x") and effort[1:] in ("low", "medium", "high", "max"):
+        return effort[1:]
+    return effort
+
+
+def extras_active(effort: str) -> bool:
+    """True when the tier is x-prefixed — i.e. the engine should
+    fan out to ``extra_models`` for fan-outable roles. False for
+    every base tier; ``extra_models`` is unused at those tiers."""
+    return effort.startswith("x") and effort[1:] in (
+        "low", "medium", "high", "max"
+    )
 
 DEFAULT_HTTP_PORT = 38095
 DEFAULT_MODEL = "kimi-k2.6:cloud"
@@ -73,6 +101,22 @@ class RoleConfig:
     # upstream model. The chat client gracefully degrades to no-think
     # if the model returns 400 on the ``think`` field.
     think: Any = None
+    # Phase 9: additional Ollama tags consulted at x-prefixed effort
+    # tiers (xmedium / xhigh / xmax). For fan-outable roles
+    # (researcher, critic) each plan-item lane spawns one researcher
+    # per [model] + extra_models entry, so the synthesizer / meta-
+    # critic sees diverse perspectives. Strictly opt-in via tier;
+    # silently ignored at low/medium/high/max so a base-tier
+    # consultation always behaves as before.
+    #
+    # Validation rules applied at load time:
+    #   - dedup'd against ``model`` (primary); a duplicate is
+    #     dropped with a warning so users can put their primary in
+    #     the list without doubling work.
+    #   - empty / non-string entries dropped silently.
+    # Tools-capability validation against /api/tags is the runner's
+    # job (we don't want a config load to require network).
+    extra_models: list[str] = field(default_factory=list)
 
 
 # Per-role think defaults. Tuned from the 2026-05-07 trace
@@ -159,6 +203,7 @@ def _merge_role(base: RoleConfig, override: dict) -> RoleConfig:
         ctx_max=base.ctx_max,
         ctx_max_explicit=base.ctx_max_explicit,
         think=base.think,
+        extra_models=list(base.extra_models),
     )
     if "enabled" in override:
         out.enabled = bool(override["enabled"])
@@ -184,6 +229,34 @@ def _merge_role(base: RoleConfig, override: dict) -> RoleConfig:
             out.think = v.lower()
         elif v is None:
             out.think = None
+    if "extra_models" in override:
+        raw_extras = override["extra_models"]
+        if isinstance(raw_extras, list):
+            out.extra_models = _sanitize_extras(raw_extras, primary=out.model)
+    return out
+
+
+def _sanitize_extras(values: list, *, primary: str) -> list[str]:
+    """Drop empties / non-strings, dedup, and strip the primary
+    model so set+extras can be written verbatim by users without
+    double-running the primary."""
+    seen: set[str] = set()
+    out: list[str] = []
+    primary_norm = (primary or "").strip()
+    for v in values:
+        if not isinstance(v, str):
+            continue
+        s = v.strip()
+        if not s:
+            continue
+        if s == primary_norm:
+            # Drop silently; primary is always-on regardless of
+            # extras.
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
     return out
 
 
@@ -270,6 +343,13 @@ def _render(cfg: ConsultantsConfig) -> str:
             L.append(f"ctx_max = {int(rc.ctx_max)}")
         L.append(f"ctx_max_explicit = "
                  f"{'true' if rc.ctx_max_explicit else 'false'}")
+        if rc.extra_models:
+            inner = ", ".join(_toml_str(m) for m in rc.extra_models)
+            L.append(f"extra_models = [{inner}]")
+        else:
+            # Always emit the key even when empty so hand-editors
+            # know it exists; cheaper than docs-spelunking.
+            L.append("extra_models = []")
         L.append("")
     return "\n".join(L)
 
@@ -303,8 +383,27 @@ def _save_after_change(cfg: ConsultantsConfig, *,
 def set_role(role: str, *, model: Optional[str] = None,
              ctx_max: Optional[int] = None,
              enabled: Optional[bool] = None,
+             add_extra_model: Optional[str] = None,
+             remove_extra_model: Optional[str] = None,
+             clear_extras: bool = False,
              scope: str = "user",
              cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Mutate one role's config and persist.
+
+    Phase 9 added the multi-model knobs:
+
+    - ``add_extra_model``: append an Ollama tag to ``extra_models``.
+      No-op + idempotent if the tag is already present or matches the
+      primary; raises if empty.
+    - ``remove_extra_model``: drop an entry; idempotent if absent.
+    - ``clear_extras``: empty the list. Useful for reverting an
+      x-tier benchmark prep.
+
+    Researcher and critic are the only fan-outable roles, so the
+    extras knobs are accepted on planner/synthesizer too but are
+    effectively unused at runtime — the engine only consults
+    ``extra_models`` for researcher (Phase 9) / critic (Phase 10).
+    """
     if role not in ROLES:
         raise ValueError(
             f"unknown role: {role!r}. Valid: {', '.join(ROLES)}"
@@ -319,6 +418,9 @@ def set_role(role: str, *, model: Optional[str] = None,
         if not model.strip():
             raise ValueError("model must be non-empty")
         rc.model = model.strip()
+        # Re-sanitize extras against the new primary so a swap
+        # doesn't leave the primary in extras.
+        rc.extra_models = _sanitize_extras(rc.extra_models, primary=rc.model)
     if ctx_max is not None:
         if ctx_max == 0:
             rc.ctx_max = None
@@ -330,6 +432,18 @@ def set_role(role: str, *, model: Optional[str] = None,
             rc.ctx_max_explicit = True
     if enabled is not None:
         rc.enabled = bool(enabled)
+    if clear_extras:
+        rc.extra_models = []
+    if add_extra_model is not None:
+        tag = add_extra_model.strip()
+        if not tag:
+            raise ValueError("add_extra_model must be non-empty")
+        rc.extra_models = _sanitize_extras(
+            rc.extra_models + [tag], primary=rc.model,
+        )
+    if remove_extra_model is not None:
+        tag = remove_extra_model.strip()
+        rc.extra_models = [m for m in rc.extra_models if m != tag]
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 
