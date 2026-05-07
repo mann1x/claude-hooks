@@ -12,7 +12,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from consultants import config as cc
 from consultants.engine import council as council_mod
@@ -35,6 +35,7 @@ def make_runner(*, ollama_base_url: str):
     )
     from claude_hooks.caliber_proxy.prompt import build_grounding_messages
     from consultants.engine.graph import GraphDeps, build_council_graph
+    from consultants.engine.recorder import MessageRecorder, RecorderMeta
     from consultants.engine.trace import (
         Tracer, TracedChat, traced_tool, traced_node,
     )
@@ -98,6 +99,16 @@ def make_runner(*, ollama_base_url: str):
         # re-enter planner/synthesizer with identical state).
         disable_cache = cfg.effort in ("high", "max")
 
+        # v1.1 SQLite recorder. Construction is best-effort — if the
+        # filesystem refuses (read-only mount, permissions), we log
+        # and continue without it so the consultation still runs.
+        # The artifact dir is the same one storage.write_consultation
+        # writes to.
+        recorder = _build_recorder(
+            sid=state.sid, cwd=cwd, question=question, cfg=cfg,
+            models=models, parent_sid=None,
+        )
+
         deps = GraphDeps(
             chat_clients=chat_clients,
             models=models,
@@ -109,6 +120,7 @@ def make_runner(*, ollama_base_url: str):
             think_by_role=think_by_role,
             synthesizer_self_critic=synthesizer_self_critic,
             disable_cache=disable_cache,
+            recorder=recorder,
         )
         compiled = build_council_graph(deps, tracer=tracer)
 
@@ -157,6 +169,7 @@ def make_runner(*, ollama_base_url: str):
             state.status = "failed"
             state.error = f"graph crashed: {e}"
             state.finished_at = time.time()
+            _finalize_recorder(recorder, status="failed", error=str(e))
             _write_failed_artifacts(state, cwd, question, e)
             return
 
@@ -226,6 +239,10 @@ def make_runner(*, ollama_base_url: str):
         if node_failed:
             log.warning("council finished with role failure: %s",
                         node_failed)
+        _finalize_recorder(
+            recorder, status=terminal_status, error=node_error,
+            finished_at=state.finished_at,
+        )
 
     return run_council
 
@@ -247,6 +264,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
     )
     from claude_hooks.caliber_proxy.prompt import build_grounding_messages
     from consultants.engine.graph import GraphDeps, build_follow_up_graph
+    from consultants.engine.recorder import MessageRecorder, RecorderMeta
     from consultants.engine.trace import (
         Tracer, TracedChat, traced_tool, traced_node,
     )
@@ -312,6 +330,14 @@ def make_follow_up_runner(*, ollama_base_url: str):
         # is fine.
         think_by_role = {r: cc.role_think(cfg, r) for r in enabled_t}
 
+        # Recorder for the follow-up — separate db file under the
+        # follow-up's own sid dir, with parent_sid baked into meta so
+        # the chain is reconstructable from disk-only state.
+        recorder = _build_recorder(
+            sid=state.sid, cwd=cwd, question=question, cfg=cfg,
+            models=models, parent_sid=state.parent_sid,
+        )
+
         deps = GraphDeps(
             chat_clients=chat_clients,
             models=models,
@@ -323,6 +349,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
             think_by_role=think_by_role,
             synthesizer_self_critic=False,  # follow-ups never
             disable_cache=True,             # caching not useful here
+            recorder=recorder,
         )
         compiled = build_follow_up_graph(deps, tracer=tracer)
 
@@ -383,6 +410,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
             state.status = "failed"
             state.error = f"graph crashed: {e}"
             state.finished_at = time.time()
+            _finalize_recorder(recorder, status="failed", error=str(e))
             _write_failed_artifacts(state, cwd, question, e)
             return
 
@@ -449,8 +477,69 @@ def make_follow_up_runner(*, ollama_base_url: str):
                 "parent=%s)",
                 node_failed, state.sid, state.parent_sid,
             )
+        _finalize_recorder(
+            recorder, status=terminal_status, error=node_error,
+            finished_at=state.finished_at,
+        )
 
     return run_follow_up
+
+
+def _build_recorder(*, sid: str, cwd: str, question: str,
+                    cfg: cc.ConsultantsConfig, models: dict[str, str],
+                    parent_sid: Optional[str]):
+    """Build a MessageRecorder for the consultation. Returns ``None``
+    on any construction failure so the caller can keep running without
+    the SQLite sidecar (the consultation still produces summary.md /
+    transcript.md / metadata.json).
+
+    The db file lives at
+    ``<cwd>/.claude-hooks/consultants/<sid>/transcript.db`` —
+    same directory storage.write_consultation writes to.
+    """
+    from consultants.engine.recorder import MessageRecorder, RecorderMeta
+    from consultants.engine import storage as _storage
+    try:
+        sdir = Path(cwd) / ".claude-hooks" / "consultants" / sid
+        meta = RecorderMeta(
+            sid=sid,
+            cwd=cwd,
+            question=question,
+            effort=cfg.effort,
+            topology=cfg.topology,
+            models=dict(models),
+            parent_sid=parent_sid,
+        )
+        return MessageRecorder(
+            sdir / _storage.TRANSCRIPT_DB_FILENAME,
+            meta=meta,
+        )
+    except Exception as exc:
+        log.warning(
+            "MessageRecorder construction failed (sid=%s): %s; "
+            "consultation will run without transcript.db", sid, exc,
+        )
+        return None
+
+
+def _finalize_recorder(recorder, *, status: str,
+                       error: Optional[str] = None,
+                       finished_at: Optional[float] = None) -> None:
+    """Best-effort finalize + close. Safe to call with ``None`` (the
+    construction-failed path) or after the consultation has already
+    finalized — `finalize` is idempotent, `close` is too."""
+    if recorder is None:
+        return
+    try:
+        recorder.finalize(
+            status=status, error=error, finished_at=finished_at,
+        )
+    except Exception as exc:  # pragma: no cover — recorder must not mask
+        log.warning("recorder.finalize raised: %s", exc)
+    try:
+        recorder.close()
+    except Exception as exc:  # pragma: no cover
+        log.warning("recorder.close raised: %s", exc)
 
 
 def _write_failed_artifacts(state, cwd: str, question: str,

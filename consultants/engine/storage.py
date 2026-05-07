@@ -32,6 +32,13 @@ from typing import Iterable, Optional
 SUMMARY_FILENAME = "summary.md"
 TRANSCRIPT_FILENAME = "transcript.md"
 METADATA_FILENAME = "metadata.json"
+# v1.1: SQLite sidecar holding the full per-role LLM message threads
+# (see docs/PLAN-consultants-v1.1-message-history.md). Written
+# in real time by consultants.engine.recorder.MessageRecorder during
+# the run; finalize() flips meta.status at completion. Optional —
+# v1.0 sessions will never have one and the reopen path falls back
+# cleanly to turn-content reconstruction.
+TRANSCRIPT_DB_FILENAME = "transcript.db"
 
 
 # ----------------------- types -------------------------------------- #
