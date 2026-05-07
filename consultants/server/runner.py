@@ -56,7 +56,13 @@ def make_runner(*, ollama_base_url: str):
         #   ~3.5 min on the synthesizer node for diminishing returns.
         # - high|max: keep dedicated critic; standard synthesizer.
         #   Quality-first; user explicitly opted in to the cost.
-        if cfg.effort in ("low", "medium") and "critic" in enabled:
+        # Critic gating mirrors the BASE tier: low/medium (and their
+        # x-prefixed counterparts xmedium) drop the critic; high /
+        # max / xhigh / xmax keep it. cc.base_effort strips the
+        # x-prefix so we make one decision per base tier and let
+        # x-tiers inherit.
+        if cc.base_effort(cfg.effort) in ("low", "medium") \
+                and "critic" in enabled:
             enabled = tuple(r for r in enabled if r != "critic")
             log.info(
                 "effort=%s: dropping critic node (cost > value at "
@@ -109,14 +115,19 @@ def make_runner(*, ollama_base_url: str):
             models=models, parent_sid=None,
         )
 
-        # Phase 9 (v1.1) — multi-model x-tier fan-out. ``extras_active``
-        # is True only at xmedium/xhigh/xmax, so ``extra_models`` is
-        # silently ignored at every base tier. Researcher gets the
-        # multi-model machinery now; critic lands in Phase 10 with
-        # xmax. Cost-of-fan-out warning fires when the primary plus
-        # extras would expand each lane to >= 2 models, which is the
-        # whole point of opting in but worth telegraphing once at
-        # consultation start so token bills aren't surprises.
+        # Phase 9 (v1.1) — multi-model x-tier fan-out for researcher.
+        # ``extras_active`` is True only at xmedium/xhigh/xmax, so
+        # ``extra_models`` is silently ignored at every base tier
+        # (a benchmark labeled `high` is never accidentally 3× the
+        # cost). Cost-of-fan-out warning fires once at consultation
+        # start so token bills aren't surprises.
+        #
+        # Phase 10 (v1.1) — multi-model critic fan-out, xmax-only.
+        # Researcher fan-out activates at any x-tier; critic fan-out
+        # activates only at xmax (per the user's design — diverse
+        # critics + meta-critic combine is the most expensive
+        # capability). At xhigh+critic_extras, the critic extras are
+        # silently ignored.
         extra_models_by_role: dict[str, list[str]] = {}
         if cc.extras_active(cfg.effort):
             researcher_extras = list(
@@ -130,6 +141,19 @@ def make_runner(*, ollama_base_url: str):
                     extras=researcher_extras,
                     effort=cfg.effort,
                 )
+            # Critic extras only activate at xmax.
+            if cfg.effort == "xmax":
+                critic_extras = list(
+                    cfg.roles["critic"].extra_models or []
+                )
+                if critic_extras and "critic" in enabled:
+                    extra_models_by_role["critic"] = critic_extras
+                    _warn_extras_cost(
+                        role="critic",
+                        primary=cfg.roles["critic"].model,
+                        extras=critic_extras,
+                        effort=cfg.effort,
+                    )
 
         deps = GraphDeps(
             chat_clients=chat_clients,
@@ -305,12 +329,14 @@ def make_follow_up_runner(*, ollama_base_url: str):
         parent_state = runner_input.get("parent_state")
 
         # Topology: researcher + synthesizer always; critic only at
-        # high/max effort (matches the main runner's gate). The
-        # parent's ``enabled_roles`` may have included critic but
-        # the follow-up topology decides independently based on
-        # this follow-up's effort.
+        # high/max effort (matches the main runner's gate). x-tiers
+        # mirror their base tier: xhigh / xmax keep critic, xmedium
+        # drops it. The parent's ``enabled_roles`` may have
+        # included critic but the follow-up topology decides
+        # independently based on this follow-up's effort.
         enabled = ["researcher", "synthesizer"]
-        if cfg.effort in ("high", "max") and "critic" in cc.enabled_roles(cfg):
+        if cc.base_effort(cfg.effort) in ("high", "max") \
+                and "critic" in cc.enabled_roles(cfg):
             enabled = ["researcher", "critic", "synthesizer"]
         enabled_t = tuple(enabled)
 

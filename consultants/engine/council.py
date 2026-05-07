@@ -161,6 +161,69 @@ CRITIC_SYSTEM = _role_prompt(
     "extra round costs another full agent loop."
 )
 
+# Phase 10: meta-critic synthesizes the C parallel-critic verdicts
+# at xmax. Same output contract as CRITIC_SYSTEM (DECISION: line
+# first, then justification) so the existing parse_critic_decision
+# + route_after_critic conditional edge work unchanged. The prompt
+# emphasizes weighing diverse model perspectives — that's the whole
+# point of multi-critic — without caving to any single voice.
+META_CRITIC_SYSTEM = _role_prompt(
+    "ROLE: meta-critic. Multiple critics have independently judged "
+    "whether the researcher's evidence is sufficient. Their training "
+    "differs and they may disagree. Your job: weigh the verdicts and "
+    "emit ONE final decision the synthesizer will see.\n\n"
+    "Output line 1: `DECISION: ready` OR `DECISION: needs_more_research`.\n"
+    "Output line 2+: a synthesized critique. When critics agreed, "
+    "consolidate their reasoning in 1-3 sentences. When they "
+    "disagreed, name the disagreement explicitly and pick a side — "
+    "do NOT punt with 'depends'. Cite `path:line` when the gap is "
+    "concrete.\n\n"
+    "Bias toward `ready` unless at least one critic named a "
+    "concrete missing fact AND that fact is plausibly load-bearing "
+    "for the synthesizer's answer. A critic raising a theoretical "
+    "concern that another critic credibly dismisses is NOT grounds "
+    "for more research."
+)
+
+
+def build_meta_critic_messages(
+    question: str, plan: str,
+    research_rounds: list[str],
+    critic_verdicts: list[str],
+) -> list[dict]:
+    """Build the meta-critic's prompt. Critics are anonymized as
+    ``Critic 1``, ``Critic 2``, ... in the order ``critic_verdicts``
+    arrives — the recorder's per-row ``model`` column is the audit
+    map back to which Ollama tag produced which verdict.
+
+    Identity is anonymized to avoid biasing the meta-critic toward
+    a model it 'knows' performs better. The recorder is the source
+    of truth for who-said-what.
+    """
+    parts = [
+        f"USER QUESTION:\n{question.strip()}",
+        f"\nPLANNER'S PLAN:\n{plan.strip()}",
+    ]
+    for i, r in enumerate(research_rounds, start=1):
+        parts.append(f"\nRESEARCHER REPORT (round {i}):\n{r.strip()}")
+    if not critic_verdicts:
+        parts.append(
+            "\n(no critic verdicts — meta-critic invoked with no "
+            "input; default to ready unless evidence is obviously "
+            "thin)"
+        )
+    else:
+        for i, v in enumerate(critic_verdicts, start=1):
+            parts.append(f"\nCRITIC {i} VERDICT:\n{v.strip()}")
+    parts.append(
+        "\nSynthesize. Emit the final DECISION line and a single "
+        "consolidated critique paragraph."
+    )
+    return [
+        {"role": "system", "content": META_CRITIC_SYSTEM},
+        {"role": "user", "content": "\n".join(parts)},
+    ]
+
 SYNTHESIZER_SYSTEM = _role_prompt(
     "ROLE: synthesizer. Write the final answer the user will see, "
     "consuming the planner's plan, researcher's report(s), and "
@@ -834,11 +897,19 @@ def researcher_node(state: dict, *,
 def critic_node(state: dict, *, chat_client, model: str,
                 think: Any = True, recorder=None) -> dict:
     rounds_used_pre = int(state.get("research_rounds_used") or 0)
+    # Phase 10: per-lane multi-model fan-out for critics. Same shape
+    # as researcher's model_override path. lane_idx propagates from
+    # the dispatcher (=critic_idx) so the recorder can map each row
+    # back to its critic instance for audit.
+    model_override = state.get("model_override")
+    if isinstance(model_override, str) and model_override.strip():
+        model = model_override.strip()
+    lane_idx = state.get("lane_idx")
     if recorder is not None:
         try:
             recorder.record_node(
                 role="critic", kind="node_enter",
-                round=max(rounds_used_pre, 1),
+                round=max(rounds_used_pre, 1), lane_idx=lane_idx,
             )
         except Exception:  # pragma: no cover
             log.exception("recorder.record_node raised; ignored")
@@ -851,6 +922,7 @@ def critic_node(state: dict, *, chat_client, model: str,
             chat_client, model, msgs, think=think,
             recorder=recorder, role="critic",
             round=max(rounds_used_pre, 1),
+            lane_idx=lane_idx,
         )
     except Exception as e:
         log.exception("critic_node failed: %s", e)
@@ -886,12 +958,139 @@ def critic_node(state: dict, *, chat_client, model: str,
         try:
             recorder.record_node(
                 role="critic", kind="node_exit",
-                round=max(rounds_used, 1),
+                round=max(rounds_used, 1), lane_idx=lane_idx,
                 duration_ms=int(dt * 1000),
             )
         except Exception:  # pragma: no cover
             log.exception("recorder.record_node raised; ignored")
+    # In multi-critic mode (Phase 10 xmax+critic-extras), the
+    # presence of ``lane_idx`` on this invocation means the critic
+    # is one of C parallel instances. Two consequences:
+    #
+    # 1. Don't write critic_decision / critique — they're racy
+    #    (last-writer-wins across C parallel lanes) and the
+    #    meta-critic downstream overwrites them with the consolidated
+    #    values anyway. Suppressing the write keeps the merged state
+    #    cleaner pre-meta-critic and saves a no-op overwrite.
+    # 2. Don't add to critic_reroutes_used. The additive reducer
+    #    would otherwise tick the counter by up to C per round,
+    #    blowing the re-route cap C× faster than intended. Meta-
+    #    critic owns the single increment based on ITS final
+    #    decision.
+    if lane_idx is not None:
+        return {
+            "turns": [turn],
+            "total_prompt_tokens": pt,
+            "total_completion_tokens": ct,
+        }
+    # Single-critic path (every base tier + xmedium/xhigh + xmax
+    # without critic extras): emit the full delta as before.
     return {
+        "critique": text,
+        "critic_decision": decision,
+        "critic_reroutes_used": rerouted_delta,
+        "turns": [turn],
+        "total_prompt_tokens": pt,
+        "total_completion_tokens": ct,
+    }
+
+
+def meta_critic_node(state: dict, *, chat_client, model: str,
+                     think: Any = True, recorder=None) -> dict:
+    """Phase 10: synthesize the C parallel-critic verdicts at xmax
+    into one final decision. Reads the C critic critiques from the
+    additive ``turns`` list (filtering by ``role == 'critic'`` and
+    the current round), feeds them to ``model`` (the primary critic
+    model) anonymized, and writes the consolidated
+    ``critic_decision`` + ``critique`` to state — overwriting the
+    racy values left by the C parallel critics.
+
+    Always runs at xmax+critic-extras even when all C critics
+    agree: the synthesizer's prompt always sees a single
+    consolidated critique, so the user's experience is predictable
+    regardless of consensus.
+    """
+    rounds_used = int(state.get("research_rounds_used") or 0)
+    this_round = max(rounds_used, 1)
+
+    if recorder is not None:
+        try:
+            recorder.record_node(
+                role="meta_critic", kind="node_enter",
+                round=this_round,
+            )
+        except Exception:  # pragma: no cover
+            log.exception("recorder.record_node raised; ignored")
+
+    # Pull the C parallel critiques out of the turns reducer. Order
+    # is whatever LangGraph's barrier delivered — anonymized
+    # numbering, not stable across runs. Audit-mapping back to
+    # models is done via the recorder's per-row ``model`` column.
+    critic_verdicts: list[str] = [
+        t.content for t in (state.get("turns") or [])
+        if getattr(t, "role", None) == "critic"
+        and getattr(t, "round", 1) == this_round
+        and (getattr(t, "content", "") or "").strip()
+    ]
+
+    msgs = build_meta_critic_messages(
+        state["question"], state.get("plan", ""),
+        state.get("research") or [],
+        critic_verdicts,
+    )
+    t0 = time.monotonic()
+    try:
+        text, pt, ct = _single_shot(
+            chat_client, model, msgs, think=think,
+            recorder=recorder, role="meta_critic",
+            round=this_round,
+        )
+    except Exception as e:
+        log.exception("meta_critic_node failed: %s", e)
+        # Failure mode: keep the council moving by defaulting to
+        # ready and surfacing the error in critique. The C critics'
+        # raw turns are still on the transcript so an audit can see
+        # what they said.
+        err_text = (
+            f"(meta-critic failed: {e}; defaulting to ready. "
+            f"Raw critic verdicts available in transcript.)"
+        )
+        return {
+            "error": f"meta_critic failed: {e}",
+            "_role_failed": "meta_critic",
+            "critic_decision": "ready",
+            "critique": err_text,
+            "turns": [RoleTurn(
+                role="meta_critic", round=this_round, content=err_text,
+                prompt_tokens=0, completion_tokens=0,
+                duration_seconds=0.0,
+            )],
+        }
+    dt = time.monotonic() - t0
+    decision = parse_critic_decision(text)
+    # Meta-critic owns the single critic_reroutes_used increment in
+    # multi-critic mode (the C parallel critics suppress their own
+    # delta — see critic_node). Adds 1 if the consolidated decision
+    # is needs_more_research, 0 if ready. The route_after_critic
+    # conditional edge then reads the additive total to enforce the
+    # effort tier's reroute cap.
+    rerouted_delta = 1 if decision == "needs_more_research" else 0
+    turn = RoleTurn(
+        role="meta_critic", round=this_round, content=text,
+        prompt_tokens=pt, completion_tokens=ct, duration_seconds=dt,
+    )
+    if recorder is not None:
+        try:
+            recorder.record_node(
+                role="meta_critic", kind="node_exit",
+                round=this_round, duration_ms=int(dt * 1000),
+            )
+        except Exception:  # pragma: no cover
+            log.exception("recorder.record_node raised; ignored")
+    return {
+        # Synthesizer reads ``critique`` + ``critic_decision``. In
+        # multi-critic mode the C parallel critics deliberately don't
+        # write these; meta-critic is the sole writer.
         "critique": text,
         "critic_decision": decision,
         "critic_reroutes_used": rerouted_delta,

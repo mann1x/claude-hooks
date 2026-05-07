@@ -213,6 +213,22 @@ def _wrap_synthesizer(deps: GraphDeps):
     return _node
 
 
+def _wrap_meta_critic(deps: GraphDeps):
+    """Phase 10: meta-critic wrapper. Uses the primary critic model
+    (deps.models['critic']) and the critic role's think value. Only
+    instantiated at xmax with critic extras populated — the graph
+    builder routes around this node otherwise."""
+    def _node(state: dict) -> dict:
+        return council.meta_critic_node(
+            state,
+            chat_client=deps.chat_clients["critic"],
+            model=deps.models["critic"],
+            think=_think_for(deps, "critic"),
+            recorder=deps.recorder,
+        )
+    return _node
+
+
 # ----------------------- topology helper -------------------------- #
 
 def plan_topology(enabled: tuple[str, ...]) -> list[tuple[str, str]]:
@@ -364,8 +380,21 @@ def build_council_graph(deps: GraphDeps,
     if "researcher" in enabled:
         sg.add_node("researcher",
                     _wrap("researcher", _wrap_researcher(deps)))
+    # Phase 10: at xmax with critic extras, fan out the critic
+    # across [primary] + extras and add a meta_critic node that
+    # synthesizes the verdicts. multi_critic_active flips the
+    # graph topology — see the conditional-edge wiring below.
+    multi_critic_active = (
+        "critic" in enabled
+        and bool(deps.extra_models_by_role.get("critic"))
+    )
     if "critic" in enabled:
         sg.add_node("critic", _wrap("critic", _wrap_critic(deps)))
+    if multi_critic_active:
+        sg.add_node(
+            "meta_critic",
+            _wrap("meta_critic", _wrap_meta_critic(deps)),
+        )
     _maybe_cached(
         "synthesizer",
         _wrap("synthesizer", _wrap_synthesizer(deps)),
@@ -444,12 +473,76 @@ def build_council_graph(deps: GraphDeps,
             return sends
         fanout_router = _fanout_after_planner
 
-    # Unconditional edges from plan_topology — skip the
-    # planner -> researcher edge when fan-out is wired (we replace
-    # it with the conditional edge below).
+    # Phase 10: when multi_critic_active, build a Send-based
+    # dispatcher into the "critic" node. Each Send carries one
+    # critic instance (lane_idx + model_override). LangGraph's
+    # barrier waits for all C parallel returns before transitioning
+    # to meta_critic. The predecessor is whichever role feeds critic
+    # in plan_topology — researcher when enabled, planner otherwise.
+    critic_predecessor: Optional[str] = None
+    critic_fanout_router = None
+    if multi_critic_active:
+        critic_extras = list(
+            deps.extra_models_by_role.get("critic") or []
+        )
+
+        def _fanout_to_critics(state: dict) -> Any:
+            primary = deps.models.get("critic", "")
+            models_per_lane: list[str] = [primary] + critic_extras
+            sends: list[Send] = []
+            for idx, model_tag in enumerate(models_per_lane):
+                sends.append(Send(
+                    "critic",
+                    {
+                        "question": state.get("question"),
+                        "plan": state.get("plan", ""),
+                        "cwd": state.get("cwd"),
+                        "effort": state.get("effort"),
+                        "models": state.get("models", {}),
+                        "topology": state.get("topology"),
+                        # Each critic sees the merged research from
+                        # the upstream researcher fan-out.
+                        "research": list(state.get("research") or []),
+                        "research_rounds_used": int(
+                            state.get("research_rounds_used") or 0
+                        ),
+                        # lane_idx flags this critic as part of a
+                        # fanout (critic_node suppresses its
+                        # decision/reroute deltas in that mode).
+                        "lane_idx": idx,
+                        "model_override": model_tag,
+                        # Empty deltas so additive reducers don't
+                        # double-count.
+                        "turns": [],
+                        "total_prompt_tokens": 0,
+                        "total_completion_tokens": 0,
+                        "critic_reroutes_used": 0,
+                    },
+                ))
+            return sends
+
+        critic_fanout_router = _fanout_to_critics
+        # Determine the immediate predecessor of critic in the
+        # plan_topology output — it's the source whose dst is
+        # "critic" in the unconditional-edge list. The skip-and-
+        # replace pattern below mirrors the planner->researcher
+        # case from Phase 9.
+        for src, dst in plan_topology(enabled):
+            if dst == "critic":
+                critic_predecessor = src
+                break
+
+    # Unconditional edges from plan_topology — skip:
+    # 1. The planner -> researcher edge when researcher fan-out is
+    #    wired (replaced by Phase 9 conditional below).
+    # 2. The {predecessor} -> critic edge when multi-critic is
+    #    active (replaced by the Phase 10 conditional fan-out).
     for src, dst in plan_topology(enabled):
         if (fanout_router is not None
                 and src == "planner" and dst == "researcher"):
+            continue
+        if (multi_critic_active and dst == "critic"
+                and src == critic_predecessor):
             continue
         src_node = START if src == "START" else src
         dst_node = END if dst == "END" else dst
@@ -462,16 +555,39 @@ def build_council_graph(deps: GraphDeps,
             ["researcher"],
         )
 
+    if multi_critic_active and critic_predecessor is not None:
+        # Predecessor -> [Send to critic] × C
+        pred_node = START if critic_predecessor == "START" else critic_predecessor
+        sg.add_conditional_edges(
+            pred_node,
+            critic_fanout_router,
+            ["critic"],
+        )
+        # critic (×C, barrier) -> meta_critic. LangGraph waits for
+        # all C parallel returns before firing this edge; the
+        # additive reducer on ``turns`` has merged C critic
+        # critiques into state["turns"] by the time meta_critic
+        # runs.
+        sg.add_edge("critic", "meta_critic")
+
     # Critic's conditional edge: needs_more_research -> researcher,
-    # else -> synthesizer. Only added when critic is enabled. The
-    # critic re-route uses the SINGLE-researcher path (no Send) —
-    # by the time critic fires, the fan-out has already merged its
-    # results into state['research']; the re-route does targeted
-    # follow-up on whatever gaps the critic named.
-    if "critic" in enabled:
+    # else -> synthesizer. In single-critic mode the critic itself
+    # owns the conditional; in multi-critic mode meta_critic does.
+    # The critic re-route uses the SINGLE-researcher path (no Send)
+    # — by the time critic / meta_critic fires, the upstream
+    # fan-out has already merged its results into state['research'];
+    # the re-route does targeted follow-up on whatever gaps were
+    # named.
+    if multi_critic_active:
+        decider = "meta_critic"
+    elif "critic" in enabled:
+        decider = "critic"
+    else:
+        decider = None
+    if decider is not None:
         if "researcher" in enabled:
             sg.add_conditional_edges(
-                "critic",
+                decider,
                 council.route_after_critic,
                 {
                     council.ROUTE_RESEARCHER: "researcher",
@@ -479,9 +595,9 @@ def build_council_graph(deps: GraphDeps,
                 },
             )
         else:
-            # No researcher to loop back to; critic is effectively
-            # advisory — straight to synthesizer.
-            sg.add_edge("critic", "synthesizer")
+            # No researcher to loop back to; the critic-side is
+            # effectively advisory — straight to synthesizer.
+            sg.add_edge(decider, "synthesizer")
 
     if cache is not None:
         return sg.compile(checkpointer=checkpointer, cache=cache)
