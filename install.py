@@ -4438,10 +4438,11 @@ SKILLS = [
     # marker is a sentinel checked by _install_skills against the
     # tool-detection result; when the consultants env is missing the
     # skills are skipped silently.
-    ("consultants",          "claude-consultants"),
-    ("consultants--list",    "claude-consultants"),
-    ("consultants--show",    "claude-consultants"),
-    ("consultants--config",  "claude-consultants"),
+    ("consultants",            "claude-consultants"),
+    ("consultants--list",      "claude-consultants"),
+    ("consultants--show",      "claude-consultants"),
+    ("consultants--config",    "claude-consultants"),
+    ("consultants--followup",  "claude-consultants"),
 ]
 
 
