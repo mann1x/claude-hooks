@@ -273,13 +273,27 @@ def build_council_graph(deps: GraphDeps,
         try:
             from langgraph.cache.memory import InMemoryCache
             from langgraph.types import CachePolicy
-            cache = InMemoryCache()
-            # 1h TTL — long enough to dedupe within an interactive
-            # session, short enough that real config / code changes
-            # invalidate quickly.
-            cache_policy_planner = CachePolicy(ttl=3600)
-            cache_policy_synthesizer = CachePolicy(ttl=3600)
-        except ImportError:  # langgraph too old; skip caching
+            # Some langgraph versions (0.3.x) ship CachePolicy as a
+            # no-field stub — calling CachePolicy(ttl=...) raises
+            # ``__new__() got an unexpected keyword argument 'ttl'``.
+            # Probe the signature; if it doesn't accept ttl, skip
+            # the cache wiring entirely (it'd be a no-op anyway).
+            try:
+                _probe = CachePolicy(ttl=3600)
+                cache = InMemoryCache()
+                # 1h TTL — long enough to dedupe within an
+                # interactive session, short enough that real
+                # config / code changes invalidate quickly.
+                cache_policy_planner = _probe
+                cache_policy_synthesizer = CachePolicy(ttl=3600)
+            except TypeError:
+                log.info(
+                    "langgraph CachePolicy in this version does not "
+                    "accept ttl; skipping node cache (upgrade "
+                    "langgraph to >= 0.4 to enable)",
+                )
+                cache = None
+        except ImportError:  # langgraph too old to expose either
             log.info("langgraph cache API unavailable; skipping node cache")
             cache = None
 
