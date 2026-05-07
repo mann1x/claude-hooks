@@ -301,4 +301,11 @@ def run_loop(
         )
     else:
         log.warning("agent loop hit max_iterations=%d", config.max_iterations)
+    # Attach the final conversation transcript to the response so
+    # callers that need to follow up (e.g., the consultants
+    # researcher fallback when the loop ends with empty text) can
+    # build a fresh prompt that keeps tool results in context.
+    # Existing callers (caliber, advisor) ignore the extra key.
+    final = dict(final or {})
+    final.setdefault("_loop_messages", list(payload.get("messages") or []))
     return final

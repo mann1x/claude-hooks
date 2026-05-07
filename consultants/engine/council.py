@@ -518,14 +518,25 @@ def researcher_node(state: dict, *,
             (cfg.max_iterations if cfg else -1),
             state.get("lane_idx"),
         )
-        summary_msgs = list(payload["messages"]) + [{
+        # CRITICAL: use the run_loop's final conversation transcript
+        # (with tool calls + results) rather than the original
+        # pre-loop messages. The latter contains zero evidence; the
+        # model would correctly answer "I have no findings". Caught
+        # in the 2026-05-07 audit v3 trace where the lanes had run
+        # 27 read_file + 29 grep calls but the fallback summary
+        # said "no useful evidence" because it didn't see the tool
+        # results. ``_loop_messages`` is set by run_loop on every
+        # return.
+        loop_msgs = final.get("_loop_messages") or payload["messages"]
+        summary_msgs = list(loop_msgs) + [{
             "role": "user",
             "content": (
-                "Write your findings now as a focused report. One "
-                "bullet per finding with `path:line` reference. Do "
-                "NOT call tools. If your prior tool calls produced "
-                "no useful evidence, say so explicitly with one "
-                "sentence — never return empty."
+                "Write your findings now as a focused report based on "
+                "the tool outputs above. One bullet per finding with "
+                "`path:line` reference. Do NOT call tools. If the "
+                "tool outputs above are genuinely empty (no matches, "
+                "no readable files), say so explicitly — never return "
+                "empty."
             ),
         }]
         try:
