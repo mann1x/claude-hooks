@@ -50,4 +50,6 @@ graded). Keep the per-label `results.md` files as raw data.
 
 ## Existing labels
 
-<!-- Append entries below when a new sweep lands. -->
+| Label | Model | Effort scheme | Smoke | Audit-med | Audit-hi | Verdict |
+|---|---|---|---|---|---|---|
+| [`kimi-k2.6-cloud-2026-05-07`](kimi-k2.6-cloud-2026-05-07/results.md) | `kimi-k2.6:cloud` (every role) | medium / medium / high | 212s · PASS | 167s · A | 1030s · A | PROD-READY (single-run) |

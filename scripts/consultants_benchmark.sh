@@ -170,37 +170,50 @@ run_query() {
 }
 
 # Render the per-label results.md once all queries have run.
+# Captures wall, token totals, LLM call count, tool call count, and
+# per-role breakdown — see EVALUATION.md §2 for the KPI list.
 write_results_md() {
     local results="${OUT_DIR}/results.md"
+    local py_renderer="${REPO}/scripts/consultants_bench_row.py"
+    local resolved_py
+    resolved_py="$(${REPO}/bin/_resolve_python.sh 2>/dev/null \
+        || command -v python3 || echo python3)"
     {
         echo "# Benchmark — \`${LABEL}\`"
         echo
         echo "Generated $(date -Iseconds) on $(hostname)."
+        echo "Repo HEAD: \`$(git -C "${REPO}" rev-parse --short HEAD 2>/dev/null || echo unknown)\`"
         echo
         if [[ -n "${MODEL}" ]]; then
             echo "Model pin: \`${MODEL}\` (every role)."
         else
-            echo "Model pin: per-role config (no override)."
+            echo "Model pin: per-role config (no override). Snapshot of \`claude-consultants config show\`:"
+            echo
+            echo '```json'
+            "${REPO}/bin/claude-consultants" config show 2>/dev/null \
+                || echo '(could not read config)'
+            echo '```'
         fi
         echo
-        echo "| Query | Effort | Status | Wall | sid |"
-        echo "|---|---|---|---|---|"
+        echo "## Summary"
+        echo
+        echo "| Query | Effort | Status | Wall | Prompt tok | Completion tok | LLM calls | Tool calls | sid |"
+        echo "|---|---|---|---|---|---|---|---|---|"
         for slug in smoke audit-medium audit-high; do
-            local f="${OUT_DIR}/${slug}.status"
-            if [[ ! -f "${f}" ]]; then
-                echo "| ${slug} | – | (no run) | – | – |"
-                continue
-            fi
-            # shellcheck disable=SC1090
-            source "${f}"
-            if [[ "${status:-skipped}" == "skipped" ]]; then
-                echo "| ${slug} | – | skipped | – | – |"
-            else
-                echo "| ${slug} | ${effort} | ${status} | ${wall_s}s | \`${sid}\` |"
-            fi
-            unset sid status wall_s started_at finished_at effort
+            "${resolved_py}" "${py_renderer}" "${slug}" "${OUT_DIR}" \
+                --mode summary-row
         done
         echo
+        echo "## Per-role breakdown"
+        echo
+        echo "Wall sums every entry of the role node (researcher in"
+        echo "fan-out fires once per lane; counts accumulate). Token"
+        echo "totals include cloud-model reasoning tokens."
+        echo
+        for slug in smoke audit-medium audit-high; do
+            "${resolved_py}" "${py_renderer}" "${slug}" "${OUT_DIR}" \
+                --mode role-table
+        done
         echo "## Files"
         echo
         echo "Per-query artifacts in this directory:"
@@ -213,6 +226,21 @@ write_results_md() {
             echo "  - \`${slug}.trace.jsonl\` — raw JSONL trace"
             echo "  - \`${slug}.metadata.json\` — token totals + retries"
         done
+        echo
+        echo "## Grades (manual)"
+        echo
+        echo "Fill these per [\`EVALUATION.md\`](../EVALUATION.md) §3"
+        echo "after the benchmark completes."
+        echo
+        echo "| Query | Grade | Notes |"
+        echo "|---|---|---|"
+        echo "| smoke        | _PASS / WEAK / FAIL_   | _one-line note_ |"
+        echo "| audit-medium | _A / B / C / F_        | _one-line note_ |"
+        echo "| audit-high   | _A / B / C / F_        | _one-line note_ |"
+        echo
+        echo "**Verdict:** _PROD-READY / EVALUATED-ONLY / UNSTABLE_"
+        echo
+        echo "**Commentary:** _one paragraph — what surprised you, where this label wins/loses, would you ship it_"
     } > "${results}"
     echo "::: wrote ${results}"
 }
