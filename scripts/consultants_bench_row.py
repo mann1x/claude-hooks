@@ -2,9 +2,14 @@
 """Render one benchmark query's KPIs from its on-disk artifacts.
 
 Reads ``<dir>/<slug>.metadata.json`` (token totals + retries) and
-``<dir>/<slug>.trace.jsonl`` (per-role wall + per-LLM-call shape) and
-emits structured output the benchmark runner injects into
+``<dir>/<slug>.transcript.db`` (per-role wall + per-LLM-call shape)
+and emits structured output the benchmark runner injects into
 ``results.md``.
+
+In v1.0 this script read ``<dir>/<slug>.trace.jsonl``; v1.1 replaced
+the JSONL stream with the per-session SQLite ``transcript.db`` (see
+``consultants/engine/recorder.py``). The benchmark runner now copies
+``transcript.db`` into the label dir alongside the metadata.
 
 Modes
 -----
@@ -35,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -66,18 +72,40 @@ def _read_metadata(path: Path) -> dict[str, Any]:
         return {}
 
 
-def _read_trace(path: Path) -> list[dict[str, Any]]:
+def _read_trace_db(path: Path) -> list[dict[str, Any]]:
+    """Load events from a v1.1 transcript.db. Returns a list of
+    dicts with the same keys the v1.0 JSONL reader produced
+    (``event``, ``role``, ``duration_ms``, ``prompt_tokens``,
+    ``completion_tokens``) so downstream aggregation logic is
+    unchanged."""
     if not path.exists():
         return []
+    try:
+        conn = sqlite3.connect(
+            f"file:{path}?mode=ro", uri=True, timeout=5.0,
+        )
+    except sqlite3.OperationalError:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT kind, role, duration_ms, prompt_tokens, "
+            "completion_tokens FROM events ORDER BY ts"
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return []
+    finally:
+        conn.close()
+
     events: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            events.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+    for kind, role, dt_ms, ptok, ctok in rows:
+        events.append({
+            # Map kinds to the v1.0 ``event`` field for compat.
+            "event": kind,
+            "role": role,
+            "duration_ms": int(dt_ms or 0),
+            "prompt_tokens": int(ptok or 0),
+            "completion_tokens": int(ctok or 0),
+        })
     return events
 
 
@@ -127,7 +155,7 @@ def _fmt_secs(ms: int) -> str:
 def render_summary_row(slug: str, dir_: Path) -> str:
     status = _read_status(dir_ / f"{slug}.status")
     metadata = _read_metadata(dir_ / f"{slug}.metadata.json")
-    events = _read_trace(dir_ / f"{slug}.trace.jsonl")
+    events = _read_trace_db(dir_ / f"{slug}.transcript.db")
 
     sid = status.get("sid", "-")
     effort = status.get("effort", "-")
@@ -151,7 +179,7 @@ def render_summary_row(slug: str, dir_: Path) -> str:
 
 
 def render_role_table(slug: str, dir_: Path) -> str:
-    events = _read_trace(dir_ / f"{slug}.trace.jsonl")
+    events = _read_trace_db(dir_ / f"{slug}.transcript.db")
     if not events:
         return f"### {slug}\n\n(no trace)\n"
 

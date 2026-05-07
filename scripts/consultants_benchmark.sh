@@ -175,7 +175,7 @@ run_query() {
     local consult_out
     consult_out="$(
         "${REPO}/bin/claude-consultants" consult \
-            --trace --effort "${effort}" \
+            --effort "${effort}" \
             --message "${query}" --cwd "${CWD}"
     )"
     local sid
@@ -202,18 +202,21 @@ run_query() {
     local wall_s=$((finished_at - started_at))
     echo "::: ${slug} sid=${sid} status=${status} wall=${wall_s}s"
 
-    # Capture artifacts. Trace lives at ~/.claude/consultants-traces/;
-    # the answer + transcript live under <cwd>/.claude-hooks/consultants/<sid>/.
-    local trace_src="${HOME}/.claude/consultants-traces/${sid}.jsonl"
+    # Capture artifacts. v1.1: every artifact lives next to the
+    # session under <cwd>/.claude-hooks/consultants/<sid>/, including
+    # the structured event log in transcript.db. The legacy JSONL
+    # trace at ~/.claude/consultants-traces/ is no longer written.
     local artifact_dir="${CWD}/.claude-hooks/consultants/${sid}"
-    cp -f "${trace_src}" "${OUT_DIR}/${slug}.trace.jsonl" 2>/dev/null || true
     cp -f "${artifact_dir}/summary.md" \
         "${OUT_DIR}/${slug}.summary.md" 2>/dev/null || true
     cp -f "${artifact_dir}/transcript.md" \
         "${OUT_DIR}/${slug}.transcript.md" 2>/dev/null || true
     cp -f "${artifact_dir}/metadata.json" \
         "${OUT_DIR}/${slug}.metadata.json" 2>/dev/null || true
-    "${REPO}/scripts/consultants_trace_summary.py" "${sid}" \
+    cp -f "${artifact_dir}/transcript.db" \
+        "${OUT_DIR}/${slug}.transcript.db" 2>/dev/null || true
+    "${REPO}/scripts/consultants_trace_summary.py" \
+        "${OUT_DIR}/${slug}.transcript.db" \
         > "${OUT_DIR}/${slug}.waterfall.txt" 2>&1 || true
 
     {
@@ -288,7 +291,7 @@ write_results_md() {
             echo "  - \`${slug}.summary.md\` — synthesizer answer"
             echo "  - \`${slug}.transcript.md\` — full role transcript"
             echo "  - \`${slug}.waterfall.txt\` — per-role wall waterfall"
-            echo "  - \`${slug}.trace.jsonl\` — raw JSONL trace"
+            echo "  - \`${slug}.transcript.db\` — structured event log (SQLite, v1.1)"
             echo "  - \`${slug}.metadata.json\` — token totals + retries"
         done
         echo

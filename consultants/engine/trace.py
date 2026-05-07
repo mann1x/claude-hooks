@@ -1,244 +1,167 @@
-"""Lightweight stdlib tracer for the council pipeline.
+"""Deprecated tracer shim — kept as no-op pass-through.
 
-Emits one JSONL event per node entry/exit, LLM call, and tool call so
-we can build a waterfall after a consultation finishes. Zero deps,
-~no overhead per event (one ``json.dumps`` + one ``write()``).
+In v1.0 this module wrote a JSONL stream to
+``~/.claude/consultants-traces/<sid>.jsonl`` whenever
+``CONSULTANTS_TRACE=1`` (or ``--trace``) was set. v1.1 supersedes
+that with the per-session SQLite ``transcript.db`` produced by
+``consultants/engine/recorder.py`` — same data, structured
+queries, opaque to text indexers (the privacy property the user
+called out as the reason to pick SQLite).
 
-Usage at wiring time (``consultants/server/runner.py``)::
+Rather than rip out every ``Tracer.for_session(...)`` /
+``TracedChat`` / ``traced_tool`` / ``traced_node`` call site
+(scattered across the runner + graph builder), we keep the symbols
+as no-op shims:
 
-    tracer = Tracer.for_session(sid)
-    chat_clients = {r: TracedChat(c, role=r, tracer=tracer)
-                    for r, c in chat_clients.items()}
-    tool_exec = traced_tool(tool_executor, tracer=tracer)
-    # then pass these into GraphDeps as usual
+- ``Tracer`` always reports disabled and writes nothing.
+- ``TracedChat`` is a thin pass-through that still exposes
+  ``_client`` so the runner's ChatClient extraction
+  (``getattr(c, "_client", c)``) keeps working unchanged.
+- ``traced_tool`` and ``traced_node`` simply return the wrapped
+  callable unchanged.
 
-Output file: ``~/.claude/consultants-traces/<sid>.jsonl``. Read via
-``scripts/consultants_trace_summary.py`` which prints a per-role
-waterfall.
+The legacy JSONL path is gone in v1.1. ``CONSULTANTS_TRACE`` and
+the ``--trace`` / ``--no-trace`` CLI flags are still parsed for
+backward compatibility but they emit a deprecation warning the
+first time they're observed in a process.
 
-Disabled by default; opt-in via the env var
-``CONSULTANTS_TRACE=1`` so production runs pay nothing extra. The
-tracer is a no-op when disabled.
+To inspect a session post-hoc, point
+``scripts/consultants_trace_summary.py`` at the session sid; it
+queries the ``transcript.db`` directly. The waterfall format
+matches the v1.0 output so muscle memory carries.
+
+This shim will be removed entirely in v1.2.
 """
 
 from __future__ import annotations
 
 import contextlib
-import json
 import logging
 import os
 import threading
-import time
-from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 log = logging.getLogger("consultants.engine.trace")
 
 
-_TRACE_DIR_DEFAULT = "~/.claude/consultants-traces"
+_DEPRECATION_LOGGED = False
+_DEPRECATION_LOCK = threading.Lock()
 
 
-def _enabled() -> bool:
-    return os.environ.get("CONSULTANTS_TRACE", "").strip() in ("1", "true", "yes", "on")
+def _log_deprecation_once(reason: str) -> None:
+    """Emit a one-shot deprecation log per process."""
+    global _DEPRECATION_LOGGED
+    with _DEPRECATION_LOCK:
+        if _DEPRECATION_LOGGED:
+            return
+        _DEPRECATION_LOGGED = True
+    log.warning(
+        "consultants tracer is deprecated (%s). v1.1 records the "
+        "same data — and more — into "
+        "<cwd>/.claude-hooks/consultants/<sid>/transcript.db. "
+        "CONSULTANTS_TRACE / --trace / --no-trace are now no-ops "
+        "and will be removed in v1.2. Use "
+        "scripts/consultants_trace_summary.py <sid> for the "
+        "waterfall view.",
+        reason,
+    )
 
 
 class Tracer:
-    """Per-session JSONL tracer. Thread-safe (the LangGraph runtime
-    serializes node execution but tool calls inside the researcher's
-    sub-loop can interleave LLM + tool spans, so we lock the writer).
+    """No-op tracer. Every method does nothing; ``enabled`` is
+    permanently ``False``. Kept so existing call sites keep
+    importing cleanly until v1.2."""
 
-    A disabled tracer (``CONSULTANTS_TRACE`` unset) is a no-op for
-    every method — callers don't need to gate on enabled-ness.
-    """
-
-    def __init__(self, sid: str, path: Path, enabled: bool = True) -> None:
+    def __init__(self, sid: str = "", path: Any = None,
+                 enabled: bool = False) -> None:
         self.sid = sid
         self.path = path
-        self.enabled = enabled
-        self._lock = threading.Lock()
-        self._role_stack: list[str] = []  # for nested role context
+        self.enabled = False  # always — see module docstring
+        self._role_stack: list[str] = []
 
     @classmethod
-    def for_session(cls, sid: str, *, base_dir: Optional[str] = None,
+    def for_session(cls, sid: str, *,
+                    base_dir: Optional[str] = None,
                     enabled: Optional[bool] = None) -> "Tracer":
-        """Build a tracer for a session.
-
-        ``enabled`` precedence:
-          1. Explicit ``enabled=`` argument (per-request override from
-             the CLI / consult body).
-          2. Env var ``CONSULTANTS_TRACE`` (process-wide default).
-          3. Off.
-
-        When disabled, every method on the returned tracer is a no-op
-        and no file is created — production runs pay nothing.
-        """
-        if enabled is None:
-            enabled = _enabled()
-        base = Path(os.path.expanduser(base_dir or _TRACE_DIR_DEFAULT))
-        if enabled:
-            base.mkdir(parents=True, exist_ok=True)
-        return cls(sid=sid, path=base / f"{sid}.jsonl", enabled=enabled)
-
-    def _write(self, event: dict) -> None:
-        if not self.enabled:
-            return
-        event = {"ts": time.time(), "sid": self.sid, **event}
-        line = json.dumps(event, ensure_ascii=False, default=str)
-        with self._lock:
-            try:
-                with self.path.open("a", encoding="utf-8") as fh:
-                    fh.write(line + "\n")
-            except OSError as e:  # pragma: no cover
-                log.warning("trace write failed (sid=%s): %s", self.sid, e)
+        # Nudge the deprecation log when someone explicitly opts in.
+        if enabled or _legacy_env_enabled():
+            _log_deprecation_once(
+                "CONSULTANTS_TRACE / --trace requested but ignored"
+            )
+        return cls(sid=sid)
 
     @contextlib.contextmanager
     def span(self, role: str, **extra: Any) -> Iterator[None]:
-        """Context manager around an entire node execution."""
-        if not self.enabled:
-            yield
-            return
+        # Push/pop role so any caller depending on ``current_role()``
+        # mid-span still gets a sane answer (caliber's traced_tool
+        # for the v1.0 wrapping pattern). Tests rely on this.
         self._role_stack.append(role)
-        t0 = time.monotonic()
-        self._write({"event": "node_enter", "role": role, **extra})
         try:
             yield
         finally:
-            self._write({
-                "event": "node_exit",
-                "role": role,
-                "duration_ms": int((time.monotonic() - t0) * 1000),
-                **extra,
-            })
             self._role_stack.pop()
 
     def current_role(self) -> Optional[str]:
         return self._role_stack[-1] if self._role_stack else None
 
-    def record_llm(self, *, role: str, model: str, duration_ms: int,
-                   prompt_tokens: int = 0, completion_tokens: int = 0,
-                   iter_index: Optional[int] = None,
-                   tool_calls: int = 0,
-                   error: Optional[str] = None) -> None:
-        self._write({
-            "event": "llm_call",
-            "role": role,
-            "model": model,
-            "duration_ms": duration_ms,
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "iter_index": iter_index,
-            "tool_calls": tool_calls,
-            "error": error,
-        })
+    def record_llm(self, **_kw: Any) -> None:
+        return None
 
-    def record_tool(self, *, role: str, tool: str, duration_ms: int,
-                    output_chars: int = 0,
-                    error: Optional[str] = None) -> None:
-        self._write({
-            "event": "tool_call",
-            "role": role,
-            "tool": tool,
-            "duration_ms": duration_ms,
-            "output_chars": output_chars,
-            "error": error,
-        })
+    def record_tool(self, **_kw: Any) -> None:
+        return None
 
 
-# ----------------------- chat client wrapper --------------------- #
-# We wrap the raw ``chat_client.chat(payload)`` callable so every LLM
-# round-trip emits an ``llm_call`` span. The wrapper preserves the
-# duck-typed shape (anything that has a ``.chat(payload)`` method).
+def _legacy_env_enabled() -> bool:
+    return os.environ.get("CONSULTANTS_TRACE", "").strip() in (
+        "1", "true", "yes", "on",
+    )
+
+
+# ----------------------- pass-through wrappers ------------------- #
+# Kept for source compatibility. The runner wraps each ChatClient in
+# TracedChat so it can later extract the raw client via ``_client``
+# for warm-handle reuse — see make_runner / make_follow_up_runner.
+# The wrapper no longer records anything; it just forwards.
 
 class TracedChat:
-    """Drop-in wrapper around any ChatClient-like object.
+    """Thin pass-through. Forwards every attribute, including
+    ``.chat(payload)``. The ``_client`` attribute remains so the
+    runner can extract the raw ChatClient for live-session retention
+    (see ``state._chat_clients`` / ``getattr(c, "_client", c)``)."""
 
-    Forwards every attribute access to the wrapped client; only
-    ``.chat(payload)`` is intercepted to add timing + token-count
-    extraction. If the wrapped reply doesn't contain a ``usage``
-    block (some Ollama responses), token counts default to 0.
-    """
-
-    def __init__(self, client: Any, *, role: str, tracer: Tracer) -> None:
+    def __init__(self, client: Any, *, role: str = "",
+                 tracer: Optional[Tracer] = None) -> None:
         self._client = client
         self._role = role
-        self._tracer = tracer
-        self._iter_count = 0
+        self._tracer = tracer or Tracer()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._client, name)
 
     def chat(self, payload: dict, *args: Any, **kwargs: Any) -> dict:
-        t0 = time.monotonic()
-        self._iter_count += 1
-        idx = self._iter_count
-        model = (payload or {}).get("model", "unknown")
-        err: Optional[str] = None
-        reply: dict = {}
-        try:
-            reply = self._client.chat(payload, *args, **kwargs)
-        except Exception as e:
-            err = f"{type(e).__name__}: {e}"
-            raise
-        finally:
-            dt_ms = int((time.monotonic() - t0) * 1000)
-            usage = (reply or {}).get("usage") or {}
-            choices = (reply or {}).get("choices") or []
-            tc_count = 0
-            if choices:
-                msg = (choices[0] or {}).get("message") or {}
-                tc_count = len(msg.get("tool_calls") or [])
-            self._tracer.record_llm(
-                role=self._role,
-                model=str(model),
-                duration_ms=dt_ms,
-                prompt_tokens=int(usage.get("prompt_tokens") or 0),
-                completion_tokens=int(usage.get("completion_tokens") or 0),
-                iter_index=idx,
-                tool_calls=tc_count,
-                error=err,
-            )
-        return reply
+        return self._client.chat(payload, *args, **kwargs)
 
 
-# ----------------------- tool executor wrapper ------------------- #
-# The researcher's tool_executor is a plain callable
-# ``(name: str, args_str: str, cwd: str) -> output_str``. We wrap it
-# so every call emits a ``tool_call`` span. Caliber's executor is the
-# real one; tests pass mocks. The wrapper tags every call with the
-# role currently active in the tracer's role-stack so the post-hoc
-# waterfall can group tool calls under the right role.
-
-def traced_tool(executor: Callable[..., str], *, tracer: Tracer) -> Callable[..., str]:
-    def _wrapped(name: str, args_str: str, cwd: str, *args: Any,
-                 **kwargs: Any) -> str:
-        t0 = time.monotonic()
-        err: Optional[str] = None
-        out = ""
-        try:
-            out = executor(name, args_str, cwd, *args, **kwargs)
-            return out
-        except Exception as e:
-            err = f"{type(e).__name__}: {e}"
-            raise
-        finally:
-            dt_ms = int((time.monotonic() - t0) * 1000)
-            role = tracer.current_role() or "unknown"
-            tracer.record_tool(
-                role=role,
-                tool=name,
-                duration_ms=dt_ms,
-                output_chars=len(out or ""),
-                error=err,
-            )
-    return _wrapped
+def traced_tool(executor: Callable[..., str], *,
+                tracer: Optional[Tracer] = None) -> Callable[..., str]:
+    """No-op wrapper — returns the executor unchanged. Kept as a
+    function so existing callers keep working without an import
+    change."""
+    return executor
 
 
-# ----------------------- node-fn wrapper ------------------------- #
+def traced_node(fn: Callable[[dict], dict], *, role: str = "",
+                tracer: Optional[Tracer] = None) -> Callable[[dict], dict]:
+    """No-op wrapper — returns the node fn unchanged. Same
+    rationale as ``traced_tool``."""
+    return fn
 
-def traced_node(fn: Callable[[dict], dict], *, role: str,
-                tracer: Tracer) -> Callable[[dict], dict]:
-    """Wrap a LangGraph node function to emit enter/exit spans."""
-    def _wrapped(state: dict) -> dict:
-        with tracer.span(role):
-            return fn(state)
-    return _wrapped
+
+# Process-startup courtesy: if the legacy env var is set, log the
+# deprecation once at import time so operators see it without
+# having to fire a consultation first. Cheap (one os.environ lookup
+# + one no-op call when unset).
+if _legacy_env_enabled():
+    _log_deprecation_once(
+        "CONSULTANTS_TRACE=1 set in environment but ignored"
+    )

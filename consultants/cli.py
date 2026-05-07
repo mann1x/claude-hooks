@@ -86,6 +86,28 @@ class CLIError(Exception):
         self.exit_code = exit_code
 
 
+_TRACE_DEPRECATION_LOGGED = False
+
+
+def _warn_trace_deprecated() -> None:
+    """One-shot deprecation notice for --trace / --no-trace. v1.1
+    replaced the JSONL trace stream with the per-session
+    transcript.db; the flags are no-ops now and will be removed in
+    v1.2."""
+    global _TRACE_DEPRECATION_LOGGED
+    if _TRACE_DEPRECATION_LOGGED:
+        return
+    _TRACE_DEPRECATION_LOGGED = True
+    print(
+        "WARNING: --trace / --no-trace are deprecated in v1.1 and "
+        "will be removed in v1.2. The per-session transcript.db "
+        "(under <cwd>/.claude-hooks/consultants/<sid>/) records "
+        "the same data. Use scripts/consultants_trace_summary.py "
+        "<sid> for the waterfall view.",
+        file=sys.stderr,
+    )
+
+
 def _http(method: str, url: str, *, body: Optional[dict] = None,
           timeout: float = 600.0) -> dict:
     data = json.dumps(body).encode() if body is not None else None
@@ -127,13 +149,12 @@ def cmd_consult(args, base: str) -> int:
     }
     if args.effort:
         body["effort"] = args.effort
-    # Per-request trace override. --trace forces on, --no-trace forces
-    # off; absence falls through to the engine's CONSULTANTS_TRACE env
-    # var (default off).
-    if args.trace is True:
-        body["trace"] = True
-    elif args.trace is False:
-        body["trace"] = False
+    # --trace / --no-trace are deprecated in v1.1 (the JSONL trace
+    # was replaced by the per-session transcript.db). The flag is
+    # still accepted but no longer forwarded to the engine; warn
+    # operators who pass it explicitly so they update tooling.
+    if args.trace is True or args.trace is False:
+        _warn_trace_deprecated()
     out = _http("POST", f"{base}/v1/consult", body=body)
     print(json.dumps({"ok": True, **out}, indent=2))
     return 0
@@ -156,10 +177,8 @@ def cmd_follow_up(args, base: str) -> int:
     body = {"message": args.message}
     if args.effort:
         body["effort"] = args.effort
-    if args.trace is True:
-        body["trace"] = True
-    elif args.trace is False:
-        body["trace"] = False
+    if args.trace is True or args.trace is False:
+        _warn_trace_deprecated()
     # Always include cwd so cold-path follow-ups (parent evicted /
     # service restarted) can reopen from disk without a separate
     # reopen call.
@@ -453,16 +472,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Project root (default: current directory).")
     c.add_argument("--effort", choices=tuple(cc.EFFORT_BUDGETS),
                    help="Override effort tier for this consultation.")
-    # Tri-state: --trace forces on, --no-trace forces off, absence
-    # falls back to the engine's CONSULTANTS_TRACE env var.
+    # DEPRECATED in v1.1 — kept as a no-op so muscle memory doesn't
+    # break. v1.1 always writes the structured event log to
+    # transcript.db; there's no on/off switch any more.
     c.add_argument("--trace", dest="trace",
                    action="store_true", default=None,
-                   help="Force tracing on for this consultation. Writes "
-                        "JSONL to ~/.claude/consultants-traces/<sid>.jsonl. "
-                        "Summarize with scripts/consultants_trace_summary.py.")
+                   help="DEPRECATED: no-op in v1.1 (replaced by "
+                        "per-session transcript.db). Will be removed "
+                        "in v1.2.")
     c.add_argument("--no-trace", dest="trace", action="store_false",
-                   help="Force tracing off for this consultation, "
-                        "overriding CONSULTANTS_TRACE.")
+                   help="DEPRECATED: no-op in v1.1.")
     c.set_defaults(fn=cmd_consult)
 
     # status
@@ -491,10 +510,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "(default: same as parent).")
     fu.add_argument("--trace", dest="trace",
                     action="store_true", default=None,
-                    help="Force tracing on for this follow-up.")
+                    help="DEPRECATED: no-op in v1.1.")
     fu.add_argument("--no-trace", dest="trace", action="store_false",
-                    help="Force tracing off, overriding "
-                         "CONSULTANTS_TRACE.")
+                    help="DEPRECATED: no-op in v1.1.")
     fu.add_argument("--cwd",
                     help="Project root for disk-fallback when the "
                          "parent isn't in engine memory (default: "
