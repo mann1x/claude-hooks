@@ -21,7 +21,12 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
 > v0.6+ adds an in-process AST code-graph + MCP server. v0.7+ adds the LSP
 > engine (per-project session-scoped daemon, Windows parity, sub-ms IPC,
-> opt-in compile-aware diagnostics) and the PostToolUse ruff hook.
+> opt-in compile-aware diagnostics) and the PostToolUse ruff hook. The
+> `/consultants` agentic engine ships v1.1 with full per-role
+> message-history persistence — every consultation now produces a SQLite
+> `transcript.db` sidecar that disk-reopens identically to a warm session,
+> so closed/evicted sessions can be resumed with no quality loss. Schema
+> documented at [`docs/consultants-transcript-db-schema.md`](docs/consultants-transcript-db-schema.md).
 
 ---
 

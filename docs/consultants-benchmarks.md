@@ -9,8 +9,14 @@ These run via `scripts/consultants_benchmark.sh <label>` which:
    `<!-- BENCH-Q: ... -->` anchors below).
 2. Sets every role's model to the value the script was invoked with
    (or leaves the existing config alone with `--no-set-model`).
-3. Issues `claude-consultants consult --trace` for each query.
-4. Saves trace summary + answer to `docs/benchmarks/<label>/`.
+3. Issues `claude-consultants consult` for each query.
+4. Saves answer + structured event log to `docs/benchmarks/<label>/`.
+   Each query lands `<slug>.summary.md`, `<slug>.transcript.md`,
+   `<slug>.metadata.json`, `<slug>.transcript.db` (SQLite, v1.1),
+   and `<slug>.waterfall.txt`. The `.db` files contain full LLM
+   payloads (system prompts, tool results) — committing benchmark
+   labels publishes those, which is fine for internal audit data
+   but worth flagging if the host-level repo ever goes public.
 5. Writes `docs/benchmarks/<label>/results.md` with wall times,
    token totals, and pass/fail-on-quality verdicts.
 
