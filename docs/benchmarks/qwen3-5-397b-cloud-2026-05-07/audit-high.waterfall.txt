@@ -1,0 +1,53 @@
+reading: /root/.claude/consultants-traces/csl-2026-05-07-1025-f8da.jsonl
+
+sid: csl-2026-05-07-1025-f8da
+total wall: 228.6s   first_event=+0.0s  last_event=+228.6s
+
+  planner       node=19.1s   (entries) llm=1x=19.1s   tool=0x=0ms     tok=p407/c2173
+      LLM iter=1 model=qwen3.5:397b-cloud          19.1s  p=407    c=2173   tool_calls=0
+
+  researcher    node=5.5m    (3xentries) llm=26x=5.5m    tool=47x=18ms    tok=p568268/c19350
+      LLM iter=26 model=qwen3.5:397b-cloud          52.5s  p=36318  c=2652   tool_calls=0
+      LLM iter=23 model=qwen3.5:397b-cloud          44.5s  p=39039  c=3170   tool_calls=0
+      LLM iter=22 model=qwen3.5:397b-cloud          44.2s  p=38386  c=2842   tool_calls=0
+      LLM iter=24 model=qwen3.5:397b-cloud          38.7s  p=37032  c=2638   tool_calls=1
+      LLM iter=21 model=qwen3.5:397b-cloud          31.8s  p=36883  c=2273   tool_calls=2
+      LLM iter=25 model=qwen3.5:397b-cloud          13.3s  p=36167  c=836    tool_calls=2
+      LLM iter=20 model=qwen3.5:397b-cloud          13.2s  p=37705  c=836    tool_calls=2
+      LLM iter=16 model=qwen3.5:397b-cloud          12.0s  p=36747  c=267    tool_calls=3
+      LLM iter=11 model=qwen3.5:397b-cloud           9.3s  p=4730   c=211    tool_calls=4
+      LLM iter=17 model=qwen3.5:397b-cloud           8.6s  p=31914  c=171    tool_calls=2
+      LLM iter=15 model=qwen3.5:397b-cloud           8.5s  p=37047  c=741    tool_calls=2
+      LLM iter=13 model=qwen3.5:397b-cloud           8.2s  p=31905  c=124    tool_calls=2
+      LLM iter=18 model=qwen3.5:397b-cloud           7.6s  p=37355  c=768    tool_calls=2
+      LLM iter=12 model=qwen3.5:397b-cloud           4.1s  p=18961  c=166    tool_calls=3
+      LLM iter=14 model=qwen3.5:397b-cloud           3.9s  p=32210  c=134    tool_calls=2
+      LLM iter=19 model=qwen3.5:397b-cloud           3.7s  p=34283  c=87     tool_calls=1
+      LLM iter=7 model=qwen3.5:397b-cloud           3.3s  p=4662   c=126    tool_calls=1
+      LLM iter=9 model=qwen3.5:397b-cloud           3.1s  p=4721   c=206    tool_calls=4
+      LLM iter=3 model=qwen3.5:397b-cloud           2.8s  p=3080   c=133    tool_calls=1
+      LLM iter=1 model=qwen3.5:397b-cloud           2.8s  p=3104   c=137    tool_calls=1
+      LLM iter=4 model=qwen3.5:397b-cloud           2.5s  p=4517   c=170    tool_calls=2
+      LLM iter=6 model=qwen3.5:397b-cloud           2.4s  p=4516   c=167    tool_calls=3
+      LLM iter=5 model=qwen3.5:397b-cloud           2.2s  p=4540   c=122    tool_calls=1
+      LLM iter=10 model=qwen3.5:397b-cloud           1.7s  p=4753   c=163    tool_calls=3
+      LLM iter=2 model=qwen3.5:397b-cloud           1.7s  p=3081   c=120    tool_calls=1
+      LLM iter=8 model=qwen3.5:397b-cloud           1.5s  p=4612   c=90     tool_calls=2
+      tool grep               x15     15ms chars=5779
+      tool read_file          x20      3ms chars=297852
+      tool survey_project     x3       0ms chars=11154
+      tool list_files         x9       0ms chars=1290
+
+  critic        node=11.3s   (entries) llm=1x=11.3s   tool=0x=0ms     tok=p5327/c941
+      LLM iter=1 model=qwen3.5:397b-cloud          11.3s  p=5327   c=941    tool_calls=0
+
+  synthesizer   node=33.0s   (entries) llm=1x=33.0s   tool=0x=0ms     tok=p5782/c1355
+      LLM iter=1 model=qwen3.5:397b-cloud          33.0s  p=5782   c=1355   tool_calls=0
+
+totals
+  wall                  228.6s
+  sum of node spans     6.5m
+  sum of LLM call time  6.5m  (171.0% of wall)
+  sum of tool call time 18ms
+  total prompt tokens   579784
+  total completion tok  23819

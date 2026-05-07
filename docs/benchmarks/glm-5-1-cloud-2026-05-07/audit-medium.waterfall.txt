@@ -1,0 +1,37 @@
+reading: /root/.claude/consultants-traces/csl-2026-05-07-0957-ccac.jsonl
+
+sid: csl-2026-05-07-0957-ccac
+total wall: 55.6s   first_event=+0.0s  last_event=+55.6s
+
+  planner       node=6.1s    (entries) llm=1x=6.1s    tool=0x=0ms     tok=p265/c351
+      LLM iter=1 model=glm-5.1:cloud                6.1s  p=265    c=351    tool_calls=0
+
+  researcher    node=1.8m    (3xentries) llm=14x=1.8m    tool=37x=423ms   tok=p278435/c5445
+      LLM iter=12 model=glm-5.1:cloud               26.4s  p=20038  c=1512   tool_calls=0
+      LLM iter=13 model=glm-5.1:cloud               16.4s  p=20026  c=1315   tool_calls=0
+      LLM iter=9 model=glm-5.1:cloud               15.3s  p=26874  c=636    tool_calls=2
+      LLM iter=14 model=glm-5.1:cloud                9.6s  p=27367  c=722    tool_calls=0
+      LLM iter=11 model=glm-5.1:cloud                7.4s  p=19093  c=88     tool_calls=3
+      LLM iter=10 model=glm-5.1:cloud                4.8s  p=18918  c=56     tool_calls=3
+      LLM iter=2 model=glm-5.1:cloud                4.8s  p=16466  c=176    tool_calls=4
+      LLM iter=3 model=glm-5.1:cloud                4.6s  p=16402  c=131    tool_calls=3
+      LLM iter=7 model=glm-5.1:cloud                4.1s  p=18919  c=91     tool_calls=3
+      LLM iter=8 model=glm-5.1:cloud                3.8s  p=19033  c=113    tool_calls=3
+      LLM iter=1 model=glm-5.1:cloud                3.8s  p=16434  c=133    tool_calls=3
+      LLM iter=5 model=glm-5.1:cloud                3.2s  p=24930  c=220    tool_calls=5
+      LLM iter=4 model=glm-5.1:cloud                3.1s  p=17254  c=129    tool_calls=4
+      LLM iter=6 model=glm-5.1:cloud                2.2s  p=16681  c=123    tool_calls=4
+      tool grep               x17    415ms chars=32259
+      tool glob               x1       4ms chars=28
+      tool read_file          x19      4ms chars=36332
+
+  synthesizer   node=7.4s    (entries) llm=1x=7.4s    tool=0x=0ms     tok=p2594/c597
+      LLM iter=1 model=glm-5.1:cloud                7.4s  p=2594   c=597    tool_calls=0
+
+totals
+  wall                  55.6s
+  sum of node spans     2.1m
+  sum of LLM call time  2.0m  (220.9% of wall)
+  sum of tool call time 423ms
+  total prompt tokens   281294
+  total completion tok  6393

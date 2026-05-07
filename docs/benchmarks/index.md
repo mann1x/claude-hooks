@@ -64,9 +64,19 @@ labels at the same effort scheme. **Runs** is the number of r1..rN
 runs published for the label; per [`EVALUATION.md`](EVALUATION.md)
 §5 a label needs N=3 to be a publishable comparison anchor.
 
+All sweeps run sequentially against the `bench-baseline-2026-05-07`
+git tag (commit `83cfd3b`) on engine HEAD `83cfd3b`, in the
+**06:00–09:00 UTC window** (sweep started 07:49 UTC, ended 08:39 UTC).
+Cloud model snapshots captured to each label's `models.json`.
+
 | Label | Model | Effort scheme | Runs | Smoke | Audit-med | Audit-hi | Total c-tok | Verdict |
 |---|---|---|---|---|---|---|---|---|
 | [`kimi-k2.6-cloud-2026-05-07`](kimi-k2.6-cloud-2026-05-07/results.md) | `kimi-k2.6:cloud` (every role) | medium / medium / high | 1/3 | 257s · 4.1k · PASS | 213s · 12.3k · A | 787s · 34.3k · A | 50.7k | PROD-READY (single-run) |
+| [`gemma4-31b-cloud-2026-05-07`](gemma4-31b-cloud-2026-05-07/results.md) | `gemma4:31b-cloud` (every role) | medium / medium / high | 1/3 | 121s · 0.9k · PASS | 75s · 2.7k · A | 197s · 8.9k · A | 12.5k | PROD-READY (single-run) — **best speed/quality** |
+| [`glm-5-1-cloud-2026-05-07`](glm-5-1-cloud-2026-05-07/results.md) | `glm-5.1:cloud` (every role) | medium / medium / high | 1/3 | 31s · 1.1k · PASS | 60s · 4.6k · B | 393s · 10.7k · A | 16.4k | PROD-READY (single-run) — sharp reasoning, B on retrieval |
+| [`minimax-m2-7-cloud-2026-05-07`](minimax-m2-7-cloud-2026-05-07/results.md) | `minimax-m2.7:cloud` (every role) | medium / medium / high | 1/3 | 46s · 0.7k · PASS | 106s · 3.4k · F | 757s · 22.4k · F | 26.5k | EVALUATED-ONLY — Q3 hallucinated paths |
+| [`qwen3-5-397b-cloud-2026-05-07`](qwen3-5-397b-cloud-2026-05-07/results.md) | `qwen3.5:397b-cloud` (every role) | medium / medium / high | 1/3 | 91s · 4.7k · PASS | 91s · 9.0k · C | 242s · 13.1k · F | 26.8k | EVALUATED-ONLY — wrong commit-existence claim, no Q3 rec |
+| [`qwen3-5-cloud-2026-05-07`](qwen3-5-cloud-2026-05-07/results.md) | `qwen3.5:cloud` (every role) | medium / medium / high | 1/3 | 106s · 9.4k · PASS | 91s · 9.1k · C | 303s · 13.2k · B | 31.8k | EVALUATED-ONLY — same retrieval gap as :397b, sharper Q3 |
 
 ### Role-suitability matrix
 
@@ -81,4 +91,24 @@ invocations / parallel lanes). Use this to compose mixes:
 
 | Label | Planner | Researcher | Critic | Synthesizer | Mix string |
 |---|---|---|---|---|---|
-| `kimi-k2.6-cloud-2026-05-07` | A | A | A | A | `P:A R:A C:A S:A` |
+| `kimi-k2.6-cloud-2026-05-07`     | A | A | A | A | `P:A R:A C:A S:A` |
+| `gemma4-31b-cloud-2026-05-07`    | A | A | A | A | `P:A R:A C:A S:A` |
+| `glm-5-1-cloud-2026-05-07`       | A | B | **A+** | A | `P:A R:B C:A+ S:A` |
+| `minimax-m2-7-cloud-2026-05-07`  | B | F | F | F | `P:B R:F C:F S:F` |
+| `qwen3-5-397b-cloud-2026-05-07`  | A | C | C | F | `P:A R:C C:C S:F` |
+| `qwen3-5-cloud-2026-05-07`       | A | C | A | B | `P:A R:C C:A S:B` |
+
+### Cheapest A-or-better per role (provisional, single-run)
+
+| Role | Cheapest A pick | Median wall on this role | Notes |
+|---|---|---|---|
+| Planner     | `gemma4:31b-cloud` | ~10s on this label | All 5 candidates produce an A planner; gemma is the cheapest by a large margin |
+| Researcher  | `gemma4:31b-cloud` | researcher cumulative ~3 min | Only kimi and gemma found 6/6 sites; gemma is 7x faster |
+| Critic      | `gemma4:31b-cloud` | ~10s on this label | gemma (A), glm-5.1 (A+ deep cross-round contradiction catch), kimi (A); gemma cheapest |
+| Synthesizer | `gemma4:31b-cloud` | synthesizer ~30-60s | gemma's audit-high answer cited correct path:line and proposed a working hardening change |
+
+**Provisional verdict:** `gemma4:31b-cloud` looks like a candidate for **every role** at the bench-baseline-2026-05-07 baseline, at roughly 4× lower cost than kimi-k2.6:cloud. To confirm, this requires N=3 runs (the single-run could be a lucky sample). The mix-screening phase the user proposed is the right next step — try `gemma4:31b-cloud` everywhere, then incrementally swap kimi back into specific roles to see whether quality recovers any further.
+
+`glm-5.1:cloud` is the standout for **critic** (the only A+ on this sweep — caught a real cross-round contradiction the others missed). Worth keeping as a critic-only pick.
+
+`minimax-m2.7:cloud` and the `qwen3.5:*` family are unsuitable for any role at this baseline — the qwen pair both falsely claimed commit `4e67dc2` doesn't exist (it does); minimax fabricated paths that don't exist either.

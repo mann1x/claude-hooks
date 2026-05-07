@@ -1,0 +1,36 @@
+reading: /root/.claude/consultants-traces/csl-2026-05-07-0952-b0fc.jsonl
+
+sid: csl-2026-05-07-0952-b0fc
+total wall: 181.9s   first_event=+0.0s  last_event=+181.9s
+
+  planner       node=17.4s   (entries) llm=1x=17.4s   tool=0x=0ms     tok=p424/c859
+      LLM iter=1 model=gemma4:31b-cloud            17.4s  p=424    c=859    tool_calls=0
+
+  researcher    node=4.0m    (3xentries) llm=10x=4.0m    tool=22x=13ms    tok=p307214/c9094
+      LLM iter=8 model=gemma4:31b-cloud             1.4m  p=47090  c=3803   tool_calls=0
+      LLM iter=9 model=gemma4:31b-cloud            44.7s  p=39133  c=1529   tool_calls=1
+      LLM iter=7 model=gemma4:31b-cloud            31.4s  p=45337  c=944    tool_calls=0
+      LLM iter=10 model=gemma4:31b-cloud            28.7s  p=51973  c=1087   tool_calls=0
+      LLM iter=6 model=gemma4:31b-cloud            15.2s  p=20114  c=290    tool_calls=4
+      LLM iter=1 model=gemma4:31b-cloud             8.8s  p=18154  c=395    tool_calls=4
+      LLM iter=3 model=gemma4:31b-cloud             8.2s  p=18135  c=372    tool_calls=4
+      LLM iter=4 model=gemma4:31b-cloud             7.1s  p=20038  c=340    tool_calls=4
+      LLM iter=2 model=gemma4:31b-cloud             6.6s  p=18135  c=287    tool_calls=3
+      LLM iter=5 model=gemma4:31b-cloud             3.3s  p=29105  c=47     tool_calls=2
+      tool survey_project     x2       8ms chars=7902
+      tool read_file          x13      5ms chars=259839
+      tool list_files         x7       0ms chars=966
+
+  critic        node=27.9s   (entries) llm=1x=27.9s   tool=0x=0ms     tok=p3385/c1134
+      LLM iter=1 model=gemma4:31b-cloud            27.9s  p=3385   c=1134   tool_calls=0
+
+  synthesizer   node=36.0s   (entries) llm=1x=36.0s   tool=0x=0ms     tok=p3555/c1082
+      LLM iter=1 model=gemma4:31b-cloud            36.0s  p=3555   c=1082   tool_calls=0
+
+totals
+  wall                  181.9s
+  sum of node spans     5.4m
+  sum of LLM call time  5.4m  (177.0% of wall)
+  sum of tool call time 13ms
+  total prompt tokens   314578
+  total completion tok  12169

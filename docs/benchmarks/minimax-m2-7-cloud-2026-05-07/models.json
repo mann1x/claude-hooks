@@ -1,0 +1,50 @@
+{
+  "captured_at": "2026-05-07T10:06:13+02:00",
+  "endpoint": "http://192.168.178.2:11433",
+  "models": {
+    "minimax-m2.7:cloud": {
+      "modified_at": "2026-03-18T00:00:00Z",
+      "capabilities": [
+        "completion",
+        "tools",
+        "thinking"
+      ],
+      "details": {
+        "parent_model": "minimax-m2.7",
+        "format": "",
+        "family": "minimax-m2",
+        "families": null,
+        "parameter_size": "0",
+        "quantization_level": ""
+      },
+      "model_info": {
+        "general.architecture": "minimax-m2",
+        "general.parameter_count": 0,
+        "minimax-m2.context_length": 196608,
+        "minimax-m2.embedding_length": 3072
+      },
+      "raw": {
+        "details": {
+          "parent_model": "minimax-m2.7",
+          "format": "",
+          "family": "minimax-m2",
+          "families": null,
+          "parameter_size": "0",
+          "quantization_level": ""
+        },
+        "model_info": {
+          "general.architecture": "minimax-m2",
+          "general.parameter_count": 0,
+          "minimax-m2.context_length": 196608,
+          "minimax-m2.embedding_length": 3072
+        },
+        "capabilities": [
+          "completion",
+          "tools",
+          "thinking"
+        ],
+        "modified_at": "2026-03-18T00:00:00Z"
+      }
+    }
+  }
+}

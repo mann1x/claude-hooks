@@ -1,0 +1,56 @@
+{"ts": 1778141219.352349, "sid": "csl-2026-05-07-1006-bbd1", "event": "node_enter", "role": "planner"}
+{"ts": 1778141235.4757915, "sid": "csl-2026-05-07-1006-bbd1", "event": "llm_call", "role": "planner", "model": "minimax-m2.7:cloud", "duration_ms": 16123, "prompt_tokens": 270, "completion_tokens": 422, "iter_index": 1, "tool_calls": 0, "error": null}
+{"ts": 1778141235.4760716, "sid": "csl-2026-05-07-1006-bbd1", "event": "node_exit", "role": "planner", "duration_ms": 16123}
+{"ts": 1778141235.4774258, "sid": "csl-2026-05-07-1006-bbd1", "event": "node_enter", "role": "researcher"}
+{"ts": 1778141235.477746, "sid": "csl-2026-05-07-1006-bbd1", "event": "node_enter", "role": "researcher"}
+{"ts": 1778141235.4781091, "sid": "csl-2026-05-07-1006-bbd1", "event": "node_enter", "role": "researcher"}
+{"ts": 1778141240.3379672, "sid": "csl-2026-05-07-1006-bbd1", "event": "llm_call", "role": "researcher", "model": "minimax-m2.7:cloud", "duration_ms": 4858, "prompt_tokens": 17215, "completion_tokens": 131, "iter_index": 3, "tool_calls": 3, "error": null}
+{"ts": 1778141240.3451722, "sid": "csl-2026-05-07-1006-bbd1", "event": "llm_call", "role": "researcher", "model": "minimax-m2.7:cloud", "duration_ms": 4866, "prompt_tokens": 17180, "completion_tokens": 113, "iter_index": 1, "tool_calls": 2, "error": null}
+{"ts": 1778141240.3480117, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 246, "error": null}
+{"ts": 1778141240.4236493, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 73, "output_chars": 939, "error": null}
+{"ts": 1778141240.5302258, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 192, "output_chars": 12527, "error": null}
+{"ts": 1778141240.5318239, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 1, "output_chars": 39241, "error": null}
+{"ts": 1778141240.6602747, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 128, "output_chars": 9560, "error": null}
+{"ts": 1778141242.4699454, "sid": "csl-2026-05-07-1006-bbd1", "event": "llm_call", "role": "researcher", "model": "minimax-m2.7:cloud", "duration_ms": 6991, "prompt_tokens": 17182, "completion_tokens": 68, "iter_index": 2, "tool_calls": 1, "error": null}
+{"ts": 1778141242.5759547, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 105, "output_chars": 12527, "error": null}
+{"ts": 1778141246.2190394, "sid": "csl-2026-05-07-1006-bbd1", "event": "llm_call", "role": "researcher", "model": "minimax-m2.7:cloud", "duration_ms": 5794, "prompt_tokens": 17589, "completion_tokens": 170, "iter_index": 4, "tool_calls": 3, "error": null}
+{"ts": 1778141246.2196882, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 977, "error": null}
+{"ts": 1778141246.2204, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 1015, "error": null}
+{"ts": 1778141246.2587423, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 38, "output_chars": 8348, "error": null}
+{"ts": 1778141252.9750202, "sid": "csl-2026-05-07-1006-bbd1", "event": "llm_call", "role": "researcher", "model": "minimax-m2.7:cloud", "duration_ms": 12314, "prompt_tokens": 38865, "completion_tokens": 367, "iter_index": 5, "tool_calls": 7, "error": null}
+{"ts": 1778141252.9754944, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 679, "error": null}
+{"ts": 1778141252.9761472, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 1070, "error": null}
+{"ts": 1778141252.9768343, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 831, "error": null}
+{"ts": 1778141252.9787295, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 1, "output_chars": 1979, "error": null}
+{"ts": 1778141252.980351, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 1, "output_chars": 1380, "error": null}
+{"ts": 1778141252.981884, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 1, "output_chars": 852, "error": null}
+{"ts": 1778141252.982448, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 657, "error": null}
+{"ts": 1778141254.4605792, "sid": "csl-2026-05-07-1006-bbd1", "event": "llm_call", "role": "researcher", "model": "minimax-m2.7:cloud", "duration_ms": 8201, "prompt_tokens": 20875, "completion_tokens": 261, "iter_index": 7, "tool_calls": 2, "error": null}
+{"ts": 1778141254.460883, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 520, "error": null}
+{"ts": 1778141254.474893, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 13, "output_chars": 700, "error": null}
+{"ts": 1778141258.5180519, "sid": "csl-2026-05-07-1006-bbd1", "event": "llm_call", "role": "researcher", "model": "minimax-m2.7:cloud", "duration_ms": 15941, "prompt_tokens": 20904, "completion_tokens": 803, "iter_index": 6, "tool_calls": 10, "error": null}
+{"ts": 1778141258.519876, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 1, "output_chars": 3233, "error": null}
+{"ts": 1778141258.5214717, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 1, "output_chars": 756, "error": null}
+{"ts": 1778141258.5222611, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 1663, "error": null}
+{"ts": 1778141258.522823, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 44, "error": null}
+{"ts": 1778141258.5232913, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 1135, "error": null}
+{"ts": 1778141258.5250845, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 1, "output_chars": 7610, "error": null}
+{"ts": 1778141258.5266526, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 1, "output_chars": 1109, "error": null}
+{"ts": 1778141258.5273874, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 1162, "error": null}
+{"ts": 1778141261.2220845, "sid": "csl-2026-05-07-1006-bbd1", "event": "llm_call", "role": "researcher", "model": "minimax-m2.7:cloud", "duration_ms": 6747, "prompt_tokens": 21345, "completion_tokens": 220, "iter_index": 9, "tool_calls": 0, "error": null}
+{"ts": 1778141261.2222633, "sid": "csl-2026-05-07-1006-bbd1", "event": "node_exit", "role": "researcher", "duration_ms": 25744}
+{"ts": 1778141264.2087862, "sid": "csl-2026-05-07-1006-bbd1", "event": "llm_call", "role": "researcher", "model": "minimax-m2.7:cloud", "duration_ms": 5681, "prompt_tokens": 27210, "completion_tokens": 241, "iter_index": 10, "tool_calls": 4, "error": null}
+{"ts": 1778141264.2091458, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 1237, "error": null}
+{"ts": 1778141264.2094789, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 1278, "error": null}
+{"ts": 1778141264.2097387, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 823, "error": null}
+{"ts": 1778141264.2105782, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 533, "error": null}
+{"ts": 1778141274.3685982, "sid": "csl-2026-05-07-1006-bbd1", "event": "llm_call", "role": "researcher", "model": "minimax-m2.7:cloud", "duration_ms": 21385, "prompt_tokens": 41789, "completion_tokens": 454, "iter_index": 8, "tool_calls": 2, "error": null}
+{"ts": 1778141274.3700166, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 1, "output_chars": 1805, "error": null}
+{"ts": 1778141274.4148571, "sid": "csl-2026-05-07-1006-bbd1", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 44, "output_chars": 92, "error": null}
+{"ts": 1778141296.748592, "sid": "csl-2026-05-07-1006-bbd1", "event": "llm_call", "role": "researcher", "model": "minimax-m2.7:cloud", "duration_ms": 32537, "prompt_tokens": 28815, "completion_tokens": 1310, "iter_index": 11, "tool_calls": 0, "error": null}
+{"ts": 1778141296.7487173, "sid": "csl-2026-05-07-1006-bbd1", "event": "node_exit", "role": "researcher", "duration_ms": 61270}
+{"ts": 1778141299.945465, "sid": "csl-2026-05-07-1006-bbd1", "event": "llm_call", "role": "researcher", "model": "minimax-m2.7:cloud", "duration_ms": 25530, "prompt_tokens": 42549, "completion_tokens": 865, "iter_index": 12, "tool_calls": 0, "error": null}
+{"ts": 1778141299.9456615, "sid": "csl-2026-05-07-1006-bbd1", "event": "node_exit", "role": "researcher", "duration_ms": 64467}
+{"ts": 1778141299.9467113, "sid": "csl-2026-05-07-1006-bbd1", "event": "node_enter", "role": "synthesizer"}
+{"ts": 1778141314.1316571, "sid": "csl-2026-05-07-1006-bbd1", "event": "llm_call", "role": "synthesizer", "model": "minimax-m2.7:cloud", "duration_ms": 14184, "prompt_tokens": 2275, "completion_tokens": 567, "iter_index": 1, "tool_calls": 0, "error": null}
+{"ts": 1778141314.1318314, "sid": "csl-2026-05-07-1006-bbd1", "event": "node_exit", "role": "synthesizer", "duration_ms": 14185}

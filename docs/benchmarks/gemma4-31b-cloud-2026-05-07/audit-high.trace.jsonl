@@ -1,0 +1,47 @@
+{"ts": 1778140369.8911915, "sid": "csl-2026-05-07-0952-b0fc", "event": "node_enter", "role": "planner"}
+{"ts": 1778140387.2468414, "sid": "csl-2026-05-07-0952-b0fc", "event": "llm_call", "role": "planner", "model": "gemma4:31b-cloud", "duration_ms": 17355, "prompt_tokens": 424, "completion_tokens": 859, "iter_index": 1, "tool_calls": 0, "error": null}
+{"ts": 1778140387.2472136, "sid": "csl-2026-05-07-0952-b0fc", "event": "node_exit", "role": "planner", "duration_ms": 17356}
+{"ts": 1778140387.2486897, "sid": "csl-2026-05-07-0952-b0fc", "event": "node_enter", "role": "researcher"}
+{"ts": 1778140387.249099, "sid": "csl-2026-05-07-0952-b0fc", "event": "node_enter", "role": "researcher"}
+{"ts": 1778140387.2494287, "sid": "csl-2026-05-07-0952-b0fc", "event": "node_enter", "role": "researcher"}
+{"ts": 1778140393.851805, "sid": "csl-2026-05-07-0952-b0fc", "event": "llm_call", "role": "researcher", "model": "gemma4:31b-cloud", "duration_ms": 6601, "prompt_tokens": 18135, "completion_tokens": 287, "iter_index": 2, "tool_calls": 3, "error": null}
+{"ts": 1778140393.8608584, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "survey_project", "duration_ms": 8, "output_chars": 3951, "error": null}
+{"ts": 1778140393.8613532, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "list_files", "duration_ms": 0, "output_chars": 183, "error": null}
+{"ts": 1778140393.8617961, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "list_files", "duration_ms": 0, "output_chars": 116, "error": null}
+{"ts": 1778140395.4219046, "sid": "csl-2026-05-07-0952-b0fc", "event": "llm_call", "role": "researcher", "model": "gemma4:31b-cloud", "duration_ms": 8171, "prompt_tokens": 18135, "completion_tokens": 372, "iter_index": 3, "tool_calls": 4, "error": null}
+{"ts": 1778140395.422311, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "list_files", "duration_ms": 0, "output_chars": 183, "error": null}
+{"ts": 1778140395.422743, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "list_files", "duration_ms": 0, "output_chars": 116, "error": null}
+{"ts": 1778140395.423987, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 1, "output_chars": 21228, "error": null}
+{"ts": 1778140395.4248996, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 12934, "error": null}
+{"ts": 1778140396.0016842, "sid": "csl-2026-05-07-0952-b0fc", "event": "llm_call", "role": "researcher", "model": "gemma4:31b-cloud", "duration_ms": 8751, "prompt_tokens": 18154, "completion_tokens": 395, "iter_index": 1, "tool_calls": 4, "error": null}
+{"ts": 1778140396.0019622, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "survey_project", "duration_ms": 0, "output_chars": 3951, "error": null}
+{"ts": 1778140396.002454, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "list_files", "duration_ms": 0, "output_chars": 183, "error": null}
+{"ts": 1778140396.0028825, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "list_files", "duration_ms": 0, "output_chars": 116, "error": null}
+{"ts": 1778140396.0033638, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "list_files", "duration_ms": 0, "output_chars": 69, "error": null}
+{"ts": 1778140398.7517958, "sid": "csl-2026-05-07-0952-b0fc", "event": "llm_call", "role": "researcher", "model": "gemma4:31b-cloud", "duration_ms": 3326, "prompt_tokens": 29105, "completion_tokens": 47, "iter_index": 5, "tool_calls": 2, "error": null}
+{"ts": 1778140398.7524695, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 9861, "error": null}
+{"ts": 1778140398.7541203, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 1, "output_chars": 37814, "error": null}
+{"ts": 1778140400.9209049, "sid": "csl-2026-05-07-0952-b0fc", "event": "llm_call", "role": "researcher", "model": "gemma4:31b-cloud", "duration_ms": 7058, "prompt_tokens": 20038, "completion_tokens": 340, "iter_index": 4, "tool_calls": 4, "error": null}
+{"ts": 1778140400.9218554, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 21228, "error": null}
+{"ts": 1778140400.9229033, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 12934, "error": null}
+{"ts": 1778140400.9239402, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 9861, "error": null}
+{"ts": 1778140400.9263163, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 2, "output_chars": 37814, "error": null}
+{"ts": 1778140411.1760917, "sid": "csl-2026-05-07-0952-b0fc", "event": "llm_call", "role": "researcher", "model": "gemma4:31b-cloud", "duration_ms": 15172, "prompt_tokens": 20114, "completion_tokens": 290, "iter_index": 6, "tool_calls": 4, "error": null}
+{"ts": 1778140411.1768649, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 14328, "error": null}
+{"ts": 1778140411.1780357, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 21228, "error": null}
+{"ts": 1778140411.1788855, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 12934, "error": null}
+{"ts": 1778140411.1796098, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 9861, "error": null}
+{"ts": 1778140430.1439686, "sid": "csl-2026-05-07-0952-b0fc", "event": "llm_call", "role": "researcher", "model": "gemma4:31b-cloud", "duration_ms": 31389, "prompt_tokens": 45337, "completion_tokens": 944, "iter_index": 7, "tool_calls": 0, "error": null}
+{"ts": 1778140430.1441705, "sid": "csl-2026-05-07-0952-b0fc", "event": "node_exit", "role": "researcher", "duration_ms": 42894}
+{"ts": 1778140455.8348026, "sid": "csl-2026-05-07-0952-b0fc", "event": "llm_call", "role": "researcher", "model": "gemma4:31b-cloud", "duration_ms": 44654, "prompt_tokens": 39133, "completion_tokens": 1529, "iter_index": 9, "tool_calls": 1, "error": null}
+{"ts": 1778140455.836347, "sid": "csl-2026-05-07-0952-b0fc", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 1, "output_chars": 37814, "error": null}
+{"ts": 1778140484.55494, "sid": "csl-2026-05-07-0952-b0fc", "event": "llm_call", "role": "researcher", "model": "gemma4:31b-cloud", "duration_ms": 28718, "prompt_tokens": 51973, "completion_tokens": 1087, "iter_index": 10, "tool_calls": 0, "error": null}
+{"ts": 1778140484.5551257, "sid": "csl-2026-05-07-0952-b0fc", "event": "node_exit", "role": "researcher", "duration_ms": 97306}
+{"ts": 1778140487.868028, "sid": "csl-2026-05-07-0952-b0fc", "event": "llm_call", "role": "researcher", "model": "gemma4:31b-cloud", "duration_ms": 86941, "prompt_tokens": 47090, "completion_tokens": 3803, "iter_index": 8, "tool_calls": 0, "error": null}
+{"ts": 1778140487.8686073, "sid": "csl-2026-05-07-0952-b0fc", "event": "node_exit", "role": "researcher", "duration_ms": 100619}
+{"ts": 1778140487.8696604, "sid": "csl-2026-05-07-0952-b0fc", "event": "node_enter", "role": "critic"}
+{"ts": 1778140515.784237, "sid": "csl-2026-05-07-0952-b0fc", "event": "llm_call", "role": "critic", "model": "gemma4:31b-cloud", "duration_ms": 27914, "prompt_tokens": 3385, "completion_tokens": 1134, "iter_index": 1, "tool_calls": 0, "error": null}
+{"ts": 1778140515.7844148, "sid": "csl-2026-05-07-0952-b0fc", "event": "node_exit", "role": "critic", "duration_ms": 27914}
+{"ts": 1778140515.7854908, "sid": "csl-2026-05-07-0952-b0fc", "event": "node_enter", "role": "synthesizer"}
+{"ts": 1778140551.796833, "sid": "csl-2026-05-07-0952-b0fc", "event": "llm_call", "role": "synthesizer", "model": "gemma4:31b-cloud", "duration_ms": 36011, "prompt_tokens": 3555, "completion_tokens": 1082, "iter_index": 1, "tool_calls": 0, "error": null}
+{"ts": 1778140551.7969363, "sid": "csl-2026-05-07-0952-b0fc", "event": "node_exit", "role": "synthesizer", "duration_ms": 36011}

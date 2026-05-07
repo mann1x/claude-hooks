@@ -1,0 +1,31 @@
+reading: /root/.claude/consultants-traces/csl-2026-05-07-0951-fe97.jsonl
+
+sid: csl-2026-05-07-0951-fe97
+total wall: 71.5s   first_event=+0.0s  last_event=+71.5s
+
+  planner       node=19.9s   (entries) llm=1x=19.9s   tool=0x=0ms     tok=p280/c569
+      LLM iter=1 model=gemma4:31b-cloud            19.9s  p=280    c=569    tool_calls=0
+
+  researcher    node=1.8m    (3xentries) llm=9x=1.8m    tool=19x=230ms   tok=p247885/c4519
+      LLM iter=4 model=gemma4:31b-cloud            24.7s  p=27019  c=1165   tool_calls=4
+      LLM iter=7 model=gemma4:31b-cloud            19.9s  p=60344  c=563    tool_calls=0
+      LLM iter=6 model=gemma4:31b-cloud            18.7s  p=22277  c=918    tool_calls=9
+      LLM iter=8 model=gemma4:31b-cloud            11.6s  p=28869  c=485    tool_calls=0
+      LLM iter=9 model=gemma4:31b-cloud             9.2s  p=28495  c=461    tool_calls=0
+      LLM iter=1 model=gemma4:31b-cloud             8.0s  p=17976  c=315    tool_calls=1
+      LLM iter=2 model=gemma4:31b-cloud             7.3s  p=17943  c=284    tool_calls=1
+      LLM iter=5 model=gemma4:31b-cloud             5.6s  p=27005  c=95     tool_calls=4
+      LLM iter=3 model=gemma4:31b-cloud             5.2s  p=17957  c=233    tool_calls=1
+      tool grep               x3     224ms chars=66557
+      tool read_file          x16      6ms chars=119655
+
+  synthesizer   node=12.5s   (entries) llm=1x=12.5s   tool=0x=0ms     tok=p1997/c581
+      LLM iter=1 model=gemma4:31b-cloud            12.5s  p=1997   c=581    tool_calls=0
+
+totals
+  wall                  71.5s
+  sum of node spans     2.4m
+  sum of LLM call time  2.4m  (199.2% of wall)
+  sum of tool call time 230ms
+  total prompt tokens   250162
+  total completion tok  5669

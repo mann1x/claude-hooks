@@ -1,0 +1,47 @@
+reading: /root/.claude/consultants-traces/csl-2026-05-07-0958-04c1.jsonl
+
+sid: csl-2026-05-07-0958-04c1
+total wall: 392.7s   first_event=+0.0s  last_event=+392.7s
+
+  planner       node=7.8s    (entries) llm=1x=7.8s    tool=0x=0ms     tok=p394/c628
+      LLM iter=1 model=glm-5.1:cloud                7.8s  p=394    c=628    tool_calls=0
+
+  researcher    node=8.6m    (3xentries) llm=20x=8.6m    tool=39x=24ms    tok=p715909/c18301
+      LLM iter=20 model=glm-5.1:cloud                1.4m  p=44454  c=1140   tool_calls=0
+      LLM iter=7 model=glm-5.1:cloud                1.2m  p=40440  c=3968   tool_calls=2
+      LLM iter=18 model=glm-5.1:cloud                1.1m  p=44815  c=3019   tool_calls=2
+      LLM iter=8 model=glm-5.1:cloud               51.4s  p=41953  c=2812   tool_calls=2
+      LLM iter=14 model=glm-5.1:cloud               50.2s  p=49208  c=3274   tool_calls=0
+      LLM iter=13 model=glm-5.1:cloud               35.9s  p=44950  c=2852   tool_calls=0
+      LLM iter=17 model=glm-5.1:cloud               27.9s  p=42989  c=134    tool_calls=1
+      LLM iter=10 model=glm-5.1:cloud               26.8s  p=41152  c=62     tool_calls=2
+      LLM iter=16 model=glm-5.1:cloud               24.3s  p=42094  c=35     tool_calls=1
+      LLM iter=19 model=glm-5.1:cloud               21.7s  p=45076  c=21     tool_calls=1
+      LLM iter=15 model=glm-5.1:cloud               10.6s  p=40513  c=34     tool_calls=1
+      LLM iter=6 model=glm-5.1:cloud                8.0s  p=16746  c=87     tool_calls=4
+      LLM iter=4 model=glm-5.1:cloud                6.7s  p=18216  c=125    tool_calls=4
+      LLM iter=9 model=glm-5.1:cloud                6.2s  p=40483  c=131    tool_calls=3
+      LLM iter=5 model=glm-5.1:cloud                5.7s  p=26159  c=69     tool_calls=2
+      LLM iter=3 model=glm-5.1:cloud                5.2s  p=16600  c=106    tool_calls=3
+      LLM iter=11 model=glm-5.1:cloud                3.8s  p=42644  c=35     tool_calls=1
+      LLM iter=2 model=glm-5.1:cloud                2.9s  p=16602  c=143    tool_calls=4
+      LLM iter=12 model=glm-5.1:cloud                2.8s  p=44210  c=158    tool_calls=2
+      LLM iter=1 model=glm-5.1:cloud                2.7s  p=16605  c=96     tool_calls=4
+      tool survey_project     x1      11ms chars=3951
+      tool grep               x8       7ms chars=3873
+      tool read_file          x22      5ms chars=298120
+      tool list_files         x8       1ms chars=1159
+
+  critic        node=42.9s   (entries) llm=1x=42.9s   tool=0x=0ms     tok=p4357/c1747
+      LLM iter=1 model=glm-5.1:cloud               42.9s  p=4357   c=1747   tool_calls=0
+
+  synthesizer   node=26.5s   (entries) llm=1x=26.5s   tool=0x=0ms     tok=p4668/c1020
+      LLM iter=1 model=glm-5.1:cloud               26.5s  p=4668   c=1020   tool_calls=0
+
+totals
+  wall                  392.7s
+  sum of node spans     9.9m
+  sum of LLM call time  9.9m  (150.8% of wall)
+  sum of tool call time 24ms
+  total prompt tokens   725328
+  total completion tok  21696
