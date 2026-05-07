@@ -7,17 +7,29 @@
 #
 # Usage:
 #   scripts/consultants_benchmark.sh <label> [--model <ollama-tag>]
-#       [--skip smoke|audit-medium|audit-high]... [--cwd <path>]
+#       [--at <git-tag-or-HEAD>] [--cwd <path>]
+#       [--skip smoke|audit-medium|audit-high]...
+#
+# Subject codebase pinning (--at):
+#   The consultants audit a frozen git worktree at the tag listed in
+#   docs/benchmarks/CURRENT_BASELINE by default, so Q2 ground truth +
+#   Q3 path:line refs stay valid as the engine evolves. Pass
+#   --at <other-tag> to use a different baseline, or --at HEAD to
+#   audit the live working tree (screening only — not comparable
+#   across labels). The runner creates a worktree, runs from it,
+#   and removes it on exit.
 #
 # Examples:
-#   # Use the model already configured per role:
+#   # Default: every role uses its configured model, audit the
+#   # frozen baseline tag:
 #   scripts/consultants_benchmark.sh kimi-k2.6-cloud-2026-05-07
 #
 #   # Pin every role to one model:
 #   scripts/consultants_benchmark.sh deepseek-v4-pro --model deepseek-v4-pro:cloud
 #
-#   # Just the cheap one:
-#   scripts/consultants_benchmark.sh quickcheck --skip audit-medium --skip audit-high
+#   # Just the cheap one against the live tree (screening):
+#   scripts/consultants_benchmark.sh quickcheck --at HEAD \
+#       --skip audit-medium --skip audit-high
 #
 # The script does NOT touch the engine service unit. Restart it
 # yourself if you change the model AND the engine runs in always-on
@@ -31,8 +43,14 @@ DOC="${REPO}/docs/consultants-benchmarks.md"
 
 LABEL=""
 MODEL=""
-CWD="${REPO}"
+# Subject codebase: by default, the consultants audit a git
+# worktree at the tag listed in docs/benchmarks/CURRENT_BASELINE.
+# This freezes Q2 ground truth + Q3 path:line refs across model
+# sweeps. ``--at HEAD`` opts out (screening / dev runs).
+BASELINE_TAG=""
+CWD_OVERRIDE=""
 SKIP=()
+WORKTREE=""
 
 usage() {
     grep -E '^# ' "$0" | sed 's/^# \?//' >&2
@@ -42,7 +60,8 @@ usage() {
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --model) MODEL="$2"; shift 2 ;;
-        --cwd) CWD="$(cd "$2" && pwd)"; shift 2 ;;
+        --cwd) CWD_OVERRIDE="$(cd "$2" && pwd)"; shift 2 ;;
+        --at) BASELINE_TAG="$2"; shift 2 ;;
         --skip) SKIP+=("$2"); shift 2 ;;
         -h|--help) usage ;;
         --*) echo "unknown flag: $1" >&2; usage ;;
@@ -51,6 +70,44 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -z "$LABEL" ]] && { echo "label is required" >&2; usage; }
+
+# Resolve the subject codebase. Precedence:
+#   1. --cwd <path> — explicit override (screening only).
+#   2. --at HEAD    — use the live working tree (screening only).
+#   3. --at <tag>   — create a worktree at that tag.
+#   4. default      — read docs/benchmarks/CURRENT_BASELINE.
+CWD=""
+if [[ -n "${CWD_OVERRIDE}" ]]; then
+    CWD="${CWD_OVERRIDE}"
+    echo "::: subject codebase: explicit --cwd ${CWD} (screening run)"
+elif [[ "${BASELINE_TAG}" == "HEAD" ]]; then
+    CWD="${REPO}"
+    echo "::: subject codebase: live HEAD at $(git -C "${REPO}" rev-parse --short HEAD) (screening run)"
+else
+    if [[ -z "${BASELINE_TAG}" ]]; then
+        local_baseline_file="${REPO}/docs/benchmarks/CURRENT_BASELINE"
+        [[ -f "${local_baseline_file}" ]] || {
+            echo "!!! ${local_baseline_file} missing and no --at given" >&2
+            exit 1
+        }
+        BASELINE_TAG="$(head -n 1 "${local_baseline_file}" | tr -d '[:space:]')"
+    fi
+    if ! git -C "${REPO}" rev-parse "${BASELINE_TAG}" >/dev/null 2>&1; then
+        echo "!!! baseline tag '${BASELINE_TAG}' not in this repo" >&2
+        exit 1
+    fi
+    WORKTREE="$(mktemp -d -t "claude-hooks-bench-${BASELINE_TAG//\//-}-XXXX")"
+    # Clean up if we exit unexpectedly.
+    trap 'if [[ -n "${WORKTREE:-}" && -d "${WORKTREE}" ]]; then
+            git -C "${REPO}" worktree remove --force "${WORKTREE}" 2>/dev/null || rm -rf "${WORKTREE}"
+          fi' EXIT
+    git -C "${REPO}" worktree add --detach "${WORKTREE}" "${BASELINE_TAG}" \
+        >/dev/null
+    CWD="${WORKTREE}"
+    echo "::: subject codebase: worktree at tag '${BASELINE_TAG}' "
+    echo "    commit=$(git -C "${WORKTREE}" rev-parse --short HEAD)"
+    echo "    path=${WORKTREE}"
+fi
 
 OUT_DIR="${REPO}/docs/benchmarks/${LABEL}"
 mkdir -p "${OUT_DIR}"
@@ -182,7 +239,15 @@ write_results_md() {
         echo "# Benchmark — \`${LABEL}\`"
         echo
         echo "Generated $(date -Iseconds) on $(hostname)."
-        echo "Repo HEAD: \`$(git -C "${REPO}" rev-parse --short HEAD 2>/dev/null || echo unknown)\`"
+        echo "Engine HEAD (\`${REPO}\`): \`$(git -C "${REPO}" rev-parse --short HEAD 2>/dev/null || echo unknown)\`"
+        if [[ -n "${BASELINE_TAG}" ]]; then
+            local cwd_commit
+            cwd_commit="$(git -C "${CWD}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+            echo "Subject baseline: \`${BASELINE_TAG}\` (commit \`${cwd_commit}\`) — frozen worktree at \`${CWD}\`"
+        else
+            echo "Subject baseline: live HEAD (screening run, NOT comparable across labels)"
+        fi
+        echo "Cloud model snapshot: see \`models.json\`."
         echo
         if [[ -n "${MODEL}" ]]; then
             echo "Model pin: \`${MODEL}\` (every role)."
@@ -227,10 +292,7 @@ write_results_md() {
             echo "  - \`${slug}.metadata.json\` — token totals + retries"
         done
         echo
-        echo "## Grades (manual)"
-        echo
-        echo "Fill these per [\`EVALUATION.md\`](../EVALUATION.md) §3"
-        echo "after the benchmark completes."
+        echo "## Per-query grades (manual, per [\`EVALUATION.md\`](../EVALUATION.md) §3)"
         echo
         echo "| Query | Grade | Notes |"
         echo "|---|---|---|"
@@ -238,9 +300,24 @@ write_results_md() {
         echo "| audit-medium | _A / B / C / F_        | _one-line note_ |"
         echo "| audit-high   | _A / B / C / F_        | _one-line note_ |"
         echo
+        echo "## Per-role grades (manual, per [\`EVALUATION.md\`](../EVALUATION.md) §3.5)"
+        echo
+        echo "Read each role's output in the per-query \`transcript.md\`"
+        echo "files and assign one grade per role aggregated across all"
+        echo "three queries. Critic grade is \`n/a\` unless audit-high ran."
+        echo
+        echo "| Role | Grade | One-sentence justification |"
+        echo "|---|---|---|"
+        echo "| planner     | _A / B / C / F_      | _why_ |"
+        echo "| researcher  | _A / B / C / F_      | _why_ |"
+        echo "| critic      | _A / B / C / F / n/a_| _why_ |"
+        echo "| synthesizer | _A / B / C / F_      | _why_ |"
+        echo
+        echo "**Mix string:** \`P:_ R:_ C:_ S:_\`"
+        echo
         echo "**Verdict:** _PROD-READY / EVALUATED-ONLY / UNSTABLE_"
         echo
-        echo "**Commentary:** _one paragraph — what surprised you, where this label wins/loses, would you ship it_"
+        echo "**Commentary:** _one paragraph — what role(s) this model wins at vs prior labels, which role(s) it should NOT be used for, whether you'd build a heterogeneous mix around it_"
     } > "${results}"
     echo "::: wrote ${results}"
 }
@@ -259,6 +336,11 @@ main() {
     fi
 
     maybe_set_model
+
+    # Capture the cloud-model snapshot BEFORE running queries so r2/r3
+    # have something to verify against. Writes <label>/models.json.
+    "${REPO}/scripts/consultants_model_snapshot.py" capture "${OUT_DIR}" \
+        || echo "!!! model snapshot capture had probe failures (continuing)" >&2
 
     run_query smoke         medium
     run_query audit-medium  medium

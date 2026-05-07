@@ -50,12 +50,35 @@ graded). Keep the per-label `results.md` files as raw data.
 
 ## Existing labels
 
+Two complementary tables. The first is the high-level scoreboard;
+the second is the **role-suitability matrix** — what we actually
+use to compose heterogeneous model mixes.
+
+### Scoreboard
+
 Each query cell is `wall · completion-tok · grade`. Completion
 tokens include the cloud model's reasoning chain (often dominant
 on thinking models like kimi-k2.6:cloud). Total completion is the
 column on the right — useful as a coarse cost proxy when comparing
-labels at the same effort scheme.
+labels at the same effort scheme. **Runs** is the number of r1..rN
+runs published for the label; per [`EVALUATION.md`](EVALUATION.md)
+§5 a label needs N=3 to be a publishable comparison anchor.
 
-| Label | Model | Effort scheme | Smoke | Audit-med | Audit-hi | Total c-tok | Verdict |
-|---|---|---|---|---|---|---|---|
-| [`kimi-k2.6-cloud-2026-05-07`](kimi-k2.6-cloud-2026-05-07/results.md) | `kimi-k2.6:cloud` (every role) | medium / medium / high | 212s · 10.9k · PASS | 167s · 12.6k · A | 1030s · 38.9k · A | 62.4k | PROD-READY (single-run) |
+| Label | Model | Effort scheme | Runs | Smoke | Audit-med | Audit-hi | Total c-tok | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| [`kimi-k2.6-cloud-2026-05-07`](kimi-k2.6-cloud-2026-05-07/results.md) | `kimi-k2.6:cloud` (every role) | medium / medium / high | 1/3 | 212s · 10.9k · PASS | 167s · 12.6k · A | 1030s · 38.9k · A | 62.4k | PROD-READY (single-run) |
+
+### Role-suitability matrix
+
+Per [`EVALUATION.md`](EVALUATION.md) §3.5. Each cell is the
+per-role grade aggregated across all three queries, plus the
+median wall the role spent on this label (sum across query
+invocations / parallel lanes). Use this to compose mixes:
+
+> For each role, pick the cheapest model with grade ≥ A. If no
+> model gets A on a role, pick the highest-grading available;
+> ties broken by lower median wall.
+
+| Label | Planner | Researcher | Critic | Synthesizer | Mix string |
+|---|---|---|---|---|---|
+| `kimi-k2.6-cloud-2026-05-07` | _ungraded_ | _ungraded_ | _ungraded_ | _ungraded_ | _pending_ |

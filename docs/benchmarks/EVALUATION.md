@@ -124,6 +124,92 @@ models will typically land at **B** or **C**.
 
 ---
 
+## 3.5 Per-role quality grading (the key to building a model mix)
+
+The per-query grade tells you whether the council answered the
+question. The per-role grade tells you which role each model is
+GOOD at — that's what lets us compose heterogeneous configs like
+"cheap fast model as planner + frontier as synthesizer".
+
+For each label, after running the three queries, read each role's
+output across all three transcripts and assign **one role grade
+per role** (A / B / C / F). The grader is the human; auto-grading
+these is currently out of scope. Record the grade plus a
+one-sentence justification in `results.md` § Per-role grades.
+
+### Planner (input: question; output: numbered plan)
+
+Read the planner output in each `<query>.transcript.md`'s
+`## Planner` section.
+
+| Grade | Criterion |
+|---|---|
+| **A** | 3-7 numbered items; each one cites a concrete file/path/symbol target OR a specific verification step ("verify that X handles Y"); no items of the form "understand the code" or "look at how X works" |
+| **B** | Right item count; some items concrete but 1-2 are vague ("review the architecture") |
+| **C** | Wrong item count (1, or > 10); items are mostly vague; researcher would not be able to execute against this plan |
+| **F** | Plan is missing entirely (planner crashed → tombstone); OR plan is a single paragraph with no structure |
+
+### Researcher (input: plan + tools; output: per-lane reports)
+
+Read every `## Researcher (round N)` section.
+
+| Grade | Criterion |
+|---|---|
+| **A** | Every claim cites `path:line`; tool calls are batched (multiple in one assistant turn whenever possible); coverage hits the plan items; no hallucinated paths |
+| **B** | Most claims cited but some bare prose; mostly batched tool calls but some sequential; covers most plan items |
+| **C** | Few `path:line` citations; sequential single-tool calls dominate; misses plan items |
+| **F** | Empty output (the fallback fired); OR fabricated `path:line` references; OR claims findings without any tool calls run |
+
+### Critic (only at `effort=high`; input: plan + research; output: DECISION line)
+
+Read each `## Critic` section.
+
+| Grade | Criterion |
+|---|---|
+| **A** | First line is `DECISION: ready` or `DECISION: needs_more_research`; reasoning is concise (≤ 5 lines); when re-routing, names 1-3 specific gaps with `path:line` |
+| **B** | Decision line present and parseable; reasoning is sound but verbose; gaps named without `path:line` |
+| **C** | Decision line missing or non-parseable (parser falls back to "ready"); reasoning hedges or restates the question |
+| **F** | Crashed (tombstone fired); OR routed to needs_more_research with no gap content |
+
+(For non-high efforts the critic isn't fired; mark "n/a".)
+
+### Synthesizer (input: plan + research [+ critique at high]; output: final answer)
+
+Read each `<query>.summary.md` body.
+
+| Grade | Criterion |
+|---|---|
+| **A** | Lead sentence is the bottom line (no preamble); evidence-grounded with `path:line` citations; output shape matches question (list-shaped → bullets, yes/no → one sentence + justification); no hedging when evidence is concrete; explicit hedging when evidence is sparse |
+| **B** | Bottom line within first paragraph; mostly cited; output shape mostly right but some unnecessary preamble or markdown ceremony |
+| **C** | Bottom line buried below preamble; few `path:line` cites; output shape mismatched (paragraphs for a list question) |
+| **F** | Tombstone-only ("consultation incomplete: synthesizer error"); OR fabricates `path:line` cites; OR refuses to answer despite available evidence |
+
+### Composing the role grades
+
+In a heterogeneous config (different model per role), each role's
+grade is the mode of that role's per-query grades — same
+aggregation as §3 query grades. A label's "model mix verdict" is:
+
+```
+P:<grade> R:<grade> C:<grade> S:<grade>
+```
+
+e.g. `P:B R:A C:A S:A` means kimi is excellent at researcher /
+critic / synthesizer but fine-but-not-great at planner — a
+candidate for a mix where the planner runs on a cheaper model.
+
+To find a viable mix, scan the cross-label `index.md`'s per-role
+columns:
+
+- **Cheapest A grade per role** → use that model for that role.
+- If no model gets A on a role, use the highest-grading model
+  available; if multiple tie, prefer the one with lower wall.
+
+A composed mix should be re-baselined as its own label
+(`mix-2026-05-XX-PA-RA-CA-SA`) before being declared usable.
+
+---
+
 ## 4. Pass/fail thresholds for a label
 
 A label is **PROD-READY** when:
@@ -168,24 +254,83 @@ comparison table at `index.md`.
 
 ## 6. Comparison protocol — what to control
 
-When comparing labels, the following must match across all
-labels in the comparison:
+There are **three independent drift sources** every comparable run
+has to pin. The runner captures all three automatically; the
+verifier checks them before r2/r3.
 
-- **Repo HEAD** — record `git rev-parse HEAD` for each run; if it
-  differs across labels, re-run the older label at the newer HEAD.
-  Engine code changes invalidate prior measurements.
+### 6.1 Subject codebase (what the consultants audit)
+
+Q2's ground-truth `path:line` set and Q3's reducer trace lines
+both reference the actual claude-hooks repo. As the repo evolves
+those lines move, breaking historical comparisons.
+
+**Mechanism:** a git tag listed in
+`docs/benchmarks/CURRENT_BASELINE`. The runner creates a worktree
+at that tag and passes its path as `--cwd` to the consultants. The
+worktree is auto-removed at the end. The current baseline is
+`bench-baseline-2026-05-07`.
+
+When to bump the baseline tag (and re-run every label against the
+new tag): when the dev branch moves enough that Q2/Q3 stop being
+useful audits — e.g. files renamed, the line numbers Q3 cites
+shift more than ~50 lines, or new psycopg sites land that flip the
+ground truth. Bumping is a deliberate act with full re-baseline
+cost; treat it as a sweep-suite version bump.
+
+`results.md` records `Subject baseline: <tag> (commit <sha>)` so
+you can tell at a glance which tree the run audited.
+
+### 6.2 Engine code (the consultants engine itself)
+
+The engine's prompts / caps / fan-out / reducers all influence
+results from the same model. We pin this via the engine's git HEAD,
+recorded in `results.md` as `Engine HEAD: <sha>`. If the engine
+changes — even a one-character prompt tweak — every prior run is
+invalidated.
+
+When to re-baseline: any commit touching `consultants/`,
+`claude_hooks/agent_loop/`, `claude_hooks/get_advice/chat_client.py`,
+or `claude_hooks/caliber_proxy/` invalidates open sweeps. Either:
+- finish the current sweep BEFORE merging the engine change, or
+- re-run all open labels at the new engine HEAD.
+
+### 6.3 Cloud model snapshot
+
+The cloud upstream (`192.168.178.2:11433` proxy fronting Ollama
+Cloud or similar) can rotate the snapshot behind a tag like
+`kimi-k2.6:cloud` without notice — quantisation tweak,
+fine-tune drop, etc. Tracked via `/api/show`'s `modified_at` +
+`capabilities` + `parameter_size`.
+
+**Mechanism:** at r1, the runner writes `<label>/models.json`
+containing a `/api/show` snapshot for every distinct role model.
+Before r2/r3, run:
+
+```bash
+scripts/consultants_model_snapshot.py verify <label-dir>
+```
+
+Exit codes:
+- `0` — snapshot matches; safe to add the next run.
+- `2` — drift detected. Per protocol, **re-execute every prior
+  rN run at the current snapshot before adding the next one**.
+- `3` — probe failed (network / proxy). Don't add a run until
+  you can verify; the cloud may be in a partial state.
+
+### 6.4 Other things to control
+
 - **Effort tiers** — same effort per query across labels (the
   canonical assignment is in `consultants-benchmarks.md`; don't
   override at the runner unless you're testing effort itself).
-- **Service config** — `consultants-config.toml` snapshot saved
-  to `<label>/config.toml` at run time (the runner does this if
-  `CONSULTANTS_CAPTURE_CONFIG=1`).
+- **Service config** — `claude-consultants config show` snapshot
+  is embedded in `results.md` automatically.
 - **Network path** — same proxy URL (default `192.168.178.2:11433`).
-  If the proxy changes, treat as a new label suffix.
+  If the proxy changes, treat as a new label suffix
+  (`<existing>-via-<new-proxy-tag>`).
 - **Time of day** — cloud-model latency varies by US business
   hours. Run all labels in the same UTC window (e.g. all between
   20:00–06:00 UTC, or all between 14:00–18:00 UTC). Note the
-  window in the label or `results.md` header.
+  window in `results.md`.
 
 What you can vary:
 
@@ -279,10 +424,10 @@ partial results across runs).
 ## 11. Reporting template
 
 The runner-generated `results.md` is raw data. After grading, append
-this section manually:
+these sections manually:
 
 ```markdown
-## Grades
+## Per-query grades
 
 | Query | Grade | Notes |
 |---|---|---|
@@ -290,15 +435,34 @@ this section manually:
 | audit-medium | A / B / C / F      | one-line note |
 | audit-high   | A / B / C / F      | one-line note |
 
+## Per-role grades
+
+(See §3.5 for criteria; one grade per role aggregated across all
+three queries. Critic grade is `n/a` unless audit-high ran.)
+
+| Role | Grade | One-sentence justification |
+|---|---|---|
+| planner     | A / B / C / F      | …  |
+| researcher  | A / B / C / F      | …  |
+| critic      | A / B / C / F / n/a| …  |
+| synthesizer | A / B / C / F      | …  |
+
+Mix string: `P:<g> R:<g> C:<g> S:<g>`
+
 ## Verdict
 
 PROD-READY / EVALUATED-ONLY / UNSTABLE
 
 ## One-paragraph commentary
 
-What surprised you. Where this model wins / loses vs prior labels.
-Whether you'd put it in production for any role.
+What surprised you. Which role(s) this model wins at vs prior
+labels, which role(s) it should NOT be used for. Whether you'd
+build a heterogeneous mix around it.
 ```
+
+The per-role grades are what makes a heterogeneous mix possible —
+without them you only know "this label is OK overall", not "it's
+great at researcher but mediocre at planner".
 
 The commentary is the most useful artifact when a future session
 picks the model — quick verdict scannable from `index.md`'s table
