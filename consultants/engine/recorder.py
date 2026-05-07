@@ -429,3 +429,134 @@ class MessageRecorder:
         else:
             self.finalize(status="failed", error=f"{exc_type.__name__}: {exc}")
         self.close()
+
+
+# ---------------------------------------------------------------- #
+# Reconstruction reader — used by the reopen path (Phase 4) and the
+# warm-session population (Phase 4 also wires this in to keep the
+# disk-loaded and warm code paths symmetric).
+# ---------------------------------------------------------------- #
+
+def load_role_messages(
+    db_path: Path | str,
+) -> tuple[Optional[dict[str, list[dict]]],
+           Optional[dict[str, dict[int, list[dict]]]]]:
+    """Reconstruct per-role and per-lane LLM message threads from a
+    finalized ``transcript.db``.
+
+    Returns ``(role_messages, role_lane_messages)``:
+
+    - ``role_messages[role]`` — for each role that issued at least one
+      ``llm_call`` event, the complete final thread: the request's
+      full ``messages`` list (system + user + tool messages
+      accumulated across iters) plus the final assistant message
+      from the response. When a role had multiple lanes, this picks
+      the most recent llm_call across all lanes — useful for the
+      "feed prior conversation to the synthesizer" follow-up case.
+
+    - ``role_lane_messages[role][lane_idx]`` — same shape but split
+      per lane, populated for any role that has non-NULL ``lane_idx``
+      events (in practice: researcher only). Useful when a follow-up
+      wants to extend a SPECIFIC lane.
+
+    Returns ``(None, None)`` when the file is missing, corrupt, or
+    has no llm_call events. Callers fall back to today's
+    turn-content reconstruction in that case.
+
+    The db is opened read-only via the URI form so this is safe to
+    call against a session whose engine instance is still alive.
+    """
+    p = Path(db_path)
+    if not p.is_file():
+        return (None, None)
+    try:
+        # mode=ro avoids creating WAL files when probing a fresh path
+        # and lets us run against a still-open writer without locking.
+        conn = sqlite3.connect(
+            f"file:{p}?mode=ro", uri=True, timeout=5.0,
+            check_same_thread=False,
+        )
+    except sqlite3.OperationalError:
+        return (None, None)
+    try:
+        rows = conn.execute(
+            "SELECT request_json, response_json, role, round, lane_idx "
+            "FROM events WHERE kind = 'llm_call' ORDER BY ts"
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        # File exists but isn't a valid SQLite DB (e.g. v1.0 left a
+        # zero-byte file from an earlier crash, or someone replaced
+        # the artifact with garbage). Tolerate.
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return (None, None)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    if not rows:
+        return (None, None)
+
+    # Walk events in ts order; for each role and (role, lane_idx) we
+    # keep only the LAST llm_call's payloads since the request's
+    # ``messages`` list at iter N+1 already contains everything from
+    # iter N plus that round's tool results. The final assistant
+    # message comes from the response.
+    last_by_role: dict[str, tuple[Optional[dict], Optional[dict]]] = {}
+    last_by_lane: dict[str, dict[int, tuple[Optional[dict], Optional[dict]]]] = {}
+    for req_j, resp_j, role, _round, lane_idx in rows:
+        try:
+            req = json.loads(req_j) if req_j else None
+        except (json.JSONDecodeError, TypeError):
+            req = None
+        try:
+            resp = json.loads(resp_j) if resp_j else None
+        except (json.JSONDecodeError, TypeError):
+            resp = None
+        last_by_role[role] = (req, resp)
+        if lane_idx is not None:
+            last_by_lane.setdefault(role, {})[int(lane_idx)] = (req, resp)
+
+    def _thread(req: Optional[dict],
+                resp: Optional[dict]) -> Optional[list[dict]]:
+        """Collapse (request, response) into a flat message list:
+        the request's prior messages + the final assistant message
+        from the response. None if either side is missing the
+        expected shape."""
+        if not isinstance(req, dict):
+            return None
+        msgs = req.get("messages") or []
+        if not isinstance(msgs, list):
+            return None
+        out = list(msgs)
+        if isinstance(resp, dict):
+            choices = resp.get("choices") or []
+            if choices and isinstance(choices, list):
+                msg = (choices[0] or {}).get("message")
+                if isinstance(msg, dict):
+                    out.append(msg)
+        return out
+
+    role_messages: dict[str, list[dict]] = {}
+    for role, (req, resp) in last_by_role.items():
+        thread = _thread(req, resp)
+        if thread is not None:
+            role_messages[role] = thread
+
+    role_lane_messages: dict[str, dict[int, list[dict]]] = {}
+    for role, lanes in last_by_lane.items():
+        per_lane: dict[int, list[dict]] = {}
+        for lane_idx, (req, resp) in lanes.items():
+            thread = _thread(req, resp)
+            if thread is not None:
+                per_lane[lane_idx] = thread
+        if per_lane:
+            role_lane_messages[role] = per_lane
+
+    if not role_messages and not role_lane_messages:
+        return (None, None)
+    return (role_messages or None, role_lane_messages or None)

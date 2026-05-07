@@ -86,6 +86,27 @@ class SessionState:
     # The follow-up runner reuses these to skip the /api/show probe
     # and the upstream warmup.
     _chat_clients: Optional[dict] = field(default=None, repr=False)
+    # v1.1 message-history fields. Populated from transcript.db on
+    # reopen-from-disk and from the live recorder on warm-session
+    # completion, so the disk-loaded path is indistinguishable from
+    # warm. Phase 5's follow-up runner reads these and extends the
+    # parent's threads instead of starting fresh.
+    #
+    # ``_role_messages[role]`` — flat per-role thread (last
+    # llm_call's messages + final assistant message). Populated for
+    # every role that issued at least one llm_call.
+    # ``_role_lane_messages[role][lane_idx]`` — per-lane thread for
+    # roles that fanned out (researcher in practice). When None for
+    # a given role, that role didn't fan out.
+    # Both are None on v1.0 sessions (no transcript.db) — the
+    # follow-up runner branches on presence and falls back to the
+    # turn-content reconstruction in that case.
+    _role_messages: Optional[dict[str, list[dict]]] = field(
+        default=None, repr=False,
+    )
+    _role_lane_messages: Optional[dict[str, dict[int, list[dict]]]] = field(
+        default=None, repr=False,
+    )
 
     def public_dict(self) -> dict:
         return {
@@ -721,6 +742,23 @@ def _load_session_from_artifacts(sid: str,
     duration = float(meta.get("duration_seconds") or 0.0)
     finished = (started + duration) if started and duration else None
 
+    # v1.1: probe for transcript.db and reconstruct per-role message
+    # threads. Missing / corrupt / v1.0-shape (no .db) gives back
+    # (None, None) — Phase 5's follow-up branch on this and falls
+    # back to today's turn-content reconstruction.
+    role_messages = None
+    role_lane_messages = None
+    db_path = sdir / storage.TRANSCRIPT_DB_FILENAME
+    if db_path.is_file():
+        try:
+            from consultants.engine.recorder import load_role_messages
+            role_messages, role_lane_messages = load_role_messages(db_path)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning(
+                "transcript.db reconstruction failed for %s: %s; "
+                "falling back to turn-content view", sid, exc,
+            )
+
     state = SessionState(
         sid=sid,
         cwd=str(cwd),
@@ -744,10 +782,16 @@ def _load_session_from_artifacts(sid: str,
         closed_at=None,
         last_activity_at=time.time(),
         _chat_clients=None,  # rebuilt cold on first follow-up
+        _role_messages=role_messages,
+        _role_lane_messages=role_lane_messages,
     )
     log.info(
-        "reopened session %s from disk (cwd=%s, %d research turns)",
+        "reopened session %s from disk (cwd=%s, %d research turns, "
+        "%s)",
         sid, cwd, len(research_list),
+        ("with transcript.db threads"
+         if role_messages or role_lane_messages
+         else "no transcript.db — turn-content fallback"),
     )
     return state
 

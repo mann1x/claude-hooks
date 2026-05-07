@@ -17,6 +17,7 @@ from consultants.engine.recorder import (
     SCHEMA_VERSION,
     MessageRecorder,
     RecorderMeta,
+    load_role_messages,
 )
 
 
@@ -432,6 +433,180 @@ class TestLifecycle(unittest.TestCase):
             conn.close()
             self.assertEqual(status, "failed")
             self.assertIn("boom", err or "")
+
+
+class TestLoadRoleMessages(unittest.TestCase):
+    """Phase 4 reader: reconstruct per-role / per-lane LLM message
+    threads from a finalized transcript.db. Used by the reopen path
+    and the warm-session population to keep both code paths
+    symmetric."""
+
+    def _make_db(self, td: Path,
+                 events: list[dict]) -> Path:
+        db = td / "transcript.db"
+        rec = MessageRecorder(db, meta=_meta())
+        try:
+            for ev in events:
+                rec.record_llm(**ev)
+            rec.finalize(status="completed")
+        finally:
+            rec.close()
+        return db
+
+    def test_returns_none_when_file_missing(self):
+        with TemporaryDirectory() as td:
+            rm, rlm = load_role_messages(Path(td) / "nope.db")
+            self.assertIsNone(rm)
+            self.assertIsNone(rlm)
+
+    def test_returns_none_on_corrupt_file(self):
+        with TemporaryDirectory() as td:
+            bad = Path(td) / "bad.db"
+            bad.write_text("not a sqlite db")
+            rm, rlm = load_role_messages(bad)
+            self.assertIsNone(rm)
+            self.assertIsNone(rlm)
+
+    def test_returns_none_when_no_llm_calls(self):
+        with TemporaryDirectory() as td:
+            db = Path(td) / "empty.db"
+            rec = MessageRecorder(db, meta=_meta())
+            try:
+                rec.record_node(role="planner", kind="node_enter")
+                rec.finalize(status="completed")
+            finally:
+                rec.close()
+            rm, rlm = load_role_messages(db)
+            self.assertIsNone(rm)
+            self.assertIsNone(rlm)
+
+    def test_single_role_thread_reconstructs_messages(self):
+        with TemporaryDirectory() as td:
+            req = {
+                "messages": [
+                    {"role": "system", "content": "you are helpful"},
+                    {"role": "user", "content": "what is 2+2?"},
+                ],
+            }
+            resp = {
+                "choices": [{"message": {
+                    "role": "assistant", "content": "4",
+                }}],
+            }
+            db = self._make_db(Path(td), [
+                dict(role="planner", model="m", request=req, response=resp),
+            ])
+            rm, rlm = load_role_messages(db)
+            self.assertIsNotNone(rm)
+            self.assertIn("planner", rm)
+            thread = rm["planner"]
+            # request.messages + final assistant message
+            self.assertEqual(len(thread), 3)
+            self.assertEqual(thread[0]["role"], "system")
+            self.assertEqual(thread[-1]["content"], "4")
+            # No lanes for non-fan-out roles.
+            self.assertIsNone(rlm)
+
+    def test_multi_iter_role_keeps_only_last_request(self):
+        # Researcher pattern: each iter's request.messages already
+        # contains everything from the prior iter plus that round's
+        # tool results. The reader must take only the LAST iter's
+        # request to get the complete thread.
+        with TemporaryDirectory() as td:
+            req1 = {"messages": [
+                {"role": "user", "content": "find foo"}]}
+            resp1 = {"choices": [{"message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{"id": "t1", "function": {
+                    "name": "read_file", "arguments": "{}"}}],
+            }}]}
+            req2 = {"messages": [
+                {"role": "user", "content": "find foo"},
+                {"role": "assistant", "tool_calls": [{"id": "t1"}]},
+                {"role": "tool", "content": "def foo(): pass"},
+            ]}
+            resp2 = {"choices": [{"message": {
+                "role": "assistant",
+                "content": "found foo at foo.py:1",
+            }}]}
+            db = self._make_db(Path(td), [
+                dict(role="researcher", round=1, lane_idx=0,
+                     model="m", request=req1, response=resp1),
+                dict(role="researcher", round=1, lane_idx=0,
+                     model="m", request=req2, response=resp2),
+            ])
+            rm, rlm = load_role_messages(db)
+            thread = rm["researcher"]
+            # Last request had 3 messages; +1 final assistant = 4
+            self.assertEqual(len(thread), 4)
+            self.assertEqual(thread[0]["content"], "find foo")
+            self.assertEqual(thread[2]["content"], "def foo(): pass")
+            self.assertEqual(thread[-1]["content"],
+                             "found foo at foo.py:1")
+            # Per-lane thread also populated for lane 0.
+            self.assertIsNotNone(rlm)
+            self.assertIn("researcher", rlm)
+            self.assertIn(0, rlm["researcher"])
+            self.assertEqual(len(rlm["researcher"][0]), 4)
+
+    def test_multi_lane_fan_out_each_lane_independent(self):
+        with TemporaryDirectory() as td:
+            def _req(lane: int) -> dict:
+                return {"messages": [
+                    {"role": "user", "content": f"lane {lane}"}]}
+            def _resp(lane: int) -> dict:
+                return {"choices": [{"message": {
+                    "role": "assistant",
+                    "content": f"finding from lane {lane}",
+                }}]}
+            db = self._make_db(Path(td), [
+                dict(role="researcher", round=1, lane_idx=0,
+                     model="m", request=_req(0), response=_resp(0)),
+                dict(role="researcher", round=1, lane_idx=1,
+                     model="m", request=_req(1), response=_resp(1)),
+                dict(role="researcher", round=1, lane_idx=2,
+                     model="m", request=_req(2), response=_resp(2)),
+            ])
+            rm, rlm = load_role_messages(db)
+            self.assertIn("researcher", rlm)
+            lanes = rlm["researcher"]
+            self.assertEqual(set(lanes.keys()), {0, 1, 2})
+            for lane_idx in (0, 1, 2):
+                thread = lanes[lane_idx]
+                self.assertEqual(thread[0]["content"],
+                                 f"lane {lane_idx}")
+                self.assertEqual(thread[-1]["content"],
+                                 f"finding from lane {lane_idx}")
+            # Flat _role_messages picks the most recent llm_call
+            # across lanes (lane 2 here, by ts ordering).
+            self.assertEqual(rm["researcher"][-1]["content"],
+                             "finding from lane 2")
+
+    def test_skips_rows_with_unparseable_payloads(self):
+        # Defensive: if request_json or response_json got truncated
+        # (recorder process killed mid-write), the reader skips
+        # cleanly without raising.
+        with TemporaryDirectory() as td:
+            db = Path(td) / "transcript.db"
+            rec = MessageRecorder(db, meta=_meta())
+            # Bypass the recorder's safe_dumps and write garbage
+            # directly so we can assert the reader's tolerance.
+            try:
+                conn = rec._conn()  # noqa: SLF001 — test-only
+                conn.execute(
+                    "INSERT INTO events (ts, kind, role, round, "
+                    "request_json, response_json) VALUES "
+                    "(?, 'llm_call', 'planner', 1, ?, ?)",
+                    (time.time(), "{not valid json", "also bad"),
+                )
+                conn.commit()
+                rec.finalize(status="completed")
+            finally:
+                rec.close()
+            rm, rlm = load_role_messages(db)
+            # Both fields are None — no usable rows.
+            self.assertIsNone(rm)
+            self.assertIsNone(rlm)
 
 
 if __name__ == "__main__":

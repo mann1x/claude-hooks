@@ -677,6 +677,137 @@ class TestReopen:
                 "critic": "stub", "synthesizer": "stub",
             }
 
+    def test_reopen_loads_role_messages_when_transcript_db_present(
+            self, isolated_home, project_dir):
+        # Phase 4: when the artifact dir contains a finalized
+        # transcript.db, the reopen path populates SessionState's
+        # _role_messages / _role_lane_messages fields. The stub
+        # runner doesn't write a transcript.db (it bypasses the
+        # recorder), so we seed one manually after the consultation
+        # completes — same shape Phase 5's follow-up reads.
+        from consultants.engine.recorder import (
+            MessageRecorder, RecorderMeta,
+        )
+        app = create_app(run_council=make_stub_runner())
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_for_status(client, sid)
+
+            # Seed a transcript.db alongside the existing artifacts.
+            sdir = (project_dir / ".claude-hooks" / "consultants" / sid)
+            db_path = sdir / storage.TRANSCRIPT_DB_FILENAME
+            meta = RecorderMeta(
+                sid=sid, cwd=str(project_dir),
+                question="q", effort="medium",
+                topology="council", models={"planner": "m"},
+            )
+            rec = MessageRecorder(db_path, meta=meta)
+            try:
+                rec.record_llm(
+                    role="synthesizer", round=1, model="m",
+                    request={"messages": [
+                        {"role": "user", "content": "q"}]},
+                    response={"choices": [{"message": {
+                        "role": "assistant",
+                        "content": "**Verdict**: from db.",
+                    }}]},
+                )
+                rec.record_llm(
+                    role="researcher", round=1, lane_idx=0, model="m",
+                    request={"messages": [
+                        {"role": "user", "content": "lane 0 task"}]},
+                    response={"choices": [{"message": {
+                        "role": "assistant",
+                        "content": "lane 0 finding",
+                    }}]},
+                )
+                rec.record_llm(
+                    role="researcher", round=1, lane_idx=1, model="m",
+                    request={"messages": [
+                        {"role": "user", "content": "lane 1 task"}]},
+                    response={"choices": [{"message": {
+                        "role": "assistant",
+                        "content": "lane 1 finding",
+                    }}]},
+                )
+                rec.finalize(status="completed")
+            finally:
+                rec.close()
+
+            # Evict and reopen — exercise the disk-load branch.
+            with app.state.sessions_lock:
+                app.state.sessions.pop(sid)
+            r = client.post(f"/v1/consult/{sid}/reopen",
+                            json={"cwd": str(project_dir)})
+            assert r.status_code == 200
+            state = app.state.sessions[sid]
+
+            # _role_messages populated for both roles.
+            assert state._role_messages is not None
+            assert "synthesizer" in state._role_messages
+            assert "researcher" in state._role_messages
+            assert state._role_messages["synthesizer"][-1]["content"] \
+                == "**Verdict**: from db."
+            # Per-lane researcher threads carry both lanes.
+            assert state._role_lane_messages is not None
+            assert state._role_lane_messages["researcher"].keys() \
+                == {0, 1}
+            assert state._role_lane_messages["researcher"][0][-1]["content"] \
+                == "lane 0 finding"
+            assert state._role_lane_messages["researcher"][1][-1]["content"] \
+                == "lane 1 finding"
+
+    def test_reopen_without_transcript_db_keeps_fields_none(
+            self, isolated_home, project_dir):
+        # Backward compat: a v1.0-shape artifact dir (metadata.json
+        # but no transcript.db) reopens cleanly with _role_messages
+        # left at None. Phase 5 falls back to turn-content
+        # reconstruction in that case.
+        app = create_app(run_council=make_stub_runner())
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_for_status(client, sid)
+            # No transcript.db seeding — the stub runner doesn't
+            # write one.
+            with app.state.sessions_lock:
+                app.state.sessions.pop(sid)
+            r = client.post(f"/v1/consult/{sid}/reopen",
+                            json={"cwd": str(project_dir)})
+            assert r.status_code == 200
+            state = app.state.sessions[sid]
+            assert state._role_messages is None
+            assert state._role_lane_messages is None
+            # And other reopen behavior still works.
+            assert state.final_answer == "**Verdict**: stub answer."
+
+    def test_reopen_tolerates_corrupt_transcript_db(
+            self, isolated_home, project_dir):
+        # If transcript.db exists but isn't a valid SQLite database
+        # (truncated mid-write, replaced with garbage), reopen still
+        # succeeds; _role_messages just stays None.
+        app = create_app(run_council=make_stub_runner())
+        with TestClient(app) as client:
+            sid = client.post("/v1/consult", json={
+                "message": "q", "cwd": str(project_dir),
+            }).json()["sid"]
+            _wait_for_status(client, sid)
+            sdir = (project_dir / ".claude-hooks" / "consultants" / sid)
+            (sdir / storage.TRANSCRIPT_DB_FILENAME).write_text(
+                "not a sqlite db",
+            )
+            with app.state.sessions_lock:
+                app.state.sessions.pop(sid)
+            r = client.post(f"/v1/consult/{sid}/reopen",
+                            json={"cwd": str(project_dir)})
+            assert r.status_code == 200
+            state = app.state.sessions[sid]
+            assert state._role_messages is None
+            assert state._role_lane_messages is None
+
 
 # ----------------------- close endpoint ------------------------- #
 

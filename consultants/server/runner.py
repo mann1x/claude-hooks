@@ -243,6 +243,12 @@ def make_runner(*, ollama_base_url: str):
             recorder, status=terminal_status, error=node_error,
             finished_at=state.finished_at,
         )
+        # v1.1: load the role-message threads off the now-finalized
+        # transcript.db so the warm SessionState carries the same
+        # ``_role_messages`` / ``_role_lane_messages`` shape a
+        # disk-reopened session would have. Phase 5's follow-up
+        # branches on these uniformly.
+        _populate_role_messages(state, recorder)
 
     return run_council
 
@@ -481,6 +487,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
             recorder, status=terminal_status, error=node_error,
             finished_at=state.finished_at,
         )
+        _populate_role_messages(state, recorder)
 
     return run_follow_up
 
@@ -520,6 +527,29 @@ def _build_recorder(*, sid: str, cwd: str, question: str,
             "consultation will run without transcript.db", sid, exc,
         )
         return None
+
+
+def _populate_role_messages(state, recorder) -> None:
+    """After ``finalize_recorder`` runs, query the just-finalized
+    transcript.db and attach the per-role / per-lane message threads
+    to the SessionState. Best-effort — leaves the fields at None on
+    any failure (recorder=None, file missing, parse error). The
+    fields default to None so a no-op leaves the warm-session shape
+    matching a v1.0 reopen.
+    """
+    if recorder is None:
+        return
+    try:
+        from consultants.engine.recorder import load_role_messages
+        rm, rlm = load_role_messages(recorder.db_path)
+        state._role_messages = rm
+        state._role_lane_messages = rlm
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning(
+            "role-message reconstruction from %s failed: %s; "
+            "leaving _role_messages=None",
+            getattr(recorder, "db_path", "<unknown>"), exc,
+        )
 
 
 def _finalize_recorder(recorder, *, status: str,
