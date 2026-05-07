@@ -35,6 +35,9 @@ def make_runner(*, ollama_base_url: str):
     )
     from claude_hooks.caliber_proxy.prompt import build_grounding_messages
     from consultants.engine.graph import GraphDeps, build_council_graph
+    from consultants.engine.trace import (
+        Tracer, TracedChat, traced_tool, traced_node,
+    )
 
     def run_council(state, runner_input: dict) -> None:
         cfg: cc.ConsultantsConfig = runner_input["config"]
@@ -42,9 +45,20 @@ def make_runner(*, ollama_base_url: str):
         question: str = runner_input["question"]
         enabled = tuple(cc.enabled_roles(cfg))
 
+        # Per-session tracer. No-op when both the per-request flag is
+        # unset and the env var ``CONSULTANTS_TRACE`` is off, so
+        # production runs pay zero overhead.
+        tracer = Tracer.for_session(
+            state.sid, enabled=runner_input.get("trace"),
+        )
+
         # One ChatClient per role so retries and timing don't bleed.
+        # Each is wrapped with TracedChat so every .chat() call emits
+        # an llm_call span tagged with role, model, tokens, duration.
         chat_clients = {
-            r: ChatClient(ollama_base_url) for r in enabled
+            r: TracedChat(ChatClient(ollama_base_url),
+                          role=r, tracer=tracer)
+            for r in enabled
         }
         models = {r: cfg.roles[r].model for r in enabled}
 
@@ -57,11 +71,11 @@ def make_runner(*, ollama_base_url: str):
             models=models,
             enabled_roles=enabled,
             cwd=cwd,
-            tool_executor=tool_execute,
+            tool_executor=traced_tool(tool_execute, tracer=tracer),
             tool_specs=openai_tool_specs(),
             grounding_msgs=grounding_msgs,
         )
-        compiled = build_council_graph(deps)
+        compiled = build_council_graph(deps, tracer=tracer)
 
         # Build initial state, mark planner in_progress for the first
         # progress poll (it's the entry node by default).

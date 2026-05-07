@@ -184,12 +184,18 @@ def plan_topology(enabled: tuple[str, ...]) -> list[tuple[str, str]]:
 # ----------------------- builder --------------------------------- #
 
 def build_council_graph(deps: GraphDeps,
-                        *, checkpointer: Optional[Any] = None):
+                        *, checkpointer: Optional[Any] = None,
+                        tracer: Optional[Any] = None):
     """Compile the LangGraph state machine.
 
     Imports langgraph lazily so this module is importable in envs
     without the package. The compiled graph's ``invoke(state)``
     runs the council; ``ainvoke`` is also available.
+
+    ``tracer`` is an optional ``consultants.engine.trace.Tracer``
+    instance; when provided, every node's enter/exit emits a span.
+    A disabled tracer (``CONSULTANTS_TRACE`` unset) is a no-op so
+    the wrap is safe to apply unconditionally.
     """
     try:
         from langgraph.graph import StateGraph, START, END
@@ -205,16 +211,24 @@ def build_council_graph(deps: GraphDeps,
     if "synthesizer" not in enabled:
         raise ValueError("synthesizer must be enabled")
 
+    def _wrap(role: str, fn):
+        if tracer is None:
+            return fn
+        from consultants.engine.trace import traced_node
+        return traced_node(fn, role=role, tracer=tracer)
+
     sg = StateGraph(CouncilState)
 
     # Wrappers per role (closures over deps).
     if "planner" in enabled:
-        sg.add_node("planner", _wrap_planner(deps))
+        sg.add_node("planner", _wrap("planner", _wrap_planner(deps)))
     if "researcher" in enabled:
-        sg.add_node("researcher", _wrap_researcher(deps))
+        sg.add_node("researcher",
+                    _wrap("researcher", _wrap_researcher(deps)))
     if "critic" in enabled:
-        sg.add_node("critic", _wrap_critic(deps))
-    sg.add_node("synthesizer", _wrap_synthesizer(deps))
+        sg.add_node("critic", _wrap("critic", _wrap_critic(deps)))
+    sg.add_node("synthesizer",
+                _wrap("synthesizer", _wrap_synthesizer(deps)))
 
     # Unconditional edges from plan_topology.
     for src, dst in plan_topology(enabled):

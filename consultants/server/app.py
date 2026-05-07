@@ -196,10 +196,21 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             ),
         )
 
+        # Per-request trace override. ``body["trace"]`` (bool) wins over
+        # the process-wide ``CONSULTANTS_TRACE`` env var. ``None`` =
+        # fall through to env-var default.
+        trace_flag = body.get("trace")
+        if trace_flag is not None and not isinstance(trace_flag, bool):
+            raise HTTPException(
+                status_code=400,
+                detail="trace must be a bool",
+            )
+
         runner_input = {
             "config": cfg,
             "cwd": str(cwd_path),
             "question": question,
+            "trace": trace_flag,
         }
 
         # Hand off to the executor. The runner mutates ``state`` and

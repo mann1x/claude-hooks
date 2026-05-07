@@ -127,6 +127,13 @@ def cmd_consult(args, base: str) -> int:
     }
     if args.effort:
         body["effort"] = args.effort
+    # Per-request trace override. --trace forces on, --no-trace forces
+    # off; absence falls through to the engine's CONSULTANTS_TRACE env
+    # var (default off).
+    if args.trace is True:
+        body["trace"] = True
+    elif args.trace is False:
+        body["trace"] = False
     out = _http("POST", f"{base}/v1/consult", body=body)
     print(json.dumps({"ok": True, **out}, indent=2))
     return 0
@@ -379,6 +386,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Project root (default: current directory).")
     c.add_argument("--effort", choices=tuple(cc.EFFORT_BUDGETS),
                    help="Override effort tier for this consultation.")
+    # Tri-state: --trace forces on, --no-trace forces off, absence
+    # falls back to the engine's CONSULTANTS_TRACE env var.
+    c.add_argument("--trace", dest="trace",
+                   action="store_true", default=None,
+                   help="Force tracing on for this consultation. Writes "
+                        "JSONL to ~/.claude/consultants-traces/<sid>.jsonl. "
+                        "Summarize with scripts/consultants_trace_summary.py.")
+    c.add_argument("--no-trace", dest="trace", action="store_false",
+                   help="Force tracing off for this consultation, "
+                        "overriding CONSULTANTS_TRACE.")
     c.set_defaults(fn=cmd_consult)
 
     # status
