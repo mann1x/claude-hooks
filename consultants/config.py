@@ -399,10 +399,17 @@ def set_role(role: str, *, model: Optional[str] = None,
     - ``clear_extras``: empty the list. Useful for reverting an
       x-tier benchmark prep.
 
-    Researcher and critic are the only fan-outable roles, so the
-    extras knobs are accepted on planner/synthesizer too but are
-    effectively unused at runtime — the engine only consults
-    ``extra_models`` for researcher (Phase 9) / critic (Phase 10).
+    Researcher and critic are the only fan-outable roles. The extras
+    knobs are accepted on planner / synthesizer too:
+
+    - ``planner.extra_models`` is currently unused at runtime
+      (planner doesn't fan out and doesn't have a fallback path).
+    - ``synthesizer.extra_models`` is repurposed (2026-05-07) as a
+      serial **failure-fallback** chain — when the primary
+      synthesizer model exhausts its retry budget on a cloud flap,
+      the engine walks this list in order before declaring the
+      consultation failed. Active at every effort tier (not gated
+      by x-prefix). NOT a fan-out.
     """
     if role not in ROLES:
         raise ValueError(

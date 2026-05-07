@@ -144,6 +144,15 @@ class GraphDeps:
     extra_models_by_role: dict[str, list[str]] = field(
         default_factory=dict,
     )
+    # 2026-05-07: serial fallback chain for the synthesizer when its
+    # primary model exhausts its retry budget on a cloud flap. NOT a
+    # fan-out — the synthesizer always tries primary first and only
+    # walks this list on Exception. Cloud 500's that persist past the
+    # ChatClient retry budget (15 attempts / ~15 min) are the
+    # motivating case (csl-2026-05-07-2158-7c75). Populated from
+    # ``cfg.roles["synthesizer"].extra_models`` at every effort tier
+    # (not gated by x-prefix — cloud flaps don't care about effort).
+    synthesizer_fallback_models: list[str] = field(default_factory=list)
 
 
 # ----------------------- node wrappers --------------------------- #
@@ -209,6 +218,7 @@ def _wrap_synthesizer(deps: GraphDeps):
             self_critic=deps.synthesizer_self_critic,
             recorder=deps.recorder,
             prior_messages=deps.prior_messages_by_role.get("synthesizer"),
+            fallback_models=list(deps.synthesizer_fallback_models),
         )
     return _node
 

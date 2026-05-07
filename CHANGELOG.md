@@ -16,6 +16,66 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added
+
+- **/consultants — synthesizer fallback chain on persistent
+  failure** — when the primary synthesizer model exhausts its
+  ChatClient retry budget on a cloud flap (HTTP 500 / 502 / 503 /
+  504 / 408 / 429), the engine now walks `synthesizer.extra_models`
+  in order before declaring the consultation failed. Same
+  `chat_client` (so the same proxy + connection pool); only the
+  `model` field of the payload changes per attempt. First success
+  wins. Each attempt records an `llm_call` event with the actual
+  model used, so post-hoc audit via `/consultants--show <sid> --raw`
+  reveals which model produced the final answer. Configure with
+  `claude-consultants config set-role synthesizer --add-model
+  <tag>`. Active at every effort tier (not gated by the x-prefix —
+  cloud flaps don't care about effort).
+
+- **/consultants — degraded-answer composer on synthesizer
+  failure** — when every model in the fallback chain fails, the
+  council now writes a `summary.md` whose `final_answer` field
+  surfaces the researcher's full reports + the critic's verdict
+  rather than `(consultation incomplete: synthesizer error: ...)`.
+  Researcher reports often run 3-5k tokens of analysis at xhigh
+  effort, and the critic verdict adds another 1k of structured
+  decision text — that's the most expensive work in a consultation
+  and now survives the synthesizer's failure to the user. The
+  banner explains it's a degraded answer (not a synthesized one)
+  and points the user at `claude-consultants follow-up <THIS_SID>
+  --message "compose a final answer..."` to recover cheaply (the
+  next synthesizer attempt inherits research + critic warm and
+  costs one more call, not a full re-run).
+
+- **/consultants--followup — failed-session-aware parent picker**
+  — the skill now defaults to the most recent session of *any*
+  status (was: most recent `completed` only). When the most recent
+  is `failed`, AskUserQuestion offers two paths: (1) chain off the
+  failed sid (cheapest — researcher + critic threads inherit from
+  disk and only the synthesizer re-runs) or (2) chain off the
+  failed sid's `parent_sid` (start over from a known-good thread).
+  Pairs with the engine-side fallback chain + degraded answer above
+  to make recovery from a cloud flap a one-step user action.
+
+### Changed
+
+- **ChatClient retry budget bumped from 8 attempts / ~136 s to 15
+  attempts / ~905 s (~15 min)** — `DEFAULT_MAX_RETRIES` 8 → 15 and
+  `DEFAULT_RETRY_MAX_DELAY_S` 30 → 90 in
+  `claude_hooks/get_advice/chat_client.py`. The motivating session
+  (`csl-2026-05-07-2158-7c75`, xhigh effort) burned the whole
+  pre-bump budget on a 2+ minute Ollama Cloud 500 window and lost
+  the synthesizer outright; with the new budget a flap of that
+  shape is absorbed by the retry loop and the consultation
+  completes. A 5-15 minute consultation can now tolerate up to ~15
+  minutes of cloud unavailability without failing — the trade-off
+  being that an actual permanent outage takes longer to surface as
+  a user-visible error. Affects both `/consultants` (synthesizer
+  + every other role's ChatClient) and `/get-advice` (the advisor
+  itself). Override via `ChatClient(..., max_retries=N,
+  retry_max_delay_s=S)` per call site if a cheaper budget is
+  desirable.
+
 ### Fixed
 
 - **install.py — bin/* shim PATH wrappers (cross-platform)** —

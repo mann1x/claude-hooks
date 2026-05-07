@@ -25,12 +25,20 @@ DEFAULT_TIMEOUT_S = 600.0
 # upstream parser errors like ``"Value looks like object, but can't
 # find closing '}' symbol"`` even when the request body is verifiably
 # valid JSON (the same body retried wins seconds later). Treat 408,
-# 429, 4xx-with-known-transient-bodies, and all 5xx as retryable. The
-# retry budget is generous because cloud models can flap several
-# times in a row before settling.
-DEFAULT_MAX_RETRIES = 8
+# 429, 4xx-with-known-transient-bodies, and all 5xx as retryable.
+#
+# Budget sizing — empirical Ollama Cloud flap windows on
+# 2026-05-07 (synthesizer 500'd for >2 min on csl-2026-05-07-2158-7c75
+# and burned the prior 8-attempt / 136 s budget). A /consultants
+# session can take 5-15 min total, so paying up to ~15 min of retry
+# budget is a good trade vs. failing the consultation outright.
+#
+# Sequence with these defaults (15 attempts, base 1.5 s, cap 90 s):
+#   1.5  3  6  12  24  48  90 ... 90  (10 runs at the cap)
+#   = 1.5 + 3 + 6 + 12 + 24 + 48 + 90*9 = 904.5 s  ≈ 15.1 min
+DEFAULT_MAX_RETRIES = 15
 DEFAULT_RETRY_BASE_DELAY_S = 1.5
-DEFAULT_RETRY_MAX_DELAY_S = 30.0
+DEFAULT_RETRY_MAX_DELAY_S = 90.0
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 # 4xx response bodies that look like transient cloud parser/validator
 # flaps rather than genuine "you sent bad data" errors. Substring

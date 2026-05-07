@@ -155,6 +155,16 @@ def make_runner(*, ollama_base_url: str):
                         effort=cfg.effort,
                     )
 
+        # 2026-05-07: synthesizer fallback chain. Universal — applies
+        # at every effort tier including base ones. ``extra_models``
+        # on the synthesizer role is repurposed here as a serial
+        # failure-fallback list (NOT a fan-out — the synthesizer never
+        # fans out, even at xmax). Empty list -> no fallback, original
+        # single-model behavior.
+        synthesizer_fallback = list(
+            cfg.roles["synthesizer"].extra_models or []
+        )
+
         deps = GraphDeps(
             chat_clients=chat_clients,
             models=models,
@@ -168,6 +178,7 @@ def make_runner(*, ollama_base_url: str):
             disable_cache=disable_cache,
             recorder=recorder,
             extra_models_by_role=extra_models_by_role,
+            synthesizer_fallback_models=synthesizer_fallback,
         )
         compiled = build_council_graph(deps, tracer=tracer)
 
@@ -407,6 +418,13 @@ def make_follow_up_runner(*, ollama_base_url: str):
                 if thread:
                     prior_messages_by_role[role] = thread
 
+        # 2026-05-07: same synthesizer fallback chain as the primary
+        # runner. Carries through follow-ups so a flap mid-followup
+        # is rescued the same way as a flap mid-original.
+        synthesizer_fallback_followup = list(
+            cfg.roles["synthesizer"].extra_models or []
+        )
+
         deps = GraphDeps(
             chat_clients=chat_clients,
             models=models,
@@ -420,6 +438,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
             disable_cache=True,             # caching not useful here
             recorder=recorder,
             prior_messages_by_role=prior_messages_by_role,
+            synthesizer_fallback_models=synthesizer_fallback_followup,
         )
         compiled = build_follow_up_graph(deps, tracer=tracer)
 

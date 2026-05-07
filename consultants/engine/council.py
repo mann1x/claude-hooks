@@ -534,6 +534,97 @@ def _single_shot(chat_client, model: str, messages: list[dict],
     return (_extract_text(response), pt, ct)
 
 
+def _compose_degraded_answer(state: dict, *, error: str) -> str:
+    """Build a fallback ``final_answer`` from researcher + critic work
+    when the synthesizer fails after exhausting its retry budget.
+
+    The researcher reports and critic verdict are the most expensive
+    work in a consultation (often 2-3 minutes each at xhigh effort)
+    and they live in state by the time the synthesizer runs. When
+    the cloud flaps a 500 on the synthesizer alone, ditching all
+    that work and returning ``(consultation incomplete)`` is much
+    worse than handing the user the raw findings with a clear
+    "synthesizer failed, this is not a synthesis" banner.
+
+    Result shape (markdown):
+
+        # Degraded answer (synthesizer failed)
+        > {error string, indented}
+        > The findings below are the researcher's raw reports and
+        > the critic's verdict.
+
+        ## Researcher findings
+        ### Round 1
+        <full content>
+        ### Round 2
+        ...
+
+        ## Critic verdict
+        <full content>
+
+        ## How to recover
+        <how-to-resume hint pointing at follow-up>
+
+    Returns the placeholder error string only when neither research
+    nor critic content survived (rare — would mean the failure
+    happened before researcher even produced output). The caller
+    still treats the consultation as ``status=failed``.
+    """
+    research = [
+        r for r in (state.get("research") or [])
+        if isinstance(r, str) and r.strip()
+    ]
+    critique = (state.get("critique") or "").strip()
+    if not research and not critique:
+        return f"(consultation incomplete: synthesizer error: {error})"
+
+    parts: list[str] = []
+    parts.append("# Degraded answer (synthesizer failed)")
+    parts.append("")
+    parts.append("> **synthesizer error:**")
+    for line in error.splitlines() or [error]:
+        parts.append(f"> {line}")
+    parts.append(">")
+    parts.append("> The synthesizer could not compose a final answer "
+                 "after exhausting its retry budget. The findings "
+                 "below are the researcher's raw reports and the "
+                 "critic's verdict — uncombined and unsmoothed. "
+                 "See **How to recover** at the bottom for the "
+                 "cheapest way to get a real synthesis.")
+    parts.append("")
+    if research:
+        parts.append("## Researcher findings")
+        if len(research) == 1:
+            parts.append("")
+            parts.append(research[0].strip())
+        else:
+            for i, rep in enumerate(research, start=1):
+                parts.append("")
+                parts.append(f"### Round {i}")
+                parts.append("")
+                parts.append(rep.strip())
+        parts.append("")
+    if critique:
+        parts.append("## Critic verdict")
+        parts.append("")
+        parts.append(critique)
+        parts.append("")
+    parts.append("## How to recover")
+    parts.append("")
+    parts.append(
+        "Follow up against THIS session's sid (not the original "
+        "parent) to inherit researcher + critic threads — the "
+        "synthesizer can then compose with the work above already "
+        "warm. Cost is one synthesizer call, not a full re-run."
+    )
+    parts.append("")
+    parts.append(
+        "    claude-consultants follow-up <THIS_SID> "
+        "--message \"compose a final answer from the prior research and critic\""
+    )
+    return "\n".join(parts)
+
+
 # ----------------------- node implementations -------------------- #
 # Each node mutates only its own slice of state. The LangGraph
 # Reducer pattern would let us return partial updates that are
@@ -1104,7 +1195,8 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                      think: Any = True,
                      self_critic: bool = False,
                      recorder=None,
-                     prior_messages: Optional[list[dict]] = None) -> dict:
+                     prior_messages: Optional[list[dict]] = None,
+                     fallback_models: Optional[list[str]] = None) -> dict:
     if recorder is not None:
         try:
             recorder.record_node(role="synthesizer", kind="node_enter")
@@ -1153,27 +1245,60 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
             state.get("critique"),
             self_critic=self_critic,
         )
+    # 2026-05-07: serial fallback chain. The synthesizer always tries
+    # ``model`` first (with its own ChatClient retry budget — ~15 min
+    # at the v1.1 defaults). On Exception, walks ``fallback_models``
+    # in order. Same chat_client, same prior_messages — only the
+    # ``model`` field of the payload changes. First successful model
+    # wins; if every model fails, fall through to the degraded-answer
+    # path. Each attempt logs an llm_call event with the actual model
+    # used so the audit trail in transcript.db is accurate.
+    models_to_try: list[str] = [model] + list(fallback_models or [])
     t0 = time.monotonic()
-    try:
-        text, pt, ct = _single_shot(
-            chat_client, model, msgs, think=think,
-            recorder=recorder, role="synthesizer", round=1,
-        )
-    except Exception as e:
-        log.exception("synthesizer_node failed: %s", e)
+    text: Optional[str] = None
+    pt = ct = 0
+    last_exc: Optional[Exception] = None
+    used_model: str = model
+    for attempt_idx, try_model in enumerate(models_to_try):
+        try:
+            text, pt, ct = _single_shot(
+                chat_client, try_model, msgs, think=think,
+                recorder=recorder, role="synthesizer", round=1,
+            )
+            used_model = try_model
+            if attempt_idx > 0:
+                log.warning(
+                    "synthesizer fell back from %s to %s on attempt %d/%d",
+                    model, try_model,
+                    attempt_idx + 1, len(models_to_try),
+                )
+            break
+        except Exception as e:
+            last_exc = e
+            if attempt_idx + 1 < len(models_to_try):
+                log.warning(
+                    "synthesizer model %s failed (%s); "
+                    "trying fallback model %s",
+                    try_model, e, models_to_try[attempt_idx + 1],
+                )
+                continue
+            # Last fallback also failed — fall through to degraded.
+            log.exception(
+                "synthesizer_node failed on every model "
+                "(primary=%s, fallbacks=%s): %s",
+                model, list(fallback_models or []), e,
+            )
+    if text is None:
         # Synthesizer failure is terminal — propagate as an error
-        # but produce a placeholder final_answer so storage still
-        # writes something readable. Tombstone the turn so the
-        # transcript records the failure (the artifact reader at
-        # storage.py iterates ``turns`` and would otherwise drop
-        # this lane).
-        err_text = f"(synthesizer failed: {e})"
+        # but try to surface the researcher + critic work that DID
+        # complete as a "degraded answer" so the user gets the raw
+        # findings instead of a bare "(consultation incomplete)".
+        err_text = f"(synthesizer failed: {last_exc})"
+        degraded = _compose_degraded_answer(state, error=str(last_exc))
         return {
-            "error": f"synthesizer failed: {e}",
+            "error": f"synthesizer failed: {last_exc}",
             "_role_failed": "synthesizer",
-            "final_answer": (
-                f"(consultation incomplete: synthesizer error: {e})"
-            ),
+            "final_answer": degraded,
             "turns": [RoleTurn(
                 role="synthesizer", round=1, content=err_text,
                 prompt_tokens=0, completion_tokens=0,

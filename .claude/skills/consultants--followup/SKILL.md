@@ -41,32 +41,65 @@ Only execute the workflow below when **all** of these are true:
 If the trigger is ambiguous, ask one short clarifying question
 rather than running silently.
 
-## Step 1 — resolve the parent sid
+## Step 1 — resolve the parent sid (with failed-session awareness)
 
 Parse the user's message after the slash command. Look for a
 positional sid argument matching the pattern
 `csl-<YYYY-MM-DD>-<HHMM>-<hex>` at the start of the args. The
 remaining text is the follow-up message.
 
-**If the user provided a sid:** use it directly.
+**If the user provided a sid:** use it directly. Don't second-guess
+— the user knows what they want to chain off.
 
-**If no sid is present and a previous /consultants or
-/consultants--show in the current Claude Code session printed a
-session id in its footer:** use that one. Tell the user which sid
-you picked.
-
-**If no sid is available:** run
+**If no sid is present, default to the MOST RECENT session of any
+status** (not just completed). Run:
 
 ```
 claude-consultants list --cwd "$(pwd)" --limit 10
 ```
 
-Surface the JSON `sessions` array as a compact numbered list
-(newest first, with sid + status + effort + question preview).
-If exactly one session is `completed`, default to it and announce
-that choice. If multiple are completed, AskUserQuestion which one
-to follow up on. If the list is empty, say so plainly and suggest
-the user start a new consultation with `/consultants`.
+Sort sessions newest-first (the JSON usually arrives that way) and
+inspect the top entry's `status`. Three cases:
+
+### Case A — most recent is `completed`
+
+Use it as `parent_sid`. Tell the user:
+> "Following up on csl-..., your last completed consultation."
+
+### Case B — most recent is `failed`
+
+This is the synthesizer-flap case (e.g. transient HTTP 500). The
+researcher + critic work survives in transcript.db, so chaining
+off the FAILED sid is usually the cheapest win. AskUserQuestion:
+
+- **Chain off the failed session (recommended)** — uses the failed
+  sid as parent. Researcher + critic threads inherit from disk; the
+  follow-up's synthesizer composes with that prior work warm. Often
+  the right answer when the original failure was a cloud flap and
+  the user just wants to retry.
+- **Chain off the failed session's `parent_sid`** — start over from
+  the known-good consultation upstream of the failure. Use this
+  when the failed session's research was thin / wrong and the user
+  wants a fresh angle on the original question. Look up the failed
+  session's `parent_sid` field via `claude-consultants result <failed_sid>`
+  (in the metadata) — that's the sid to chain off.
+- **Cancel** — the user wants to do something else.
+
+### Case C — most recent is `running`
+
+The previous consultation hasn't finished yet. Tell the user, offer
+to either wait (poll status until complete, then follow up) or
+cancel. Don't fire a follow-up against a running session.
+
+### Edge cases
+
+- **List empty**: say so plainly and suggest `/consultants <query>`
+  to start a fresh consultation.
+- **More than one completed session looks plausible** (e.g. the user
+  ran several /consultants in this project today): default to the
+  newest, but if the user's follow-up text references a specific
+  earlier session by topic ("re: the LR audit"), AskUserQuestion to
+  pick the right sid.
 
 ## Step 2 — check whether the parent is warm
 
@@ -162,6 +195,16 @@ inherits all prior turns from the same role thread.
   different files in scope), use `/consultants` not this skill.
   The signal: does the question reference the parent's findings or
   recommendations? If yes, follow-up. If no, fresh.
+- **Chaining off a failed session is usually CHEAPER than chaining
+  off its parent.** When a synthesizer-only failure occurs (cloud
+  flap, HTTP 500 after the retry budget), the researcher's full
+  analysis and the critic's verdict are already on disk in the
+  failed session's `transcript.db`. Chaining off the failed sid
+  means the synthesizer composes with that prior research warm —
+  often a sub-second `_single_shot` once the engine is reopened.
+  Chaining off the parent re-runs researcher + critic from scratch.
+  When in doubt, prefer the failed sid; the user can re-do from
+  scratch if the answer is unsatisfying.
 - **Chains are cheap**: a follow-up on a follow-up costs only the
   marginal turn — the warm-engine path skips planner re-grounding
   entirely. This is the intended workflow for iterative refinement

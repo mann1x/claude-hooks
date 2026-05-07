@@ -1,0 +1,65 @@
+# gemma4-98e native-tools (Q4_K_M) Modelfile
+#
+# Same Gemma 4 native tool template as :native-tools (Q6_K), but on the
+# Q4_K_M base for ~3 GB lower weights footprint. Q4_K_M = 11.5 GB weights
+# vs Q6_K = 14.5 GB. KV cache scales identically with num_ctx.
+#
+# At num_ctx=131072 (typical caliber prompts: 30-140k tokens):
+#   :native-tools     (Q6_K): ~22.1 GB total VRAM
+#   :native-tools-q4  (Q4_K_M): ~19.1 GB total VRAM
+#
+# That ~3 GB savings on a 24 GB GPU (3090/4090) is enough to coexist
+# with qwen3-embedding:0.6b on GPU at 16k ctx (~3.5 GB), removing the
+# need for the proxy's CPU-fallback embedder path. Worth running side-
+# by-side against the Q6_K leg to confirm output quality (skill count,
+# file:line refs, density) holds.
+#
+# Build:
+#   ollama create gemma4-98e:native-tools-q4 -f modelfiles/gemma4-98e-native-tools-q4.Modelfile
+
+FROM hf.co/ManniX-ITA/gemma-4-A4B-98e-v3-it-GGUF:CD-Q4_K_M
+
+TEMPLATE """{{- if or .System .Tools }}<bos><|turn>system
+{{ if .System }}{{ .System }}
+{{ end }}{{- if .Tools }}
+You may call one or more functions to assist the user. Available functions:
+{{- range .Tools }}
+<|tool>declaration:{{ .Function.Name }}{{ .Function.Parameters }}<tool|>
+{{- end }}
+
+To call a function, emit:
+<|tool_call>call:FUNCTION_NAME{arg_name:<|"|>string_value<|"|>,other_arg:number}<tool_call|>
+
+All string values MUST be wrapped in <|"|>...<|"|> delimiters. Numbers and booleans are raw.
+{{- end }}<turn|>
+{{ end -}}
+{{- range $i, $msg := .Messages }}
+{{- $last := eq (len (slice $.Messages $i)) 1 -}}
+{{- if eq $msg.Role "system" }}
+{{- if gt $i 0 }}<|turn>system
+{{ $msg.Content }}<turn|>
+{{ end }}
+{{- else if eq $msg.Role "user" }}<|turn>user
+{{ $msg.Content }}<turn|>
+{{ else if eq $msg.Role "assistant" }}<|turn>model
+{{- if $msg.Content }}
+{{ $msg.Content }}
+{{- end }}
+{{- range $msg.ToolCalls }}
+<|tool_call>call:{{ .Function.Name }}{{ .Function.Arguments }}<tool_call|>
+{{- end }}{{ if not $last }}<turn|>
+{{ end }}
+{{- else if eq $msg.Role "tool" }}<|turn>user
+<|tool_response>response:{{ $msg.Name }}{ {{ $msg.Content }} }<tool_response|><turn|>
+{{ end }}
+{{- if and (ne $msg.Role "assistant") $last }}<|turn>model
+{{ end }}
+{{- end }}"""
+
+PARAMETER num_ctx 256000
+PARAMETER stop "<turn|>"
+PARAMETER stop "<|tool_response>"
+PARAMETER repeat_penalty 1.15
+PARAMETER repeat_last_n 256
+PARAMETER temperature 0.6
+PARAMETER top_p 0.95

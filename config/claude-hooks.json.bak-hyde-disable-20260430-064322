@@ -1,0 +1,227 @@
+{
+  "version": 2,
+  "providers": {
+    "qdrant": {
+      "enabled": false,
+      "mcp_url": "http://192.168.178.2:32775/mcp",
+      "headers": {},
+      "collection": "memory",
+      "recall_k": 3,
+      "store_mode": "auto",
+      "timeout": 5.0,
+      "dedup_threshold": 0.85
+    },
+    "memory_kg": {
+      "enabled": false,
+      "mcp_url": "http://192.168.178.2:32776/mcp",
+      "headers": {},
+      "recall_k": 3,
+      "store_mode": "auto",
+      "timeout": 5.0
+    },
+    "pgvector": {
+      "enabled": true,
+      "dsn": "postgresql://claude:Xct29ERYVvn6iTme6dt544pd3sP6o1QmR0A69d82@127.0.0.1:5432/memory",
+      "table": "memories_qwen3",
+      "additional_tables": [
+        "kg_observations_qwen3"
+      ],
+      "embedder": "ollama",
+      "embedder_options": {
+        "url": "http://192.168.178.2:11433/api/embeddings",
+        "model": "qwen3-embedding:0.6b",
+        "timeout": 30.0,
+        "num_ctx": 32768,
+        "max_chars": 30000
+      },
+      "recall_k": 5,
+      "store_mode": "auto",
+      "timeout": 10.0,
+      "dedup_threshold": 0.85
+    },
+    "sqlite_vec": {
+      "enabled": false,
+      "db_path": "~/.claude/claude-hooks-memory.db",
+      "table": "memory",
+      "embedder": "ollama",
+      "embedder_options": {
+        "url": "http://localhost:11434/api/embeddings",
+        "model": "nomic-embed-text"
+      },
+      "recall_k": 5,
+      "store_mode": "auto",
+      "timeout": 10.0
+    }
+  },
+  "hooks": {
+    "user_prompt_submit": {
+      "enabled": true,
+      "min_prompt_chars": 10,
+      "include_providers": [
+        "pgvector"
+      ],
+      "max_total_chars": 4000,
+      "hyde_enabled": true,
+      "hyde_grounded": true,
+      "hyde_ground_k": 3,
+      "hyde_ground_max_chars": 1500,
+      "hyde_model": "gemma4:e2b",
+      "hyde_fallback_model": "gemma4:e4b",
+      "hyde_url": "http://192.168.178.2:11433/api/generate",
+      "hyde_timeout": 30.0,
+      "hyde_max_tokens": 150,
+      "hyde_keep_alive": "15m",
+      "progressive": false,
+      "decay_enabled": true,
+      "decay_file": "~/.claude/claude-hooks-decay.json",
+      "decay_recency_halflife_days": 14,
+      "decay_frequency_cap": 5,
+      "metadata_filter": {
+        "enabled": false,
+        "over_fetch_factor": 4,
+        "require_cwd_match": false,
+        "require_observation_type": null,
+        "max_age_days": null,
+        "require_tags": []
+      }
+    },
+    "session_start": {
+      "enabled": true,
+      "show_status_line": true,
+      "compact_recall": true,
+      "compact_recall_query": "session context, key decisions, and important patterns"
+    },
+    "stop": {
+      "enabled": true,
+      "store_threshold": "noteworthy",
+      "classify_observations": true,
+      "extract_instincts": true,
+      "instincts_dir": "~/.claude/instincts",
+      "summary_format": "markdown",
+      "detach_store": false
+    },
+    "stop_guard": {
+      "enabled": true,
+      "patterns": [],
+      "skip_meta_context": true,
+      "meta_markers": [],
+      "skip_on_user_wrap_up": true,
+      "user_wrap_up_markers": []
+    },
+    "session_end": {
+      "enabled": true
+    },
+    "daemon": {
+      "enabled": true,
+      "host": "127.0.0.1",
+      "port": 47018,
+      "replay_window_seconds": 60
+    },
+    "code_graph": {
+      "enabled": true,
+      "min_source_files": 5,
+      "max_files_to_scan": 2000,
+      "staleness_minutes": 10,
+      "lock_min_age_seconds": 60,
+      "max_inject_chars": 4000,
+      "rebuild_on_session_start": true,
+      "rebuild_on_stop": true
+    },
+    "companions": {
+      "enabled": true,
+      "reindex_on_stop": true,
+      "lock_min_age_seconds": 60,
+      "axon_host": {
+        "enabled": false
+      }
+    },
+    "claudemem_reindex": {
+      "enabled": true,
+      "check_on_stop": true,
+      "check_on_session_start": true,
+      "staleness_minutes": 10,
+      "max_files_to_scan": 2000,
+      "ignored_dirs": [],
+      "lock_min_age_seconds": 60
+    },
+    "pre_tool_use": {
+      "enabled": false,
+      "warn_on_tools": [
+        "Bash",
+        "Edit",
+        "Write"
+      ],
+      "warn_on_patterns": [
+        "rm ",
+        "git reset --hard"
+      ],
+      "file_read_gate": false,
+      "file_read_gate_tools": [
+        "Read",
+        "Edit",
+        "MultiEdit"
+      ],
+      "safety_scan_enabled": false,
+      "safety_use_defaults": true,
+      "safety_extra_patterns": [],
+      "safety_log_enabled": true,
+      "safety_log_dir": "~/.claude/permission-scanner",
+      "safety_log_retention_days": 90,
+      "rtk_rewrite_enabled": true,
+      "rtk_min_version": "0.23.0",
+      "rtk_timeout": 3.0,
+      "rtk_log_rewrites": false,
+      "rtk_scan_rewrites": true,
+      "code_graph_lookup_enabled": true,
+      "code_graph_lookup_budget_ms": 50,
+      "code_graph_lookup_max_hits": 5
+    }
+  },
+  "reflect": {
+    "enabled": true,
+    "max_memories_to_analyze": 50,
+    "min_pattern_count": 3,
+    "output_path": "~/.claude/CLAUDE.md",
+    "ollama_model": "gemma4:e2b",
+    "ollama_url": "http://192.168.178.2:11433/api/generate"
+  },
+  "consolidate": {
+    "enabled": true,
+    "trigger": "manual",
+    "min_sessions_between_runs": 10,
+    "state_file": "~/.claude/claude-hooks-consolidate.json",
+    "max_memories_to_scan": 200,
+    "merge_similarity_threshold": 0.8,
+    "prune_stale_days": 90,
+    "ollama_model": "gemma4:e2b",
+    "ollama_url": "http://192.168.178.2:11433/api/generate"
+  },
+  "episodic": {
+    "mode": "server",
+    "server_url": "",
+    "server_host": "192.168.178.2",
+    "server_port": 11435,
+    "binary": "episodic-memory",
+    "timeout": 10.0
+  },
+  "proxy": {
+    "enabled": true,
+    "listen_host": "192.168.178.2",
+    "listen_port": 38080,
+    "upstream": "https://api.anthropic.com",
+    "timeout": 120.0,
+    "log_requests": true,
+    "log_dir": "~/.claude/claude-hooks-proxy",
+    "log_retention_days": 14,
+    "record_rate_limit_headers": true,
+    "block_warmup": true,
+    "scan_stop_phrases": true
+  },
+  "logging": {
+    "path": "~/.claude/claude-hooks.log",
+    "level": "debug",
+    "max_bytes": 2097152,
+    "backup_count": 3
+  },
+  "disable_marker_filename": ".claude-hooks-disable"
+}
