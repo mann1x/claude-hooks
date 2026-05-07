@@ -297,6 +297,58 @@ class TestThreadSafety(unittest.TestCase):
 
 
 class TestLifecycle(unittest.TestCase):
+    def test_finalize_truncates_wal_after_concurrent_writes(self):
+        # Regression: finalize must close every peer (writer-thread)
+        # connection BEFORE running PRAGMA wal_checkpoint(TRUNCATE);
+        # otherwise the truncate silently downgrades to PASSIVE and
+        # the on-disk -wal file stays at its high-water mark even
+        # after the consultation completes. Caught on the live
+        # 2026-05-07 smoke run where transcript.db-wal sat at 1 MB
+        # next to a 1 MB main DB.
+        import os
+
+        with TemporaryDirectory() as td:
+            db = Path(td) / "transcript.db"
+            rec = MessageRecorder(db, meta=_meta())
+
+            errors: list[Exception] = []
+
+            def worker(lane: int) -> None:
+                try:
+                    for i in range(40):
+                        rec.record_llm(
+                            role="researcher", round=1, lane_idx=lane,
+                            model="qwen3.5:cloud",
+                            request={"lane": lane, "i": i, "pad": "x" * 200},
+                            response={"ok": True, "pad": "y" * 200},
+                        )
+                except Exception as exc:
+                    errors.append(exc)
+
+            try:
+                threads = [threading.Thread(target=worker, args=(lane,))
+                           for lane in range(4)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+                self.assertEqual(errors, [])
+
+                rec.finalize(status="completed")
+
+                wal_path = db.with_suffix(db.suffix + "-wal")
+                # The -wal file may not even exist after a clean
+                # truncate (SQLite removes it once size goes to 0).
+                # If it exists, it must be empty.
+                if wal_path.exists():
+                    self.assertEqual(
+                        os.path.getsize(wal_path), 0,
+                        f"-wal file should be 0 bytes after finalize, "
+                        f"got {os.path.getsize(wal_path)} bytes",
+                    )
+            finally:
+                rec.close()
+
     def test_finalize_updates_meta_and_runs_vacuum(self):
         with TemporaryDirectory() as td:
             db = Path(td) / "transcript.db"

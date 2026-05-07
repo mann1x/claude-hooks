@@ -149,9 +149,19 @@ class MessageRecorder:
     # ------------------------------------------------------------------ #
 
     def _new_conn(self) -> sqlite3.Connection:
-        # `check_same_thread=False` is unsafe — we deliberately keep
-        # the default (True) and hand each thread its own connection.
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        # ``check_same_thread=False`` lets the finalizer thread close
+        # peer threads' connections at teardown. We still hand each
+        # thread its own connection for writes (the safety property
+        # the same-thread default exists to enforce); we only need
+        # cross-thread access for ``close()`` so wal_checkpoint(
+        # TRUNCATE) can actually shrink the WAL. Without this flag,
+        # ``conn.close()`` raises sqlite3.ProgrammingError on a
+        # cross-thread call, the close fails silently inside
+        # finalize's except guard, and the WAL stays at high-water
+        # mark.
+        conn = sqlite3.connect(
+            str(self.db_path), timeout=30.0, check_same_thread=False,
+        )
         for pragma in _PRAGMAS:
             conn.execute(pragma)
         with self._lock:
@@ -347,12 +357,40 @@ class MessageRecorder:
             (status, finished_at if finished_at is not None else time.time(), error, self._meta.sid),
         )
         conn.commit()
-        # Checkpoint + VACUUM keep on-disk size honest. Both are
-        # cheap (~50 ms total at the sizes we expect) and only run
-        # once per consultation.
+        # Drop every peer connection before checkpointing. SQLite's
+        # ``wal_checkpoint(TRUNCATE)`` silently downgrades to PASSIVE
+        # mode (folds pages but leaves the WAL file at high-water
+        # mark) when ANY other connection — even an idle one from a
+        # fan-out writer thread — is still attached. We hold N
+        # writer-thread conns in ``_all_conns``; close all but the
+        # finalizing one so TRUNCATE actually shrinks the WAL.
+        with self._lock:
+            for c in list(self._all_conns):
+                if c is not conn:
+                    try:
+                        c.close()
+                    except Exception:
+                        pass
+            self._all_conns = [conn]
+        # Invalidate other threads' TLS refs — they'll get a fresh
+        # conn from ``_conn()`` if they ever record again (they
+        # shouldn't; finalize is the terminal call).
         try:
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            del self._tls.conn
+        except AttributeError:
+            pass
+        self._tls.conn = conn  # the finalizer's TLS slot points at the live conn
+        # VACUUM first to compact the main DB, then
+        # ``wal_checkpoint(TRUNCATE)`` to shrink the WAL to zero.
+        # Order matters: in WAL mode VACUUM writes its compaction
+        # output through the WAL, so a TRUNCATE before VACUUM gets
+        # immediately re-filled (~100 KB on a 4-lane fan-out).
+        # Doing the TRUNCATE last leaves both files at minimum size.
+        # Both calls are cheap (~50 ms total) and only run once per
+        # consultation.
+        try:
             conn.execute("VACUUM;")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
         except sqlite3.OperationalError:
             # VACUUM can fail if another connection has an open
             # transaction. Not worth retrying — meta is already
