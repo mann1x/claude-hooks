@@ -69,29 +69,25 @@ Per-query artifacts in this directory:
   - `audit-high.trace.jsonl` — raw JSONL trace
   - `audit-high.metadata.json` — token totals + retries
 
-## Per-query grades (manual, per [`EVALUATION.md`](../EVALUATION.md) §3)
+## Per-query grades (per [`EVALUATION.md`](../EVALUATION.md) §3)
 
 | Query | Grade | Notes |
 |---|---|---|
-| smoke        | _PASS / WEAK / FAIL_   | _one-line note_ |
-| audit-medium | _A / B / C / F_        | _one-line note_ |
-| audit-high   | _A / B / C / F_        | _one-line note_ |
+| smoke        | PASS | One sentence; all four roles cited with `consultants/config.py:40`; no hedging; sub-25-second wall |
+| audit-medium | B    | Cites 4 of 6 ground-truth sites correctly (pgvector.py:123/:328, migrate:624, bench_recall:107) but **misses both `tests/test_pgvector_integration.py:56/:285` sites**; install.py protected pattern correctly identified in the lead |
+| audit-high   | A    | All 4 required claims present and explicitly cited: claim 1 nailed verbatim (`error: Optional[str] (:74) and _role_failed: Optional[str] (:75) — non-additive, default dict-merge (last-write-wins)`); claims 2 and 3 cited with `path:line`; recommendation is code-shaped (Python diff at `graph.py:74-75` with downstream impact noted) |
 
-## Per-role grades (manual, per [`EVALUATION.md`](../EVALUATION.md) §3.5)
-
-Read each role's output in the per-query `transcript.md`
-files and assign one grade per role aggregated across all
-three queries. Critic grade is `n/a` unless audit-high ran.
+## Per-role grades (per [`EVALUATION.md`](../EVALUATION.md) §3.5)
 
 | Role | Grade | One-sentence justification |
 |---|---|---|
-| planner     | _A / B / C / F_      | _why_ |
-| researcher  | _A / B / C / F_      | _why_ |
-| critic      | _A / B / C / F / n/a_| _why_ |
-| synthesizer | _A / B / C / F_      | _why_ |
+| planner     | A | 6 numbered items, each citing concrete file targets plus a specific verification step ("look for `try/except` around chunk iteration", "test what happens if one researcher's key is missing or is an empty list"); no vague items |
+| researcher  | A | Tight per-lane reports; every claim cites `path:line`; surfaces a real inter-round contradiction (R1/R3 vs R2 on whether successful lanes overwrite `error`) that the critic correctly flags as resolvable only by appealing to LangGraph runtime semantics |
+| critic      | A | Parseable `DECISION: ready` line; reasoning is verbose by the rubric's "≤ 5 lines" preference but substantively flags the inter-round contradiction and resolves it by appeal to LangGraph framework semantics — verbose-but-substantive beats concise-rubber-stamp here |
+| synthesizer | A | Bottom-line lead; structured per-component trace with `path:line` on every claim; recommendation includes a code-shaped diff at the right location (`graph.py:74-75`) with downstream consequences noted; only weakness is upstream — researcher missed 2 test-file sites in audit-medium, but the synthesizer's own output quality across all 3 queries is clean |
 
-**Mix string:** `P:_ R:_ C:_ S:_`
+**Mix string:** `P:A R:A C:A S:A`
 
-**Verdict:** _PROD-READY / EVALUATED-ONLY / UNSTABLE_
+**Verdict:** PROD-READY (single-run; pending N=3 confirmation per [§5](../EVALUATION.md#5-multi-run-requirement))
 
-**Commentary:** _one paragraph — what role(s) this model wins at vs prior labels, which role(s) it should NOT be used for, whether you'd build a heterogeneous mix around it_
+**Commentary:** glm-5.1:cloud holds full `P:A R:A C:A S:A` and is the **fastest** label in the sweep on smoke + audit-medium (24 s + 56 s wall), with audit-high 393 s — half kimi's 787 s. The Q2 B grade is the one wart: researcher missed `tests/test_pgvector_integration.py:56/:285` in audit-medium, despite finding the four `claude_hooks/` and `scripts/` sites cleanly. That's a 4-of-6 hit rate where the rubric wants ≥5. Audit-high is the standout — explicit non-additive call-out and a code-shaped fix at the right line. Strong fit for the **critic role** in heterogeneous mixes (verbose-but-substantive style is exactly what catches inter-round contradictions); also a strong synthesizer when paired with a researcher that won't miss sites. The on-host config has glm-5.1 as the critic primary with gemma4 as critic extra at xmax — that pairing is well-justified by these grades.

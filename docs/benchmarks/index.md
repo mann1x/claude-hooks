@@ -1,17 +1,43 @@
 # `/consultants` benchmark sweeps
 
-> **tl;dr (2026-05-07 sweep, 7 cloud labels)** — only
-> [`kimi-k2.6-cloud-2026-05-07/`](kimi-k2.6-cloud-2026-05-07/) and the
-> retroactive [`kimi-k2.6-cloud-2026-05-07-pre-harden/`](kimi-k2.6-cloud-2026-05-07-pre-harden/)
-> baseline carry **graded verdicts** so far (both PROD-READY,
-> single-run; mix string `P:A R:A C:A S:A`; N=3 confirmation
-> pending per [`EVALUATION.md` §5](EVALUATION.md#5-multi-run-requirement)).
-> Runs for `gemma4-31b-cloud`, `glm-5-1-cloud`, `minimax-m2-7-cloud`,
-> `qwen3-5-397b-cloud`, and `qwen3-5-cloud` completed cleanly but
-> their `results.md` per-query / per-role grade tables are still
-> placeholders — token + wall data is real, the human-graded
-> answer-quality verdict isn't filled in yet. For "which model
-> should I pick?" guidance see
+> **tl;dr — 2026-05-07 sweep, all 7 cloud labels graded by Claude
+> reading the on-disk transcripts** (per
+> [`EVALUATION.md` §3.5](EVALUATION.md#35-per-role-quality-grading-the-key-to-building-a-model-mix);
+> the human operator only verifies model selection in real-world
+> skill usage on whichever model gets picked — they don't grade
+> transcripts). Single-run; N=3 confirmation pending per
+> [§5](EVALUATION.md#5-multi-run-requirement).
+>
+> | Label | Q1 | Q2 | Q3 | Mix | Verdict | Audit-high wall |
+> |---|---|---|---|---|---|---|
+> | [kimi-k2.6-cloud](kimi-k2.6-cloud-2026-05-07/) | PASS | A | A | P:A R:A C:A S:A | **PROD-READY** | 787s |
+> | [gemma4-31b-cloud](gemma4-31b-cloud-2026-05-07/) | PASS | A | B | P:A R:A C:A S:A | **PROD-READY** | 197s |
+> | [glm-5-1-cloud](glm-5-1-cloud-2026-05-07/) | PASS | B | A | P:A R:A C:A S:A | **PROD-READY** | 393s |
+> | [minimax-m2-7-cloud](minimax-m2-7-cloud-2026-05-07/) | PASS | A | C | P:C R:C C:A S:B | EVALUATED-ONLY | 752s |
+> | [qwen3-5-397b-cloud](qwen3-5-397b-cloud-2026-05-07/) | PASS | C | A | P:A R:B C:A S:B | EVALUATED-ONLY | 228s |
+> | [qwen3-5-cloud](qwen3-5-cloud-2026-05-07/) | PASS | C | A | P:A R:B C:A S:B | EVALUATED-ONLY | 300s |
+> | [kimi-k2.6-cloud-pre-harden](kimi-k2.6-cloud-2026-05-07-pre-harden/) | PASS | A | A | P:A R:A C:A S:A | PROD-READY (retroactive baseline) | n/a |
+>
+> **Three PROD-READY labels** — kimi-k2.6, gemma4-31b, glm-5.1 —
+> all hold full `P:A R:A C:A S:A` mix at single-run. Per the §4
+> rubric, the per-query grades floor is Q1 PASS, Q2 ≥ B, Q3 ≥ B;
+> no query > 25 min wall. The recommended on-host config for
+> v1.1.0 (mixed: planner / synthesizer = gemma4:31b-cloud,
+> researcher = gemma4 + glm-5.1, critic = glm-5.1 + gemma4 at
+> xmax, synthesizer fallback = glm-5.1) draws on the relative
+> strengths surfaced here.
+>
+> **Three EVALUATED-ONLY labels** are usable in heterogeneous
+> mixes for specific roles where their per-role grade is A — most
+> notably **minimax-m2.7 as a critic** (its `needs_more_research`
+> verdict on audit-high was the most diagnostically useful in the
+> sweep) and **qwen3.5:397b / qwen3.5 as planner** (clean
+> numbered plans with concrete file targets at fast wall times).
+> Don't use them as synthesizer for enumeration-heavy queries —
+> qwen3 fabricates "commit doesn't exist" claims; minimax hedges
+> "files don't exist" leads.
+>
+> For "which model should I pick?" guidance see
 > [`../consultants.md` § Picking models](../consultants.md#picking-models);
 > for the protocol see [`EVALUATION.md`](EVALUATION.md).
 

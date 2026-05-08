@@ -137,9 +137,16 @@ GOOD at — that's what lets us compose heterogeneous configs like
 
 For each label, after running the three queries, read each role's
 output across all three transcripts and assign **one role grade
-per role** (A / B / C / F). The grader is the human; auto-grading
-these is currently out of scope. Record the grade plus a
-one-sentence justification in `results.md` § Per-role grades.
+per role** (A / B / C / F). The grader is **Claude (the LLM
+driving the consultation work)** reading the on-disk transcripts.
+This is the natural fit for a `/consultants`-style evaluation:
+the conversation is LLM-to-LLM throughout, including the grading.
+The human operator's job is the lighter one — verify model
+selection in real-world skill usage on whichever model gets
+picked, not grade transcripts.
+
+Record the grade plus a one-sentence justification in
+`results.md` § Per-role grades.
 
 ### Planner (input: question; output: numbered plan)
 

@@ -69,29 +69,25 @@ Per-query artifacts in this directory:
   - `audit-high.trace.jsonl` — raw JSONL trace
   - `audit-high.metadata.json` — token totals + retries
 
-## Per-query grades (manual, per [`EVALUATION.md`](../EVALUATION.md) §3)
+## Per-query grades (per [`EVALUATION.md`](../EVALUATION.md) §3)
 
 | Query | Grade | Notes |
 |---|---|---|
-| smoke        | _PASS / WEAK / FAIL_   | _one-line note_ |
-| audit-medium | _A / B / C / F_        | _one-line note_ |
-| audit-high   | _A / B / C / F_        | _one-line note_ |
+| smoke        | PASS | One sentence; all four roles named with `consultants/config.py:40` citation; no hedging |
+| audit-medium | A    | All 6 ground-truth psycopg sites cited with correct exercisability verdicts (pgvector.py:123/:328, migrate:624, bench_recall:107, test_pgvector_integration.py:56/:285); install.py protected sites correctly omitted |
+| audit-high   | B    | Claims 2-4 present and concrete (researcher_node tombstone at `council.py:555`; synthesizer's missing failure signal; `build_synthesizer_messages` at `council.py:245` as the hardening target); claim 1 (non-additive `error`/`_role_failed` reducers) implicit but not explicitly called out as last-write-wins |
 
-## Per-role grades (manual, per [`EVALUATION.md`](../EVALUATION.md) §3.5)
-
-Read each role's output in the per-query `transcript.md`
-files and assign one grade per role aggregated across all
-three queries. Critic grade is `n/a` unless audit-high ran.
+## Per-role grades (per [`EVALUATION.md`](../EVALUATION.md) §3.5)
 
 | Role | Grade | One-sentence justification |
 |---|---|---|
-| planner     | _A / B / C / F_      | _why_ |
-| researcher  | _A / B / C / F_      | _why_ |
-| critic      | _A / B / C / F / n/a_| _why_ |
-| synthesizer | _A / B / C / F_      | _why_ |
+| planner     | A | 6 numbered items, each citing a concrete file/path target (`consultants/engine/graph.py`, `runner.py`, `storage.py`) plus a specific verification step ("trace the call stack", "verify if a node failure terminates the entire stream"); no vague "look at how X works" items |
+| researcher  | A | Tight per-lane reports across 3 fan-out lanes; every claim cites `path:line`; no hallucinated paths; planner's 6 items covered without redundant reads |
+| critic      | A | Single concise paragraph (~5 lines) with parseable `DECISION: ready` line; correctly identifies the trace as complete and the recommendation as cited; no re-route burned on already-complete evidence |
+| synthesizer | A | Bottom-line lead ("degraded but coherent answer, but the overall consultation is marked as `status=failed`"); structured per-stage trace with file/line on each claim; recommendation cites real file with concrete change shape; no preamble or hedging |
 
-**Mix string:** `P:_ R:_ C:_ S:_`
+**Mix string:** `P:A R:A C:A S:A`
 
-**Verdict:** _PROD-READY / EVALUATED-ONLY / UNSTABLE_
+**Verdict:** PROD-READY (single-run; pending N=3 confirmation per [§5](../EVALUATION.md#5-multi-run-requirement))
 
-**Commentary:** _one paragraph — what role(s) this model wins at vs prior labels, which role(s) it should NOT be used for, whether you'd build a heterogeneous mix around it_
+**Commentary:** Across the board strong — gemma4:31b-cloud holds the same `P:A R:A C:A S:A` mix as the kimi baseline at roughly **25% of the wall time** (audit-high 197s vs kimi's 787s). The Q3 grade dropped to B because the synthesizer never explicitly named the non-additive last-write-wins behavior of `error`/`_role_failed` — the implication is there in the recommendation but not stated, and a frontier-tier answer should call it out. Strongly suitable for any role; if cost-optimizing a heterogeneous mix this is the cheaper drop-in for planner / researcher / synthesizer where kimi was previously default. Critic role is fine here too — the verdict was concise and correctly signaled "ready" rather than burning a re-route on the already-complete trace.

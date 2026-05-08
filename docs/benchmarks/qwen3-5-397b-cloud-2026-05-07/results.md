@@ -69,29 +69,25 @@ Per-query artifacts in this directory:
   - `audit-high.trace.jsonl` — raw JSONL trace
   - `audit-high.metadata.json` — token totals + retries
 
-## Per-query grades (manual, per [`EVALUATION.md`](../EVALUATION.md) §3)
+## Per-query grades (per [`EVALUATION.md`](../EVALUATION.md) §3)
 
 | Query | Grade | Notes |
 |---|---|---|
-| smoke        | _PASS / WEAK / FAIL_   | _one-line note_ |
-| audit-medium | _A / B / C / F_        | _one-line note_ |
-| audit-high   | _A / B / C / F_        | _one-line note_ |
+| smoke        | PASS | One sentence; all four roles named with `consultants/engine/council.py:98-99` citation; no hedging |
+| audit-medium | C    | Cites only **2 of 6** ground-truth sites (pgvector.py:123/:328); misses migrate:624, bench_recall:107, and both test sites; **also makes a fabricated claim** ("Commit `4e67dc2` does not exist in this repository") which is false (the commit is in `git log`) — exactly the "fabricates non-existent ... claims" failure mode in the §3 rubric |
+| audit-high   | A    | All 4 required claims present and explicitly cited: claim 1 nailed (`error and _role_failed at lines 74-75 are not annotated (plain dict merge, last-write-wins)`); claims 2-3 cited with `path:line`; recommendation is code-shaped (Python diff at `council.py:545-550` adding `error: None` and `_role_failed: None` to successful returns) |
 
-## Per-role grades (manual, per [`EVALUATION.md`](../EVALUATION.md) §3.5)
-
-Read each role's output in the per-query `transcript.md`
-files and assign one grade per role aggregated across all
-three queries. Critic grade is `n/a` unless audit-high ran.
+## Per-role grades (per [`EVALUATION.md`](../EVALUATION.md) §3.5)
 
 | Role | Grade | One-sentence justification |
 |---|---|---|
-| planner     | _A / B / C / F_      | _why_ |
-| researcher  | _A / B / C / F_      | _why_ |
-| critic      | _A / B / C / F / n/a_| _why_ |
-| synthesizer | _A / B / C / F_      | _why_ |
+| planner     | A | 7 numbered items, each citing concrete file targets with verification steps ("verify how parallel lane exceptions are merged", "identify the exception handling boundary"); item 7 is overly procedural ("Pinpoint the specific line ... where wrapping parallel lane execution would isolate failures") but the rest are sound |
+| researcher  | B | Real `path:line` citations on claims (council.py:555-571, graph.py:74-75, runner.py:174); but inserts answer-shaped sub-headers (`## Failure Path Analysis`, `## Verdict`, `## Recommended Hardening Change`) per lane — drafts the synthesizer's answer instead of producing per-lane evidence; critic correctly flagged inter-round contradiction on status determination |
+| critic      | A | Parseable `DECISION: needs_more_research` with explicit gap-naming ("show the successful `researcher_node` return dict structure", "confirm exact status logic with surrounding context") and `path:line` for each gap; correctly identified the contradiction across rounds |
+| synthesizer | B | Audit-high A and smoke clean; but audit-medium fabricates the "commit doesn't exist" claim — that's a synthesizer-quality issue, not a researcher one (researcher provided the 2 sites; synthesizer chose to lead with a wrong claim about commit existence rather than acknowledge the search didn't surface it) |
 
-**Mix string:** `P:_ R:_ C:_ S:_`
+**Mix string:** `P:A R:B C:A S:B`
 
-**Verdict:** _PROD-READY / EVALUATED-ONLY / UNSTABLE_
+**Verdict:** EVALUATED-ONLY (Q2 grade C falls below the §4 PROD-READY floor of B)
 
-**Commentary:** _one paragraph — what role(s) this model wins at vs prior labels, which role(s) it should NOT be used for, whether you'd build a heterogeneous mix around it_
+**Commentary:** qwen3.5:397b's frontier-question performance (audit-high A) is the surprise — it explicitly nailed the non-additive last-write-wins behavior with a code-shaped fix, matching the kimi baseline at this difficulty. But the audit-medium C grade is a real foot-gun: only 2 of 6 sites cited and a confidently-wrong claim about commit existence. Strong fit for **planner** (clean numbered plans) and **critic** (substantive gap-naming with `path:line`). Risky for synthesizer in audit / fact-extraction queries where its tendency to fabricate negative claims ("X doesn't exist") would mislead users; safer when the question is reasoning-heavy rather than enumeration-heavy. Wall is fast (audit-high 228s vs kimi 787s), so a P:qwen-397b R:_ C:qwen-397b S:_ mix could work if the researcher and synthesizer roles are filled by labels that ground better.

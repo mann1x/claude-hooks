@@ -69,29 +69,25 @@ Per-query artifacts in this directory:
   - `audit-high.trace.jsonl` — raw JSONL trace
   - `audit-high.metadata.json` — token totals + retries
 
-## Per-query grades (manual, per [`EVALUATION.md`](../EVALUATION.md) §3)
+## Per-query grades (per [`EVALUATION.md`](../EVALUATION.md) §3)
 
 | Query | Grade | Notes |
 |---|---|---|
-| smoke        | _PASS / WEAK / FAIL_   | _one-line note_ |
-| audit-medium | _A / B / C / F_        | _one-line note_ |
-| audit-high   | _A / B / C / F_        | _one-line note_ |
+| smoke        | PASS | One sentence (compound, slightly verbose for smoke); all four roles named with role-purpose summary; cites `consultants/engine/council.py:116,126,144,156`; no hedging |
+| audit-medium | A    | All 6 ground-truth sites cited correctly; install.py protected pattern explicitly identified (`install.py:2127`, `2524`, `2647`); test sites correctly flagged as "appropriate as-is" / "silent no-op acceptable" |
+| audit-high   | C    | Synthesizer **opens with a wrong assertion** ("The specific files (...) **do not exist at those paths** in this repository") that contradicts the rest of its own answer; the trace that follows is structurally correct (claim 2 ✓, claim 3 ✓, claim 4 ✓ with code block) but the lead hedge undermines the answer's reliability — a synthesizer that hedges its own evidence is a bigger problem than missing one claim |
 
-## Per-role grades (manual, per [`EVALUATION.md`](../EVALUATION.md) §3.5)
-
-Read each role's output in the per-query `transcript.md`
-files and assign one grade per role aggregated across all
-three queries. Critic grade is `n/a` unless audit-high ran.
+## Per-role grades (per [`EVALUATION.md`](../EVALUATION.md) §3.5)
 
 | Role | Grade | One-sentence justification |
 |---|---|---|
-| planner     | _A / B / C / F_      | _why_ |
-| researcher  | _A / B / C / F_      | _why_ |
-| critic      | _A / B / C / F / n/a_| _why_ |
-| synthesizer | _A / B / C / F_      | _why_ |
+| planner     | C | 7 numbered items but several are vague ("Trace one-lane failure through all four stages", "Determine if council produces answer or surfaces `status=failed`" — the latter just restates the question); the planner output also mixes inline tool-call placeholders within the plan, which is wrong shape (planner should plan, not start executing) |
+| researcher  | C | Researcher inserts its own `## Failure Path Analysis`, `## ONE hardening recommendation`, etc. sub-headers — drafting the synthesizer's answer rather than producing per-lane evidence reports; the critic explicitly flagged that "filesystem search returned zero matches for `consultants/` as a directory" — citations to unread files; tool-call discipline is the central failure here |
+| critic      | A | Parseable `DECISION: needs_more_research` line; gaps named with explicit `path:line` ("`consultants/engine/council.py` does not exist", "Round 2 says exception propagates ... Rounds 1 and 3 say the opposite"); requested specific verification snippets; the critic's diagnosis was correct (the synthesizer LATER walked into exactly the "files don't exist" hedge the critic was trying to resolve before synthesis) |
+| synthesizer | B | Two clean queries (smoke + audit-medium A) but audit-high opens with a wrong claim then hedges; the structural trace is correct but the lead damages user trust — would benefit from synthesizer-side guard ("when researcher disagrees about basic facts, ask for verification rather than synthesizing") |
 
-**Mix string:** `P:_ R:_ C:_ S:_`
+**Mix string:** `P:C R:C C:A S:B`
 
-**Verdict:** _PROD-READY / EVALUATED-ONLY / UNSTABLE_
+**Verdict:** EVALUATED-ONLY (Q3 grade C falls below the §4 PROD-READY floor of B)
 
-**Commentary:** _one paragraph — what role(s) this model wins at vs prior labels, which role(s) it should NOT be used for, whether you'd build a heterogeneous mix around it_
+**Commentary:** minimax-m2.7's standout role is **critic** — its needs_more_research verdict on audit-high was the most diagnostically useful of any label, naming the exact contradictions across rounds and requesting the specific snippet ranges that would resolve them. The planner and researcher roles are weaker: planner mixes meta-procedural items with concrete ones, and researcher writes synthesizer-shaped reports rather than per-lane evidence (with citations to files it hadn't actually opened, per the critic's flag). For a heterogeneous mix this model is a strong **critic-only** pick, especially as one extra in `xmax` critic fan-out where its tendency to flag inter-round contradictions complements gemma4 / glm-5.1's more affirmative styles. Not recommended for planner / researcher / synthesizer at frontier-question difficulty until the answer-shape discipline improves. Wall times are middling (smoke 36s, audit-high 752s).

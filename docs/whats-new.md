@@ -210,10 +210,24 @@ verdicts:
   `qwen3-5-397b-cloud`, `minimax-m2-7-cloud`, plus the
   retroactive `kimi-k2.6-cloud-pre-harden` baseline.
 
-Currently graded: kimi-k2.6 (both labels) — both PROD-READY,
-single-run, mix string `P:A R:A C:A S:A`. The other five labels
-have completed runs with real wall + token data but their
-human-graded answer-quality tables are still placeholders.
+All seven labels are graded by Claude (the LLM driving the
+evaluation work) reading the on-disk transcripts per the
+[§3.5 protocol](benchmarks/EVALUATION.md#35-per-role-quality-grading-the-key-to-building-a-model-mix);
+the human operator only verifies model selection in real-world
+skill usage on whichever model gets picked — they don't grade
+transcripts. Headline grades:
+
+| Verdict | Labels |
+|---|---|
+| **PROD-READY** (mix `P:A R:A C:A S:A`) | `kimi-k2.6-cloud`, `gemma4-31b-cloud`, `glm-5-1-cloud`, plus the retroactive `kimi-k2.6-cloud-pre-harden` baseline |
+| **EVALUATED-ONLY** (usable in mixes for specific roles where the per-role grade is A) | `minimax-m2-7-cloud` (strong critic), `qwen3-5-397b-cloud` (strong planner + critic), `qwen3-5-cloud` (cheap sibling, same shape as 397b) |
+
+Single-run, N=3 confirmation pending per
+[§5](benchmarks/EVALUATION.md#5-multi-run-requirement). The
+recommended on-host mixed config for v1.1.0 (planner / synthesizer
+= `gemma4:31b-cloud`, researcher = gemma4 + glm-5.1 at x-tier,
+critic = glm-5.1 + gemma4 at xmax, synthesizer failure-fallback
+= glm-5.1) draws directly on these grades.
 
 For "which model should I pick?" guidance see [`docs/consultants.md`
 § Picking models](consultants.md#picking-models).

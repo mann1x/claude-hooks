@@ -69,29 +69,25 @@ Per-query artifacts in this directory:
   - `audit-high.trace.jsonl` — raw JSONL trace
   - `audit-high.metadata.json` — token totals + retries
 
-## Per-query grades (manual, per [`EVALUATION.md`](../EVALUATION.md) §3)
+## Per-query grades (per [`EVALUATION.md`](../EVALUATION.md) §3)
 
 | Query | Grade | Notes |
 |---|---|---|
-| smoke        | _PASS / WEAK / FAIL_   | _one-line note_ |
-| audit-medium | _A / B / C / F_        | _one-line note_ |
-| audit-high   | _A / B / C / F_        | _one-line note_ |
+| smoke        | PASS | One sentence; all four roles named with `consultants/config.py:40` citation; no hedging |
+| audit-medium | C    | Cites only **2 of 6** ground-truth sites (pgvector.py:123/:328); misses migrate:624, bench_recall:107, and both test sites; **also fabricates** "The referenced commit `4e67dc2` does not exist in the repository history" (it does — same failure mode as the qwen3.5:397b sibling label) |
+| audit-high   | A    | All 4 required claims present and cited; claim 1 explicit ("error/_role_failed are plain fields (last-writer-wins)"); recommendation is code-shaped (remove the `error` key from lane-level tombstones at `council.py:563-566`) — note the recommendation's *direction* is debatable (removing the error key would prevent `status=failed` for partial-lane failures, which may be incorrect engine policy), but it's concrete and on a real line so the rubric grade stands |
 
-## Per-role grades (manual, per [`EVALUATION.md`](../EVALUATION.md) §3.5)
-
-Read each role's output in the per-query `transcript.md`
-files and assign one grade per role aggregated across all
-three queries. Critic grade is `n/a` unless audit-high ran.
+## Per-role grades (per [`EVALUATION.md`](../EVALUATION.md) §3.5)
 
 | Role | Grade | One-sentence justification |
 |---|---|---|
-| planner     | _A / B / C / F_      | _why_ |
-| researcher  | _A / B / C / F_      | _why_ |
-| critic      | _A / B / C / F / n/a_| _why_ |
-| synthesizer | _A / B / C / F_      | _why_ |
+| planner     | A | 7 numbered items with concrete file targets and verification steps ("locate the specific line ... where tool_executor non-string returns or timeouts raise unhandled exceptions"); reasoning chain is structured (item 6 isolates the exception origin, item 7 specifies the fix location) |
+| researcher  | B | Real `path:line` citations (council.py:555, graph.py:64-75, runner.py:172-174, agent_loop/runner.py:122); but inserts answer-shaped sub-headers per lane (`## Failure Path Analysis`, `## Recommended Hardening Change`) just like the 397b sibling — drafts the synthesizer's answer rather than producing per-lane evidence; critic flagged inter-round contradiction on status determination |
+| critic      | A | Parseable `DECISION: needs_more_research` line; gaps named with explicit `path:line` (`runner.py:172-176`, `graph.py:74-75`, `council.py:564 vs runner.py:174 vs agent_loop/runner.py:122`); flagged contradiction succinctly |
+| synthesizer | B | Audit-high A and smoke clean; but audit-medium fabricates the "commit doesn't exist" claim — same synthesizer-quality issue as the 397b sibling; the audit-high recommendation's debatable direction is a softer concern but worth flagging in commentary |
 
-**Mix string:** `P:_ R:_ C:_ S:_`
+**Mix string:** `P:A R:B C:A S:B`
 
-**Verdict:** _PROD-READY / EVALUATED-ONLY / UNSTABLE_
+**Verdict:** EVALUATED-ONLY (Q2 grade C falls below the §4 PROD-READY floor of B)
 
-**Commentary:** _one paragraph — what role(s) this model wins at vs prior labels, which role(s) it should NOT be used for, whether you'd build a heterogeneous mix around it_
+**Commentary:** qwen3.5:cloud is the cheaper sibling of qwen3.5:397b:cloud and shares the same shape — strong on planner + critic + frontier reasoning (audit-high A), weak on enumeration-heavy audit-medium where it cites only 2 of 6 sites and fabricates a commit-doesn't-exist claim. Wall is mid-pack (smoke 97s, audit-medium 88s, audit-high 300s), faster than kimi everywhere. The audit-high recommendation also has a directional issue worth noting — "remove the error key from tombstones so status doesn't show failed" is the wrong engine policy (the engine *should* mark status=failed when any lane errors), but the rubric grades on path:line + code-shape, both of which it delivers. **Strong critic / planner pick** for cost-conscious heterogeneous mixes; **avoid for synthesizer on audit-shaped queries** where its fabrication tendency would mislead. Direct comparison vs `qwen3-5-397b-cloud-2026-05-07`: same shape, different scale; the smaller model is competitive enough that the larger 397b's premium isn't obviously justified for this work.
