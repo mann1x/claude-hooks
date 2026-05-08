@@ -5,12 +5,38 @@ on every prompt and write findings back at the end of the turn.
 
 Install once at the **user level** and every Claude Code session gets
 deterministic memory recall + storage — no per-project init, no model
-forgetting. Beyond the core, v0.5+ ships a transparent
-`api.anthropic.com` proxy with stats DB + dashboard + behavior canaries,
-v0.6+ adds an in-process Python AST code-graph (with optional
-tree-sitter / MCP-server / clustering extras), and v0.7+ closes the
-IDE feedback loop with a session-scoped LSP engine and an opt-in ruff
-PostToolUse hook.
+forgetting. Beyond the core:
+
+- **v0.5+** — transparent `api.anthropic.com` proxy with stats DB +
+  dashboard + behavior canaries
+- **v0.6+** — in-process Python AST code-graph (with optional
+  tree-sitter / MCP-server / clustering extras)
+- **v0.7+** — session-scoped LSP engine + opt-in ruff PostToolUse hook
+- **v0.8+** — Caliber grounding proxy + shared `agent_loop.runner`
+- **v1.0** — daemon-first hook execution, stable skill surface,
+  pgvector backup + validity canary stack
+- **v1.1** — two LLM-to-LLM advisory features built on
+  `agent_loop.runner`:
+  - **`/get-advice`** — single-model second-opinion advisor talking
+    to a configured Ollama backend with project-grounded tool
+    access. Multi-turn, effort-budgeted, tool-filtered.
+    See [`docs/get-advice.md`](docs/get-advice.md).
+  - **`/consultants`** — multi-agent **council** (planner →
+    researcher → critic → synthesizer) with full per-role
+    LLM-message-history persistence in `transcript.db`, so a
+    follow-up against a session reopened from disk produces an
+    answer indistinguishable from a still-warm one. Multi-model
+    fan-out at `xmedium`/`xhigh`/`xmax` effort tiers, multi-critic
+    consensus with meta-critic combine at `xmax`, synthesizer
+    failure-fallback model chain, and a degraded-answer composer
+    that surfaces the researcher + critic work even when the
+    synthesizer can't compose. See
+    [`docs/consultants.md`](docs/consultants.md) for the runbook
+    and [`docs/benchmarks/EVALUATION.md`](docs/benchmarks/EVALUATION.md)
+    + [`docs/benchmarks/`](docs/benchmarks/) for the cloud-model
+    evaluation suite (smoke + audit-medium + audit-high sweeps
+    across kimi-k2.6, gemma4-31b, glm-5-1, qwen3-5, qwen3-5-397b,
+    minimax-m2-7).
 
 ---
 
@@ -35,10 +61,12 @@ wiring, monitoring, uninstall — see [`docs/deployment.md`](docs/deployment.md)
 
 ### Releases & versioning
 
-- Current version: **v1.0.2** — see [CHANGELOG.md](CHANGELOG.md) for the full history.
+- Current version: **v1.1.0** — see [CHANGELOG.md](CHANGELOG.md) for the full history,
+  or [`docs/whats-new.md`](docs/whats-new.md) for the human-readable
+  v1.1 highlights.
 - Tagged releases live on [GitHub Releases](https://github.com/mann1x/claude-hooks/releases) with auto-generated `Source code (zip / tar.gz)` archives.
 - Branch model: `main` is the release branch (every commit shippable, tags live here); `dev` is the working branch (feature work + fixes land here first). See [`docs/RELEASING.md`](docs/RELEASING.md) for the cut procedure.
-- To track unreleased work: `git log v1.0.2..origin/dev` after fetching.
+- To track unreleased work: `git log v1.1.0..origin/dev` after fetching.
 - **Optional self-update check** (opt-in via `install.py` or
   `update_check.enabled = true`): the daemon polls
   `https://api.github.com/repos/mann1x/claude-hooks/releases/latest`
@@ -437,7 +465,40 @@ The installer will:
 3. Verify each server with a real MCP call
 4. Write `config/claude-hooks.json` with your server URLs
 5. Merge hook entries into `~/.claude/settings.json` (idempotent, tagged `_managedBy`)
-6. Asks **"Use the API proxy?"**. On yes:
+6. **Drop PATH wrappers for every `bin/*` shim** so skill CLIs
+   (`claude-advisor`, `claude-consultants`, …) resolve by bare name
+   from Claude Code's bash subprocess. Locations are platform-specific:
+   - **POSIX (Linux + macOS)**: `~/.local/bin/<shim>` — POSIX sh
+     wrapper that `exec`s the absolute repo path. Almost always
+     already on `PATH`; the installer prints a one-line hint if not.
+   - **Windows**: `%LOCALAPPDATA%\claude-hooks\bin\<shim>` (POSIX
+     sh wrapper for the MSYS bash that Claude Code uses) plus a
+     `<shim>.cmd` sibling for native cmd / PowerShell users. The
+     installer also prepends that directory to **HKCU\Environment\PATH
+     via `reg add`** (NOT `setx`, which silently truncates User PATH
+     to 1024 chars), then broadcasts `WM_SETTINGCHANGE` so new
+     processes pick it up without a logoff.
+   Wrappers carry an install-time tag string in their first comment
+   line so re-runs are idempotent and `--uninstall` removes only the
+   tagged ones — hand-rolled wrappers of the same name are left alone.
+7. Asks **"Install /consultants engine?"**. On yes (opt-in, off by
+   default — declines cleanly): creates a dedicated
+   `claude-hooks-consultants` conda env (Py 3.11), pip-installs the
+   `consultants/` package with its LangGraph + LangServe stack, and
+   wires the per-OS service. Two modes:
+   - **Always-on** (default): systemd / launchd / Task Scheduler unit
+     keeps the engine resident, ~250 MB steady-state RAM. First-turn
+     latency is sub-second.
+   - **Smart-start** (opt-in): the daemon spawns the engine on
+     demand and reaps it after `idle_timeout_seconds` (default
+     30 min). Zero RAM idle, ~5-10 s cold start on first request
+     after a quiet period.
+   Conda is required — install.py aborts with a clear message
+   pointing at Miniconda if it's missing, no silent fallback to
+   bare venv. Everything goes through the dedicated env so the
+   LangGraph dep tree never leaks into the main `claude-hooks`
+   conda env that the test suite runs in.
+8. Asks **"Use the API proxy?"**. On yes:
    - **`[1]` Local install** — pip-installs `httpx[http2]>=0.27` into
      the chosen Python env, then drops the per-OS service:
      - **Linux** — `claude-hooks-proxy.service` + `rollup.service` +
@@ -514,16 +575,25 @@ expansion. If Ollama is down, HyDE degrades gracefully to the raw prompt.
 These are available as skills after running the installer. Type the
 command in the Claude Code prompt.
 
-| Command | Requires | Description |
-|---------|----------|-------------|
-| `/reflect` | Ollama | Analyze recent memories for recurring patterns, generate CLAUDE.md rules |
-| `/consolidate` | Ollama | Find duplicate memories, compress old entries, prune stale ones |
-| `/wrapup` | -- | Produce a restore-ready session state summary before compacting / pausing |
-| `/episodic <query>` | episodic-server | Search past Claude Code conversations by semantic query |
-| `/save-learning` | -- | Save a user instruction/preference as a persistent learning |
-| `/find-skills` | caliber | Search the public skill registry for community skills |
-| `/setup-caliber` | caliber | Set up Caliber pre-commit hooks for config drift detection |
-| `/setup-compile-aware` | LSP engine | Detect build tools in the current project and propose a `[compile_aware.commands]` block for `.claude-hooks/lsp-engine.toml`. Asks for confirmation before writing. |
+| Command | Since | Requires | Description |
+|---------|-------|----------|-------------|
+| `/reflect` | v0.2 | Ollama | Analyze recent memories for recurring patterns, generate CLAUDE.md rules |
+| `/consolidate` | v0.2 | Ollama | Find duplicate memories, compress old entries, prune stale ones |
+| `/wrapup` | v0.5 | -- | Produce a restore-ready session state summary before compacting / pausing |
+| `/episodic <query>` | v0.6 | episodic-server | Search past Claude Code conversations by semantic query |
+| `/save-learning` | v0.7 | -- | Save a user instruction/preference as a persistent learning |
+| `/find-skills` | v0.7 | caliber | Search the public skill registry for community skills |
+| `/setup-caliber` | v0.7 | caliber | Set up Caliber pre-commit hooks for config drift detection |
+| `/setup-compile-aware` | v0.7 | LSP engine | Detect build tools in the current project and propose a `[compile_aware.commands]` block for `.claude-hooks/lsp-engine.toml`. Asks for confirmation before writing. |
+| `/get-advice <query>` | **v1.1** | claude-advisor + Ollama | Multi-turn LLM-to-LLM second-opinion conversation with a configured Ollama advisor. Project tools (read_file, grep, glob, list_files, recall_memory) available to the advisor. See [`docs/get-advice.md`](docs/get-advice.md). |
+| `/get-advice--model [name [ctx]]` | **v1.1** | claude-advisor | Report or set the advisor's Ollama model + optional pinned context length. |
+| `/get-advice--effort [tier]` | **v1.1** | claude-advisor | Report or set the effort tier (`low`/`medium`/`high`/`max`) — caps how many fresh advisor sessions Claude may spawn per `/get-advice`. |
+| `/get-advice--tools [csv\|all\|none]` | **v1.1** | claude-advisor | Report or set the project-tool list exposed to the advisor. |
+| `/consultants <query>` | **v1.1** | claude-consultants | Multi-agent council consultation (planner → researcher → critic → synthesizer) with per-role message-history persistence in `transcript.db`. See [`docs/consultants.md`](docs/consultants.md). |
+| `/consultants--config` | **v1.1** | claude-consultants | Interactive walk-through to toggle roles, change per-role models, set context pins, switch effort tier (`low`/`medium`/`high`/`max`/`xmedium`/`xhigh`/`xmax`), change service mode (always-on / smart-start). |
+| `/consultants--list` | **v1.1** | claude-consultants | List past council sessions in this project. |
+| `/consultants--show <sid>` | **v1.1** | claude-consultants | Print a stored session's synthesizer answer + metadata; `--raw` dumps `transcript.db` events. |
+| `/consultants--followup [<sid>] <question>` | **v1.1** | claude-consultants | Iterate on a prior session — every role inherits its prior message thread from `transcript.db`. Failed-session-aware: when the most recent session failed (synthesizer flap), offers to chain off the failed sid (researcher + critic threads inherit warm; synthesizer re-runs with the v1.1 fallback chain) or its parent. |
 
 ### CLI commands (outside Claude Code)
 
@@ -556,6 +626,41 @@ curl "http://SERVER:11435/search?q=bcache&limit=5"   # search conversations
 curl http://SERVER:11435/health                       # health check
 curl http://SERVER:11435/stats                        # index statistics
 curl -X POST http://SERVER:11435/sync                 # trigger re-index
+
+# /get-advice CLI (v1.1)
+claude-advisor get-model                            # show configured model + ctx_max
+claude-advisor set-model qwen3.5:cloud              # set model (auto-probes ctx_max)
+claude-advisor set-model qwen3.5:cloud 32768        # set model + pin context length
+claude-advisor get-effort                           # show effort tier + budget
+claude-advisor set-effort medium                    # low | medium | high | max
+claude-advisor get-tools                            # show advisor's project-tool list
+claude-advisor set-tools all                        # all known tools
+claude-advisor set-tools none                       # tools-off
+claude-advisor set-tools read_file,grep             # explicit subset
+claude-advisor turn <sid> --first --message "..."   # start a session
+claude-advisor turn <sid> --message "..."           # continue a session
+claude-advisor reset <sid> --carryover "..."        # forced reset, returns new sid
+claude-advisor cleanup                              # prune sessions > 24h old
+
+# /consultants CLI (v1.1)
+claude-consultants config show                      # JSON dump of full config
+claude-consultants config set-role planner --model gemma4:31b-cloud
+claude-consultants config set-role researcher --add-model glm-5.1:cloud   # x-tier extra
+claude-consultants config set-role synthesizer --add-model glm-5.1:cloud  # failure fallback
+claude-consultants config set-effort medium         # or xmedium / xhigh / xmax
+claude-consultants config set-service-mode always-on  # or smart-start
+claude-consultants config list-models               # tools-capable Ollama tags upstream
+claude-consultants consult --message "..." --cwd "$(pwd)"
+claude-consultants consult --message "..." --effort xhigh   # multi-model fan-out
+claude-consultants status <sid>                     # poll progress
+claude-consultants result <sid>                     # fetch summary + metadata
+claude-consultants list                             # past sessions in this project
+claude-consultants show <sid>                       # render stored summary
+claude-consultants show <sid> --raw                 # dump transcript.db events as JSONL
+claude-consultants follow-up <parent_sid> --message "..."  # extend prior session
+claude-consultants list-open                        # warm sessions in engine memory
+claude-consultants reopen <sid>                     # restore evicted session from disk
+claude-consultants close <sid>                      # release engine memory (reversible)
 ```
 
 ## Per-project opt-out

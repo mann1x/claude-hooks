@@ -1,5 +1,20 @@
 # `/consultants` benchmark sweeps
 
+> **tl;dr (2026-05-07 sweep, 7 cloud labels)** — only
+> [`kimi-k2.6-cloud-2026-05-07/`](kimi-k2.6-cloud-2026-05-07/) and the
+> retroactive [`kimi-k2.6-cloud-2026-05-07-pre-harden/`](kimi-k2.6-cloud-2026-05-07-pre-harden/)
+> baseline carry **graded verdicts** so far (both PROD-READY,
+> single-run; mix string `P:A R:A C:A S:A`; N=3 confirmation
+> pending per [`EVALUATION.md` §5](EVALUATION.md#5-multi-run-requirement)).
+> Runs for `gemma4-31b-cloud`, `glm-5-1-cloud`, `minimax-m2-7-cloud`,
+> `qwen3-5-397b-cloud`, and `qwen3-5-cloud` completed cleanly but
+> their `results.md` per-query / per-role grade tables are still
+> placeholders — token + wall data is real, the human-graded
+> answer-quality verdict isn't filled in yet. For "which model
+> should I pick?" guidance see
+> [`../consultants.md` § Picking models](../consultants.md#picking-models);
+> for the protocol see [`EVALUATION.md`](EVALUATION.md).
+
 This directory contains per-label benchmark runs of the canonical
 queries documented in [`../consultants-benchmarks.md`](../consultants-benchmarks.md).
 
