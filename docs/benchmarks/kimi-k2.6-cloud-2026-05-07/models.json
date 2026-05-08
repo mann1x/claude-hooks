@@ -1,0 +1,52 @@
+{
+  "captured_at": "2026-05-07T09:00:34+02:00",
+  "endpoint": "http://192.168.178.2:11433",
+  "models": {
+    "kimi-k2.6:cloud": {
+      "modified_at": "2026-03-31T00:00:00Z",
+      "capabilities": [
+        "vision",
+        "thinking",
+        "completion",
+        "tools"
+      ],
+      "details": {
+        "parent_model": "kimi-k2.6",
+        "format": "",
+        "family": "kimi-k2",
+        "families": null,
+        "parameter_size": "1042000000000",
+        "quantization_level": "INT4"
+      },
+      "model_info": {
+        "general.architecture": "kimi-k2",
+        "general.parameter_count": 1042000000000,
+        "kimi-k2.context_length": 262144,
+        "kimi-k2.embedding_length": 2048
+      },
+      "raw": {
+        "details": {
+          "parent_model": "kimi-k2.6",
+          "format": "",
+          "family": "kimi-k2",
+          "families": null,
+          "parameter_size": "1042000000000",
+          "quantization_level": "INT4"
+        },
+        "model_info": {
+          "general.architecture": "kimi-k2",
+          "general.parameter_count": 1042000000000,
+          "kimi-k2.context_length": 262144,
+          "kimi-k2.embedding_length": 2048
+        },
+        "capabilities": [
+          "vision",
+          "thinking",
+          "completion",
+          "tools"
+        ],
+        "modified_at": "2026-03-31T00:00:00Z"
+      }
+    }
+  }
+}

@@ -1,0 +1,39 @@
+reading: /root/.claude/consultants-traces/csl-2026-05-07-1023-c9ca.jsonl
+
+sid: csl-2026-05-07-1023-c9ca
+total wall: 78.6s   first_event=+0.0s  last_event=+78.6s
+
+  planner       node=25.1s   (entries) llm=1x=25.1s   tool=0x=0ms     tok=p277/c2564
+      LLM iter=1 model=qwen3.5:397b-cloud          25.1s  p=277    c=2564   tool_calls=0
+
+  researcher    node=1.5m    (3xentries) llm=15x=1.5m    tool=23x=594ms   tok=p127754/c5513
+      LLM iter=13 model=qwen3.5:397b-cloud          14.5s  p=22970  c=1403   tool_calls=0
+      LLM iter=14 model=qwen3.5:397b-cloud          11.1s  p=21186  c=990    tool_calls=0
+      LLM iter=12 model=qwen3.5:397b-cloud           9.9s  p=4580   c=260    tool_calls=3
+      LLM iter=15 model=qwen3.5:397b-cloud           8.9s  p=5391   c=765    tool_calls=0
+      LLM iter=10 model=qwen3.5:397b-cloud           8.5s  p=17099  c=139    tool_calls=2
+      LLM iter=11 model=qwen3.5:397b-cloud           6.1s  p=18388  c=312    tool_calls=2
+      LLM iter=7 model=qwen3.5:397b-cloud           4.6s  p=4460   c=300    tool_calls=3
+      LLM iter=3 model=qwen3.5:397b-cloud           4.2s  p=2942   c=137    tool_calls=1
+      LLM iter=2 model=qwen3.5:397b-cloud           4.1s  p=2927   c=140    tool_calls=1
+      LLM iter=1 model=qwen3.5:397b-cloud           4.1s  p=2949   c=142    tool_calls=1
+      LLM iter=8 model=qwen3.5:397b-cloud           3.4s  p=6300   c=209    tool_calls=2
+      LLM iter=6 model=qwen3.5:397b-cloud           3.1s  p=4378   c=230    tool_calls=3
+      LLM iter=9 model=qwen3.5:397b-cloud           2.8s  p=5436   c=176    tool_calls=2
+      LLM iter=4 model=qwen3.5:397b-cloud           2.7s  p=4385   c=197    tool_calls=2
+      LLM iter=5 model=qwen3.5:397b-cloud           2.2s  p=4363   c=113    tool_calls=1
+      tool grep               x14    591ms chars=37846
+      tool read_file          x5       3ms chars=83281
+      tool survey_project     x3       0ms chars=11154
+      tool list_files         x1       0ms chars=1132
+
+  synthesizer   node=22.3s   (entries) llm=1x=22.3s   tool=0x=0ms     tok=p2532/c2517
+      LLM iter=1 model=qwen3.5:397b-cloud          22.3s  p=2532   c=2517   tool_calls=0
+
+totals
+  wall                  78.6s
+  sum of node spans     2.3m
+  sum of LLM call time  2.3m  (175.0% of wall)
+  sum of tool call time 594ms
+  total prompt tokens   130563
+  total completion tok  10594

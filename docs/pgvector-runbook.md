@@ -625,10 +625,72 @@ schema change, drop the affected tables and re-run the migration.
 
 ### Backups
 
-`data/` is a host-mounted volume. Standard Postgres backup applies:
+The `claude-hooks-pgvector-backup.timer` systemd unit runs a daily
+`pg_dump -Fc` (custom binary, internally compressed) inside the
+container and writes to `/shared/config/mcp-pgvector/backups/` with
+three retention tiers:
+
+| Tier | Schedule | Retain | Path |
+|------|----------|--------|------|
+| daily   | every day at 01:17 local         | 7 | `daily/pgvector-YYYY-MM-DD.dump` |
+| weekly  | promoted on Sunday (`WEEKLY_DOW=7`) | 4 | `weekly/pgvector-YYYY-Www.dump` |
+| monthly | promoted on day 1                  | 3 | `monthly/pgvector-YYYY-MM.dump` |
+
+Promotion is by hardlink so weekly/monthly do not double the storage
+footprint. `pg_dump` takes only `ACCESS SHARE` locks, so reads + writes
+proceed unblocked during the dump.
+
+The unit is installed by `install.py` when the pgvector provider is
+enabled. Override defaults with
+`systemctl edit claude-hooks-pgvector-backup.service` and a drop-in
+such as:
+
+```
+[Service]
+Environment=KEEP_DAILY=14
+Environment=BACKUP_DIR=/path/to/elsewhere
+```
+
+Tunables: `CONTAINER`, `PG_USER`, `PG_DB`, `BACKUP_DIR`, `KEEP_DAILY`,
+`KEEP_WEEKLY`, `KEEP_MONTHLY`, `WEEKLY_DOW` (1=Mon … 7=Sun).
+
+#### Restore
 
 ```bash
-docker exec mcp-pgvector pg_dump -U claude memory > /backup/pgvector_$(date +%F).sql
+# Restore the most recent daily (overwrites the live DB; asks YES first)
+sudo scripts/pgvector_restore.sh latest_daily
+
+# Or a specific dump
+sudo scripts/pgvector_restore.sh /shared/config/mcp-pgvector/backups/weekly/pgvector-2026-W18.dump
+
+# Skip the prompt (CI / scripted)
+sudo FORCE=1 scripts/pgvector_restore.sh latest_daily
+```
+
+#### Validity canary
+
+`claude-hooks-pgvector-backup-check.timer` runs every Monday at 02:43
+local and walks each retention tier, running:
+
+1. `pg_restore -l` on the most recent dump (TOC + metadata scan).
+2. `pg_restore -f /dev/null` on the same dump (full byte-read of the
+   archive — emits all SQL to /dev/null without touching any DB,
+   catches mid-file corruption that the TOC scan misses).
+
+Logs to journal as `claude-hooks-pgvector-backup-check.service`. Exits
+non-zero on any failure, so you can wire `OnFailure=` to a notification
+unit if desired. Tunables: `CONTAINER`, `BACKUP_DIR`, `CHECK_TIERS`,
+`FAIL_ON_EMPTY`. Run on demand:
+
+```bash
+sudo systemctl start claude-hooks-pgvector-backup-check.service
+sudo journalctl -u claude-hooks-pgvector-backup-check.service -n 20
+```
+
+#### Manual one-shot
+
+```bash
+docker exec mcp-pgvector pg_dump -U claude memory -Fc > /tmp/pgvector.dump
 ```
 
 ### Resetting

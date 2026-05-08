@@ -1,0 +1,33 @@
+reading: /root/.claude/consultants-traces/csl-2026-05-07-0957-ae17.jsonl
+
+sid: csl-2026-05-07-0957-ae17
+total wall: 24.8s   first_event=+0.0s  last_event=+24.8s
+
+  planner       node=4.1s    (entries) llm=1x=4.1s    tool=0x=0ms     tok=p240/c306
+      LLM iter=1 model=glm-5.1:cloud                4.1s  p=240    c=306    tool_calls=0
+
+  researcher    node=30.4s   (3xentries) llm=10x=30.4s   tool=17x=42ms    tok=p227832/c1207
+      LLM iter=10 model=glm-5.1:cloud                6.7s  p=26825  c=399    tool_calls=0
+      LLM iter=7 model=glm-5.1:cloud                3.6s  p=33219  c=230    tool_calls=0
+      LLM iter=1 model=glm-5.1:cloud                3.2s  p=16396  c=129    tool_calls=6
+      LLM iter=6 model=glm-5.1:cloud                3.2s  p=27228  c=116    tool_calls=2
+      LLM iter=3 model=glm-5.1:cloud                3.2s  p=16373  c=97     tool_calls=2
+      LLM iter=2 model=glm-5.1:cloud                2.8s  p=16371  c=67     tool_calls=3
+      LLM iter=9 model=glm-5.1:cloud                2.6s  p=26721  c=28     tool_calls=1
+      LLM iter=5 model=glm-5.1:cloud                2.5s  p=20747  c=82     tool_calls=0
+      LLM iter=8 model=glm-5.1:cloud                1.3s  p=27435  c=29     tool_calls=1
+      LLM iter=4 model=glm-5.1:cloud                1.2s  p=16517  c=30     tool_calls=2
+      tool grep               x7      40ms chars=57160
+      tool read_file          x3       2ms chars=55045
+      tool list_files         x7       0ms chars=991
+
+  synthesizer   node=3.5s    (entries) llm=1x=3.5s    tool=0x=0ms     tok=p959/c43
+      LLM iter=1 model=glm-5.1:cloud                3.5s  p=959    c=43     tool_calls=0
+
+totals
+  wall                  24.8s
+  sum of node spans     38.1s
+  sum of LLM call time  38.0s  (153.1% of wall)
+  sum of tool call time 42ms
+  total prompt tokens   229031
+  total completion tok  1556

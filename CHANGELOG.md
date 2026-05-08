@@ -16,8 +16,381 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-_(work in progress on the `dev` branch — see `git log v1.0.3..origin/dev`
-for landed but not-yet-released commits.)_
+### Added
+
+- **/consultants — synthesizer fallback chain on persistent
+  failure** — when the primary synthesizer model exhausts its
+  ChatClient retry budget on a cloud flap (HTTP 500 / 502 / 503 /
+  504 / 408 / 429), the engine now walks `synthesizer.extra_models`
+  in order before declaring the consultation failed. Same
+  `chat_client` (so the same proxy + connection pool); only the
+  `model` field of the payload changes per attempt. First success
+  wins. Each attempt records an `llm_call` event with the actual
+  model used, so post-hoc audit via `/consultants--show <sid> --raw`
+  reveals which model produced the final answer. Configure with
+  `claude-consultants config set-role synthesizer --add-model
+  <tag>`. Active at every effort tier (not gated by the x-prefix —
+  cloud flaps don't care about effort).
+
+- **/consultants — degraded-answer composer on synthesizer
+  failure** — when every model in the fallback chain fails, the
+  council now writes a `summary.md` whose `final_answer` field
+  surfaces the researcher's full reports + the critic's verdict
+  rather than `(consultation incomplete: synthesizer error: ...)`.
+  Researcher reports often run 3-5k tokens of analysis at xhigh
+  effort, and the critic verdict adds another 1k of structured
+  decision text — that's the most expensive work in a consultation
+  and now survives the synthesizer's failure to the user. The
+  banner explains it's a degraded answer (not a synthesized one)
+  and points the user at `claude-consultants follow-up <THIS_SID>
+  --message "compose a final answer..."` to recover cheaply (the
+  next synthesizer attempt inherits research + critic warm and
+  costs one more call, not a full re-run).
+
+- **/consultants--followup — failed-session-aware parent picker**
+  — the skill now defaults to the most recent session of *any*
+  status (was: most recent `completed` only). When the most recent
+  is `failed`, AskUserQuestion offers two paths: (1) chain off the
+  failed sid (cheapest — researcher + critic threads inherit from
+  disk and only the synthesizer re-runs) or (2) chain off the
+  failed sid's `parent_sid` (start over from a known-good thread).
+  Pairs with the engine-side fallback chain + degraded answer above
+  to make recovery from a cloud flap a one-step user action.
+
+### Changed
+
+- **ChatClient retry budget bumped from 8 attempts / ~136 s to 15
+  attempts / ~905 s (~15 min)** — `DEFAULT_MAX_RETRIES` 8 → 15 and
+  `DEFAULT_RETRY_MAX_DELAY_S` 30 → 90 in
+  `claude_hooks/get_advice/chat_client.py`. The motivating session
+  (`csl-2026-05-07-2158-7c75`, xhigh effort) burned the whole
+  pre-bump budget on a 2+ minute Ollama Cloud 500 window and lost
+  the synthesizer outright; with the new budget a flap of that
+  shape is absorbed by the retry loop and the consultation
+  completes. A 5-15 minute consultation can now tolerate up to ~15
+  minutes of cloud unavailability without failing — the trade-off
+  being that an actual permanent outage takes longer to surface as
+  a user-visible error. Affects both `/consultants` (synthesizer
+  + every other role's ChatClient) and `/get-advice` (the advisor
+  itself). Override via `ChatClient(..., max_retries=N,
+  retry_max_delay_s=S)` per call site if a cheaper budget is
+  desirable.
+
+### Fixed
+
+- **install.py — bin/* shim PATH wrappers (cross-platform)** —
+  skill CLIs (`claude-consultants`, `claude-advisor`, …) invoked by
+  bare name from a `/consultants--config` or `/get-advice` skill
+  failed with `command not found` because Claude Code's bash
+  subprocess does not include the repo's `bin/` on PATH on any
+  platform. Symlinks don't fix it either: the shims resolve `REPO`
+  via `dirname "$0"`, which through a symlink points at the symlink
+  dir (e.g. `/usr/local/bin/..`) and the helper sourcing breaks.
+  Installer now drops thin exec-wrappers in a known PATH-friendly
+  location for all 11 shims (`claude-hook`, `claude-consultants`,
+  `claude-advisor`, `claude-hooks-daemon`, `claude-hooks-daemon-ctl`,
+  `claude-hooks-proxy`, `claude-hooks-dashboard`,
+  `claude-hooks-rollup`, `caliber-grounding-proxy`, `caliber-smart`,
+  `claude-hook-pgvector-mcp`):
+  - **POSIX (Linux + macOS)**: `~/.local/bin/<shim>` — POSIX sh
+    wrapper that `exec`s the absolute repo path.
+  - **Windows**: `%LOCALAPPDATA%\claude-hooks\bin\<shim>` (POSIX sh
+    for the MSYS bash that Claude Code uses) plus a `.cmd` sibling
+    for native cmd / PowerShell users.
+  Wrappers carry an install-time tag in their first comment line,
+  so `python install.py` is fully idempotent and won't clobber a
+  hand-rolled wrapper. `python install.py --uninstall` removes only
+  tagged wrappers. Same root cause as the 2026-05-02 ruff PATH fix
+  — once the wrappers land, every bare-name invocation from a skill
+  resolves on every platform.
+
+## [1.1.0] — 2026-05-07
+
+MINOR bump for several new opt-in subsystems landed since v1.0.3:
+the `/get-advice` LLM-to-LLM advisor skill (multi-turn second
+opinions via local Ollama), the shared `agent_loop.runner` that
+backs both caliber and the advisor, the stop_guard stall check, a
+full pgvector backup + canary stack, and the v1.1 of the
+`/consultants` agentic engine — full per-role LLM message-history
+persistence so a session closed and reopened from disk produces
+identical follow-up answers to a warm one, plus multi-model
+researcher (xmedium / xhigh) and multi-critic + meta-critic
+(xmax) fan-out tiers for hard architectural questions where
+diverse cloud-model perspectives matter. Ten phases on `dev`
+(`9f71c9d`..`cdea074`) plus the planning commit (`5cb6738`).
+
+### Added
+
+- **/consultants v1.1 — multi-model x-tiers (xmedium / xhigh / xmax)**
+  — three new effort tiers that fan out fan-outable roles across
+  multiple Ollama models per plan-item lane, so the synthesizer
+  (or meta-critic at xmax) sees diverse perspectives from
+  different model trainings on the same evidence. Configured via
+  per-role `extra_models = [...]` in the role's TOML block;
+  silently ignored at every base tier (a benchmark labeled
+  `high` is never accidentally 3× the cost — opting into x-tiers
+  requires the explicit tier name). xmedium / xhigh only fan
+  out the researcher; xmax additionally fans out the critic and
+  adds a meta-critic node that synthesizes the C parallel-critic
+  verdicts into one consolidated decision (anonymized as
+  `Critic 1` / `Critic 2` / ... in the prompt to avoid biasing
+  toward a model the meta-critic "knows" performs better; the
+  recorder's per-row `model` column is the audit map). Cost-of-
+  fan-out warning fires once at consultation start with the
+  expected token-cost multiplier. Skill (`/consultants--config`)
+  gains a "Manage extra models" sub-action under researcher /
+  critic; CLI gains `set-role <role> --add-model X --remove-model
+  Y --clear-extras`. Live-verified on solidpc — xmax with 2
+  researcher models and 3 critic models produces 3 distinct
+  critic verdicts (one per model) that the meta-critic
+  consolidates. Ten phases on `dev` (`9f71c9d`..`cdea074`).
+
+- **/consultants v1.1 — full message-history persistence** — every
+  consultation now produces a SQLite `transcript.db` sidecar at
+  `<cwd>/.claude-hooks/consultants/<sid>/transcript.db` alongside
+  the existing `summary.md`, `transcript.md`, and `metadata.json`.
+  The recorder writes one row per LLM call, tool execution, and
+  node enter/exit boundary in WAL mode (concurrent fan-out lanes
+  write through per-thread connections). When a session is
+  reopened from disk after engine restart or eviction, the
+  per-role LLM message threads are reconstructed via SQL —
+  follow-ups against disk-reopened parents now extend those
+  threads with the new question instead of rebuilding prompts
+  from scratch. Live-verified: a follow-up against a closed
+  parent issued **0 tool calls vs. the parent's 5** because the
+  model could lean on prior tool results in context (the explicit
+  v1.1-is-done criterion from the plan). SQLite was chosen over
+  JSONL for opacity to text indexers (`claudemem reindex`,
+  ripgrep, RAG ingestors) since `transcript.db` carries full LLM
+  payloads. Schema documented at
+  [`docs/consultants-transcript-db-schema.md`](docs/consultants-transcript-db-schema.md);
+  inspect a session via `claude-consultants show --raw <sid>` with
+  optional `--filter role=researcher --filter kind=tool_call
+  --limit N`. Backward-compatible: v1.0 sessions without a `.db`
+  reopen via the existing turn-content fallback. The legacy v1.0
+  JSONL trace at `~/.claude/consultants-traces/<sid>.jsonl` is
+  decommissioned; `CONSULTANTS_TRACE` and the `--trace` /
+  `--no-trace` CLI flags are now no-ops with a one-shot
+  deprecation warning (will be removed in v1.2). Plan and
+  pre-implementation log: [`docs/PLAN-consultants-v1.1-message-history.md`](docs/PLAN-consultants-v1.1-message-history.md).
+
+- **/get-advice — LLM-to-LLM advisor skill** — Claude Code can now consult
+  a configured Ollama model (default `qwen3.5:cloud`) for a multi-turn
+  second opinion via the `/get-advice <query>` skill. Three helper
+  skills (`/get-advice--model`, `/get-advice--effort`,
+  `/get-advice--tools`) configure model + ctx, effort tier (low=1
+  session / medium=3 / high=5 / max=25), and the per-tool gate
+  (CSV / `all` / `none`) without editing JSON. Settings persist to
+  `~/.claude/get-advice-config.json`. New CLI `bin/claude-advisor`
+  drives the conversation: `turn`, `reset`, `cleanup`, get/set
+  subcommands. Per-turn JSON exposes `prompt_eval_count` /
+  `eval_count` so Claude knows when to summarize and reset before the
+  advisor's context fills (default threshold 85%). Reuses caliber-proxy
+  grounding (project anchors + structure map) and the same six tools
+  (`read_file`, `grep`, `glob`, `list_files`, `survey_project`,
+  `recall_memory`) when enabled.
+
+- **agent_loop.runner — shared tool-use loop** — extracted the agent
+  loop from `claude_hooks.caliber_proxy.server.run_agent_loop` into a
+  reusable `claude_hooks.agent_loop.runner.run_loop` function with a
+  `LoopConfig` dataclass. Both the caliber grounding proxy and the new
+  `/get-advice` advisor drive their conversations through this single
+  loop, so every gemma4-era quirk (force-first-tool-call,
+  force-answer-after, tool-call burst dedup + cap, preseed survey)
+  benefits both consumers consistently. The runner is transport-
+  agnostic: callers pass their own `chat_fn` and `tool_executor`.
+  `caliber_proxy/server.py:run_agent_loop` is now a thin shim that
+  reads env vars, builds the `LoopConfig`, prepends grounding, calls
+  the runner, and applies the caliber-specific
+  `sanitize_assistant_json` post-processor. Behavior unchanged — the
+  full caliber-proxy test suite (91 tests across `TestAgentLoop` /
+  `TestPreseedSurvey` / etc.) passes against the refactored path.
+  v1.1 added optional `on_iter` / `on_tool` callbacks so consumers
+  (notably the consultants `MessageRecorder`) can observe every
+  chat round and tool execution without sub-classing the runner.
+
+- **stop_guard: stall-after-commitment check** — catches a new failure
+  mode observed on `claude-opus-4-7` (1M context): the model writes a
+  paragraph ending with an action-commitment phrase ("Diving in now",
+  "Writing the script now", "On it.") and then ends the turn WITHOUT
+  calling any tool. The user has to nudge the session to unstall it.
+  Three independent conditions stack so false-positive risk is low:
+  (1) `stop_reason=end_turn`, (2) zero `tool_use` blocks in the
+  message content, (3) one of the commitment phrases appears in the
+  last ~250 chars of the message text. The Stop hook returns
+  `decision=block` with a correction asking the model to either
+  execute the action it described or ask a specific question. Honours
+  the same user-wrap-up bypass as the prose-pattern guard so an
+  "All done. On it." closing after the user said "wrap up" doesn't
+  trigger. Default on when stop_guard itself is enabled; opt out via
+  `hooks.stop_guard.stall_check_enabled = false`. New module entry
+  points: `claude_hooks.stop_guard.check_stall_after_commitment`,
+  `COMMITMENT_PATTERNS`, `STALL_CORRECTION`. 15 unit tests in
+  `tests/test_stop_guard.py::StallAfterCommitmentTests` plus an
+  end-to-end smoke through `_run_stop_guard`.
+- **pgvector backup-validity canary** — new
+  `claude-hooks-pgvector-backup-check.{service,timer}` runs every
+  Monday at 02:43 local and walks each retention tier
+  (daily/weekly/monthly), validating the most recent dump in two
+  layers: (1) `pg_restore -l` for the TOC + metadata, (2)
+  `pg_restore -f /dev/null` for a full byte-read of the archive
+  (catches mid-file corruption that the TOC scan misses). Both
+  layers run inside the `mcp-pgvector` container so the
+  pg_restore version always matches whatever wrote the dump.
+  Exits non-zero on any failure → wireable into `OnFailure=`.
+  New script: `scripts/pgvector_backup_check.sh`.
+- **pgvector daily backup timer** — new
+  `claude-hooks-pgvector-backup.{service,timer}` runs
+  `pg_dump -Fc` inside the `mcp-pgvector` container at 01:17 local
+  every day and writes to `/shared/config/mcp-pgvector/backups/`
+  with three retention tiers: 7 daily, 4 weekly (promoted on
+  Sunday by hardlink), 3 monthly (promoted on day 1 by hardlink).
+  `pg_dump` takes only `ACCESS SHARE` locks so reads + writes are
+  not blocked during the backup. New scripts:
+  `scripts/pgvector_backup.sh` (the worker) and
+  `scripts/pgvector_restore.sh` (interactive restore helper with
+  `latest_daily` / `latest_weekly` / `latest_monthly` shortcuts).
+  Wired into `install.py` — installed when `providers.pgvector.enabled`
+  is true. Tunables: `CONTAINER`, `PG_USER`, `PG_DB`, `BACKUP_DIR`,
+  `KEEP_DAILY`, `KEEP_WEEKLY`, `KEEP_MONTHLY`, `WEEKLY_DOW`.
+
+### Fixed
+
+- **/consultants xmax — critic-fanout 6× cost overshoot** — the
+  Phase 10 multi-critic dispatcher wired its conditional fan-out
+  edge directly to `researcher`, which is itself Send-multiplexed
+  by the Phase 9 researcher fan-out (N×M parallel invocations at
+  x-tiers). LangGraph's `add_conditional_edges` from a
+  Send-multiplexed source fires PER UPSTREAM SEND INVOCATION,
+  not per-barrier-merge — so 6 researcher lanes spawned 6 ×
+  C critic invocations instead of C. Caught on the first live
+  xmax smoke (`csl-2026-05-07-1707-2a8f`): 18 critic LLM calls
+  against an intended 3. Correctness wasn't affected — every
+  critic still saw the same merged research and meta-critic
+  consolidated correctly — but token cost was 6× the design.
+  Fix inserts a single-invocation pass-through `research_barrier`
+  node between researcher and the critic-fanout dispatcher.
+  Unconditional edges from Send-multiplexed sources DO barrier-
+  merge (this is how the legacy single-critic edge always worked),
+  so routing through the barrier node forces the conditional
+  fan-out to fire exactly once. Same question post-fix: 3 critic
+  invocations, wall time 374s → 174s (54% faster). Test pins the
+  count invariant: regardless of how many researcher lanes fan
+  out, the critic fires exactly `1 + len(extra_models)` times.
+
+- **axon-host crash-loop after host restart** — two compounding
+  issues that put the unit into a 5s `Restart=on-failure` loop
+  forever. (1) `/root/.axon` had been deleted between installs;
+  the unit's `ReadWritePaths=/root/.axon` directive failed
+  systemd's namespace bind-mount with `status=226/NAMESPACE`
+  ("Failed to set up mount namespacing"). (2) The `claude-hooks`
+  conda env had drifted — `uvicorn`, `httpx-sse`,
+  `pydantic-settings`, and `sse-starlette` were silently dropped
+  (likely from a partial reinstall during another env's build),
+  and once the namespace bug was fixed axon crashed on import
+  with `ModuleNotFoundError: No module named 'uvicorn'`. The
+  loop just moved one step deeper. install.py now does two
+  pre-flight checks before enabling the unit: `_ensure_axon_
+  registry_dir` mkdir's `~/.axon/repos/` so the bind-mount has a
+  target, and `_ensure_axon_deps` probes the env's import
+  surface and pip-installs `requirements-axon.txt` (new file
+  pinning the runtime deps) when anything is missing. Refuses to
+  enable the unit when either pre-flight fails, so future drift
+  becomes a clear `install.py` re-run rather than a silent
+  service-loop.
+
+- **PreCompact: stop emitting hookSpecificOutput** — Claude Code's
+  PreCompact event schema does NOT accept `hookSpecificOutput`
+  (only the universal `continue` / `stopReason` / `suppressOutput`
+  envelope). Returning the wrap-up markdown as
+  `hookSpecificOutput.additionalContext` failed CC's JSON validator
+  with `(root): Invalid input` — the disk write succeeded but the
+  hook was reported as failed every time the user resumed a session
+  that had auto-compacted. The wrap-up file on disk is the sole
+  delivery channel; `wrapup_recovery` already surfaces the pointer
+  on the next post-compaction `UserPromptSubmit`, so dropping the
+  inline context loses nothing. Handler now returns `None` on
+  success. Existing `test_pre_compact.py` updated to pin the new
+  contract.
+
+### Added
+
+- **/get-advice — LLM-to-LLM advisor skill** — Claude Code can now consult
+  a configured Ollama model (default `qwen3.5:cloud`) for a multi-turn
+  second opinion via the `/get-advice <query>` skill. Three helper
+  skills (`/get-advice--model`, `/get-advice--effort`,
+  `/get-advice--tools`) configure model + ctx, effort tier (low=1
+  session / medium=3 / high=5 / max=25), and the per-tool gate
+  (CSV / `all` / `none`) without editing JSON. Settings persist to
+  `~/.claude/get-advice-config.json`. New CLI `bin/claude-advisor`
+  drives the conversation: `turn`, `reset`, `cleanup`, get/set
+  subcommands. Per-turn JSON exposes `prompt_eval_count` /
+  `eval_count` so Claude knows when to summarize and reset before the
+  advisor's context fills (default threshold 85%). Reuses caliber-proxy
+  grounding (project anchors + structure map) and the same six tools
+  (`read_file`, `grep`, `glob`, `list_files`, `survey_project`,
+  `recall_memory`) when enabled.
+
+- **agent_loop.runner — shared tool-use loop** — extracted the agent
+  loop from `claude_hooks.caliber_proxy.server.run_agent_loop` into a
+  reusable `claude_hooks.agent_loop.runner.run_loop` function with a
+  `LoopConfig` dataclass. Both the caliber grounding proxy and the new
+  `/get-advice` advisor drive their conversations through this single
+  loop, so every gemma4-era quirk (force-first-tool-call,
+  force-answer-after, tool-call burst dedup + cap, preseed survey)
+  benefits both consumers consistently. The runner is transport-
+  agnostic: callers pass their own `chat_fn` and `tool_executor`.
+  `caliber_proxy/server.py:run_agent_loop` is now a thin shim that
+  reads env vars, builds the `LoopConfig`, prepends grounding, calls
+  the runner, and applies the caliber-specific
+  `sanitize_assistant_json` post-processor. Behavior unchanged — the
+  full caliber-proxy test suite (91 tests across `TestAgentLoop` /
+  `TestPreseedSurvey` / etc.) passes against the refactored path.
+
+- **stop_guard: stall-after-commitment check** — catches a new failure
+  mode observed on `claude-opus-4-7` (1M context): the model writes a
+  paragraph ending with an action-commitment phrase ("Diving in now",
+  "Writing the script now", "On it.") and then ends the turn WITHOUT
+  calling any tool. The user has to nudge the session to unstall it.
+  Three independent conditions stack so false-positive risk is low:
+  (1) `stop_reason=end_turn`, (2) zero `tool_use` blocks in the
+  message content, (3) one of the commitment phrases appears in the
+  last ~250 chars of the message text. The Stop hook returns
+  `decision=block` with a correction asking the model to either
+  execute the action it described or ask a specific question. Honours
+  the same user-wrap-up bypass as the prose-pattern guard so an
+  "All done. On it." closing after the user said "wrap up" doesn't
+  trigger. Default on when stop_guard itself is enabled; opt out via
+  `hooks.stop_guard.stall_check_enabled = false`. New module entry
+  points: `claude_hooks.stop_guard.check_stall_after_commitment`,
+  `COMMITMENT_PATTERNS`, `STALL_CORRECTION`. 15 unit tests in
+  `tests/test_stop_guard.py::StallAfterCommitmentTests` plus an
+  end-to-end smoke through `_run_stop_guard`.
+- **pgvector backup-validity canary** — new
+  `claude-hooks-pgvector-backup-check.{service,timer}` runs every
+  Monday at 02:43 local and walks each retention tier
+  (daily/weekly/monthly), validating the most recent dump in two
+  layers: (1) `pg_restore -l` for the TOC + metadata, (2)
+  `pg_restore -f /dev/null` for a full byte-read of the archive
+  (catches mid-file corruption that the TOC scan misses). Both
+  layers run inside the `mcp-pgvector` container so the
+  pg_restore version always matches whatever wrote the dump.
+  Exits non-zero on any failure → wireable into `OnFailure=`.
+  New script: `scripts/pgvector_backup_check.sh`.
+- **pgvector daily backup timer** — new
+  `claude-hooks-pgvector-backup.{service,timer}` runs
+  `pg_dump -Fc` inside the `mcp-pgvector` container at 01:17 local
+  every day and writes to `/shared/config/mcp-pgvector/backups/`
+  with three retention tiers: 7 daily, 4 weekly (promoted on
+  Sunday by hardlink), 3 monthly (promoted on day 1 by hardlink).
+  `pg_dump` takes only `ACCESS SHARE` locks so reads + writes are
+  not blocked during the backup. New scripts:
+  `scripts/pgvector_backup.sh` (the worker) and
+  `scripts/pgvector_restore.sh` (interactive restore helper with
+  `latest_daily` / `latest_weekly` / `latest_monthly` shortcuts).
+  Wired into `install.py` — installed when `providers.pgvector.enabled`
+  is true. Tunables: `CONTAINER`, `PG_USER`, `PG_DB`, `BACKUP_DIR`,
+  `KEEP_DAILY`, `KEEP_WEEKLY`, `KEEP_MONTHLY`, `WEEKLY_DOW`.
 
 ## [1.0.3] — 2026-05-03
 

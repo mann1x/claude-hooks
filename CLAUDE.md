@@ -15,13 +15,21 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.0.3** — ~1.6k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.1.0** — ~1.6k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
 > v0.6+ adds an in-process AST code-graph + MCP server. v0.7+ adds the LSP
 > engine (per-project session-scoped daemon, Windows parity, sub-ms IPC,
-> opt-in compile-aware diagnostics) and the PostToolUse ruff hook.
+> opt-in compile-aware diagnostics) and the PostToolUse ruff hook. v1.1
+> adds the `/get-advice` LLM-to-LLM advisor, the shared
+> `agent_loop.runner` that backs both caliber and the advisor, the
+> stop_guard stall-after-commitment check, a pgvector backup +
+> validity canary stack, and the v1.1 of the `/consultants` agentic
+> engine — full per-role message-history persistence so a session
+> closed and reopened from disk produces follow-up answers
+> indistinguishable from a warm one. Schema for the new transcript.db
+> sidecar at [`docs/consultants-transcript-db-schema.md`](docs/consultants-transcript-db-schema.md).
 
 ---
 

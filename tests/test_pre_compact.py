@@ -192,7 +192,10 @@ class HandlerGatingTests(unittest.TestCase):
             out = pc.handle(event={}, config=cfg, providers=[])
         self.assertIsNone(out)
 
-    def test_skill_present_emits_additional_context(self):
+    def test_skill_present_writes_file_and_returns_none(self):
+        """PreCompact's CC schema doesn't accept hookSpecificOutput, so
+        the handler MUST return None even on success — the wrap-up file
+        on disk is the sole deliverable."""
         with tempfile.TemporaryDirectory() as tmp:
             skill = Path(tmp) / "SKILL.md"
             skill.write_text("# wrapup", encoding="utf-8")
@@ -215,19 +218,24 @@ class HandlerGatingTests(unittest.TestCase):
             }
             out = pc.handle(event=event, config=cfg, providers=[])
 
-        self.assertIsNotNone(out)
-        self.assertIn("hookSpecificOutput", out)
-        hso = out["hookSpecificOutput"]
-        self.assertEqual(hso["hookEventName"], "PreCompact")
-        ac = hso["additionalContext"]
-        # Sections present.
-        self.assertIn("## 1.", ac)
-        # Saved-to pointer is the LAST non-empty content line.
-        last_line = [l for l in ac.splitlines() if l.strip()][-1]
-        self.assertIn("State summary saved to:", last_line)
-        self.assertIn("Read this file", last_line)
+            # Contract: handler must NOT return any output dict — CC's
+            # PreCompact schema rejects hookSpecificOutput as
+            # "(root): Invalid input".
+            self.assertIsNone(out)
+            # The file IS written on disk (sole delivery channel).
+            wrapup_files = list((Path(tmp) / ".wolf").glob("wrapup-pre-compact-*.md"))
+            if not wrapup_files:
+                wrapup_files = list((Path(tmp) / "docs" / "wrapup")
+                                    .glob("wrapup-pre-compact-*.md"))
+            self.assertTrue(
+                wrapup_files,
+                "expected a wrap-up .md to be written to .wolf/ or docs/wrapup/",
+            )
+            # And it has the synthesised sections.
+            content = wrapup_files[0].read_text(encoding="utf-8")
+            self.assertIn("## 1.", content)
 
-    def test_save_to_file_off_skips_pointer(self):
+    def test_save_to_file_off_still_returns_none(self):
         with tempfile.TemporaryDirectory() as tmp:
             skill = Path(tmp) / "SKILL.md"
             skill.write_text("# wrapup", encoding="utf-8")
@@ -240,9 +248,8 @@ class HandlerGatingTests(unittest.TestCase):
             event = {"transcript_path": "", "cwd": tmp, "session_id": "s"}
             out = pc.handle(event=event, config=cfg, providers=[])
 
-        self.assertIsNotNone(out)
-        ac = out["hookSpecificOutput"]["additionalContext"]
-        self.assertNotIn("State summary saved to:", ac)
+            # Contract: handler always returns None.
+            self.assertIsNone(out)
 
 
 # --------------------------------------------------------------------------- #
@@ -278,8 +285,8 @@ class ResilienceTests(unittest.TestCase):
                 out = pc.handle(event=event, config=cfg, providers=[])
             except Exception as e:
                 self.fail(f"handle() must not raise on corrupt transcript: {e}")
-            # Still emits a (mostly-empty) summary.
-            self.assertIsNotNone(out)
+            # Always returns None (PreCompact schema doesn't accept output).
+            self.assertIsNone(out)
 
 
 if __name__ == "__main__":

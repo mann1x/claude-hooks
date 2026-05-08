@@ -151,6 +151,43 @@ class TestOrchestratorSkip:
             )
         assert cfg["proxy"]["enabled"] is True
 
+    def test_empty_input_keeps_currently_disabled_off(
+        self, settings_path,
+    ):
+        # Empty input + currently disabled -> stays off (matches [y/N]).
+        cfg = {"proxy": {"enabled": False}}
+        with patch("builtins.input", side_effect=[""]):
+            install._setup_proxy_orchestrator(
+                cfg, settings_path,
+                non_interactive=False, dry_run=False,
+            )
+        assert cfg["proxy"]["enabled"] is False
+
+    def test_empty_input_keeps_currently_enabled_on(
+        self, settings_path, tmp_path,
+    ):
+        # Regression for solidpc 2026-05-06: when proxy is already
+        # enabled, the prompt now shows [Y/n] and an empty answer
+        # MUST keep proxy on (Step 2 path runs) — previously empty
+        # input silently flipped proxy.enabled to false.
+        cfg = {"proxy": {"enabled": True,
+                         "listen_host": "127.0.0.1",
+                         "listen_port": 38080}}
+        # Empty (treated as yes), then choose remote (2), then URL.
+        with patch("builtins.input",
+                   side_effect=["", "2", "http://existing:38080"]):
+            install._setup_proxy_orchestrator(
+                cfg, settings_path,
+                non_interactive=False, dry_run=False,
+            )
+        # Proxy reached the [1/2] branch — we know that because
+        # ANTHROPIC_BASE_URL got written to settings.json via the
+        # remote-proxy code path.
+        import json as _json
+        data = _json.loads(settings_path.read_text(encoding="utf-8"))
+        assert data["env"]["ANTHROPIC_BASE_URL"] == \
+            "http://existing:38080"
+
 
 class TestOrchestratorLocal:
     def test_local_choice_enables_and_writes_base_url(

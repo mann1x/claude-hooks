@@ -1,0 +1,39 @@
+# Optional: axon shared host (axon-host.service).
+#
+# axon's own pip package (`axoniq`) declares these as transitive
+# deps, so a clean `pip install axoniq` pulls them in. The reason
+# this file exists is the conda env *drift* mode we hit on
+# 2026-05-07 after a host restart:
+#
+#   * /root/.axon went missing (cleaned by something) and the
+#     systemd unit's ``ReadWritePaths=/root/.axon`` directive
+#     failed namespace setup → status=226/NAMESPACE → 5s restart
+#     loop. install.py now mkdir's the directory.
+#
+#   * uvicorn / httpx-sse / pydantic-settings / sse-starlette
+#     were dropped from the claude-hooks conda env at some point
+#     (likely a partial reinstall) — axon's import surface tripped
+#     ModuleNotFoundError on every restart. With these pinned
+#     here, ``install.py`` re-installs them via
+#     ``pip install -r requirements-axon.txt`` whenever the dep
+#     check fails, instead of leaving the operator to debug
+#     ``axon: command not found``-style errors by hand.
+#
+# Install:
+#   pip install -r requirements.txt -r requirements-axon.txt
+#
+# Or just let ``python install.py`` do it when
+# ``companions.axon_host.enabled`` is true — install.py probes
+# the env, and if any of these are missing it pip-installs the
+# whole file in one shot.
+#
+# axoniq is the upstream package providing the ``axon`` CLI; the
+# others are its FastAPI/HTTP-MCP serving stack. Versions tracked
+# permissively to avoid blocking minor bumps; install.py runs
+# ``pip check`` after install to surface conflicts.
+
+axoniq>=1.0
+uvicorn>=0.30
+httpx-sse>=0.4
+pydantic-settings>=2.5.2
+sse-starlette>=2.0.0

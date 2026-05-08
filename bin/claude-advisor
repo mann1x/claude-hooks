@@ -1,0 +1,8 @@
+#!/bin/sh
+# claude-advisor — CLI driver for the /get-advice skill.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+. "$HERE/_resolve_python.sh"
+[ -z "$PY" ] && { echo "claude-advisor: no python found" >&2; exit 1; }
+export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PY" -m claude_hooks.get_advice.cli "$@"

@@ -1,0 +1,50 @@
+{
+  "captured_at": "2026-05-07T09:57:07+02:00",
+  "endpoint": "http://192.168.178.2:11433",
+  "models": {
+    "glm-5.1:cloud": {
+      "modified_at": "2026-04-07T08:00:00-08:00",
+      "capabilities": [
+        "thinking",
+        "completion",
+        "tools"
+      ],
+      "details": {
+        "parent_model": "glm-5.1",
+        "format": "",
+        "family": "glm5.1",
+        "families": null,
+        "parameter_size": "756162687872",
+        "quantization_level": "FP8"
+      },
+      "model_info": {
+        "general.architecture": "glm5.1",
+        "general.parameter_count": 756162687872,
+        "glm5.1.context_length": 202752,
+        "glm5.1.embedding_length": 6144
+      },
+      "raw": {
+        "details": {
+          "parent_model": "glm-5.1",
+          "format": "",
+          "family": "glm5.1",
+          "families": null,
+          "parameter_size": "756162687872",
+          "quantization_level": "FP8"
+        },
+        "model_info": {
+          "general.architecture": "glm5.1",
+          "general.parameter_count": 756162687872,
+          "glm5.1.context_length": 202752,
+          "glm5.1.embedding_length": 6144
+        },
+        "capabilities": [
+          "thinking",
+          "completion",
+          "tools"
+        ],
+        "modified_at": "2026-04-07T08:00:00-08:00"
+      }
+    }
+  }
+}

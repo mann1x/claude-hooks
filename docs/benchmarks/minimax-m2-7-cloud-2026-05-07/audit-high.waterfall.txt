@@ -1,0 +1,49 @@
+reading: /root/.claude/consultants-traces/csl-2026-05-07-1008-4409.jsonl
+
+sid: csl-2026-05-07-1008-4409
+total wall: 752.4s   first_event=+0.0s  last_event=+752.4s
+
+  planner       node=6.3m    (entries) llm=1x=6.3m    tool=0x=0ms     tok=p472/c13856
+      LLM iter=1 model=minimax-m2.7:cloud           6.3m  p=472    c=13856  tool_calls=0
+
+  researcher    node=8.5m    (3xentries) llm=22x=8.5m    tool=39x=88ms    tok=p1047072/c16374
+      LLM iter=18 model=minimax-m2.7:cloud           1.7m  p=60086  c=3040   tool_calls=2
+      LLM iter=22 model=minimax-m2.7:cloud           1.4m  p=74786  c=2676   tool_calls=0
+      LLM iter=14 model=minimax-m2.7:cloud          45.7s  p=64419  c=2224   tool_calls=0
+      LLM iter=11 model=minimax-m2.7:cloud          41.9s  p=54657  c=1114   tool_calls=2
+      LLM iter=17 model=minimax-m2.7:cloud          41.5s  p=59108  c=1524   tool_calls=1
+      LLM iter=19 model=minimax-m2.7:cloud          33.1s  p=60402  c=1601   tool_calls=0
+      LLM iter=21 model=minimax-m2.7:cloud          28.9s  p=74575  c=768    tool_calls=1
+      LLM iter=20 model=minimax-m2.7:cloud          27.8s  p=60315  c=710    tool_calls=2
+      LLM iter=10 model=minimax-m2.7:cloud          22.2s  p=64375  c=905    tool_calls=1
+      LLM iter=9 model=minimax-m2.7:cloud          14.2s  p=34535  c=234    tool_calls=2
+      LLM iter=6 model=minimax-m2.7:cloud           8.8s  p=35701  c=76     tool_calls=2
+      LLM iter=3 model=minimax-m2.7:cloud           8.0s  p=20788  c=277    tool_calls=2
+      LLM iter=15 model=minimax-m2.7:cloud           6.7s  p=53192  c=127    tool_calls=2
+      LLM iter=7 model=minimax-m2.7:cloud           6.0s  p=26784  c=150    tool_calls=3
+      LLM iter=8 model=minimax-m2.7:cloud           5.0s  p=52118  c=92     tool_calls=2
+      LLM iter=2 model=minimax-m2.7:cloud           4.9s  p=20248  c=118    tool_calls=3
+      LLM iter=12 model=minimax-m2.7:cloud           4.5s  p=46133  c=132    tool_calls=3
+      LLM iter=5 model=minimax-m2.7:cloud           4.4s  p=21738  c=201    tool_calls=4
+      LLM iter=13 model=minimax-m2.7:cloud           4.0s  p=51776  c=135    tool_calls=2
+      LLM iter=16 model=minimax-m2.7:cloud           3.8s  p=56749  c=127    tool_calls=2
+      LLM iter=4 model=minimax-m2.7:cloud           3.6s  p=27979  c=100    tool_calls=2
+      LLM iter=1 model=minimax-m2.7:cloud           3.4s  p=26608  c=43     tool_calls=1
+      tool glob               x6      46ms chars=644
+      tool grep               x8      33ms chars=23651
+      tool read_file          x23      6ms chars=322656
+      tool survey_project     x2       3ms chars=7902
+
+  critic        node=29.0s   (entries) llm=1x=29.0s   tool=0x=0ms     tok=p22018/c951
+      LLM iter=1 model=minimax-m2.7:cloud          29.0s  p=22018  c=951    tool_calls=0
+
+  synthesizer   node=40.5s   (entries) llm=1x=40.5s   tool=0x=0ms     tok=p22692/c1074
+      LLM iter=1 model=minimax-m2.7:cloud          40.5s  p=22692  c=1074   tool_calls=0
+
+totals
+  wall                  752.4s
+  sum of node spans     15.9m
+  sum of LLM call time  15.9m  (127.1% of wall)
+  sum of tool call time 88ms
+  total prompt tokens   1092254
+  total completion tok  32255

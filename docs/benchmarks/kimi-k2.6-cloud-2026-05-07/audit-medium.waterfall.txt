@@ -1,0 +1,40 @@
+reading: /root/.claude/consultants-traces/csl-2026-05-07-0907-5644.jsonl
+
+sid: csl-2026-05-07-0907-5644
+total wall: 197.8s   first_event=+0.0s  last_event=+197.8s
+
+  planner       node=25.7s   (entries) llm=1x=25.7s   tool=0x=0ms     tok=p270/c1145
+      LLM iter=1 model=kimi-k2.6:cloud             25.7s  p=270    c=1145   tool_calls=0
+
+  researcher    node=3.1m    (3xentries) llm=15x=3.1m    tool=27x=378ms   tok=p92452/c9171
+      LLM iter=15 model=kimi-k2.6:cloud              1.2m  p=24283  c=4129   tool_calls=0
+      LLM iter=13 model=kimi-k2.6:cloud             53.8s  p=7256   c=2505   tool_calls=0
+      LLM iter=11 model=kimi-k2.6:cloud              6.4s  p=15083  c=262    tool_calls=3
+      LLM iter=6 model=kimi-k2.6:cloud              6.1s  p=3799   c=216    tool_calls=3
+      LLM iter=2 model=kimi-k2.6:cloud              5.6s  p=2336   c=198    tool_calls=1
+      LLM iter=1 model=kimi-k2.6:cloud              5.6s  p=2313   c=337    tool_calls=3
+      LLM iter=10 model=kimi-k2.6:cloud              5.1s  p=3741   c=283    tool_calls=2
+      LLM iter=3 model=kimi-k2.6:cloud              4.7s  p=2297   c=151    tool_calls=2
+      LLM iter=7 model=kimi-k2.6:cloud              4.5s  p=4808   c=239    tool_calls=2
+      LLM iter=5 model=kimi-k2.6:cloud              4.3s  p=3684   c=139    tool_calls=2
+      LLM iter=4 model=kimi-k2.6:cloud              4.2s  p=3993   c=233    tool_calls=3
+      LLM iter=14 model=kimi-k2.6:cloud              4.1s  p=3903   c=199    tool_calls=2
+      LLM iter=9 model=kimi-k2.6:cloud              3.6s  p=5242   c=142    tool_calls=3
+      LLM iter=8 model=kimi-k2.6:cloud              2.8s  p=4016   c=59     tool_calls=1
+      LLM iter=12 model=kimi-k2.6:cloud              2.3s  p=5698   c=79     tool_calls=2
+      tool grep               x14    367ms chars=10953
+      tool recall_memory      x1       8ms chars=72
+      tool read_file          x8       2ms chars=77380
+      tool list_files         x1       1ms chars=1132
+      tool survey_project     x3       0ms chars=11130
+
+  synthesizer   node=1.3m    (entries) llm=1x=1.3m    tool=0x=0ms     tok=p1511/c3655
+      LLM iter=1 model=kimi-k2.6:cloud              1.3m  p=1511   c=3655   tool_calls=0
+
+totals
+  wall                  197.8s
+  sum of node spans     4.9m
+  sum of LLM call time  4.9m  (147.1% of wall)
+  sum of tool call time 378ms
+  total prompt tokens   94233
+  total completion tok  13971

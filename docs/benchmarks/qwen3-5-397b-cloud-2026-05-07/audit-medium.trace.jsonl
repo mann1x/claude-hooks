@@ -1,0 +1,50 @@
+{"ts": 1778142235.023509, "sid": "csl-2026-05-07-1023-c9ca", "event": "node_enter", "role": "planner"}
+{"ts": 1778142260.1692426, "sid": "csl-2026-05-07-1023-c9ca", "event": "llm_call", "role": "planner", "model": "qwen3.5:397b-cloud", "duration_ms": 25145, "prompt_tokens": 277, "completion_tokens": 2564, "iter_index": 1, "tool_calls": 0, "error": null}
+{"ts": 1778142260.1694798, "sid": "csl-2026-05-07-1023-c9ca", "event": "node_exit", "role": "planner", "duration_ms": 25145}
+{"ts": 1778142260.1709042, "sid": "csl-2026-05-07-1023-c9ca", "event": "node_enter", "role": "researcher"}
+{"ts": 1778142260.1713078, "sid": "csl-2026-05-07-1023-c9ca", "event": "node_enter", "role": "researcher"}
+{"ts": 1778142260.1717174, "sid": "csl-2026-05-07-1023-c9ca", "event": "node_enter", "role": "researcher"}
+{"ts": 1778142264.2260382, "sid": "csl-2026-05-07-1023-c9ca", "event": "llm_call", "role": "researcher", "model": "qwen3.5:397b-cloud", "duration_ms": 4054, "prompt_tokens": 2949, "completion_tokens": 142, "iter_index": 1, "tool_calls": 1, "error": null}
+{"ts": 1778142264.2262828, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "survey_project", "duration_ms": 0, "output_chars": 3718, "error": null}
+{"ts": 1778142264.2510393, "sid": "csl-2026-05-07-1023-c9ca", "event": "llm_call", "role": "researcher", "model": "qwen3.5:397b-cloud", "duration_ms": 4078, "prompt_tokens": 2927, "completion_tokens": 140, "iter_index": 2, "tool_calls": 1, "error": null}
+{"ts": 1778142264.2512496, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "survey_project", "duration_ms": 0, "output_chars": 3718, "error": null}
+{"ts": 1778142264.3430533, "sid": "csl-2026-05-07-1023-c9ca", "event": "llm_call", "role": "researcher", "model": "qwen3.5:397b-cloud", "duration_ms": 4170, "prompt_tokens": 2942, "completion_tokens": 137, "iter_index": 3, "tool_calls": 1, "error": null}
+{"ts": 1778142264.3432798, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "survey_project", "duration_ms": 0, "output_chars": 3718, "error": null}
+{"ts": 1778142266.4470274, "sid": "csl-2026-05-07-1023-c9ca", "event": "llm_call", "role": "researcher", "model": "qwen3.5:397b-cloud", "duration_ms": 2195, "prompt_tokens": 4363, "completion_tokens": 113, "iter_index": 5, "tool_calls": 1, "error": null}
+{"ts": 1778142266.4826024, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 35, "output_chars": 169, "error": null}
+{"ts": 1778142266.9359982, "sid": "csl-2026-05-07-1023-c9ca", "event": "llm_call", "role": "researcher", "model": "qwen3.5:397b-cloud", "duration_ms": 2709, "prompt_tokens": 4385, "completion_tokens": 197, "iter_index": 4, "tool_calls": 2, "error": null}
+{"ts": 1778142266.9668539, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 30, "output_chars": 169, "error": null}
+{"ts": 1778142266.9953513, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 28, "output_chars": 5718, "error": null}
+{"ts": 1778142267.4261642, "sid": "csl-2026-05-07-1023-c9ca", "event": "llm_call", "role": "researcher", "model": "qwen3.5:397b-cloud", "duration_ms": 3082, "prompt_tokens": 4378, "completion_tokens": 230, "iter_index": 6, "tool_calls": 3, "error": null}
+{"ts": 1778142267.4271746, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "list_files", "duration_ms": 0, "output_chars": 1132, "error": null}
+{"ts": 1778142267.463023, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 35, "output_chars": 169, "error": null}
+{"ts": 1778142267.497237, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 33, "output_chars": 1841, "error": null}
+{"ts": 1778142270.3348114, "sid": "csl-2026-05-07-1023-c9ca", "event": "llm_call", "role": "researcher", "model": "qwen3.5:397b-cloud", "duration_ms": 2837, "prompt_tokens": 5436, "completion_tokens": 176, "iter_index": 9, "tool_calls": 2, "error": null}
+{"ts": 1778142270.3363438, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 1, "output_chars": 39241, "error": null}
+{"ts": 1778142270.3717506, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 35, "output_chars": 76, "error": null}
+{"ts": 1778142270.43821, "sid": "csl-2026-05-07-1023-c9ca", "event": "llm_call", "role": "researcher", "model": "qwen3.5:397b-cloud", "duration_ms": 3442, "prompt_tokens": 6300, "completion_tokens": 209, "iter_index": 8, "tool_calls": 2, "error": null}
+{"ts": 1778142270.440557, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 2, "output_chars": 39241, "error": null}
+{"ts": 1778142270.5346074, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 93, "output_chars": 1466, "error": null}
+{"ts": 1778142271.0481021, "sid": "csl-2026-05-07-1023-c9ca", "event": "llm_call", "role": "researcher", "model": "qwen3.5:397b-cloud", "duration_ms": 4565, "prompt_tokens": 4460, "completion_tokens": 300, "iter_index": 7, "tool_calls": 3, "error": null}
+{"ts": 1778142271.048659, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 1570, "error": null}
+{"ts": 1778142271.0493233, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 1690, "error": null}
+{"ts": 1778142271.087202, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 37, "output_chars": 111, "error": null}
+{"ts": 1778142276.679196, "sid": "csl-2026-05-07-1023-c9ca", "event": "llm_call", "role": "researcher", "model": "qwen3.5:397b-cloud", "duration_ms": 6144, "prompt_tokens": 18388, "completion_tokens": 312, "iter_index": 11, "tool_calls": 2, "error": null}
+{"ts": 1778142276.8174741, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 138, "output_chars": 12527, "error": null}
+{"ts": 1778142276.8292904, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 11, "output_chars": 1854, "error": null}
+{"ts": 1778142278.8701594, "sid": "csl-2026-05-07-1023-c9ca", "event": "llm_call", "role": "researcher", "model": "qwen3.5:397b-cloud", "duration_ms": 8498, "prompt_tokens": 17099, "completion_tokens": 139, "iter_index": 10, "tool_calls": 2, "error": null}
+{"ts": 1778142278.8938794, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 23, "output_chars": 8348, "error": null}
+{"ts": 1778142278.9363894, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 42, "output_chars": 5268, "error": null}
+{"ts": 1778142280.975159, "sid": "csl-2026-05-07-1023-c9ca", "event": "llm_call", "role": "researcher", "model": "qwen3.5:397b-cloud", "duration_ms": 9887, "prompt_tokens": 4580, "completion_tokens": 260, "iter_index": 12, "tool_calls": 3, "error": null}
+{"ts": 1778142281.0108833, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 35, "output_chars": 88, "error": null}
+{"ts": 1778142281.0278742, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 16, "output_chars": 42, "error": null}
+{"ts": 1778142281.0284135, "sid": "csl-2026-05-07-1023-c9ca", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 1539, "error": null}
+{"ts": 1778142289.9131207, "sid": "csl-2026-05-07-1023-c9ca", "event": "llm_call", "role": "researcher", "model": "qwen3.5:397b-cloud", "duration_ms": 8884, "prompt_tokens": 5391, "completion_tokens": 765, "iter_index": 15, "tool_calls": 0, "error": null}
+{"ts": 1778142289.913315, "sid": "csl-2026-05-07-1023-c9ca", "event": "node_exit", "role": "researcher", "duration_ms": 29742}
+{"ts": 1778142290.037553, "sid": "csl-2026-05-07-1023-c9ca", "event": "llm_call", "role": "researcher", "model": "qwen3.5:397b-cloud", "duration_ms": 11100, "prompt_tokens": 21186, "completion_tokens": 990, "iter_index": 14, "tool_calls": 0, "error": null}
+{"ts": 1778142290.0377228, "sid": "csl-2026-05-07-1023-c9ca", "event": "node_exit", "role": "researcher", "duration_ms": 29866}
+{"ts": 1778142291.327638, "sid": "csl-2026-05-07-1023-c9ca", "event": "llm_call", "role": "researcher", "model": "qwen3.5:397b-cloud", "duration_ms": 14498, "prompt_tokens": 22970, "completion_tokens": 1403, "iter_index": 13, "tool_calls": 0, "error": null}
+{"ts": 1778142291.3278077, "sid": "csl-2026-05-07-1023-c9ca", "event": "node_exit", "role": "researcher", "duration_ms": 31156}
+{"ts": 1778142291.3288965, "sid": "csl-2026-05-07-1023-c9ca", "event": "node_enter", "role": "synthesizer"}
+{"ts": 1778142313.627798, "sid": "csl-2026-05-07-1023-c9ca", "event": "llm_call", "role": "synthesizer", "model": "qwen3.5:397b-cloud", "duration_ms": 22298, "prompt_tokens": 2532, "completion_tokens": 2517, "iter_index": 1, "tool_calls": 0, "error": null}
+{"ts": 1778142313.6279883, "sid": "csl-2026-05-07-1023-c9ca", "event": "node_exit", "role": "synthesizer", "duration_ms": 22299}

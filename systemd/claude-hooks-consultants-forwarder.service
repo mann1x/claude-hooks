@@ -1,0 +1,19 @@
+[Unit]
+Description=claude-hooks /consultants smart-start forwarder
+Documentation=https://github.com/cytostack/claude-hooks
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=@WORKINGDIR@
+# The forwarder runs in the *main* claude-hooks env (stdlib only)
+# but spawns the engine in the consultants env on demand.
+ExecStart=@MAIN_PYTHON@ -m claude_hooks.consultants_forwarder --engine-python @CONSULTANTS_PYTHON@
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=-%h/.config/claude-hooks-consultants.env
+StandardOutput=append:%h/.claude/claude-hooks-consultants-forwarder.log
+StandardError=append:%h/.claude/claude-hooks-consultants-forwarder.log
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,35 @@
+reading: /root/.claude/consultants-traces/csl-2026-05-07-1006-b8a8.jsonl
+
+sid: csl-2026-05-07-1006-b8a8
+total wall: 35.8s   first_event=+0.0s  last_event=+35.8s
+
+  planner       node=3.9s    (entries) llm=1x=3.9s    tool=0x=0ms     tok=p282/c177
+      LLM iter=1 model=minimax-m2.7:cloud           3.9s  p=282    c=177    tool_calls=0
+
+  researcher    node=49.9s   (3xentries) llm=11x=49.7s   tool=13x=220ms   tok=p241814/c1150
+      LLM iter=9 model=minimax-m2.7:cloud           8.1s  p=23161  c=78     tool_calls=0
+      LLM iter=11 model=minimax-m2.7:cloud           8.0s  p=36570  c=230    tool_calls=0
+      LLM iter=10 model=minimax-m2.7:cloud           7.0s  p=22428  c=56     tool_calls=1
+      LLM iter=6 model=minimax-m2.7:cloud           6.7s  p=22297  c=88     tool_calls=2
+      LLM iter=2 model=minimax-m2.7:cloud           4.4s  p=17104  c=63     tool_calls=1
+      LLM iter=8 model=minimax-m2.7:cloud           3.6s  p=22525  c=124    tool_calls=1
+      LLM iter=3 model=minimax-m2.7:cloud           2.7s  p=17100  c=103    tool_calls=2
+      LLM iter=1 model=minimax-m2.7:cloud           2.7s  p=17127  c=83     tool_calls=2
+      LLM iter=7 model=minimax-m2.7:cloud           2.5s  p=23665  c=109    tool_calls=0
+      LLM iter=5 model=minimax-m2.7:cloud           2.3s  p=17286  c=131    tool_calls=3
+      LLM iter=4 model=minimax-m2.7:cloud           1.8s  p=22551  c=85     tool_calls=1
+      tool grep               x5     212ms chars=52137
+      tool glob               x1       7ms chars=300
+      tool read_file          x5       1ms chars=43166
+      tool list_files         x2       0ms chars=262
+
+  synthesizer   node=5.8s    (entries) llm=1x=5.8s    tool=0x=0ms     tok=p772/c140
+      LLM iter=1 model=minimax-m2.7:cloud           5.8s  p=772    c=140    tool_calls=0
+
+totals
+  wall                  35.8s
+  sum of node spans     59.7s
+  sum of LLM call time  59.5s  (165.9% of wall)
+  sum of tool call time 220ms
+  total prompt tokens   242868
+  total completion tok  1467

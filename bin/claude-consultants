@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# claude-consultants — drives the /consultants engine over HTTP.
+#
+# Resolves to the dedicated ``claude-hooks-consultants`` conda env's
+# Python. If that env is missing, prints a clear error pointing at
+# install.py and exits 2. Does NOT fall back to system Python or
+# the main ``claude-hooks`` env — the consultants stack is
+# intentionally isolated (see memory/feedback_conda_first_design.md).
+
+set -e
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=_resolve_python_consultants.sh
+. "$REPO/bin/_resolve_python_consultants.sh"
+
+if [ -z "$PY" ]; then
+    cat >&2 <<'EOF'
+error: claude-hooks-consultants conda env not found.
+
+The /consultants engine runs in a dedicated conda env named
+``claude-hooks-consultants`` to keep its LangGraph/LangServe
+dependency tree isolated from the main claude-hooks install.
+
+To set it up:
+
+    cd <claude-hooks-repo>
+    python install.py
+
+If conda itself is missing, install Miniconda from
+https://docs.conda.io/projects/miniconda/ and re-run install.py.
+
+Override with ``CLAUDE_CONSULTANTS_PY=/path/to/python`` if you've
+installed the deps somewhere else.
+EOF
+    exit 2
+fi
+
+exec "$PY" -m consultants.cli "$@"

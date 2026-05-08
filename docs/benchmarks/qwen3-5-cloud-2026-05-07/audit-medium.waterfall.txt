@@ -1,0 +1,40 @@
+reading: /root/.claude/consultants-traces/csl-2026-05-07-1032-1b25.jsonl
+
+sid: csl-2026-05-07-1032-1b25
+total wall: 87.8s   first_event=+0.0s  last_event=+87.8s
+
+  planner       node=28.8s   (entries) llm=1x=28.8s   tool=0x=0ms     tok=p277/c3155
+      LLM iter=1 model=qwen3.5:cloud               28.8s  p=277    c=3155   tool_calls=0
+
+  researcher    node=1.6m    (3xentries) llm=15x=1.5m    tool=20x=554ms   tok=p159337/c5603
+      LLM iter=11 model=qwen3.5:cloud               16.2s  p=18578  c=1017   tool_calls=0
+      LLM iter=15 model=qwen3.5:cloud               14.8s  p=42650  c=1075   tool_calls=0
+      LLM iter=13 model=qwen3.5:cloud               13.6s  p=5344   c=1066   tool_calls=0
+      LLM iter=14 model=qwen3.5:cloud               10.5s  p=19601  c=723    tool_calls=3
+      LLM iter=6 model=qwen3.5:cloud                6.9s  p=6277   c=249    tool_calls=3
+      LLM iter=12 model=qwen3.5:cloud                5.5s  p=20138  c=248    tool_calls=3
+      LLM iter=8 model=qwen3.5:cloud                5.0s  p=4468   c=170    tool_calls=1
+      LLM iter=9 model=qwen3.5:cloud                4.9s  p=16050  c=127    tool_calls=1
+      LLM iter=1 model=qwen3.5:cloud                3.6s  p=2935   c=221    tool_calls=3
+      LLM iter=3 model=qwen3.5:cloud                2.3s  p=2937   c=144    tool_calls=1
+      LLM iter=2 model=qwen3.5:cloud                2.2s  p=2935   c=148    tool_calls=1
+      LLM iter=10 model=qwen3.5:cloud                2.1s  p=4210   c=111    tool_calls=1
+      LLM iter=4 model=qwen3.5:cloud                2.0s  p=4371   c=135    tool_calls=1
+      LLM iter=5 model=qwen3.5:cloud                1.8s  p=4373   c=73     tool_calls=1
+      LLM iter=7 model=qwen3.5:cloud                1.6s  p=4470   c=96     tool_calls=1
+      tool grep               x9     527ms chars=17593
+      tool glob               x1      21ms chars=2397
+      tool read_file          x6       6ms chars=146233
+      tool survey_project     x3       0ms chars=11154
+      tool list_files         x1       0ms chars=513
+
+  synthesizer   node=17.3s   (entries) llm=1x=17.3s   tool=0x=0ms     tok=p2089/c1872
+      LLM iter=1 model=qwen3.5:cloud               17.3s  p=2089   c=1872   tool_calls=0
+
+totals
+  wall                  87.8s
+  sum of node spans     2.3m
+  sum of LLM call time  2.3m  (158.4% of wall)
+  sum of tool call time 554ms
+  total prompt tokens   161703
+  total completion tok  10630

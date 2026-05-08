@@ -3,11 +3,23 @@ context is auto-compacted.
 
 Reads the session transcript, builds a deterministic markdown
 summary of the eight-section ``/wrapup`` skill structure (with
-the model-judgment sections clearly marked), persists it next to
-the project (preferring ``.wolf/`` then ``docs/wrapup/``, falling
-back to ``~/.claude/wrapup-pre-compact/``), and returns the
-markdown as ``additionalContext`` so it lands inside the
-compaction window.
+the model-judgment sections clearly marked), and persists it next
+to the project (preferring ``.wolf/`` then ``docs/wrapup/``,
+falling back to ``~/.claude/wrapup-pre-compact/``).
+
+The post-compaction assistant picks up the file via
+:mod:`claude_hooks.wrapup_recovery`, which prepends a one-shot
+pointer block to ``additionalContext`` on the next
+``UserPromptSubmit`` after compaction.
+
+Why we don't return ``hookSpecificOutput.additionalContext`` from
+PreCompact: Claude Code's PreCompact event schema does NOT include
+``hookSpecificOutput`` — it only accepts the universal
+``continue`` / ``stopReason`` / ``suppressOutput`` envelope. Trying
+to emit ``additionalContext`` from this hook fails the JSON-schema
+validator with ``(root): Invalid input`` and the whole hook is
+reported as failed even though the disk write succeeded. So the
+disk file + post-compact recovery is the ONLY delivery channel.
 
 Activation gates (BOTH must be true):
 
@@ -87,7 +99,6 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
         log.warning("pre_compact: synthesis failed: %s", e)
         return None
 
-    saved_to: Optional[Path] = None
     if hook_cfg.get("save_to_file", True):
         try:
             output_path = resolve_output_path(cwd, session_id)
@@ -97,25 +108,9 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
         except Exception as e:
             log.debug("pre_compact: file write failed: %s", e)
 
-    # Build the additionalContext block. The file-location pointer
-    # appears as the LAST line so post-compaction the assistant sees
-    # it most recently in context (recent context dominates attention)
-    # and reliably knows where to Read the full summary from disk.
-    parts: list[str] = [markdown]
-    if saved_to:
-        if not parts[-1].endswith("\n"):
-            parts.append("")
-        parts.append("---")
-        parts.append("")
-        parts.append(
-            f"**State summary saved to:** `{saved_to}` — Read this file "
-            f"to recover the full pre-compaction context."
-        )
-    additional_context = "\n".join(parts)
-
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": "PreCompact",
-            "additionalContext": additional_context,
-        }
-    }
+    # No JSON output. PreCompact's hook schema doesn't accept
+    # hookSpecificOutput.additionalContext (Claude Code rejects it as
+    # "(root): Invalid input"). The wrap-up file on disk is the only
+    # delivery channel; wrapup_recovery surfaces the pointer on the
+    # next post-compaction UserPromptSubmit.
+    return None

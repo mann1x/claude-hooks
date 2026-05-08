@@ -9,16 +9,23 @@
 # it, and re-installs when proxy.enabled is true and the deps are
 # missing (see _ensure_proxy_deps in install.py).
 #
-# OPTIONAL provider extras live in their own files — install only the
-# ones you actually enable in config/claude-hooks.json:
+# OPTIONAL extras live in their own files — install only the ones
+# you actually enable in config/claude-hooks.json:
 #
 #   pip install -r requirements.txt                        # core only
 #   pip install -r requirements.txt -r requirements-pgvector.txt
 #   pip install -r requirements.txt -r requirements-sqlite-vec.txt
+#   pip install -r requirements.txt -r requirements-axon.txt    # if running axon-host.service
 #
 # Or all of them at once:
-#   pip install -r requirements.txt -r requirements-pgvector.txt -r requirements-sqlite-vec.txt
+#   pip install -r requirements.txt -r requirements-pgvector.txt -r requirements-sqlite-vec.txt -r requirements-axon.txt
 #   pip install -r requirements-dev.txt                    # tests
+#
+# install.py auto-applies the optional files when the matching
+# subsystem is enabled in config/claude-hooks.json (proxy → core,
+# pgvector → -pgvector, axon_host → -axon, etc.) — so a fresh
+# install + `companions.axon_host.enabled=true` doesn't require
+# the operator to remember the right -r incantation.
 #
 
 httpx[http2]>=0.27

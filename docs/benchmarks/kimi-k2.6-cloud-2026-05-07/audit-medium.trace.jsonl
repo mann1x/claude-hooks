@@ -1,0 +1,54 @@
+{"ts": 1778137628.9149823, "sid": "csl-2026-05-07-0907-5644", "event": "node_enter", "role": "planner"}
+{"ts": 1778137654.65028, "sid": "csl-2026-05-07-0907-5644", "event": "llm_call", "role": "planner", "model": "kimi-k2.6:cloud", "duration_ms": 25734, "prompt_tokens": 270, "completion_tokens": 1145, "iter_index": 1, "tool_calls": 0, "error": null}
+{"ts": 1778137654.6505997, "sid": "csl-2026-05-07-0907-5644", "event": "node_exit", "role": "planner", "duration_ms": 25735}
+{"ts": 1778137654.652234, "sid": "csl-2026-05-07-0907-5644", "event": "node_enter", "role": "researcher"}
+{"ts": 1778137654.6526265, "sid": "csl-2026-05-07-0907-5644", "event": "node_enter", "role": "researcher"}
+{"ts": 1778137654.6529982, "sid": "csl-2026-05-07-0907-5644", "event": "node_enter", "role": "researcher"}
+{"ts": 1778137659.3921645, "sid": "csl-2026-05-07-0907-5644", "event": "llm_call", "role": "researcher", "model": "kimi-k2.6:cloud", "duration_ms": 4738, "prompt_tokens": 2297, "completion_tokens": 151, "iter_index": 3, "tool_calls": 2, "error": null}
+{"ts": 1778137659.3923733, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "survey_project", "duration_ms": 0, "output_chars": 3710, "error": null}
+{"ts": 1778137659.3936734, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "list_files", "duration_ms": 1, "output_chars": 1132, "error": null}
+{"ts": 1778137660.2858772, "sid": "csl-2026-05-07-0907-5644", "event": "llm_call", "role": "researcher", "model": "kimi-k2.6:cloud", "duration_ms": 5632, "prompt_tokens": 2313, "completion_tokens": 337, "iter_index": 1, "tool_calls": 3, "error": null}
+{"ts": 1778137660.2860897, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "survey_project", "duration_ms": 0, "output_chars": 3710, "error": null}
+{"ts": 1778137660.2955196, "sid": "csl-2026-05-07-0907-5644", "event": "llm_call", "role": "researcher", "model": "kimi-k2.6:cloud", "duration_ms": 5641, "prompt_tokens": 2336, "completion_tokens": 198, "iter_index": 2, "tool_calls": 1, "error": null}
+{"ts": 1778137660.2971768, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "survey_project", "duration_ms": 0, "output_chars": 3710, "error": null}
+{"ts": 1778137660.3274868, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 41, "output_chars": 169, "error": null}
+{"ts": 1778137660.3358696, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "recall_memory", "duration_ms": 8, "output_chars": 72, "error": null}
+{"ts": 1778137663.5921657, "sid": "csl-2026-05-07-0907-5644", "event": "llm_call", "role": "researcher", "model": "kimi-k2.6:cloud", "duration_ms": 4198, "prompt_tokens": 3993, "completion_tokens": 233, "iter_index": 4, "tool_calls": 3, "error": null}
+{"ts": 1778137663.6135018, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 21, "output_chars": 836, "error": null}
+{"ts": 1778137663.631475, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 17, "output_chars": 1766, "error": null}
+{"ts": 1778137663.6444802, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 12, "output_chars": 93, "error": null}
+{"ts": 1778137664.5978146, "sid": "csl-2026-05-07-0907-5644", "event": "llm_call", "role": "researcher", "model": "kimi-k2.6:cloud", "duration_ms": 4299, "prompt_tokens": 3684, "completion_tokens": 139, "iter_index": 5, "tool_calls": 2, "error": null}
+{"ts": 1778137664.6194093, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 21, "output_chars": 169, "error": null}
+{"ts": 1778137664.6380055, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 18, "output_chars": 836, "error": null}
+{"ts": 1778137666.486063, "sid": "csl-2026-05-07-0907-5644", "event": "llm_call", "role": "researcher", "model": "kimi-k2.6:cloud", "duration_ms": 6149, "prompt_tokens": 3799, "completion_tokens": 216, "iter_index": 6, "tool_calls": 3, "error": null}
+{"ts": 1778137666.4867957, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 1596, "error": null}
+{"ts": 1778137666.487514, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 1675, "error": null}
+{"ts": 1778137666.5241487, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 36, "output_chars": 1766, "error": null}
+{"ts": 1778137667.4440877, "sid": "csl-2026-05-07-0907-5644", "event": "llm_call", "role": "researcher", "model": "kimi-k2.6:cloud", "duration_ms": 2805, "prompt_tokens": 4016, "completion_tokens": 59, "iter_index": 8, "tool_calls": 1, "error": null}
+{"ts": 1778137667.4650774, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 20, "output_chars": 836, "error": null}
+{"ts": 1778137668.0981398, "sid": "csl-2026-05-07-0907-5644", "event": "llm_call", "role": "researcher", "model": "kimi-k2.6:cloud", "duration_ms": 4453, "prompt_tokens": 4808, "completion_tokens": 239, "iter_index": 7, "tool_calls": 2, "error": null}
+{"ts": 1778137668.1323614, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 34, "output_chars": 169, "error": null}
+{"ts": 1778137668.1340365, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 1, "output_chars": 39241, "error": null}
+{"ts": 1778137670.1152284, "sid": "csl-2026-05-07-0907-5644", "event": "llm_call", "role": "researcher", "model": "kimi-k2.6:cloud", "duration_ms": 3590, "prompt_tokens": 5242, "completion_tokens": 142, "iter_index": 9, "tool_calls": 3, "error": null}
+{"ts": 1778137670.1577883, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 42, "output_chars": 105, "error": null}
+{"ts": 1778137670.1728914, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 14, "output_chars": 65, "error": null}
+{"ts": 1778137670.2232616, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 50, "output_chars": 2845, "error": null}
+{"ts": 1778137672.51615, "sid": "csl-2026-05-07-0907-5644", "event": "llm_call", "role": "researcher", "model": "kimi-k2.6:cloud", "duration_ms": 2292, "prompt_tokens": 5698, "completion_tokens": 79, "iter_index": 12, "tool_calls": 2, "error": null}
+{"ts": 1778137672.5167022, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 2692, "error": null}
+{"ts": 1778137672.5171778, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 2075, "error": null}
+{"ts": 1778137672.597108, "sid": "csl-2026-05-07-0907-5644", "event": "llm_call", "role": "researcher", "model": "kimi-k2.6:cloud", "duration_ms": 5131, "prompt_tokens": 3741, "completion_tokens": 283, "iter_index": 10, "tool_calls": 2, "error": null}
+{"ts": 1778137672.597282, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 23, "error": null}
+{"ts": 1778137672.597516, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 23, "error": null}
+{"ts": 1778137674.5772293, "sid": "csl-2026-05-07-0907-5644", "event": "llm_call", "role": "researcher", "model": "kimi-k2.6:cloud", "duration_ms": 6442, "prompt_tokens": 15083, "completion_tokens": 262, "iter_index": 11, "tool_calls": 3, "error": null}
+{"ts": 1778137674.6132092, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 35, "output_chars": 108, "error": null}
+{"ts": 1778137674.619728, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 6, "output_chars": 1190, "error": null}
+{"ts": 1778137674.6210074, "sid": "csl-2026-05-07-0907-5644", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 1, "output_chars": 30055, "error": null}
+{"ts": 1778137676.6812394, "sid": "csl-2026-05-07-0907-5644", "event": "llm_call", "role": "researcher", "model": "kimi-k2.6:cloud", "duration_ms": 4083, "prompt_tokens": 3903, "completion_tokens": 199, "iter_index": 14, "tool_calls": 2, "error": null}
+{"ts": 1778137676.6814005, "sid": "csl-2026-05-07-0907-5644", "event": "node_exit", "role": "researcher", "duration_ms": 22028}
+{"ts": 1778137726.292151, "sid": "csl-2026-05-07-0907-5644", "event": "llm_call", "role": "researcher", "model": "kimi-k2.6:cloud", "duration_ms": 53774, "prompt_tokens": 7256, "completion_tokens": 2505, "iter_index": 13, "tool_calls": 0, "error": null}
+{"ts": 1778137726.2923641, "sid": "csl-2026-05-07-0907-5644", "event": "node_exit", "role": "researcher", "duration_ms": 71640}
+{"ts": 1778137749.2113588, "sid": "csl-2026-05-07-0907-5644", "event": "llm_call", "role": "researcher", "model": "kimi-k2.6:cloud", "duration_ms": 74589, "prompt_tokens": 24283, "completion_tokens": 4129, "iter_index": 15, "tool_calls": 0, "error": null}
+{"ts": 1778137749.2115498, "sid": "csl-2026-05-07-0907-5644", "event": "node_exit", "role": "researcher", "duration_ms": 94558}
+{"ts": 1778137749.2126884, "sid": "csl-2026-05-07-0907-5644", "event": "node_enter", "role": "synthesizer"}
+{"ts": 1778137826.7197397, "sid": "csl-2026-05-07-0907-5644", "event": "llm_call", "role": "synthesizer", "model": "kimi-k2.6:cloud", "duration_ms": 77506, "prompt_tokens": 1511, "completion_tokens": 3655, "iter_index": 1, "tool_calls": 0, "error": null}
+{"ts": 1778137826.7199004, "sid": "csl-2026-05-07-0907-5644", "event": "node_exit", "role": "synthesizer", "duration_ms": 77507}

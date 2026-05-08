@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -68,7 +69,7 @@ CONDA_PY_WIN = Path.home() / "anaconda3" / "envs" / CONDA_ENV_NAME / "python.exe
 
 # Resolved env path is cached so repeated calls during a single install
 # run don't re-spawn ``conda env list``.
-_CONDA_PY_CACHE: Optional[Path] = None
+_CONDA_PY_CACHE: dict[str, Path] = {}
 
 
 def find_conda_env_pythonw(env_name: str = CONDA_ENV_NAME) -> Optional[Path]:
@@ -105,11 +106,21 @@ def find_conda_env_python(env_name: str = CONDA_ENV_NAME) -> Path:
     reports. Returns the platform-default fallback path when nothing is
     found, so callers can still ``.exists()``-check on it.
 
-    Cached after first successful probe per process.
+    Cached per env_name after first successful probe — the cache used
+    to be a single global, which broke
+    ``find_conda_env_python('claude-hooks-consultants')`` after a prior
+    call with the default ``'claude-hooks'`` had already filled the
+    cache (it returned the wrong env's python). The bug shipped in
+    v1.0.5-dev and silently routed the consultants pip install into
+    the main env on pandorum on 2026-05-06; fix is per-env-name keying.
     """
     global _CONDA_PY_CACHE
-    if _CONDA_PY_CACHE is not None and _CONDA_PY_CACHE.exists():
-        return _CONDA_PY_CACHE
+    if not isinstance(_CONDA_PY_CACHE, dict):
+        # Migrate the legacy single-Path cache to a dict keyed by env.
+        _CONDA_PY_CACHE = {}
+    cached = _CONDA_PY_CACHE.get(env_name)
+    if cached is not None and cached.exists():
+        return cached
 
     # Step 1 -- try common install paths without spawning conda. Covers:
     #   - Linux:   ~/anaconda3, ~/miniconda3, /opt/conda
@@ -134,7 +145,7 @@ def find_conda_env_python(env_name: str = CONDA_ENV_NAME) -> Path:
         ]
     for c in candidates:
         if c.exists():
-            _CONDA_PY_CACHE = c
+            _CONDA_PY_CACHE[env_name] = c
             return c
 
     # Step 2 -- ask conda where it thinks the env lives.
@@ -158,15 +169,31 @@ def find_conda_env_python(env_name: str = CONDA_ENV_NAME) -> Path:
                         prefix / "python.exe",
                     ):
                         if layout.exists():
-                            _CONDA_PY_CACHE = layout
+                            _CONDA_PY_CACHE[env_name] = layout
                             return layout
         except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
             pass
 
-    # Last resort: return the platform-default fallback. Caller will
-    # ``.exists()`` it; if it doesn't, the install path proceeds with
-    # system python3.
-    return CONDA_PY_WIN if os.name == "nt" else CONDA_PY_LINUX
+    # Last resort: return a canonical path **for the requested
+    # env_name**, NOT the hardcoded main-env constant. Caller will
+    # ``.exists()`` it; with env_name baked into the path, that check
+    # tells the truth instead of lying when a different env exists.
+    #
+    # The hardcoded ``CONDA_PY_LINUX`` / ``CONDA_PY_WIN`` constants
+    # caused a subtle bug on solidpc 2026-05-06: calling
+    # ``find_conda_env_python("claude-hooks-consultants")`` against a
+    # host that had ``claude-hooks`` (but no consultants env) returned
+    # the main env's python via the fallback. ``.exists()`` was True
+    # (because the main env IS installed), so ``_install_consultants``
+    # decided the consultants env was already there and pip-installed
+    # the heavy LangChain stack into the WRONG env. Constructing the
+    # fallback from env_name fixes it: a missing env produces a
+    # missing path, and the caller's exists() check correctly returns
+    # False.
+    home = Path.home()
+    if os.name == "nt":
+        return home / "anaconda3" / "envs" / env_name / "python.exe"
+    return home / "anaconda3" / "envs" / env_name / "bin" / "python"
 
 # Hook entries to install in ~/.claude/settings.json. Each event has its own
 # matcher block; matchers are empty strings (= match everything) for events
@@ -542,9 +569,18 @@ def _setup_proxy_orchestrator(
     proxy_cfg = cfg.setdefault("proxy", {})
     currently_enabled = bool(proxy_cfg.get("enabled", False))
 
+    # Default the prompt to the current state — empty input keeps
+    # things as they are, which matches every other re-install
+    # prompt in this script. The previous version showed `[y/N]`
+    # regardless of state, so a re-run with proxy already enabled
+    # would silently switch it off if the user just hit Enter.
+    suffix = "[Y/n]" if currently_enabled else "[y/N]"
     ans = input(
-        f"  Use the API proxy? (current: {'yes' if currently_enabled else 'no'}) [y/N]: "
+        f"  Use the API proxy? (current: "
+        f"{'yes' if currently_enabled else 'no'}) {suffix}: "
     ).strip().lower()
+    if not ans:
+        ans = "y" if currently_enabled else "n"
     if ans not in ("y", "yes"):
         # Don't flip an already-true value to false silently -- if the
         # user has it on, they probably want to keep it. Only set the
@@ -972,6 +1008,12 @@ def _install_caliber_proxy_systemd(
 
 
 _PGVECTOR_MCP_UNIT = "claude-hooks-pgvector-mcp.service"
+_PGVECTOR_BACKUP_UNITS = (
+    "claude-hooks-pgvector-backup.service",
+    "claude-hooks-pgvector-backup.timer",
+    "claude-hooks-pgvector-backup-check.service",
+    "claude-hooks-pgvector-backup-check.timer",
+)
 
 
 def _install_pgvector_mcp_systemd(
@@ -1039,6 +1081,90 @@ def _install_pgvector_mcp_systemd(
         print(f"  [!!] enable failed:\n{rc.stderr.strip()[-300:]}")
 
 
+def _install_pgvector_backup_systemd(
+    cfg: dict, *, non_interactive: bool, dry_run: bool,
+) -> None:
+    """Install the pgvector daily-backup timer when the pgvector
+    provider is enabled.
+
+    Linux + Docker only. Idempotent. The script and timer assume the
+    container is named ``mcp-pgvector`` (override via
+    ``systemctl edit`` after install). Backups land in
+    ``/shared/config/mcp-pgvector/backups/`` (resolved through any
+    symlinks at install time).
+    """
+    if os.name == "nt":
+        return
+    if not Path("/etc/systemd/system").is_dir():
+        return
+    pgvector_cfg = (cfg.get("providers") or {}).get("pgvector") or {}
+    if not pgvector_cfg.get("enabled", False):
+        return
+
+    missing = [
+        u for u in _PGVECTOR_BACKUP_UNITS
+        if not (Path("/etc/systemd/system") / u).exists()
+    ]
+    if not missing:
+        return
+
+    print("\n==> claude-hooks-pgvector-backup systemd units")
+    print(f"  Missing: {', '.join(missing)}")
+    print(f"  Will install to /etc/systemd/system/ with __REPO_PATH__ = {HERE}")
+    print("  Default schedule: daily at 01:17 local; retain 7 daily / 4 weekly / 3 monthly.")
+    print("  Includes weekly canary (Mon 02:43) that runs pg_restore -l + full-read on each tier.")
+    if dry_run:
+        print("  [dry-run] skipping write.")
+        return
+    if non_interactive:
+        print("  --non-interactive: proceeding.")
+    else:
+        ans = input(
+            "  Install pgvector backup timer? [Y/n]: ",
+        ).strip().lower()
+        if ans not in ("", "y", "yes"):
+            print("  Skipped.")
+            return
+
+    repo_path = str(HERE.resolve())
+    home_path = str(Path.home())
+    wrote: list[str] = []
+    for unit in _PGVECTOR_BACKUP_UNITS:
+        src = HERE / "systemd" / unit
+        dest = Path("/etc/systemd/system") / unit
+        if dest.exists():
+            print(f"  · {unit} already installed -- leaving as-is")
+            continue
+        if not src.exists():
+            print(f"  [!!] {src} missing -- skipping")
+            continue
+        content = src.read_text(encoding="utf-8")
+        content = content.replace("__REPO_PATH__", repo_path)
+        content = content.replace("__HOME__", home_path)
+        try:
+            dest.write_text(content, encoding="utf-8")
+        except OSError as e:
+            print(f"  [!!] Failed to write {dest}: {e}")
+            continue
+        wrote.append(unit)
+        print(f"  + wrote {unit}")
+
+    if not wrote:
+        return
+    subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
+    for u in wrote:
+        if not u.endswith(".timer"):
+            continue
+        rc = subprocess.run(
+            ["systemctl", "enable", "--now", u],
+            capture_output=True, text=True,
+        )
+        if rc.returncode == 0:
+            print(f"  · enabled + started {u}")
+        else:
+            print(f"  [!!] enable failed:\n{rc.stderr.strip()[-300:]}")
+
+
 _AXON_HOST_UNIT = "axon-host.service"
 _AXON_HOST_CWD = Path("/var/lib/axon-host")
 _AXON_PLACEHOLDER = (
@@ -1048,6 +1174,38 @@ _AXON_PLACEHOLDER = (
     "# the parser without adding meaningful content. Do not delete.\n"
     "EMPTY = None\n"
 )
+
+
+def _ensure_axon_registry_dir(*, dry_run: bool) -> bool:
+    """Ensure ``~/.axon/repos/`` exists.
+
+    The axon-host unit declares ``ReadWritePaths=/root/.axon`` so
+    systemd can bind-mount it into the service's namespace. If the
+    directory is missing at unit start, systemd fails namespace
+    setup with ``status=226/NAMESPACE`` and the unit crash-loops
+    every 5s (the ``Restart=on-failure`` cadence). Caught
+    2026-05-07 after a host restart left ``/root/.axon`` missing.
+
+    The ``repos/`` subdir is the registry path axon's host walks at
+    startup to enumerate served projects.
+
+    Returns True on success, False if creation failed (e.g.
+    permission). dry-run prints the would-do without writing.
+    """
+    base = Path.home() / ".axon"
+    repos = base / "repos"
+    if repos.is_dir():
+        return True
+    if dry_run:
+        print(f"  [dry-run] Would: mkdir -p {repos}")
+        return True
+    try:
+        repos.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"  [!!] Failed to create {repos}: {e}")
+        return False
+    print(f"  + ensured {repos} exists (axon registry path)")
+    return True
 
 
 def _install_axon_host_systemd(
@@ -1071,6 +1229,15 @@ def _install_axon_host_systemd(
         import resolver.
       * ``MemoryMax=8G`` / ``MemoryHigh=6G`` so a future runaway can
         not OOM the host.
+
+    Two pre-flight checks added 2026-05-07 (post-loop incident):
+      * ``_ensure_axon_registry_dir`` mkdir's ``/root/.axon/repos/``
+        before enable; missing dir blocks systemd's namespace
+        bind-mount.
+      * ``_ensure_axon_deps`` probes the env's axon import surface
+        and pip-installs ``requirements-axon.txt`` when anything
+        (uvicorn / sse-starlette / pydantic-settings / httpx-sse)
+        has drifted out of the env.
     """
     if os.name == "nt":
         return
@@ -1081,6 +1248,24 @@ def _install_axon_host_systemd(
     if not axon_host_cfg.get("enabled", False):
         return
 
+    print("\n==> axon-host systemd unit")
+
+    # Pre-flight 1 — ensure the registry dir exists. If we skip this
+    # and the dir is missing, systemd fails namespace setup
+    # (status=226/NAMESPACE) on every restart attempt.
+    if not _ensure_axon_registry_dir(dry_run=dry_run):
+        print("  Skipped: registry dir setup failed.")
+        return
+
+    # Pre-flight 2 — ensure the env has axon's runtime deps. Without
+    # this, the unit boots, ModuleNotFoundError-crashes on import,
+    # and Restart=on-failure loops the service forever.
+    if not _ensure_axon_deps(
+        non_interactive=non_interactive, dry_run=dry_run,
+    ):
+        print("  Skipped: axon dep check failed. Fix env then re-run.")
+        return
+
     axon_bin = shutil.which("axon")
     if axon_bin is None:
         # Fall back to the conda env claude-hooks itself uses, mirroring
@@ -1089,17 +1274,18 @@ def _install_axon_host_systemd(
         if candidate.is_file():
             axon_bin = str(candidate)
     if axon_bin is None:
-        print("\n==> axon-host systemd unit")
         print("  axon binary not found on PATH or in ~/anaconda3/envs/claude-hooks/bin/")
-        print("  Skipped. Run `pip install axoniq` and re-run install.py.")
+        print("  Skipped. Run `pip install -r requirements-axon.txt` and re-run install.py.")
         return
 
     src = HERE / "systemd" / _AXON_HOST_UNIT
     dest = Path("/etc/systemd/system") / _AXON_HOST_UNIT
     if dest.exists():
-        return  # idempotent
+        # Pre-flight checks above already ran (registry dir + deps),
+        # so an existing unit is now safe to leave alone. Idempotent.
+        print(f"  · unit already at {dest} — pre-flight ran, leaving as-is.")
+        return
 
-    print("\n==> axon-host systemd unit")
     if not src.exists():
         print(f"  [!!] {src} missing -- skipping")
         return
@@ -1960,6 +2146,81 @@ def _install_daemon_windows_steps(
             return
 
 
+_PGVECTOR_VERIFY_SCRIPT = r"""
+import json, sys
+try:
+    import psycopg
+except ImportError as e:
+    print(json.dumps({"ok": False,
+                       "reason": "psycopg not importable: " + str(e)}))
+    sys.exit(0)
+try:
+    with psycopg.connect(sys.argv[1], connect_timeout=5) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+            cur.execute("SELECT 1 FROM pg_extension WHERE extname='vector'")
+            if cur.fetchone() is None:
+                print(json.dumps({"ok": False,
+                                   "reason": "pgvector extension not "
+                                             "installed in target DB"}))
+                sys.exit(0)
+    print(json.dumps({"ok": True, "reason": "ok"}))
+except Exception as e:
+    print(json.dumps({"ok": False,
+                       "reason": type(e).__name__ + ": " + str(e)}))
+"""
+
+
+def _verify_pgvector_dsn(dsn: str) -> tuple[bool, str]:
+    """Probe Postgres for the pgvector extension. Returns (ok, reason).
+
+    Uses the conda env's python via subprocess when psycopg isn't
+    importable in the current interpreter. install.py is often
+    invoked with whatever ``python`` is on PATH (system py3,
+    sometimes a different env), and pinning the verify call to the
+    claude-hooks env's python — where psycopg IS installed — gives
+    accurate reachability info instead of a misleading "FAILED".
+    """
+    # Fast path: psycopg available in this interpreter.
+    try:
+        import psycopg  # type: ignore  # noqa: F401, PLC0415
+        from claude_hooks.providers.pgvector import PgvectorProvider  # noqa: PLC0415
+        from claude_hooks.providers import ServerCandidate  # noqa: PLC0415
+        candidate = ServerCandidate(server_key="pgvector", url=dsn,
+                                    source="installer", confidence="manual")
+        if PgvectorProvider.verify(candidate):
+            return True, "ok"
+        return False, "verify returned false (see logs)"
+    except ImportError:
+        pass
+
+    # Fallback: shell out to the conda env's python where psycopg
+    # is expected to be installed.
+    conda_py = find_conda_env_python()
+    if not conda_py.exists():
+        return False, ("psycopg not in current python AND "
+                       f"conda env not found at {conda_py}")
+
+    try:
+        rc = subprocess.run(
+            [str(conda_py), "-c", _PGVECTOR_VERIFY_SCRIPT, dsn],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, f"subprocess failed: {e}"
+
+    out = (rc.stdout or "").strip().splitlines()
+    if not out:
+        return False, (f"verify subprocess produced no output "
+                       f"(rc={rc.returncode}, stderr={rc.stderr.strip()[:200]})")
+    try:
+        result = json.loads(out[-1])
+    except json.JSONDecodeError:
+        return False, f"verify subprocess output not JSON: {out[-1][:200]}"
+    return bool(result.get("ok")), str(result.get("reason") or "")
+
+
 def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
     """Ask if pgvector is available and set up the system-wide MCP server.
 
@@ -2023,19 +2284,11 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
         return
 
     # 2. Verify the DSN reaches a Postgres with the pgvector extension.
-    try:
-        from claude_hooks.providers.pgvector import PgvectorProvider
-        from claude_hooks.providers import ServerCandidate
-    except ImportError as e:
-        print(f"  Cannot import pgvector provider: {e}")
-        return
-    candidate = ServerCandidate(server_key="pgvector", url=dsn,
-                                source="installer", confidence="manual")
     print("  Probing Postgres + pgvector extension...", end=" ", flush=True)
-    ok = PgvectorProvider.verify(candidate)
-    print("OK" if ok else "FAILED")
+    ok, reason = _verify_pgvector_dsn(dsn)
+    print("OK" if ok else f"FAILED ({reason})")
     if not ok:
-        print("  Couldn't reach pgvector with that DSN.")
+        print(f"  Couldn't reach pgvector with that DSN: {reason}")
         print("  Fix the DSN and re-run install.py -- leaving pgvector disabled.")
         return
 
@@ -2190,6 +2443,319 @@ def _write_pgvector_launcher(path: Path, *, py: str, repo: str) -> None:
         print(f"      Add to PATH if you want Cursor/Codex/etc. to spawn `pgvector-mcp` by name.")
 
 
+# -- bin/ shim wrappers (cross-platform PATH glue) ----------------------- #
+#
+# The bin/ shims (claude-hook, claude-consultants, claude-advisor,
+# claude-hooks-daemon, caliber-grounding-proxy, ...) live inside the
+# repo and resolve their own location with ``dirname "$0"``. That works
+# fine when invoked by absolute path (e.g. from settings.json's
+# UserPromptSubmit hook entry) but breaks two ways for skill CLIs that
+# use the bare command name:
+#
+#   1. Skills run inside Claude Code's bash subprocess, whose PATH does
+#      NOT include the repo's bin/ on any platform -- so a bare
+#      ``claude-consultants config show`` from /consultants--config
+#      returns 127 / command not found.
+#
+#   2. Symlinking the repo shim into a PATH dir doesn't help either:
+#      ``$0`` becomes the symlink path and REPO resolves to the wrong
+#      tree (e.g. /usr/local instead of the repo), so the shim fails
+#      to source its bin/_resolve_python*.sh helper.
+#
+# Fix: drop tiny exec-wrapper scripts in a known PATH-friendly location
+# that ``exec`` the absolute repo shim path. The wrapper has zero logic
+# beyond forwarding args -- the real shim still runs and resolves REPO
+# correctly via the absolute ``$0``.
+#
+# Locations (matches the pgvector-mcp launcher pattern above):
+#   POSIX (Linux + macOS): ``~/.local/bin/<shim>``  (POSIX sh wrapper)
+#   Windows:               ``%LOCALAPPDATA%\claude-hooks\bin\<shim>``
+#                          (POSIX sh wrapper for MSYS / Git-bash that
+#                           Claude Code uses on Windows) + ``<shim>.cmd``
+#                          (native cmd.exe / PowerShell wrapper).
+#
+# All wrappers are tagged in their first comment line so a re-run of
+# install.py replaces only its own files and never clobbers a hand-rolled
+# wrapper of the same name.
+
+# List of bin/ shims that should get a PATH wrapper. Helpers (anything
+# starting with ``_``) and platform-specific .cmd files are excluded --
+# the .cmd siblings are produced from the POSIX shim by this installer.
+_SHIM_WRAPPER_TAG = "claude-hooks shim wrapper -- generated by install.py"
+
+
+def _shim_names_to_install(repo_path: Path) -> list[str]:
+    """Return the sorted list of bin/ shim base names to wrap.
+
+    Walks ``<repo>/bin/`` and picks every regular file that:
+      * does not start with ``_`` (helpers like _resolve_python.sh)
+      * does not end in ``.cmd`` (Windows native sibling, generated)
+      * has a shebang line (filters out READMEs etc.)
+    """
+    names: list[str] = []
+    bin_dir = repo_path / "bin"
+    if not bin_dir.is_dir():
+        return names
+    for child in sorted(bin_dir.iterdir()):
+        if not child.is_file():
+            continue
+        n = child.name
+        if n.startswith("_") or n.endswith(".cmd"):
+            continue
+        try:
+            with open(child, "rb") as f:
+                head = f.read(4)
+            if head[:2] != b"#!":
+                continue
+        except OSError:
+            continue
+        names.append(n)
+    return names
+
+
+def _shim_wrapper_dir() -> Path:
+    """Choose the wrapper install dir for the current platform.
+
+    POSIX (Linux + macOS): ``~/.local/bin``. Conventional user-bin dir,
+    on PATH for most modern desktops; we warn if it isn't.
+    Windows: ``%LOCALAPPDATA%\\claude-hooks\\bin``. Mirrors the existing
+    ``pgvector-mcp`` launcher path so all claude-hooks user-bin glue
+    lives in one place.
+    """
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local"))
+        return base / "claude-hooks" / "bin"
+    return Path(os.path.expanduser("~/.local/bin"))
+
+
+def _write_shim_wrapper_posix(path: Path, target: Path) -> None:
+    """POSIX sh wrapper: ``exec`` the absolute repo shim with all args."""
+    body = (
+        "#!/usr/bin/env sh\n"
+        f"# {_SHIM_WRAPPER_TAG}\n"
+        f'exec "{target}" "$@"\n'
+    )
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _write_shim_wrapper_cmd(path: Path, target: Path) -> None:
+    """Windows .cmd wrapper for native cmd.exe / PowerShell.
+
+    Claude Code itself uses MSYS bash on Windows and reaches the POSIX
+    wrapper, but the .cmd sibling lets the user invoke the same command
+    name from a normal shell without thinking about it.
+    """
+    # ``call`` would re-enter the same .cmd; use the absolute repo
+    # ``.cmd`` shim if it exists, else fall back to running the POSIX
+    # shim through sh.
+    posix_target = target
+    cmd_target = target.with_suffix(target.suffix + ".cmd") if target.suffix else target.with_name(target.name + ".cmd")
+    if cmd_target.exists():
+        body = (
+            "@echo off\r\n"
+            f"REM {_SHIM_WRAPPER_TAG}\r\n"
+            f'"{cmd_target}" %*\r\n'
+            "exit /b %ERRORLEVEL%\r\n"
+        )
+    else:
+        # No .cmd sibling in the repo -- run the POSIX shim through sh.
+        # MSYS / Git-bash provides ``sh.exe`` on PATH whenever bash is
+        # installed, which is true on every Claude Code Windows host.
+        body = (
+            "@echo off\r\n"
+            f"REM {_SHIM_WRAPPER_TAG}\r\n"
+            f'sh "{posix_target}" %*\r\n'
+            "exit /b %ERRORLEVEL%\r\n"
+        )
+    path.write_text(body, encoding="utf-8")
+
+
+def _is_managed_shim_wrapper(path: Path) -> bool:
+    """True if the file looks like a wrapper we previously wrote.
+
+    Checked by reading the first ~200 bytes and matching the tag. We
+    deliberately don't trust the path alone -- a hand-rolled wrapper at
+    the same name should NOT be silently replaced.
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(256)
+        return _SHIM_WRAPPER_TAG.encode("ascii") in head
+    except OSError:
+        return False
+
+
+def _install_bin_shim_wrappers(repo_path: Path, *, dry_run: bool) -> None:
+    """Drop PATH-friendly wrappers for every bin/* shim in the repo.
+
+    Idempotent: replaces only files tagged with ``_SHIM_WRAPPER_TAG``;
+    skips any pre-existing file of the same name that isn't ours.
+    Prints a single summary line at the end.
+    """
+    names = _shim_names_to_install(repo_path)
+    if not names:
+        return
+    wrapper_dir = _shim_wrapper_dir()
+    if dry_run:
+        print(f"  [dry-run] Would write {len(names)} shim wrappers under {wrapper_dir}")
+        return
+    wrapper_dir.mkdir(parents=True, exist_ok=True)
+    written = 0
+    skipped: list[str] = []
+    for n in names:
+        target = (repo_path / "bin" / n).resolve()
+        if os.name == "nt":
+            posix_path = wrapper_dir / n
+            cmd_path = wrapper_dir / (n + ".cmd")
+            for p, writer in ((posix_path, _write_shim_wrapper_posix),
+                              (cmd_path, _write_shim_wrapper_cmd)):
+                if p.exists() and not _is_managed_shim_wrapper(p):
+                    skipped.append(str(p))
+                    continue
+                writer(p, target)
+                written += 1
+        else:
+            p = wrapper_dir / n
+            if p.exists() and not _is_managed_shim_wrapper(p):
+                skipped.append(str(p))
+                continue
+            _write_shim_wrapper_posix(p, target)
+            written += 1
+    print(f"  Bin wrappers: wrote {written} under {wrapper_dir}")
+    if skipped:
+        print(f"  Skipped {len(skipped)} pre-existing non-managed file(s):")
+        for s in skipped[:5]:
+            print(f"    {s}")
+        if len(skipped) > 5:
+            print(f"    ... and {len(skipped) - 5} more")
+    # PATH-membership: on Windows we MUST get the wrapper dir into the
+    # user's persistent PATH because Claude Code's bash subprocess
+    # inherits its PATH from the parent process, so a skill calling
+    # ``claude-consultants`` by bare name fails until the dir is in
+    # User PATH (HKCU\Environment). On POSIX ``~/.local/bin`` is
+    # almost always already on the user's interactive PATH, but if
+    # not we just print a clear shell-rc hint -- modifying shell rc
+    # files non-interactively is too invasive.
+    path_dirs = (os.environ.get("PATH") or "").split(os.pathsep)
+    if str(wrapper_dir) in path_dirs:
+        return
+    if os.name == "nt":
+        _ensure_windows_user_path_includes(wrapper_dir)
+    else:
+        print(f"  [!] {wrapper_dir} is not in PATH for this shell.")
+        print(f"      To enable bare-name skill CLIs (claude-consultants, claude-advisor, ...):")
+        print(f'        echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.bashrc  # or ~/.zshrc')
+        print(f"      Then open a new shell (or restart Claude Code).")
+
+
+def _read_windows_user_path() -> Optional[str]:
+    """Read HKCU\\Environment\\PATH via reg query.
+
+    Returns the raw User PATH string (REG_EXPAND_SZ or REG_SZ), or
+    ``None`` if the value is missing or unreadable. Reading via reg
+    avoids the system+user merge that ``%PATH%`` and Python's
+    ``os.environ`` see, which would lead us to ADD a dir that is
+    already on system PATH (harmless but noisy) or skip a dir that
+    is on system PATH but not user PATH (broken result).
+    """
+    try:
+        out = subprocess.check_output(
+            ["reg", "query", "HKCU\\Environment", "/v", "PATH"],
+            stderr=subprocess.STDOUT, text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    # Output shape:
+    #   HKEY_CURRENT_USER\Environment
+    #       PATH    REG_EXPAND_SZ    C:\foo;C:\bar
+    for line in out.splitlines():
+        line = line.strip()
+        if line.upper().startswith("PATH"):
+            # Split on whitespace, drop name + type, rejoin remainder.
+            parts = line.split(None, 2)
+            if len(parts) >= 3:
+                return parts[2]
+    return None
+
+
+def _ensure_windows_user_path_includes(wrapper_dir: Path) -> None:
+    """Prepend ``wrapper_dir`` to HKCU\\Environment\\PATH if missing.
+
+    Uses ``reg add`` rather than ``setx`` because ``setx`` silently
+    truncates PATH to 1024 chars, which on a developer machine with
+    a long user PATH is destructive. ``reg add`` writes the literal
+    bytes we hand it, capped only by the registry's REG_EXPAND_SZ
+    limit (~32 KB).
+
+    Idempotent. Skips with a warning if the resulting PATH would be
+    absurdly long (>= 16 KB) -- defensive guard, you'd have to be
+    deliberately abusing user PATH to hit it.
+    """
+    target = str(wrapper_dir)
+    cur = _read_windows_user_path()
+    cur_dirs = (cur or "").split(";") if cur else []
+    cur_dirs_norm = [d.lower().rstrip("\\") for d in cur_dirs if d]
+    if target.lower().rstrip("\\") in cur_dirs_norm:
+        # Already there but not visible to this shell -- the next
+        # shell spawn (or Claude Code restart) will pick it up.
+        print(f"  [info] {wrapper_dir} already on User PATH (open a new shell to see it).")
+        return
+    new_path = (target + ";" + cur) if cur else target
+    if len(new_path) > 16384:
+        print(f"  [warn] User PATH would exceed 16 KB; refusing to extend it.")
+        print(f"         Add manually if you need it: {wrapper_dir}")
+        return
+    try:
+        subprocess.check_output(
+            ["reg", "add", "HKCU\\Environment", "/v", "PATH",
+             "/t", "REG_EXPAND_SZ", "/d", new_path, "/f"],
+            stderr=subprocess.STDOUT, text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"  [warn] reg add failed: {e}")
+        print(f"         Add manually:   setx PATH \"{wrapper_dir};%PATH%\"")
+        return
+    # Notify Explorer so future processes pick up the new PATH without
+    # logoff. Best-effort: a one-shot SendMessageTimeoutW broadcast.
+    try:
+        import ctypes
+        HWND_BROADCAST = 0xFFFF
+        WM_SETTINGCHANGE = 0x001A
+        SMTO_ABORTIFHUNG = 0x0002
+        ctypes.windll.user32.SendMessageTimeoutW(
+            HWND_BROADCAST, WM_SETTINGCHANGE, 0,
+            ctypes.c_wchar_p("Environment"), SMTO_ABORTIFHUNG, 5000, None,
+        )
+    except Exception:
+        pass
+    print(f"  [ok] Prepended {wrapper_dir} to User PATH (HKCU\\Environment).")
+    print(f"       Open a new shell or restart Claude Code to pick it up.")
+
+
+def _remove_bin_shim_wrappers(*, dry_run: bool) -> int:
+    """Uninstall counterpart -- removes only files tagged as ours."""
+    wrapper_dir = _shim_wrapper_dir()
+    if not wrapper_dir.is_dir():
+        return 0
+    removed = 0
+    for child in sorted(wrapper_dir.iterdir()):
+        if not child.is_file():
+            continue
+        if not _is_managed_shim_wrapper(child):
+            continue
+        if dry_run:
+            print(f"  [dry-run] Would remove {child}")
+        else:
+            try:
+                child.unlink()
+            except OSError as e:
+                print(f"  [warn] could not remove {child}: {e}")
+                continue
+        removed += 1
+    return removed
+
+
 def _register_pgvector_mcp_in_claude_json(launcher_path: Path) -> None:
     """Register ``mcpServers.pgvector`` at the root of ``~/.claude.json``.
 
@@ -2318,20 +2884,61 @@ def _pgvector_tables_present(dsn: str, table_name: str) -> bool:
     we treat the schema as initialized. The shared kg_entities /
     kg_relations / kg_observations_<model> get audited inside
     ``_init_pgvector_schema`` (every CREATE is idempotent).
+
+    Like ``_verify_pgvector_dsn``, falls back to a conda-env
+    subprocess when the calling interpreter lacks psycopg — without
+    this fallback, install.py running on system py3 (which has no
+    psycopg) returns False here and silently re-prompts schema init
+    on every re-run, making the user think the existing schema has
+    vanished.
     """
+    # Fast path.
     try:
-        import psycopg  # type: ignore
+        import psycopg  # type: ignore  # noqa: PLC0415
+        try:
+            with psycopg.connect(dsn, connect_timeout=5) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_name = %s",
+                        (table_name,),
+                    )
+                    return cur.fetchone() is not None
+        except Exception:
+            return False
     except ImportError:
+        pass
+
+    # Subprocess fallback via the conda env's python.
+    conda_py = find_conda_env_python()
+    if not conda_py.exists():
+        return False
+    script = (
+        "import json, sys\n"
+        "try:\n"
+        "    import psycopg\n"
+        "    with psycopg.connect(sys.argv[1], connect_timeout=5) as conn:\n"
+        "        with conn.cursor() as cur:\n"
+        "            cur.execute("
+        "'SELECT 1 FROM information_schema.tables WHERE table_name = %s', "
+        "(sys.argv[2],))\n"
+        "            print(json.dumps({'present': cur.fetchone() is not None}))\n"
+        "except Exception as e:\n"
+        "    print(json.dumps({'present': False, 'error': str(e)}))\n"
+    )
+    try:
+        rc = subprocess.run(
+            [str(conda_py), "-c", script, dsn, table_name],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    out = (rc.stdout or "").strip().splitlines()
+    if not out:
         return False
     try:
-        with psycopg.connect(dsn, connect_timeout=5) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT 1 FROM information_schema.tables WHERE table_name = %s",
-                    (table_name,),
-                )
-                return cur.fetchone() is not None
-    except Exception:
+        return bool(json.loads(out[-1]).get("present"))
+    except json.JSONDecodeError:
         return False
 
 
@@ -2393,19 +3000,58 @@ def _init_pgvector_schema(dsn: str, *, model: str = "qwen3") -> None:
     ``scripts.migrate_to_pgvector.schema_sql_for_model`` so install.py
     and the bulk migration stay in lock-step on table layout, indexes,
     and constraints -- drift between them silently breaks recall.
+
+    Falls back to the conda env's python when the calling interpreter
+    lacks psycopg, mirroring ``_verify_pgvector_dsn`` and
+    ``_pgvector_tables_present``. The DDL is piped via stdin (it's a
+    few KB so argv would be cramped).
     """
-    import psycopg  # type: ignore
+    # Build the full DDL once so both code paths use identical text.
     sys.path.insert(0, str(HERE / "scripts"))
     try:
         from migrate_to_pgvector import MODELS, schema_sql_for_model  # type: ignore
     finally:
         sys.path.pop(0)
     spec = MODELS[model]
-    with psycopg.connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute(_PGVECTOR_SHARED_DDL)
-            cur.execute(schema_sql_for_model(spec))
-        conn.commit()
+    full_sql = _PGVECTOR_SHARED_DDL + "\n" + schema_sql_for_model(spec)
+
+    # Fast path: psycopg in this interpreter.
+    try:
+        import psycopg  # type: ignore  # noqa: PLC0415
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(full_sql)
+            conn.commit()
+        return
+    except ImportError:
+        pass
+
+    # Subprocess fallback.
+    conda_py = find_conda_env_python()
+    if not conda_py.exists():
+        raise RuntimeError(
+            "psycopg not in current python and conda env not found at "
+            f"{conda_py}; cannot initialize pgvector schema. "
+            "Activate the conda env or install psycopg in your shell."
+        )
+    script = (
+        "import sys\n"
+        "import psycopg\n"
+        "ddl = sys.stdin.read()\n"
+        "with psycopg.connect(sys.argv[1]) as conn:\n"
+        "    with conn.cursor() as cur:\n"
+        "        cur.execute(ddl)\n"
+        "    conn.commit()\n"
+    )
+    rc = subprocess.run(
+        [str(conda_py), "-c", script, dsn],
+        input=full_sql, capture_output=True, text=True, timeout=60,
+    )
+    if rc.returncode != 0:
+        raise RuntimeError(
+            f"pgvector schema init failed (rc={rc.returncode}): "
+            f"{rc.stderr.strip()[-500:]}"
+        )
 
 
 def _ensure_proxy_deps(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
@@ -2460,6 +3106,83 @@ def _ensure_proxy_deps(cfg: dict, *, non_interactive: bool, dry_run: bool) -> No
     else:
         print(f"  pip install failed:\n{rc.stderr[-500:]}")
         print(f"  Run manually: {' '.join(pip_cmd)}")
+
+
+def _ensure_axon_deps(*, non_interactive: bool, dry_run: bool) -> bool:
+    """Verify axon's runtime deps in the claude-hooks conda env.
+
+    axon is installed via the upstream ``axoniq`` pip package and
+    transitively needs uvicorn / httpx-sse / pydantic-settings /
+    sse-starlette to serve its HTTP MCP. The conda env we hit on
+    2026-05-07 had drifted — uvicorn et al. were dropped, axon
+    crash-looped under systemd with ModuleNotFoundError, and the
+    /root/.axon registry dir was missing so systemd's namespace
+    setup failed every restart.
+
+    This helper probes the env, and if anything's missing offers to
+    pip-install ``requirements-axon.txt`` in one shot. Returns True
+    when axon is importable after the run (or already was), False
+    on any failure / user-declined install.
+    """
+    conda_py = find_conda_env_python()
+    py = str(conda_py) if conda_py.exists() else sys.executable
+
+    probe = subprocess.run(
+        [py, "-c",
+         "import axon, uvicorn, httpx_sse, pydantic_settings, "
+         "sse_starlette; print(axon.__version__ if hasattr(axon, "
+         "'__version__') else 'ok')"],
+        capture_output=True, text=True,
+    )
+    if probe.returncode == 0:
+        print(f"\nAxon deps:      OK ({probe.stdout.strip()})")
+        return True
+
+    # Surface the actual failing import so the operator knows what
+    # broke. The probe's stderr ends with "ModuleNotFoundError: ...".
+    err_tail = (probe.stderr or "").strip().splitlines()
+    last_line = err_tail[-1] if err_tail else "(no error output)"
+    print("\nAxon deps:      INCOMPLETE")
+    print(f"  Probe failed: {last_line}")
+    print("  axon needs uvicorn / httpx-sse / pydantic-settings / sse-starlette")
+    print("  to serve its HTTP MCP at :8420.")
+
+    req_axon = HERE / "requirements-axon.txt"
+    if not req_axon.is_file():
+        print(f"  [!!] {req_axon} missing — cannot auto-install.")
+        return False
+
+    if dry_run:
+        print(f"  [dry-run] Would: {py} -m pip install -r {req_axon}")
+        return False
+
+    if non_interactive:
+        print("  --non-interactive: installing axon deps...")
+    else:
+        ans = input("  Install axon deps now? [Y/n]: ").strip().lower()
+        if ans not in ("", "y", "yes"):
+            print("  Skipped. The axon-host systemd unit will crash-")
+            print("  loop on import until installed manually:")
+            print(f"    {py} -m pip install -r {req_axon}")
+            return False
+
+    pip_bin = str(Path(py).parent / ("pip.exe" if os.name == "nt" else "pip"))
+    pip_cmd = [pip_bin, "install", "-r", str(req_axon)] \
+        if Path(pip_bin).exists() \
+        else [py, "-m", "pip", "install", "-r", str(req_axon)]
+    rc = subprocess.run(pip_cmd, capture_output=True, text=True)
+    if rc.returncode != 0:
+        print(f"  pip install failed:\n{rc.stderr[-500:]}")
+        print(f"  Run manually: {' '.join(pip_cmd)}")
+        return False
+    print("  Installed.")
+    # Re-probe so the caller knows the env is actually ready.
+    re_probe = subprocess.run(
+        [py, "-c",
+         "import axon, uvicorn, httpx_sse, pydantic_settings, sse_starlette"],
+        capture_output=True, text=True,
+    )
+    return re_probe.returncode == 0
 
 
 CODE_GRAPH_EXTRAS = (
@@ -2617,6 +3340,591 @@ def _check_conda_env(*, non_interactive: bool, dry_run: bool) -> None:
     else:
         print(f"  Warning: env created but python not found at {conda_py}")
         print(f"Hook runtime:   system python3")
+
+
+CONSULTANTS_ENV_NAME = "claude-hooks-consultants"
+
+
+def _install_consultants(cfg: dict, cfg_path: Path, *,
+                         non_interactive: bool, dry_run: bool) -> bool:
+    """Optional /consultants engine setup.
+
+    Returns True if the dedicated conda env is present (and any
+    service unit / config wiring requested by the user has been
+    written), False otherwise. The skills installer uses the return
+    value to decide whether to deploy the four /consultants skills.
+
+    Conda is **mandatory**: the consultants stack (LangGraph,
+    LangServe) is heavy and version-pinned, so we never fall back to
+    a bare venv or system Python. If conda is missing the function
+    prints a clear message pointing at Miniconda installation and
+    returns False.
+    """
+    print("\n==> /consultants engine")
+    consultants_py = find_conda_env_python(env_name=CONSULTANTS_ENV_NAME)
+    already_present = consultants_py.exists()
+    if already_present:
+        print(f"    {CONSULTANTS_ENV_NAME} env exists at:")
+        print(f"      {consultants_py}")
+    else:
+        print(f"    {CONSULTANTS_ENV_NAME} env not found.")
+
+    # Decide whether to (re)install. In non-interactive mode, only
+    # update the existing env; never create a new one without consent.
+    if non_interactive:
+        if not already_present:
+            print("    --non-interactive: skipping (no consent to create env).")
+            return False
+    else:
+        prompt = ("    Install /consultants engine?"
+                  if not already_present
+                  else "    Refresh /consultants engine deps?")
+        ans = input(f"{prompt} [y/N]: ").strip().lower()
+        if ans not in ("y", "yes"):
+            print("    Skipping /consultants install.")
+            return already_present
+
+    # Conda is mandatory.
+    conda_bin = _find_conda()
+    if not conda_bin:
+        print("    error: conda not found on PATH.")
+        print("    Install Miniconda from "
+              "https://docs.conda.io/projects/miniconda/ then re-run.")
+        return False
+
+    if dry_run:
+        print("    [dry-run] Would create env, install consultants, "
+              "and (optionally) install service unit.")
+        return already_present
+
+    # Service mode prompt — non-interactive defaults to always-on.
+    service_mode = "always-on"
+    if not non_interactive:
+        ans = input("    Service mode: [a]lways-on (default) or "
+                    "[s]mart-start (engine spawned on demand): ").strip().lower()
+        if ans.startswith("s"):
+            service_mode = "smart-start"
+
+    # Create env if needed.
+    if not already_present:
+        print(f"    Creating conda env '{CONSULTANTS_ENV_NAME}' "
+              "(Python 3.11)...")
+        rc = subprocess.run(
+            [conda_bin, "create", "-n", CONSULTANTS_ENV_NAME,
+             "python=3.11", "-y"],
+            capture_output=True, text=True,
+        )
+        if rc.returncode != 0:
+            print(f"    conda create failed:\n{rc.stderr[-500:]}")
+            return False
+        consultants_py = find_conda_env_python(
+            env_name=CONSULTANTS_ENV_NAME)
+        if not consultants_py.exists():
+            print(f"    error: env created but python not found at "
+                  f"{consultants_py}")
+            return False
+
+    # pip install -e consultants/ — heavy, but using the env's pip
+    # ensures all deps land in the right place.
+    print(f"    Installing consultants/ into {consultants_py.parent.name}...")
+    rc = subprocess.run(
+        [str(consultants_py), "-m", "pip", "install", "-e",
+         str(HERE / "consultants")],
+        capture_output=True, text=True,
+    )
+    if rc.returncode != 0:
+        print(f"    pip install -e consultants/ failed:\n{rc.stderr[-500:]}")
+        return False
+
+    # Wire smart-start flag into config/claude-hooks.json.
+    consultants_cfg = ((cfg.setdefault("hooks", {})
+                       .setdefault("consultants", {})))
+    smart = consultants_cfg.setdefault("smart_start", {})
+    smart["enabled"] = (service_mode == "smart-start")
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(json.dumps(cfg, indent=2) + "\n",
+                        encoding="utf-8")
+    print(f"    Service mode: {service_mode}")
+
+    # Persist the engine port the install picked (currently the
+    # config default) so the verify step uses the same number the
+    # task will bind.
+    engine_port = int(consultants_cfg.get("engine_url",
+                      "http://127.0.0.1:38095").rsplit(":", 1)[-1].rstrip("/"))
+    forwarder_port = int(((smart.get("forwarder_url")
+                           or "http://127.0.0.1:38096"))
+                         .rsplit(":", 1)[-1].rstrip("/"))
+
+    # Platform autostart.
+    if platform.system() == "Linux":
+        if service_mode == "always-on":
+            _install_consultants_systemd_unit(consultants_py, dry_run=dry_run)
+        else:
+            print("    Smart-start: the engine will be spawned by the "
+                  "consultants forwarder on first request.")
+            print("    Forwarder unit ships under systemd/ — install + "
+                  "enable it to autostart on boot.")
+    elif os.name == "nt":
+        _install_consultants_windows(
+            consultants_py=consultants_py,
+            service_mode=service_mode,
+            engine_port=engine_port,
+            forwarder_port=forwarder_port,
+            non_interactive=non_interactive,
+            dry_run=dry_run,
+        )
+    elif sys.platform == "darwin":
+        _install_consultants_launchd(
+            consultants_py=consultants_py,
+            service_mode=service_mode,
+            engine_port=engine_port,
+            forwarder_port=forwarder_port,
+            non_interactive=non_interactive,
+            dry_run=dry_run,
+        )
+    else:
+        print("    No autostart manager wired for this platform — "
+              "start the engine manually with `consultants-server` or "
+              "`python -m consultants.server`.")
+
+    return True
+
+
+_CONSULTANTS_TASK_NAME = "claude-hooks-consultants"
+_CONSULTANTS_FORWARDER_TASK_NAME = "claude-hooks-consultants-forwarder"
+
+# Same XML shape as ``_DAEMON_TASK_XML`` (logon trigger, no execution
+# time limit, restart on failure) — only the Description differs.
+# Templated so always-on and smart-start can share it. UTF-16 on disk
+# because that's what schtasks /XML expects.
+_CONSULTANTS_TASK_XML = """<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>{description}</Description>
+    <Author>claude-hooks installer</Author>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{user_id}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{command}</Command>
+      <Arguments>{arguments}</Arguments>
+      <WorkingDirectory>{workdir}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+def _write_consultants_task_xml(*, description: str, command: str,
+                                arguments: str, workdir: str,
+                                prefix: str) -> Path:
+    """Write a UTF-16 task XML to a temp file and return its path.
+    Caller cleans it up after schtasks consumes it."""
+    xml = _CONSULTANTS_TASK_XML.format(
+        description=_xml_escape(description),
+        user_id=_xml_escape(_windows_user_id()),
+        command=_xml_escape(command),
+        arguments=_xml_escape(arguments),
+        workdir=_xml_escape(workdir),
+    )
+    import tempfile  # noqa: PLC0415 — Windows-only path
+    fd, path = tempfile.mkstemp(prefix=prefix, suffix=".xml")
+    os.close(fd)
+    Path(path).write_bytes(xml.encode("utf-16"))
+    return Path(path)
+
+
+def _wait_for_consultants_health(port: int, *,
+                                 timeout: float = 30.0) -> bool:
+    """Poll ``http://127.0.0.1:<port>/v1/health`` until it returns
+    200 or ``timeout`` elapses. Used to confirm the engine /
+    forwarder is up after the scheduled task fires.
+
+    First-poll latency on Windows is generous (~5–10 s for the engine
+    cold start because LangChain imports take a beat); the forwarder
+    is much faster (stdlib only). 30 s default covers both with
+    headroom."""
+    import time as _time  # noqa: PLC0415
+    import urllib.error  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+    deadline = _time.monotonic() + timeout
+    url = f"http://127.0.0.1:{port}/v1/health"
+    while _time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=1.5) as r:
+                if 200 <= r.status < 300:
+                    return True
+        except (urllib.error.URLError, OSError):
+            pass
+        _time.sleep(0.5)
+    return False
+
+
+def _register_consultants_task(*, task_name: str, description: str,
+                               exec_command: str, exec_arguments: str,
+                               workdir: str, port: int,
+                               health_timeout: float,
+                               non_interactive: bool) -> bool:
+    """Generic helper: register a single Windows scheduled task,
+    /Run it, and verify health. Used for both the always-on engine
+    task and the smart-start forwarder task. Returns True iff the
+    task is registered AND health-checked at the end.
+
+    Mirrors ``_install_daemon_windows_steps`` but tighter — the
+    consultants tasks don't need the daemon's special-cases (no
+    pythonw fallback to .cmd, no first-run-port-bind dance)."""
+    delete_argstr = f'/Delete /TN "{task_name}" /F'
+    delete_argv = ["/Delete", "/TN", task_name, "/F"]
+    run_argstr = f'/Run /TN "{task_name}"'
+    run_argv = ["/Run", "/TN", task_name]
+
+    # Already-installed branch: in non-interactive mode just verify;
+    # otherwise prompt for re-install.
+    if _windows_task_exists(task_name):
+        print(f"    · scheduled task '{task_name}' already exists")
+        if non_interactive:
+            print("    · --non-interactive: leaving as-is, verifying health")
+            if _wait_for_consultants_health(port, timeout=health_timeout):
+                print(f"    · responding on 127.0.0.1:{port}")
+                return True
+            print(f"    [!!] not responding — try `schtasks {run_argstr}`")
+            return False
+        ans = input("    Re-install (delete + recreate)? [y/N]: "
+                    ).strip().lower()
+        if ans in ("y", "yes"):
+            if not _run_schtasks_elevated(delete_argstr, delete_argv):
+                print("    [!!] could not delete existing task — leaving as-is")
+                return False
+            # fall through to fresh install
+        else:
+            if _wait_for_consultants_health(port, timeout=health_timeout):
+                print(f"    · responding on 127.0.0.1:{port}")
+                return True
+            print(f"    · not currently responding — `schtasks {run_argstr}`")
+            return False
+
+    # Fresh install path. In non-interactive mode print the schtasks
+    # commands and bail (we can't fire UAC without a user).
+    xml_path = _write_consultants_task_xml(
+        description=description,
+        command=exec_command,
+        arguments=exec_arguments,
+        workdir=workdir,
+        prefix=f"{task_name}-",
+    )
+    create_argstr = f'/Create /XML "{xml_path}" /TN "{task_name}" /F'
+    create_argv = ["/Create", "/XML", str(xml_path), "/TN", task_name, "/F"]
+    try:
+        if non_interactive:
+            print("    --non-interactive: cannot prompt for UAC. "
+                  "Run from an elevated cmd:")
+            print(f"      schtasks {create_argstr}")
+            print(f"      schtasks {run_argstr}")
+            return False
+
+        print(f"    Registering '{task_name}'...")
+        print(f"      Command: {exec_command} {exec_arguments}")
+        print("      UAC prompt is scoped to one schtasks call.")
+        if not _run_schtasks_elevated(create_argstr, create_argv):
+            print("    [!!] schtasks /Create failed (UAC declined?)")
+            return False
+        if not _windows_task_exists(task_name):
+            print("    [!!] task not detected after /Create")
+            return False
+        print(f"    · task '{task_name}' registered")
+
+        # Trigger now — LogonTrigger only fires at next logon.
+        _run_schtasks_elevated(run_argstr, run_argv)
+        if _wait_for_consultants_health(port, timeout=health_timeout):
+            print(f"    · responding on 127.0.0.1:{port}")
+            return True
+        print(f"    [!!] task triggered but not responding on "
+              f"127.0.0.1:{port} within {health_timeout:.0f}s")
+        print(f"         Inspect: schtasks /Query /TN \"{task_name}\" /V /FO LIST")
+        return False
+    finally:
+        try:
+            xml_path.unlink()
+        except OSError:
+            pass
+
+
+def _install_consultants_windows(*, consultants_py: Path, service_mode: str,
+                                 engine_port: int, forwarder_port: int,
+                                 non_interactive: bool, dry_run: bool) -> None:
+    """Register the appropriate Windows scheduled task(s) for the
+    consultants engine.
+
+    - **always-on**: register a single ``claude-hooks-consultants``
+      task that runs ``<consultants-env>/pythonw.exe -m
+      consultants.server``. Engine listens on ``engine_port``.
+    - **smart-start**: register a ``claude-hooks-consultants-forwarder``
+      task running in the **main** claude-hooks env (stdlib only). The
+      forwarder spawns the engine on demand into the consultants env.
+
+    On either path we print clear `schtasks` fallback commands when
+    non-interactive (UAC can't be prompted), and clean up the temp XML
+    after schtasks consumes it. Mirrors the daemon's auto-install
+    behaviour so /consultants is a first-class Windows citizen, not a
+    CLI-only afterthought."""
+    if dry_run:
+        print("    [dry-run] would register Windows scheduled task")
+        return
+
+    workdir = str(HERE.resolve())
+
+    if service_mode == "always-on":
+        # pythonw avoids the cmd flash; fall back to console python only
+        # if pythonw is missing (rare).
+        pyw = find_conda_env_pythonw(env_name=CONSULTANTS_ENV_NAME)
+        exec_path = pyw if pyw is not None else consultants_py
+        if pyw is None:
+            print("    [!] pythonw.exe missing in consultants env — using "
+                  "python.exe; a console window will be visible.")
+        ok = _register_consultants_task(
+            task_name=_CONSULTANTS_TASK_NAME,
+            description=("claude-hooks /consultants engine — multi-agent "
+                         "council (always-on)"),
+            exec_command=str(exec_path),
+            exec_arguments=("-m consultants.server "
+                            f"--host 127.0.0.1 --port {engine_port}"),
+            workdir=workdir,
+            port=engine_port,
+            health_timeout=30.0,
+            non_interactive=non_interactive,
+        )
+        if ok:
+            print("    · always-on engine: ready")
+        return
+
+    # smart-start: forwarder runs in the MAIN claude-hooks env so we
+    # don't carry LangChain's import cost when the engine is reaped.
+    main_pyw = find_conda_env_pythonw()
+    main_py = find_conda_env_python()
+    if main_pyw is not None:
+        exec_command = str(main_pyw)
+    elif main_py.exists():
+        exec_command = str(main_py)
+    else:
+        print("    [!!] main claude-hooks env not found — can't register "
+              "the forwarder. Run `python install.py` first.")
+        return
+    forwarder_args = (
+        f"-m claude_hooks.consultants_forwarder "
+        f"--listen-port {forwarder_port} "
+        f"--engine-python \"{consultants_py}\""
+    )
+    ok = _register_consultants_task(
+        task_name=_CONSULTANTS_FORWARDER_TASK_NAME,
+        description=("claude-hooks /consultants smart-start forwarder — "
+                     "spawns engine on demand"),
+        exec_command=exec_command,
+        exec_arguments=forwarder_args,
+        workdir=workdir,
+        port=forwarder_port,
+        health_timeout=15.0,
+        non_interactive=non_interactive,
+    )
+    if ok:
+        print("    · smart-start forwarder: ready")
+
+
+# macOS launchd plist template — same shape as the daemon's, with
+# the ProgramArguments rewritten to invoke the engine / forwarder
+# directly. KeepAlive=true gives us systemd-style restart semantics.
+_CONSULTANTS_LAUNCHD_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{label}</string>
+  <key>ProgramArguments</key>
+  <array>
+{program_args_xml}
+  </array>
+  <key>WorkingDirectory</key><string>{workdir}</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>{logfile}</string>
+  <key>StandardErrorPath</key><string>{logfile}</string>
+</dict>
+</plist>
+"""
+
+
+def _consultants_launchd_plist(*, label: str, argv: list[str],
+                               workdir: str, logfile: str) -> str:
+    program_args_xml = "\n".join(
+        f"    <string>{_xml_escape(a)}</string>" for a in argv
+    )
+    return _CONSULTANTS_LAUNCHD_PLIST.format(
+        label=_xml_escape(label),
+        program_args_xml=program_args_xml,
+        workdir=_xml_escape(workdir),
+        logfile=_xml_escape(logfile),
+    )
+
+
+def _install_consultants_launchd(*, consultants_py: Path, service_mode: str,
+                                 engine_port: int, forwarder_port: int,
+                                 non_interactive: bool, dry_run: bool) -> None:
+    """Register a macOS launchd LaunchAgent for the consultants
+    engine (always-on) or smart-start forwarder. Mirrors
+    ``_install_daemon_launchd`` but with HTTP /v1/health verification
+    and a parameterised ProgramArguments so the same code handles
+    both modes."""
+    if dry_run:
+        print("    [dry-run] would write LaunchAgent plist + launchctl load")
+        return
+
+    plist_dir = Path.home() / "Library" / "LaunchAgents"
+    plist_dir.mkdir(parents=True, exist_ok=True)
+    home = str(Path.home())
+    workdir = str(HERE.resolve())
+
+    if service_mode == "always-on":
+        label = "com.claude-hooks.consultants"
+        argv = [str(consultants_py), "-m", "consultants.server",
+                "--host", "127.0.0.1", "--port", str(engine_port)]
+        port = engine_port
+        log = f"{home}/.claude/claude-hooks-consultants.log"
+        timeout = 30.0
+    else:
+        # Forwarder runs in the main env so LangChain doesn't load
+        # until the engine is actually needed.
+        main_py = find_conda_env_python()
+        if not main_py.exists():
+            print("    [!!] main claude-hooks env not found — can't wire "
+                  "the forwarder.")
+            return
+        label = "com.claude-hooks.consultants-forwarder"
+        argv = [str(main_py), "-m", "claude_hooks.consultants_forwarder",
+                "--listen-port", str(forwarder_port),
+                "--engine-python", str(consultants_py)]
+        port = forwarder_port
+        log = f"{home}/.claude/claude-hooks-consultants-forwarder.log"
+        timeout = 15.0
+
+    dest = plist_dir / f"{label}.plist"
+    if dest.exists():
+        if non_interactive:
+            print(f"    · {dest.name} already installed — "
+                  f"verifying health on 127.0.0.1:{port}")
+            if _wait_for_consultants_health(port, timeout=5.0):
+                print(f"    · responding on 127.0.0.1:{port}")
+                return
+            print(f"    [!!] not responding — try: "
+                  f"launchctl kickstart -k gui/$(id -u)/{label}")
+            return
+        ans = input(f"    {dest.name} already installed. "
+                    "Re-install + re-verify? [y/N]: ").strip().lower()
+        if ans in ("y", "yes"):
+            subprocess.run(["launchctl", "unload", "-w", str(dest)],
+                           capture_output=True)
+            try:
+                dest.unlink()
+            except OSError as e:
+                print(f"    [!!] could not remove {dest}: {e}")
+                return
+        else:
+            if _wait_for_consultants_health(port, timeout=5.0):
+                print(f"    · responding on 127.0.0.1:{port}")
+            else:
+                print(f"    [!!] not responding — try: "
+                      f"launchctl kickstart -k gui/$(id -u)/{label}")
+            return
+
+    plist_content = _consultants_launchd_plist(
+        label=label, argv=argv, workdir=workdir, logfile=log,
+    )
+    try:
+        dest.write_text(plist_content, encoding="utf-8")
+    except OSError as e:
+        print(f"    [!!] Failed to write {dest}: {e}")
+        return
+    print(f"    + wrote {dest}")
+    rc = subprocess.run(
+        ["launchctl", "load", "-w", str(dest)],
+        capture_output=True, text=True,
+    )
+    if rc.returncode != 0:
+        print(f"    [!!] launchctl load failed:\n{rc.stderr.strip()[-300:]}")
+        return
+    print("    · loaded into launchd")
+    if _wait_for_consultants_health(port, timeout=timeout):
+        print(f"    · responding on 127.0.0.1:{port}")
+    else:
+        print(f"    [!!] not responding within {timeout:.0f}s — try: "
+              f"launchctl kickstart -k gui/$(id -u)/{label}")
+
+
+def _install_consultants_systemd_unit(consultants_py: Path, *,
+                                      dry_run: bool) -> None:
+    """Drop the always-on systemd --user unit and reload."""
+    if dry_run:
+        print("    [dry-run] Would install claude-hooks-consultants.service")
+        return
+    unit_src = HERE / "systemd" / "claude-hooks-consultants.service"
+    if not unit_src.exists():
+        print(f"    warning: unit file missing at {unit_src}")
+        return
+    user_units = Path.home() / ".config" / "systemd" / "user"
+    user_units.mkdir(parents=True, exist_ok=True)
+    target = user_units / "claude-hooks-consultants.service"
+    text = unit_src.read_text(encoding="utf-8")
+    # Substitute placeholders the unit file uses.
+    text = text.replace("@PYTHON@", str(consultants_py))
+    text = text.replace("@WORKINGDIR@", str(HERE))
+    target.write_text(text, encoding="utf-8")
+    print(f"    Wrote {target}")
+    # Best-effort reload + enable.
+    subprocess.run(["systemctl", "--user", "daemon-reload"],
+                   capture_output=True)
+    rc = subprocess.run(
+        ["systemctl", "--user", "enable", "--now",
+         "claude-hooks-consultants.service"],
+        capture_output=True, text=True,
+    )
+    if rc.returncode == 0:
+        print("    Service enabled + started.")
+    else:
+        print(f"    systemctl enable: {rc.stderr.strip()[-300:]}")
+        print("    Run manually: "
+              "systemctl --user enable --now claude-hooks-consultants.service")
 
 
 def main() -> int:
@@ -2794,6 +4102,15 @@ def main() -> int:
         non_interactive=args.non_interactive,
         dry_run=args.dry_run,
     )
+    # Offer to install the daily pgvector backup timer (opt-in under
+    # providers.pgvector.enabled). Default: 01:17 local, 7 daily / 4
+    # weekly / 3 monthly retention, dumps in
+    # /shared/config/mcp-pgvector/backups/.
+    _install_pgvector_backup_systemd(
+        cfg,
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
     # Offer to install the axon shared-host systemd unit (opt-in under
     # companions.axon_host.enabled in config). Runs a singleton axon
     # daemon at http://127.0.0.1:8420/mcp so users can drop the legacy
@@ -2837,9 +4154,28 @@ def main() -> int:
         dry_run=args.dry_run,
     )
 
+    # PATH-friendly wrappers for every bin/* shim. Required so skills
+    # that invoke the CLIs by bare name (claude-consultants,
+    # claude-advisor, ...) resolve from Claude Code's bash subprocess
+    # on every platform. See ``_install_bin_shim_wrappers`` for the
+    # symlink-vs-wrapper rationale.
+    print(f"\n==> Bin wrappers ({_shim_wrapper_dir()})")
+    _install_bin_shim_wrappers(HERE, dry_run=args.dry_run)
+
     # Detect companion tools and install skills.
     print("\n==> Companion tools")
     installed_tools = _detect_companion_tools()
+
+    # /consultants engine — opt-in install of the dedicated conda env
+    # + service unit. Mutates installed_tools so the consultants
+    # skills only install when the env is present.
+    consultants_present = _install_consultants(
+        cfg, cfg_path,
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
+    installed_tools["claude-consultants"] = consultants_present
+
     _install_skills(installed_tools, non_interactive=args.non_interactive, dry_run=args.dry_run)
 
     # Episodic memory setup.
@@ -3008,6 +4344,11 @@ def uninstall(*, dry_run: bool) -> int:
         else:
             del hooks[event]
     print(f"  Removed {removed} claude-hooks entries from {settings_path}")
+    # Remove any bin/* wrappers we previously installed. Tagged-only --
+    # hand-rolled wrappers under the same name are left alone.
+    wrappers_removed = _remove_bin_shim_wrappers(dry_run=dry_run)
+    if wrappers_removed:
+        print(f"  Removed {wrappers_removed} bin shim wrapper(s) from {_shim_wrapper_dir()}")
     if dry_run:
         print("[dry-run] Not writing.")
         return 0
@@ -3080,13 +4421,28 @@ COMPANION_TOOLS = [
 # Skills shipped with the repo and what they require.
 # requirement: None = always install, or a tool binary name.
 SKILLS = [
-    ("reflect",       None),         # built-in: uses claude-hooks reflect module
-    ("consolidate",   None),         # built-in: uses claude-hooks consolidate module
-    ("save-learning", None),         # standalone
-    ("find-skills",   None),         # standalone
-    ("setup-caliber", "caliber"),    # needs caliber installed
-    ("episodic",      None),         # queries remote episodic-server API
-    ("wrapup",        None),         # session state summary for hand-off / compact
+    ("reflect",            None),    # built-in: uses claude-hooks reflect module
+    ("consolidate",        None),    # built-in: uses claude-hooks consolidate module
+    ("save-learning",      None),    # standalone
+    ("find-skills",        None),    # standalone
+    ("setup-caliber",      "caliber"),  # needs caliber installed
+    ("episodic",           None),    # queries remote episodic-server API
+    ("wrapup",             None),    # session state summary for hand-off / compact
+    ("get-advice",         None),    # LLM-to-LLM advisor (uses bin/claude-advisor)
+    ("get-advice--model",  None),    # config helper for /get-advice
+    ("get-advice--effort", None),    # config helper for /get-advice
+    ("get-advice--tools",  None),    # config helper for /get-advice
+    # /consultants — multi-agent council. The skills require the
+    # ``claude-hooks-consultants`` conda env which install.py creates
+    # on user opt-in via _install_consultants(). The "requires"
+    # marker is a sentinel checked by _install_skills against the
+    # tool-detection result; when the consultants env is missing the
+    # skills are skipped silently.
+    ("consultants",            "claude-consultants"),
+    ("consultants--list",      "claude-consultants"),
+    ("consultants--show",      "claude-consultants"),
+    ("consultants--config",    "claude-consultants"),
+    ("consultants--followup",  "claude-consultants"),
 ]
 
 

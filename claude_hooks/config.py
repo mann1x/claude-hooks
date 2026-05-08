@@ -179,6 +179,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "skip_on_user_wrap_up": True,
             # Empty list = use claude_hooks.stop_guard.DEFAULT_USER_WRAP_UP_MARKERS.
             "user_wrap_up_markers": [],
+            # Stall-after-commitment check: catches the failure mode
+            # where the model writes a paragraph ending with an
+            # action-commitment phrase ("Diving in now", "Writing the
+            # script now") and then ends the turn WITHOUT calling any
+            # tool. Stacks three independent conditions
+            # (stop_reason=end_turn + zero tool_use + commitment phrase
+            # in last paragraph) so false-positive risk is low. Default
+            # on when stop_guard itself is enabled — set to false to
+            # suppress just this sub-check while keeping the prose
+            # pattern guard active.
+            "stall_check_enabled": True,
         },
         "session_end": {
             "enabled": True,
@@ -382,6 +393,36 @@ DEFAULT_CONFIG: dict[str, Any] = {
             # Max hits to render. Above this threshold we return nothing
             # — the grep is the right tool for that case.
             "code_graph_lookup_max_hits": 5,
+        },
+        # /consultants engine — multi-agent council. The /consultants
+        # config-of-truth (per-role models, effort, topology) lives in
+        # ``~/.claude/consultants-config.toml`` (see
+        # ``consultants/config.py``). This block only carries the
+        # flags that the daemon and CLI need to know about: which
+        # service mode is active and where to find the engine.
+        "consultants": {
+            # Engine endpoint when running in always-on mode (the
+            # default). The CLI hits this directly.
+            "engine_url": "http://127.0.0.1:38095",
+            "smart_start": {
+                # When enabled, the daemon spawns the engine as a
+                # child process on first request and reaps it after
+                # idle_timeout_seconds. The CLI routes through the
+                # daemon's forwarder instead of the engine directly.
+                "enabled": False,
+                # Reap the engine after this many seconds of idle.
+                "idle_timeout_seconds": 1800,
+                # Max time to wait for the engine subprocess to come
+                # up after spawn (waiting for /v1/health to return 200).
+                "spawn_timeout_seconds": 15,
+                # Reaper poll interval — the daemon's idle thread
+                # checks last_activity_at on this cadence.
+                "reaper_interval_seconds": 60,
+                # Daemon's forwarder URL when smart-start is on.
+                # Distinct port so always-on and smart-start can
+                # coexist on the same host without colliding.
+                "forwarder_url": "http://127.0.0.1:38096",
+            },
         },
     },
     "reflect": {

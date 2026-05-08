@@ -1,0 +1,36 @@
+reading: /root/.claude/consultants-traces/csl-2026-05-07-0934-9ec3.jsonl
+
+sid: csl-2026-05-07-0934-9ec3
+total wall: 247.8s   first_event=+0.0s  last_event=+247.8s
+
+  planner       node=1.7m    (entries) llm=1x=1.7m    tool=0x=0ms     tok=p245/c1879
+      LLM iter=1 model=kimi-k2.6:cloud              1.7m  p=245    c=1879   tool_calls=0
+
+  researcher    node=3.0m    (3xentries) llm=12x=3.0m    tool=12x=271ms   tok=p95894/c2056
+      LLM iter=12 model=kimi-k2.6:cloud             30.8s  p=16325  c=543    tool_calls=0
+      LLM iter=10 model=kimi-k2.6:cloud             26.9s  p=15703  c=193    tool_calls=1
+      LLM iter=5 model=kimi-k2.6:cloud             18.6s  p=3619   c=163    tool_calls=2
+      LLM iter=8 model=kimi-k2.6:cloud             18.2s  p=20523  c=301    tool_calls=0
+      LLM iter=6 model=kimi-k2.6:cloud             16.9s  p=3591   c=178    tool_calls=3
+      LLM iter=4 model=kimi-k2.6:cloud             11.3s  p=3630   c=94     tool_calls=1
+      LLM iter=7 model=kimi-k2.6:cloud             11.0s  p=5302   c=138    tool_calls=1
+      LLM iter=3 model=kimi-k2.6:cloud             10.9s  p=2244   c=106    tool_calls=1
+      LLM iter=2 model=kimi-k2.6:cloud             10.6s  p=2272   c=89     tool_calls=1
+      LLM iter=11 model=kimi-k2.6:cloud              9.7s  p=12510  c=101    tool_calls=0
+      LLM iter=1 model=kimi-k2.6:cloud              9.4s  p=2283   c=107    tool_calls=1
+      LLM iter=9 model=kimi-k2.6:cloud              6.0s  p=7892   c=43     tool_calls=1
+      tool grep               x5     267ms chars=48459
+      tool survey_project     x3       3ms chars=11154
+      tool read_file          x3       1ms chars=92468
+      tool list_files         x1       0ms chars=131
+
+  synthesizer   node=58.1s   (entries) llm=1x=58.1s   tool=0x=0ms     tok=p801/c1035
+      LLM iter=1 model=kimi-k2.6:cloud             58.1s  p=801    c=1035   tool_calls=0
+
+totals
+  wall                  247.8s
+  sum of node spans     5.6m
+  sum of LLM call time  5.6m  (136.6% of wall)
+  sum of tool call time 271ms
+  total prompt tokens   96940
+  total completion tok  4970

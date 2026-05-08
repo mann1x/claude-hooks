@@ -1,0 +1,1137 @@
+"""Tests for ``consultants.engine.council`` and the topology helper
+in ``consultants.engine.graph``.
+
+These tests run in the main ``claude-hooks`` conda env — they do NOT
+import langgraph. ``build_council_graph`` itself is exercised in a
+follow-up integration test that requires the
+``claude-hooks-consultants`` env.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from consultants.engine import council, graph
+from consultants.engine.storage import RoleTurn
+
+
+# ----------------------- fake chat client ------------------------- #
+
+class FakeChatClient:
+    """Minimal chat-client stand-in. Returns a queued response per
+    call; raises on overflow so test bugs surface."""
+
+    def __init__(self, replies: list[dict]):
+        self._replies = list(replies)
+        self.calls: list[dict] = []
+
+    def chat(self, payload: dict) -> dict:
+        self.calls.append(payload)
+        if not self._replies:
+            raise AssertionError("FakeChatClient out of replies")
+        return self._replies.pop(0)
+
+
+def _completion(text: str, *, prompt_tokens: int = 10,
+                completion_tokens: int = 5) -> dict:
+    """OpenAI-shape completion response, matching what
+    ChatClient._from_ollama produces."""
+    return {
+        "choices": [{
+            "message": {"content": text},
+            "finish_reason": "stop",
+        }],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+    }
+
+
+# ----------------------- effort caps ------------------------------ #
+
+class TestEffortCaps:
+    def test_low_disables_critic_loop(self):
+        c = council.caps_for("low")
+        assert c.researcher_rounds_max == 1
+        assert c.critic_reroutes_max == 0
+
+    def test_medium_default(self):
+        c = council.caps_for("medium")
+        assert c.researcher_rounds_max == 1
+        assert c.critic_reroutes_max == 1
+
+    def test_high_allows_more_loops(self):
+        c = council.caps_for("high")
+        assert c.researcher_rounds_max == 3
+        assert c.critic_reroutes_max == 2
+
+    def test_unknown_falls_back_to_medium(self):
+        assert council.caps_for("nonsense") == council.caps_for("medium")
+
+
+# ----------------------- critic decision parser ------------------- #
+
+class TestParseCriticDecision:
+    @pytest.mark.parametrize("text,expected", [
+        ("DECISION: ready\nThe evidence covers all gaps.", "ready"),
+        ("decision: READY", "ready"),
+        ("DECISION: needs_more_research\n- check util.py:42", "needs_more_research"),
+        ("Some preamble.\n\nDECISION: ready\nGood enough.", "ready"),
+        ("DECISION:ready", "ready"),  # tight spacing
+        ("  DECISION : needs_more_research  ", "needs_more_research"),
+    ])
+    def test_explicit_decisions(self, text, expected):
+        assert council.parse_critic_decision(text) == expected
+
+    def test_missing_decision_defaults_to_ready(self):
+        assert council.parse_critic_decision("looks fine to me") == "ready"
+
+    def test_empty_string_defaults_to_ready(self):
+        assert council.parse_critic_decision("") == "ready"
+
+    def test_none_safe(self):
+        assert council.parse_critic_decision(None) == "ready"
+
+    def test_first_match_wins(self):
+        text = "DECISION: ready\nDECISION: needs_more_research"
+        assert council.parse_critic_decision(text) == "ready"
+
+
+# ----------------------- plan parser ----------------------------- #
+
+
+class TestParsePlanItems:
+    def test_numbered_dot_format(self):
+        plan = (
+            "1. read foo.py\n"
+            "2. grep for bar in src/\n"
+            "3. verify baz at qux.py:42\n"
+        )
+        items = council.parse_plan_items(plan)
+        assert len(items) == 3
+        assert items[0] == "read foo.py"
+        assert items[1] == "grep for bar in src/"
+        assert items[2] == "verify baz at qux.py:42"
+
+    def test_numbered_paren_format(self):
+        plan = "1) first\n2) second\n3) third\n"
+        items = council.parse_plan_items(plan)
+        assert items == ["first", "second", "third"]
+
+    def test_bulleted_format(self):
+        plan = "- step one\n- step two\n* step three\n"
+        items = council.parse_plan_items(plan)
+        assert items == ["step one", "step two", "step three"]
+
+    def test_multi_line_items(self):
+        # An item can span multiple lines until the next marker.
+        plan = (
+            "1. inspect alpha\n"
+            "   the alpha module is complex\n"
+            "2. inspect beta\n"
+        )
+        items = council.parse_plan_items(plan)
+        assert len(items) == 2
+        assert "alpha" in items[0]
+        assert items[1] == "inspect beta"
+
+    def test_empty_plan(self):
+        assert council.parse_plan_items("") == []
+        assert council.parse_plan_items("\n\n") == []
+
+    def test_unparseable_plan_returns_empty(self):
+        # Free-prose plans without numbered/bulleted markers yield
+        # zero items, which downstream falls through to the
+        # single-researcher path (no fan-out).
+        plan = "Just dive in and look at the code, see what makes sense."
+        assert council.parse_plan_items(plan) == []
+
+    def test_fanout_min_items_is_two(self):
+        # Documenting the gate constant — graph.py uses this to
+        # decide whether to fan out or run a single researcher.
+        assert council.FANOUT_MIN_ITEMS == 2
+
+
+class TestGroupItemsIntoLanes:
+    def test_below_cap_returns_one_per_lane(self):
+        items = ["a", "b", "c"]
+        lanes = council.group_items_into_lanes(items, max_lanes=5)
+        assert lanes == [["a"], ["b"], ["c"]]
+
+    def test_at_cap_returns_one_per_lane(self):
+        items = ["a", "b", "c"]
+        lanes = council.group_items_into_lanes(items, max_lanes=3)
+        assert lanes == [["a"], ["b"], ["c"]]
+
+    def test_above_cap_groups_balanced(self):
+        # 6 items, 3 lanes: 2 + 2 + 2
+        items = ["a", "b", "c", "d", "e", "f"]
+        lanes = council.group_items_into_lanes(items, max_lanes=3)
+        assert lanes == [["a", "b"], ["c", "d"], ["e", "f"]]
+
+    def test_above_cap_unbalanced_earlier_heavier(self):
+        # 7 items, 3 lanes: 3 + 2 + 2 (earlier lanes take the extra)
+        items = ["a", "b", "c", "d", "e", "f", "g"]
+        lanes = council.group_items_into_lanes(items, max_lanes=3)
+        assert lanes == [["a", "b", "c"], ["d", "e"], ["f", "g"]]
+
+    def test_empty_input(self):
+        assert council.group_items_into_lanes([], max_lanes=3) == []
+
+    def test_max_lanes_clamped_to_at_least_one(self):
+        # Defensive: max_lanes=0 still returns one lane with everything.
+        items = ["a", "b"]
+        lanes = council.group_items_into_lanes(items, max_lanes=0)
+        assert lanes == [["a", "b"]]
+
+    def test_join_lane_items_renumbers(self):
+        text = council.join_lane_items(["foo", "bar"])
+        assert text == "1. foo\n2. bar"
+
+    def test_fanout_max_lanes_constant(self):
+        # 3 lanes is the cloud-serialization-effective cap on
+        # 192.168.178.2:11433. Bumping requires re-measuring.
+        assert council.FANOUT_MAX_LANES == 3
+
+
+# ----------------------- routing ---------------------------------- #
+
+class TestRouteAfterCritic:
+    def _state(self, **overrides):
+        s = {
+            "critic_decision": "ready",
+            "research_rounds_used": 1,
+            "critic_reroutes_used": 0,
+            "effort": "medium",
+        }
+        s.update(overrides)
+        return s
+
+    def test_ready_goes_to_synthesizer(self):
+        assert council.route_after_critic(self._state()) == \
+            council.ROUTE_SYNTHESIZER
+
+    def test_needs_more_with_budget_loops_back(self):
+        s = self._state(critic_decision="needs_more_research",
+                        research_rounds_used=1,
+                        critic_reroutes_used=0,
+                        effort="high")
+        assert council.route_after_critic(s) == council.ROUTE_RESEARCHER
+
+    def test_reroute_cap_forces_synthesizer(self):
+        # medium caps: critic_reroutes_max=1
+        s = self._state(critic_decision="needs_more_research",
+                        critic_reroutes_used=1,
+                        effort="medium")
+        assert council.route_after_critic(s) == council.ROUTE_SYNTHESIZER
+
+    def test_research_round_cap_forces_synthesizer(self):
+        s = self._state(critic_decision="needs_more_research",
+                        research_rounds_used=1,
+                        critic_reroutes_used=0,
+                        effort="medium")  # researcher_rounds_max=1
+        assert council.route_after_critic(s) == council.ROUTE_SYNTHESIZER
+
+    def test_high_effort_allows_multiple_loops(self):
+        s = self._state(critic_decision="needs_more_research",
+                        research_rounds_used=2,
+                        critic_reroutes_used=1,
+                        effort="high")  # rounds_max=3, reroutes_max=2
+        assert council.route_after_critic(s) == council.ROUTE_RESEARCHER
+
+    def test_missing_decision_defaults_ready(self):
+        s = self._state(critic_decision=None)
+        assert council.route_after_critic(s) == council.ROUTE_SYNTHESIZER
+
+
+# ----------------------- prompt builders -------------------------- #
+
+class TestPromptBuilders:
+    def test_planner_messages_have_system_and_user(self):
+        msgs = council.build_planner_messages("How does X work?")
+        assert msgs[0]["role"] == "system"
+        # The role marker now lives in the role-specific tail of
+        # the prompt (after the COUNCIL_PREAMBLE), as ``ROLE: planner``.
+        assert "ROLE: planner" in msgs[0]["content"]
+        # And the council preamble is prepended to every role.
+        assert "LLM-to-LLM council" in msgs[0]["content"]
+        assert msgs[1] == {"role": "user", "content": "How does X work?"}
+
+    def test_planner_strips_whitespace(self):
+        msgs = council.build_planner_messages("  q  \n")
+        assert msgs[1]["content"] == "q"
+
+    def test_researcher_includes_plan_and_grounding(self):
+        ground = [{"role": "system", "content": "GROUNDING-BLOCK"}]
+        msgs = council.build_researcher_messages(
+            "q", "1. step\n2. step", [], ground,
+        )
+        assert msgs[0]["content"] == "GROUNDING-BLOCK"
+        # Same shape change as planner: ``ROLE: researcher`` after preamble.
+        assert any("ROLE: researcher" in m["content"] for m in msgs
+                   if m["role"] == "system")
+        body = msgs[-1]["content"]
+        assert "USER QUESTION:\nq" in body
+        assert "PLAN FROM PLANNER:\n1. step" in body
+        assert "PRIOR REPORT" not in body  # no prior rounds
+
+    def test_researcher_includes_prior_rounds_when_present(self):
+        msgs = council.build_researcher_messages(
+            "q", "p", ["found A at f.py:10", "found B at g.py:20"], [],
+        )
+        body = msgs[-1]["content"]
+        assert "PRIOR REPORT (round 1)" in body
+        assert "PRIOR REPORT (round 2)" in body
+        assert "found A at f.py:10" in body
+        assert "critic asked for MORE" in body
+
+    def test_critic_messages_include_reports(self):
+        msgs = council.build_critic_messages(
+            "q", "p", ["report1", "report2"],
+        )
+        body = msgs[-1]["content"]
+        assert "RESEARCHER REPORT (round 1)" in body
+        assert "RESEARCHER REPORT (round 2)" in body
+        assert "report1" in body
+        assert "report2" in body
+
+    def test_synthesizer_includes_critique_when_present(self):
+        msgs = council.build_synthesizer_messages(
+            "q", "p", ["r1"], "DECISION: ready\nGood.",
+        )
+        body = msgs[-1]["content"]
+        assert "CRITIC'S VERDICT" in body
+        assert "DECISION: ready" in body
+
+    def test_synthesizer_skips_critique_when_none(self):
+        msgs = council.build_synthesizer_messages("q", "p", ["r1"], None)
+        body = msgs[-1]["content"]
+        assert "CRITIC'S VERDICT" not in body
+
+    def test_council_preamble_prepended_to_every_role(self):
+        # Regression: every role's system message must carry the
+        # COUNCIL_PREAMBLE so the LLM-to-LLM / concise / dense /
+        # no-filler directives are inherited uniformly. The original
+        # v1 prompts had each role write its own preamble (or none),
+        # which let the synthesizer balloon to 8.5k completion tokens
+        # on a list-shaped question. Caught on solidpc 2026-05-06
+        # consultation csl-2026-05-06-2208-7f31.
+        marker = "LLM-to-LLM council"
+        for builder, args in [
+            (council.build_planner_messages, ("q",)),
+            (council.build_researcher_messages, ("q", "p", [], [])),
+            (council.build_critic_messages, ("q", "p", ["r1"])),
+            (council.build_synthesizer_messages,
+             ("q", "p", ["r1"], "DECISION: ready\nok")),
+        ]:
+            msgs = builder(*args)
+            sys_msgs = [m["content"] for m in msgs if m["role"] == "system"]
+            assert any(marker in c for c in sys_msgs), \
+                f"{builder.__name__}: missing council preamble"
+
+    def test_council_preamble_carries_density_directive(self):
+        # The preamble explicitly tells every role to prefer density
+        # over verbosity. Pin this so a future refactor can't silently
+        # drop it and re-introduce the synthesizer-bloat regression.
+        for marker in ("concise replies", "high information density",
+                       "avoid sign-offs"):
+            assert marker in council.COUNCIL_PREAMBLE, \
+                f"COUNCIL_PREAMBLE lost directive: {marker!r}"
+
+
+# ----------------------- planner_node ----------------------------- #
+
+class TestPlannerNode:
+    def test_records_plan_and_turn(self):
+        client = FakeChatClient([_completion("1. step\n2. step")])
+        state = council.initial_state(
+            question="q", cwd="/tmp", models={"planner": "m"},
+            topology="council", effort="medium",
+        )
+        update = council.planner_node(state, chat_client=client, model="m")
+        assert update["plan"] == "1. step\n2. step"
+        assert len(update["turns"]) == 1
+        t = update["turns"][0]
+        assert isinstance(t, RoleTurn)
+        assert t.role == "planner"
+        assert t.prompt_tokens == 10
+        assert t.completion_tokens == 5
+
+    def test_failure_records_error(self):
+        class BoomClient:
+            def chat(self, payload):
+                raise RuntimeError("upstream 500")
+        state = council.initial_state(
+            question="q", cwd="/tmp", models={"planner": "m"},
+            topology="council", effort="medium",
+        )
+        update = council.planner_node(state, chat_client=BoomClient(),
+                                      model="m")
+        assert "planner failed" in update["error"]
+        assert update["_role_failed"] == "planner"
+
+    def test_planner_failure_emits_tombstone(self):
+        # Hardening: planner failure must populate ``plan`` (so the
+        # researcher sees a failure marker), zero out ``plan_items``
+        # (so the fan-out router falls back to the single-researcher
+        # path), and contribute a turn record.
+        class BoomClient:
+            def chat(self, payload):
+                raise RuntimeError("planner upstream 503")
+        state = council.initial_state(
+            question="q", cwd="/tmp", models={"planner": "m"},
+            topology="council", effort="medium",
+        )
+        update = council.planner_node(state, chat_client=BoomClient(),
+                                      model="m")
+        assert "planner failed" in update["plan"]
+        assert update["plan_items"] == []
+        assert len(update["turns"]) == 1
+        assert update["turns"][0].role == "planner"
+        assert "planner failed" in update["turns"][0].content
+
+    def test_token_totals_accumulate(self):
+        # Post-fanout: nodes return DELTA-only values; LangGraph's
+        # additive reducers in CouncilState concat/sum across
+        # parallel lanes. Here we just assert the node emits the
+        # delta (this call's tokens), not the running total.
+        client = FakeChatClient([_completion("p", prompt_tokens=100,
+                                             completion_tokens=50)])
+        state = council.initial_state(
+            question="q", cwd="/tmp", models={"planner": "m"},
+            topology="council", effort="medium",
+        )
+        state["total_prompt_tokens"] = 5
+        state["total_completion_tokens"] = 7
+        update = council.planner_node(state, chat_client=client, model="m")
+        # Delta only — reducer adds to the running total in graph state.
+        assert update["total_prompt_tokens"] == 100
+        assert update["total_completion_tokens"] == 50
+
+
+# ----------------------- researcher_node -------------------------- #
+
+class TestResearcherNode:
+    def test_uses_loop_runner_and_records_round(self):
+        # Stub loop_runner: returns a final response without calling
+        # any tools or chat_fn. Lets us avoid importing run_loop.
+        def fake_loop(payload, cwd, *, config, tool_specs, chat_fn,
+                      tool_executor, preseed_builder=None):
+            return _completion("found X at f.py:10",
+                               prompt_tokens=200, completion_tokens=80)
+
+        client = FakeChatClient([])  # never called via fake_loop
+        state = council.initial_state(
+            question="q", cwd="/proj",
+            models={"researcher": "m"},
+            topology="council", effort="medium",
+        )
+        state["plan"] = "1. read f.py"
+        update = council.researcher_node(
+            state,
+            chat_client=client,
+            tool_executor=lambda *a, **k: "",
+            tool_specs=[],
+            grounding_msgs=[],
+            model="m",
+            cwd="/proj",
+            loop_runner=fake_loop,
+        )
+        assert update["research"] == ["found X at f.py:10"]
+        assert update["research_rounds_used"] == 1
+        assert update["turns"][0].role == "researcher"
+        assert update["turns"][0].round == 1
+        assert update["total_prompt_tokens"] == 200
+
+    def test_subsequent_round_increments_count(self):
+        # Post-fanout: researcher_node returns delta-only.
+        # LangGraph's additive reducers concat across lanes / rounds;
+        # the node just emits this round's findings + counts. We
+        # assert the delta semantics here; merge correctness is
+        # covered by graph-level integration tests.
+        def fake_loop(payload, cwd, **kw):
+            return _completion("round 2 findings")
+
+        state = council.initial_state(
+            question="q", cwd="/proj",
+            models={"researcher": "m"},
+            topology="council", effort="high",
+        )
+        state["plan"] = "p"
+        state["research"] = ["round 1 prior"]
+        state["research_rounds_used"] = 1
+        update = council.researcher_node(
+            state, chat_client=FakeChatClient([]),
+            tool_executor=lambda *a, **k: "",
+            tool_specs=[], grounding_msgs=[], model="m", cwd="/proj",
+            loop_runner=fake_loop,
+        )
+        # Delta-only: this round's text + +1 round counter.
+        assert update["research"] == ["round 2 findings"]
+        assert update["research_rounds_used"] == 1
+        # Round number on the turn record reflects the prior count + 1.
+        assert update["turns"][0].round == 2
+
+    def test_plan_item_focuses_on_single_lane(self):
+        # Send fan-out: the researcher gets a per-lane plan_item;
+        # the prompt should reflect ONE sub-question, not the whole
+        # plan, and prior_rounds should be ignored (each lane starts
+        # fresh).
+        captured: dict = {}
+
+        def fake_loop(payload, cwd, **kw):
+            captured["msgs"] = payload["messages"]
+            return _completion("lane finding")
+
+        state = council.initial_state(
+            question="q", cwd="/proj",
+            models={"researcher": "m"},
+            topology="council", effort="medium",
+        )
+        state["plan"] = "1. lane A\n2. lane B\n3. lane C"
+        state["plan_item"] = "lane B"
+        state["lane_idx"] = 1
+        state["research"] = ["should be ignored"]
+        update = council.researcher_node(
+            state, chat_client=FakeChatClient([]),
+            tool_executor=lambda *a, **k: "",
+            tool_specs=[], grounding_msgs=[], model="m", cwd="/proj",
+            loop_runner=fake_loop,
+        )
+        # The user-message body should mention the lane number and the
+        # specific item but NOT the other lanes' content.
+        user_msg = captured["msgs"][-1]["content"]
+        assert "lane B" in user_msg
+        assert "lane A" not in user_msg
+        assert "lane C" not in user_msg
+        assert "Sub-research lane 2" in user_msg
+        # And the prior research rounds are not echoed for a fan-out lane.
+        assert "should be ignored" not in user_msg
+        assert update["research"] == ["lane finding"]
+
+    def test_loop_failure_returns_error(self):
+        def boom(payload, cwd, **kw):
+            raise RuntimeError("ollama unreachable")
+        state = council.initial_state(
+            question="q", cwd="/proj",
+            models={"researcher": "m"},
+            topology="council", effort="medium",
+        )
+        state["plan"] = "p"
+        update = council.researcher_node(
+            state, chat_client=FakeChatClient([]),
+            tool_executor=lambda *a, **k: "",
+            tool_specs=[], grounding_msgs=[], model="m", cwd="/proj",
+            loop_runner=boom,
+        )
+        assert "researcher failed" in update["error"]
+
+    def test_loop_failure_emits_tombstone_research(self):
+        # Hardening from audit-high (csl-...-faa2): the except branch
+        # MUST contribute to the additive reducers so the synthesizer
+        # sees a visible failure marker rather than silently
+        # producing a degraded answer over the surviving lanes.
+        def boom(payload, cwd, **kw):
+            raise RuntimeError("HTTP timeout exhausted retries")
+        state = council.initial_state(
+            question="q", cwd="/proj",
+            models={"researcher": "m"},
+            topology="council", effort="medium",
+        )
+        state["plan"] = "p"
+        update = council.researcher_node(
+            state, chat_client=FakeChatClient([]),
+            tool_executor=lambda *a, **k: "",
+            tool_specs=[], grounding_msgs=[], model="m", cwd="/proj",
+            loop_runner=boom,
+        )
+        # Tombstone in research (additive reducer concats this).
+        assert "research" in update
+        assert isinstance(update["research"], list)
+        assert len(update["research"]) == 1
+        assert "researcher lane failed" in update["research"][0]
+        assert "HTTP timeout" in update["research"][0]
+        # Turn record so the transcript shows the failure.
+        assert "turns" in update
+        assert len(update["turns"]) == 1
+        assert update["turns"][0].role == "researcher"
+        # research_rounds_used += 1 (additive).
+        assert update["research_rounds_used"] == 1
+
+
+# ----------------------- critic_node ------------------------------ #
+
+class TestCriticNode:
+    def test_ready_decision_no_reroute_increment(self):
+        client = FakeChatClient([_completion(
+            "DECISION: ready\nLooks complete.")])
+        state = council.initial_state(
+            question="q", cwd="/p", models={"critic": "m"},
+            topology="council", effort="medium",
+        )
+        state["plan"] = "p"
+        state["research"] = ["r1"]
+        state["research_rounds_used"] = 1
+        update = council.critic_node(state, chat_client=client, model="m")
+        assert update["critic_decision"] == "ready"
+        assert update["critic_reroutes_used"] == 0
+
+    def test_needs_more_increments_reroutes(self):
+        client = FakeChatClient([_completion(
+            "DECISION: needs_more_research\n- gap A\n- gap B")])
+        state = council.initial_state(
+            question="q", cwd="/p", models={"critic": "m"},
+            topology="council", effort="high",
+        )
+        state["plan"] = "p"
+        state["research"] = ["r1"]
+        state["research_rounds_used"] = 1
+        state["critic_reroutes_used"] = 0
+        update = council.critic_node(state, chat_client=client, model="m")
+        assert update["critic_decision"] == "needs_more_research"
+        assert update["critic_reroutes_used"] == 1
+
+    def test_failure_defaults_to_ready(self):
+        class BoomClient:
+            def chat(self, payload):
+                raise RuntimeError("500")
+        state = council.initial_state(
+            question="q", cwd="/p", models={"critic": "m"},
+            topology="council", effort="medium",
+        )
+        state["plan"] = "p"
+        state["research"] = ["r1"]
+        update = council.critic_node(state, chat_client=BoomClient(),
+                                     model="m")
+        assert update["critic_decision"] == "ready"
+        assert "critic failed" in update["error"]
+
+    def test_failure_emits_tombstone_critique_and_turn(self):
+        # Hardening: critic failure must populate ``critique`` (so
+        # the synthesizer sees the failure note) and add a turn so
+        # the transcript records it.
+        class BoomClient:
+            def chat(self, payload):
+                raise RuntimeError("critic upstream 502")
+        state = council.initial_state(
+            question="q", cwd="/p", models={"critic": "m"},
+            topology="council", effort="medium",
+        )
+        state["plan"] = "p"
+        state["research"] = ["r1"]
+        update = council.critic_node(state, chat_client=BoomClient(),
+                                     model="m")
+        assert "critic failed" in update["critique"]
+        assert "defaulting to ready" in update["critique"]
+        assert len(update["turns"]) == 1
+        assert update["turns"][0].role == "critic"
+
+
+# ----------------------- synthesizer_node ------------------------- #
+
+class TestSynthesizerNode:
+    def test_records_final_answer(self):
+        client = FakeChatClient([_completion("**Answer**: yes.")])
+        state = council.initial_state(
+            question="q", cwd="/p", models={"synthesizer": "m"},
+            topology="council", effort="medium",
+        )
+        state["plan"] = "p"
+        state["research"] = ["r1"]
+        state["critique"] = "DECISION: ready\nGood."
+        update = council.synthesizer_node(state, chat_client=client,
+                                          model="m")
+        assert update["final_answer"] == "**Answer**: yes."
+        assert update["turns"][0].role == "synthesizer"
+
+    def test_failure_produces_placeholder_answer(self):
+        class BoomClient:
+            def chat(self, payload):
+                raise RuntimeError("crash")
+        state = council.initial_state(
+            question="q", cwd="/p", models={"synthesizer": "m"},
+            topology="council", effort="medium",
+        )
+        update = council.synthesizer_node(state, chat_client=BoomClient(),
+                                          model="m")
+        assert "consultation incomplete" in update["final_answer"]
+        assert update["_role_failed"] == "synthesizer"
+
+    def test_failure_emits_tombstone_turn(self):
+        # Hardening: synthesizer failure must record a turn so the
+        # storage.py transcript writer (which iterates result.turns)
+        # shows the failure rather than silently dropping it.
+        class BoomClient:
+            def chat(self, payload):
+                raise RuntimeError("synth upstream 504")
+        state = council.initial_state(
+            question="q", cwd="/p", models={"synthesizer": "m"},
+            topology="council", effort="medium",
+        )
+        update = council.synthesizer_node(state, chat_client=BoomClient(),
+                                          model="m")
+        assert len(update["turns"]) == 1
+        assert update["turns"][0].role == "synthesizer"
+        assert "synthesizer failed" in update["turns"][0].content
+
+
+# ----------------------- topology builder ------------------------- #
+
+class TestPlanTopology:
+    def test_full_council(self):
+        edges = graph.plan_topology(
+            ("planner", "researcher", "critic", "synthesizer")
+        )
+        assert ("START", "planner") in edges
+        assert ("planner", "researcher") in edges
+        assert ("researcher", "critic") in edges
+        # Critic's outgoing edge is conditional, NOT in this list.
+        assert not any(src == "critic" for src, _ in edges)
+        assert ("synthesizer", "END") in edges
+
+    def test_no_critic(self):
+        edges = graph.plan_topology(
+            ("planner", "researcher", "synthesizer")
+        )
+        assert ("START", "planner") in edges
+        assert ("planner", "researcher") in edges
+        assert ("researcher", "synthesizer") in edges
+        assert ("synthesizer", "END") in edges
+
+    def test_planner_only(self):
+        edges = graph.plan_topology(("planner", "synthesizer"))
+        assert ("START", "planner") in edges
+        assert ("planner", "synthesizer") in edges
+        assert ("synthesizer", "END") in edges
+
+    def test_researcher_only(self):
+        edges = graph.plan_topology(("researcher", "synthesizer"))
+        assert ("START", "researcher") in edges
+        assert ("researcher", "synthesizer") in edges
+
+    def test_planner_plus_critic_no_researcher(self):
+        # Ends in critic so we DON'T emit critic->synthesizer here;
+        # build_council_graph adds an unconditional edge in this
+        # specific config (researcher disabled).
+        edges = graph.plan_topology(("planner", "critic", "synthesizer"))
+        assert ("START", "planner") in edges
+        assert ("planner", "critic") in edges
+        assert not any(src == "critic" for src, _ in edges)
+        assert ("synthesizer", "END") in edges
+
+    def test_synthesizer_only_pathological(self):
+        # validate_pipeline rejects this in the config layer, but
+        # plan_topology is defensive.
+        edges = graph.plan_topology(("synthesizer",))
+        assert ("START", "synthesizer") in edges
+        assert ("synthesizer", "END") in edges
+
+    def test_synthesizer_required(self):
+        with pytest.raises(ValueError):
+            graph.plan_topology(("planner",))
+
+
+# ----------------------- build_council_graph ---------------------- #
+
+class TestBuildCouncilGraph:
+    def test_skipped_when_langgraph_missing(self):
+        """If langgraph isn't installed, build_council_graph raises a
+        helpful RuntimeError rather than ImportError. We can't easily
+        force ImportError here without monkey-patching sys.modules,
+        so this test only runs when langgraph is genuinely absent."""
+        try:
+            import langgraph  # noqa: F401
+        except ImportError:
+            pass
+        else:
+            pytest.skip("langgraph is installed in this env")
+        deps = graph.GraphDeps(
+            chat_clients={}, models={"synthesizer": "m"},
+            enabled_roles=("synthesizer",), cwd="/p",
+        )
+        with pytest.raises(RuntimeError, match="langgraph is not installed"):
+            graph.build_council_graph(deps)
+
+
+# ----------------------- initial_state ---------------------------- #
+
+class TestInitialState:
+    def test_has_all_keys(self):
+        s = council.initial_state(
+            question="q", cwd="/p", models={"planner": "m"},
+            topology="council", effort="medium",
+        )
+        for k in ("question", "cwd", "models", "topology", "effort",
+                  "plan", "research", "critique", "critic_decision",
+                  "final_answer", "turns",
+                  "research_rounds_used", "critic_reroutes_used",
+                  "total_prompt_tokens", "total_completion_tokens",
+                  "retries_by_role"):
+            assert k in s, f"missing key: {k}"
+
+    def test_defaults_zero_counters(self):
+        s = council.initial_state(
+            question="q", cwd="/p", models={}, topology="council",
+            effort="medium",
+        )
+        assert s["research_rounds_used"] == 0
+        assert s["critic_reroutes_used"] == 0
+        assert s["total_prompt_tokens"] == 0
+        assert s["turns"] == []
+
+
+# ----------------------- recorder integration --------------------- #
+# Phase 2 of the v1.1 message-history plan: every role node records
+# llm_call / tool_call / node_enter / node_exit events into a
+# MessageRecorder when one is supplied. Tests use the real recorder
+# (stdlib SQLite) because it has no network or graph deps.
+
+class TestRecorderIntegration:
+    @staticmethod
+    def _new_recorder(tmp_path):
+        from consultants.engine.recorder import MessageRecorder, RecorderMeta
+        meta = RecorderMeta(
+            sid="csl-rec-001", cwd=str(tmp_path),
+            question="why is the sky blue?", effort="medium",
+            topology="council",
+            models={"planner": "m", "researcher": "m",
+                    "critic": "m", "synthesizer": "m"},
+        )
+        return MessageRecorder(tmp_path / "transcript.db", meta=meta)
+
+    @staticmethod
+    def _query_events(rec):
+        import sqlite3
+        conn = sqlite3.connect(str(rec.db_path))
+        rows = conn.execute(
+            "SELECT kind, role, round, lane_idx, model, prompt_tokens, "
+            "completion_tokens, tool, output_chars FROM events ORDER BY ts"
+        ).fetchall()
+        conn.close()
+        return rows
+
+    def test_planner_records_node_boundaries_and_llm_call(self, tmp_path):
+        rec = self._new_recorder(tmp_path)
+        try:
+            client = FakeChatClient([_completion(
+                "1. read foo.py\n2. grep bar",
+                prompt_tokens=42, completion_tokens=11,
+            )])
+            state = council.initial_state(
+                question="q", cwd="/p", models={"planner": "m"},
+                topology="council", effort="medium",
+            )
+            council.planner_node(
+                state, chat_client=client, model="m", recorder=rec,
+            )
+            rows = self._query_events(rec)
+            kinds = [(r[0], r[1]) for r in rows]
+            assert ("node_enter", "planner") in kinds
+            assert ("node_exit", "planner") in kinds
+            assert ("llm_call", "planner") in kinds
+            llm = next(r for r in rows if r[0] == "llm_call")
+            assert llm[4] == "m"           # model
+            assert llm[5] == 42            # prompt_tokens
+            assert llm[6] == 11            # completion_tokens
+        finally:
+            rec.close()
+
+    def test_critic_records_under_correct_round(self, tmp_path):
+        rec = self._new_recorder(tmp_path)
+        try:
+            client = FakeChatClient([
+                _completion("DECISION: ready\nlgtm")
+            ])
+            state = council.initial_state(
+                question="q", cwd="/p", models={"critic": "m"},
+                topology="council", effort="medium",
+            )
+            state["plan"] = "p"
+            state["research"] = ["r1"]
+            state["research_rounds_used"] = 2
+            council.critic_node(
+                state, chat_client=client, model="m", recorder=rec,
+            )
+            rows = self._query_events(rec)
+            critic_rows = [r for r in rows if r[1] == "critic"]
+            assert len(critic_rows) >= 3  # node_enter + llm_call + node_exit
+            assert all(r[2] == 2 for r in critic_rows)  # round = rounds_used
+        finally:
+            rec.close()
+
+    def test_synthesizer_records_llm_call(self, tmp_path):
+        rec = self._new_recorder(tmp_path)
+        try:
+            client = FakeChatClient([_completion(
+                "final answer", prompt_tokens=300, completion_tokens=120,
+            )])
+            state = council.initial_state(
+                question="q", cwd="/p", models={"synthesizer": "m"},
+                topology="council", effort="medium",
+            )
+            state["plan"] = "p"
+            state["research"] = ["r1"]
+            council.synthesizer_node(
+                state, chat_client=client, model="m", recorder=rec,
+            )
+            rows = self._query_events(rec)
+            llm = [r for r in rows if r[0] == "llm_call" and r[1] == "synthesizer"]
+            assert len(llm) == 1
+            assert llm[0][5] == 300
+            assert llm[0][6] == 120
+        finally:
+            rec.close()
+
+    def test_researcher_records_per_iter_and_per_tool(self, tmp_path):
+        # Stub loop_runner that simulates the real run_loop's behavior:
+        # invokes on_iter once per round and on_tool per tool call.
+        # The real run_loop is integration-tested separately; here we
+        # only assert the binding from researcher_node -> loop_runner
+        # callbacks -> recorder rows.
+        rec = self._new_recorder(tmp_path)
+        try:
+            def fake_loop(payload, cwd, *, config, tool_specs, chat_fn,
+                          tool_executor, on_iter=None, on_tool=None,
+                          preseed_builder=None):
+                # Simulate two iterations: first calls a tool, second
+                # produces a final answer.
+                if on_iter is not None:
+                    on_iter(0, dict(payload), {"choices": [{"finish_reason": "tool_calls"}]}, 50)
+                if on_tool is not None:
+                    on_tool("read_file", '{"path":"foo.py"}', "line1\nline2", 7, None)
+                if on_iter is not None:
+                    on_iter(1, dict(payload),
+                            _completion("found X at foo.py:1",
+                                        prompt_tokens=200, completion_tokens=80),
+                            120)
+                return _completion("found X at foo.py:1",
+                                   prompt_tokens=200, completion_tokens=80)
+
+            state = council.initial_state(
+                question="q", cwd="/p", models={"researcher": "m"},
+                topology="council", effort="medium",
+            )
+            state["plan"] = "p"
+            state["lane_idx"] = 3
+            state["plan_item"] = "lane finding"
+            council.researcher_node(
+                state, chat_client=FakeChatClient([]),
+                tool_executor=lambda *a, **k: "",
+                tool_specs=[], grounding_msgs=[], model="m", cwd="/p",
+                loop_runner=fake_loop, recorder=rec,
+            )
+            rows = self._query_events(rec)
+            llm_rows = [r for r in rows if r[0] == "llm_call" and r[1] == "researcher"]
+            tool_rows = [r for r in rows if r[0] == "tool_call" and r[1] == "researcher"]
+            assert len(llm_rows) == 2
+            assert len(tool_rows) == 1
+            # lane_idx propagates from state
+            assert all(r[3] == 3 for r in llm_rows)
+            assert tool_rows[0][3] == 3
+            assert tool_rows[0][7] == "read_file"
+            assert tool_rows[0][8] == len("line1\nline2")  # output_chars
+        finally:
+            rec.close()
+
+    def test_recorder_failure_does_not_crash_node(self, tmp_path):
+        # Misbehaving recorder must not bring the council down — the
+        # nodes log + swallow exceptions raised by record_*. Use a
+        # stub that raises on every call.
+        class BadRecorder:
+            def record_llm(self, **kw):
+                raise RuntimeError("disk full")
+            def record_tool(self, **kw):
+                raise RuntimeError("disk full")
+            def record_node(self, **kw):
+                raise RuntimeError("disk full")
+
+        client = FakeChatClient([_completion("plan")])
+        state = council.initial_state(
+            question="q", cwd="/p", models={"planner": "m"},
+            topology="council", effort="medium",
+        )
+        update = council.planner_node(
+            state, chat_client=client, model="m", recorder=BadRecorder(),
+        )
+        assert update["plan"] == "plan"
+
+    def test_researcher_uses_prior_messages_when_set(self, tmp_path):
+        # Phase 5 (v1.1): when prior_messages is provided, the
+        # researcher feeds (prior_thread + follow_up_user_msg) into
+        # the loop_runner as messages, NOT a freshly built shape
+        # from build_researcher_messages. Verify the loop sees the
+        # parent's tool messages so it can reuse them without
+        # re-fetching.
+        rec = self._new_recorder(tmp_path)
+        try:
+            captured: dict = {}
+
+            def fake_loop(payload, cwd, *, config, tool_specs, chat_fn,
+                          tool_executor, on_iter=None, on_tool=None,
+                          preseed_builder=None):
+                captured["msgs"] = list(payload["messages"])
+                return _completion(
+                    "found foo at foo.py:1", prompt_tokens=200,
+                    completion_tokens=80,
+                )
+
+            prior = [
+                {"role": "system", "content": "RESEARCHER_SYSTEM"},
+                {"role": "user", "content": "ORIGINAL TASK: find foo"},
+                {"role": "assistant", "tool_calls": [{
+                    "id": "t1", "function": {
+                        "name": "read_file",
+                        "arguments": '{"path": "foo.py"}',
+                    },
+                }]},
+                {"role": "tool", "tool_call_id": "t1",
+                 "content": "def foo():\n    pass\n"},
+                {"role": "assistant",
+                 "content": "found foo at foo.py:1 (parent)"},
+            ]
+            state = council.initial_state(
+                question="what does foo do?", cwd="/p",
+                models={"researcher": "m"},
+                topology="council", effort="medium",
+            )
+            state["plan"] = "p"
+            council.researcher_node(
+                state, chat_client=FakeChatClient([]),
+                tool_executor=lambda *a, **k: "",
+                tool_specs=[], grounding_msgs=[], model="m", cwd="/p",
+                loop_runner=fake_loop,
+                recorder=rec,
+                prior_messages=prior,
+            )
+            sent = captured["msgs"]
+            # The prior thread's 5 messages survive verbatim; we
+            # appended one user message with the follow-up question.
+            assert sent[:5] == prior
+            assert sent[-1]["role"] == "user"
+            assert "what does foo do?" in sent[-1]["content"]
+            assert "FOLLOW-UP QUESTION" in sent[-1]["content"]
+            # Critically: the parent's tool result message is
+            # preserved so the model can reference it without
+            # re-calling read_file.
+            assert any(m.get("role") == "tool"
+                       and "def foo()" in m.get("content", "")
+                       for m in sent)
+        finally:
+            rec.close()
+
+    def test_researcher_falls_back_when_prior_messages_none(self, tmp_path):
+        # Backward-compat: prior_messages=None → existing
+        # build_researcher_messages path runs.
+        captured: dict = {}
+
+        def fake_loop(payload, cwd, *, config, tool_specs, chat_fn,
+                      tool_executor, on_iter=None, on_tool=None,
+                      preseed_builder=None):
+            captured["msgs"] = list(payload["messages"])
+            return _completion("finding")
+
+        state = council.initial_state(
+            question="why is the sky blue?", cwd="/p",
+            models={"researcher": "m"},
+            topology="council", effort="medium",
+        )
+        state["plan"] = "1. measure\n2. infer"
+        council.researcher_node(
+            state, chat_client=FakeChatClient([]),
+            tool_executor=lambda *a, **k: "",
+            tool_specs=[], grounding_msgs=[], model="m", cwd="/p",
+            loop_runner=fake_loop,
+            prior_messages=None,
+        )
+        # Existing path: USER QUESTION + PLAN headers in the user
+        # message body.
+        user = next(m for m in captured["msgs"] if m["role"] == "user")
+        assert "USER QUESTION" in user["content"]
+        assert "PLAN FROM PLANNER" in user["content"]
+
+    def test_synthesizer_uses_prior_messages_when_set(self, tmp_path):
+        rec = self._new_recorder(tmp_path)
+        try:
+            client = FakeChatClient([_completion(
+                "follow-up answer with new finding",
+                prompt_tokens=100, completion_tokens=40,
+            )])
+            prior = [
+                {"role": "system", "content": "SYNTHESIZER_SYSTEM"},
+                {"role": "user", "content": "ORIGINAL TASK: explain X"},
+                {"role": "assistant",
+                 "content": "X works because of Y, see foo.py:10"},
+            ]
+            state = council.initial_state(
+                question="and what about Z?", cwd="/p",
+                models={"synthesizer": "m"},
+                topology="council", effort="medium",
+            )
+            state["research"] = ["follow-up turn researcher: Z is W"]
+            update = council.synthesizer_node(
+                state, chat_client=client, model="m", recorder=rec,
+                prior_messages=prior,
+            )
+            sent = client.calls[0]["messages"]
+            # Prior thread preserved; one user message appended.
+            assert sent[:3] == prior
+            assert sent[-1]["role"] == "user"
+            content = sent[-1]["content"]
+            assert "FOLLOW-UP QUESTION" in content
+            assert "and what about Z?" in content
+            # The follow-up's NEW research delta is surfaced under a
+            # clearly-labeled section.
+            assert "NEW RESEARCHER REPORT" in content
+            assert "Z is W" in content
+            # Final answer threaded through.
+            assert update["final_answer"].startswith("follow-up answer")
+        finally:
+            rec.close()
+
+    def test_synthesizer_falls_back_when_prior_messages_none(self, tmp_path):
+        # Backward-compat: prior_messages=None → existing
+        # build_synthesizer_messages path runs.
+        client = FakeChatClient([_completion("answer")])
+        state = council.initial_state(
+            question="q", cwd="/p", models={"synthesizer": "m"},
+            topology="council", effort="medium",
+        )
+        state["plan"] = "1. step"
+        state["research"] = ["finding"]
+        council.synthesizer_node(
+            state, chat_client=client, model="m",
+            prior_messages=None,
+        )
+        sent = client.calls[0]["messages"]
+        # Existing 2-message shape: system + structured user.
+        assert len(sent) == 2
+        assert sent[0]["role"] == "system"
+        assert "USER QUESTION" in sent[1]["content"]
+        assert "PLANNER'S PLAN" in sent[1]["content"]
+
+    def test_single_shot_records_failure(self, tmp_path):
+        rec = self._new_recorder(tmp_path)
+        try:
+            class Boom:
+                def chat(self, payload):
+                    raise RuntimeError("upstream 500")
+            with pytest.raises(RuntimeError):
+                council._single_shot(
+                    Boom(), "m", [{"role": "user", "content": "x"}],
+                    recorder=rec, role="planner",
+                )
+            rows = self._query_events(rec)
+            llm_rows = [r for r in rows if r[0] == "llm_call"]
+            assert len(llm_rows) == 1
+            # Confirm error column populated.
+            import sqlite3
+            conn = sqlite3.connect(str(rec.db_path))
+            err = conn.execute(
+                "SELECT error FROM events WHERE kind='llm_call'"
+            ).fetchone()[0]
+            conn.close()
+            assert "upstream 500" in err
+        finally:
+            rec.close()

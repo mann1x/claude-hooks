@@ -43,6 +43,15 @@ Thumbs.db
 # Caliber (local state)
 .caliber/
 
+# Consultants per-project session artifacts (summary.md / transcript.md /
+# metadata.json / transcript.db). transcript.db carries full LLM
+# payloads — system prompts, tool results, intermediate model
+# reasoning. Don't commit them upstream. Per-project benchmark labels
+# under docs/benchmarks/<host>/ are committed deliberately as audit
+# data; the per-session live artifacts under .claude-hooks/ are not.
+.claude-hooks/consultants/
+.claude-hooks-disable
+
 # Claude Code project hooks (installed per-machine)
 .claude/hooks/
 .claude/settings.json
@@ -53,3 +62,12 @@ Thumbs.db
 graphify-out/cache/
 graphify-out/manifest.json
 graphify-out/.code-graph-build.lock
+
+# Stray local artifacts that have caught us out before — bench
+# scratch JSONs at the repo root, config backup files written by
+# install.py during dev iterations, and locally-experimented
+# Ollama Modelfiles. Ignored so a careless ``git add -A`` doesn't
+# sweep them into a feature commit.
+/bench-*.json
+/config/claude-hooks.json.bak-*
+/modelfiles/

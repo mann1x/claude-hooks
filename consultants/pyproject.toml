@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-hooks-consultants"
+version = "0.1.0"
+description = "LangGraph council engine for the claude-hooks /consultants skill"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "claude-hooks contributors" }]
+
+# Pinned to known-working minor versions. Bumping is a separate task —
+# the LangChain ecosystem is an aggressive churn zone.
+dependencies = [
+    "langgraph>=0.2,<0.4",
+    "langchain>=0.3,<0.5",
+    "langchain-community>=0.3,<0.5",
+    "langchain-ollama>=0.2,<0.4",
+    "langgraph-checkpoint-sqlite>=2.0,<3.0",
+    "langserve[server]>=0.3,<0.5",
+    "fastapi>=0.115,<0.130",
+    "uvicorn[standard]>=0.32,<0.40",
+    "httpx>=0.27,<0.30",
+    "pyyaml>=6.0,<7.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[project.scripts]
+claude-consultants = "consultants.cli:main"
+consultants-server = "consultants.server.__main__:main"
+
+# The pyproject lives INSIDE the package directory (claude-hooks's
+# main pyproject.toml occupies the repo root, so we can't put this
+# one a level up). Map every package back to its on-disk path: the
+# ``consultants`` top-level package is ``.`` (the dir holding this
+# file), and the two subpackages live in ``engine`` / ``server``
+# relative to it. Explicit packages list avoids find-packages
+# misinterpreting ``engine`` / ``server`` as top-level modules.
+[tool.setuptools]
+packages = ["consultants", "consultants.engine", "consultants.server"]
+package-dir = { "consultants" = ".", "consultants.engine" = "engine", "consultants.server" = "server" }

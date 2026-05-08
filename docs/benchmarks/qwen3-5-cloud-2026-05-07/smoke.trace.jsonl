@@ -1,0 +1,32 @@
+{"ts": 1778142629.5522375, "sid": "csl-2026-05-07-1030-58a8", "event": "node_enter", "role": "planner"}
+{"ts": 1778142665.6409698, "sid": "csl-2026-05-07-1030-58a8", "event": "llm_call", "role": "planner", "model": "qwen3.5:cloud", "duration_ms": 36088, "prompt_tokens": 251, "completion_tokens": 3749, "iter_index": 1, "tool_calls": 0, "error": null}
+{"ts": 1778142665.6411881, "sid": "csl-2026-05-07-1030-58a8", "event": "node_exit", "role": "planner", "duration_ms": 36088}
+{"ts": 1778142665.6426513, "sid": "csl-2026-05-07-1030-58a8", "event": "node_enter", "role": "researcher"}
+{"ts": 1778142665.6430073, "sid": "csl-2026-05-07-1030-58a8", "event": "node_enter", "role": "researcher"}
+{"ts": 1778142665.643465, "sid": "csl-2026-05-07-1030-58a8", "event": "node_enter", "role": "researcher"}
+{"ts": 1778142667.0278459, "sid": "csl-2026-05-07-1030-58a8", "event": "llm_call", "role": "researcher", "model": "qwen3.5:cloud", "duration_ms": 1384, "prompt_tokens": 2897, "completion_tokens": 62, "iter_index": 1, "tool_calls": 1, "error": null}
+{"ts": 1778142667.0382767, "sid": "csl-2026-05-07-1030-58a8", "event": "tool_call", "role": "researcher", "tool": "survey_project", "duration_ms": 10, "output_chars": 3718, "error": null}
+{"ts": 1778142667.2291632, "sid": "csl-2026-05-07-1030-58a8", "event": "llm_call", "role": "researcher", "model": "qwen3.5:cloud", "duration_ms": 1585, "prompt_tokens": 2884, "completion_tokens": 81, "iter_index": 2, "tool_calls": 1, "error": null}
+{"ts": 1778142667.229426, "sid": "csl-2026-05-07-1030-58a8", "event": "tool_call", "role": "researcher", "tool": "survey_project", "duration_ms": 0, "output_chars": 3718, "error": null}
+{"ts": 1778142667.8959885, "sid": "csl-2026-05-07-1030-58a8", "event": "llm_call", "role": "researcher", "model": "qwen3.5:cloud", "duration_ms": 2251, "prompt_tokens": 2883, "completion_tokens": 115, "iter_index": 3, "tool_calls": 1, "error": null}
+{"ts": 1778142667.8962235, "sid": "csl-2026-05-07-1030-58a8", "event": "tool_call", "role": "researcher", "tool": "survey_project", "duration_ms": 0, "output_chars": 3718, "error": null}
+{"ts": 1778142669.07402, "sid": "csl-2026-05-07-1030-58a8", "event": "llm_call", "role": "researcher", "model": "qwen3.5:cloud", "duration_ms": 1844, "prompt_tokens": 4320, "completion_tokens": 106, "iter_index": 5, "tool_calls": 1, "error": null}
+{"ts": 1778142669.0754988, "sid": "csl-2026-05-07-1030-58a8", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 1, "output_chars": 37814, "error": null}
+{"ts": 1778142669.3630984, "sid": "csl-2026-05-07-1030-58a8", "event": "llm_call", "role": "researcher", "model": "qwen3.5:cloud", "duration_ms": 2324, "prompt_tokens": 4333, "completion_tokens": 119, "iter_index": 4, "tool_calls": 1, "error": null}
+{"ts": 1778142669.520445, "sid": "csl-2026-05-07-1030-58a8", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 157, "output_chars": 414, "error": null}
+{"ts": 1778142672.6332245, "sid": "csl-2026-05-07-1030-58a8", "event": "llm_call", "role": "researcher", "model": "qwen3.5:cloud", "duration_ms": 4736, "prompt_tokens": 4319, "completion_tokens": 163, "iter_index": 6, "tool_calls": 2, "error": null}
+{"ts": 1778142672.63535, "sid": "csl-2026-05-07-1030-58a8", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 1, "output_chars": 37814, "error": null}
+{"ts": 1778142672.6463656, "sid": "csl-2026-05-07-1030-58a8", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 10, "output_chars": 16664, "error": null}
+{"ts": 1778142673.2302818, "sid": "csl-2026-05-07-1030-58a8", "event": "llm_call", "role": "researcher", "model": "qwen3.5:cloud", "duration_ms": 3709, "prompt_tokens": 4493, "completion_tokens": 124, "iter_index": 8, "tool_calls": 1, "error": null}
+{"ts": 1778142673.2386942, "sid": "csl-2026-05-07-1030-58a8", "event": "tool_call", "role": "researcher", "tool": "grep", "duration_ms": 8, "output_chars": 15340, "error": null}
+{"ts": 1778142677.8750834, "sid": "csl-2026-05-07-1030-58a8", "event": "llm_call", "role": "researcher", "model": "qwen3.5:cloud", "duration_ms": 4635, "prompt_tokens": 7720, "completion_tokens": 116, "iter_index": 10, "tool_calls": 1, "error": null}
+{"ts": 1778142677.8756046, "sid": "csl-2026-05-07-1030-58a8", "event": "tool_call", "role": "researcher", "tool": "read_file", "duration_ms": 0, "output_chars": 662, "error": null}
+{"ts": 1778142682.3928978, "sid": "csl-2026-05-07-1030-58a8", "event": "llm_call", "role": "researcher", "model": "qwen3.5:cloud", "duration_ms": 13317, "prompt_tokens": 17304, "completion_tokens": 412, "iter_index": 7, "tool_calls": 0, "error": null}
+{"ts": 1778142682.3930714, "sid": "csl-2026-05-07-1030-58a8", "event": "node_exit", "role": "researcher", "duration_ms": 16750}
+{"ts": 1778142683.8154228, "sid": "csl-2026-05-07-1030-58a8", "event": "llm_call", "role": "researcher", "model": "qwen3.5:cloud", "duration_ms": 11168, "prompt_tokens": 22089, "completion_tokens": 355, "iter_index": 9, "tool_calls": 0, "error": null}
+{"ts": 1778142683.8155007, "sid": "csl-2026-05-07-1030-58a8", "event": "node_exit", "role": "researcher", "duration_ms": 18172}
+{"ts": 1778142685.4971652, "sid": "csl-2026-05-07-1030-58a8", "event": "llm_call", "role": "researcher", "model": "qwen3.5:cloud", "duration_ms": 7621, "prompt_tokens": 8111, "completion_tokens": 426, "iter_index": 11, "tool_calls": 0, "error": null}
+{"ts": 1778142685.4973316, "sid": "csl-2026-05-07-1030-58a8", "event": "node_exit", "role": "researcher", "duration_ms": 19854}
+{"ts": 1778142685.498412, "sid": "csl-2026-05-07-1030-58a8", "event": "node_enter", "role": "synthesizer"}
+{"ts": 1778142726.4460166, "sid": "csl-2026-05-07-1030-58a8", "event": "llm_call", "role": "synthesizer", "model": "qwen3.5:cloud", "duration_ms": 40947, "prompt_tokens": 863, "completion_tokens": 4388, "iter_index": 1, "tool_calls": 0, "error": null}
+{"ts": 1778142726.446183, "sid": "csl-2026-05-07-1030-58a8", "event": "node_exit", "role": "synthesizer", "duration_ms": 40947}
