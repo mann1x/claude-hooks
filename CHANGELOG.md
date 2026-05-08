@@ -16,95 +16,10 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-### Added
+_(no entries yet — work since v1.1.0 lands here as it's committed
+on `dev`. See `git log v1.1.0..origin/dev` after fetching.)_
 
-- **/consultants — synthesizer fallback chain on persistent
-  failure** — when the primary synthesizer model exhausts its
-  ChatClient retry budget on a cloud flap (HTTP 500 / 502 / 503 /
-  504 / 408 / 429), the engine now walks `synthesizer.extra_models`
-  in order before declaring the consultation failed. Same
-  `chat_client` (so the same proxy + connection pool); only the
-  `model` field of the payload changes per attempt. First success
-  wins. Each attempt records an `llm_call` event with the actual
-  model used, so post-hoc audit via `/consultants--show <sid> --raw`
-  reveals which model produced the final answer. Configure with
-  `claude-consultants config set-role synthesizer --add-model
-  <tag>`. Active at every effort tier (not gated by the x-prefix —
-  cloud flaps don't care about effort).
-
-- **/consultants — degraded-answer composer on synthesizer
-  failure** — when every model in the fallback chain fails, the
-  council now writes a `summary.md` whose `final_answer` field
-  surfaces the researcher's full reports + the critic's verdict
-  rather than `(consultation incomplete: synthesizer error: ...)`.
-  Researcher reports often run 3-5k tokens of analysis at xhigh
-  effort, and the critic verdict adds another 1k of structured
-  decision text — that's the most expensive work in a consultation
-  and now survives the synthesizer's failure to the user. The
-  banner explains it's a degraded answer (not a synthesized one)
-  and points the user at `claude-consultants follow-up <THIS_SID>
-  --message "compose a final answer..."` to recover cheaply (the
-  next synthesizer attempt inherits research + critic warm and
-  costs one more call, not a full re-run).
-
-- **/consultants--followup — failed-session-aware parent picker**
-  — the skill now defaults to the most recent session of *any*
-  status (was: most recent `completed` only). When the most recent
-  is `failed`, AskUserQuestion offers two paths: (1) chain off the
-  failed sid (cheapest — researcher + critic threads inherit from
-  disk and only the synthesizer re-runs) or (2) chain off the
-  failed sid's `parent_sid` (start over from a known-good thread).
-  Pairs with the engine-side fallback chain + degraded answer above
-  to make recovery from a cloud flap a one-step user action.
-
-### Changed
-
-- **ChatClient retry budget bumped from 8 attempts / ~136 s to 15
-  attempts / ~905 s (~15 min)** — `DEFAULT_MAX_RETRIES` 8 → 15 and
-  `DEFAULT_RETRY_MAX_DELAY_S` 30 → 90 in
-  `claude_hooks/get_advice/chat_client.py`. The motivating session
-  (`csl-2026-05-07-2158-7c75`, xhigh effort) burned the whole
-  pre-bump budget on a 2+ minute Ollama Cloud 500 window and lost
-  the synthesizer outright; with the new budget a flap of that
-  shape is absorbed by the retry loop and the consultation
-  completes. A 5-15 minute consultation can now tolerate up to ~15
-  minutes of cloud unavailability without failing — the trade-off
-  being that an actual permanent outage takes longer to surface as
-  a user-visible error. Affects both `/consultants` (synthesizer
-  + every other role's ChatClient) and `/get-advice` (the advisor
-  itself). Override via `ChatClient(..., max_retries=N,
-  retry_max_delay_s=S)` per call site if a cheaper budget is
-  desirable.
-
-### Fixed
-
-- **install.py — bin/* shim PATH wrappers (cross-platform)** —
-  skill CLIs (`claude-consultants`, `claude-advisor`, …) invoked by
-  bare name from a `/consultants--config` or `/get-advice` skill
-  failed with `command not found` because Claude Code's bash
-  subprocess does not include the repo's `bin/` on PATH on any
-  platform. Symlinks don't fix it either: the shims resolve `REPO`
-  via `dirname "$0"`, which through a symlink points at the symlink
-  dir (e.g. `/usr/local/bin/..`) and the helper sourcing breaks.
-  Installer now drops thin exec-wrappers in a known PATH-friendly
-  location for all 11 shims (`claude-hook`, `claude-consultants`,
-  `claude-advisor`, `claude-hooks-daemon`, `claude-hooks-daemon-ctl`,
-  `claude-hooks-proxy`, `claude-hooks-dashboard`,
-  `claude-hooks-rollup`, `caliber-grounding-proxy`, `caliber-smart`,
-  `claude-hook-pgvector-mcp`):
-  - **POSIX (Linux + macOS)**: `~/.local/bin/<shim>` — POSIX sh
-    wrapper that `exec`s the absolute repo path.
-  - **Windows**: `%LOCALAPPDATA%\claude-hooks\bin\<shim>` (POSIX sh
-    for the MSYS bash that Claude Code uses) plus a `.cmd` sibling
-    for native cmd / PowerShell users.
-  Wrappers carry an install-time tag in their first comment line,
-  so `python install.py` is fully idempotent and won't clobber a
-  hand-rolled wrapper. `python install.py --uninstall` removes only
-  tagged wrappers. Same root cause as the 2026-05-02 ruff PATH fix
-  — once the wrappers land, every bare-name invocation from a skill
-  resolves on every platform.
-
-## [1.1.0] — 2026-05-07
+## [1.1.0] — 2026-05-08
 
 MINOR bump for several new opt-in subsystems landed since v1.0.3:
 the `/get-advice` LLM-to-LLM advisor skill (multi-turn second
@@ -391,6 +306,156 @@ diverse cloud-model perspectives matter. Ten phases on `dev`
   Wired into `install.py` — installed when `providers.pgvector.enabled`
   is true. Tunables: `CONTAINER`, `PG_USER`, `PG_DB`, `BACKUP_DIR`,
   `KEEP_DAILY`, `KEEP_WEEKLY`, `KEEP_MONTHLY`, `WEEKLY_DOW`.
+
+### Late additions (post-2026-05-07 cut-prep work, landed 2026-05-08)
+
+The 2026-05-07 batch above was complete but uncut — pyproject.toml
+was bumped to 1.1.0 with a "prep for tag, not yet cut" commit
+(`f984d73`). The day before the actual cut produced four more sets
+of changes that landed under the same MINOR version because they're
+all extensions of the v1.1 work above (cloud-flap recovery for the
+new `/consultants` engine, install.py glue so the new skill CLIs
+resolve on every platform, and a documentation pass for the v1.1
+surface).
+
+#### Added (2026-05-08)
+
+- **/consultants — synthesizer fallback chain on persistent
+  failure** — when the primary synthesizer model exhausts its
+  ChatClient retry budget on a cloud flap (HTTP 500 / 502 / 503 /
+  504 / 408 / 429), the engine now walks `synthesizer.extra_models`
+  in order before declaring the consultation failed. Same
+  `chat_client` (so the same proxy + connection pool); only the
+  `model` field of the payload changes per attempt. First success
+  wins. Each attempt records an `llm_call` event with the actual
+  model used, so post-hoc audit via `/consultants--show <sid> --raw`
+  reveals which model produced the final answer. Configure with
+  `claude-consultants config set-role synthesizer --add-model
+  <tag>`. Active at every effort tier (not gated by the x-prefix —
+  cloud flaps don't care about effort).
+
+- **/consultants — degraded-answer composer on synthesizer
+  failure** — when every model in the fallback chain fails, the
+  council now writes a `summary.md` whose `final_answer` field
+  surfaces the researcher's full reports + the critic's verdict
+  rather than `(consultation incomplete: synthesizer error: ...)`.
+  Researcher reports often run 3-5k tokens of analysis at xhigh
+  effort, and the critic verdict adds another 1k of structured
+  decision text — that's the most expensive work in a consultation
+  and now survives the synthesizer's failure to the user. The
+  banner explains it's a degraded answer (not a synthesized one)
+  and points the user at `claude-consultants follow-up <THIS_SID>
+  --message "compose a final answer..."` to recover cheaply (the
+  next synthesizer attempt inherits research + critic warm and
+  costs one more call, not a full re-run).
+
+- **/consultants--followup — failed-session-aware parent picker**
+  — the skill now defaults to the most recent session of *any*
+  status (was: most recent `completed` only). When the most recent
+  is `failed`, AskUserQuestion offers two paths: (1) chain off the
+  failed sid (cheapest — researcher + critic threads inherit from
+  disk and only the synthesizer re-runs) or (2) chain off the
+  failed sid's `parent_sid` (start over from a known-good thread).
+  Pairs with the engine-side fallback chain + degraded answer above
+  to make recovery from a cloud flap a one-step user action.
+
+- **/consultants--followup — dedicated sub-skill** — the new fifth
+  member of the `/consultants` skill family, exposes
+  `claude-consultants follow-up` directly. Previously only
+  reachable via the underlying CLI or by asking Claude to dispatch
+  it manually; now `/consultants--followup [<sid>] <question>` is
+  a first-class skill with its own SKILL.md + activation guard +
+  failed-session handling.
+
+- **Cloud-model evaluation suite — full grading pass** — every
+  label in the 2026-05-07 sweep now carries Claude-graded per-query
+  + per-role grades + a verdict (PROD-READY / EVALUATED-ONLY) per
+  the [`docs/benchmarks/EVALUATION.md`](docs/benchmarks/EVALUATION.md)
+  rubric. Three labels are PROD-READY at single-run with
+  `P:A R:A C:A S:A`: `kimi-k2.6-cloud`, `gemma4-31b-cloud`,
+  `glm-5-1-cloud`. Three are EVALUATED-ONLY usable in mixes for
+  specific roles where the per-role grade is A:
+  `minimax-m2-7-cloud` (strong critic), `qwen3-5-397b-cloud`
+  (strong planner + critic), `qwen3-5-cloud` (cheap sibling).
+  Headline matrix lives at the top of [`docs/benchmarks/index.md`](docs/benchmarks/index.md).
+  EVALUATION.md §3.5 was updated to clarify the grader is Claude
+  reading transcripts, not the human (the original "grader is the
+  human" wording contradicted the LLM-to-LLM workflow).
+
+- **User-facing v1.1 documentation pass** — three new top-level
+  user runbooks landed: [`docs/get-advice.md`](docs/get-advice.md)
+  (351 lines: when to use, prereqs, the four sub-skills, model
+  picking, effort tiers, tools, common workflows, troubleshooting),
+  [`docs/consultants.md`](docs/consultants.md) (639 lines: the
+  four-role council, x-tier multi-model fan-out semantics, service
+  modes, follow-ups + chaining + failed-session recovery, the
+  three-layer cloud-flap recovery story, configuration via
+  `/consultants--config`, picking models with explicit benchmark
+  links, troubleshooting), and [`docs/whats-new.md`](docs/whats-new.md)
+  (276 lines: human-readable v1.1 highlights with the full benchmark
+  verdict matrix). README.md grew from 8 to 16 slash-command rows
+  with a new "Since" column flagging v1.1 additions, and a CLI
+  block per skill family. Install section grew from 6 to 8
+  numbered steps to cover the new bin/* PATH wrappers and the
+  opt-in /consultants conda env.
+
+#### Changed (2026-05-08)
+
+- **ChatClient retry budget bumped from 8 attempts / ~136 s to 15
+  attempts / ~905 s (~15 min)** — `DEFAULT_MAX_RETRIES` 8 → 15 and
+  `DEFAULT_RETRY_MAX_DELAY_S` 30 → 90 in
+  `claude_hooks/get_advice/chat_client.py`. The motivating session
+  (`csl-2026-05-07-2158-7c75`, xhigh effort) burned the whole
+  pre-bump budget on a 2+ minute Ollama Cloud 500 window and lost
+  the synthesizer outright; with the new budget a flap of that
+  shape is absorbed by the retry loop and the consultation
+  completes. A 5-15 minute consultation can now tolerate up to ~15
+  minutes of cloud unavailability without failing — the trade-off
+  being that an actual permanent outage takes longer to surface as
+  a user-visible error. Affects both `/consultants` (synthesizer
+  + every other role's ChatClient) and `/get-advice` (the advisor
+  itself). Override via `ChatClient(..., max_retries=N,
+  retry_max_delay_s=S)` per call site if a cheaper budget is
+  desirable.
+
+#### Fixed (2026-05-08)
+
+- **install.py — bin/* shim PATH wrappers (cross-platform)** —
+  skill CLIs (`claude-consultants`, `claude-advisor`, …) invoked by
+  bare name from a `/consultants--config` or `/get-advice` skill
+  failed with `command not found` because Claude Code's bash
+  subprocess does not include the repo's `bin/` on PATH on any
+  platform. Symlinks don't fix it either: the shims resolve `REPO`
+  via `dirname "$0"`, which through a symlink points at the symlink
+  dir (e.g. `/usr/local/bin/..`) and the helper sourcing breaks.
+  Installer now drops thin exec-wrappers in a known PATH-friendly
+  location for all 11 shims (`claude-hook`, `claude-consultants`,
+  `claude-advisor`, `claude-hooks-daemon`, `claude-hooks-daemon-ctl`,
+  `claude-hooks-proxy`, `claude-hooks-dashboard`,
+  `claude-hooks-rollup`, `caliber-grounding-proxy`, `caliber-smart`,
+  `claude-hook-pgvector-mcp`):
+  - **POSIX (Linux + macOS)**: `~/.local/bin/<shim>` — POSIX sh
+    wrapper that `exec`s the absolute repo path.
+  - **Windows**: `%LOCALAPPDATA%\claude-hooks\bin\<shim>` (POSIX sh
+    for the MSYS bash that Claude Code uses) plus a `.cmd` sibling
+    for native cmd / PowerShell users.
+  Wrappers carry an install-time tag in their first comment line,
+  so `python install.py` is fully idempotent and won't clobber a
+  hand-rolled wrapper. `python install.py --uninstall` removes only
+  tagged wrappers. Same root cause as the 2026-05-02 ruff PATH fix
+  — once the wrappers land, every bare-name invocation from a skill
+  resolves on every platform.
+
+- **install.py — Windows User PATH auto-prepend via `reg add`** —
+  for `/consultants` and `/get-advice` skills to actually resolve
+  on Windows the wrapper directory needs to be on User PATH that
+  Claude Code's bash subprocess inherits. Installer now prepends
+  `%LOCALAPPDATA%\claude-hooks\bin` to `HKCU\Environment\PATH`
+  using `reg add` (NOT `setx` — `setx` silently truncates User
+  PATH to 1024 chars, which is destructive on any developer
+  machine), then broadcasts `WM_SETTINGCHANGE` so new processes
+  pick it up without a logoff. Defensive 16 KB ceiling on the
+  resulting PATH.
 
 ## [1.0.3] — 2026-05-03
 
