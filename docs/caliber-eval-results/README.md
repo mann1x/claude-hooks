@@ -20,7 +20,8 @@ are useful to ship with the code:
 |---|---|---|---|---|---|---|
 | [claude-cli (REFERENCE)](REFERENCE-claude-cli.md) | 2026-04-29 | claude-cli (default) | 37m 14s | **94/100** | 5/8 | Baseline; every other label is graded against this |
 | `gemma-tools-optc` | 2026-04-29 | gemma4-98e:tools | ~30m | n/a | 0/3 | Pre-resilience-port; produced 3 skills with empty `paths:` fm. Smoke evidence only |
-| [gemma4-31b-cloud](gemma4-31b-cloud-summary.md) | 2026-05-09 | gemma4:31b-cloud | **28m 41s** | **85/100** | **2/5** | First non-claude-cli A grade; 23% faster than baseline; `paths:` fm 2/2 |
+| [gemma-native-tools-v3](gemma-native-tools-v3-summary.md) | 2026-04-30 | gemma4-98e:native-tools (Q6_K, 256k, 24 GB) | **14m 32s** | **87/100** | **1/4** | Fastest non-claude-cli run on record; densest per-skill `paths:` fm (5 entries on `proxy-ops`). Filed upstream as [caliber-ai-org/ai-setup#205](https://github.com/caliber-ai-org/ai-setup/issues/205) — argues 7-pt gap is largely structural (caliber rubric denominator) |
+| [gemma4-31b-cloud](gemma4-31b-cloud-summary.md) | 2026-05-09 | gemma4:31b-cloud | 28m 41s | 85/100 | 2/5 | First **cloud** Ollama A grade; 23% faster than baseline; `paths:` fm 2/2 |
 
 ## How these get published
 
