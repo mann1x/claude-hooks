@@ -1,0 +1,37 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/gemini-3-flash-preview-cloud-2026-05-09-r3/smoke.transcript.db
+
+sid: csl-2026-05-09-0805-7f65
+status: completed
+total wall: 18.2s
+
+  planner       node=3.1s    (entries) llm=1x=3.1s    tool=0x=0ms     tok=p237/c363
+      LLM round=1 model=gemini-3-flash-preview:cloud    3.1s  p=237    c=363   
+
+  researcher    node=26.3s   (3xentries) llm=11x=28.9s   tool=12x=92ms    tok=p169592/c2165
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    4.1s  p=36294  c=515   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    3.8s  p=31293  c=281   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    3.5s  p=44393  c=340   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    2.9s  p=8344   c=207   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    2.7s  p=26526  c=221   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    2.4s  p=1072   c=76    
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    2.1s  p=13939  c=106   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    1.9s  p=2768   c=84    
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    1.9s  p=1082   c=83    
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    1.8s  p=2785   c=154   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    1.7s  p=1096   c=98    
+      tool grep               x3      79ms chars=74447
+      tool survey_project     x3       8ms chars=11214
+      tool read_file          x6       5ms chars=195620
+
+  synthesizer   node=3.0s    (entries) llm=1x=3.0s    tool=0x=0ms     tok=p1125/c450
+      LLM round=1 model=gemini-3-flash-preview:cloud    3.0s  p=1125   c=450   
+
+totals
+  wall                  18.2s
+  sum of node spans     32.4s
+  sum of LLM call time  34.9s  (192.3% of wall)
+  sum of tool call time 92ms
+  total prompt tokens   170954
+  total completion tok  2978

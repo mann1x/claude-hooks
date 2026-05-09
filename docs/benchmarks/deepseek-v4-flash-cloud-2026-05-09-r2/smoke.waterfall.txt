@@ -1,0 +1,36 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/deepseek-v4-flash-cloud-2026-05-09-r2/smoke.transcript.db
+
+sid: csl-2026-05-09-0754-421f
+status: completed
+total wall: 14.2s
+
+  planner       node=2.4s    (entries) llm=1x=2.4s    tool=0x=0ms     tok=p241/c212
+      LLM round=1 model=deepseek-v4-flash:cloud      2.4s  p=241    c=212   
+
+  researcher    node=21.7s   (3xentries) llm=9x=21.7s   tool=10x=21ms    tok=p183687/c1000
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud      3.9s  p=29548  c=156   
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud      2.9s  p=17233  c=148   
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud      2.7s  p=17295  c=134   
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud      2.4s  p=17245  c=88    
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud      2.4s  p=18818  c=112   
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud      2.1s  p=22130  c=106   
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud      1.9s  p=19464  c=111   
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud      1.7s  p=19644  c=71    
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud      1.7s  p=22310  c=74    
+      tool grep               x2      18ms chars=25028
+      tool survey_project     x1       2ms chars=3738
+      tool read_file          x3       1ms chars=38416
+      tool list_files         x4       0ms chars=576
+
+  synthesizer   node=3.1s    (entries) llm=1x=3.1s    tool=0x=0ms     tok=p652/c27
+      LLM round=1 model=deepseek-v4-flash:cloud      3.1s  p=652    c=27    
+
+totals
+  wall                  14.2s
+  sum of node spans     27.2s
+  sum of LLM call time  27.2s  (191.1% of wall)
+  sum of tool call time 21ms
+  total prompt tokens   184580
+  total completion tok  1239

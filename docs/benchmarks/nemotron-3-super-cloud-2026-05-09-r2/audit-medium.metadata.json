@@ -1,0 +1,73 @@
+{
+  "created": "2026-05-09T07:40:41",
+  "cwd": "/tmp/claude-hooks-bench-bench-baseline-2026-05-07-LQZY",
+  "duration_seconds": 270.43129873275757,
+  "effort": "medium",
+  "error": null,
+  "final_answer": "- claude_hooks/providers/pgvector.py:123 \u2013 exercisable from non\u2011conda-env Python  \n- claude_hooks/providers/pgvector.py:328 \u2013 exercisable from non\u2011conda-env Python  \n- scripts/migrate_to_pgvector.py:624 \u2013 exercisable from non\u2011conda-env Python  \n- scripts/bench_recall.py:107 \u2013 exercisable from non\u2011conda-env Python  \n- tests/test_pgvector_integration.py:56 \u2013 exercisable from non\u2011conda-env Python  \n- tests/test_pgvector_integration.py:285 \u2013 exercisable from non\u2011conda-env Python",
+  "models": {
+    "planner": "nemotron-3-super:cloud",
+    "researcher": "nemotron-3-super:cloud",
+    "synthesizer": "nemotron-3-super:cloud"
+  },
+  "parent_sid": null,
+  "question": "Audit claude-hooks for psycopg import sites that still lack the conda-env subprocess fallback added in 4e67dc2 \u2014 list each file:line and whether it's actually exercisable from a non-conda-env Python.",
+  "retries_by_role": {},
+  "session_id": "csl-2026-05-09-0740-5dbc",
+  "status": "completed",
+  "topology": "council",
+  "total_completion_tokens": 9899,
+  "total_prompt_tokens": 184495,
+  "turns": [
+    {
+      "completion_tokens": 607,
+      "content": "1. Run `grep -Rn -- \"import psycopg\\|from psycopg\" claude-hooks/` to locate all psycopg import sites with file:line.\n2. For each match, extract the surrounding 10 lines and check for the conda-env subprocess fallback pattern introduced in commit 4e67dc2 (e.g., a call to `subprocess.run` with `conda` or a check of `CONDA_PREFIX`).\n3. Flag any import site where the fallback pattern is absent.\n4. For each flagged site, determine if the import is executed unconditionally or guarded by a condition that would be false outside a conda environment (e.g., inspect surrounding `if` statements for `CONDA_PREFIX` or similar env vars).\n5. Output a list of file:line entries for sites lacking the fallback and mark them as \u201cexercisable from non\u2011conda-env Python\u201d if the import is unconditionally reachable, otherwise mark as \u201cconda\u2011guarded\u201d.",
+      "duration_seconds": 16.595149781001965,
+      "prompt_tokens": 285,
+      "role": "planner",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 967,
+      "content": "- claude_hooks/providers/pgvector.py:123 - import inside `verify` method, no conda-env fallback; exercisable when provider verification runs (e.g., during installer detection or manual provider use)\n- claude_hooks/providers/pgvector.py:328 - import inside `_ensure_ready` method, no conda-env fallback; exercisable when provider attempts to establish a DB connection (e.g., during recall/store operations)",
+      "duration_seconds": 81.23846599800163,
+      "prompt_tokens": 48993,
+      "role": "researcher",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 3951,
+      "content": "- `claude_hooks/providers/pgvector.py:123` \u2014 import inside `verify()` method, guarded by `try/except ImportError` but no conda-env fallback; exercisable from non-conda-env Python (returns False on missing psycopg)\n- `claude_hooks/providers/pgvector.py:328` \u2014 import inside `_ensure_ready()` method, guarded by `try/except ImportError` but no conda-env fallback; exercisable from non-conda-env Python (raises ImportError with message)\n- `scripts/migrate_to_pgvector.py:624` \u2014 bare import in `main()` function, no guard or fallback; exercisable from non-conda-env Python (crashes with ModuleNotFoundError)\n- `scripts/bench_recall.py:107` \u2014 import inside `PgvectorBenchProvider.__init__()`, no guard or fallback; exercisable from non-conda-env Python when benchmark code path is hit (crashes with ModuleNotFoundError)\n- `tests/test_pgvector_integration.py:56` \u2014 import inside `_skip_if_no_deps()`, guarded by `try/except ImportError` but no conda-env fallback; exercisable from non-conda-env Python (raises unittest.SkipTest)\n- `tests/test_pgvector_integration.py:285` \u2014 import inside `tearDownClass()`, guarded by `try/except Exception: pass` but no conda-env fallback; exercisable from non-conda-env Python (swallows ImportError)\n\nAll listed import sites lack the conda-env subprocess fallback pattern (e.g., no call to `find_conda_env_python()` or subprocess launch) and are exercisable from a non-conda-env Python environment. Sites in `install.py` (lines 2127, 2524, 2647) were verified to have the fallback pattern and are excluded. String literals (install.py:2546, 2666) are not actual imports.",
+      "duration_seconds": 139.9308763089939,
+      "prompt_tokens": 58879,
+      "role": "researcher",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 4116,
+      "content": "claude_hooks/providers/pgvector.py:123 \u2014 exercisable  \nclaude_hooks/providers/pgvector.py:328 \u2014 exercisable  \nscripts/migrate_to_pgvector.py:624 \u2014 exercisable  \nscripts/bench_recall.py:107 \u2014 exercisable  \ntests/test_pgvector_integration.py:56 \u2014 exercisable  \ntests/test_pgvector_integration.py:285 \u2014 exercisable",
+      "duration_seconds": 35.702067147998605,
+      "prompt_tokens": 75066,
+      "role": "researcher",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 258,
+      "content": "- claude_hooks/providers/pgvector.py:123 \u2013 exercisable from non\u2011conda-env Python  \n- claude_hooks/providers/pgvector.py:328 \u2013 exercisable from non\u2011conda-env Python  \n- scripts/migrate_to_pgvector.py:624 \u2013 exercisable from non\u2011conda-env Python  \n- scripts/bench_recall.py:107 \u2013 exercisable from non\u2011conda-env Python  \n- tests/test_pgvector_integration.py:56 \u2013 exercisable from non\u2011conda-env Python  \n- tests/test_pgvector_integration.py:285 \u2013 exercisable from non\u2011conda-env Python",
+      "duration_seconds": 7.5506632270116825,
+      "prompt_tokens": 1272,
+      "role": "synthesizer",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    }
+  ]
+}

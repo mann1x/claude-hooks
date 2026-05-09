@@ -1,0 +1,38 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/deepseek-v4-flash-cloud-2026-05-09-r3/smoke.transcript.db
+
+sid: csl-2026-05-09-0819-746b
+status: completed
+total wall: 96.8s
+
+  planner       node=2.9s    (entries) llm=1x=2.9s    tool=0x=0ms     tok=p241/c206
+      LLM round=1 model=deepseek-v4-flash:cloud      2.9s  p=241    c=206   
+
+  researcher    node=3.5m    (3xentries) llm=10x=3.5m    tool=13x=15ms    tok=p214839/c1139
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud     50.2s  p=28110  c=92    
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud     39.7s  p=17255  c=110   
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud     37.4s  p=21434  c=175   
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud     37.3s  p=18811  c=122   
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud     32.4s  p=21811  c=83    
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud      3.2s  p=34423  c=130   
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud      3.1s  p=17276  c=183   
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud      2.7s  p=17471  c=75    
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud      2.5s  p=17236  c=100   
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud      1.8s  p=21012  c=69    
+      tool glob               x1       8ms chars=300
+      tool grep               x5       4ms chars=15788
+      tool survey_project     x1       2ms chars=3738
+      tool read_file          x3       1ms chars=92468
+      tool list_files         x3       0ms chars=393
+
+  synthesizer   node=1.2s    (entries) llm=1x=1.2s    tool=0x=0ms     tok=p615/c39
+      LLM round=1 model=deepseek-v4-flash:cloud      1.2s  p=615    c=39    
+
+totals
+  wall                  96.8s
+  sum of node spans     3.6m
+  sum of LLM call time  3.6m  (221.6% of wall)
+  sum of tool call time 15ms
+  total prompt tokens   215695
+  total completion tok  1384

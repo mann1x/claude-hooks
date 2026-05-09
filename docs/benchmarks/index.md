@@ -118,6 +118,9 @@ Cloud model snapshots captured to each label's `models.json`.
 | [`minimax-m2-7-cloud-2026-05-07`](minimax-m2-7-cloud-2026-05-07/results.md) | `minimax-m2.7:cloud` (every role) | medium / medium / high | 1/3 | 46s · 0.7k · PASS | 106s · 3.4k · F | 757s · 22.4k · F | 26.5k | EVALUATED-ONLY — Q3 hallucinated paths |
 | [`qwen3-5-397b-cloud-2026-05-07`](qwen3-5-397b-cloud-2026-05-07/results.md) | `qwen3.5:397b-cloud` (every role) | medium / medium / high | 1/3 | 91s · 4.7k · PASS | 91s · 9.0k · C | 242s · 13.1k · F | 26.8k | EVALUATED-ONLY — wrong commit-existence claim, no Q3 rec |
 | [`qwen3-5-cloud-2026-05-07`](qwen3-5-cloud-2026-05-07/results.md) | `qwen3.5:cloud` (every role) | medium / medium / high | 1/3 | 106s · 9.4k · PASS | 91s · 9.1k · C | 303s · 13.2k · B | 31.8k | EVALUATED-ONLY — same retrieval gap as :397b, sharper Q3 |
+| [`gemini-3-flash-preview-cloud-2026-05-09`](gemini-3-flash-preview-cloud-2026-05-09/results.md) | `gemini-3-flash-preview:cloud` (every role) | medium / medium / high | **3/3** | 31s median · PASS | 45s median · A | 122–136s · A− | ~33k median | **PROD-READY** — tightest variance of cohort (7% spread); fastest A on Q3 |
+| [`deepseek-v4-flash-cloud-2026-05-09`](deepseek-v4-flash-cloud-2026-05-09/results.md) | `deepseek-v4-flash:cloud` (every role) | medium / medium / high | **3/3** | 76s median · PASS | 167s median · B | 500s median · A | ~30k median | **PROD-READY** — slow-but-thorough; r3 elevated wall flagged §7-OUTLIER but no per-query outlier |
+| [`nemotron-3-super-cloud-2026-05-09`](nemotron-3-super-cloud-2026-05-09/results.md) | `nemotron-3-super:cloud` (every role) | medium / medium / high | **3/3** | 121s median · PASS | 272s median · A | 470s median · A | ~26k median | **PROD-READY** — only model whose Q3 hardening targets the right layer; widest wall variance (64% spread) |
 
 ### Role-suitability matrix
 
@@ -138,6 +141,9 @@ invocations / parallel lanes). Use this to compose mixes:
 | `minimax-m2-7-cloud-2026-05-07`  | B | F | F | F | `P:B R:F C:F S:F` |
 | `qwen3-5-397b-cloud-2026-05-07`  | A | C | C | F | `P:A R:C C:C S:F` |
 | `qwen3-5-cloud-2026-05-07`       | A | C | A | B | `P:A R:C C:A S:B` |
+| `gemini-3-flash-preview-cloud-2026-05-09` (N=3) | A | A | A | A | `P:A R:A C:A S:A` |
+| `deepseek-v4-flash-cloud-2026-05-09` (N=3)      | A | A | A | A | `P:A R:A C:A S:A` |
+| `nemotron-3-super-cloud-2026-05-09` (N=3)       | A | A | A | A | `P:A R:A C:A S:A` |
 
 ### Cheapest A-or-better per role (provisional, single-run)
 
