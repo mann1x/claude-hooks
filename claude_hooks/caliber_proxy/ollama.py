@@ -103,6 +103,24 @@ class UpstreamError(RuntimeError):
 
 # --- Request translation: OpenAI -> Ollama /api/chat ---------------- #
 
+# Tool-call fields known to break specific upstreams when echoed back
+# in a request. Provider-evidence-based; expand only when a real
+# upstream returns a 400 on the echoed field. Default behaviour is
+# pass-through (see :func:`_translate_request_message` rationale).
+#
+# - ``function.index`` — emitted by deepseek/qwen3.5 cloud builds in
+#   their *responses* (see ``get_advice/chat_client.py:_from_ollama``);
+#   echoing it back in a *request* causes upstream JSON validators to
+#   400 with "Value looks like object, but can't find closing '}'
+#   symbol". The field is response-only.
+_TOOL_CALL_DENY_OUTBOUND_FUNCTION: frozenset[str] = frozenset({"index"})
+
+# tool_call-level (i.e. ``tool_calls[i].<field>``, not nested under
+# ``function``). Empty for now — OpenAI-standard keys (``id``,
+# ``type``, ``index``) are documented and accepted by Ollama 0.5+.
+_TOOL_CALL_DENY_OUTBOUND_TOPLEVEL: frozenset[str] = frozenset()
+
+
 # OpenAI sampling fields that map cleanly to Ollama options.<same-or-aliased>.
 _SAMPLING_FIELD_MAP: list[tuple[str, str]] = [
     ("temperature", "temperature"),
@@ -121,9 +139,19 @@ def _translate_request_message(msg: dict) -> dict:
     Two role-specific tweaks; everything else passes through verbatim:
 
     1. ``assistant`` with ``tool_calls`` — OpenAI carries arguments as
-       a JSON string and adds ``id`` / ``type`` per call. Ollama wants
-       arguments as an object and ignores the surrounding metadata, so
-       we parse and strip.
+       a JSON string while Ollama wants an object; only that field is
+       transformed. **All other fields on the tool_call AND on its
+       nested ``function`` are passed through verbatim**, except for
+       a small denylist of fields known to break specific upstreams
+       when echoed back (see :data:`_TOOL_CALL_DENY_OUTBOUND`).
+
+       Why generic passthrough: providers attach required-on-echo
+       metadata under various keys (Gemini's ``thought_signature`` on
+       the function part, OpenAI's ``id``, future provenance fields).
+       An explicit allowlist of {name, arguments} broke Gemini-cloud
+       with 400 ``"Function call is missing a thought_signature in
+       functionCall parts"``. Default-pass + targeted strip only
+       what we have evidence of breakage for.
     2. ``tool`` — OpenAI uses ``tool_call_id`` to correlate the result
        with its triggering call. Ollama tracks correlation by message
        ordering, so the id is dropped. We forward ``name`` as
@@ -134,7 +162,7 @@ def _translate_request_message(msg: dict) -> dict:
         kept = {k: v for k, v in msg.items() if k != "tool_calls"}
         translated_tcs: list[dict] = []
         for tc in msg["tool_calls"] or []:
-            fn = tc.get("function") or {}
+            fn = dict(tc.get("function") or {})
             args = fn.get("arguments")
             if isinstance(args, str):
                 try:
@@ -143,12 +171,15 @@ def _translate_request_message(msg: dict) -> dict:
                     args = {}
             elif args is None:
                 args = {}
-            translated_tcs.append({
-                "function": {
-                    "name": fn.get("name", ""),
-                    "arguments": args,
-                },
-            })
+            fn["arguments"] = args
+            # Strip only known-bad nested function fields (see denylist).
+            for k in _TOOL_CALL_DENY_OUTBOUND_FUNCTION:
+                fn.pop(k, None)
+            new_tc = {k: v for k, v in tc.items() if k != "function"}
+            for k in _TOOL_CALL_DENY_OUTBOUND_TOPLEVEL:
+                new_tc.pop(k, None)
+            new_tc["function"] = fn
+            translated_tcs.append(new_tc)
         kept["tool_calls"] = translated_tcs
         return kept
     if role == "tool":
@@ -242,17 +273,24 @@ def _to_openai_response(ollama_resp: dict) -> dict:
     base_id = int(time.time() * 1000)
     translated_tcs: list[dict] = []
     for i, tc in enumerate(raw_tcs):
-        fn = tc.get("function") or {}
+        fn = dict(tc.get("function") or {})
         args = fn.get("arguments", {})
         if isinstance(args, dict):
             args = json.dumps(args, ensure_ascii=False)
         elif args is None:
             args = ""
-        translated_tcs.append({
-            "id": f"call_{base_id}_{i}",
-            "type": "function",
-            "function": {"name": fn.get("name", ""), "arguments": args},
-        })
+        fn["arguments"] = args
+        # Pass through any provider-specific function-level metadata
+        # (e.g. Gemini's ``thought_signature``) so caliber/the agent
+        # loop can echo it back next turn — required by some
+        # upstreams (Gemini 400s without it).
+        new_tc: dict[str, Any] = {k: v for k, v in tc.items() if k != "function"}
+        new_tc["function"] = fn
+        # Always synthesise an OpenAI-mandatory ``id`` if upstream didn't
+        # provide one (Ollama-native often doesn't); preserve when present.
+        new_tc.setdefault("id", f"call_{base_id}_{i}")
+        new_tc.setdefault("type", "function")
+        translated_tcs.append(new_tc)
 
     done_reason = ollama_resp.get("done_reason") or "stop"
     finish_reason = "tool_calls" if translated_tcs else done_reason
