@@ -26,6 +26,14 @@ import os
 import time
 from typing import Any, Optional
 
+from claude_hooks._chat_retry import (
+    ProxyRetryConfig,
+    compute_backoff,
+    counters,
+    is_retryable_empty_response,
+    is_retryable_status,
+)
+
 log = logging.getLogger("claude_hooks.caliber_proxy.ollama")
 
 try:
@@ -95,6 +103,24 @@ class UpstreamError(RuntimeError):
 
 # --- Request translation: OpenAI -> Ollama /api/chat ---------------- #
 
+# Tool-call fields known to break specific upstreams when echoed back
+# in a request. Provider-evidence-based; expand only when a real
+# upstream returns a 400 on the echoed field. Default behaviour is
+# pass-through (see :func:`_translate_request_message` rationale).
+#
+# - ``function.index`` — emitted by deepseek/qwen3.5 cloud builds in
+#   their *responses* (see ``get_advice/chat_client.py:_from_ollama``);
+#   echoing it back in a *request* causes upstream JSON validators to
+#   400 with "Value looks like object, but can't find closing '}'
+#   symbol". The field is response-only.
+_TOOL_CALL_DENY_OUTBOUND_FUNCTION: frozenset[str] = frozenset({"index"})
+
+# tool_call-level (i.e. ``tool_calls[i].<field>``, not nested under
+# ``function``). Empty for now — OpenAI-standard keys (``id``,
+# ``type``, ``index``) are documented and accepted by Ollama 0.5+.
+_TOOL_CALL_DENY_OUTBOUND_TOPLEVEL: frozenset[str] = frozenset()
+
+
 # OpenAI sampling fields that map cleanly to Ollama options.<same-or-aliased>.
 _SAMPLING_FIELD_MAP: list[tuple[str, str]] = [
     ("temperature", "temperature"),
@@ -113,9 +139,19 @@ def _translate_request_message(msg: dict) -> dict:
     Two role-specific tweaks; everything else passes through verbatim:
 
     1. ``assistant`` with ``tool_calls`` — OpenAI carries arguments as
-       a JSON string and adds ``id`` / ``type`` per call. Ollama wants
-       arguments as an object and ignores the surrounding metadata, so
-       we parse and strip.
+       a JSON string while Ollama wants an object; only that field is
+       transformed. **All other fields on the tool_call AND on its
+       nested ``function`` are passed through verbatim**, except for
+       a small denylist of fields known to break specific upstreams
+       when echoed back (see :data:`_TOOL_CALL_DENY_OUTBOUND`).
+
+       Why generic passthrough: providers attach required-on-echo
+       metadata under various keys (Gemini's ``thought_signature`` on
+       the function part, OpenAI's ``id``, future provenance fields).
+       An explicit allowlist of {name, arguments} broke Gemini-cloud
+       with 400 ``"Function call is missing a thought_signature in
+       functionCall parts"``. Default-pass + targeted strip only
+       what we have evidence of breakage for.
     2. ``tool`` — OpenAI uses ``tool_call_id`` to correlate the result
        with its triggering call. Ollama tracks correlation by message
        ordering, so the id is dropped. We forward ``name`` as
@@ -126,7 +162,7 @@ def _translate_request_message(msg: dict) -> dict:
         kept = {k: v for k, v in msg.items() if k != "tool_calls"}
         translated_tcs: list[dict] = []
         for tc in msg["tool_calls"] or []:
-            fn = tc.get("function") or {}
+            fn = dict(tc.get("function") or {})
             args = fn.get("arguments")
             if isinstance(args, str):
                 try:
@@ -135,12 +171,15 @@ def _translate_request_message(msg: dict) -> dict:
                     args = {}
             elif args is None:
                 args = {}
-            translated_tcs.append({
-                "function": {
-                    "name": fn.get("name", ""),
-                    "arguments": args,
-                },
-            })
+            fn["arguments"] = args
+            # Strip only known-bad nested function fields (see denylist).
+            for k in _TOOL_CALL_DENY_OUTBOUND_FUNCTION:
+                fn.pop(k, None)
+            new_tc = {k: v for k, v in tc.items() if k != "function"}
+            for k in _TOOL_CALL_DENY_OUTBOUND_TOPLEVEL:
+                new_tc.pop(k, None)
+            new_tc["function"] = fn
+            translated_tcs.append(new_tc)
         kept["tool_calls"] = translated_tcs
         return kept
     if role == "tool":
@@ -234,17 +273,24 @@ def _to_openai_response(ollama_resp: dict) -> dict:
     base_id = int(time.time() * 1000)
     translated_tcs: list[dict] = []
     for i, tc in enumerate(raw_tcs):
-        fn = tc.get("function") or {}
+        fn = dict(tc.get("function") or {})
         args = fn.get("arguments", {})
         if isinstance(args, dict):
             args = json.dumps(args, ensure_ascii=False)
         elif args is None:
             args = ""
-        translated_tcs.append({
-            "id": f"call_{base_id}_{i}",
-            "type": "function",
-            "function": {"name": fn.get("name", ""), "arguments": args},
-        })
+        fn["arguments"] = args
+        # Pass through any provider-specific function-level metadata
+        # (e.g. Gemini's ``thought_signature``) so caliber/the agent
+        # loop can echo it back next turn — required by some
+        # upstreams (Gemini 400s without it).
+        new_tc: dict[str, Any] = {k: v for k, v in tc.items() if k != "function"}
+        new_tc["function"] = fn
+        # Always synthesise an OpenAI-mandatory ``id`` if upstream didn't
+        # provide one (Ollama-native often doesn't); preserve when present.
+        new_tc.setdefault("id", f"call_{base_id}_{i}")
+        new_tc.setdefault("type", "function")
+        translated_tcs.append(new_tc)
 
     done_reason = ollama_resp.get("done_reason") or "stop"
     finish_reason = "tool_calls" if translated_tcs else done_reason
@@ -293,8 +339,16 @@ def chat_completions(payload: dict[str, Any],
     agent loop can inspect tool_calls between iterations and the public
     proxy layer rebuilds SSE for clients that want it.
 
-    Raises :class:`UpstreamError` on non-2xx responses so callers don't
-    silently produce empty replies.
+    Raises :class:`UpstreamError` on non-2xx responses (after retries)
+    so callers don't silently produce empty replies.
+
+    **Cloud resilience** (2026-05-09): rides upstream Ollama 5xx /
+    transient 4xx / 200-empty-content blips with the same retry
+    budget the consultants engine uses (15 attempts / ~15 min by
+    default). Tunable via ``CALIBER_GROUNDING_RETRY_*`` env vars.
+    See ``claude_hooks/_chat_retry.py`` for the policy module and
+    ``docs/PLAN-caliber-proxy-cloud-resilience.md`` for design notes.
+    Per-process flap counters expose via ``server.py``'s ``/health``.
     """
     base = _base_url(upstream)
     url = base + "/api/chat"
@@ -317,26 +371,128 @@ def chat_completions(payload: dict[str, Any],
         except OSError:
             pass
 
-    resp = client.post(
-        url,
-        json=ollama_payload,
-        headers={"Content-Type": "application/json"},
-    )
-    if resp.status_code >= 400:
-        try:
-            body = resp.json()
-        except json.JSONDecodeError:
-            body = resp.text[:500]
-        raise UpstreamError(resp.status_code, body)
-    try:
-        ollama_resp = resp.json()
-    except json.JSONDecodeError as e:
-        raise RuntimeError(
-            f"upstream returned non-JSON ({resp.status_code}): "
-            f"{resp.text[:200]}"
-        ) from e
+    cfg = ProxyRetryConfig()
+    cnt = counters()
 
-    return _to_openai_response(ollama_resp)
+    # Two parallel retry budgets:
+    #  - status_attempt: counts toward ``cfg.max_attempts``, advances on
+    #    every retryable HTTP failure. Backoff uses this index.
+    #  - empty_attempt: separate small budget for 200-empty soft fails;
+    #    doesn't count against the main budget but its own cap (~5)
+    #    avoids spinning on a model that legitimately produced empty.
+    status_attempt = 0
+    empty_attempt = 0
+    last_error: Optional[UpstreamError] = None
+
+    while True:
+        try:
+            resp = client.post(
+                url,
+                json=ollama_payload,
+                headers={"Content-Type": "application/json"},
+            )
+        except (httpx.RequestError, httpx.HTTPError) as e:
+            # Network-level failure (connection reset, DNS, etc.) —
+            # treat as 5xx-equivalent. Retryable.
+            if cfg.disabled() or status_attempt >= cfg.max_attempts:
+                cnt.upstream_retry_exhausted_total += 1
+                raise UpstreamError(
+                    599, f"network error: {type(e).__name__}: {e}"[:500]
+                ) from e
+            cnt.upstream_5xx_total += 1
+            delay = compute_backoff(
+                status_attempt, cfg.base_delay_s, cfg.max_delay_s,
+            )
+            log.warning(
+                "ollama POST: network %s on attempt %d/%d, retrying in %.1fs",
+                type(e).__name__, status_attempt + 1, cfg.max_attempts + 1,
+                delay,
+            )
+            time.sleep(delay)
+            status_attempt += 1
+            continue
+
+        if resp.status_code >= 400:
+            try:
+                body_obj = resp.json()
+                body_text = json.dumps(body_obj)[:500]
+            except json.JSONDecodeError:
+                body_obj = resp.text[:500]
+                body_text = resp.text[:500]
+
+            retryable = is_retryable_status(resp.status_code, body_text)
+            if (not retryable
+                    or cfg.disabled()
+                    or status_attempt >= cfg.max_attempts):
+                if retryable:
+                    cnt.upstream_retry_exhausted_total += 1
+                last_error = UpstreamError(resp.status_code, body_obj)
+                raise last_error
+
+            # Track which class of flap this was.
+            if resp.status_code in (500, 502, 503, 504, 408, 429):
+                cnt.upstream_5xx_total += 1
+            else:
+                cnt.upstream_retryable_4xx_total += 1
+
+            delay = compute_backoff(
+                status_attempt, cfg.base_delay_s, cfg.max_delay_s,
+            )
+            log.warning(
+                "ollama POST: HTTP %d on attempt %d/%d, retrying in %.1fs "
+                "(body: %s)",
+                resp.status_code, status_attempt + 1, cfg.max_attempts + 1,
+                delay, body_text,
+            )
+            time.sleep(delay)
+            status_attempt += 1
+            continue
+
+        # 2xx path. Parse JSON, then check for the 200-empty soft fail.
+        try:
+            ollama_resp = resp.json()
+        except json.JSONDecodeError as e:
+            raise RuntimeError(
+                f"upstream returned non-JSON ({resp.status_code}): "
+                f"{resp.text[:200]}"
+            ) from e
+
+        translated = _to_openai_response(ollama_resp)
+
+        if cfg.retry_on_empty and is_retryable_empty_response(translated):
+            if empty_attempt < cfg.empty_max:
+                cnt.upstream_empty_total += 1
+                delay = compute_backoff(
+                    empty_attempt, cfg.base_delay_s, cfg.max_delay_s,
+                )
+                log.warning(
+                    "ollama POST: 200 OK with empty content on empty-attempt "
+                    "%d/%d, retrying in %.1fs (model=%s)",
+                    empty_attempt + 1, cfg.empty_max,
+                    delay, ollama_payload.get("model", "?"),
+                )
+                time.sleep(delay)
+                empty_attempt += 1
+                continue
+            # Exhausted empty-retry budget; ship the empty response so
+            # the agent loop can decide what to do (force_first retry
+            # with corrective user-msg, etc.). Don't raise — empty is
+            # a wire-valid 200, not an HTTP error.
+            log.warning(
+                "ollama POST: empty-content retries exhausted (%d), "
+                "returning empty response", cfg.empty_max,
+            )
+
+        if status_attempt > 0 or empty_attempt > 0:
+            log.info(
+                "ollama POST: succeeded after %d HTTP retries + %d empty "
+                "retries (model=%s)",
+                status_attempt, empty_attempt,
+                ollama_payload.get("model", "?"),
+            )
+            cnt.upstream_retry_succeeded_total += 1
+
+        return translated
 
 
 def close() -> None:

@@ -1,0 +1,61 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /shared/dev/claude-hooks/docs/benchmarks/mix-gemini-PRC-gemma4-S-2026-05-09-r3/audit-high.transcript.db
+
+sid: csl-2026-05-09-1036-b147
+status: completed
+total wall: 135.4s
+
+  planner       node=5.8s    (entries) llm=1x=5.8s    tool=0x=0ms     tok=p410/c1000
+      LLM round=1 model=gemini-3-flash-preview:cloud    5.8s  p=410    c=1000  
+
+  researcher    node=3.5m    (3xentries) llm=30x=3.7m    tool=27x=177ms   tok=p587330/c31376
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    1.0m  p=39109  c=10450 
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud   38.8s  p=46537  c=6422  
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud   15.0s  p=43312  c=2389  
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud   10.0s  p=55943  c=1385  
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    9.6s  p=36025  c=1450  
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    9.1s  p=33035  c=1292  
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    9.0s  p=23838  c=1267  
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    8.3s  p=29202  c=1134  
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    7.0s  p=40846  c=909   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    5.7s  p=36254  c=659   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    4.1s  p=10531  c=488   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    4.0s  p=32336  c=493   
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    3.7s  p=18659  c=288   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    3.4s  p=40284  c=261   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    3.3s  p=19242  c=275   
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    3.1s  p=1317   c=442   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    2.7s  p=1324   c=283   
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    2.4s  p=23044  c=162   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    2.3s  p=3668   c=182   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    2.2s  p=12492  c=69    
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    2.1s  p=12486  c=143   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    2.0s  p=1327   c=44    
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    2.0s  p=2991   c=178   
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    2.0s  p=3379   c=148   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    2.0s  p=3384   c=196   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    2.0s  p=3227   c=176   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    1.9s  p=3554   c=46    
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    1.9s  p=3306   c=59    
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    1.8s  p=3222   c=36    
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    1.7s  p=3456   c=50    
+      tool grep               x2     174ms chars=45259
+      tool glob               x1       2ms chars=29
+      tool read_file          x16      1ms chars=296968
+      tool survey_project     x3       0ms chars=11214
+      tool list_files         x5       0ms chars=677
+
+  critic        node=9.8s    (entries) llm=1x=9.8s    tool=0x=0ms     tok=p2905/c1645
+      LLM round=3 model=gemini-3-flash-preview:cloud    9.8s  p=2905   c=1645  
+
+  synthesizer   node=18.6s   (entries) llm=1x=18.6s   tool=0x=0ms     tok=p3271/c1246
+      LLM round=1 model=gemma4:31b-cloud            18.6s  p=3271   c=1246  
+
+totals
+  wall                  135.4s
+  sum of node spans     4.0m
+  sum of LLM call time  4.3m  (190.2% of wall)
+  sum of tool call time 177ms
+  total prompt tokens   593916
+  total completion tok  35267

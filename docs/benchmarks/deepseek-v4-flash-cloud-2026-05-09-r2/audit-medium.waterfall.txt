@@ -1,0 +1,41 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/deepseek-v4-flash-cloud-2026-05-09-r2/audit-medium.transcript.db
+
+sid: csl-2026-05-09-0754-e412
+status: completed
+total wall: 96.5s
+
+  planner       node=8.0s    (entries) llm=1x=8.0s    tool=0x=0ms     tok=p276/c707
+      LLM round=1 model=deepseek-v4-flash:cloud      8.0s  p=276    c=707   
+
+  researcher    node=2.0m    (3xentries) llm=14x=2.8m    tool=46x=639ms   tok=p585349/c12390
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud     30.8s  p=65799  c=2384  
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud     29.6s  p=38993  c=2706  
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud     20.4s  p=50262  c=1768  
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud     13.2s  p=49165  c=828   
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud     11.9s  p=35054  c=472   
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud     11.8s  p=61915  c=1061  
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud     11.7s  p=32830  c=917   
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud      9.5s  p=46166  c=652   
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud      7.1s  p=48449  c=200   
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud      6.7s  p=66194  c=280   
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud      5.6s  p=38439  c=364   
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud      3.9s  p=17384  c=295   
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud      3.3s  p=17369  c=263   
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud      3.1s  p=17330  c=200   
+      tool grep               x18    624ms chars=240183
+      tool read_file          x26      8ms chars=38210
+      tool glob               x1       7ms chars=7080
+      tool survey_project     x1       0ms chars=3738
+
+  synthesizer   node=26.3s   (entries) llm=1x=26.3s   tool=0x=0ms     tok=p3051/c768
+      LLM round=1 model=deepseek-v4-flash:cloud     26.3s  p=3051   c=768   
+
+totals
+  wall                  96.5s
+  sum of node spans     2.6m
+  sum of LLM call time  3.4m  (210.2% of wall)
+  sum of tool call time 639ms
+  total prompt tokens   588676
+  total completion tok  13865

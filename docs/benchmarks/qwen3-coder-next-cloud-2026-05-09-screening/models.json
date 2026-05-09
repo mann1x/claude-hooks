@@ -1,0 +1,48 @@
+{
+  "captured_at": "2026-05-09T06:50:05+02:00",
+  "endpoint": "http://192.168.178.2:11433",
+  "models": {
+    "qwen3-coder-next:cloud": {
+      "modified_at": "2025-02-04T00:00:00Z",
+      "capabilities": [
+        "completion",
+        "tools"
+      ],
+      "details": {
+        "parent_model": "qwen3-coder-next",
+        "format": "",
+        "family": "qwen3next",
+        "families": null,
+        "parameter_size": "80000000000",
+        "quantization_level": "FP8"
+      },
+      "model_info": {
+        "general.architecture": "qwen3next",
+        "general.parameter_count": 80000000000,
+        "qwen3next.context_length": 262144,
+        "qwen3next.embedding_length": 2048
+      },
+      "raw": {
+        "details": {
+          "parent_model": "qwen3-coder-next",
+          "format": "",
+          "family": "qwen3next",
+          "families": null,
+          "parameter_size": "80000000000",
+          "quantization_level": "FP8"
+        },
+        "model_info": {
+          "general.architecture": "qwen3next",
+          "general.parameter_count": 80000000000,
+          "qwen3next.context_length": 262144,
+          "qwen3next.embedding_length": 2048
+        },
+        "capabilities": [
+          "completion",
+          "tools"
+        ],
+        "modified_at": "2025-02-04T00:00:00Z"
+      }
+    }
+  }
+}

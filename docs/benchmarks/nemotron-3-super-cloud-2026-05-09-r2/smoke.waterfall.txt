@@ -1,0 +1,39 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/nemotron-3-super-cloud-2026-05-09-r2/smoke.transcript.db
+
+sid: csl-2026-05-09-0738-9a26
+status: completed
+total wall: 140.0s
+
+  planner       node=7.5s    (entries) llm=1x=7.5s    tool=0x=0ms     tok=p252/c754
+      LLM round=1 model=nemotron-3-super:cloud       7.5s  p=252    c=754   
+
+  researcher    node=3.1m    (3xentries) llm=12x=3.2m    tool=11x=82ms    tok=p243410/c2915
+      LLM round=1 lane=2 model=nemotron-3-super:cloud       1.0m  p=17386  c=792   
+      LLM round=1 lane=2 model=nemotron-3-super:cloud      40.2s  p=30513  c=253   
+      LLM round=1 lane=1 model=nemotron-3-super:cloud      28.9s  p=29543  c=780   
+      LLM round=1 lane=2 model=nemotron-3-super:cloud      13.7s  p=17615  c=59    
+      LLM round=1 lane=0 model=nemotron-3-super:cloud      11.2s  p=19731  c=219   
+      LLM round=1 lane=0 model=nemotron-3-super:cloud      10.1s  p=20532  c=252   
+      LLM round=1 lane=0 model=nemotron-3-super:cloud       8.1s  p=18483  c=98    
+      LLM round=1 lane=0 model=nemotron-3-super:cloud       7.8s  p=19588  c=56    
+      LLM round=1 lane=0 model=nemotron-3-super:cloud       6.1s  p=17414  c=107   
+      LLM round=1 lane=1 model=nemotron-3-super:cloud       3.1s  p=17436  c=181   
+      LLM round=1 lane=1 model=nemotron-3-super:cloud       2.5s  p=17651  c=59    
+      LLM round=1 lane=1 model=nemotron-3-super:cloud       2.4s  p=17518  c=59    
+      tool grep               x1      75ms chars=2064
+      tool glob               x1       6ms chars=300
+      tool read_file          x3       1ms chars=81893
+      tool list_files         x6       0ms chars=739
+
+  synthesizer   node=18.2s   (entries) llm=1x=18.2s   tool=0x=0ms     tok=p644/c256
+      LLM round=1 model=nemotron-3-super:cloud      18.2s  p=644    c=256   
+
+totals
+  wall                  140.0s
+  sum of node spans     3.5m
+  sum of LLM call time  3.7m  (157.3% of wall)
+  sum of tool call time 82ms
+  total prompt tokens   244306
+  total completion tok  3925

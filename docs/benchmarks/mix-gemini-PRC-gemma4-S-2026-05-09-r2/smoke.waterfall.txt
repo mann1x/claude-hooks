@@ -1,0 +1,38 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /shared/dev/claude-hooks/docs/benchmarks/mix-gemini-PRC-gemma4-S-2026-05-09-r2/smoke.transcript.db
+
+sid: csl-2026-05-09-1020-6b3a
+status: completed
+total wall: 21.4s
+
+  planner       node=3.7s    (entries) llm=1x=3.7s    tool=0x=0ms     tok=p237/c569
+      LLM round=1 model=gemini-3-flash-preview:cloud    3.7s  p=237    c=569   
+
+  researcher    node=27.5s   (3xentries) llm=12x=32.2s   tool=12x=88ms    tok=p188750/c3001
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    4.8s  p=27505  c=661   
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    4.5s  p=30200  c=637   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    3.5s  p=45870  c=397   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    3.3s  p=25664  c=296   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    2.5s  p=26212  c=116   
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    2.1s  p=17901  c=152   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    2.1s  p=6571   c=175   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    2.0s  p=1093   c=80    
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    2.0s  p=2780   c=187   
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    1.9s  p=2792   c=128   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    1.8s  p=1077   c=84    
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    1.7s  p=1085   c=88    
+      tool grep               x3      82ms chars=72923
+      tool survey_project     x3       4ms chars=11214
+      tool read_file          x6       2ms chars=160966
+
+  synthesizer   node=3.4s    (entries) llm=1x=3.4s    tool=0x=0ms     tok=p1063/c179
+      LLM round=1 model=gemma4:31b-cloud             3.4s  p=1063   c=179   
+
+totals
+  wall                  21.4s
+  sum of node spans     34.6s
+  sum of LLM call time  39.2s  (183.3% of wall)
+  sum of tool call time 88ms
+  total prompt tokens   190050
+  total completion tok  3749

@@ -1,0 +1,50 @@
+{
+  "captured_at": "2026-05-09T06:10:49+02:00",
+  "endpoint": "http://192.168.178.2:11433",
+  "models": {
+    "nemotron-3-nano:30b-cloud": {
+      "modified_at": "2025-12-15T00:00:00Z",
+      "capabilities": [
+        "completion",
+        "tools",
+        "thinking"
+      ],
+      "details": {
+        "parent_model": "nemotron-3-nano:30b",
+        "format": "",
+        "family": "nemotron-3-nano",
+        "families": null,
+        "parameter_size": "32000000000",
+        "quantization_level": "FP8"
+      },
+      "model_info": {
+        "general.architecture": "nemotron-3-nano",
+        "general.parameter_count": 32000000000,
+        "nemotron-3-nano.context_length": 262144,
+        "nemotron-3-nano.embedding_length": 2880
+      },
+      "raw": {
+        "details": {
+          "parent_model": "nemotron-3-nano:30b",
+          "format": "",
+          "family": "nemotron-3-nano",
+          "families": null,
+          "parameter_size": "32000000000",
+          "quantization_level": "FP8"
+        },
+        "model_info": {
+          "general.architecture": "nemotron-3-nano",
+          "general.parameter_count": 32000000000,
+          "nemotron-3-nano.context_length": 262144,
+          "nemotron-3-nano.embedding_length": 2880
+        },
+        "capabilities": [
+          "completion",
+          "tools",
+          "thinking"
+        ],
+        "modified_at": "2025-12-15T00:00:00Z"
+      }
+    }
+  }
+}

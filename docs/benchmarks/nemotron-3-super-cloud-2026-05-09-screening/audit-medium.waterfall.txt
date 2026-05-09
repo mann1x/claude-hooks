@@ -1,0 +1,41 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/nemotron-3-super-cloud-2026-05-09-screening/audit-medium.transcript.db
+
+sid: csl-2026-05-09-0621-2dfe
+status: completed
+total wall: 208.2s
+
+  planner       node=13.7s   (entries) llm=1x=13.7s   tool=0x=0ms     tok=p285/c609
+      LLM round=1 model=nemotron-3-super:cloud      13.7s  p=285    c=609   
+
+  researcher    node=3.6m    (3xentries) llm=15x=5.8m    tool=17x=248ms   tok=p336003/c13929
+      LLM round=1 lane=1 model=nemotron-3-super:cloud       1.7m  p=17470  c=3523  
+      LLM round=1 lane=2 model=nemotron-3-super:cloud       1.7m  p=47668  c=3082  
+      LLM round=1 lane=2 model=nemotron-3-super:cloud      31.9s  p=32878  c=2859  
+      LLM round=1 lane=2 model=nemotron-3-super:cloud      24.2s  p=33407  c=738   
+      LLM round=1 lane=1 model=nemotron-3-super:cloud      23.2s  p=19399  c=1219  
+      LLM round=1 lane=2 model=nemotron-3-super:cloud      14.3s  p=18909  c=664   
+      LLM round=1 lane=2 model=nemotron-3-super:cloud      11.8s  p=17428  c=131   
+      LLM round=1 lane=1 model=nemotron-3-super:cloud      10.5s  p=18723  c=476   
+      LLM round=1 lane=0 model=nemotron-3-super:cloud       8.5s  p=18958  c=197   
+      LLM round=1 lane=1 model=nemotron-3-super:cloud       5.3s  p=18951  c=153   
+      LLM round=1 lane=0 model=nemotron-3-super:cloud       3.8s  p=18311  c=291   
+      LLM round=1 lane=1 model=nemotron-3-super:cloud       3.8s  p=19263  c=212   
+      LLM round=1 lane=0 model=nemotron-3-super:cloud       3.5s  p=17477  c=222   
+      LLM round=1 lane=0 model=nemotron-3-super:cloud       2.5s  p=18133  c=83    
+      LLM round=1 lane=0 model=nemotron-3-super:cloud       2.3s  p=19028  c=79    
+      tool grep               x6     248ms chars=71034
+      tool survey_project     x3       0ms chars=11214
+      tool read_file          x8       0ms chars=6278
+
+  synthesizer   node=12.2s   (entries) llm=1x=12.2s   tool=0x=0ms     tok=p969/c430
+      LLM round=1 model=nemotron-3-super:cloud      12.2s  p=969    c=430   
+
+totals
+  wall                  208.2s
+  sum of node spans     4.1m
+  sum of LLM call time  6.2m  (178.3% of wall)
+  sum of tool call time 248ms
+  total prompt tokens   337257
+  total completion tok  14968

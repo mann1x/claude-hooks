@@ -1,0 +1,63 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/nemotron-3-super-cloud-2026-05-09-r3/audit-high.transcript.db
+
+sid: csl-2026-05-09-0812-227b
+status: completed
+total wall: 387.4s
+
+  planner       node=16.2s   (entries) llm=1x=16.2s   tool=0x=0ms     tok=p410/c1144
+      LLM round=1 model=nemotron-3-super:cloud      16.2s  p=410    c=1144  
+
+  researcher    node=7.2m    (3xentries) llm=32x=7.9m    tool=29x=12ms    tok=p742074/c77655
+      LLM round=1 lane=0 model=nemotron-3-super:cloud       5.3m  p=41215  c=65536 
+      LLM round=1 lane=1 model=nemotron-3-super:cloud      22.8s  p=26725  c=3699  
+      LLM round=1 lane=2 model=nemotron-3-super:cloud      17.3s  p=32880  c=2202  
+      LLM round=1 lane=0 model=nemotron-3-super:cloud      11.9s  p=37145  c=518   
+      LLM round=1 lane=1 model=nemotron-3-super:cloud      11.5s  p=17623  c=726   
+      LLM round=1 lane=1 model=nemotron-3-super:cloud       6.1s  p=19298  c=360   
+      LLM round=1 lane=1 model=nemotron-3-super:cloud       6.0s  p=18114  c=202   
+      LLM round=1 lane=2 model=nemotron-3-super:cloud       5.9s  p=19384  c=370   
+      LLM round=1 lane=1 model=nemotron-3-super:cloud       5.3s  p=19147  c=514   
+      LLM round=1 lane=2 model=nemotron-3-super:cloud       5.1s  p=17629  c=420   
+      LLM round=1 lane=2 model=nemotron-3-super:cloud       5.1s  p=19203  c=308   
+      LLM round=1 lane=1 model=nemotron-3-super:cloud       4.8s  p=17703  c=344   
+      LLM round=1 lane=0 model=nemotron-3-super:cloud       4.8s  p=17599  c=614   
+      LLM round=1 lane=2 model=nemotron-3-super:cloud       4.6s  p=19285  c=43    
+      LLM round=1 lane=0 model=nemotron-3-super:cloud       3.8s  p=18204  c=127   
+      LLM round=1 lane=2 model=nemotron-3-super:cloud       3.6s  p=22799  c=199   
+      LLM round=1 lane=0 model=nemotron-3-super:cloud       3.3s  p=17682  c=41    
+      LLM round=1 lane=0 model=nemotron-3-super:cloud       2.7s  p=25172  c=60    
+      LLM round=1 lane=0 model=nemotron-3-super:cloud       2.5s  p=17781  c=67    
+      LLM round=1 lane=0 model=nemotron-3-super:cloud       2.4s  p=25031  c=235   
+      LLM round=1 lane=2 model=nemotron-3-super:cloud       2.3s  p=28749  c=185   
+      LLM round=1 lane=0 model=nemotron-3-super:cloud       2.3s  p=25090  c=47    
+      LLM round=1 lane=2 model=nemotron-3-super:cloud       2.2s  p=28673  c=28    
+      LLM round=1 lane=1 model=nemotron-3-super:cloud       2.2s  p=26226  c=229   
+      LLM round=1 lane=1 model=nemotron-3-super:cloud       2.2s  p=19399  c=129   
+      LLM round=1 lane=2 model=nemotron-3-super:cloud       2.0s  p=29626  c=44    
+      LLM round=1 lane=0 model=nemotron-3-super:cloud       1.7s  p=25253  c=72    
+      LLM round=1 lane=2 model=nemotron-3-super:cloud       1.7s  p=19148  c=66    
+      LLM round=1 lane=1 model=nemotron-3-super:cloud       1.6s  p=19220  c=65    
+      LLM round=1 lane=1 model=nemotron-3-super:cloud       1.5s  p=25841  c=105   
+      LLM round=1 lane=1 model=nemotron-3-super:cloud       1.4s  p=25778  c=68    
+      LLM round=1 lane=2 model=nemotron-3-super:cloud       1.1s  p=19452  c=32    
+      tool glob               x1       9ms chars=183
+      tool grep               x7       2ms chars=4082
+      tool read_file          x15      1ms chars=143973
+      tool survey_project     x1       0ms chars=3808
+      tool list_files         x5       0ms chars=744
+
+  critic        node=6.2s    (entries) llm=1x=6.2s    tool=0x=0ms     tok=p61687/c669
+      LLM round=3 model=nemotron-3-super:cloud       6.2s  p=61687  c=669   
+
+  synthesizer   node=9.2s    (entries) llm=1x=9.2s    tool=0x=0ms     tok=p61995/c917
+      LLM round=1 model=nemotron-3-super:cloud       9.2s  p=61995  c=917   
+
+totals
+  wall                  387.4s
+  sum of node spans     7.7m
+  sum of LLM call time  8.4m  (130.0% of wall)
+  sum of tool call time 12ms
+  total prompt tokens   866166
+  total completion tok  80385

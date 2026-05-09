@@ -16,8 +16,110 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-_(no entries yet — work since v1.1.0 lands here as it's committed
-on `dev`. See `git log v1.1.0..origin/dev` after fetching.)_
+_(no entries yet — work since v1.2.0 lands here as it's committed
+on `dev`. See `git log v1.2.0..origin/dev` after fetching.)_
+
+## [1.2.0] — 2026-05-09
+
+MINOR bump for the **caliber-grounding-proxy cloud-resilience
+layer** — a new opt-in retry subsystem visible to any `caliber init`
+run against a flapping cloud Ollama. Also ships the v1.2 of the
+`/consultants` benchmark protocol (Q3 actionability sub-rubric, first
+confirmed heterogeneous PROD-READY label) and the first caliber-eval
+cohort published in-repo (six labels graded against the `claude-cli`
+reference).
+
+### Added
+
+- **caliber-grounding-proxy cloud-resilience retry layer**
+  (`claude_hooks/caliber_proxy/ollama.py`, shared
+  `claude_hooks/_chat_retry.py`). Two parallel retry budgets
+  protect every chat completion to upstream Ollama:
+  - **15-attempt HTTP/network budget** with exponential backoff
+    (base 1.5 s, cap 90 s, ≈ 15 min total). Catches `408 / 429 /
+    500 / 502 / 503 / 504` plus a curated list of retryable 4xx
+    body substrings (the same set the consultants engine
+    already proved against `kimi-k2.6:cloud` flapping).
+  - **5-attempt empty-content budget** for `200 OK` responses
+    with empty `content`, no `tool_calls`, and
+    `finish_reason ≠ length` — the "throat-clearing" pattern
+    every cloud-tagged Ollama model exhibits on heavy initial
+    prompts.
+
+  Tunable via env vars: `CALIBER_PROXY_RETRY_MAX_ATTEMPTS`,
+  `CALIBER_PROXY_RETRY_BASE_DELAY_S`, `CALIBER_PROXY_RETRY_MAX_DELAY_S`,
+  `CALIBER_PROXY_EMPTY_RETRY_MAX`. Defaults match the consultants
+  engine, so behavior is consistent across both cloud paths.
+- **`FlapCounters` exposed at `/health.upstream_flaps`**. Five
+  process-scoped counters surfaced in the `/health` JSON:
+  `upstream_5xx_total`, `upstream_retryable_4xx_total`,
+  `upstream_empty_total`, `upstream_retry_succeeded_total`,
+  `upstream_retry_exhausted_total`. Lets `claude-hooks-rollup`
+  (and any operator dashboard) detect cloud-weather degradation
+  before it fails a bench.
+- **Generic tool-call passthrough on the proxy round-trip.**
+  Provider extras like Gemini's `thought_signature` are now
+  preserved verbatim across both legs of the round-trip instead
+  of being stripped — the earlier targeted strip broke
+  `gemini-3-flash-preview:cloud` with
+  `400 missing thought_signature in functionCall parts`. A small
+  denylist (`function.index` for deepseek/qwen; empty at top
+  level) handles the inverse case where an upstream field would
+  confuse the OpenAI-compat client. Net effect: every cloud model
+  that ships a custom tool-call extra works without per-model
+  patches.
+- **caliber-eval cohort published** at
+  [`docs/caliber-eval-results/`](docs/caliber-eval-results/) —
+  six labels graded against the `claude-cli` reference:
+  `gemma-native-tools-v3`, `gemma4-31b-cloud`,
+  `gemini-3-flash-preview-cloud`, `deepseek-v4-flash-cloud`,
+  `glm-5-1-cloud`. Each label ships its `score.py` JSON + a
+  narrative summary comparing to baseline. The workbench (full
+  rsynced workspaces, run logs, fake-HOMEs) stays off-repo at
+  `/srv/dev-disk-by-label-opt/dev/caliber-eval/` per
+  `PROTOCOL.md`, which documents the reproduce + publish recipe.
+- **`docs/caliber-eval.md`** — in-repo entry-point pointing at the
+  off-repo workbench and the published-results dir.
+- **`docs/PLAN-caliber-proxy-cloud-resilience.md`** —
+  implementation plan that drove the resilience port (marked
+  "shipped 2026-05-09").
+- **27 new tests** at `tests/test_caliber_proxy_retry.py`
+  covering the decision helpers (`is_retryable_status`,
+  `is_retryable_empty_response`, `compute_backoff`) and an
+  end-to-end mocked `httpx` harness exercising both budgets.
+- **Updated `tests/test_caliber_proxy.py`** with passthrough
+  coverage: `test_assistant_tool_calls_passthrough_unknown_fields`,
+  `test_assistant_tool_calls_function_index_stripped`,
+  `test_response_tool_call_extras_passthrough`,
+  `test_response_tool_call_preserves_upstream_id`,
+  `test_round_trip_preserves_provider_extras`.
+
+### Fixed
+
+- **consultants synthesizer no longer silently synthesizes over a
+  failure tombstone.** The SYNTHESIZER prompts now refuse to render
+  a coherent answer when an upstream role marked the section as
+  failed, surfacing the failure in the final synthesis instead.
+  Caught by the v1.2 protocol's Q3 actionability sub-rubric.
+
+### Documentation
+
+- **`/consultants` benchmark sweeps** — 2026-05-09 cloud screening
+  (7 new models), N=3 aggregate runs of the 3 PROD-READY
+  candidates, Q3 actionability re-grade against protocol v1.2,
+  per-role recommendation refresh, and the first confirmed
+  heterogeneous PROD-READY label
+  ([`mix-gemini-PRC-gemma4-S-2026-05-09`](docs/benchmarks/mix-gemini-PRC-gemma4-S-2026-05-09/)).
+- **`docs/benchmarks/index.md`** — refreshed TL;DR (5 PROD-READY
+  labels at v1.1.0 engine HEAD), per-role token/wall winner
+  matrix, cross-reference to the caliber cohort with the
+  caliber-init verdict (`claude-cli` stays default; `glm-5.1:cloud`
+  is the recommended non-claude-cli fallback).
+- **`docs/caliber-eval-results/README.md`** — `tl;dr — verdict`
+  section with the pick-when table and explicit disqualifications
+  (`deepseek-v4-flash:cloud` and `gemini-3-flash-preview:cloud`
+  both fail the references-point-to-real-files rubric — the same
+  grounding-discipline weakness they show on consultants Q3).
 
 ## [1.1.0] — 2026-05-08
 

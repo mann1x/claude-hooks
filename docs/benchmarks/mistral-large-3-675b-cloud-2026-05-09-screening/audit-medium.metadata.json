@@ -1,0 +1,73 @@
+{
+  "created": "2026-05-09T06:34:18",
+  "cwd": "/tmp/claude-hooks-bench-bench-baseline-2026-05-07-5PKY",
+  "duration_seconds": 717.8982934951782,
+  "effort": "medium",
+  "error": null,
+  "final_answer": "- `claude_hooks/providers/pgvector.py:123` \u2013 \u274c Not exercisable outside conda env (import in `verify()` called only during conda-env setup, no subprocess fallback).\n- `claude_hooks/providers/pgvector.py:328` \u2013 \u274c Not exercisable outside conda env (import in `_ensure_ready()` called by core provider methods, no subprocess fallback).\n- `scripts/migrate_to_pgvector.py:624` \u2013 \u2705 Exercisable (bare import in `main()`, no guards or fallback).\n- `scripts/bench_recall.py:107` \u2013 \u2705 Exercisable (bare import in `PgvectorBenchProvider.__init__()`, no guards or fallback).",
+  "models": {
+    "planner": "mistral-large-3:675b-cloud",
+    "researcher": "mistral-large-3:675b-cloud",
+    "synthesizer": "mistral-large-3:675b-cloud"
+  },
+  "parent_sid": null,
+  "question": "Audit claude-hooks for psycopg import sites that still lack the conda-env subprocess fallback added in 4e67dc2 \u2014 list each file:line and whether it's actually exercisable from a non-conda-env Python.",
+  "retries_by_role": {},
+  "session_id": "csl-2026-05-09-0634-76f0",
+  "status": "completed",
+  "topology": "council",
+  "total_completion_tokens": 1266,
+  "total_prompt_tokens": 80616,
+  "turns": [
+    {
+      "completion_tokens": 235,
+      "content": "1. Search the entire codebase for `import psycopg` and `from psycopg import` patterns, recording every file:line occurrence.\n2. Cross-reference each import site with the git diff of 4e67dc2 to confirm whether the fallback logic was applied at that location.\n3. For each unpatched import site, inspect the surrounding function/class/module to determine if it is reachable when running outside a conda environment (e.g., no `sys.prefix` checks, no `CONDA_DEFAULT_ENV` guards).\n4. Verify if the import is inside a try-except block that already handles `ImportError` or `ModuleNotFoundError` without the subprocess fallback.\n5. Check if the import is in a test file, example script, or documentation that is not part of the main runtime code paths.\n6. For each remaining unpatched import, trace the call graph (static or dynamic) to confirm if it is exercisable from entry points or public APIs.\n7. Compile a list of file:line locations with a boolean flag indicating whether the import is exercisable outside a conda environment.",
+      "duration_seconds": 5.1488251500122715,
+      "prompt_tokens": 273,
+      "role": "planner",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 452,
+      "content": "---\n- **`claude_hooks/providers/pgvector.py:123`** \u2014 `import psycopg` inside `PgvectorProvider.verify()`. Wrapped in `try/except ImportError`; **no conda-env subprocess fallback**. Exercisable from any Python process that calls `verify()`.\n- **`claude_hooks/providers/pgvector.py:328`** \u2014 `import psycopg` inside `PgvectorProvider._ensure_ready()`. Wrapped in `try/except ImportError` but re-raises as `ImportError(\"install psycopg: ...\")`; **no conda-env subprocess fallback**. Exercisable from any Python process that instantiates `PgvectorProvider`.\n- **`scripts/migrate_to_pgvector.py:624`** \u2014 bare `import psycopg` inside `main()`. **No guard or conda-env subprocess fallback**; crashes with `ModuleNotFoundError` if psycopg is absent. Exercisable from any Python process that runs the script.\n- **`scripts/bench_recall.py:107`** \u2014 `import psycopg` inside `PgvectorBenchProvider.__init__()`. **No guard or conda-env subprocess fallback**; crashes with `ModuleNotFoundError` if the benchmark code path is hit. Exercisable from any Python process that instantiates `PgvectorBenchProvider`.\n\n---\n- **`install.py:2092`**, **`install.py:2127`**, **`install.py:2524`** \u2014 all use the **conda-env subprocess fallback pattern** (e.g., `find_conda_env_python()` spawns a subprocess to import psycopg). **Not lacking**; exercisable only if the fallback is triggered.\n- **No matches** for `find_conda_env_python|subprocess.*psycopg|_spawn.*psycopg|fallback.*psycopg` in `scripts/migrate_to_pgvector.py` \u2014 confirms absence of fallback logic.",
+      "duration_seconds": 18.712671730987495,
+      "prompt_tokens": 29239,
+      "role": "researcher",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 6,
+      "content": "survey_project\": {}}",
+      "duration_seconds": 709.6471404090116,
+      "prompt_tokens": 17167,
+      "role": "researcher",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 408,
+      "content": "**Report: psycopg import sites in `claude_hooks/providers/pgvector.py` and exercisability**\n\n- **`claude_hooks/providers/pgvector.py:123`**\n  `import psycopg  # type: ignore`\n  **Exercisable outside conda env?** \u274c No.\n  - Called in `verify()` (`claude_hooks/providers/pgvector.py:121`), which is invoked by the installer (`install.py`) and by the daemon (`claude_hooks/daemon.py`) during provider setup.\n  - Both paths assume the conda env is active; no subprocess fallback exists.\n  - **Evidence**: No `_resolve_python` or `subprocess.run` logic in the file (`grep` confirmed no matches).\n\n- **`claude_hooks/providers/pgvector.py:328`**\n  `import psycopg  # type: ignore`\n  **Exercisable outside conda env?** \u274c No.\n  - Called in `_ensure_ready()` (`claude_hooks/providers/pgvector.py:320`), which is invoked by `recall()` (`claude_hooks/providers/pgvector.py:144`), `store()` (`claude_hooks/providers/pgvector.py:210`), and all batch methods.\n  - These are the core provider methods wired into the hook dispatcher (`claude_hooks/dispatcher.py`), so they run on every `UserPromptSubmit`/`Stop` event.\n  - **Evidence**: No conda-env subprocess fallback; the import is unconditional and fatal if missing (`raise ImportError` at `claude_hooks/providers/pgvector.py:330`).\n\n- **Summary**: Both import sites are **not exercisable** from a non-conda-env Python. The provider is effectively conda-env-only.",
+      "duration_seconds": 14.357544591999613,
+      "prompt_tokens": 32452,
+      "role": "researcher",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 165,
+      "content": "- `claude_hooks/providers/pgvector.py:123` \u2013 \u274c Not exercisable outside conda env (import in `verify()` called only during conda-env setup, no subprocess fallback).\n- `claude_hooks/providers/pgvector.py:328` \u2013 \u274c Not exercisable outside conda env (import in `_ensure_ready()` called by core provider methods, no subprocess fallback).\n- `scripts/migrate_to_pgvector.py:624` \u2013 \u2705 Exercisable (bare import in `main()`, no guards or fallback).\n- `scripts/bench_recall.py:107` \u2013 \u2705 Exercisable (bare import in `PgvectorBenchProvider.__init__()`, no guards or fallback).",
+      "duration_seconds": 3.0801694029942155,
+      "prompt_tokens": 1485,
+      "role": "synthesizer",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    }
+  ]
+}

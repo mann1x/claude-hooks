@@ -1,0 +1,66 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/nemotron-3-nano-30b-cloud-2026-05-09-screening/audit-high.transcript.db
+
+sid: csl-2026-05-09-0612-2133
+status: completed
+total wall: 56.1s
+
+  planner       node=2.5s    (entries) llm=1x=2.5s    tool=0x=0ms     tok=p410/c449
+      LLM round=1 model=nemotron-3-nano:30b-cloud    2.5s  p=410    c=449   
+
+  researcher    node=1.3m    (3xentries) llm=33x=1.7m    tool=31x=1ms     tok=p711686/c12453
+      LLM round=1 lane=0 model=nemotron-3-nano:30b-cloud   15.2s  p=44818  c=3152  
+      LLM round=1 lane=2 model=nemotron-3-nano:30b-cloud    9.6s  p=17545  c=1936  
+      LLM round=1 lane=2 model=nemotron-3-nano:30b-cloud    7.6s  p=19012  c=1452  
+      LLM round=1 lane=0 model=nemotron-3-nano:30b-cloud    4.7s  p=32619  c=605   
+      LLM round=1 lane=0 model=nemotron-3-nano:30b-cloud    3.0s  p=31859  c=261   
+      LLM round=1 lane=0 model=nemotron-3-nano:30b-cloud    3.0s  p=24511  c=273   
+      LLM round=1 lane=0 model=nemotron-3-nano:30b-cloud    3.0s  p=31701  c=270   
+      LLM round=1 lane=0 model=nemotron-3-nano:30b-cloud    3.0s  p=24711  c=277   
+      LLM round=1 lane=0 model=nemotron-3-nano:30b-cloud    2.8s  p=28781  c=266   
+      LLM round=1 lane=2 model=nemotron-3-nano:30b-cloud    2.7s  p=18801  c=198   
+      LLM round=1 lane=2 model=nemotron-3-nano:30b-cloud    2.7s  p=17999  c=266   
+      LLM round=1 lane=2 model=nemotron-3-nano:30b-cloud    2.7s  p=18498  c=273   
+      LLM round=1 lane=2 model=nemotron-3-nano:30b-cloud    2.6s  p=18375  c=333   
+      LLM round=1 lane=1 model=nemotron-3-nano:30b-cloud    2.4s  p=21302  c=227   
+      LLM round=1 lane=2 model=nemotron-3-nano:30b-cloud    2.4s  p=18420  c=230   
+      LLM round=1 lane=1 model=nemotron-3-nano:30b-cloud    2.4s  p=17980  c=238   
+      LLM round=1 lane=0 model=nemotron-3-nano:30b-cloud    2.4s  p=29272  c=197   
+      LLM round=1 lane=0 model=nemotron-3-nano:30b-cloud    2.3s  p=28849  c=148   
+      LLM round=1 lane=1 model=nemotron-3-nano:30b-cloud    2.2s  p=17901  c=170   
+      LLM round=1 lane=2 model=nemotron-3-nano:30b-cloud    2.1s  p=17957  c=217   
+      LLM round=1 lane=1 model=nemotron-3-nano:30b-cloud    2.1s  p=18059  c=208   
+      LLM round=1 lane=2 model=nemotron-3-nano:30b-cloud    2.1s  p=17680  c=177   
+      LLM round=1 lane=2 model=nemotron-3-nano:30b-cloud    2.0s  p=18884  c=141   
+      LLM round=1 lane=0 model=nemotron-3-nano:30b-cloud    2.0s  p=17585  c=140   
+      LLM round=1 lane=1 model=nemotron-3-nano:30b-cloud    2.0s  p=17574  c=139   
+      LLM round=1 lane=1 model=nemotron-3-nano:30b-cloud    1.9s  p=17101  c=120   
+      LLM round=1 lane=2 model=nemotron-3-nano:30b-cloud    1.8s  p=18091  c=109   
+      LLM round=1 lane=1 model=nemotron-3-nano:30b-cloud    1.8s  p=17822  c=90    
+      LLM round=1 lane=1 model=nemotron-3-nano:30b-cloud    1.8s  p=17763  c=52    
+      LLM round=1 lane=0 model=nemotron-3-nano:30b-cloud    1.7s  p=17684  c=86    
+      LLM round=1 lane=1 model=nemotron-3-nano:30b-cloud    1.7s  p=17650  c=87    
+      LLM round=1 lane=1 model=nemotron-3-nano:30b-cloud    1.5s  p=17711  c=57    
+      LLM round=1 lane=1 model=nemotron-3-nano:30b-cloud    1.5s  p=17171  c=58    
+      tool grep               x11      1ms chars=4271
+      tool list_files         x2       0ms chars=299
+      tool read_file          x9       0ms chars=98645
+      tool glob               x6       0ms chars=585
+      tool run_query          x1       0ms chars=31
+      tool recall_memory      x1       0ms chars=53
+      tool str_replace_editor x1       0ms chars=40
+
+  critic        node=1.8s    (entries) llm=1x=1.8s    tool=0x=0ms     tok=p1448/c280
+      LLM round=3 model=nemotron-3-nano:30b-cloud    1.8s  p=1448   c=280   
+
+  synthesizer   node=8.7s    (entries) llm=1x=8.7s    tool=0x=0ms     tok=p1638/c1833
+      LLM round=1 model=nemotron-3-nano:30b-cloud    8.7s  p=1638   c=1833  
+
+totals
+  wall                  56.1s
+  sum of node spans     1.5m
+  sum of LLM call time  1.9m  (206.5% of wall)
+  sum of tool call time 1ms
+  total prompt tokens   715182
+  total completion tok  15015

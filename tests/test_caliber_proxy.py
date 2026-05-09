@@ -1492,9 +1492,62 @@ class TestOllamaRequestTranslator:
             }],
         })
         tc = out["messages"][0]["tool_calls"][0]
-        # OpenAI-only fields removed; arguments parsed to dict.
-        assert tc == {"function": {"name": "read_file",
-                                    "arguments": {"path": "README.md"}}}
+        # arguments parsed string→dict (Ollama wire shape); top-level
+        # id/type pass through (Ollama 0.5+ accepts them, and several
+        # cloud providers REQUIRE the surrounding metadata for
+        # correlation on the next turn).
+        assert tc == {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "read_file",
+                         "arguments": {"path": "README.md"}},
+        }
+
+    def test_assistant_tool_calls_passthrough_unknown_fields(self):
+        # Provider-specific required fields (e.g. Gemini's
+        # ``thought_signature`` on the function part) MUST round-trip
+        # so the next request doesn't 400. Default policy is generic
+        # passthrough except for an explicit denylist.
+        out = ollama._to_ollama_request({
+            "model": "m",
+            "messages": [{
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_g", "type": "function",
+                    "custom_meta": "anything",  # tool_call-level extra
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path": "x"}',
+                        "thought_signature": "G_ABC123",
+                    },
+                }],
+            }],
+        })
+        tc = out["messages"][0]["tool_calls"][0]
+        assert tc["function"]["thought_signature"] == "G_ABC123"
+        assert tc["custom_meta"] == "anything"
+        assert tc["id"] == "call_g"
+
+    def test_assistant_tool_calls_function_index_stripped(self):
+        # ``function.index`` is a deepseek/qwen3.5 cloud response-only
+        # quirk — echoing it back in a request causes upstream JSON
+        # validators to 400. Explicit denylist strips it.
+        out = ollama._to_ollama_request({
+            "model": "m",
+            "messages": [{
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "x", "type": "function",
+                    "function": {
+                        "name": "f", "arguments": "{}",
+                        "index": 0,
+                    },
+                }],
+            }],
+        })
+        fn = out["messages"][0]["tool_calls"][0]["function"]
+        assert "index" not in fn
+        assert fn == {"name": "f", "arguments": {}}
 
     def test_assistant_tool_calls_invalid_json_falls_back_empty(self):
         out = ollama._to_ollama_request({
@@ -1588,6 +1641,49 @@ class TestOllamaResponseTranslator:
         })
         assert result["choices"][0]["message"]["thinking"] == "let me think"
 
+    def test_response_tool_call_extras_passthrough(self):
+        # If upstream surfaces provider-specific extras on the
+        # tool_call (Gemini's ``thought_signature`` etc.), they MUST
+        # reach caliber so caliber can echo them back next turn —
+        # Gemini 400s without thought_signature.
+        result = ollama._to_openai_response({
+            "model": "gemini-3",
+            "message": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "function": {
+                        "name": "list_files",
+                        "arguments": {"path": "."},
+                        "thought_signature": "G_XYZ",
+                    },
+                    "tool_use_id": "tu_abc",
+                }],
+            },
+            "done_reason": "stop",
+        })
+        tc = result["choices"][0]["message"]["tool_calls"][0]
+        assert tc["function"]["thought_signature"] == "G_XYZ"
+        assert tc["tool_use_id"] == "tu_abc"
+        # And the OpenAI-mandatory id/type still get filled in.
+        assert tc["type"] == "function"
+        assert "id" in tc
+
+    def test_response_tool_call_preserves_upstream_id(self):
+        # If upstream provided an id, keep it (don't synthesise).
+        result = ollama._to_openai_response({
+            "model": "m",
+            "message": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "upstream_call_1",
+                    "function": {"name": "f", "arguments": {}},
+                }],
+            },
+            "done_reason": "stop",
+        })
+        tc = result["choices"][0]["message"]["tool_calls"][0]
+        assert tc["id"] == "upstream_call_1"
+
     def test_missing_token_counts_default_to_zero(self):
         result = ollama._to_openai_response({
             "model": "m",
@@ -1623,5 +1719,38 @@ class TestRoundTripMessages:
         # Now feed it back as an assistant message in a follow-up request.
         translated_back = ollama._translate_request_message(openai_msg)
         tc = translated_back["tool_calls"][0]
-        assert tc == {"function": {"name": "grep",
-                                    "arguments": {"pattern": "foo", "path": "src"}}}
+        # The synthetic id+type added on the response side now pass
+        # through on the request side (generic passthrough policy:
+        # surrounding metadata gets preserved unless explicitly
+        # denylisted, so providers that require correlation fields
+        # like Gemini's thought_signature aren't surprised).
+        assert tc["function"] == {
+            "name": "grep",
+            "arguments": {"pattern": "foo", "path": "src"},
+        }
+        assert tc["type"] == "function"
+        assert tc["id"].startswith("call_")
+
+    def test_round_trip_preserves_provider_extras(self):
+        # Specifically the failure mode that motivated the passthrough
+        # refactor (2026-05-09 gemini-3-flash-preview bench).
+        ollama_resp = {
+            "model": "gemini-3",
+            "message": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "function": {
+                        "name": "survey_project",
+                        "arguments": {},
+                        "thought_signature": "G_OPAQUE_BLOB",
+                    },
+                }],
+            },
+            "done_reason": "stop",
+        }
+        openai_msg = ollama._to_openai_response(ollama_resp)["choices"][0]["message"]
+        translated_back = ollama._translate_request_message(openai_msg)
+        # thought_signature MUST survive both legs of the round trip
+        # — Gemini upstream returns 400 without it on echoed calls.
+        assert (translated_back["tool_calls"][0]["function"]
+                ["thought_signature"] == "G_OPAQUE_BLOB")

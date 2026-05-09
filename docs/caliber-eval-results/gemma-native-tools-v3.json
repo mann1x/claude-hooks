@@ -1,0 +1,83 @@
+{
+  "label": "gemma-native-tools-v3",
+  "project": "/srv/dev-disk-by-label-opt/dev/caliber-eval/gemma-native-tools-v3",
+  "skill_count": 4,
+  "skills_with_paths_fm": 1,
+  "total_paths_fm_entries": 5,
+  "total_file_line_refs_in_bodies": 0,
+  "total_bare_file_refs_in_bodies": 6,
+  "body_chars": {
+    "min": 2053,
+    "median": 3196,
+    "max": 7446,
+    "total": 15891
+  },
+  "skills": [
+    {
+      "name": "find-skills",
+      "description_len": 367,
+      "paths_frontmatter": [],
+      "paths_count": 0,
+      "body_chars": 2053,
+      "file_line_refs": [],
+      "file_line_refs_count": 0,
+      "bare_file_refs": [],
+      "bare_file_refs_count": 0
+    },
+    {
+      "name": "proxy-ops",
+      "description_len": 298,
+      "paths_frontmatter": [
+        "scripts/status.py",
+        "scripts/proxy_stats.py",
+        "claude_hooks/proxy/forwarder.py",
+        "claude_hooks/proxy/metadata.py",
+        "config/claude-hooks.json"
+      ],
+      "paths_count": 5,
+      "body_chars": 4218,
+      "file_line_refs": [],
+      "file_line_refs_count": 0,
+      "bare_file_refs": [
+        "claude_hooks/proxy/metadata.py",
+        "claude_hooks/proxy/stats_db.py",
+        "scripts/proxy_stats.py",
+        "claude_hooks/proxy/sse.py",
+        "claude_hooks/proxy/forwarder.py"
+      ],
+      "bare_file_refs_count": 5
+    },
+    {
+      "name": "save-learning",
+      "description_len": 331,
+      "paths_frontmatter": [],
+      "paths_count": 0,
+      "body_chars": 2174,
+      "file_line_refs": [],
+      "file_line_refs_count": 0,
+      "bare_file_refs": [],
+      "bare_file_refs_count": 0
+    },
+    {
+      "name": "setup-caliber",
+      "description_len": 273,
+      "paths_frontmatter": [],
+      "paths_count": 0,
+      "body_chars": 7446,
+      "file_line_refs": [],
+      "file_line_refs_count": 0,
+      "bare_file_refs": [
+        ".github/workflows/caliber-sync.yml"
+      ],
+      "bare_file_refs_count": 1
+    }
+  ],
+  "artifacts": {
+    "CLAUDE.md": {
+      "kind": "file",
+      "chars": 4693,
+      "file_line_refs_count": 0,
+      "bare_file_refs_count": 6
+    }
+  }
+}

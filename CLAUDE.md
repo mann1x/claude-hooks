@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.1.0** — ~1.6k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.2.0** — ~1.6k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -28,8 +28,19 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > validity canary stack, and the v1.1 of the `/consultants` agentic
 > engine — full per-role message-history persistence so a session
 > closed and reopened from disk produces follow-up answers
-> indistinguishable from a warm one. Schema for the new transcript.db
-> sidecar at [`docs/consultants-transcript-db-schema.md`](docs/consultants-transcript-db-schema.md).
+> indistinguishable from a warm one. v1.2 ports the consultants
+> engine's cloud-resilience layer to the caliber-grounding-proxy
+> (15-attempt HTTP/network + 5-attempt empty-content retry budgets,
+> `FlapCounters` exposed at `/health.upstream_flaps`), generalizes
+> tool-call passthrough so provider extras like Gemini's
+> `thought_signature` round-trip cleanly, and publishes the first
+> in-repo caliber-eval cohort at
+> [`docs/caliber-eval-results/`](docs/caliber-eval-results/) (six
+> labels graded against the `claude-cli` reference; verdict:
+> `claude-cli` stays default for caliber init, `glm-5.1:cloud` is
+> the recommended non-claude-cli fallback). Schema for the
+> consultants transcript.db sidecar at
+> [`docs/consultants-transcript-db-schema.md`](docs/consultants-transcript-db-schema.md).
 
 ---
 

@@ -1,0 +1,34 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/mistral-large-3-675b-cloud-2026-05-09-screening/audit-medium.transcript.db
+
+sid: csl-2026-05-09-0634-76f0
+status: completed
+total wall: 717.9s
+
+  planner       node=5.1s    (entries) llm=1x=5.1s    tool=0x=0ms     tok=p273/c235
+      LLM round=1 model=mistral-large-3:675b-cloud    5.1s  p=273    c=235   
+
+  researcher    node=12.4m   (3xentries) llm=7x=12.4m   tool=17x=212ms   tok=p160292/c1476
+      LLM round=1 lane=1 model=mistral-large-3:675b-cloud   11.8m  p=17167  c=6     
+      LLM round=1 lane=0 model=mistral-large-3:675b-cloud    8.6s  p=29239  c=452   
+      LLM round=1 lane=2 model=mistral-large-3:675b-cloud    8.5s  p=32452  c=408   
+      LLM round=1 lane=0 model=mistral-large-3:675b-cloud    7.7s  p=27355  c=426   
+      LLM round=1 lane=2 model=mistral-large-3:675b-cloud    4.0s  p=19691  c=89    
+      LLM round=1 lane=0 model=mistral-large-3:675b-cloud    2.3s  p=17221  c=51    
+      LLM round=1 lane=2 model=mistral-large-3:675b-cloud    1.8s  p=17167  c=44    
+      tool grep               x5     200ms chars=17921
+      tool glob               x2      12ms chars=9477
+      tool survey_project     x2       0ms chars=7476
+      tool read_file          x8       0ms chars=43593
+
+  synthesizer   node=3.1s    (entries) llm=1x=3.1s    tool=0x=0ms     tok=p1485/c165
+      LLM round=1 model=mistral-large-3:675b-cloud    3.1s  p=1485   c=165   
+
+totals
+  wall                  717.9s
+  sum of node spans     12.5m
+  sum of LLM call time  12.5m  (104.6% of wall)
+  sum of tool call time 212ms
+  total prompt tokens   162050
+  total completion tok  1876
