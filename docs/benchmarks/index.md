@@ -145,20 +145,46 @@ invocations / parallel lanes). Use this to compose mixes:
 | `deepseek-v4-flash-cloud-2026-05-09` (N=3)      | A | A | A | A | `P:A R:A C:A S:A` |
 | `nemotron-3-super-cloud-2026-05-09` (N=3)       | A | A | A | A | `P:A R:A C:A S:A` |
 
-### Cheapest A-or-better per role (provisional, single-run)
+### Cheapest A-or-better per role
 
-| Role | Cheapest A pick | Median wall on this role | Notes |
+Updated 2026-05-09 with the three new N=3-confirmed PROD-READY
+candidates. Per-role wall medians measured per-fire (a single
+invocation of the role) across all 3 runs of each label, parsed
+from each query's `waterfall.txt`. The 2026-05-07 row is single-run
+and lower-confidence by §5; the 2026-05-09 rows are N=3.
+
+Per-role wall medians on 2026-05-09 N=3 labels (per-fire, all queries pooled):
+
+| Model                              | Planner | Researcher | Critic | Synthesizer |
+|---|---|---|---|---|
+| `gemini-3-flash-preview:cloud`     | **5.7s**  | **39.8s**   | **8.4s**  | **6.3s**     |
+| `deepseek-v4-flash:cloud`          | 8.9s    | 222s       | 28.9s  | 16.0s       |
+| `nemotron-3-super:cloud`           | 13.7s   | 216s       | 36.8s  | 9.2s        |
+
+**Cheapest A pick per role (across all PROD-READY labels — 2026-05-07 + 2026-05-09):**
+
+| Role | Pick | Median wall (per-fire) | Notes |
 |---|---|---|---|
-| Planner     | `gemma4:31b-cloud` | ~10s on this label | All 5 candidates produce an A planner; gemma is the cheapest by a large margin |
-| Researcher  | `gemma4:31b-cloud` | researcher cumulative ~3 min | Only kimi and gemma found 6/6 sites; gemma is 7x faster |
-| Critic      | `gemma4:31b-cloud` | ~10s on this label | gemma (A), glm-5.1 (A+ deep cross-round contradiction catch), kimi (A); gemma cheapest |
-| Synthesizer | `gemma4:31b-cloud` | synthesizer ~30-60s | gemma's audit-high answer cited correct path:line and proposed a working hardening change |
+| Planner     | **`gemini-3-flash-preview:cloud`** (N=3) | 5.7s | Cheapest A across the cohort; faster than gemma4:31b-cloud (~10s, single-run); items consistently concrete with verification steps |
+| Researcher  | **`gemini-3-flash-preview:cloud`** (N=3) | 39.8s | 5–6× faster per fire than the next-fastest A researcher (deepseek-v4-flash 222s, nemotron-3-super 216s); every claim cites `path:line` |
+| Critic      | **`gemini-3-flash-preview:cloud`** (N=3) | 8.4s | Cheapest A; for cross-round contradiction-catching specifically `glm-5.1:cloud` was A+ on the 2026-05-07 single-run sweep — keep as a specialist critic if you need that depth |
+| Synthesizer | **`gemini-3-flash-preview:cloud`** (N=3) | 6.3s | Cheapest A; for code-diff hardening recommendations specifically `nemotron-3-super:cloud` and `deepseek-v4-flash:cloud` produce richer Q3 fixes — pick those if hardening-quality > wall |
 
-**Provisional verdict:** `gemma4:31b-cloud` looks like a candidate for **every role** at the bench-baseline-2026-05-07 baseline, at roughly 4× lower cost than kimi-k2.6:cloud. To confirm, this requires N=3 runs (the single-run could be a lucky sample). The mix-screening phase the user proposed is the right next step — try `gemma4:31b-cloud` everywhere, then incrementally swap kimi back into specific roles to see whether quality recovers any further.
+**Verdict:** `gemini-3-flash-preview:cloud` is the new default for **every role** at the bench-baseline-2026-05-07 baseline. Wall-cost is the lowest of any PROD-READY candidate and quality is `P:A R:A C:A S:A` confirmed across N=3 runs. Replaces the provisional `gemma4:31b-cloud` recommendation from 2026-05-07 (which was single-run and untested for run-to-run stability — gemini's 7% wall variance across N=3 is the cleanest data point we have).
 
-`glm-5.1:cloud` is the standout for **critic** (the only A+ on this sweep — caught a real cross-round contradiction the others missed). Worth keeping as a critic-only pick.
+**When to deviate from gemini-everywhere:**
 
-`minimax-m2.7:cloud` and the `qwen3.5:*` family are unsuitable for any role at this baseline — the qwen pair both falsely claimed commit `4e67dc2` doesn't exist (it does); minimax fabricated paths that don't exist either.
+- **Critic** specifically catching cross-round contradictions → `glm-5.1:cloud` (only A+ in the 2026-05-07 sweep).
+- **Synthesizer** for code-diff hardening recommendations → `nemotron-3-super:cloud` (only model whose Q3 fix targets the correct fault layer) or `deepseek-v4-flash:cloud` (concrete `path:line` code diff for runner status logic). Both spend more wall but deliver a more actionable fix.
+- **Audit-medium-style retrieval** at deeper coverage → `kimi-k2.6:cloud` or `gemma4:31b-cloud` (both single-run-only, but their A on retrieval was rich).
+- **When wall doesn't matter** → `deepseek-v4-flash:cloud` (B on Q2 with sophisticated reasoning; A on Q3).
+
+**Disqualified from any role at this baseline (any sweep):**
+
+- `minimax-m2.7:cloud` — fabricated paths (2026-05-07).
+- `qwen3.5:cloud` / `qwen3.5:397b-cloud` — falsely claimed commit `4e67dc2` doesn't exist (2026-05-07).
+- `mistral-large-3:675b-cloud` — fabricated `return_exceptions=True` for LangGraph `.stream()` (2026-05-09 screening; not promoted to N=3).
+- `nemotron-3-nano:30b-cloud` — synthesizer refused to answer the smoke despite evidence in the codebase (2026-05-09 screening; not promoted to N=3).
 
 ## 2026-05-09 screening sweep — 7 new cloud models
 
