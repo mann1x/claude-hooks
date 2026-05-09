@@ -1,8 +1,41 @@
 # PLAN — port consultants-engine cloud resilience to the caliber grounding proxy
 
-**Status:** scoping. Implementation deferred until the in-flight 2026-05-09
-`gemma4:31b-cloud` bench finishes (modifying the proxy now would break the
-running caliber init).
+**Status:** **shipped 2026-05-09** (Steps 1, 2, 3, 4 partial, 5, 6).
+Source code only — the running proxy will not pick up the changes
+until restart, which we are deferring until the in-flight 2026-05-09
+`gemma4:31b-cloud` bench finishes. After that bench:
+`pkill -f "caliber-grounding-proxy"` (by PID, not pattern), restart
+via the dedicated launcher, observe `/health.upstream_flaps` to
+confirm counters expose.
+
+**What landed:**
+
+- `claude_hooks/_chat_retry.py` — shared decision module (constants,
+  ``is_retryable_status``, ``is_retryable_empty_response``,
+  ``compute_backoff``, ``ProxyRetryConfig``, ``FlapCounters``).
+- `claude_hooks/caliber_proxy/ollama.py:chat_completions()` — wrapped
+  upstream `httpx.post` with the retry loop. Two budgets: 15-attempt
+  HTTP/network budget + 5-attempt empty-content budget. Backoff
+  exponential, capped at 90 s.
+- `claude_hooks/caliber_proxy/server.py` — `/health` now exposes
+  `upstream_flaps` snapshot.
+- `docs/caliber-proxy.md` — env-knob table + `/health` counter docs
+  updated.
+- `tests/test_caliber_proxy_retry.py` — 27 tests covering decision
+  helpers + end-to-end retry behavior.
+
+**What was deferred** (still in-scope for future work, separate ticket):
+
+- The consultants engine's existing inline retry pattern in
+  `claude_hooks/get_advice/chat_client.py` was **not** refactored to
+  call the new shared helpers — the existing logic is more nuanced
+  (mid-retry payload mutation for `think`-strip) and the refactor
+  risks regressing consultants. Constants are duplicated for now;
+  pull together when a future change touches both.
+
+The remainder of this doc is the original scope, kept for reference.
+
+---
 
 **Why:** `gemma4:31b-cloud`, `gemini-3-flash-preview:cloud`, and any other
 `*:cloud`-tagged Ollama model occasionally returns a 5xx, an empty content

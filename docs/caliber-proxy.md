@@ -115,6 +115,11 @@ All optional; defaults shown.
 | `CALIBER_GROUNDING_RECALL_EMBED_TIMEOUT` | `180` | Per-call timeout (seconds) for pgvector / sqlite_vec embed requests. Cold-loading `qwen3-embedding:0.6b` after Ollama auto-evicted it has been observed at 1m45s on a 24 GB GPU; lower defaults produce recurring `ollama unreachable: timed out` warnings. The proxy also pre-warms once at startup so steady-state calls rarely need more than a few seconds. |
 | `CALIBER_GROUNDING_PREHEAT` | `1` | Pre-warm the embedder(s) at proxy startup with a `embed("warmup")` call per provider, in a background thread. Set `0` to skip. |
 | `CALIBER_GROUNDING_LOG_LEVEL` | `INFO` | `DEBUG` to see prompt assembly + tool dispatch |
+| `CALIBER_GROUNDING_RETRY_MAX_ATTEMPTS` | `15` | Cloud-resilience retry budget for upstream Ollama failures (5xx, 408, 429, transient 4xx body patterns, network errors). Default sized to ride out a ~15-min cloud incident. Set `0` to disable retries entirely (1.49.x baseline behavior). See [PLAN-caliber-proxy-cloud-resilience.md](PLAN-caliber-proxy-cloud-resilience.md). |
+| `CALIBER_GROUNDING_RETRY_BASE_DELAY_S` | `1.5` | Base exponential-backoff delay between retries |
+| `CALIBER_GROUNDING_RETRY_MAX_DELAY_S` | `90.0` | Cap on backoff delay between retries |
+| `CALIBER_GROUNDING_RETRY_ON_EMPTY` | `1` | Retry 200-OK responses that arrive with empty content + no tool_calls + finish_reason ≠ "length" — a cloud-only soft-failure mode where Ollama returned success but dropped the body. Set `0` to disable. |
+| `CALIBER_GROUNDING_RETRY_EMPTY_MAX` | `5` | Separate (smaller) cap on empty-response retries so a model that legitimately produces empty replies doesn't burn the whole 5xx budget |
 
 `bin/caliber-grounding-proxy` defaults `CALIBER_GROUNDING_UPSTREAM` to
 `http://192.168.178.2:11433/v1` — that's the author's home-LAN
@@ -207,6 +212,10 @@ empirical bench results that drove these defaults.
 # liveness
 systemctl status caliber-grounding-proxy
 curl http://127.0.0.1:38090/health
+# liveness + cloud-flap counters:
+#   {"ok":true, "service":"caliber-grounding-proxy",
+#    "upstream_flaps":{"upstream_5xx_total":<n>, ...}}
+# Counters are process-local and reset on restart.
 
 # logs (systemd)
 journalctl -u caliber-grounding-proxy -f
@@ -215,6 +224,20 @@ journalctl -u caliber-grounding-proxy -n 200 --no-pager
 # logs (manual)
 CALIBER_GROUNDING_LOG_LEVEL=DEBUG bin/caliber-grounding-proxy
 ```
+
+The `/health` `upstream_flaps` block exposes per-process counters of
+upstream Ollama weather:
+
+| Key | Means |
+|---|---|
+| `upstream_5xx_total` | Retryable HTTP failures (5xx + 408/429 + network errors) |
+| `upstream_retryable_4xx_total` | 4xx with cloud-validator-flap body patterns |
+| `upstream_empty_total` | 200-OK responses that arrived empty + non-truncated (cloud soft fail) |
+| `upstream_retry_succeeded_total` | Calls where the final answer came via a retry (one increment per call, not per retry) |
+| `upstream_retry_exhausted_total` | Calls that hit the cap and surfaced the upstream error to the client |
+
+A clean run shows all-zero. Per-bench reports can sample the counters
+before + after to compute that bench's flap rate.
 
 Common failure shapes:
 

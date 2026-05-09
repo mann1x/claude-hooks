@@ -26,6 +26,14 @@ import os
 import time
 from typing import Any, Optional
 
+from claude_hooks._chat_retry import (
+    ProxyRetryConfig,
+    compute_backoff,
+    counters,
+    is_retryable_empty_response,
+    is_retryable_status,
+)
+
 log = logging.getLogger("claude_hooks.caliber_proxy.ollama")
 
 try:
@@ -293,8 +301,16 @@ def chat_completions(payload: dict[str, Any],
     agent loop can inspect tool_calls between iterations and the public
     proxy layer rebuilds SSE for clients that want it.
 
-    Raises :class:`UpstreamError` on non-2xx responses so callers don't
-    silently produce empty replies.
+    Raises :class:`UpstreamError` on non-2xx responses (after retries)
+    so callers don't silently produce empty replies.
+
+    **Cloud resilience** (2026-05-09): rides upstream Ollama 5xx /
+    transient 4xx / 200-empty-content blips with the same retry
+    budget the consultants engine uses (15 attempts / ~15 min by
+    default). Tunable via ``CALIBER_GROUNDING_RETRY_*`` env vars.
+    See ``claude_hooks/_chat_retry.py`` for the policy module and
+    ``docs/PLAN-caliber-proxy-cloud-resilience.md`` for design notes.
+    Per-process flap counters expose via ``server.py``'s ``/health``.
     """
     base = _base_url(upstream)
     url = base + "/api/chat"
@@ -317,26 +333,128 @@ def chat_completions(payload: dict[str, Any],
         except OSError:
             pass
 
-    resp = client.post(
-        url,
-        json=ollama_payload,
-        headers={"Content-Type": "application/json"},
-    )
-    if resp.status_code >= 400:
-        try:
-            body = resp.json()
-        except json.JSONDecodeError:
-            body = resp.text[:500]
-        raise UpstreamError(resp.status_code, body)
-    try:
-        ollama_resp = resp.json()
-    except json.JSONDecodeError as e:
-        raise RuntimeError(
-            f"upstream returned non-JSON ({resp.status_code}): "
-            f"{resp.text[:200]}"
-        ) from e
+    cfg = ProxyRetryConfig()
+    cnt = counters()
 
-    return _to_openai_response(ollama_resp)
+    # Two parallel retry budgets:
+    #  - status_attempt: counts toward ``cfg.max_attempts``, advances on
+    #    every retryable HTTP failure. Backoff uses this index.
+    #  - empty_attempt: separate small budget for 200-empty soft fails;
+    #    doesn't count against the main budget but its own cap (~5)
+    #    avoids spinning on a model that legitimately produced empty.
+    status_attempt = 0
+    empty_attempt = 0
+    last_error: Optional[UpstreamError] = None
+
+    while True:
+        try:
+            resp = client.post(
+                url,
+                json=ollama_payload,
+                headers={"Content-Type": "application/json"},
+            )
+        except (httpx.RequestError, httpx.HTTPError) as e:
+            # Network-level failure (connection reset, DNS, etc.) —
+            # treat as 5xx-equivalent. Retryable.
+            if cfg.disabled() or status_attempt >= cfg.max_attempts:
+                cnt.upstream_retry_exhausted_total += 1
+                raise UpstreamError(
+                    599, f"network error: {type(e).__name__}: {e}"[:500]
+                ) from e
+            cnt.upstream_5xx_total += 1
+            delay = compute_backoff(
+                status_attempt, cfg.base_delay_s, cfg.max_delay_s,
+            )
+            log.warning(
+                "ollama POST: network %s on attempt %d/%d, retrying in %.1fs",
+                type(e).__name__, status_attempt + 1, cfg.max_attempts + 1,
+                delay,
+            )
+            time.sleep(delay)
+            status_attempt += 1
+            continue
+
+        if resp.status_code >= 400:
+            try:
+                body_obj = resp.json()
+                body_text = json.dumps(body_obj)[:500]
+            except json.JSONDecodeError:
+                body_obj = resp.text[:500]
+                body_text = resp.text[:500]
+
+            retryable = is_retryable_status(resp.status_code, body_text)
+            if (not retryable
+                    or cfg.disabled()
+                    or status_attempt >= cfg.max_attempts):
+                if retryable:
+                    cnt.upstream_retry_exhausted_total += 1
+                last_error = UpstreamError(resp.status_code, body_obj)
+                raise last_error
+
+            # Track which class of flap this was.
+            if resp.status_code in (500, 502, 503, 504, 408, 429):
+                cnt.upstream_5xx_total += 1
+            else:
+                cnt.upstream_retryable_4xx_total += 1
+
+            delay = compute_backoff(
+                status_attempt, cfg.base_delay_s, cfg.max_delay_s,
+            )
+            log.warning(
+                "ollama POST: HTTP %d on attempt %d/%d, retrying in %.1fs "
+                "(body: %s)",
+                resp.status_code, status_attempt + 1, cfg.max_attempts + 1,
+                delay, body_text,
+            )
+            time.sleep(delay)
+            status_attempt += 1
+            continue
+
+        # 2xx path. Parse JSON, then check for the 200-empty soft fail.
+        try:
+            ollama_resp = resp.json()
+        except json.JSONDecodeError as e:
+            raise RuntimeError(
+                f"upstream returned non-JSON ({resp.status_code}): "
+                f"{resp.text[:200]}"
+            ) from e
+
+        translated = _to_openai_response(ollama_resp)
+
+        if cfg.retry_on_empty and is_retryable_empty_response(translated):
+            if empty_attempt < cfg.empty_max:
+                cnt.upstream_empty_total += 1
+                delay = compute_backoff(
+                    empty_attempt, cfg.base_delay_s, cfg.max_delay_s,
+                )
+                log.warning(
+                    "ollama POST: 200 OK with empty content on empty-attempt "
+                    "%d/%d, retrying in %.1fs (model=%s)",
+                    empty_attempt + 1, cfg.empty_max,
+                    delay, ollama_payload.get("model", "?"),
+                )
+                time.sleep(delay)
+                empty_attempt += 1
+                continue
+            # Exhausted empty-retry budget; ship the empty response so
+            # the agent loop can decide what to do (force_first retry
+            # with corrective user-msg, etc.). Don't raise — empty is
+            # a wire-valid 200, not an HTTP error.
+            log.warning(
+                "ollama POST: empty-content retries exhausted (%d), "
+                "returning empty response", cfg.empty_max,
+            )
+
+        if status_attempt > 0 or empty_attempt > 0:
+            log.info(
+                "ollama POST: succeeded after %d HTTP retries + %d empty "
+                "retries (model=%s)",
+                status_attempt, empty_attempt,
+                ollama_payload.get("model", "?"),
+            )
+            cnt.upstream_retry_succeeded_total += 1
+
+        return translated
 
 
 def close() -> None:

@@ -649,7 +649,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler convention
         if self.path == "/health":
-            self._write_json(200, {"ok": True, "service": "caliber-grounding-proxy"})
+            from claude_hooks._chat_retry import counters
+            self._write_json(200, {
+                "ok": True,
+                "service": "caliber-grounding-proxy",
+                "upstream_flaps": counters().snapshot(),
+            })
             return
         if self.path == "/v1/models":
             # Advertise one caliber-allowlisted name so its model-recovery
