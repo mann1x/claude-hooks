@@ -14,6 +14,34 @@ are useful to ship with the code:
 - `REFERENCE-claude-cli.md` + `claude-cli-baseline.json` — the
   reference target every other label is graded against.
 
+## tl;dr — verdict (2026-05-09)
+
+**Keep `claude-cli` as the caliber-init default.** The full 6-label
+cohort is published, and `glm-5.1:cloud` topped the rubric (96 vs
+94) with zero hallucinated refs — but produced only 3 project skills
+vs claude-cli's 5, missing the proxy-ops, daemon, and
+companion-integration axes. **Skill breadth > rubric points** when
+the init runs once and the output ships; +2 rubric pts is not worth
+losing whole architectural axes on a single-bench, single-codebase
+result.
+
+| Pick when | Backend |
+|---|---|
+| Default for every caliber init | **`claude-cli`** (94/A, 5 project skills, full breadth) |
+| No claude-cli session budget / offline | **`glm-5.1:cloud`** (96/A, 3 skills, 0 hallucinated refs — best fallback) |
+| Iterative tuning, output will be hand-fixed | `gemini-3-flash-preview:cloud` (77/B but 4m 44s wall) |
+
+**Disqualified for caliber init**:
+- `deepseek-v4-flash:cloud` — 90/A but ~5/8 of its `file:line` refs are
+  hallucinated; same grounding-discipline weakness it shows on
+  consultants Q3 (UX-flip).
+- `gemini-3-flash-preview:cloud` — 77/B with 4 hallucinated bare paths;
+  same weakness it shows on consultants Q3 (off-topic).
+
+Before reconsidering glm as primary: needs a multi-bench result on a
+structurally different project to confirm the rubric win generalizes
+and the breadth gap closes.
+
 ## Index
 
 | Label | Date | Model | Wall | Score | Skills (proj/total) | Notes |

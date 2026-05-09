@@ -44,6 +44,20 @@
 > [Cheapest A-or-better per role](#cheapest-a-or-better-per-role) below
 > and [`../consultants.md` § Picking models](../consultants.md#picking-models);
 > for the protocol see [`EVALUATION.md`](EVALUATION.md).
+>
+> ---
+>
+> **Caliber-init cohort** (separate benchmark, same model pool — 2026-05-09):
+> 6 labels evaluated at [`docs/caliber-eval-results/`](../caliber-eval-results/).
+> `glm-5.1:cloud` topped the rubric (96/100 vs claude-cli's 94/100, 0
+> hallucinated refs), but produced only 3 project skills vs claude-cli's
+> 5 — missing proxy-ops/daemon/companion-integration axes. **Decision:
+> keep `claude-cli` as caliber-init default**; glm-5.1:cloud is the
+> recommended non-claude-cli fallback (offline, no session budget, etc.).
+> deepseek-v4-flash:cloud (90/A but ~5/8 hallucinated `file:line` refs)
+> and gemini-3-flash-preview:cloud (77/B with 4 hallucinated paths)
+> both demonstrate the same grounding-discipline weakness they show on
+> consultants Q3.
 
 This directory contains per-label benchmark runs of the canonical
 queries documented in [`../consultants-benchmarks.md`](../consultants-benchmarks.md).
