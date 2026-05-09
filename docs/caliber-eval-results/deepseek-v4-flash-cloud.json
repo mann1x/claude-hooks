@@ -1,0 +1,102 @@
+{
+  "label": "deepseek-v4-flash-cloud",
+  "project": "/srv/dev-disk-by-label-opt/dev/caliber-eval/deepseek-v4-flash-cloud",
+  "skill_count": 4,
+  "skills_with_paths_fm": 1,
+  "total_paths_fm_entries": 1,
+  "total_file_line_refs_in_bodies": 25,
+  "total_bare_file_refs_in_bodies": 3,
+  "body_chars": {
+    "min": 1963,
+    "median": 4787,
+    "max": 8874,
+    "total": 20412
+  },
+  "skills": [
+    {
+      "name": "find-skills",
+      "description_len": 367,
+      "paths_frontmatter": [],
+      "paths_count": 0,
+      "body_chars": 1963,
+      "file_line_refs": [],
+      "file_line_refs_count": 0,
+      "bare_file_refs": [],
+      "bare_file_refs_count": 0
+    },
+    {
+      "name": "get-advice",
+      "description_len": 557,
+      "paths_frontmatter": [
+        ".claude/skills/get-advice/"
+      ],
+      "paths_count": 1,
+      "body_chars": 8874,
+      "file_line_refs": [
+        "claude_hooks/get_advice/cli.py:90",
+        "claude_hooks/get_advice/state.py:5",
+        "cli.py:347",
+        "state.py:60",
+        "claude_hooks/get_advice/config.py:41-46",
+        "cli.py:54-57",
+        "config.py:28-39",
+        "scripts/train.yaml:42",
+        "cli.py:38-51",
+        "cli.py:168-171",
+        "state.py:60-64",
+        "config.py:76-78",
+        "ctx_probe.py:37-62",
+        "config.py:139-157",
+        "chat_client.py:257-270",
+        "config.py:160-167",
+        "config.py:170-197",
+        "ctd/alignment.py:142",
+        "ctd/alignment.py:142",
+        "ctd/alignment.py:142",
+        "chat_client.py:39-41",
+        "claude_hooks/get_advice/ctx_probe.py:37",
+        "ctx_probe.py:37",
+        "chat_client.py:47-52",
+        "chat_client.py:72-107"
+      ],
+      "file_line_refs_count": 25,
+      "bare_file_refs": [
+        "claude_hooks/get_advice/cli.py",
+        "claude_hooks/agent_loop/runner.py"
+      ],
+      "bare_file_refs_count": 2
+    },
+    {
+      "name": "save-learning",
+      "description_len": 331,
+      "paths_frontmatter": [],
+      "paths_count": 0,
+      "body_chars": 2129,
+      "file_line_refs": [],
+      "file_line_refs_count": 0,
+      "bare_file_refs": [],
+      "bare_file_refs_count": 0
+    },
+    {
+      "name": "setup-caliber",
+      "description_len": 273,
+      "paths_frontmatter": [],
+      "paths_count": 0,
+      "body_chars": 7446,
+      "file_line_refs": [],
+      "file_line_refs_count": 0,
+      "bare_file_refs": [
+        ".github/workflows/caliber-sync.yml"
+      ],
+      "bare_file_refs_count": 1
+    }
+  ],
+  "artifacts": {
+    "CLAUDE.md": {
+      "kind": "file",
+      "chars": 12839,
+      "file_line_refs_count": 11,
+      "bare_file_refs_count": 44
+    }
+  }
+}
