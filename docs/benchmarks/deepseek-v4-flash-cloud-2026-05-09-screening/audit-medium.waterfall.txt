@@ -1,0 +1,39 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/deepseek-v4-flash-cloud-2026-05-09-screening/audit-medium.transcript.db
+
+sid: csl-2026-05-09-0654-e2ce
+status: completed
+total wall: 157.2s
+
+  planner       node=11.2s   (entries) llm=1x=11.2s   tool=0x=0ms     tok=p276/c819
+      LLM round=1 model=deepseek-v4-flash:cloud     11.2s  p=276    c=819   
+
+  researcher    node=4.8m    (3xentries) llm=13x=5.3m    tool=44x=742ms   tok=p411243/c13555
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud      1.5m  p=38271  c=2753  
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud     46.9s  p=38034  c=1232  
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud     36.3s  p=29494  c=1135  
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud     33.7s  p=38930  c=1662  
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud     31.2s  p=47448  c=3343  
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud     15.5s  p=36576  c=294   
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud     13.0s  p=34476  c=852   
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud     12.0s  p=17391  c=408   
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud      9.7s  p=17437  c=225   
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud      9.6s  p=17369  c=212   
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud      8.2s  p=19365  c=531   
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud      7.2s  p=42764  c=596   
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud      7.1s  p=33688  c=312   
+      tool grep               x15    736ms chars=102202
+      tool read_file          x26      6ms chars=118381
+      tool survey_project     x3       0ms chars=11214
+
+  synthesizer   node=11.9s   (entries) llm=1x=11.9s   tool=0x=0ms     tok=p4746/c1323
+      LLM round=1 model=deepseek-v4-flash:cloud     11.9s  p=4746   c=1323  
+
+totals
+  wall                  157.2s
+  sum of node spans     5.2m
+  sum of LLM call time  5.7m  (217.7% of wall)
+  sum of tool call time 742ms
+  total prompt tokens   416265
+  total completion tok  15697

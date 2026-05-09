@@ -109,10 +109,23 @@ No grep-able ground truth. Graded against four required claims.
 1. Names that `error` / `_role_failed` are NOT reducer-augmented
    in `CouncilState` (i.e. last-write-wins behavior).
 2. Names that `researcher_node` swallows exceptions internally and
-   returns a partial-state dict (so the stream does NOT abort).
-3. Names that the synthesizer's input messages do NOT include the
-   error / failure tombstone (so it produces a degraded answer
-   over visible lane reports).
+   returns a tombstone state update (`error`, `_role_failed`, plus
+   a placeholder string appended to `research`) so the stream does
+   NOT abort.
+3. Names that the synthesizer **does** see the failure tombstone —
+   `research` uses an additive `operator.add` reducer
+   (`consultants/engine/graph.py`), so the placeholder string from
+   a failed lane lands in the merged `research` list, and
+   `build_synthesizer_messages` at `consultants/engine/council.py:245+`
+   embeds every entry of `research` in the user prompt as a
+   "RESEARCHER REPORT (round N): …". The synthesizer therefore
+   produces a degraded answer that is aware of the lane failure
+   text — but it does NOT see the `state.error` / `state._role_failed`
+   fields directly. (This is by design — the in-code comment at
+   `council.py:555-563` notes the tombstone-visibility was the fix
+   to a previous audit-high finding where crashed lanes silently
+   contributed nothing and the synthesizer wrote a confidently-
+   degraded answer over the surviving lanes.)
 4. Recommends exactly ONE hardening change with concrete
    `path:line` (not a vague "add error handling").
 
@@ -494,6 +507,18 @@ of pointers.
 
 ---
 
-**Protocol version:** 1.0 (2026-05-07)
+**Protocol version:** 1.1 (2026-05-09)
 **Authoritative file:** `docs/benchmarks/EVALUATION.md`
-**Last reviewed:** 2026-05-07
+**Last reviewed:** 2026-05-09
+
+### Changelog
+
+- **1.1 (2026-05-09)** — Q3 claim #3 corrected to reflect current code:
+  the synthesizer **does** see the failure tombstone via the additive
+  `research` reducer + `build_synthesizer_messages`, not the inverse.
+  The pre-fix wording invalidated Q3 grades for the 2026-05-09 cloud
+  sweep where every strong model correctly read the tombstone-visibility
+  fix at `consultants/engine/council.py:555-563`. No regrading of pre-1.1
+  labels: Q3 was not the dominant signal in the 2026-05-07 sweep
+  (only kimi/glm-5.1 hit A and their answers fit either reading).
+- **1.0 (2026-05-07)** — initial protocol.

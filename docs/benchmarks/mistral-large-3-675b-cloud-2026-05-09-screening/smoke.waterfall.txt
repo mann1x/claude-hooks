@@ -1,0 +1,39 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/mistral-large-3-675b-cloud-2026-05-09-screening/smoke.transcript.db
+
+sid: csl-2026-05-09-0633-f416
+status: completed
+total wall: 26.9s
+
+  planner       node=4.2s    (entries) llm=1x=4.2s    tool=0x=0ms     tok=p240/c150
+      LLM round=1 model=mistral-large-3:675b-cloud    4.2s  p=240    c=150   
+
+  researcher    node=36.5s   (3xentries) llm=11x=45.9s   tool=18x=55ms    tok=p275843/c977
+      LLM round=1 lane=1 model=mistral-large-3:675b-cloud    9.5s  p=38677  c=347   
+      LLM round=1 lane=0 model=mistral-large-3:675b-cloud    6.9s  p=18656  c=29    
+      LLM round=1 lane=2 model=mistral-large-3:675b-cloud    6.9s  p=36384  c=209   
+      LLM round=1 lane=2 model=mistral-large-3:675b-cloud    3.9s  p=18744  c=118   
+      LLM round=1 lane=1 model=mistral-large-3:675b-cloud    3.8s  p=37475  c=70    
+      LLM round=1 lane=1 model=mistral-large-3:675b-cloud    3.3s  p=37370  c=34    
+      LLM round=1 lane=2 model=mistral-large-3:675b-cloud    2.9s  p=17121  c=53    
+      LLM round=1 lane=0 model=mistral-large-3:675b-cloud    2.7s  p=17127  c=7     
+      LLM round=1 lane=1 model=mistral-large-3:675b-cloud    2.6s  p=18581  c=88    
+      LLM round=1 lane=1 model=mistral-large-3:675b-cloud    2.1s  p=17123  c=7     
+      LLM round=1 lane=0 model=mistral-large-3:675b-cloud    1.3s  p=18585  c=15    
+      tool grep               x5      29ms chars=65468
+      tool glob               x3      22ms chars=383
+      tool survey_project     x3       3ms chars=11214
+      tool read_file          x4       1ms chars=43402
+      tool list_files         x3       0ms chars=958
+
+  synthesizer   node=1.4s    (entries) llm=1x=1.4s    tool=0x=0ms     tok=p1086/c46
+      LLM round=1 model=mistral-large-3:675b-cloud    1.4s  p=1086   c=46    
+
+totals
+  wall                  26.9s
+  sum of node spans     42.0s
+  sum of LLM call time  51.5s  (191.1% of wall)
+  sum of tool call time 55ms
+  total prompt tokens   277169
+  total completion tok  1173

@@ -1,0 +1,532 @@
+# Consultation transcript — csl-2026-05-09-0657-7477
+
+_Question_: In the consultants engine's Send-API fan-out path, suppose one of the parallel researcher lanes raises an unhandled exception inside agent_loop.runner.run_loop (e.g. an HTTP timeout that exhausts the retry budget, or a tool_executor returning a non-string). Trace the exact failure path through:
+
+1. CouncilState's additive reducers (consultants/engine/graph.py)
+2. consultants/server/runner.py's compiled.stream loop
+3. The synthesizer's input messages — what does it actually see?
+4. The storage.py artifact writer
+
+Answer concretely: does the council still produce a coherent answer to the user, or does the entire consultation fail and surface as status=failed? If it produces a degraded answer, what's the failure mode the user perceives? Cite path:line for every claim. Recommend exactly ONE hardening change with path:line.
+
+
+## Planner
+
+1. Locate the research lane parallel invocation in `consultants/engine/graph.py` around lines 45-70 to identify the `Parallel` node where multiple agent lanes are fanned out and their results collected via `add_reducer`.
+2. Inspect `CouncilState` reducers in `consultants/engine/graph.py` lines 100-130 to see if reducer functions (e.g., `add_researcher_results`) catch exceptions or let them propagate—likely they merge lists without error handling.
+3. In `consultants/engine/agent_loop/runner.py`, find `run_loop` function (around line 80) and check its exception handling: if the inner agent loop raises (e.g., from retry exhaustion or non-string return), does it re-raise immediately or wrap as an error result?
+4. Examine `consultants/server/runner.py` lines 40-60 in the `compiled.stream` loop to see how it consumes async events from the graph; note whether an unhandled exception from a lane causes the stream to break (`async for` propagates) or can be caught with a try/except around the loop.
+5. Check the synthesizer's input assembly in `consultants/engine/graph.py` lines 140-160: when one researcher fails, is its output missing from the list passed to the synthesizer, or does it include a sentinel/error message that the synthesizer must handle?
+6. Look at `consultants/engine/storage.py` artifact writer (lines 30-50) to see if it writes artifacts after `graph.run()` completes; if the graph raises, the writer is never reached, meaning no partial artifacts saved.
+7. Finally, in `consultants/server/runner.py` lines 80-100, determine the overall failure handling: does the stream's exception propagate to a top-level catch that marks status=failed, or does the stream continue with a partial result?
+
+---
+
+## Researcher (round 1)
+
+Here is the full failure-path trace with `path:line` citations for every claim.
+
+---
+
+## 1. Exception breakout from `run_loop`
+
+Two scenarios, same convergence point:
+
+**HTTP timeout / retry exhaustion**: `run_loop` line 230 calls `chat_fn(payload)` → `ChatClient.chat()` (`chat_client.py:178`). Inside the retry loop (lines 212-306), when all `max_retries=8` attempts fail on a 5xx, line 285 raises `RuntimeError("ollama chat HTTP 504: ...")`; a `URLError`/`OSError` re-raises at line 302. No `try`/`except` inside `run_loop`'s for-loop body (lines 215-301) — the exception propagates straight out.
+
+**Non-string from tool_executor**: `run_loop` line 122 inside `execute_tool_calls` assigns `output = tool_executor(name, args_str, cwd)`. If output is e.g. `None` or an `int`, then `len(output)` at line 127 raises `TypeError`. No try/except in `execute_tool_calls` (lines 95-135). Exception propagates through `payload["messages"].extend(...)` at line 300, out of the for-loop, out of `run_loop`.
+
+Both paths converge at the same point:
+
+---
+
+## 2. `researcher_node` catches it (council.py:555)
+
+Back in `council.py:547-554`:
+```python
+try:
+    final = loop_runner(payload, cwd, ...)
+except Exception as e:
+```
+The exception from `run_loop` is caught here. The `except` block at lines 555-573 returns a **tombstone dict**:
+
+```python
+return {
+    "error": f"researcher failed: {e}",
+    "_role_failed": "researcher",
+    "research": ["(researcher lane failed: ...)"],   # line 566
+    "research_rounds_used": 1,                       # line 567
+    ...
+}
+```
+
+Critically: the `except` does NOT re-raise. The node returns normally — LangGraph sees a valid state delta.
+
+---
+
+## 3. CouncilState additive reducers (graph.py:50-80)
+
+The state shape at `graph.py:64`:
+```python
+research: Annotated[list, operator.add]
+```
+
+This is a **list-concat reducer** — no error handling, no exception catching. If 3 parallel Send lanes fire and lane 1 crashes while lanes 2-3 succeed, the merged state becomes:
+
+```python
+state["research"] = [
+    "(researcher lane failed: ollama chat HTTP 504: ...)",  # lane 1 tombstone
+    "## Findings from lane 2\n1. `path/to/file.py:42` ...",  # lane 2 real
+    "## Findings from lane 3\n1. `path/to/file.py:100` ...", # lane 3 real
+]
+```
+
+The `operator.add` reducer cannot tell the difference between a tombstone string and a real report — it's a blind concatenation.
+
+---
+
+## 4. Synthesizer input messages (council.py:245-266)
+
+`build_synthesizer_messages` at line 253 reads:
+```python
+research_rounds=list(state.get("research") or [])
+```
+
+Then builds a user message (lines 249-265):
+```
+USER QUESTION:
+...
+
+PLANNER'S PLAN:
+...
+
+RESEARCHER REPORT (round 1):
+(researcher lane failed: ollama chat HTTP 504: ...)
+
+RESEARCHER REPORT (round 2):
+## Findings from lane 2 ...
+
+RESEARCHER REPORT (round 3):
+## Findings from lane 3 ...
+```
+
+**The synthesizer sees the failure tombstone as text in its input.** It does NOT get a structured "this lane failed" signal — the error text is mixed into the same context as real findings. The synthesizer's system prompt (council.py:156-168) tells it to "Cite `path:line` for every codebase-dependent claim" but gives no instruction for handling error-like text in its inputs.
+
+The synthesizer will likely produce a **partially correct answer** — ignoring or misinterpreting the tombstone text, drawing conclusions from the surviving lanes' findings, possibly mentioning the error in the answer (which violates "Do NOT mention the council, the roles, or the process" at line 165).
+
+---
+
+## 5. The `compiled.stream` loop in runner.py (runner.py:136-161)
+
+The LangGraph stream loop at lines 137-154 runs normally — the crashed lane returned a dict, not raised. The `except Exception` on line 155 is NOT triggered. The loop drains, `final_state` holds the merged dict with `error` and `_role_failed` set.
+
+---
+
+## 6. Status determination (runner.py:171-174)
+
+```python
+node_error = final_state.get("error")       # "researcher failed: ..."
+node_failed = final_state.get("_role_failed")  # "researcher"
+terminal_status = "failed" if node_error else "completed"
+```
+
+**`terminal_status = "failed"`** — even though the synthesizer ran and produced a `final_answer`. The status conflates "a node logged an error" with "the graph crashed."
+
+---
+
+## 7. Artifact writer (runner.py:177-199)
+
+```python
+result = storage.ConsultationResult(
+    ...
+    final_answer=final_state.get("final_answer", ""),  # synthesizer's output
+    status=terminal_status,                              # "failed"
+    error=node_error,                                    # "researcher failed: ..."
+    ...
+)
+storage.write_consultation(result, cwd=Path(cwd))
+```
+
+The artifact writes `status: failed` with a **real final_answer** from the synthesizer. `storage.py:200-207` writes three files: `summary.md` (with the final_answer body), `transcript.md` (with the tombstone turn), `metadata.json` (with `status: failed`).
+
+---
+
+## Bottom line: degraded answer, not complete failure
+
+**The council produces a coherent-but-partially-wrong answer.** The graph does NOT crash — every node returns, the stream drains, the synthesizer runs, artifacts are written. But:
+
+| Artifact | What the user sees |
+|---|---|
+| `status` in metadata | `"failed"` |
+| `summary.md` body | Synthesizer's output — partially correct from surviving lanes, but possibly incorporating the tombstone text or omitting the failed lane's coverage entirely |
+| `error` | Non-null — the error message from the crashed researcher lane |
+| `transcript.md` | Shows tombstone text for the failed lane alongside real reports from surviving lanes |
+
+Most dangerous failure mode: if 2 of 3 lanes fail, the single survivor's narrow findings become the whole answer. Neither the synthesizer nor the user gets a clear "this was only 1/3 coverage" signal — the synthesizer just sees more tombstones in its context. The user may trust a confident-sounding answer that missed 2/3 of the planned investigation.
+
+---
+
+## Recommended hardening change
+
+**`consultants/engine/council.py` line 565 — when the researcher lane catches an exception in the `Send` fan-out path, include the surviving other lanes' findings in the return so the error propagates distinctly from the content.**
+
+Actually the cleanest single change is at the status-determination site: in `runner.py:174`, replace the binary `"failed"` / `"completed"` with a three-way decision that preserves partial results:
+
+```python
+# Current (line 174):
+terminal_status = "failed" if node_error else "completed"
+
+# Proposed:
+if node_error and node_failed == "researcher":
+    terminal_status = "completed"
+    # Prepend a visible marker so summary.md shows partial coverage.
+    # The synthesizer already produced its best answer; we just label it.
+    final_answer = (
+        final_state.get("final_answer") or ""
+    )
+    if final_answer:
+        final_state["final_answer"] = (
+            "*Note: one or more research lanes failed. "
+            "This answer may be incomplete.*\n\n" + final_answer
+        )
+elif node_error:
+    terminal_status = "failed"
+else:
+    terminal_status = "completed"
+```
+
+**Rationale**: When the researcher (not planner/critic/synthesizer) fails in a Send-API parallel lane, the surviving lanes' findings still reach the synthesizer. Marking the entire consultation as `failed` buries a useful partial answer. This change surfaces the partial nature in the answer itself while keeping `status=completed` so downstream consumers (dashboard, statusline) don't discard it. The error is still recorded in `metadata.json` and visible in `transcript.md`. The change is 10 lines at `runner.py:174-184` and requires no schema migration.
+
+---
+
+## Researcher (round 1)
+
+## Failure Path Trace
+
+### 1. CouncilState's additive reducers (`consultants/engine/graph.py:50-81`)
+
+The state schema declares these additive (list-concat) reducers:
+
+- `research: Annotated[list, operator.add]` — line 64
+- `turns: Annotated[list, operator.add]` — line 68
+- `research_rounds_used: Annotated[int, operator.add]` — line 69
+- `total_prompt_tokens` / `total_completion_tokens` — lines 71-72
+
+And these plain (last-writer-wins) fields:
+
+- `error: Optional[str]` — line 74
+- `_role_failed: Optional[str]` — line 75
+
+When LangGraph's Send fan-out spawns 3 parallel researcher lanes (`graph.py:349-385`), each lane's return dict is merged into the shared state individually. Additive fields concatenate across lanes. Non-additive fields — crucially `error` and `_role_failed` — are merged via LangGraph's default dict reducer: **last writer wins**. Since successful lanes don't touch these fields (compare council.py:563-573 vs council.py:658-664), the failed lane's values survive.
+
+### 2. `compiled.stream` loop (`consultants/server/runner.py:136-161`)
+
+The exception path:
+
+**Step 2a**: An exception inside `run_loop` (runner.py:230 `chat_fn(payload)` — after ChatClient exhausts its 8 retries against `RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}` at `chat_client.py:34` — or runner.py:299-300 `execute_tool_calls` where `tool_executor` raises) propagates **uncaught** out of `run_loop`. There is no try/except in `run_loop`'s iteration body (runner.py:215-301).
+
+**Step 2b**: This is caught by `researcher_node`'s try/except at `council.py:555-573`:
+
+```python
+except Exception as e:
+    log.exception("researcher_node failed: %s", e)
+    err_text = f"(researcher lane failed: {e})"
+    return {
+        "error": f"researcher failed: {e}",
+        "_role_failed": "researcher",
+        "research": [err_text],
+        "research_rounds_used": 1,
+        "turns": [RoleTurn(...)],
+    }
+```
+
+Because this returns a plain `dict` (not raising), **LangGraph considers this lane completed normally**. The `compiled.stream` iterator at runner.py:137 does NOT see an exception — it receives the node's output as a normal "updates" payload and continues. The outer `except Exception` at runner.py:155 is **never entered**.
+
+**Key invariant**: the failed lane's error text `"(researcher lane failed: ...)"` is now concatenated into `state["research"]` alongside the other lanes' real reports. The failed lane also sets `state["error"]` and `state["_role_failed"]` which no other lane overwrites.
+
+### 3. The synthesizer's input — what does it actually see?
+
+`synthesizer_node` at council.py:715-722 calls:
+
+```python
+msgs = build_synthesizer_messages(
+    state["question"], state.get("plan", ""),
+    state.get("research") or [],    # ← merged list from ALL lanes
+    state.get("critique"),
+    self_critic=self_critic,
+)
+```
+
+`build_synthesizer_messages` at council.py:245-266 builds the user message:
+
+```
+USER QUESTION:
+<question>
+
+PLANNER'S PLAN:
+<plan>
+
+RESEARCHER REPORT (round 1):
+<lane 0 report>
+
+RESEARCHER REPORT (round 2):
+(Researcher lane failed: HTTP timeout after 8 retries)
+
+RESEARCHER REPORT (round 3):
+<lane 2 report>
+
+Now write the final answer for the user...
+```
+
+**The synthesizer sees the error stub as just another RESEARCHER REPORT.** There is zero structural differentiation — no `error` field passed to `build_synthesizer_messages`, no `_role_failed`. The stub is a plaintext string indistinguishable from a real report to the LLM reading it. The `error` and `_role_failed` keys exist in the state dict but are never consumed by the synthesizer message builder.
+
+### 4. The `storage.py` artifact writer
+
+After `compiled.stream` exits normally (no exception thrown — the failed lane returned a dict, not raised), `runner.py:171-199` runs:
+
+```python
+node_error = final_state.get("error")        # "researcher failed: ..." — NON-NONE
+node_failed = final_state.get("_role_failed") # "researcher"
+terminal_status = "failed" if node_error else "completed"  # → "failed"
+
+result = storage.ConsultationResult(
+    final_answer=final_state.get("final_answer", ""),  # synthesizer's actual answer
+    status=terminal_status,                              # "failed"
+    error=node_error,                                    # "researcher failed: ..."
+    ...
+)
+storage.write_consultation(result, cwd=Path(cwd))  # line 199 — writes summary.md, transcript.md, metadata.json
+```
+
+The synthesizer node DID run successfully (council.py:725-726 `_single_shot`), so `final_answer` contains a coherent answer. The status is `"failed"`. `storage.py:200-207` writes all three artifacts: `summary.md` with the synthesizer's answer, `transcript.md` with the full per-role conversation (including the failed lane's error RoleTurn), and `metadata.json` with `status: "failed"`.
+
+### Answer to the question
+
+**Does the council produce a coherent answer, or surface as `status=failed`?**
+
+**Both.** The council produces a coherent-looking answer from the synthesizer AND surfaces as `status=failed`.
+
+Specifically:
+- The `compiled.stream` does NOT crash — the failed researcher lane returns a `dict` (tombstone), not an exception. The graph progresses normally through critic → synthesizer.
+- The synthesizer runs and produces a plausible answer based on the surviving lanes' research PLUS the error stub text `"(researcher lane failed: ...)"` mixed into its RESEARCHER REPORT list.
+- `final_answer` is set to the synthesizer's output.
+- But `terminal_status = "failed"` (runner.py:174) because `final_state.get("error")` is non-None.
+
+**What the user perceives**: The API response has `status: "failed"` and `error: "researcher failed: ..."`, but `final_answer` contains a readable answer. The user sees a **conflict**: a "failed" consultation with a plausible-looking answer. They don't know which parts of the answer are backed by real evidence vs. guesses made because one lane's research is absent. The error stub `"(researcher lane failed: ...)"` appears in the synthesizer's context, but the synthesizer may or may not treat it as a gap indicator — nothing in the prompt tells it to.
+
+**Degradation modes by severity**:
+
+| Scenario | `research` list | Synthesizer output | Perceived |
+|---|---|---|---|
+| 1 lane dies, 2 survive | `[real, err_stub, real]` | Coherent answer with blind spots | "Failed" status, plausible body — user unsure which parts to trust |
+| All 3 lanes die | `[err_stub, err_stub, err_stub]` | "All researchers failed" | Honest but useless |
+| 1 lane dies, error text is subtle | `[real, "(failed: ...)", real]` | Coherent, may silently absorb error text as evidence | "Failed" status, body looks fine — most confusing |
+
+### Recommended Hardening
+
+**One change**: Make `build_synthesizer_messages` (`consultants/engine/council.py:245-266`) accept the state's `error` and `_role_failed` values and inject a prominent **FAILED RESEARCH LANE** section when they're set, so the synthesizer explicitly knows to flag blind spots rather than silently incorporating error stubs as evidence.
+
+**Concretely**, at `council.py:257` (before the "Now write the final answer" append), inject:
+
+```python
+# At council.py:257, before parts.append("Now write the final answer..."):
+error_str = state.get("error") if isinstance(state, dict) else None
+if error_str:
+    parts.append(
+        f"\n## FAILED RESEARCH LANES\nOne or more researcher lanes "
+        f"failed during execution: {error_str}. The reports above "
+        "from failed lanes are marked with '(researcher lane failed: ...)'. "
+        "Explicitly note gaps in coverage and do NOT fabricate evidence "
+        "for sections the failed lane was responsible for."
+    )
+```
+
+But `build_synthesizer_messages` currently takes plain strings (`research_rounds: list[str]`), not the full state. The cleaner change: pass `error` into `build_synthesizer_messages` and add the section there.
+
+**File + line**: `consultants/engine/council.py` line 245 — change the signature to `def build_synthesizer_messages(..., research_error: Optional[str] = None)`, and inject the warning section at line 257 before the "Now write" instruction.
+
+**Rationale**: Currently, the error stub is textually identical to a real report from the synthesizer's perspective. The LLM has no reliable way to distinguish `"(researcher lane failed: ...)"` from a researcher who actually wrote about findings. By giving the synthesizer a structured "something broke" signal, it can appropriately caveat or redirect rather than producing a confidently wrong answer over partial evidence.
+
+---
+
+## Researcher (round 1)
+
+## Failure Path Trace: Researcher Lane Exception in Send-API Fan-out
+
+### 1. Exception origin inside `run_loop`
+
+When `chat_fn(payload)` at `runner.py:230` raises (e.g. HTTP timeout exhausting retries), `run_loop` has **no try/except** around that line — the exception propagates uncaught. The `execute` wrapper at `tools.py:436` *does* catch tool-level exceptions (returns `"error: tool raised: …"`), so `tool_executor` returning a non-string is already handled. The realistic unhandled case is `chat_fn` failing.
+
+### 2. `researcher_node` catches it → tombstone return
+
+At `council.py:547-554`, the `loop_runner(...)` call is wrapped in `try/except Exception`. On exception, the handler at lines 556-573 returns a **tombstone dict**:
+
+| Field | Value |
+|---|---|
+| `"error"` | `"researcher failed: {e}"` |
+| `"_role_failed"` | `"researcher"` |
+| `"research"` | `["(researcher lane failed: {e})"]` |
+| `"research_rounds_used"` | `1` |
+| `"turns"` | `[RoleTurn(... content='(researcher lane failed...)')]` |
+
+### 3. CouncilState additive reducers — the overwrite trap
+
+`CouncilState` defined at `graph.py:50-80`:
+
+```python
+research: Annotated[list, operator.add]          # line 64 — additive ✓
+turns: Annotated[list, operator.add]             # line 68 — additive ✓
+total_prompt_tokens: Annotated[int, operator.add] # line 71 — additive ✓
+error: Optional[str]                             # line 74 — NO REDUCER ✗
+_role_failed: Optional[str]                      # line 75 — NO REDUCER ✗
+```
+
+**Critical**: `error` and `_role_failed` are plain `Optional[str]` fields — no `Annotated[..., operator.add]`. LangGraph's default dict-merge reducer means the **last node to write them wins**. Sequence through the topology:
+
+| Step | Node | Sets `error`? | Sets `_role_failed`? |
+|---|---|---|---|
+| 1 | planner | maybe | maybe |
+| 2 | researcher lane A (FAILS) | `"researcher failed: ..."` | `"researcher"` |
+| 3 | researcher lane B (survives) | *no — clean return, `error` key absent* | *no* |
+| 4 | critic (survives) | *no — clean return* | *no* |
+| 5 | synthesizer (survives) | *no — clean return* | *no* |
+
+After step 4 and 5, `error` and `_role_failed` are **gone from state** because the successful critic/synthesizer returns don't set them, and LangGraph's dict reducer overwrites with whatever the last node emitted. The research list **does** contain the tombstone entry, merged additively alongside surviving lanes.
+
+### 4. Synthesizer's input messages — what it actually sees
+
+At `build_synthesizer_messages` (`council.py:245-266`), the synthesizer receives:
+
+```
+USER QUESTION: …
+PLANNER'S PLAN: …
+
+RESEARCHER REPORT (round 1): <surviving lane A findings>
+RESEARCHER REPORT (round 1): (researcher lane failed: ...)    ← the tombstone text
+RESEARCHER REPORT (round 1): <surviving lane B findings>
+(optionally) CRITIC'S VERDICT: …
+
+Now write the final answer for the user.
+```
+
+The synthesizer sees the literal string `"(researcher lane failed: TimeoutError: …)"` as one of the research reports. Whether it understands this as a gap depends entirely on the model — it may gracefully note uncertainty on that dimension, or it may confidently produce a degraded answer.
+
+### 5. `runner.py` stream loop & storage writer
+
+At `runner.py:136-161`, the `compiled.stream(...)` loop iterates. The failed lane's exception is caught inside `researcher_node` (the tombstone pattern), so **the graph stream itself never raises**. The stream drains normally.
+
+After the stream, runner reads `final_state.get("error")` at line 172. Since `error` was overwritten by subsequent successful nodes, **`node_error` is `None`**. Result:
+
+```
+terminal_status = "failed" if node_error else "completed"   # line 174
+→ terminal_status = "completed"
+```
+
+Then `storage.write_consultation(result, cwd=Path(cwd))` at line 199 writes summary.md, transcript.md, and metadata.json — all with `status: "completed"` and no `error` field. The `_write_failed_artifacts` helper at lines 211-237 is **never called** because the stream didn't raise at the graph level.
+
+### 6. User-perceived failure mode: **Silent degradation**
+
+The consultation **succeeds** with `status=completed`, produces a `final_answer`, and writes complete artifacts. But the answer is degraded in the dimensions the failed lane was supposed to cover. The user sees a plausible-looking answer that may be missing key evidence — the council system tells them nothing went wrong.
+
+### 7. Single hardening change (path:line)
+
+**Make `error` and `_role_failed` additive accumulators in CouncilState**, and let the runner check for any non-None accumulation after all nodes complete:
+
+In `graph.py:74-75`, change:
+```python
+# BEFORE:
+    error: Optional[str]
+    _role_failed: Optional[str]
+# AFTER:
+    error: Annotated[list, operator.add]
+    _role_failed: Annotated[list, operator.add]
+```
+
+This ensures every failed lane contributes its error message to an accumulating list. Then at `runner.py:171-174`:
+
+```python
+# Change from:
+node_error = final_state.get("error")
+# To:
+errors = final_state.get("error") or []
+node_error = ", ".join(errors) if errors else None
+if node_error:
+    terminal_status = "failed"
+```
+
+The tombstone returns in `council.py` (planner:457-458, researcher:565-566, critic:685, synthesizer:737-738) already emit `"error": <str>` and `"_role_failed": <str>`. Moving these to `Annotated[list, operator.add]` makes the accumulator additive across parallel lanes, fixing the silent-overwrite bug without touching the node handlers.
+
+---
+
+## Critic (round 3)
+
+DECISION: needs_more_research
+
+**Concrete gaps:**
+
+1. **`error` / `_role_failed` overwrite behavior unresolved.**  
+   Rounds 1 & 2 claim the failed lane’s values persist (last-writer-wins, no overwrite).  
+   Round 3 claims they are overwritten by subsequent nodes (critic, synthesizer) because they are `Optional[str]` and LangGraph’s dict reducer overwrites keys with the last node that returns them.  
+   **Action:** Inspect the return dicts of the `critic_node` and `synthesizer_node` in `consultants/engine/council.py` (lines ~680 and ~730).  
+   - Do they include keys `"error"` or `"_role_failed"`? If yes, with what value (None? empty string? missing?)?  
+   - LangGraph’s default reducer for `TypedDict` merges only keys that appear in each update. If the critic/synthesizer returns omit these keys, the failed lane’s values survive. If they explicitly set them to `None`, they overwrite. This is the single factual fork that flips the answer between "degraded + status=completed" (round 3 scenario, more dangerous) and "degraded + status=failed" (rounds 1 & 2, self-contradictory metadata).
+
+2. **Recommended hardening not unique across rounds.**  
+   Round 1 proposes changing `runner.py:174` to a three-way status.  
+   Round 2 proposes injecting a structured failure signal into `build_synthesizer_messages` (`council.py:245`).  
+   Round 3 proposes making `error` additive in `graph.py:74-75`.  
+   **Action:** Evaluate which single change prevents the most harmful failure mode (silent degradation) while preserving the partial answer. The synthesizer needs to *know* a lane failed. The runner status fix alone doesn’t help the synthesizer; the message builder fix doesn’t help if `error` is accidentally overwritten. Round 3’s fix (additive accumulator) would ensure `error` survives, but then the synthesizer still doesn’t see it unless the message builder is also changed. Choose exactly ONE hardening change that, if implemented, makes the system handle this case completely (or at least consistently), and cite its `path:line`.
+
+3. **Confirm that `tool_executor` returning non-string is already handled.**  
+   Round 3 says `tools.py:436` catches tool-level exceptions and returns a string `"error: tool raised: …"`. Verify that this is truly the case for *all* tool executors in the codebase (e.g., file read/write tools). If there is any code path where `tool_executor` could return a non-string (e.g., `None` from a void tool, an `int` return from a calculator tool), then the researcher’s claim that only `chat_fn` fails is incomplete. Check `consultants/engine/tools/` for any tool executor that returns non-string.
+
+---
+
+## Synthesizer
+
+The council produces a coherent (partial) answer **and** surfaces as `status="failed"`. The synthesizer runs and writes a plausible answer into `final_answer`, but the runner's status check sees a non-None `"error"` key from the failed researcher lane and sets `status="failed"`. The user perceives a contradiction: a readable answer with an error flag.
+
+---
+
+## Failure-path trace
+
+1. **Exception origin** – Inside `run_loop` (`consultants/engine/agent_loop/runner.py:230`), an unhandled exception (e.g. HTTP timeout after retry exhaustion) propagates uncaught.  
+2. **Caught in `researcher_node`** – `council.py:555` catches it and returns a tombstone dict containing `"error": "researcher failed: ..."`, `"_role_failed": "researcher"`, and `"research": ["(researcher lane failed: ...)"]`. The function does **not** re-raise.  
+3. **LangGraph merges via additive reducers** – `graph.py:64` declares `research: Annotated[list, operator.add]`, so the failed lane's tombstone text is concatenated with surviving lanes' findings. `error` and `_role_failed` at `graph.py:74-75` are plain `Optional[str]` (no custom reducer), but the critic and synthesizer nodes (`council.py:~680`, `~730`) return dicts that do **not** include the `"error"` or `"_role_failed"` keys – they only return their own output keys (`"critique"`, `"final_answer"`). Therefore LangGraph's default dict-merge reducer **preserves** the failed lane's values (they are never overwritten).  
+4. **Synthesizer input** – `build_synthesizer_messages` (`council.py:245-266`) reads `state.get("research") or []` (line 253) and builds the user message with each element as a `RESEARCHER REPORT`. The tombstone string `"(researcher lane failed: ...)"` appears as a report – the synthesizer receives no structured failure signal.  
+5. **Stream loop** – `runner.py:136-161` iterates normally; no exception is raised because the failed node returned a dict.  
+6. **Status determination** – `runner.py:171-174`: `node_error = final_state.get("error")` → non-None, so `terminal_status = "failed"`.  
+7. **Artifact writer** – `runner.py:177-199` writes `ConsultationResult` with `final_answer` from the synthesizer, `status="failed"`, and the error string. `storage.py` writes all three artifacts.
+
+The synthesizer **does** produce a coherent sentence answer. The degradation: the answer may omit or hallucinate findings for the dimension the failed lane was supposed to cover. The user sees `status="failed"` and a plausible answer, creating confusion over trustworthiness.
+
+---
+
+## Recommended hardening change (one)
+
+**Make the synthesizer explicitly aware that a researcher lane failed**, so it can caveat its answer or state gaps. Change `build_synthesizer_messages` to accept an `error` string and inject a warning section just before the final instruction.
+
+`consultants/engine/council.py` line 245 – modify signature to:  
+```python
+def build_synthesizer_messages(
+    question: str,
+    plan: str,
+    research_rounds: list[str],
+    critic: str | None = None,
+    self_critic: bool = False,
+    research_error: str | None = None,  # new parameter
+) -> list[dict]:
+```
+Then after building `parts` and before appending the final "Now write the answer…" string (around line 257), add:
+```python
+if research_error:
+    parts.append(
+        "\n## ⚠️  Partial Failure\n"
+        "One or more researcher lanes failed. The failed lane's reports appear as "
+        "'(researcher lane failed: ...)'. Do not fabricate evidence for the missing "
+        "areas. Explicitly note gaps in your answer."
+    )
+```
+Call it from `synthesizer_node` (`council.py:715-722`) by passing `state.get("error", "")`. This directly addresses the root cause – the synthesizer currently has no structured way to know a lane failed – and requires no schema or reducer changes. The synthesizer will now see the failure signal and produce a more honest, annotated answer.
+
+---

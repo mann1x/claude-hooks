@@ -1,0 +1,84 @@
+{
+  "created": "2026-05-09T06:24:42",
+  "cwd": "/tmp/claude-hooks-bench-bench-baseline-2026-05-07-AxlY",
+  "duration_seconds": 470.5705769062042,
+  "effort": "high",
+  "error": null,
+  "final_answer": "The exception from a researcher lane is caught by `council.researcher_node`, which returns a state update containing an `\"error\"` string, a `\"_role_failed\"` flag, and a placeholder research entry\u3010consultants/engine/council.py:555-573\u3011.  \nBecause `CouncilState.error` is a plain string (last write wins) and `research`/`turns` use additive list reducers\u3010consultants/engine/graph.py:60-64\u3011\u3010consultants/engine/graph.py:74\u3011, this update overwrites any prior error and appends the placeholder to the research list.  \n\nThe runner\u2019s `compiled.stream` loop treats node\u2011level exceptions as state updates, so the graph continues to completion unless a graph\u2011level exception occurs\u3010consultants/server/runner.py:135-161\u3011. After streaming, the runner sets `terminal_status = \"failed\"` if `state.error` is truthy, otherwise `\"completed\"`\u3010consultants/server/runner.py:171-174\u3011; thus any non\u2011empty error forces a failed status.  \n\nThe synthesizer runs only after the graph finishes and receives `build_synthesizer_messages(state.get(\"research\") or [])`, which includes any error\u2011placeholder strings from failed lanes\u3010consultants/engine/council.py:245-266\u3011. If it can still produce a `final_answer`, that value is stored in state.  \n\n`storage.write_consultation` unconditionally writes a `ConsultationResult` containing `status=terminal_status`, `error=state.error`, and `final_answer=final_state.get(\"final_answer\", \"\")` to `summary.md`, `transcript.md`, and `metadata.json`\u3010consultants/engine/storage.py:200-208\u3011.  \n\n**Outcome:** The consultation is marked `status=failed`; the user sees a failed status with an error message in the metadata. If the synthesizer succeeded despite the error placeholders, the user also receives a synthesized answer that may be degraded by those placeholders.  \n\n**Hardening change:** Wrap the researcher node in `_wrap_researcher` to catch exceptions and return a state update without letting the error abort the graph, allowing other lanes to complete and the synthesizer to run. Edit `consultants/engine/graph.py:_wrap_researcher` around lines\u202f145\u2011157:\n\n```python\ndef _wrap_researcher(deps: GraphDeps):\n    def _node(state: dict) -> dict:\n        try:\n            return council.researcher_node(\n                state,\n                chat_client=deps.chat_clients[\"researcher\"],\n                tool_executor=deps.tool_executor,\n                tool_specs=deps.tool_specs,\n                grounding_msgs=deps.grounding_msgs,\n                model=deps.models[\"researcher\"],\n                cwd=deps.cwd,\n                think=_think_for(deps, \"researcher\"),\n            )\n        except Exception as exc:  # pragma: no cover \u2013 defensive\n            log.exception(\"researcher lane failed: %s\", exc)\n            return {\"error\": str(exc), \"_role_failed\": \"researcher\"}\n    return _node\n```",
+  "models": {
+    "critic": "nemotron-3-super:cloud",
+    "planner": "nemotron-3-super:cloud",
+    "researcher": "nemotron-3-super:cloud",
+    "synthesizer": "nemotron-3-super:cloud"
+  },
+  "parent_sid": null,
+  "question": "In the consultants engine's Send-API fan-out path, suppose one of the parallel researcher lanes raises an unhandled exception inside agent_loop.runner.run_loop (e.g. an HTTP timeout that exhausts the retry budget, or a tool_executor returning a non-string). Trace the exact failure path through:\n\n1. CouncilState's additive reducers (consultants/engine/graph.py)\n2. consultants/server/runner.py's compiled.stream loop\n3. The synthesizer's input messages \u2014 what does it actually see?\n4. The storage.py artifact writer\n\nAnswer concretely: does the council still produce a coherent answer to the user, or does the entire consultation fail and surface as status=failed? If it produces a degraded answer, what's the failure mode the user perceives? Cite path:line for every claim. Recommend exactly ONE hardening change with path:line.",
+  "retries_by_role": {},
+  "session_id": "csl-2026-05-09-0624-73a7",
+  "status": "completed",
+  "topology": "council",
+  "total_completion_tokens": 14993,
+  "total_prompt_tokens": 173812,
+  "turns": [
+    {
+      "completion_tokens": 983,
+      "content": "1. Consultants/engine/graph.py additive reducers (e.g., `add_consultant_state` around lines 58\u201173) to see if exceptions from `agent_loop.runner.run_loop` are caught, logged, or stored as error state.  \n2. Consultants/server/runner.py compiled.stream loop (around line 112) to verify whether the loop propagates lane exceptions upward, breaks the stream, or yields an error event.  \n3. Consultants/engine/synthesizer.py input assembly (around line 89) to determine what messages are fed to the synthesizer when a lane raises an exception (missing output vs error placeholder).  \n4. Storage.py artifact writer (around line 45) to check if partial artifacts are written on lane failure or if the write is aborted entirely.  \n5. Consultants/server/api.py response handler (around line 200) to ascertain whether the final user\u2011facing status is set to `failed` or a degraded answer is returned.",
+      "duration_seconds": 68.00111494399607,
+      "prompt_tokens": 410,
+      "role": "planner",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 1698,
+      "content": "- The researcher node wrapper in `consultants/engine/graph.py:_wrap_researcher` (lines 145\u2011157) calls `council.researcher_node` without a try/catch, so any exception from `agent_loop.runner.run_loop` propagates upward uncaught.\n- LangGraph\u2019s `Send` fan\u2011out treats an exception in any parallel researcher lane as a graph\u2011level failure; the stream in `consultants/server/runner.py:run_council` (lines 135\u2011161) catches the exception, logs it, sets `state.status = \"failed\"` and `state.error = f\"graph crashed: {e}\"`, writes failed artifacts, and returns immediately.\n- Because the graph aborts before reaching the synthesizer node, the synthesizer never runs; the `final_state` consulted by the storage layer contains only whatever state updates were merged before the failure (typically empty `final_answer`), so the user observes a completely failed consultation (`status=failed`) with an empty answer and the error message in the metadata.\n- The `ConsultationResult` written by `consultants/engine/storage.py:write_consultation` (lines 200\u2011208) records `status=\"failed\"` and the captured `error`, producing a `summary.md` with YAML front\u2011matter showing `status: failed` and an empty body.\n- **Hardening change:** wrap the researcher node call in a try/catch and return a state update that populates `CouncilState.error` and `CouncilState._role_failed` (already declared in lines 74\u201175). This lets the graph continue, allowing other lanes to complete and the synthesizer to generate a degraded answer.  \n  Edit `consultants/engine/graph.py:_wrap_researcher` around lines 145\u2011157:  \n  ```python\n  def _wrap_researcher(deps: GraphDeps):\n      def _node(state: dict) -> dict:\n          try:\n              return council.researcher_node(\n                  state,\n                  chat_client=deps.chat_clients[\"researcher\"],\n                  tool_executor=deps.tool_executor,\n                  tool_specs=deps.tool_specs,\n                  grounding_msgs=deps.grounding_msgs,\n                  model=deps.models[\"researcher\"],\n                  cwd=deps.cwd,\n                  think=_think_for(deps, \"researcher\"),\n              )\n          except Exception as exc:  # pragma: no cover \u2013 defensive\n              log.exception(\"researcher lane failed: %s\", exc)\n              return {\"error\": str(exc), \"_role_failed\": \"researcher\"}\n      return _node\n  ```  \n  This ensures lane\u2011level errors are stored in state rather than crashing the whole graph.",
+      "duration_seconds": 152.27696884900797,
+      "prompt_tokens": 32106,
+      "role": "researcher",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 4581,
+      "content": "- CouncilState uses additive reducers for `research` and `turns` (list concat) so parallel researcher lanes merge their outputs, but `error` is a plain string (last write wins)\u3010consultants/engine/graph.py:60-64\u3011\u3010consultants/engine/graph.py:74\u3011.  \n- In `researcher_node`, an unhandled exception (e.g., HTTP timeout) is caught and returns a state update with `\"error\": f\"researcher failed: {e}\"` (line\u202f564) and `\"research\": [err_text]` (line\u202f566)\u3010consultants/engine/council.py:555-573\u3011.  \n- The runner\u2019s `compiled.stream` loop catches only graph\u2011level exceptions; node\u2011level exceptions are converted to state updates, so the graph continues to completion\u3010consultants/server/runner.py:135-161\u3011.  \n- The synthesizer receives all research strings via `build_synthesizer_messages(state.get(\"research\") or [])`, thus seeing any error placeholders inserted by failed lanes\u3010consultants/engine/council.py:245-266\u3011.  \n- Artifacts are written unconditionally via `storage.write_consultation`, which persists `final_answer` (synthesizer output) and `turns` (including error turns) to `summary.md`, `transcript.md`, and `metadata.json`\u3010consultants/engine/storage.py:200-208\u3011.  \n- Because `error` is non\u2011empty after any researcher\u2011lane failure, `terminal_status` is set to `\"failed\"` (runner line\u202f174)\u3010consultants/server/runner.py:172-174\u3011; the user sees a failed consultation, but the synthesizer may still produce an answer degraded by the error\u2011text placeholders in the research input.  \n- **Hardening:** remove the `\"error\"` field from the failure return in `researcher_node` so a single lane failure does not mark the whole consultation as failed; change\u202f`consultants/engine/council.py:564` to omit the `\"error\"` key (or set it to `\"\"`). This lets the consultation finish with `status=\"completed\"` while preserving the failure trace in `_role_failed` and `turns`.",
+      "duration_seconds": 312.9888708369981,
+      "prompt_tokens": 46305,
+      "role": "researcher",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 3621,
+      "content": "- CouncilState declares additive reducers for parallel lanes: `research`, `turns`, `total_prompt_tokens`, `total_completion_tokens`, `research_rounds_used`, `critic_reroutes_used` use `Annotated[list, operator.add]` or `Annotated[int, operator.add]` (consultants/engine/graph.py:60-74)  \n- Researcher node catches exceptions from `agent_loop.runner.run_loop` (e.g. HTTP timeout, non-string tool return) and returns a tombstone update with `\"error\": f\"researcher failed: {e}\"`, `\"_role_failed\": \"researcher\"`, and `\"research\": [f\"(researcher lane failed: {e})\"]` (consultants/engine/council.py:555-573)  \n- Runner\u2019s `compiled.stream` loop only catches graph\u2011level exceptions; node\u2011level errors are retained in state via the `error` and `_role_failed` fields (consultants/server/runner.py:135-161)  \n- After streaming, the runner sets `terminal_status = \"failed\"` if `state.error` is truthy, otherwise `\"completed\"` (consultants/server/runner.py:171-174)  \n- Synthesizer receives the merged `research` list (including any error strings from failed lanes) and attempts to produce a `final_answer`; if it succeeds, `final_state[\"final_answer\"]` is non\u2011empty (consultants/engine/council.py:715-758)  \n- Storage writes a `ConsultationResult` containing `status=terminal_status`, `error=node_error`, and `final_answer=final_state.get(\"final_answer\", \"\")` (consultants/server/runner.py:176-199)  \n- Outcome: If at least one researcher lane fails but the synthesizer still yields a final answer, the consultation is marked `status=\"failed\"` yet the user receives an answer (possibly degraded); the user perceives a failed status with an error message but may still see the synthesized output  \n\n- Hardening change: In `consultants/server/runner.py`, treat a run as completed when a final answer is produced despite node errors; replace lines 171\u2011174 with:  \n  ```python\n  terminal_status = \"completed\" if final_state.get(\"final_answer\") else (\"failed\" if node_error else \"completed\")\n  ```  \n  (consultants/server/runner.py:171-174)",
+      "duration_seconds": 135.62635731100454,
+      "prompt_tokens": 90142,
+      "role": "researcher",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 1834,
+      "content": "DECISION: needs_more_research\nconsultants/engine/graph.py:145-157\nconsultants/engine/council.py:555-573",
+      "duration_seconds": 36.76879954899778,
+      "prompt_tokens": 2373,
+      "role": "critic",
+      "round": 3,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 2276,
+      "content": "The exception from a researcher lane is caught by `council.researcher_node`, which returns a state update containing an `\"error\"` string, a `\"_role_failed\"` flag, and a placeholder research entry\u3010consultants/engine/council.py:555-573\u3011.  \nBecause `CouncilState.error` is a plain string (last write wins) and `research`/`turns` use additive list reducers\u3010consultants/engine/graph.py:60-64\u3011\u3010consultants/engine/graph.py:74\u3011, this update overwrites any prior error and appends the placeholder to the research list.  \n\nThe runner\u2019s `compiled.stream` loop treats node\u2011level exceptions as state updates, so the graph continues to completion unless a graph\u2011level exception occurs\u3010consultants/server/runner.py:135-161\u3011. After streaming, the runner sets `terminal_status = \"failed\"` if `state.error` is truthy, otherwise `\"completed\"`\u3010consultants/server/runner.py:171-174\u3011; thus any non\u2011empty error forces a failed status.  \n\nThe synthesizer runs only after the graph finishes and receives `build_synthesizer_messages(state.get(\"research\") or [])`, which includes any error\u2011placeholder strings from failed lanes\u3010consultants/engine/council.py:245-266\u3011. If it can still produce a `final_answer`, that value is stored in state.  \n\n`storage.write_consultation` unconditionally writes a `ConsultationResult` containing `status=terminal_status`, `error=state.error`, and `final_answer=final_state.get(\"final_answer\", \"\")` to `summary.md`, `transcript.md`, and `metadata.json`\u3010consultants/engine/storage.py:200-208\u3011.  \n\n**Outcome:** The consultation is marked `status=failed`; the user sees a failed status with an error message in the metadata. If the synthesizer succeeded despite the error placeholders, the user also receives a synthesized answer that may be degraded by those placeholders.  \n\n**Hardening change:** Wrap the researcher node in `_wrap_researcher` to catch exceptions and return a state update without letting the error abort the graph, allowing other lanes to complete and the synthesizer to run. Edit `consultants/engine/graph.py:_wrap_researcher` around lines\u202f145\u2011157:\n\n```python\ndef _wrap_researcher(deps: GraphDeps):\n    def _node(state: dict) -> dict:\n        try:\n            return council.researcher_node(\n                state,\n                chat_client=deps.chat_clients[\"researcher\"],\n                tool_executor=deps.tool_executor,\n                tool_specs=deps.tool_specs,\n                grounding_msgs=deps.grounding_msgs,\n                model=deps.models[\"researcher\"],\n                cwd=deps.cwd,\n                think=_think_for(deps, \"researcher\"),\n            )\n        except Exception as exc:  # pragma: no cover \u2013 defensive\n            log.exception(\"researcher lane failed: %s\", exc)\n            return {\"error\": str(exc), \"_role_failed\": \"researcher\"}\n    return _node\n```",
+      "duration_seconds": 52.79397608299041,
+      "prompt_tokens": 2476,
+      "role": "synthesizer",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    }
+  ]
+}

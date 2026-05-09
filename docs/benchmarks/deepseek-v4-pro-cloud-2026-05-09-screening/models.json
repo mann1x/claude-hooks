@@ -1,0 +1,50 @@
+{
+  "captured_at": "2026-05-09T07:04:59+02:00",
+  "endpoint": "http://192.168.178.2:11433",
+  "models": {
+    "deepseek-v4-pro:cloud": {
+      "modified_at": "2026-04-24T00:00:00Z",
+      "capabilities": [
+        "completion",
+        "tools",
+        "thinking"
+      ],
+      "details": {
+        "parent_model": "deepseek-v4-pro",
+        "format": "",
+        "family": "deepseek4",
+        "families": null,
+        "parameter_size": "1600000000000",
+        "quantization_level": "FP8"
+      },
+      "model_info": {
+        "deepseek4.context_length": 1048576,
+        "deepseek4.embedding_length": 4096,
+        "general.architecture": "deepseek4",
+        "general.parameter_count": 1600000000000
+      },
+      "raw": {
+        "details": {
+          "parent_model": "deepseek-v4-pro",
+          "format": "",
+          "family": "deepseek4",
+          "families": null,
+          "parameter_size": "1600000000000",
+          "quantization_level": "FP8"
+        },
+        "model_info": {
+          "deepseek4.context_length": 1048576,
+          "deepseek4.embedding_length": 4096,
+          "general.architecture": "deepseek4",
+          "general.parameter_count": 1600000000000
+        },
+        "capabilities": [
+          "completion",
+          "tools",
+          "thinking"
+        ],
+        "modified_at": "2026-04-24T00:00:00Z"
+      }
+    }
+  }
+}

@@ -1,0 +1,41 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/deepseek-v4-pro-cloud-2026-05-09-screening/audit-medium.transcript.db
+
+sid: csl-2026-05-09-0706-5fb7
+status: completed
+total wall: 231.5s
+
+  planner       node=24.1s   (entries) llm=1x=24.1s   tool=0x=0ms     tok=p276/c1287
+      LLM round=1 model=deepseek-v4-pro:cloud       24.1s  p=276    c=1287  
+
+  researcher    node=2.9m    (3xentries) llm=15x=5.8m    tool=48x=626ms   tok=p666736/c14042
+      LLM round=1 lane=2 model=deepseek-v4-pro:cloud        1.1m  p=68965  c=3311  
+      LLM round=1 lane=0 model=deepseek-v4-pro:cloud        1.1m  p=27516  c=3053  
+      LLM round=1 lane=1 model=deepseek-v4-pro:cloud       46.6s  p=80913  c=2179  
+      LLM round=1 lane=2 model=deepseek-v4-pro:cloud       31.9s  p=66414  c=1221  
+      LLM round=1 lane=2 model=deepseek-v4-pro:cloud       18.6s  p=59439  c=632   
+      LLM round=1 lane=1 model=deepseek-v4-pro:cloud       17.8s  p=45864  c=482   
+      LLM round=1 lane=0 model=deepseek-v4-pro:cloud       17.7s  p=26264  c=600   
+      LLM round=1 lane=0 model=deepseek-v4-pro:cloud       16.4s  p=22977  c=405   
+      LLM round=1 lane=1 model=deepseek-v4-pro:cloud       14.3s  p=78680  c=327   
+      LLM round=1 lane=2 model=deepseek-v4-pro:cloud       12.7s  p=62520  c=402   
+      LLM round=1 lane=0 model=deepseek-v4-pro:cloud       12.5s  p=27096  c=353   
+      LLM round=1 lane=2 model=deepseek-v4-pro:cloud       10.2s  p=17337  c=300   
+      LLM round=1 lane=1 model=deepseek-v4-pro:cloud        8.0s  p=48091  c=331   
+      LLM round=1 lane=1 model=deepseek-v4-pro:cloud        5.7s  p=17325  c=237   
+      LLM round=1 lane=0 model=deepseek-v4-pro:cloud        5.2s  p=17335  c=209   
+      tool grep               x12    611ms chars=270366
+      tool glob               x2      11ms chars=2439
+      tool read_file          x34      4ms chars=57106
+
+  synthesizer   node=1.1m    (entries) llm=1x=1.1m    tool=0x=0ms     tok=p3959/c2654
+      LLM round=1 model=deepseek-v4-pro:cloud        1.1m  p=3959   c=2654  
+
+totals
+  wall                  231.5s
+  sum of node spans     4.4m
+  sum of LLM call time  7.3m  (190.2% of wall)
+  sum of tool call time 626ms
+  total prompt tokens   670971
+  total completion tok  17983

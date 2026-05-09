@@ -1,0 +1,35 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/deepseek-v4-pro-cloud-2026-05-09-screening/smoke.transcript.db
+
+sid: csl-2026-05-09-0704-73d2
+status: completed
+total wall: 61.0s
+
+  planner       node=18.3s   (entries) llm=1x=18.3s   tool=0x=0ms     tok=p241/c922
+      LLM round=1 model=deepseek-v4-pro:cloud       18.3s  p=241    c=922   
+
+  researcher    node=1.1m    (3xentries) llm=8x=1.1m    tool=11x=118ms   tok=p173755/c1154
+      LLM round=1 lane=0 model=deepseek-v4-pro:cloud       29.1s  p=31099  c=175   
+      LLM round=1 lane=2 model=deepseek-v4-pro:cloud        7.0s  p=17266  c=160   
+      LLM round=1 lane=0 model=deepseek-v4-pro:cloud        6.6s  p=20277  c=169   
+      LLM round=1 lane=2 model=deepseek-v4-pro:cloud        6.5s  p=22054  c=203   
+      LLM round=1 lane=1 model=deepseek-v4-pro:cloud        5.2s  p=18875  c=106   
+      LLM round=1 lane=0 model=deepseek-v4-pro:cloud        4.8s  p=17278  c=132   
+      LLM round=1 lane=1 model=deepseek-v4-pro:cloud        4.6s  p=17301  c=117   
+      LLM round=1 lane=1 model=deepseek-v4-pro:cloud        3.5s  p=29605  c=92    
+      tool grep               x3     109ms chars=38698
+      tool survey_project     x1       8ms chars=3738
+      tool read_file          x3       1ms chars=58322
+      tool list_files         x4       0ms chars=576
+
+  synthesizer   node=2.2s    (entries) llm=1x=2.2s    tool=0x=0ms     tok=p767/c89
+      LLM round=1 model=deepseek-v4-pro:cloud        2.2s  p=767    c=89    
+
+totals
+  wall                  61.0s
+  sum of node spans     1.5m
+  sum of LLM call time  1.5m  (143.7% of wall)
+  sum of tool call time 118ms
+  total prompt tokens   174763
+  total completion tok  2165

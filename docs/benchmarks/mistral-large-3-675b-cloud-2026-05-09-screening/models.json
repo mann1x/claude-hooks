@@ -1,0 +1,50 @@
+{
+  "captured_at": "2026-05-09T06:33:48+02:00",
+  "endpoint": "http://192.168.178.2:11433",
+  "models": {
+    "mistral-large-3:675b-cloud": {
+      "modified_at": "2025-12-02T00:00:00Z",
+      "capabilities": [
+        "completion",
+        "tools",
+        "vision"
+      ],
+      "details": {
+        "parent_model": "mistral-large-3:675b",
+        "format": "",
+        "family": "mistral3",
+        "families": null,
+        "parameter_size": "675000000000",
+        "quantization_level": "FP8"
+      },
+      "model_info": {
+        "general.architecture": "mistral3",
+        "general.parameter_count": 675000000000,
+        "mistral3.context_length": 262144,
+        "mistral3.embedding_length": 7168
+      },
+      "raw": {
+        "details": {
+          "parent_model": "mistral-large-3:675b",
+          "format": "",
+          "family": "mistral3",
+          "families": null,
+          "parameter_size": "675000000000",
+          "quantization_level": "FP8"
+        },
+        "model_info": {
+          "general.architecture": "mistral3",
+          "general.parameter_count": 675000000000,
+          "mistral3.context_length": 262144,
+          "mistral3.embedding_length": 7168
+        },
+        "capabilities": [
+          "completion",
+          "tools",
+          "vision"
+        ],
+        "modified_at": "2025-12-02T00:00:00Z"
+      }
+    }
+  }
+}

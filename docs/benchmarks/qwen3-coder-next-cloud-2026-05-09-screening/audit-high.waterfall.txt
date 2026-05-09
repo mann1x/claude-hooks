@@ -1,0 +1,64 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/qwen3-coder-next-cloud-2026-05-09-screening/audit-high.transcript.db
+
+sid: csl-2026-05-09-0651-eaa3
+status: completed
+total wall: 83.7s
+
+  planner       node=3.2s    (entries) llm=1x=3.2s    tool=0x=0ms     tok=p401/c203
+      LLM round=1 model=qwen3-coder-next:cloud       3.2s  p=401    c=203   
+
+  researcher    node=1.4m    (3xentries) llm=33x=2.1m    tool=56x=37ms    tok=p965413/c4545
+      LLM round=1 lane=0 model=qwen3-coder-next:cloud      35.6s  p=40184  c=2250  
+      LLM round=1 lane=2 model=qwen3-coder-next:cloud       5.5s  p=38811  c=100   
+      LLM round=1 lane=0 model=qwen3-coder-next:cloud       5.1s  p=38405  c=100   
+      LLM round=1 lane=2 model=qwen3-coder-next:cloud       5.0s  p=43180  c=101   
+      LLM round=1 lane=1 model=qwen3-coder-next:cloud       4.5s  p=35378  c=28    
+      LLM round=1 lane=1 model=qwen3-coder-next:cloud       4.3s  p=30645  c=37    
+      LLM round=1 lane=0 model=qwen3-coder-next:cloud       4.2s  p=35985  c=88    
+      LLM round=1 lane=2 model=qwen3-coder-next:cloud       4.0s  p=30647  c=94    
+      LLM round=1 lane=0 model=qwen3-coder-next:cloud       4.0s  p=30460  c=29    
+      LLM round=1 lane=2 model=qwen3-coder-next:cloud       3.8s  p=42326  c=102   
+      LLM round=1 lane=2 model=qwen3-coder-next:cloud       3.7s  p=43434  c=50    
+      LLM round=1 lane=2 model=qwen3-coder-next:cloud       3.7s  p=42628  c=49    
+      LLM round=1 lane=0 model=qwen3-coder-next:cloud       3.5s  p=38713  c=101   
+      LLM round=1 lane=1 model=qwen3-coder-next:cloud       3.1s  p=35586  c=36    
+      LLM round=1 lane=1 model=qwen3-coder-next:cloud       3.0s  p=35705  c=50    
+      LLM round=1 lane=2 model=qwen3-coder-next:cloud       2.8s  p=43769  c=157   
+      LLM round=1 lane=2 model=qwen3-coder-next:cloud       2.7s  p=4333   c=130   
+      LLM round=1 lane=2 model=qwen3-coder-next:cloud       2.7s  p=14963  c=74    
+      LLM round=1 lane=0 model=qwen3-coder-next:cloud       2.5s  p=35032  c=134   
+      LLM round=1 lane=0 model=qwen3-coder-next:cloud       2.2s  p=36576  c=100   
+      LLM round=1 lane=1 model=qwen3-coder-next:cloud       2.2s  p=36229  c=50    
+      LLM round=1 lane=0 model=qwen3-coder-next:cloud       2.2s  p=14845  c=68    
+      LLM round=1 lane=1 model=qwen3-coder-next:cloud       2.1s  p=18147  c=49    
+      LLM round=1 lane=2 model=qwen3-coder-next:cloud       1.9s  p=40702  c=100   
+      LLM round=1 lane=0 model=qwen3-coder-next:cloud       1.9s  p=39437  c=100   
+      LLM round=1 lane=1 model=qwen3-coder-next:cloud       1.9s  p=4371   c=130   
+      LLM round=1 lane=0 model=qwen3-coder-next:cloud       1.7s  p=4373   c=51    
+      LLM round=1 lane=1 model=qwen3-coder-next:cloud       1.3s  p=30806  c=29    
+      LLM round=1 lane=1 model=qwen3-coder-next:cloud       1.3s  p=35506  c=50    
+      LLM round=1 lane=1 model=qwen3-coder-next:cloud       1.3s  p=35453  c=28    
+      LLM round=1 lane=0 model=qwen3-coder-next:cloud       1.2s  p=2942   c=54    
+      LLM round=1 lane=2 model=qwen3-coder-next:cloud      766ms  p=2902   c=13    
+      LLM round=1 lane=1 model=qwen3-coder-next:cloud      766ms  p=2940   c=13    
+      tool glob               x3      22ms chars=416
+      tool read_file          x40     15ms chars=337120
+      tool survey_project     x3       0ms chars=11214
+      tool list_files         x2       0ms chars=366
+      tool grep               x8       0ms chars=1084
+
+  critic        node=4.2s    (entries) llm=1x=4.2s    tool=0x=0ms     tok=p2943/c280
+      LLM round=3 model=qwen3-coder-next:cloud       4.2s  p=2943   c=280   
+
+  synthesizer   node=12.3s   (entries) llm=1x=12.3s   tool=0x=0ms     tok=p3283/c743
+      LLM round=1 model=qwen3-coder-next:cloud      12.3s  p=3283   c=743   
+
+totals
+  wall                  83.7s
+  sum of node spans     1.8m
+  sum of LLM call time  2.4m  (174.4% of wall)
+  sum of tool call time 37ms
+  total prompt tokens   972040
+  total completion tok  5771

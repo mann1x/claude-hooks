@@ -1,0 +1,52 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/deepseek-v4-flash-cloud-2026-05-09-screening/audit-high.transcript.db
+
+sid: csl-2026-05-09-0657-7477
+status: completed
+total wall: 375.0s
+
+  planner       node=7.9s    (entries) llm=1x=7.9s    tool=0x=0ms     tok=p401/c844
+      LLM round=1 model=deepseek-v4-flash:cloud      7.9s  p=401    c=844   
+
+  researcher    node=13.5m   (3xentries) llm=21x=13.5m   tool=50x=25ms    tok=p813755/c44391
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud      3.0m  p=51141  c=4850  
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud      2.3m  p=45879  c=4334  
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud      1.6m  p=51213  c=6269  
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud      1.2m  p=50143  c=4377  
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud      1.2m  p=47693  c=5406  
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud     52.2s  p=48985  c=5664  
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud     43.8s  p=47634  c=2747  
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud     41.3s  p=45751  c=3855  
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud     36.9s  p=46184  c=2540  
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud     22.4s  p=47022  c=891   
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud     20.8s  p=48788  c=1784  
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud      7.4s  p=41696  c=186   
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud      4.4s  p=41722  c=118   
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud      3.5s  p=38911  c=122   
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud      3.4s  p=28137  c=190   
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud      3.4s  p=19241  c=180   
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud      3.0s  p=19215  c=288   
+      LLM round=1 lane=0 model=deepseek-v4-flash:cloud      3.0s  p=17548  c=176   
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud      2.9s  p=17480  c=165   
+      LLM round=1 lane=1 model=deepseek-v4-flash:cloud      2.1s  p=17506  c=162   
+      LLM round=1 lane=2 model=deepseek-v4-flash:cloud      1.8s  p=41866  c=87    
+      tool glob               x2      15ms chars=88
+      tool read_file          x23      5ms chars=331311
+      tool grep               x12      5ms chars=1512
+      tool survey_project     x3       0ms chars=11214
+      tool list_files         x10      0ms chars=1338
+
+  critic        node=21.7s   (entries) llm=1x=21.7s   tool=0x=0ms     tok=p6425/c1357
+      LLM round=3 model=deepseek-v4-flash:cloud     21.7s  p=6425   c=1357  
+
+  synthesizer   node=16.0s   (entries) llm=1x=16.0s   tool=0x=0ms     tok=p7145/c1582
+      LLM round=1 model=deepseek-v4-flash:cloud     16.0s  p=7145   c=1582  
+
+totals
+  wall                  375.0s
+  sum of node spans     14.3m
+  sum of LLM call time  14.3m  (228.7% of wall)
+  sum of tool call time 25ms
+  total prompt tokens   827726
+  total completion tok  48174

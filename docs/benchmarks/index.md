@@ -153,3 +153,39 @@ invocations / parallel lanes). Use this to compose mixes:
 `glm-5.1:cloud` is the standout for **critic** (the only A+ on this sweep — caught a real cross-round contradiction the others missed). Worth keeping as a critic-only pick.
 
 `minimax-m2.7:cloud` and the `qwen3.5:*` family are unsuitable for any role at this baseline — the qwen pair both falsely claimed commit `4e67dc2` doesn't exist (it does); minimax fabricated paths that don't exist either.
+
+## 2026-05-09 screening sweep — 7 new cloud models
+
+> **Excluded from the comparison scoreboard above per [§5](EVALUATION.md#5-multi-run-requirement)**:
+> single-run screening data, labelled with `-screening` suffix. Provisional verdicts only.
+> N=3 confirmation in progress for the three promoted candidates (`gemini-3-flash-preview`,
+> `deepseek-v4-flash`, `nemotron-3-super`) — screening data serves as r1 for those.
+>
+> Subject baseline: `bench-baseline-2026-05-07` (commit `83cfd3b`). Engine HEAD: `6b59116` (v1.1.0).
+> Sweep window: 04:10–05:23 UTC, all 7 labels in one continuous pass.
+> Cloud-snapshot drift verified clean across the window.
+>
+> **Grading caveat — protocol §3 Q3 claim #3:** the rubric's "synthesizer's input messages do NOT
+> include the failure tombstone" wording reflects pre-fix behavior. Current code at the baseline
+> tag intentionally appends an `(researcher lane failed: …)` tombstone string to the additive
+> `research` list, which `build_synthesizer_messages` (`council.py:245+`) embeds in the synthesizer's
+> user prompt. The in-code comment at `council.py:555-563` confirms this was the fix to a previous
+> audit-high finding. All 2026-05-09 Q3 grades use the corrected ground truth. The protocol fix
+> ships in a separate commit.
+
+| Label | Total wall | Q1 | Q2 | Q3 | Mix | Verdict |
+|---|---|---|---|---|---|---|
+| [`gemini-3-flash-preview-cloud-2026-05-09-screening`](gemini-3-flash-preview-cloud-2026-05-09-screening/results.md) | 213s | PASS | A | A− | `P:A R:A C:A S:A` | **PROD-screen** → N=3 |
+| [`deepseek-v4-flash-cloud-2026-05-09-screening`](deepseek-v4-flash-cloud-2026-05-09-screening/results.md) | 621s | PASS | B | A | `P:A R:A C:A S:A` | **PROD-screen** → N=3 |
+| [`nemotron-3-super-cloud-2026-05-09-screening`](nemotron-3-super-cloud-2026-05-09-screening/results.md) | 818s | PASS | B | A | `P:A R:B C:A S:A` | **PROD-screen** → N=3 |
+| [`deepseek-v4-pro-cloud-2026-05-09-screening`](deepseek-v4-pro-cloud-2026-05-09-screening/results.md) | 1059s | PASS | C | A | `P:A R:B C:A S:A` | EVAL-only (heavy + Q2 weak) |
+| [`qwen3-coder-next-cloud-2026-05-09-screening`](qwen3-coder-next-cloud-2026-05-09-screening/results.md) | 152s | PASS | C | A | `P:B R:C C:A S:A` | EVAL-only (Q2 search-scope bug) |
+| [`mistral-large-3-675b-cloud-2026-05-09-screening`](mistral-large-3-675b-cloud-2026-05-09-screening/results.md) | 832s | PASS | C | C/F | `P:B R:C C:F S:C` | REJECT (fabricated LangGraph param on Q3) |
+| [`nemotron-3-nano-30b-cloud-2026-05-09-screening`](nemotron-3-nano-30b-cloud-2026-05-09-screening/results.md) | 167s | **FAIL** | B | C | `P:C R:C C:C S:F` | REJECT (smoke synthesis refused despite evidence) |
+
+### Observations
+
+- **U-curve between size and Q2 quality.** Mid-tier models (gemini, deepseek-v4-flash, nemotron-3-super) get verdicts right; the smallest (nemotron-3-nano, qwen3-coder-next) miss ground-truth sites in places they didn't search; the largest (mistral-large-3, deepseek-v4-pro) over-think and mis-classify protected-site reasoning. Bigger ≠ better on grep-style audits.
+- **Three valid hardening recommendations on Q3.** The strong-Q3 answers each propose a fix at a different layer: nemotron-3-super wraps `_wrap_researcher` in `graph.py`; qwen3-coder-next changes `researcher_node` to re-raise; deepseek-v4-pro flips status logic in `runner.py`. All three diagnoses are correct; the disagreement is which layer should own the fix. Useful artifact for any future hardening PR.
+- **`deepseek-v4-pro:cloud` is no longer broken** on the local proxy as of 2026-05-09 — the previous block (memory entry from 2026-05-06) has cleared. Memory updated.
+- **`mistral-large-3:675b-cloud` fabricated** `return_exceptions=True` on `compiled.stream` — that parameter does not exist on LangGraph's `.stream()`. Disqualifying for any role that produces user-facing recommendations.

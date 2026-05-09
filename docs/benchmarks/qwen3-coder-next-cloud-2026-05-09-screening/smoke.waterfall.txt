@@ -1,0 +1,43 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/qwen3-coder-next-cloud-2026-05-09-screening/smoke.transcript.db
+
+sid: csl-2026-05-09-0650-4b7d
+status: completed
+total wall: 18.1s
+
+  planner       node=2.3s    (entries) llm=1x=2.3s    tool=0x=0ms     tok=p247/c168
+      LLM round=1 model=qwen3-coder-next:cloud       2.3s  p=247    c=168   
+
+  researcher    node=18.2s   (3xentries) llm=15x=35.7s   tool=16x=9ms     tok=p185763/c1288
+      LLM round=1 lane=2 model=qwen3-coder-next:cloud       6.8s  p=15832  c=337   
+      LLM round=1 lane=1 model=qwen3-coder-next:cloud       5.8s  p=40545  c=302   
+      LLM round=1 lane=0 model=qwen3-coder-next:cloud       4.9s  p=17054  c=179   
+      LLM round=1 lane=1 model=qwen3-coder-next:cloud       3.0s  p=16749  c=53    
+      LLM round=1 lane=0 model=qwen3-coder-next:cloud       2.5s  p=15855  c=50    
+      LLM round=1 lane=1 model=qwen3-coder-next:cloud       2.5s  p=34634  c=24    
+      LLM round=1 lane=0 model=qwen3-coder-next:cloud       1.9s  p=16642  c=48    
+      LLM round=1 lane=1 model=qwen3-coder-next:cloud       1.9s  p=4184   c=101   
+      LLM round=1 lane=2 model=qwen3-coder-next:cloud       1.1s  p=2750   c=43    
+      LLM round=1 lane=1 model=qwen3-coder-next:cloud       1.0s  p=2753   c=41    
+      LLM round=1 lane=0 model=qwen3-coder-next:cloud       1.0s  p=4213   c=26    
+      LLM round=1 lane=2 model=qwen3-coder-next:cloud      916ms  p=3342   c=26    
+      LLM round=1 lane=2 model=qwen3-coder-next:cloud      879ms  p=4247   c=23    
+      LLM round=1 lane=2 model=qwen3-coder-next:cloud      836ms  p=4181   c=22    
+      LLM round=1 lane=0 model=qwen3-coder-next:cloud      779ms  p=2782   c=13    
+      tool glob               x2       6ms chars=63
+      tool survey_project     x3       3ms chars=11214
+      tool read_file          x7       0ms chars=193468
+      tool list_files         x3       0ms chars=445
+      tool grep               x1       0ms chars=508
+
+  synthesizer   node=1.8s    (entries) llm=1x=1.8s    tool=0x=0ms     tok=p1338/c129
+      LLM round=1 model=qwen3-coder-next:cloud       1.8s  p=1338   c=129   
+
+totals
+  wall                  18.1s
+  sum of node spans     22.2s
+  sum of LLM call time  39.7s  (219.0% of wall)
+  sum of tool call time 9ms
+  total prompt tokens   187348
+  total completion tok  1585
