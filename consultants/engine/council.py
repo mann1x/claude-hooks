@@ -235,7 +235,15 @@ SYNTHESIZER_SYSTEM = _role_prompt(
     "Do NOT mention the council, the roles, or the process — the "
     "user only wants the answer. Do NOT restate the question. Do "
     "NOT add markdown headings unless the answer genuinely has 3+ "
-    "distinct sections."
+    "distinct sections.\n\n"
+    "If any researcher report is a failure tombstone — a string that "
+    "begins with `(researcher lane failed:` or `(planner failed:` — "
+    "do NOT silently synthesize over the gap. Either name the "
+    "specific plan item or sub-question that could not be verified "
+    "(\"could not verify <X> because <lane> failed: <error>\"), or, "
+    "when the surviving evidence is too thin to answer at all, "
+    "state that plainly and stop. The tombstone is the system's "
+    "signal that a lane crashed; never treat it as evidence."
 )
 
 # Self-critic variant — used at effort=low/medium when the critic
@@ -260,7 +268,15 @@ SYNTHESIZER_SELF_CRITIC_SYSTEM = _role_prompt(
     "Do NOT mention the council, the roles, or the process — the "
     "user only wants the answer. Do NOT restate the question. Do "
     "NOT add markdown headings unless the answer genuinely has 3+ "
-    "distinct sections."
+    "distinct sections.\n\n"
+    "If any researcher report is a failure tombstone — a string that "
+    "begins with `(researcher lane failed:` or `(planner failed:` — "
+    "do NOT silently synthesize over the gap. Either name the "
+    "specific plan item or sub-question that could not be verified "
+    "(\"could not verify <X> because <lane> failed: <error>\"), or, "
+    "when the surviving evidence is too thin to answer at all, "
+    "state that plainly and stop. The tombstone is the system's "
+    "signal that a lane crashed; never treat it as evidence."
 )
 
 
