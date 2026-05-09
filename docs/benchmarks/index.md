@@ -170,23 +170,64 @@ Per-role wall medians on 2026-05-09 N=3 labels (per-fire, all queries pooled):
 
 **Cheapest A pick per role (across all PROD-READY labels — 2026-05-07 + 2026-05-09):**
 
+> **Note on engine behavior:** the `/consultants` engine has **no per-question
+> classifier** — `consultants/config.py:RoleConfig` pins one model per role
+> at config time, and that assignment applies to every consultation until
+> `claude-consultants config set-role` rewrites it. The picks below are
+> static config recommendations, not per-question routing.
+
 | Role | Pick | Median wall (per-fire) | Notes |
 |---|---|---|---|
 | Planner     | **`gemini-3-flash-preview:cloud`** (N=3) | 5.7s | Cheapest A across the cohort; tie with gemma4 (5.9s, also N=3); items consistently concrete with verification steps |
-| Researcher  | **`gemini-3-flash-preview:cloud`** (N=3) | 39.8s | 4× faster per fire than the next-fastest A researcher (gemma4 168s, deepseek-v4-flash 222s, nemotron-3-super 216s); every claim cites `path:line` |
+| Researcher  | **`gemini-3-flash-preview:cloud`** (N=3) | 39.8s | 4× faster per fire than gemma4 (168s); every claim cites `path:line` |
 | Critic      | **`gemini-3-flash-preview:cloud`** (N=3) | 8.4s | Cheapest A; for cross-round contradiction-catching specifically `glm-5.1:cloud` was A+ on the 2026-05-07 single-run sweep — keep as a specialist critic if you need that depth |
-| Synthesizer (general) | **`gemini-3-flash-preview:cloud`** (N=3) | 6.3s | Cheapest A for general synthesis (smoke + audit-medium); fast lead-sentence answers with `path:line` cites |
-| Synthesizer (Q3 hardening) | **`gemma4:31b-cloud`** (N=3) | 8.5s | **Only model whose Q3 hardening recommendations actually pass the v1.2 correctness sub-rubric across both sweeps** — see [Q3 actionability audit](Q3-actionability-audit-2026-05-09.md). Other PROD-READY models produce Q3 recommendations that look impressive (concrete `path:line`, code-shaped) but turn out redundant, regressive, off-topic, or contentious-UX-flips when checked against live code. |
+| Synthesizer | **see verdict below** | — | The single-default question — gemini gives the cheapest answer-shaped output but its Q3 hardening recommendations grade C+ on correctness (off-topic). gemma4 produces actionable Q3 recommendations (correctness A) at ~35% higher per-fire wall (8.5s vs 6.3s). Pick depends on use profile. |
 
-**Verdict:** Two-tier default.
+**Verdict — single static default per role.**
 
-- **Default for general consultations (smoke / audit-medium / non-hardening Q3):** `gemini-3-flash-preview:cloud` — every role. Wall-cost is the lowest of any PROD-READY candidate; quality `P:A R:A C:A S:A` confirmed across N=3 runs; 7% run-to-run wall variance is the cleanest data point.
-- **Synthesizer override when the question is "trace this failure path and propose a hardening change":** `gemma4:31b-cloud`. Slightly slower per-fire (8.5s vs 6.3s) but produces actionable code/prompt fixes consistently — the other PROD-READY models look better on shape but fail correctness.
+The `/consultants` engine doesn't classify the question, so picking
+"gemini for general / gemma4 for hardening" would mean manually
+running `claude-consultants config set-role synthesizer …` before
+each consultation. That's operationally unrealistic. Pick **one**
+synthesizer and live with the tradeoff, or run a heterogeneous mix
+(see below).
 
-**When to deviate from this two-tier default:**
+**If consultations are mostly general questions** (smoke / audit /
+how-does-X-work / cross-cutting reviews) → pin everything to
+`gemini-3-flash-preview:cloud`. Cheapest A on every role; 7% run-to-run
+wall variance; ~3× faster than the alternative on the dominant
+researcher role.
+
+**If consultations include hardening-style questions** ("trace this
+failure path, propose a fix") → pin everything to `gemma4:31b-cloud`
+or run the heterogeneous mix below. gemma4 is the only PROD-READY
+model whose Q3 recommendations consistently pass the v1.2 correctness
+sub-rubric (see [Q3 actionability audit](Q3-actionability-audit-2026-05-09.md));
+the other PROD-READY models produce recommendations that grade
+A on shape but turn out redundant, regressive, off-topic, or
+contentious-UX-flips when checked against live code.
+
+**Heterogeneous mix candidate (NOT YET N=3-validated, needs its own
+mix-screening label per protocol §3.5):**
+
+```bash
+claude-consultants config set-role planner     gemini-3-flash-preview:cloud
+claude-consultants config set-role researcher  gemini-3-flash-preview:cloud
+claude-consultants config set-role critic      gemini-3-flash-preview:cloud
+claude-consultants config set-role synthesizer gemma4:31b-cloud
+```
+
+This is the "best of both" theoretical pick: gemini's fast retrieval
+on the dominant researcher role + gemma4's actionable synthesis. But
+**we have not yet measured this mix at N=3** — both gemma4 and gemini
+were measured pinned to all four roles. Mix-screening would land at
+something like `mix-gemini-PRC-gemma4-S-2026-05-XX-screening` per §3.5.
+Until that label exists, pick a pure-model default.
+
+**Other role-specific deviations:**
 
 - **Critic** specifically catching cross-round contradictions → `glm-5.1:cloud` (only A+ in the 2026-05-07 sweep).
-- **Audit-medium-style retrieval** at deeper coverage → `kimi-k2.6:cloud` or `gemma4:31b-cloud` (both N=3 confirmed strong on Q2; gemma4 also runs on the v1.1.0 engine).
+- **Audit-medium-style retrieval** at deeper coverage → `kimi-k2.6:cloud` or `gemma4:31b-cloud` (both confirmed strong on Q2; gemma4 also runs N=3 at the v1.1.0 engine).
 - **When wall doesn't matter** → `deepseek-v4-flash:cloud` (B on Q2 with sophisticated reasoning; A→C+ on Q3 — the C+ is a UX-flip recommendation, not a real bug fix).
 
 **Disqualified from any role at this baseline (any sweep):**
