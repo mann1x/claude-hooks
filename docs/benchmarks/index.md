@@ -1,44 +1,48 @@
 # `/consultants` benchmark sweeps
 
-> **tl;dr — 2026-05-07 sweep, all 7 cloud labels graded by Claude
-> reading the on-disk transcripts** (per
-> [`EVALUATION.md` §3.5](EVALUATION.md#35-per-role-quality-grading-the-key-to-building-a-model-mix);
+> **tl;dr — 5 PROD-READY labels confirmed at v1.1.0 engine HEAD**
+> (4 pure-model N=3 + 1 N=3-confirmed heterogeneous mix; protocol
+> [v1.2](EVALUATION.md#changelog) with Q3 actionability sub-rubric).
+> All grades by Claude reading on-disk transcripts per
+> [§3.5](EVALUATION.md#35-per-role-quality-grading-the-key-to-building-a-model-mix);
 > the human operator only verifies model selection in real-world
-> skill usage on whichever model gets picked — they don't grade
-> transcripts). Single-run; N=3 confirmation pending per
-> [§5](EVALUATION.md#5-multi-run-requirement).
+> skill usage — never grades transcripts.
 >
-> | Label | Q1 | Q2 | Q3 | Mix | Verdict | Audit-high wall |
+> | Label | Q1 | Q2 | Q3 (correctness) | Mix | Audit-hi wall (median) | Total wall (median) |
 > |---|---|---|---|---|---|---|
-> | [kimi-k2.6-cloud](kimi-k2.6-cloud-2026-05-07/) | PASS | A | A | P:A R:A C:A S:A | **PROD-READY** | 787s |
-> | [gemma4-31b-cloud](gemma4-31b-cloud-2026-05-07/) | PASS | A | B | P:A R:A C:A S:A | **PROD-READY** | 197s |
-> | [glm-5-1-cloud](glm-5-1-cloud-2026-05-07/) | PASS | B | A | P:A R:A C:A S:A | **PROD-READY** | 393s |
-> | [minimax-m2-7-cloud](minimax-m2-7-cloud-2026-05-07/) | PASS | A | C | P:C R:C C:A S:B | EVALUATED-ONLY | 752s |
-> | [qwen3-5-397b-cloud](qwen3-5-397b-cloud-2026-05-07/) | PASS | C | A | P:A R:B C:A S:B | EVALUATED-ONLY | 228s |
-> | [qwen3-5-cloud](qwen3-5-cloud-2026-05-07/) | PASS | C | A | P:A R:B C:A S:B | EVALUATED-ONLY | 300s |
-> | [kimi-k2.6-cloud-pre-harden](kimi-k2.6-cloud-2026-05-07-pre-harden/) | PASS | A | A | P:A R:A C:A S:A | PROD-READY (retroactive baseline) | n/a |
+> | [`mix-gemini-PRC-gemma4-S-2026-05-09`](mix-gemini-PRC-gemma4-S-2026-05-09/results.md) | PASS | A | B+ | `P:A R:A C:A S:A−` | **127s ± 6 MAD** | **201s ± 9 MAD** |
+> | [`gemini-3-flash-preview-cloud-2026-05-09`](gemini-3-flash-preview-cloud-2026-05-09/results.md) | PASS | A | C+ (off-topic) | `P:A R:A C:A S:A` | 122–136s | 213s |
+> | [`gemma4-31b-cloud-2026-05-09`](gemma4-31b-cloud-2026-05-09/results.md) | PASS | A | **A** | `P:A R:A C:A S:A` | 121–317s | 408s |
+> | [`deepseek-v4-flash-cloud-2026-05-09`](deepseek-v4-flash-cloud-2026-05-09/results.md) | PASS | B | C+ (UX flip) | `P:A R:A C:A S:A` | 500s | 621s |
+> | [`nemotron-3-super-cloud-2026-05-09`](nemotron-3-super-cloud-2026-05-09/results.md) | PASS | B | D (redundant) | `P:A R:B C:A S:A` | 470s | 818s |
 >
-> **Three PROD-READY labels** — kimi-k2.6, gemma4-31b, glm-5.1 —
-> all hold full `P:A R:A C:A S:A` mix at single-run. Per the §4
-> rubric, the per-query grades floor is Q1 PASS, Q2 ≥ B, Q3 ≥ B;
-> no query > 25 min wall. The recommended on-host config for
-> v1.1.0 (mixed: planner / synthesizer = gemma4:31b-cloud,
-> researcher = gemma4 + glm-5.1, critic = glm-5.1 + gemma4 at
-> xmax, synthesizer fallback = glm-5.1) draws on the relative
-> strengths surfaced here.
+> **Recommended default for both solidPC + pandorum** (live as of 2026-05-09):
+> the heterogeneous mix — `gemini-3-flash-preview:cloud` for P/R/C +
+> `gemma4:31b-cloud` for synthesis. Tightest N=3 spread of any 2026-05-09
+> label (8% total wall variance), and the only label-set whose synthesizer
+> consistently distinguishes "coherent but degraded" from "failed" in Q1
+> framing.
 >
-> **Three EVALUATED-ONLY labels** are usable in heterogeneous
-> mixes for specific roles where their per-role grade is A — most
-> notably **minimax-m2.7 as a critic** (its `needs_more_research`
-> verdict on audit-high was the most diagnostically useful in the
-> sweep) and **qwen3.5:397b / qwen3.5 as planner** (clean
-> numbered plans with concrete file targets at fast wall times).
-> Don't use them as synthesizer for enumeration-heavy queries —
-> qwen3 fabricates "commit doesn't exist" claims; minimax hedges
-> "files don't exist" leads.
+> **For code-diff hardening review PRs** specifically: pick **pure
+> `gemma4:31b-cloud`** single-shot. It is the only model whose Q3
+> recommendations consistently pass the v1.2 actionability sub-rubric
+> (see [Q3 actionability audit](Q3-actionability-audit-2026-05-09.md));
+> every other PROD-READY label produces Q3 recos that grade A on shape
+> but turn out **redundant** (nemotron-3-super), **regressive** (qwen3-coder-next:
+> EVALUATED-ONLY), **off-topic** (gemini), or **UX-contentious** (deepseek-v4-flash,
+> kimi-k2.6) when checked against live code. The mix preserves most of
+> gemma4's synthesis quality but its Q3 ceiling is B+ — when the work
+> *is* the Q3 reco, prefer pure gemma4.
+>
+> **2026-05-07 single-run labels** (kimi-k2.6, glm-5.1, minimax-m2.7,
+> qwen3.5*, kimi-k2.6-pre-harden, original gemma4-31b) are retained as
+> historical anchors below but are not directly comparable to v1.1.0
+> sweep data per [§6.2](EVALUATION.md). Their full results and grades
+> live in the [Scoreboard](#scoreboard) section.
 >
 > For "which model should I pick?" guidance see
-> [`../consultants.md` § Picking models](../consultants.md#picking-models);
+> [Cheapest A-or-better per role](#cheapest-a-or-better-per-role) below
+> and [`../consultants.md` § Picking models](../consultants.md#picking-models);
 > for the protocol see [`EVALUATION.md`](EVALUATION.md).
 
 This directory contains per-label benchmark runs of the canonical
@@ -161,52 +165,121 @@ invocation of the role) across all 3 runs of each label, parsed
 from each query's `waterfall.txt`. The 2026-05-07 row is single-run
 and lower-confidence by §5; the 2026-05-09 rows are N=3.
 
-Per-role wall medians on 2026-05-09 N=3 labels (per-fire, all queries pooled):
-
-| Model                              | Planner | Researcher | Critic | Synthesizer |
-|---|---|---|---|---|
-| `gemini-3-flash-preview:cloud`     | **5.7s**  | **39.8s**   | **8.4s**  | **6.3s**     |
-| `deepseek-v4-flash:cloud`          | 8.9s    | 222s       | 28.9s  | 16.0s       |
-| `nemotron-3-super:cloud`           | 13.7s   | 216s       | 36.8s  | 9.2s        |
-
-**Cheapest A pick per role (across all PROD-READY labels — 2026-05-07 + 2026-05-09):**
-
 > **Note on engine behavior:** the `/consultants` engine has **no per-question
 > classifier** — `consultants/config.py:RoleConfig` pins one model per role
 > at config time, and that assignment applies to every consultation until
 > `claude-consultants config set-role` rewrites it. The picks below are
 > static config recommendations, not per-question routing.
 
-| Role | Pick | Median wall (per-fire) | Notes |
-|---|---|---|---|
-| Planner     | **`gemini-3-flash-preview:cloud`** (N=3) | 5.7s | Cheapest A across the cohort; tie with gemma4 (5.9s, also N=3); items consistently concrete with verification steps |
-| Researcher  | **`gemini-3-flash-preview:cloud`** (N=3) | 39.8s | 4× faster per fire than gemma4 (168s); every claim cites `path:line` |
-| Critic      | **`gemini-3-flash-preview:cloud`** (N=3) | 8.4s | Cheapest A; for cross-round contradiction-catching specifically `glm-5.1:cloud` was A+ on the 2026-05-07 single-run sweep — keep as a specialist critic if you need that depth |
-| Synthesizer | **see verdict below** | — | The single-default question — gemini gives the cheapest answer-shaped output but its Q3 hardening recommendations grade C+ on correctness (off-topic). gemma4 produces actionable Q3 recommendations (correctness A) at ~35% higher per-fire wall (8.5s vs 6.3s). Pick depends on use profile. |
+#### Winner matrix (2026-05-09 N=3 cohort + mix)
 
-**Verdict — single static default per role.**
+Three columns, three different optima per role. Bold = winner. "Per-fire" = one
+invocation of the role; "per-consult" = sum across one full consultation
+(researcher's per-consult is dominated by fan-out lanes, so the per-fire wall
+is the speed metric and the per-consult sum is the cost metric).
 
-The `/consultants` engine doesn't classify the question, so picking
-"gemini for general / gemma4 for hardening" would mean manually
-running `claude-consultants config set-role synthesizer …` before
-each consultation. That's operationally unrealistic. Pick **one**
-synthesizer and live with the tradeoff, or run a heterogeneous mix
-(see below).
+| Role | Cheapest wall (per-fire) | Cheapest tokens (per-consult, p+c) | Best quality | Recommended pick |
+|---|---|---|---|---|
+| Planner     | **gemma4 5.9s** ≈ gemini 6.0s ≈ mix 5.2s | **gemma4** 280p + 521c | A-tie (5/5 PROD-READY labels) | gemma4 (cheapest tokens at A) |
+| Researcher  | **gemini 14.3s/fire**, 3× faster than gemma4 (45.7s) | **gemma4** 130k+2.5k vs gemini 189k+7.4k | gemini A (richest cites) | gemini (4× per-consult wall improvement, +45% tokens — fair trade) |
+| Critic      | **gemini 9.0s** | **gemini** 2.5k + 1.7k | A-tie | gemini |
+| Synthesizer | **gemini 7.5s** | **nemotron** 1.1k+530 (very light) | **gemma4** (only model with A-grade Q3 hardening; mix lands B+) | **gemma4** for hardening-PR review; gemini if Q3 reco quality doesn't matter |
 
-**If consultations are mostly general questions** (smoke / audit /
-how-does-X-work / cross-cutting reviews) → pin everything to
-`gemini-3-flash-preview:cloud`. Cheapest A on every role; 7% run-to-run
-wall variance; ~3× faster than the alternative on the dominant
-researcher role.
+#### Per-role detail tables (all 5 N=3 PROD-READY labels)
 
-**If consultations include hardening-style questions** ("trace this
-failure path, propose a fix") → pin everything to `gemma4:31b-cloud`
-or run the heterogeneous mix below. gemma4 is the only PROD-READY
-model whose Q3 recommendations consistently pass the v1.2 correctness
-sub-rubric (see [Q3 actionability audit](Q3-actionability-audit-2026-05-09.md));
-the other PROD-READY models produce recommendations that grade
-A on shape but turn out redundant, regressive, off-topic, or
-contentious-UX-flips when checked against live code.
+Medians across 3 runs × all queries that fire the role. Critic only fires on
+audit-high (high effort), so its `n` is small (2–3 fires across the N=3 sweep).
+
+**Planner** — fires once per consult.
+
+| Model | Wall/fire | p_tok/fire | c_tok/fire | Wall/consult | p_tok/consult | c_tok/consult | Grade |
+|---|---|---|---|---|---|---|---|
+| `gemini-3-flash-preview:cloud`     | 6.0s | 266 | 960 | 6.0s | 266 | 960 | A |
+| `gemma4:31b-cloud`                 | **5.9s** | **280** | **521** | **5.9s** | **280** | **521** | A |
+| `deepseek-v4-flash:cloud`          | 23.0s | 276 | 740 | 23.0s | 276 | 740 | A |
+| `nemotron-3-super:cloud`           | 8.9s | 285 | 792 | 8.9s | 285 | 792 | A |
+| `mix-gemini-PRC-gemma4-S` (gemini) | 5.2s | 266 | 637 | 5.2s | 266 | 637 | A |
+
+**Researcher** — fires once per planner-emitted research item; the `consult`
+column sums all fan-out lanes for one consultation (research_rounds × items).
+
+| Model | Wall/fire | p_tok/fire | c_tok/fire | Wall/consult | p_tok/consult | c_tok/consult | Grade |
+|---|---|---|---|---|---|---|---|
+| `gemini-3-flash-preview:cloud`     | **14.3s** | 46.7k | 2211 | **42.7s** | 189k | 7405 | A |
+| `gemma4:31b-cloud`                 | 45.7s | **42.3k** | **605** | 168.1s | **130k** | **2487** | A |
+| `deepseek-v4-flash:cloud`          | 80.8s | 50.4k | 2490 | 215.6s | 161k | 8938 | A |
+| `nemotron-3-super:cloud`           | 39.8s | 44.9k | 2100 | 220.2s | 140k | 6979 | B |
+| `mix-gemini-PRC-gemma4-S` (gemini) | 16.4s | 45.9k | 2283 | 43.6s | 145k | 6508 | A |
+
+**Critic** — fires once per audit-high consult (ratchet on high effort only).
+
+| Model | Wall/fire | p_tok/fire | c_tok/fire | Wall/consult | p_tok/consult | c_tok/consult | Grade |
+|---|---|---|---|---|---|---|---|
+| `gemini-3-flash-preview:cloud`     | **9.0s** | **2514** | 1740 | **9.0s** | **2514** | 1740 | A |
+| `gemma4:31b-cloud`                 | 18.8s | 3187 | **1044** | 18.8s | 3187 | **1044** | A |
+| `deepseek-v4-flash:cloud`          | 34.5s | 5720 | 764 | 34.5s | 5720 | 764 | A |
+| `nemotron-3-super:cloud`           | 27.5s | 31699 | 504 | 27.5s | 31699 | 504 | A |
+| `mix-gemini-PRC-gemma4-S` (gemini) | 12.8s | 2609 | 2199 | 12.8s | 2609 | 2199 | A |
+
+**Synthesizer** — fires once per consult.
+
+| Model | Wall/fire | p_tok/fire | c_tok/fire | Wall/consult | p_tok/consult | c_tok/consult | Grade (incl. Q3 actionability) |
+|---|---|---|---|---|---|---|---|
+| `gemini-3-flash-preview:cloud`     | **7.5s** | 1868 | 1416 | **7.5s** | 1868 | 1416 | A on shape; **C+ on Q3** (off-topic) |
+| `gemma4:31b-cloud`                 | 8.5s | 2161 | 1044 | 8.5s | 2161 | 1044 | A on shape; **A on Q3** (only label) |
+| `deepseek-v4-flash:cloud`          | 23.2s | 3332 | 704 | 23.2s | 3332 | 704 | A on shape; **C+ on Q3** (UX flip) |
+| `nemotron-3-super:cloud`           | 8.4s | **1118** | **530** | 8.4s | **1118** | **530** | A on shape; **D on Q3** (redundant) |
+| `mix-gemini-PRC-gemma4-S` (gemma4) | 18.6s | 1890 | 708 | 18.6s | 1890 | 708 | A on shape; **B+ on Q3** (median across r1/r2/r3) |
+
+The mix's synthesizer wall (18.6s) is **higher** than pure gemma4 (8.5s) because
+gemma4 there processes a richer `research` list produced by the gemini researcher
+— more material to summarise. Total per-consult wall is still the fastest A-grade
+in the cohort (201s median vs gemma4's 408s).
+
+#### Reading the matrix — one paragraph per role
+
+**Planner.** The cheapest role, dominated by output tokens (no big context).
+gemma4 is the per-token winner at 521 c_tok/fire (vs gemini's 960) but the wall
+delta is in the noise. Any of the 5 PROD-READY labels is A here.
+
+**Researcher.** The dominant role by wall AND by tokens — researcher per-consult
+totals are 4–8× heavier than synthesizer. Speed picks **gemini** (14.3s/fire,
+3× faster than gemma4); per-consult tokens pick **gemma4** (130k+2.5k vs
+gemini's 189k+7.4k — gemma4 emits more concise notes). Net: gemini wins because
+its 4× wall improvement translates directly to user-perceived latency, and the
++45% prompt token cost is small in absolute dollars.
+
+**Critic.** Only fires on audit-high. **gemini wins on every dimension** (wall,
+tokens, grade-A). nemotron's per-fire prompt token count (31.7k!) is an outlier
+— it re-reads the whole research dump in critic role rather than relying on the
+state-passed summary. Avoid for cost-sensitive deployments.
+
+**Synthesizer — the role that decides everything.** Wall: gemini 7.5s wins.
+Tokens: nemotron 1118p + 530c wins (it produces terse summaries — fits its
+critic-style minimalism). Quality: **gemma4 is the only label with an A-grade
+Q3 hardening recommendation** across runs; every other PROD-READY synthesizer
+produces Q3 recos that grade A on shape but **fail the v1.2 correctness
+sub-rubric** (gemini off-topic, deepseek-v4-flash UX flip, nemotron redundant).
+The mix lands B+ on Q3 — gemma4 still doing synthesis, but over gemini's
+research notes rather than its own.
+
+#### Decision tree
+
+**If your consultations are mostly general questions** (smoke / audit /
+how-does-X-work / cross-cutting reviews) → pick the **N=3 mix**. Cheapest
+A-grade total wall (201s median ± 9 MAD), and the synthesizer still produces
+the only "coherent but degraded" framing in the cohort.
+
+**If your consultations are hardening-PR reviews** ("trace this failure path,
+propose a fix") → pin everything to `gemma4:31b-cloud`. The only model whose
+Q3 recommendations consistently pass the v1.2 actionability sub-rubric (see
+[Q3 actionability audit](Q3-actionability-audit-2026-05-09.md)). Costs you
+~2× total wall vs the mix (408s median vs 201s) — worth it when the work
+*is* the recommendation.
+
+**If both, and you can't switch config per call** (the engine has no
+per-question classifier — see note above) → pick the mix as default and run
+pure-gemma4 manually for hardening PRs.
 
 **Heterogeneous mix — N=3-confirmed PROD-READY ([`mix-gemini-PRC-gemma4-S-2026-05-09`](mix-gemini-PRC-gemma4-S-2026-05-09/results.md)):**
 
