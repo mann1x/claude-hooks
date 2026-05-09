@@ -110,17 +110,24 @@ git tag (commit `83cfd3b`) on engine HEAD `83cfd3b`, in the
 **06:00–09:00 UTC window** (sweep started 07:49 UTC, ended 08:39 UTC).
 Cloud model snapshots captured to each label's `models.json`.
 
-| Label | Model | Effort scheme | Runs | Smoke | Audit-med | Audit-hi | Total c-tok | Verdict |
+> **Q3 grades regraded 2026-05-09 with the v1.2 actionability sub-rubric**
+> ([Q3 actionability audit](Q3-actionability-audit-2026-05-09.md)).
+> The Q3 column below shows `<old shape grade> → <new correctness grade>`
+> where they differ. Headline finding: only `gemma4:31b-cloud` produces
+> consistently actionable Q3 recommendations across both sweeps.
+
+| Label | Model | Effort scheme | Runs | Smoke | Audit-med | Audit-hi (shape→correctness) | Total c-tok | Verdict |
 |---|---|---|---|---|---|---|---|---|
-| [`kimi-k2.6-cloud-2026-05-07`](kimi-k2.6-cloud-2026-05-07/results.md) | `kimi-k2.6:cloud` (every role) | medium / medium / high | 1/3 | 257s · 4.1k · PASS | 213s · 12.3k · A | 787s · 34.3k · A | 50.7k | PROD-READY (single-run) |
-| [`gemma4-31b-cloud-2026-05-07`](gemma4-31b-cloud-2026-05-07/results.md) | `gemma4:31b-cloud` (every role) | medium / medium / high | 1/3 | 121s · 0.9k · PASS | 75s · 2.7k · A | 197s · 8.9k · A | 12.5k | PROD-READY (single-run) — **best speed/quality** |
-| [`glm-5-1-cloud-2026-05-07`](glm-5-1-cloud-2026-05-07/results.md) | `glm-5.1:cloud` (every role) | medium / medium / high | 1/3 | 31s · 1.1k · PASS | 60s · 4.6k · B | 393s · 10.7k · A | 16.4k | PROD-READY (single-run) — sharp reasoning, B on retrieval |
+| [`kimi-k2.6-cloud-2026-05-07`](kimi-k2.6-cloud-2026-05-07/results.md) | `kimi-k2.6:cloud` (every role) | medium / medium / high | 1/3 | 257s · 4.1k · PASS | 213s · 12.3k · A | 787s · 34.3k · A → **C+** (UX flip — 3-way status, contentious) | 50.7k | PROD-READY (single-run); Q3 reco contentious |
+| [`gemma4-31b-cloud-2026-05-07`](gemma4-31b-cloud-2026-05-07/results.md) | `gemma4:31b-cloud` (every role) | medium / medium / high | 1/3 | 121s · 0.9k · PASS | 75s · 2.7k · A | 197s · 8.9k · **A** (kept — modify `build_synthesizer_messages` for failure-aware prompt) | 12.5k | PROD-READY (single-run) — **only 2026-05-07 model with actionable Q3 reco** |
+| [`glm-5-1-cloud-2026-05-07`](glm-5-1-cloud-2026-05-07/results.md) | `glm-5.1:cloud` (every role) | medium / medium / high | 1/3 | 31s · 1.1k · PASS | 60s · 4.6k · B | 393s · 10.7k · A → **B+** (additive `error` reducer — partial fix, real improvement) | 16.4k | PROD-READY (single-run) — sharp reasoning |
 | [`minimax-m2-7-cloud-2026-05-07`](minimax-m2-7-cloud-2026-05-07/results.md) | `minimax-m2.7:cloud` (every role) | medium / medium / high | 1/3 | 46s · 0.7k · PASS | 106s · 3.4k · F | 757s · 22.4k · F | 26.5k | EVALUATED-ONLY — Q3 hallucinated paths |
-| [`qwen3-5-397b-cloud-2026-05-07`](qwen3-5-397b-cloud-2026-05-07/results.md) | `qwen3.5:397b-cloud` (every role) | medium / medium / high | 1/3 | 91s · 4.7k · PASS | 91s · 9.0k · C | 242s · 13.1k · F | 26.8k | EVALUATED-ONLY — wrong commit-existence claim, no Q3 rec |
-| [`qwen3-5-cloud-2026-05-07`](qwen3-5-cloud-2026-05-07/results.md) | `qwen3.5:cloud` (every role) | medium / medium / high | 1/3 | 106s · 9.4k · PASS | 91s · 9.1k · C | 303s · 13.2k · B | 31.8k | EVALUATED-ONLY — same retrieval gap as :397b, sharper Q3 |
-| [`gemini-3-flash-preview-cloud-2026-05-09`](gemini-3-flash-preview-cloud-2026-05-09/results.md) | `gemini-3-flash-preview:cloud` (every role) | medium / medium / high | **3/3** | 31s median · PASS | 45s median · A | 122–136s · A− | ~33k median | **PROD-READY** — tightest variance of cohort (7% spread); fastest A on Q3 |
-| [`deepseek-v4-flash-cloud-2026-05-09`](deepseek-v4-flash-cloud-2026-05-09/results.md) | `deepseek-v4-flash:cloud` (every role) | medium / medium / high | **3/3** | 76s median · PASS | 167s median · B | 500s median · A | ~30k median | **PROD-READY** — slow-but-thorough; r3 elevated wall flagged §7-OUTLIER but no per-query outlier |
-| [`nemotron-3-super-cloud-2026-05-09`](nemotron-3-super-cloud-2026-05-09/results.md) | `nemotron-3-super:cloud` (every role) | medium / medium / high | **3/3** | 121s median · PASS | 272s median · A | 470s median · A | ~26k median | **PROD-READY** — only model whose Q3 hardening targets the right layer; widest wall variance (64% spread) |
+| [`qwen3-5-397b-cloud-2026-05-07`](qwen3-5-397b-cloud-2026-05-07/results.md) | `qwen3.5:397b-cloud` (every role) | medium / medium / high | 1/3 | 91s · 4.7k · PASS | 91s · 9.0k · C | 242s · 13.1k · F | 26.8k | EVALUATED-ONLY — wrong commit-existence claim, no Q3 reco |
+| [`qwen3-5-cloud-2026-05-07`](qwen3-5-cloud-2026-05-07/results.md) | `qwen3.5:cloud` (every role) | medium / medium / high | 1/3 | 106s · 9.4k · PASS | 91s · 9.1k · C | 303s · 13.2k · B → **C** (remove `error` from tombstone — silences failure signal) | 31.8k | EVALUATED-ONLY |
+| [`gemini-3-flash-preview-cloud-2026-05-09`](gemini-3-flash-preview-cloud-2026-05-09/results.md) | `gemini-3-flash-preview:cloud` (every role) | medium / medium / high | **3/3** | 31s median · PASS | 45s median · A | 122–136s · A− → **C+** (off-topic — fixes `research_rounds_used`, not the failure mode) | ~33k median | **PROD-READY** — tightest variance, but Q3 reco off-topic |
+| [`deepseek-v4-flash-cloud-2026-05-09`](deepseek-v4-flash-cloud-2026-05-09/results.md) | `deepseek-v4-flash:cloud` (every role) | medium / medium / high | **3/3** | 76s median · PASS | 167s median · B | 500s median · A → **C+** (UX flip — same as kimi) | ~30k median | **PROD-READY** — Q3 reco contentious |
+| [`nemotron-3-super-cloud-2026-05-09`](nemotron-3-super-cloud-2026-05-09/results.md) | `nemotron-3-super:cloud` (every role) | medium / medium / high | **3/3** | 121s median · PASS | 272s median · A | 470s median · A → **D** (REDUNDANT — `researcher_node` already wraps) | ~26k median | **PROD-READY** — Q3 reco redundant |
+| [`gemma4-31b-cloud-2026-05-09`](gemma4-31b-cloud-2026-05-09/results.md) | `gemma4:31b-cloud` (every role) | medium / medium / high | **3/3** | 30–61s · PASS | 76–166s · A | 121–317s · **A** (prompt fix r2 + additive-error r3 — both actionable) | varied | **PROD-READY** — only model with consistently actionable Q3 across runs |
 
 ### Role-suitability matrix
 
@@ -165,19 +172,22 @@ Per-role wall medians on 2026-05-09 N=3 labels (per-fire, all queries pooled):
 
 | Role | Pick | Median wall (per-fire) | Notes |
 |---|---|---|---|
-| Planner     | **`gemini-3-flash-preview:cloud`** (N=3) | 5.7s | Cheapest A across the cohort; faster than gemma4:31b-cloud (~10s, single-run); items consistently concrete with verification steps |
-| Researcher  | **`gemini-3-flash-preview:cloud`** (N=3) | 39.8s | 5–6× faster per fire than the next-fastest A researcher (deepseek-v4-flash 222s, nemotron-3-super 216s); every claim cites `path:line` |
+| Planner     | **`gemini-3-flash-preview:cloud`** (N=3) | 5.7s | Cheapest A across the cohort; tie with gemma4 (5.9s, also N=3); items consistently concrete with verification steps |
+| Researcher  | **`gemini-3-flash-preview:cloud`** (N=3) | 39.8s | 4× faster per fire than the next-fastest A researcher (gemma4 168s, deepseek-v4-flash 222s, nemotron-3-super 216s); every claim cites `path:line` |
 | Critic      | **`gemini-3-flash-preview:cloud`** (N=3) | 8.4s | Cheapest A; for cross-round contradiction-catching specifically `glm-5.1:cloud` was A+ on the 2026-05-07 single-run sweep — keep as a specialist critic if you need that depth |
-| Synthesizer | **`gemini-3-flash-preview:cloud`** (N=3) | 6.3s | Cheapest A; for code-diff hardening recommendations specifically `nemotron-3-super:cloud` and `deepseek-v4-flash:cloud` produce richer Q3 fixes — pick those if hardening-quality > wall |
+| Synthesizer (general) | **`gemini-3-flash-preview:cloud`** (N=3) | 6.3s | Cheapest A for general synthesis (smoke + audit-medium); fast lead-sentence answers with `path:line` cites |
+| Synthesizer (Q3 hardening) | **`gemma4:31b-cloud`** (N=3) | 8.5s | **Only model whose Q3 hardening recommendations actually pass the v1.2 correctness sub-rubric across both sweeps** — see [Q3 actionability audit](Q3-actionability-audit-2026-05-09.md). Other PROD-READY models produce Q3 recommendations that look impressive (concrete `path:line`, code-shaped) but turn out redundant, regressive, off-topic, or contentious-UX-flips when checked against live code. |
 
-**Verdict:** `gemini-3-flash-preview:cloud` is the new default for **every role** at the bench-baseline-2026-05-07 baseline. Wall-cost is the lowest of any PROD-READY candidate and quality is `P:A R:A C:A S:A` confirmed across N=3 runs. Replaces the provisional `gemma4:31b-cloud` recommendation from 2026-05-07 (which was single-run and untested for run-to-run stability — gemini's 7% wall variance across N=3 is the cleanest data point we have).
+**Verdict:** Two-tier default.
 
-**When to deviate from gemini-everywhere:**
+- **Default for general consultations (smoke / audit-medium / non-hardening Q3):** `gemini-3-flash-preview:cloud` — every role. Wall-cost is the lowest of any PROD-READY candidate; quality `P:A R:A C:A S:A` confirmed across N=3 runs; 7% run-to-run wall variance is the cleanest data point.
+- **Synthesizer override when the question is "trace this failure path and propose a hardening change":** `gemma4:31b-cloud`. Slightly slower per-fire (8.5s vs 6.3s) but produces actionable code/prompt fixes consistently — the other PROD-READY models look better on shape but fail correctness.
+
+**When to deviate from this two-tier default:**
 
 - **Critic** specifically catching cross-round contradictions → `glm-5.1:cloud` (only A+ in the 2026-05-07 sweep).
-- **Synthesizer** for code-diff hardening recommendations → `nemotron-3-super:cloud` (only model whose Q3 fix targets the correct fault layer) or `deepseek-v4-flash:cloud` (concrete `path:line` code diff for runner status logic). Both spend more wall but deliver a more actionable fix.
-- **Audit-medium-style retrieval** at deeper coverage → `kimi-k2.6:cloud` or `gemma4:31b-cloud` (both single-run-only, but their A on retrieval was rich).
-- **When wall doesn't matter** → `deepseek-v4-flash:cloud` (B on Q2 with sophisticated reasoning; A on Q3).
+- **Audit-medium-style retrieval** at deeper coverage → `kimi-k2.6:cloud` or `gemma4:31b-cloud` (both N=3 confirmed strong on Q2; gemma4 also runs on the v1.1.0 engine).
+- **When wall doesn't matter** → `deepseek-v4-flash:cloud` (B on Q2 with sophisticated reasoning; A→C+ on Q3 — the C+ is a UX-flip recommendation, not a real bug fix).
 
 **Disqualified from any role at this baseline (any sweep):**
 
@@ -205,14 +215,17 @@ Per-role wall medians on 2026-05-09 N=3 labels (per-fire, all queries pooled):
 > audit-high finding. All 2026-05-09 Q3 grades use the corrected ground truth. The protocol fix
 > ships in a separate commit.
 
-| Label | Total wall | Q1 | Q2 | Q3 | Mix | Verdict |
+**Q3 column shows `<original shape grade> → <v1.2 correctness grade>` where they differ.**
+Re-grading was applied 2026-05-09 per the [Q3 actionability audit](Q3-actionability-audit-2026-05-09.md).
+
+| Label | Total wall | Q1 | Q2 | Q3 (shape→correctness) | Mix | Verdict |
 |---|---|---|---|---|---|---|
-| [`gemini-3-flash-preview-cloud-2026-05-09-screening`](gemini-3-flash-preview-cloud-2026-05-09-screening/results.md) | 213s | PASS | A | A− | `P:A R:A C:A S:A` | **PROD-screen** → N=3 |
-| [`deepseek-v4-flash-cloud-2026-05-09-screening`](deepseek-v4-flash-cloud-2026-05-09-screening/results.md) | 621s | PASS | B | A | `P:A R:A C:A S:A` | **PROD-screen** → N=3 |
-| [`nemotron-3-super-cloud-2026-05-09-screening`](nemotron-3-super-cloud-2026-05-09-screening/results.md) | 818s | PASS | B | A | `P:A R:B C:A S:A` | **PROD-screen** → N=3 |
-| [`deepseek-v4-pro-cloud-2026-05-09-screening`](deepseek-v4-pro-cloud-2026-05-09-screening/results.md) | 1059s | PASS | C | A | `P:A R:B C:A S:A` | EVAL-only (heavy + Q2 weak) |
-| [`qwen3-coder-next-cloud-2026-05-09-screening`](qwen3-coder-next-cloud-2026-05-09-screening/results.md) | 152s | PASS | C | A | `P:B R:C C:A S:A` | EVAL-only (Q2 search-scope bug) |
-| [`mistral-large-3-675b-cloud-2026-05-09-screening`](mistral-large-3-675b-cloud-2026-05-09-screening/results.md) | 832s | PASS | C | C/F | `P:B R:C C:F S:C` | REJECT (fabricated LangGraph param on Q3) |
+| [`gemini-3-flash-preview-cloud-2026-05-09-screening`](gemini-3-flash-preview-cloud-2026-05-09-screening/results.md) | 213s | PASS | A | A− → **C+** (off-topic) | `P:A R:A C:A S:A` | **PROD-screen** → N=3 |
+| [`deepseek-v4-flash-cloud-2026-05-09-screening`](deepseek-v4-flash-cloud-2026-05-09-screening/results.md) | 621s | PASS | B | A → **C+** (UX flip) | `P:A R:A C:A S:A` | **PROD-screen** → N=3 |
+| [`nemotron-3-super-cloud-2026-05-09-screening`](nemotron-3-super-cloud-2026-05-09-screening/results.md) | 818s | PASS | B | A → **D** (REDUNDANT) | `P:A R:B C:A S:A` | **PROD-screen** → N=3 |
+| [`deepseek-v4-pro-cloud-2026-05-09-screening`](deepseek-v4-pro-cloud-2026-05-09-screening/results.md) | 1059s | PASS | C | A → **C+** (UX flip) | `P:A R:B C:A S:A` | EVAL-only (heavy + Q2 weak) |
+| [`qwen3-coder-next-cloud-2026-05-09-screening`](qwen3-coder-next-cloud-2026-05-09-screening/results.md) | 152s | PASS | C | A → **F** (REGRESSIVE — reverts a deliberate fix) | `P:B R:C C:A S:A` | EVAL-only (Q2 search-scope bug; Q3 regressive) |
+| [`mistral-large-3-675b-cloud-2026-05-09-screening`](mistral-large-3-675b-cloud-2026-05-09-screening/results.md) | 832s | PASS | C | F (fabricated LangGraph param) | `P:B R:C C:F S:C` | REJECT |
 | [`nemotron-3-nano-30b-cloud-2026-05-09-screening`](nemotron-3-nano-30b-cloud-2026-05-09-screening/results.md) | 167s | **FAIL** | B | C | `P:C R:C C:C S:F` | REJECT (smoke synthesis refused despite evidence) |
 
 ### Observations

@@ -131,13 +131,47 @@ No grep-able ground truth. Graded against four required claims.
 
 | Grade | Criterion |
 |---|---|
-| **A** | All 4 claims present and correctly cited with `path:line`; recommendation includes a code-shaped change (not just prose) |
-| **B** | 3 of 4 claims correct; recommendation cites a real file but is vague about the change |
-| **C** | 1-2 of 4 claims correct; recommendation is generic ("add try/except") with no path:line |
-| **F** | Status `failed`, OR no recommendation, OR claims hand-waved without citations, OR fabricated `path:line` references |
+| **A** | All 4 claims present and correctly cited with `path:line`; recommendation is code-shaped (not just prose) AND **passes the actionability sub-rubric below** |
+| **B** | 3 of 4 claims correct; recommendation cites a real file but is vague, OR recommendation is concrete but only partially addresses the failure mode (per actionability sub-rubric) |
+| **C** | 1-2 of 4 claims correct, OR recommendation is generic ("add try/except") with no `path:line`, OR recommendation compiles but is REDUNDANT / off-topic / a contentious UX choice rather than a bug fix |
+| **F** | Status `failed`, OR no recommendation, OR claims hand-waved without citations, OR fabricated `path:line` references, OR recommendation references a parameter/symbol that does not exist (e.g. fabricated function args), OR recommendation is REGRESSIVE (would revert a deliberate prior fix that an in-code comment documents as the cure for a previous audit-high finding) |
 
 A grade of **A** on Q3 is the bar a frontier model should hit. Mid-tier
 models will typically land at **B** or **C**.
+
+#### Actionability sub-rubric (added v1.2)
+
+The shape-only Q3 grade (v1.0/v1.1) gave A to recommendations that were
+redundant, off-topic, or regressive. The 2026-05-09 audit at
+`docs/benchmarks/Q3-actionability-audit-2026-05-09.md` re-graded every
+Q3 across both prior sweeps and reshuffled the leaderboard.
+
+To be A-graded a Q3 recommendation must satisfy BOTH:
+
+1. **Compiles cleanly against live code.** The suggested edit applies to
+   the current `consultants/engine/*.py` and `consultants/server/runner.py`
+   without invoking a fabricated function/parameter. Stale `path:line`
+   references are tolerated if the *intent* is unambiguous.
+
+2. **Addresses the failure mode the answer described.** The Q3 question
+   asks the model to trace a specific failure path and propose a fix.
+   A recommendation that compiles but fixes a different bug fails this
+   dimension.
+
+Common patterns that DO NOT pass the sub-rubric:
+
+- **Redundant** — proposes a guard that already exists at another layer
+  (e.g. wrapping a function whose body already has the same try/except).
+- **Regressive** — proposes reverting a deliberate prior fix. Look for
+  in-code comments that document the current behavior as the response to
+  a previous audit-high finding; the model probably didn't read them.
+- **Off-topic** — picks a different reducer / state field / function to
+  modify than the one whose behavior the answer just described.
+- **Contentious UX flip** — proposes changing the meaning of a
+  user-facing field (e.g. flipping `status=failed` semantics). The
+  change is technically correct but reshapes the contract for every
+  downstream consumer; it's a design discussion, not a bug fix. These
+  drop to C+ even when shape-A.
 
 ---
 
@@ -507,12 +541,23 @@ of pointers.
 
 ---
 
-**Protocol version:** 1.1 (2026-05-09)
+**Protocol version:** 1.2 (2026-05-09)
 **Authoritative file:** `docs/benchmarks/EVALUATION.md`
 **Last reviewed:** 2026-05-09
 
 ### Changelog
 
+- **1.2 (2026-05-09)** — Q3 grading gains a correctness sub-rubric.
+  The v1.0/v1.1 shape-only grade gave A to several recommendations
+  that turn out to be redundant, regressive, off-topic, or
+  contentious UX flips when checked against the live code. The new
+  sub-rubric requires both (a) compiles cleanly against live code
+  and (b) addresses the failure mode the answer described. See the
+  audit at `docs/benchmarks/Q3-actionability-audit-2026-05-09.md`
+  which re-grades every Q3 across both prior sweeps and reshuffles
+  the leaderboard. Headline finding: only `gemma4:31b-cloud`
+  consistently produces actionable Q3 recommendations across both
+  sweeps and three runs at the v1.1.0 engine HEAD.
 - **1.1 (2026-05-09)** — Q3 claim #3 corrected to reflect current code:
   the synthesizer **does** see the failure tombstone via the additive
   `research` reducer + `build_synthesizer_messages`, not the inverse.

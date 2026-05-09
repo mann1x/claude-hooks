@@ -1,0 +1,35 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/gemma4-31b-cloud-2026-05-09-r2/smoke.transcript.db
+
+sid: csl-2026-05-09-0915-f775
+status: completed
+total wall: 24.3s
+
+  planner       node=4.2s    (entries) llm=1x=4.2s    tool=0x=0ms     tok=p251/c331
+      LLM round=1 model=gemma4:31b-cloud             4.2s  p=251    c=331   
+
+  researcher    node=43.6s   (3xentries) llm=9x=43.5s   tool=11x=25ms    tok=p224823/c955
+      LLM round=1 lane=1 model=gemma4:31b-cloud             7.6s  p=18137  c=109   
+      LLM round=1 lane=2 model=gemma4:31b-cloud             6.7s  p=17912  c=198   
+      LLM round=1 lane=1 model=gemma4:31b-cloud             6.2s  p=17916  c=178   
+      LLM round=1 lane=0 model=gemma4:31b-cloud             5.3s  p=26962  c=206   
+      LLM round=1 lane=0 model=gemma4:31b-cloud             4.7s  p=39802  c=35    
+      LLM round=1 lane=1 model=gemma4:31b-cloud             4.0s  p=37056  c=33    
+      LLM round=1 lane=0 model=gemma4:31b-cloud             3.5s  p=17932  c=76    
+      LLM round=1 lane=2 model=gemma4:31b-cloud             3.4s  p=30973  c=35    
+      LLM round=1 lane=2 model=gemma4:31b-cloud             2.2s  p=18133  c=85    
+      tool grep               x1      25ms chars=24092
+      tool list_files         x6       0ms chars=860
+      tool read_file          x4       0ms chars=130282
+
+  synthesizer   node=2.2s    (entries) llm=1x=2.2s    tool=0x=0ms     tok=p533/c305
+      LLM round=1 model=gemma4:31b-cloud             2.2s  p=533    c=305   
+
+totals
+  wall                  24.3s
+  sum of node spans     50.0s
+  sum of LLM call time  50.0s  (205.7% of wall)
+  sum of tool call time 25ms
+  total prompt tokens   225607
+  total completion tok  1591
