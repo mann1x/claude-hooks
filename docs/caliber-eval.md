@@ -6,28 +6,39 @@ caliber driven by `claude-cli` on the four rubric axes that gemma
 historically lagged on (skill count, populated `paths:` frontmatter,
 file references in skill bodies, score-refine convergence).
 
-The benchmark, baseline data, scorer, run logs, and per-bench reports
-all live **outside this repo** at:
+## Where to read
 
-    /srv/dev-disk-by-label-opt/dev/caliber-eval/
+- **Summary results (versioned, ships with the code)** —
+  [`docs/caliber-eval-results/`](caliber-eval-results/) in this repo.
+  One `<label>.json` (scorer output) + one `<label>-summary.md`
+  (narrative comparison vs baseline) per bench. Index + per-label
+  one-liner table at [`caliber-eval-results/README.md`](caliber-eval-results/README.md).
+  This is what a future reader looks at first.
+- **Full workbench (live, off-repo)** —
+  `/srv/dev-disk-by-label-opt/dev/caliber-eval/`. Holds the rsynced
+  project workspaces, run logs, fake-HOME isolation dirs, and the
+  full `claude-cli-artifacts/` snapshot (17 MB) used as ground truth
+  for diffs. Read here when you need to actually rerun a bench, look
+  at a transcript, or diff the on-disk artefacts a model produced.
 
-Docs in that directory:
+Workbench docs:
 
 - [`PROTOCOL.md`](file:///srv/dev-disk-by-label-opt/dev/caliber-eval/PROTOCOL.md)
   — full reproduce recipe (workspace prep, fake-HOME isolation, dedicated
-  proxy, run launcher, scoring, comparison). Read first.
+  proxy, run launcher, scoring, **§7 publish summary results back to this
+  repo**, tear down). Read first.
 - [`README.md`](file:///srv/dev-disk-by-label-opt/dev/caliber-eval/README.md)
   — entry point + directory layout + TL;DR.
-- `reports/REFERENCE-claude-cli.md` — the 2026-04-29 baseline (claude-hooks
-  @ `b3fcb1f`, 8 skills, score 94/100, wall 37m 14s) that any non-claude-cli
-  model is graded against.
-- `reports/<label>.json` — scorer output per benchmarked workspace.
+- `reports/<label>-summary.md` + `reports/<label>.json` — the
+  authoritative copies (the in-repo `caliber-eval-results/` versions are
+  copies of these, refreshed after each run per PROTOCOL §7).
 
-Why outside the repo: the workspace dirs (`gemma4-31b-cloud/` etc.) are
-17+ MB rsync'd copies of claude-hooks itself, which would balloon the
-repo. The workspace + report layout is workbench-style (logs, scratch,
-fake-home dirs, transient artefacts) that doesn't belong under version
-control.
+Why split workbench-vs-results: the workspace dirs (`gemma4-31b-cloud/`
+etc.) are 250+ MB rsync'd copies of claude-hooks (with `.git`); logs
+accumulate per run; `claude-cli-artifacts/` is 17 MB. None of that
+belongs under version control. The lightweight `<label>.json` +
+`<label>-summary.md` pair (a few KB each) **does** belong with the
+code and is committed via [PROTOCOL §7](file:///srv/dev-disk-by-label-opt/dev/caliber-eval/PROTOCOL.md).
 
 ## Cross-references in this repo
 

@@ -1,0 +1,97 @@
+{
+  "label": "gemma4-31b-cloud",
+  "project": "/srv/dev-disk-by-label-opt/dev/caliber-eval/gemma4-31b-cloud",
+  "skill_count": 5,
+  "skills_with_paths_fm": 2,
+  "total_paths_fm_entries": 4,
+  "total_file_line_refs_in_bodies": 0,
+  "total_bare_file_refs_in_bodies": 8,
+  "body_chars": {
+    "min": 1963,
+    "median": 2892,
+    "max": 7446,
+    "total": 18316
+  },
+  "skills": [
+    {
+      "name": "consultants-management",
+      "description_len": 305,
+      "paths_frontmatter": [
+        "consultants/**",
+        "config/claude-hooks.json"
+      ],
+      "paths_count": 2,
+      "body_chars": 3886,
+      "file_line_refs": [],
+      "file_line_refs_count": 0,
+      "bare_file_refs": [
+        "consultants/engine/council.py",
+        "consultants/engine/recorder.py",
+        "consultants/config.py"
+      ],
+      "bare_file_refs_count": 3
+    },
+    {
+      "name": "find-skills",
+      "description_len": 367,
+      "paths_frontmatter": [],
+      "paths_count": 0,
+      "body_chars": 1963,
+      "file_line_refs": [],
+      "file_line_refs_count": 0,
+      "bare_file_refs": [],
+      "bare_file_refs_count": 0
+    },
+    {
+      "name": "save-learning",
+      "description_len": 331,
+      "paths_frontmatter": [],
+      "paths_count": 0,
+      "body_chars": 2129,
+      "file_line_refs": [],
+      "file_line_refs_count": 0,
+      "bare_file_refs": [],
+      "bare_file_refs_count": 0
+    },
+    {
+      "name": "setup-caliber",
+      "description_len": 273,
+      "paths_frontmatter": [],
+      "paths_count": 0,
+      "body_chars": 7446,
+      "file_line_refs": [],
+      "file_line_refs_count": 0,
+      "bare_file_refs": [
+        ".github/workflows/caliber-sync.yml"
+      ],
+      "bare_file_refs_count": 1
+    },
+    {
+      "name": "setup-compile-aware",
+      "description_len": 259,
+      "paths_frontmatter": [
+        ".claude-hooks/lsp-engine.toml",
+        "claude_hooks/lsp_engine/**"
+      ],
+      "paths_count": 2,
+      "body_chars": 2892,
+      "file_line_refs": [],
+      "file_line_refs_count": 0,
+      "bare_file_refs": [
+        "pyproject.toml",
+        "claude_hooks/lsp_engine/compile.py",
+        ".claude-hooks/lsp-engine.toml",
+        "claude_hooks/lsp_engine/config.py"
+      ],
+      "bare_file_refs_count": 4
+    }
+  ],
+  "artifacts": {
+    "CLAUDE.md": {
+      "kind": "file",
+      "chars": 6104,
+      "file_line_refs_count": 0,
+      "bare_file_refs_count": 25
+    }
+  }
+}
