@@ -1,0 +1,43 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /shared/dev/claude-hooks/docs/benchmarks/mix-gemini-PRC-gemma4-S-2026-05-09-r2/audit-medium.transcript.db
+
+sid: csl-2026-05-09-1020-7cd4
+status: completed
+total wall: 61.0s
+
+  planner       node=4.5s    (entries) llm=1x=4.5s    tool=0x=0ms     tok=p266/c637
+      LLM round=1 model=gemini-3-flash-preview:cloud    4.5s  p=266    c=637   
+
+  researcher    node=55.8s   (3xentries) llm=15x=1.5m    tool=34x=314ms   tok=p548731/c12740
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud   13.9s  p=69577  c=2435  
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud   10.6s  p=71252  c=1864  
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    8.9s  p=28862  c=1531  
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    8.7s  p=62042  c=1240  
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    8.2s  p=69783  c=1145  
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    6.0s  p=26768  c=752   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    5.1s  p=26258  c=596   
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    5.0s  p=31000  c=589   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    5.0s  p=24179  c=706   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    4.1s  p=62793  c=566   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    3.7s  p=9366   c=458   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    3.1s  p=1109   c=343   
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    2.5s  p=63461  c=56    
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    2.2s  p=1134   c=234   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    1.9s  p=1147   c=225   
+      tool grep               x7     312ms chars=173197
+      tool glob               x1       2ms chars=44
+      tool survey_project     x3       0ms chars=11214
+      tool list_files         x1       0ms chars=1132
+      tool read_file          x22      0ms chars=240476
+
+  synthesizer   node=24.0s   (entries) llm=1x=24.0s   tool=0x=0ms     tok=p1890/c708
+      LLM round=1 model=gemma4:31b-cloud            24.0s  p=1890   c=708   
+
+totals
+  wall                  61.0s
+  sum of node spans     1.4m
+  sum of LLM call time  2.0m  (192.5% of wall)
+  sum of tool call time 314ms
+  total prompt tokens   550887
+  total completion tok  14085

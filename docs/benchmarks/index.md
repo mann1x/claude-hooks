@@ -128,6 +128,7 @@ Cloud model snapshots captured to each label's `models.json`.
 | [`deepseek-v4-flash-cloud-2026-05-09`](deepseek-v4-flash-cloud-2026-05-09/results.md) | `deepseek-v4-flash:cloud` (every role) | medium / medium / high | **3/3** | 76s median · PASS | 167s median · B | 500s median · A → **C+** (UX flip — same as kimi) | ~30k median | **PROD-READY** — Q3 reco contentious |
 | [`nemotron-3-super-cloud-2026-05-09`](nemotron-3-super-cloud-2026-05-09/results.md) | `nemotron-3-super:cloud` (every role) | medium / medium / high | **3/3** | 121s median · PASS | 272s median · A | 470s median · A → **D** (REDUNDANT — `researcher_node` already wraps) | ~26k median | **PROD-READY** — Q3 reco redundant |
 | [`gemma4-31b-cloud-2026-05-09`](gemma4-31b-cloud-2026-05-09/results.md) | `gemma4:31b-cloud` (every role) | medium / medium / high | **3/3** | 30–61s · PASS | 76–166s · A | 121–317s · **A** (prompt fix r2 + additive-error r3 — both actionable) | varied | **PROD-READY** — only model with consistently actionable Q3 across runs |
+| [`mix-gemini-PRC-gemma4-S-2026-05-09`](mix-gemini-PRC-gemma4-S-2026-05-09/results.md) | mix: gemini-3-flash-preview P/R/C + gemma4 S | medium / medium / high | **3/3** | 22s median · PASS | 57s median · A | 127s ± 6 MAD · A on Q1+Q2, **B+** Q3 (r1+r2 `str(output)` defensive coercion; r3 synthesizer short-circuit — overcorrects) | 29.2k median | **PROD-READY** — first confirmed heterogeneous mix; tightest N=3 spread (201s ± 9 total); only label whose synthesizer explicitly distinguishes "coherent but degraded" from "failed" |
 
 ### Role-suitability matrix
 
@@ -207,22 +208,37 @@ the other PROD-READY models produce recommendations that grade
 A on shape but turn out redundant, regressive, off-topic, or
 contentious-UX-flips when checked against live code.
 
-**Heterogeneous mix candidate (NOT YET N=3-validated, needs its own
-mix-screening label per protocol §3.5):**
+**Heterogeneous mix — N=3-confirmed PROD-READY ([`mix-gemini-PRC-gemma4-S-2026-05-09`](mix-gemini-PRC-gemma4-S-2026-05-09/results.md)):**
 
 ```bash
-claude-consultants config set-role planner     gemini-3-flash-preview:cloud
-claude-consultants config set-role researcher  gemini-3-flash-preview:cloud
-claude-consultants config set-role critic      gemini-3-flash-preview:cloud
-claude-consultants config set-role synthesizer gemma4:31b-cloud
+claude-consultants config set-role planner     --model gemini-3-flash-preview:cloud
+claude-consultants config set-role researcher  --model gemini-3-flash-preview:cloud \
+    --add-model gemma4:31b-cloud --add-model glm-5.1:cloud
+claude-consultants config set-role critic      --model gemini-3-flash-preview:cloud \
+    --add-model glm-5.1:cloud
+claude-consultants config set-role synthesizer --model gemma4:31b-cloud
 ```
 
-This is the "best of both" theoretical pick: gemini's fast retrieval
-on the dominant researcher role + gemma4's actionable synthesis. But
-**we have not yet measured this mix at N=3** — both gemma4 and gemini
-were measured pinned to all four roles. Mix-screening would land at
-something like `mix-gemini-PRC-gemma4-S-2026-05-XX-screening` per §3.5.
-Until that label exists, pick a pure-model default.
+**Mix string `P:A R:A C:A S:A−`, total wall median 201s ± 9 MAD —
+tightest N=3 spread of any 2026-05-09 label.** Q1=PASS, Q2=A across
+all 3 runs; audit-high Q1+Q2 are A but Q3 ceiling lands at B+ (r1+r2
+propose the same defensive `str(output)` coercion; r3 proposes a
+stricter synthesizer short-circuit). The synthesizer produced the
+only label-set in the catalogue that explicitly distinguishes
+"coherent but degraded" from "failed" in its Q1 framing — a
+gemma4-only behaviour the mix preserves.
+
+The `--add-model` extras for `researcher` and `critic` only fire at
+xmedium/xhigh/xmax effort — they're configured here so xmedium+ runs
+benefit automatically without a follow-up config change.
+
+**When NOT to use this mix:** for code-diff hardening review PRs,
+prefer pure `gemma4:31b-cloud` single-shot consultation. The mix's
+synthesizer Q3 quality (B+ median) is *lower* than pure gemma4's
+gemma4-r2 prompt-augmentation answer (A) — likely because gemma4
+here is synthesising over gemini-style research notes rather than
+its own. For hardening PRs, run the mix and pure-gemma4 side-by-side
+and read both Q3 recommendations.
 
 **Other role-specific deviations:**
 

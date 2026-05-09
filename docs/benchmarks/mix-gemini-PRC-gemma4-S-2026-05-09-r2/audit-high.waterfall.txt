@@ -1,0 +1,62 @@
+NOTE: v1.0 traces still present in /root/.claude/consultants-traces; v1.1 reads transcript.db instead. Old files are safe to delete.
+
+reading: /shared/dev/claude-hooks/docs/benchmarks/mix-gemini-PRC-gemma4-S-2026-05-09-r2/audit-high.transcript.db
+
+sid: csl-2026-05-09-1021-0736
+status: completed
+total wall: 126.8s
+
+  planner       node=7.1s    (entries) llm=1x=7.1s    tool=0x=0ms     tok=p410/c1106
+      LLM round=1 model=gemini-3-flash-preview:cloud    7.1s  p=410    c=1106  
+
+  researcher    node=3.1m    (3xentries) llm=31x=3.7m    tool=30x=65ms    tok=p566041/c30128
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud   38.9s  p=47239  c=6464  
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud   25.8s  p=32268  c=3765  
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud   24.4s  p=40815  c=3878  
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud   22.5s  p=36630  c=3741  
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud   11.0s  p=38097  c=1767  
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud   11.0s  p=33518  c=1542  
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    8.9s  p=34142  c=1256  
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    8.0s  p=28642  c=927   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    6.1s  p=23707  c=809   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    5.6s  p=28613  c=747   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    4.9s  p=1260   c=586   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    4.2s  p=24083  c=462   
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    4.1s  p=28504  c=539   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    3.8s  p=3950   c=251   
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    3.7s  p=15338  c=347   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    3.7s  p=10882  c=382   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    3.2s  p=48982  c=255   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    3.2s  p=10634  c=254   
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    3.2s  p=8443   c=214   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    3.0s  p=3103   c=313   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    2.8s  p=3543   c=267   
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    2.7s  p=32414  c=170   
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    2.6s  p=3465   c=248   
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    2.1s  p=7363   c=221   
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    2.0s  p=1301   c=184   
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    2.0s  p=3248   c=70    
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    1.9s  p=1303   c=181   
+      LLM round=1 lane=0 model=gemini-3-flash-preview:cloud    1.9s  p=3829   c=124   
+      LLM round=1 lane=1 model=gemini-3-flash-preview:cloud    1.8s  p=3104   c=96    
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    1.7s  p=3766   c=41    
+      LLM round=1 lane=2 model=gemini-3-flash-preview:cloud    1.6s  p=3855   c=27    
+      tool grep               x1      59ms chars=10073
+      tool glob               x2       6ms chars=61
+      tool survey_project     x3       0ms chars=11214
+      tool list_files         x6       0ms chars=798
+      tool read_file          x18      0ms chars=311582
+
+  critic        node=12.8s   (entries) llm=1x=12.8s   tool=0x=0ms     tok=p2590/c2199
+      LLM round=3 model=gemini-3-flash-preview:cloud   12.8s  p=2590   c=2199  
+
+  synthesizer   node=20.2s   (entries) llm=1x=20.2s   tool=0x=0ms     tok=p3123/c1360
+      LLM round=1 model=gemma4:31b-cloud            20.2s  p=3123   c=1360  
+
+totals
+  wall                  126.8s
+  sum of node spans     3.7m
+  sum of LLM call time  4.4m  (207.1% of wall)
+  sum of tool call time 65ms
+  total prompt tokens   572164
+  total completion tok  34793

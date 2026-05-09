@@ -1,0 +1,98 @@
+{
+  "captured_at": "2026-05-09T10:09:18+02:00",
+  "endpoint": "http://192.168.178.2:11433",
+  "models": {
+    "gemini-3-flash-preview:cloud": {
+      "modified_at": "2025-12-17T00:00:00Z",
+      "capabilities": [
+        "completion",
+        "tools",
+        "thinking",
+        "vision"
+      ],
+      "details": {
+        "parent_model": "gemini-3-flash-preview",
+        "format": "",
+        "family": "gemini",
+        "families": null,
+        "parameter_size": "0",
+        "quantization_level": ""
+      },
+      "model_info": {
+        "gemini.context_length": 1048576,
+        "gemini.embedding_length": 0,
+        "general.architecture": "gemini",
+        "general.parameter_count": 0
+      },
+      "raw": {
+        "details": {
+          "parent_model": "gemini-3-flash-preview",
+          "format": "",
+          "family": "gemini",
+          "families": null,
+          "parameter_size": "0",
+          "quantization_level": ""
+        },
+        "model_info": {
+          "gemini.context_length": 1048576,
+          "gemini.embedding_length": 0,
+          "general.architecture": "gemini",
+          "general.parameter_count": 0
+        },
+        "capabilities": [
+          "completion",
+          "tools",
+          "thinking",
+          "vision"
+        ],
+        "modified_at": "2025-12-17T00:00:00Z"
+      }
+    },
+    "gemma4:31b-cloud": {
+      "modified_at": "2026-04-02T09:00:00-08:00",
+      "capabilities": [
+        "completion",
+        "thinking",
+        "tools",
+        "vision"
+      ],
+      "details": {
+        "parent_model": "gemma4:31b",
+        "format": "",
+        "family": "gemma4",
+        "families": null,
+        "parameter_size": "32682372656",
+        "quantization_level": "BF16"
+      },
+      "model_info": {
+        "gemma4.context_length": 262144,
+        "gemma4.embedding_length": 5376,
+        "general.architecture": "gemma4",
+        "general.parameter_count": 32682372656
+      },
+      "raw": {
+        "details": {
+          "parent_model": "gemma4:31b",
+          "format": "",
+          "family": "gemma4",
+          "families": null,
+          "parameter_size": "32682372656",
+          "quantization_level": "BF16"
+        },
+        "model_info": {
+          "gemma4.context_length": 262144,
+          "gemma4.embedding_length": 5376,
+          "general.architecture": "gemma4",
+          "general.parameter_count": 32682372656
+        },
+        "capabilities": [
+          "completion",
+          "thinking",
+          "tools",
+          "vision"
+        ],
+        "modified_at": "2026-04-02T09:00:00-08:00"
+      }
+    }
+  }
+}
