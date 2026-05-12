@@ -56,20 +56,28 @@ the skill's call stack.
 
 ---
 
-## The four sub-skills
+## The /get-advice dispatcher (v1.3+)
 
-The `/get-advice` family has one driver skill and three
-configuration skills:
+`/get-advice` is one skill with four verbs. The first whitespace-
+separated arg selects the verb; an unrecognized first token (or no
+args at all) implicitly fires the `ask` verb against the whole arg.
 
-| Skill | What it does |
+| Form | What it does |
 |---|---|
-| `/get-advice <query>` | Run an advisor conversation about `<query>`. Polls the advisor through Claude Code's orchestration loop; surfaces the bottom-line answer + recommendations. |
-| `/get-advice--model [name [ctx]]` | Read or write the advisor's Ollama model. With one arg: set the model, auto-probe `ctx_max` on first use. With two args: set the model AND pin a context length explicitly. With no args: report current. |
-| `/get-advice--effort [tier]` | Read or write the effort tier. Tier governs how many fresh advisor sessions Claude may spawn per `/get-advice` invocation when quality stalls. `low` = 1, `medium` = 2, `high` = 4, `max` = uncapped. With no args: report. |
-| `/get-advice--tools [csv\|all\|none]` | Read or write the project-tool list exposed to the advisor. `all` = the full six-tool surface; `none` = no tools (advisor answers from its own training only); CSV = explicit subset (e.g. `read_file,grep`). |
+| `/get-advice [ask] <query>` | Run an advisor conversation about `<query>`. Polls the advisor through Claude Code's orchestration loop; surfaces the bottom-line answer + recommendations. `ask` may be omitted — bare `/get-advice <query>` works. |
+| `/get-advice model [name [ctx]]` | Read or write the advisor's Ollama model. With one arg: set the model, auto-probe `ctx_max` on first use. With two args: set the model AND pin a context length explicitly. With no args: report current. |
+| `/get-advice effort [tier]` | Read or write the effort tier. Tier governs how many fresh advisor sessions Claude may spawn per `/get-advice` invocation when quality stalls. `low` = 1, `medium` = 2, `high` = 4, `max` = uncapped. With no args: report. |
+| `/get-advice tools [csv\|all\|none]` | Read or write the project-tool list exposed to the advisor. `all` = the full six-tool surface; `none` = no tools (advisor answers from its own training only); CSV = explicit subset (e.g. `read_file,grep`). |
 
-All four persist their state to `~/.claude/get-advice-config.json`
+All four verbs persist state to `~/.claude/get-advice-config.json`
 so settings stick across Claude Code sessions.
+
+> **v1.3 migration note:** The pre-v1.3 form had separate slash
+> commands (`/get-advice--model`, `/get-advice--effort`,
+> `/get-advice--tools`). Those were collapsed into the single
+> dispatcher above to cut the upfront slash-command menu cost. The
+> installer removes the legacy `~/.claude/skills/get-advice--*`
+> dirs on first v1.3 upgrade run.
 
 ---
 
@@ -130,9 +138,9 @@ windows.
 To switch:
 
 ```
-/get-advice--model glm-5.1:cloud         # auto-probe ctx_max on first use
-/get-advice--model qwen3.5:cloud 32768   # pin ctx_max=32768 explicitly
-/get-advice--model                       # report current
+/get-advice model glm-5.1:cloud          # auto-probe ctx_max on first use
+/get-advice model qwen3.5:cloud 32768    # pin ctx_max=32768 explicitly
+/get-advice model                        # report current
 ```
 
 If a model 400's the first request because it doesn't accept the
@@ -166,8 +174,8 @@ contradicting itself.
 | `max` | uncapped | Long debugging or design reviews; orchestrator stops when it's actually done |
 
 ```
-/get-advice--effort medium    # set
-/get-advice--effort           # report
+/get-advice effort medium    # set
+/get-advice effort           # report
 ```
 
 ---
@@ -189,19 +197,19 @@ only — useful for purely conceptual questions where you don't want
 the advisor distracted by your codebase):
 
 ```
-/get-advice--tools none
+/get-advice tools none
 ```
 
 To restrict to a subset:
 
 ```
-/get-advice--tools read_file,grep,recall_memory
+/get-advice tools read_file,grep,recall_memory
 ```
 
 To re-enable everything:
 
 ```
-/get-advice--tools all
+/get-advice tools all
 ```
 
 The skill's framing message tells the advisor where to look (e.g.
@@ -275,13 +283,13 @@ Two common causes:
    genuinely down and `/get-advice` will surface that error.
 2. **`ctx_max` mis-pinned**: if you pinned a context length
    smaller than the actual model context, big payloads truncate to
-   nothing. Run `/get-advice--model` with no args to see the
-   pinned value. Run `/get-advice--model <name>` (no ctx) to clear
+   nothing. Run `/get-advice model` with no args to see the
+   pinned value. Run `/get-advice model <name>` (no ctx) to clear
    the pin and re-auto-probe.
 
 ### "no candidates" / advisor says it can't reach a tool
 
-Check the advisor's tool list with `/get-advice--tools`. If it's
+Check the advisor's tool list with `/get-advice tools`. If it's
 `none` you turned tools off — set to `all` to re-enable. If a
 specific tool isn't in the list (e.g. `recall_memory`), your
 pgvector backend isn't configured; either configure it via

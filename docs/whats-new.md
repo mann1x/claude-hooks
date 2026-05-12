@@ -10,6 +10,15 @@
 > pick up the new bin/ shim wrappers and (optionally) install the
 > `/consultants` engine. See [`docs/RELEASING.md`](RELEASING.md)
 > if you want the upgrade procedure.
+>
+> **Slash-command shape note (v1.3+):** the per-verb `/get-advice--*`
+> and `/consultants--*` skills shown below were collapsed into two
+> dispatcher skills at v1.3 — `/get-advice <verb>` and
+> `/consultants <verb>` with implicit `ask`. The functionality is
+> unchanged; only the invocation shape changed. See
+> [`docs/get-advice.md`](get-advice.md) and
+> [`docs/consultants.md`](consultants.md) for the v1.3+ form. Below
+> is preserved as the historical v1.1 record.
 
 This is the human-readable v1.1 highlights doc. For the full,
 release-engineered, "every commit accounted for" record see
