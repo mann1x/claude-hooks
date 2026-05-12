@@ -16,8 +16,81 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-_(no entries yet — work since v1.2.0 lands here as it's committed
-on `dev`. See `git log v1.2.0..origin/dev` after fetching.)_
+_(no entries yet — work since v1.3.0 lands here as it's committed
+on `dev`. See `git log v1.3.0..origin/dev` after fetching.)_
+
+## [1.3.0] — 2026-05-12
+
+MINOR bump for a **user-facing slash-command vocabulary change**
+— the per-verb skills shipped at v1.1 (`/get-advice--model`,
+`/get-advice--effort`, `/get-advice--tools`,
+`/consultants--config`, `/consultants--list`, `/consultants--show`,
+`/consultants--followup`) are collapsed into two dispatcher
+skills. Backing CLIs (`claude-advisor`, `claude-consultants`)
+already subcommand-dispatch internally; the skill-file split was
+pure duplication of that CLI shape and burned 9 entries in the
+Claude Code slash-command menu (each with its own description).
+The dispatcher pattern cuts that to 2 entries while keeping all
+functionality.
+
+### Changed (breaking — slash-command shape)
+
+- **`/get-advice <query>`** is now a dispatcher with verbs:
+  - `ask <query>` — run / continue an advisor conversation
+    (default; **implicit** — bare `/get-advice <query>` works).
+  - `model [NAME [CTX]]` — report or set the advisor's Ollama
+    model and pinned context length. Replaces `/get-advice--model`.
+  - `effort [tier]` — report or set the sessions-per-invocation
+    budget (`low`/`medium`/`high`/`max`). Replaces
+    `/get-advice--effort`.
+  - `tools [csv|all|none]` — report or set the tool list exposed
+    to the advisor. Replaces `/get-advice--tools`.
+- **`/consultants <query>`** is now a dispatcher with verbs:
+  - `ask <query>` — run a fresh council on a question (default;
+    **implicit** — bare `/consultants <query>` works).
+  - `followup [<sid>] <question>` — iterate on a prior session,
+    failed-session-aware. Replaces `/consultants--followup`.
+  - `list [--limit N]` — past sessions. Replaces
+    `/consultants--list`.
+  - `show <sid> [--raw]` — re-read a stored summary. Replaces
+    `/consultants--show`.
+  - `config [args...]` — interactive role/model/effort/service-
+    mode walk-through, or passthrough sub-args. Replaces
+    `/consultants--config`.
+- The seven per-verb slash commands are **removed cold-turkey**;
+  no aliases retained. Net upfront menu cost drops by ~7 skill
+  descriptions per session; total skill body 42 KB → 28 KB.
+
+### Added
+
+- **Idempotent legacy-cleanup pass in `install.py`**
+  (`_install_skills` → `LEGACY_SKILL_DIRS`). On upgrade, removes
+  `~/.claude/skills/get-advice--{model,effort,tools}/` and
+  `~/.claude/skills/consultants--{list,show,config,followup}/`
+  so the old slash commands stop appearing in the menu. Runs
+  unconditionally — no-op on fresh installs, removes on first
+  v1.3 run, no-op on re-runs. Respects `--dry-run`.
+- **6 new tests** at `tests/test_install_skills_legacy_cleanup.py`
+  covering the cleanup contract (constant enumerates all v1.2
+  variants, removes pre-seeded stale dirs, no-op fresh,
+  idempotent re-run, dry-run prints but doesn't touch, SKILLS
+  list registers only the two dispatchers).
+
+### Documentation
+
+- **`docs/get-advice.md`** — rewrites slash-command usage section
+  to the verb form, adds a v1.3 migration note.
+- **`docs/consultants.md`** — rewrites all `/consultants--*`
+  references to `/consultants <verb>` form, adds a v1.3 migration
+  note.
+- **`docs/whats-new.md`** — preserved as historical v1.1 record;
+  callout at top points readers at the v1.3 dispatcher shape for
+  the up-to-date invocations.
+- **`README.md`** — collapses the 9-row skills table section to
+  2 rows showing the dispatchers with their verb lists.
+- **`CLAUDE.md`** — status banner extended with the v1.3 paragraph.
+- **`.wolf/anatomy.md`** — collapses the 9 skill entries to 2 with
+  verb summaries.
 
 ## [1.2.0] — 2026-05-09
 

@@ -49,6 +49,15 @@ OS reboots, and Claude Code updates — and live under
   from disk. Schema:
   [`docs/consultants-transcript-db-schema.md`](consultants-transcript-db-schema.md).
 
+> **v1.3 migration note:** The pre-v1.3 form had five separate
+> slash commands (`/consultants`, `/consultants--config`,
+> `/consultants--list`, `/consultants--show`,
+> `/consultants--followup`). Those were collapsed into a single
+> dispatcher with subverbs (`ask` default-implicit, `config`,
+> `list`, `show`, `followup`) to cut the upfront slash-command
+> menu cost. The installer removes the legacy
+> `~/.claude/skills/consultants--*` dirs on first v1.3 upgrade run.
+
 ---
 
 ## When to use it
@@ -57,7 +66,7 @@ OS reboots, and Claude Code updates — and live under
 |---|---|
 | The question benefits from a **specialist split** — a researcher actively grounding in code while a critic challenges the evidence | One model is plenty |
 | You want **iterative refinement** — the critic can re-route back to the researcher for more rounds | One conversation is plenty |
-| You want the answer to **survive restarts** and be re-readable later via `/consultants--show <sid>` | Single-shot is fine |
+| You want the answer to **survive restarts** and be re-readable later via `/consultants show <sid>` | Single-shot is fine |
 | You want **multi-model perspective** at `xmedium` / `xhigh` / `xmax` effort tiers — fan out the researcher across 2-N different cloud models and have a meta-critic combine multiple critic verdicts | One model's perspective is enough |
 | Wall-clock budget: 1-15 min depending on effort tier | Wall-clock budget: seconds to a minute |
 | Question types: architecture audits, refactor risk analysis, release-notes-vs-diff cross-check, design review on a decision that affects multiple files | Validation, sanity-check, recipe review, code review of one function |
@@ -220,7 +229,7 @@ What happens:
    ```
 
 5. Re-read any past consultation later with
-   `/consultants--show <sid>` (no engine call — reads `summary.md`
+   `/consultants show <sid>` (no engine call — reads `summary.md`
    from disk).
 
 To override effort for a single consultation (e.g. force xhigh on
@@ -234,7 +243,7 @@ a particularly cross-cutting question without changing the default):
 
 ## Follow-ups — the v1.1 headline feature
 
-`/consultants--followup` runs a **continuous** consultation that
+`/consultants followup` runs a **continuous** consultation that
 reuses the parent's per-role LLM message history. The planner /
 researcher / critic / synthesizer each pick up exactly where they
 left off — the follow-up's answer is continuous with the parent's,
@@ -259,8 +268,8 @@ How it works:
 Usage:
 
 ```
-/consultants--followup <question>
-/consultants--followup csl-2026-... <question>
+/consultants followup <question>
+/consultants followup csl-2026-... <question>
 ```
 
 Without an explicit sid, the skill defaults to the **most recent
@@ -320,7 +329,7 @@ up. **Same chat_client** (so the same proxy + connection pool);
 only the `model` field of the payload changes per attempt. First
 success wins. Each attempt records an `llm_call` event in
 `transcript.db` with the actual model used, so post-hoc audit via
-`/consultants--show <sid> --raw` reveals which model produced the
+`/consultants show <sid> --raw` reveals which model produced the
 final answer.
 
 Configure:
@@ -360,7 +369,7 @@ gives you the raw expensive work — uncombined but readable.
 
 ## Configuration
 
-`/consultants--config` walks you through every config knob via
+`/consultants config` walks you through every config knob via
 AskUserQuestion. No file editing. The on-disk source of truth is
 `~/.claude/consultants-config.toml` (user-global) or
 `<project>/.claude-hooks/consultants.toml` (per-project override),
@@ -424,7 +433,7 @@ csl-2026-05-08-1520-3f9a/
 └── transcript.db       ← SQLite sidecar (LLM message threads)
 ```
 
-`summary.md` is what `/consultants--show <sid>` prints. It's
+`summary.md` is what `/consultants show <sid>` prints. It's
 markdown with YAML front-matter; tools that already parse YAML
 (Caliber's `score-refine.ts`, OpenWolf's `cerebrum.md` parsers,
 etc.) round-trip it cleanly.
@@ -547,7 +556,7 @@ Three possibilities, in order of likelihood:
    answer with researcher + critic content surfaced. To recover:
 
    ```
-   /consultants--followup csl-... compose a final answer from
+   /consultants followup csl-... compose a final answer from
    the prior research and critic
    ```
 
@@ -588,10 +597,10 @@ follow-up's. To chain off a sibling follow-up, point at it
 explicitly:
 
 ```
-/consultants--followup csl-<sibling_sid> <next question>
+/consultants followup csl-<sibling_sid> <next question>
 ```
 
-The `/consultants--followup` skill picks the most recent session
+The `/consultants followup` skill picks the most recent session
 of any status by default, which usually does the right thing.
 
 ---

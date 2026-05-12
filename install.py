@@ -4428,22 +4428,27 @@ SKILLS = [
     ("setup-caliber",      "caliber"),  # needs caliber installed
     ("episodic",           None),    # queries remote episodic-server API
     ("wrapup",             None),    # session state summary for hand-off / compact
+    # /get-advice — single dispatcher skill (v1.3+); routes by verb
+    # (`ask` default-implicit, `model`, `effort`, `tools`) through the
+    # already-subcommand-aware bin/claude-advisor CLI.
     ("get-advice",         None),    # LLM-to-LLM advisor (uses bin/claude-advisor)
-    ("get-advice--model",  None),    # config helper for /get-advice
-    ("get-advice--effort", None),    # config helper for /get-advice
-    ("get-advice--tools",  None),    # config helper for /get-advice
-    # /consultants — multi-agent council. The skills require the
-    # ``claude-hooks-consultants`` conda env which install.py creates
-    # on user opt-in via _install_consultants(). The "requires"
-    # marker is a sentinel checked by _install_skills against the
-    # tool-detection result; when the consultants env is missing the
-    # skills are skipped silently.
-    ("consultants",            "claude-consultants"),
-    ("consultants--list",      "claude-consultants"),
-    ("consultants--show",      "claude-consultants"),
-    ("consultants--config",    "claude-consultants"),
-    ("consultants--followup",  "claude-consultants"),
+    # /consultants — single dispatcher skill (v1.3+); routes by verb
+    # (`ask` default-implicit, `followup`, `list`, `show`, `config`)
+    # through the already-subcommand-aware bin/claude-consultants CLI.
+    # The skill requires the ``claude-hooks-consultants`` conda env
+    # which install.py creates on user opt-in via _install_consultants().
+    # When the consultants env is missing the skill is skipped silently.
+    ("consultants",        "claude-consultants"),
 ]
+
+# Legacy per-verb skill dirs from v1.2 and earlier. Removed
+# unconditionally on every install run so upgraders don't end up
+# with stale `--variant` slash commands cluttering the menu.
+LEGACY_SKILL_DIRS: tuple[str, ...] = (
+    "get-advice--model", "get-advice--effort", "get-advice--tools",
+    "consultants--list", "consultants--show",
+    "consultants--config", "consultants--followup",
+)
 
 
 def _detect_companion_tools() -> dict[str, bool]:
@@ -4531,6 +4536,17 @@ def _install_skills(
         return
 
     print(f"\n==> Skills (target: {user_skills_dir})")
+
+    # Legacy cleanup — remove `--variant` dirs from v1.2 and earlier
+    # so the slash-command menu doesn't show stale entries after
+    # the v1.3 dispatcher-skill consolidation. Idempotent: no-op on
+    # fresh installs, removes on upgrades, no-op on re-runs.
+    for legacy in LEGACY_SKILL_DIRS:
+        stale = user_skills_dir / legacy
+        if stale.exists():
+            print(f"  [rm] /{legacy:20} removed (v1.3: collapsed into parent skill)")
+            if not dry_run:
+                shutil.rmtree(stale)
 
     to_install: list[str] = []
     skipped: list[tuple[str, str]] = []

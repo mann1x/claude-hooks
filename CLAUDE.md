@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.2.0** — ~1.6k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.3.0** — ~1.6k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -38,8 +38,15 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > [`docs/caliber-eval-results/`](docs/caliber-eval-results/) (six
 > labels graded against the `claude-cli` reference; verdict:
 > `claude-cli` stays default for caliber init, `glm-5.1:cloud` is
-> the recommended non-claude-cli fallback). Schema for the
-> consultants transcript.db sidecar at
+> the recommended non-claude-cli fallback). v1.3 collapses the
+> per-verb slash-command skills into two **dispatcher skills** —
+> `/get-advice <verb>` (verbs: `ask`/`model`/`effort`/`tools`) and
+> `/consultants <verb>` (verbs: `ask`/`followup`/`list`/`show`/
+> `config`) with implicit `ask` default — replacing the 9 v1.2
+> skills (4 `/get-advice--*` + 5 `/consultants--*`) and cutting the
+> upfront slash-command menu cost. `install.py` removes the legacy
+> `~/.claude/skills/<variant>` dirs idempotently on upgrade. Schema
+> for the consultants transcript.db sidecar at
 > [`docs/consultants-transcript-db-schema.md`](docs/consultants-transcript-db-schema.md).
 
 ---
