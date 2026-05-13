@@ -16,8 +16,40 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-_(no entries yet — work since v1.3.1 lands here as it's committed
-on `dev`. See `git log v1.3.1..origin/dev` after fetching.)_
+_(no entries yet — work since v1.3.2 lands here as it's committed
+on `dev`. See `git log v1.3.2..origin/dev` after fetching.)_
+
+## [1.3.2] — 2026-05-13
+
+PATCH — fixes a long-standing version-drift bug that caused the
+update-check banner to misreport every release since v1.0.3.
+
+### Fixed
+
+- **`claude_hooks.__version__` no longer drifts from `pyproject.toml`.**
+  The constant was hard-coded to `"1.0.3"` and never bumped during
+  the v1.0.4 / v1.1.0 / v1.2.0 / v1.3.0 / v1.3.1 cuts (only
+  `pyproject.toml`, `CHANGELOG.md`, and the `CLAUDE.md` banner were
+  updated each time). The Stop-hook update-check banner reads
+  `CURRENT_VERSION` from this constant, so every install reported
+  itself as `current 1.0.3` — visible to users as e.g.
+  `[claude-hooks] update available: v1.3.1 (current 1.0.3)` on a
+  host that was actually running v1.3.1.
+- **`claude_hooks/__init__.py`** now resolves `__version__` at import
+  time via a three-step chain:
+  1. `importlib.metadata.version("claude-hooks")` — canonical when
+     pip-installed (editable or wheel).
+  2. Walk up from `__file__` looking for `pyproject.toml`, parse
+     `[project].version` with a tiny hand-rolled scanner (no
+     `tomllib` import, keeps the 3.9 floor). This is the path the
+     `bin/claude-hook` shim install model hits.
+  3. Final string fallback (`"0.0.0+unknown"`) — only reached on a
+     broken deploy; conservative so update-check reports "no update
+     available" rather than hallucinating a build number.
+- **`tests/test_version_no_drift.py`** pins the contract: a new
+  test asserts `claude_hooks.__version__` equals the
+  `pyproject.toml::[project].version` value. The cut procedure no
+  longer relies on remembering to edit two files in lock-step.
 
 ## [1.3.1] — 2026-05-13
 
