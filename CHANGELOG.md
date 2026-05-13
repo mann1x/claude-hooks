@@ -16,8 +16,32 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-_(no entries yet — work since v1.3.0 lands here as it's committed
-on `dev`. See `git log v1.3.0..origin/dev` after fetching.)_
+_(no entries yet — work since v1.3.1 lands here as it's committed
+on `dev`. See `git log v1.3.1..origin/dev` after fetching.)_
+
+## [1.3.1] — 2026-05-13
+
+PATCH — single-bug fix for the `sqlite_vec` backend.
+
+### Fixed
+
+- **sqlite_vec is no longer silently skipped on every event.**
+  `claude_hooks/dispatcher.py:build_providers` only checked for
+  `mcp_url` (HTTP MCP backends) or `dsn` (pgvector) when extracting
+  the per-provider URL it hands to `ServerCandidate.url`. The
+  sqlite_vec provider — and its example config — write the path
+  under `db_path`, so the dispatcher saw an empty URL and skipped
+  the provider unconditionally with
+  `provider sqlite_vec has no mcp_url/dsn configured — skipping`.
+  Net effect on a sqlite_vec-only install: no DB was ever created,
+  recall and storage were both no-ops for the lifetime of the
+  install. The dispatcher now also accepts `db_path` and the log
+  message reflects all three field names. Regression test in
+  `tests/test_coverage_phase8.py::TestBuildProviders::
+  test_sqlite_vec_db_path_accepted_as_url`.
+  Reported and diagnosed end-to-end by
+  [@JGFSnyman](https://github.com/JGFSnyman) in
+  [#2](https://github.com/mann1x/claude-hooks/issues/2) — thanks!
 
 ## [1.3.0] — 2026-05-12
 

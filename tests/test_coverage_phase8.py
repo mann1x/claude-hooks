@@ -596,6 +596,31 @@ class TestBuildProviders:
         out = dispatcher.build_providers({})
         assert out == []
 
+    def test_sqlite_vec_db_path_accepted_as_url(self, tmp_path):
+        """Regression for #2: sqlite_vec config uses ``db_path`` rather
+        than ``mcp_url`` / ``dsn``. The dispatcher must accept it and
+        pass it through as ``ServerCandidate.url`` so the provider can
+        read it back (sqlite_vec.verify / store both consume
+        ``server.url``)."""
+        db = tmp_path / "memory.db"
+        cfg = {"providers": {"sqlite_vec": {
+            "enabled": True,
+            "db_path": str(db),
+            "embedder": "ollama",
+            "embedder_options": {
+                "url": "http://localhost:11434/api/embeddings",
+                "model": "qwen3-embedding:0.6b",
+            },
+        }}}
+        out = dispatcher.build_providers(cfg)
+        names = [p.name for p in out]
+        assert "sqlite_vec" in names, (
+            "sqlite_vec must be instantiated when db_path is set "
+            "(GH #2 regression)"
+        )
+        sv = next(p for p in out if p.name == "sqlite_vec")
+        assert sv.server.url == str(db)
+
 
 class TestDispatcherImportFailures:
     def test_handler_import_failure_returns_zero(self):
