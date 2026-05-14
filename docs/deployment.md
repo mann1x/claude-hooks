@@ -55,23 +55,65 @@ The installer:
 3. Writes `config/claude-hooks.json`.
 4. Merges hook entries into `~/.claude/settings.json` (idempotent;
    entries are tagged `_managedBy: claude-hooks`).
-5. **pgvector setup (optional)** — asks once whether to enable
+5. **Ollama chat-side prompts (v1.4+)** — asks whether to use
+   Ollama as a chat backend (validates `/api/tags`), then prompts
+   for HyDE model + fallback + `num_ctx` and offers a
+   shared-skills shortcut so `/reflect` and `/consolidate`
+   inherit the same model and context. Writes
+   `hooks.user_prompt_submit.hyde_*`, `reflect.*`, `consolidate.*`.
+   Pre-v1.4 these settings were hard-coded in `config.py`; the
+   dialog closes that gap.
+6. **pgvector setup (optional)** — asks once whether to enable
    pgvector. On yes, prompts for the DSN, probes Postgres + the
-   `vector` extension, offers to `ollama pull` the embedder model
-   (`qwen3-embedding:0.6b` by default) if missing, initializes the
-   qwen3 + KG schema (`memories_qwen3`, `kg_observations_qwen3`,
-   shared `kg_entities` + `kg_relations`) when not present, drops a
+   `vector` extension, initializes the qwen3 + KG schema
+   (`memories_qwen3`, `kg_observations_qwen3`, shared
+   `kg_entities` + `kg_relations`) when not present, drops a
    system-wide launcher at `~/.local/bin/pgvector-mcp` (POSIX) or
-   `%LOCALAPPDATA%\claude-hooks\bin\pgvector-mcp.cmd` (Windows), and
-   registers it in `~/.claude.json`'s `mcpServers` so any MCP-aware
-   client — Claude Code, Cursor, Codex, OpenWebUI — can recall +
-   store + query the KG via `mcp__pgvector__*` tools. See
+   `%LOCALAPPDATA%\claude-hooks\bin\pgvector-mcp.cmd` (Windows),
+   and registers it in `~/.claude.json`'s `mcpServers` so any
+   MCP-aware client — Claude Code, Cursor, Codex, OpenWebUI — can
+   recall + store + query the KG via `mcp__pgvector__*` tools.
+   The embedder choice is delegated to the **embedding-engine
+   dialog** (see step 8). See
    [pgvector-runbook.md §4 "MCP server"](pgvector-runbook.md).
-6. Optionally prompts for env-var recommendations (`CLAUDE_CODE_
-   DISABLE_BACKGROUND_TASKS`, the bcherny stack). **Default = No**
-   for everything — the proxy is the better fix for Warmup drain,
-   and the bcherny stack caused more harm than good in our field
-   tests (see [env-vars.md](env-vars.md) for verdicts).
+7. **sqlite_vec setup (optional, v1.4+)** —
+   `_setup_sqlite_vec_mcp`, mirrors the pgvector flow for the
+   single-file SQLite backend. Pre-v1.4 sqlite_vec had **zero**
+   installer code; v1.4 pays back that latent gap. Same embedder
+   choice via step 8.
+8. **Embedding-engine dialog (v1.4+)** — per local-embed provider
+   enabled in steps 6/7, asks:
+   - Use Ollama for embeddings? Model + `num_ctx`; offers
+     `ollama pull` if missing.
+   - OpenAI-compatible primary instead? (Mutually exclusive with
+     Ollama-primary.)
+   - Use llamafile as fallback? Default Yes when a primary is
+     set; mandatory primary when both Ollama and OpenAI are
+     declined.
+   - llamafile sub-dialog: default model
+     (`qwen3-embedding-0.6b`, 16 k ctx) or custom GGUF; **GPU
+     mode `auto` vs `cpu`** (`auto` → `-ngl 99` with transparent
+     CPU fallback; `cpu` → `--gpu disable`).
+   On default-model picks the installer fetches the composite
+   `qwen3-embedding-0.6b-16k.llamafile` (~1.5 GB) from the
+   matching GitHub Release asset and SHA-verifies against the
+   in-tree `vendor/llamafile/dist/SHA256SUMS.composite`.
+   Second-provider invocations default to "same as previous?" so
+   the common case is one dialog total. The daemon supervises
+   the spawned llamafile with a 5-minute idle reap. See
+   [llamafile-integration.md](llamafile-integration.md) for the
+   full architecture.
+9. **Qdrant + memory_kg validate-only (v1.4+)** — both MCPs
+   embed server-side (Qdrant uses FastEmbed inside the MCP
+   image; memory_kg has a bundled embedder). The installer
+   probes connectivity, prints a one-line note about where the
+   model lives, and never overrides their config.
+10. Optionally prompts for env-var recommendations
+    (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, the bcherny stack).
+    **Default = No** for everything — the proxy is the better
+    fix for Warmup drain, and the bcherny stack caused more
+    harm than good in our field tests (see
+    [env-vars.md](env-vars.md) for verdicts).
 
 ### Verify
 

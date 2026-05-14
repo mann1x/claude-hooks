@@ -143,6 +143,13 @@ re-ranks within the pool. They compose cleanly.
 
 ## Configuration knobs
 
+> **v1.4+**: the keys below are set interactively by
+> `install.py`'s `_setup_ollama_chat` dialog (Ollama chat URL,
+> HyDE model + fallback + `num_ctx`, plus the shared-skills
+> shortcut for `/reflect` and `/consolidate`). Pre-v1.4 they were
+> hard-coded `config.py` defaults; v1.4 closes that gap. Hand-edit
+> the JSON below for anything the dialog doesn't expose.
+
 Under `hooks.user_prompt_submit` in `config/claude-hooks.json`:
 
 | Key | Default | Purpose |

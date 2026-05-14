@@ -80,7 +80,7 @@ Opt-in: existing installs keep their Ollama-only embedder until
   on mismatch).
 - **`docs/llamafile-integration.md`** — architecture + installer
   flow + ops runbook.
-- **~185 new tests** (now ~2355 total, up from v1.3.2's 2146):
+- **~187 new tests** (2333 passed + 24 skipped at cut, up from v1.3.2's 2146):
   `test_embedders_llamafile.py`, `test_gpu_probe.py`,
   `test_embedding_manager.py` (incl. APE-wrap regressions),
   `test_daemon_embedding_rpc.py`,
@@ -127,7 +127,7 @@ Opt-in: existing installs keep their Ollama-only embedder until
 - Reproducible composite builds on solidpc (Linux + RTX 3090).
 - End-to-end through standalone daemon: cold-spawn 1.2 s, 1024-dim
   L2-normalized vector, idle reap clean.
-- Full test suite green: 2331 passed + 24 skipped.
+- Full test suite green: 2333 passed + 24 skipped (final pre-cut run).
 
 ## [1.3.2] — 2026-05-13
 
