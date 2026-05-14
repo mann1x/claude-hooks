@@ -2842,6 +2842,224 @@ def _setup_embedding_engine(
     print(f"    -> {provider}.embedder = {pcfg['embedder']}")
 
 
+def _setup_ollama_chat(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
+    """Walk the user through Ollama chat-backend settings (v1.4).
+
+    Covers the three Ollama-backed flows that previously had **no**
+    interactive prompts (all hard-coded defaults in config.py):
+
+    1. HyDE (``hooks.user_prompt_submit.hyde_*``) — fast hallucinated
+       answer used as the retrieval query for memory recall.
+    2. Reflect (``reflect.*``) — Stop-hook turn-summary skill.
+    3. Consolidate (``consolidate.*``) — periodic memory dedup /
+       prune skill.
+
+    Explicitly **not** covered: the /get-advice advisor and the
+    /consultants engine. Those have their own separate model
+    configurations (different envs, different defaults, different
+    sizes) and would muddy this dialog.
+
+    Idempotent — re-running install.py preserves existing values as
+    defaults; brand-new installs get the full prompt sequence.
+
+    Skipped silently in non-interactive mode when no Ollama URL is
+    already configured anywhere (so a fresh install in CI doesn't
+    ask three model-name questions to no avail).
+    """
+    ups = (cfg.get("hooks") or {}).get("user_prompt_submit") or {}
+    reflect = cfg.get("reflect") or {}
+    consolidate = cfg.get("consolidate") or {}
+
+    # Probe existing config — used for sensible defaults.
+    existing_hyde_url = ups.get("hyde_url") or ""
+    existing_hyde_model = ups.get("hyde_model") or ""
+    existing_hyde_fallback = ups.get("hyde_fallback_model") or ""
+    existing_hyde_ctx = ups.get("hyde_num_ctx") or 16384
+    existing_reflect_model = reflect.get("ollama_model") or ""
+    existing_reflect_ctx = reflect.get("num_ctx") or 16384
+    existing_consolidate_model = consolidate.get("ollama_model") or ""
+    existing_consolidate_ctx = consolidate.get("num_ctx") or 16384
+
+    any_existing = any([
+        existing_hyde_url, existing_hyde_model,
+        existing_reflect_model, existing_consolidate_model,
+    ])
+
+    print("\n--- Ollama chat backend (HyDE + skills) ---")
+    print("  Used for HyDE query expansion, the reflect Stop-hook")
+    print("  summarizer, and the consolidate memory-cleanup skill.")
+    print("  NOT used for /get-advice or /consultants (separate configs).")
+
+    if non_interactive:
+        if not any_existing:
+            print("  --non-interactive and no Ollama URL in config -> skipping.")
+            return
+        ans = "y"
+        print("  --non-interactive: keeping existing Ollama chat config.")
+    else:
+        default = "Y" if any_existing else "N"
+        ans = input(
+            f"  Use Ollama as a chat backend? [{default}/{'n' if default == 'Y' else 'y'}]: "
+        ).strip().lower() or default.lower()
+        if ans not in ("y", "yes"):
+            print("  Skipped — HyDE / reflect / consolidate stay at hardcoded defaults.")
+            return
+
+    # ----- 1. Base URL ----------------------------------------------
+    default_base_url = "http://localhost:11434/api/generate"
+    if existing_hyde_url:
+        proposed_url = existing_hyde_url
+    else:
+        proposed_url = default_base_url
+
+    if non_interactive:
+        chat_url = proposed_url
+    else:
+        chat_url = input(
+            f"  Ollama base URL [{proposed_url}]: "
+        ).strip() or proposed_url
+
+    # Validate by hitting /api/tags (cheap, doesn't require model load).
+    base = _ollama_base_from_embed_url(chat_url)
+    print(f"  Probing {base}/api/tags ...", end=" ", flush=True)
+    try:
+        import urllib.request as _u
+        with _u.urlopen(f"{base}/api/tags", timeout=5) as r:
+            tags = json.loads(r.read().decode("utf-8") or "{}")
+        ok = isinstance(tags.get("models"), list)
+        print("OK" if ok else "unexpected response")
+    except Exception as e:
+        print(f"FAILED ({e})")
+        ok = False
+    if not ok:
+        if non_interactive:
+            print("  --non-interactive: keeping URL in config; you can fix it later.")
+        else:
+            ans = input("  Keep URL anyway? [y/N]: ").strip().lower()
+            if ans not in ("y", "yes"):
+                print("  Skipped Ollama chat setup.")
+                return
+
+    # ----- 2. HyDE settings -----------------------------------------
+    # Whether HyDE itself is enabled is orthogonal — the user might
+    # have an Ollama URL but want HyDE off (slow models on low-end
+    # hardware). Re-running install.py preserves the prior toggle
+    # state.
+    existing_hyde_enabled = ups.get("hyde_enabled", True)
+    if non_interactive:
+        hyde_enabled = existing_hyde_enabled
+    else:
+        default = "Y" if existing_hyde_enabled else "N"
+        ans = input(
+            f"  Enable HyDE query expansion? [{default}/{'n' if default == 'Y' else 'y'}]: "
+        ).strip().lower() or default.lower()
+        hyde_enabled = ans in ("y", "yes")
+
+    proposed_hyde_model = existing_hyde_model or "gemma4:e2b"
+    proposed_hyde_fallback = existing_hyde_fallback or proposed_hyde_model
+    if non_interactive:
+        hyde_model = proposed_hyde_model
+        hyde_fallback = proposed_hyde_fallback
+        hyde_ctx = existing_hyde_ctx
+    else:
+        hyde_model = input(
+            f"  HyDE model [{proposed_hyde_model}]: "
+        ).strip() or proposed_hyde_model
+        hyde_fallback = input(
+            f"  HyDE fallback model [{proposed_hyde_fallback}]: "
+        ).strip() or proposed_hyde_fallback
+        raw = input(f"  HyDE num_ctx [{existing_hyde_ctx}]: ").strip()
+        try:
+            hyde_ctx = int(raw) if raw else existing_hyde_ctx
+        except ValueError:
+            hyde_ctx = existing_hyde_ctx
+
+    # ----- 3. Skills (reflect + consolidate) ------------------------
+    # The two skill models are typically the same — offer a shortcut
+    # so the user doesn't answer four near-identical questions.
+    proposed_skill_model = (
+        existing_reflect_model
+        or existing_consolidate_model
+        or hyde_model
+    )
+    if non_interactive:
+        share_skills = (
+            (existing_reflect_model == existing_consolidate_model)
+            or not (existing_reflect_model or existing_consolidate_model)
+        )
+    else:
+        ans = input(
+            "  Same model for reflect + consolidate skills? [Y/n]: "
+        ).strip().lower() or "y"
+        share_skills = ans in ("y", "yes")
+
+    if share_skills:
+        if non_interactive:
+            skill_model = proposed_skill_model
+            skill_ctx = max(existing_reflect_ctx, existing_consolidate_ctx)
+        else:
+            skill_model = input(
+                f"  Skills model [{proposed_skill_model}]: "
+            ).strip() or proposed_skill_model
+            ctx_default = max(existing_reflect_ctx, existing_consolidate_ctx)
+            raw = input(f"  Skills num_ctx [{ctx_default}]: ").strip()
+            try:
+                skill_ctx = int(raw) if raw else ctx_default
+            except ValueError:
+                skill_ctx = ctx_default
+        reflect_model = consolidate_model = skill_model
+        reflect_ctx = consolidate_ctx = skill_ctx
+    else:
+        if non_interactive:
+            reflect_model = existing_reflect_model or proposed_skill_model
+            consolidate_model = existing_consolidate_model or proposed_skill_model
+            reflect_ctx = existing_reflect_ctx
+            consolidate_ctx = existing_consolidate_ctx
+        else:
+            reflect_model = input(
+                f"  Reflect model [{existing_reflect_model or proposed_skill_model}]: "
+            ).strip() or (existing_reflect_model or proposed_skill_model)
+            raw = input(f"  Reflect num_ctx [{existing_reflect_ctx}]: ").strip()
+            try:
+                reflect_ctx = int(raw) if raw else existing_reflect_ctx
+            except ValueError:
+                reflect_ctx = existing_reflect_ctx
+            consolidate_model = input(
+                f"  Consolidate model [{existing_consolidate_model or proposed_skill_model}]: "
+            ).strip() or (existing_consolidate_model or proposed_skill_model)
+            raw = input(f"  Consolidate num_ctx [{existing_consolidate_ctx}]: ").strip()
+            try:
+                consolidate_ctx = int(raw) if raw else existing_consolidate_ctx
+            except ValueError:
+                consolidate_ctx = existing_consolidate_ctx
+
+    # ----- 4. Apply --------------------------------------------------
+    cfg.setdefault("hooks", {}).setdefault("user_prompt_submit", {})
+    cfg["hooks"]["user_prompt_submit"]["hyde_url"] = chat_url
+    cfg["hooks"]["user_prompt_submit"]["hyde_enabled"] = hyde_enabled
+    cfg["hooks"]["user_prompt_submit"]["hyde_model"] = hyde_model
+    cfg["hooks"]["user_prompt_submit"]["hyde_fallback_model"] = hyde_fallback
+    cfg["hooks"]["user_prompt_submit"]["hyde_num_ctx"] = hyde_ctx
+
+    cfg.setdefault("reflect", {})
+    cfg["reflect"]["ollama_url"] = chat_url
+    cfg["reflect"]["ollama_model"] = reflect_model
+    cfg["reflect"]["num_ctx"] = reflect_ctx
+
+    cfg.setdefault("consolidate", {})
+    cfg["consolidate"]["ollama_url"] = chat_url
+    cfg["consolidate"]["ollama_model"] = consolidate_model
+    cfg["consolidate"]["num_ctx"] = consolidate_ctx
+
+    print(f"  HyDE: {hyde_model} (fallback {hyde_fallback}) "
+          f"@ ctx={hyde_ctx} -> {chat_url}")
+    if share_skills:
+        print(f"  Skills (reflect + consolidate): {reflect_model} @ ctx={reflect_ctx}")
+    else:
+        print(f"  Reflect: {reflect_model} @ ctx={reflect_ctx}")
+        print(f"  Consolidate: {consolidate_model} @ ctx={consolidate_ctx}")
+
+
 def _sqlite_vec_extension_available() -> bool:
     """Return True iff the ``sqlite_vec`` Python package is importable.
 
@@ -4565,6 +4783,17 @@ def main() -> int:
             if candidate.headers:
                 pcfg["headers"] = candidate.headers
             cfg.setdefault("providers", {})[cls.name] = pcfg
+
+    # Ollama chat backend (v1.4): HyDE + reflect + consolidate.
+    # These were hard-coded defaults in config.py until v1.4 — now
+    # an explicit dialog so users without an Ollama instance get
+    # a clean skip path. NOT used by /get-advice or /consultants
+    # (those have their own model configs).
+    _setup_ollama_chat(
+        cfg,
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
 
     # pgvector: ask if available, install system-wide launcher, register
     # in mcpServers. Self-contained -- no detect/verify path through the
