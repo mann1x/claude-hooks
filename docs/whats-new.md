@@ -1,299 +1,379 @@
-# What's new in v1.1.0
+# What's new in v1.4.0
 
-> **Released:** 2026-05-08 · cut from `dev` after a 5-week
-> series of phased landings · prior release was
-> [v1.0.3](https://github.com/mann1x/claude-hooks/releases/tag/v1.0.3)
-> on 2026-04-30
+> **Released:** 2026-05-14 · cut from `dev` after the llamafile
+> integration arc · prior release was
+> [v1.3.2](https://github.com/mann1x/claude-hooks/releases/tag/v1.3.2)
+> on 2026-05-13
 >
-> **Migration:** drop-in. No config schema breaks; no hook
-> contract changes. Run `python install.py` once on each host to
-> pick up the new bin/ shim wrappers and (optionally) install the
-> `/consultants` engine. See [`docs/RELEASING.md`](RELEASING.md)
-> if you want the upgrade procedure.
+> **Migration:** drop-in for existing installs. Nothing in your
+> running config breaks. Re-run `python install.py` on each host
+> to pick up the new prompts and (optionally) enable the
+> llamafile embedding engine. See
+> [`docs/RELEASING.md`](RELEASING.md) for the upgrade procedure
+> and [`docs/llamafile-integration.md`](llamafile-integration.md)
+> for the architecture deep-dive.
 >
-> **Slash-command shape note (v1.3+):** the per-verb `/get-advice--*`
-> and `/consultants--*` skills shown below were collapsed into two
-> dispatcher skills at v1.3 — `/get-advice <verb>` and
-> `/consultants <verb>` with implicit `ask`. The functionality is
-> unchanged; only the invocation shape changed. See
-> [`docs/get-advice.md`](get-advice.md) and
-> [`docs/consultants.md`](consultants.md) for the v1.3+ form. Below
-> is preserved as the historical v1.1 record.
+> **Older release notes** (kept verbatim for the record):
+> [v1.1](whats-new-v1.1.md). v1.0/v1.2/v1.3 highlights live in
+> [`CHANGELOG.md`](../CHANGELOG.md).
 
-This is the human-readable v1.1 highlights doc. For the full,
+This is the human-readable v1.4 highlights doc. For the full,
 release-engineered, "every commit accounted for" record see
 [`CHANGELOG.md`](../CHANGELOG.md).
 
 ---
 
-## Two LLM-to-LLM advisory features, both built on the shared `agent_loop.runner`
+## The one-paragraph summary
 
-The headline of v1.1 is two new ways to get a second opinion from
-a model that isn't Claude:
-
-### `/get-advice` — single-model second opinion
-
-Multi-turn conversation with a configured Ollama advisor. The
-advisor sees your project through six grounding tools (`read_file`,
-`grep`, `glob`, `list_files`, `recall_memory`, `recall_kg`) and
-gives a focused validation / sanity-check / design-review answer.
-
-Four sub-skills configure it: `/get-advice--model`,
-`/get-advice--effort`, `/get-advice--tools`, plus the driver
-`/get-advice <query>`.
-
-Full runbook: [`docs/get-advice.md`](get-advice.md).
-
-### `/consultants` — multi-agent council
-
-Four-role pipeline (planner → researcher → critic → synthesizer)
-with iterative refinement, on-disk durable sessions, and
-follow-up support that picks up exactly where the prior session
-left off. Heavier than `/get-advice` — runs in the background as
-a sibling service while you keep working — but produces an
-audit-quality answer when the question deserves one.
-
-Five sub-skills: `/consultants <query>`, `/consultants--config`,
-`/consultants--list`, `/consultants--show`, `/consultants--followup`.
-
-Full runbook: [`docs/consultants.md`](consultants.md).
+claude-hooks v1.4 turns the embedding side of the recall pipeline
+into something that **can survive an Ollama outage without losing
+recall**. We vendored Mozilla's
+[`llamafile`](https://github.com/mozilla-ai/llamafile) (a single
+APE binary that runs across Linux + macOS + Windows), bundled
+`qwen3-embedding-0.6b` into a 1.5 GB composite, and taught the
+existing `claude-hooks-daemon` to spawn it on demand with the
+same 5-minute idle-reap that Ollama uses by default. A new
+`CompositeEmbedder` tries Ollama (or an OpenAI-compatible
+endpoint) on every embed and drops to llamafile on
+`EmbedderError`. The installer dialog grew a real
+embedder-engine sub-flow that drives both `pgvector` and
+`sqlite_vec` providers, plus three more long-standing gaps
+finally closed: interactive HyDE / `/reflect` / `/consolidate`
+prompts, a dedicated `sqlite_vec` setup helper, and validate-only
+connectivity checks for the server-side-embedding MCPs (Qdrant
+and memory_kg).
 
 ---
 
-## /consultants v1.1 — what got added on top of the v1.0.3 first-release engine
+## Why this exists — the failure mode
 
-The `/consultants` engine itself shipped during the v1.0 series.
-v1.1 added **eight phases** of follow-on work:
+Pre-v1.4, every claude-hooks install with `pgvector` or
+`sqlite_vec` had a hard dependency on the configured embedder
+endpoint. The embedder was almost always Ollama on the same LAN,
+and Ollama on a busy host can decide to unload your model, fail
+to load it back (RAM pressure, model file missing, daemon
+restart mid-pull), or just be unreachable for the duration of an
+upgrade. The symptom was always the same:
 
-### 1. Full per-role LLM-message-history persistence (Phases 1-4)
+```
+[WARNING] claude_hooks.providers.pgvector: pgvector embed
+failed: ollama unreachable at http://192.168.178.2:11433/api/
+embeddings: timed out
+```
 
-Every role's complete LLM message thread (system + user + tool
-results accumulated across iters + the final assistant message)
-is now persisted to a `transcript.db` SQLite sidecar in each
-session's directory. When a session is closed, evicted by the
-idle reaper, or simply not warm anymore, the next follow-up
-reconstructs the threads from disk and the response is
-indistinguishable from a still-warm follow-up.
+Recall returns zero hits, the model proceeds without prior
+context, and the user only finds out 30 turns later when memory
+that "should have been there" wasn't.
 
-Schema: [`docs/consultants-transcript-db-schema.md`](consultants-transcript-db-schema.md).
-
-### 2. Live-session iteration and follow-up message threads (Phases 5-7)
-
-`claude-consultants follow-up <parent_sid>` extends a parent's
-role threads with a new user question. The follow-up runs through
-a shortened graph (researcher + synthesizer; critic optional) and
-emits its own session under `.claude-hooks/consultants/<new_sid>/`
-with `parent_sid` recorded in metadata. Chains are fine — a
-follow-up's sid can be the parent of another follow-up.
-
-The JSONL tracer that v1.0 used was decommissioned in Phase 6;
-all traces now live in `transcript.db` and are queryable via
-`claude-consultants show <sid> --raw`.
-
-### 3. Multi-model x-tier fan-out (Phases 9-10)
-
-Three new effort tiers — `xmedium`, `xhigh`, `xmax` — activate
-fan-out across configured `extra_models`:
-
-- **xmedium / xhigh**: researcher fan-out. Planner emits N×M Sends
-  (N plan-items × M models) so each researcher lane runs a
-  different model in parallel. Synthesizer sees the union.
-- **xmax**: researcher fan-out + critic fan-out + meta-critic
-  combine. C parallel critics across `critic.extra_models`, then a
-  meta-critic synthesizes the C verdicts into one consensus
-  decision. Critic identities are anonymized in the meta-critic
-  prompt; the audit map back to models lives in
-  `transcript.db.events.model`.
-
-Phase 10a fixed a critic-fanout 6× overshoot caused by LangGraph
-conditional edges firing per-Send-source-invocation; the fix is a
-pass-through `research_barrier` node that restores barrier
-semantics before the conditional fan-out fires.
-
-Base tiers (`low`/`medium`/`high`/`max`) silently ignore
-`extra_models` — the foot-gun guard.
-
-### 4. Cloud-flap recovery (this commit, 2026-05-08)
-
-Three layers of recovery from transient `Internal Server Error`
-flaps on Ollama Cloud:
-
-- **ChatClient retry budget bumped to 15 attempts / ~15 min
-  ceiling** (was 8 / ~136 s). Affects both `/consultants` and
-  `/get-advice`. Trade-off: a real permanent outage takes ~15 min
-  to surface as a user-visible error.
-- **Synthesizer fallback model chain** — when the primary
-  synthesizer model exhausts its retry budget, the engine walks
-  `synthesizer.extra_models` in order before giving up. Same
-  ChatClient (so the same proxy + connection pool); only the
-  `model` field of the payload changes per attempt. NOT a fan-out
-  (synthesizer never fans out, even at xmax).
-- **Degraded-answer composer** — when every model in the
-  fallback chain fails, the engine writes a `summary.md` whose
-  `final_answer` field surfaces the researcher's full reports +
-  the critic's verdict (the most expensive work of the
-  consultation, not lost) with a banner explaining it's a
-  degraded answer and a recovery hint pointing at `follow-up
-  <THIS_SID>` to inherit research + critic warm.
-
-The `/consultants--followup` skill is **failed-session-aware**:
-when the most recent session is `failed` (synthesizer flap), the
-skill defaults to it and offers to chain off the failed sid
-(researcher + critic threads inherit warm from disk; synthesizer
-re-runs with the v1.1 fallback chain) or its parent (start fresh).
+v1.4 fixes this by making the embedding tier **structurally
+redundant**: a primary that talks to your existing Ollama (or
+OpenAI-compatible endpoint), and a fallback that runs
+side-by-side as a daemon-managed local process. Both speak the
+same 1024-dim `qwen3-embedding` vector space, so the failover is
+transparent to the rest of the pipeline. Parity bench shows mean
+cosine 0.99963 over 23 mixed prompts between Ollama and
+llamafile serving the same GGUF — they are interchangeable.
 
 ---
 
-## Cross-platform install.py hardening
+## Llamafile as a fallback-capable embedding engine
 
-Two install.py improvements that make `python install.py` produce
-a working install on any platform without manual PATH editing:
+The shipped composite is `qwen3-embedding-0.6b-16k.llamafile`
+(1.52 GB, dim 1024, native 32 k ctx — we bake 16 k as the
+default for cache friendliness, override with the installer's
+custom-context prompt). It is APE
+([Cosmopolitan-Libc](https://github.com/jart/cosmopolitan)) so
+the **same file** runs across Linux, macOS, and Windows. The
+host detects CUDA / ROCm / Vulkan at runtime and picks the best
+GPU backend, transparently falling back to CPU on VRAM
+exhaustion.
 
-### bin/* shim wrappers (POSIX + Windows)
+### How it's supervised
 
-Skill CLIs invoked by bare name from a `/consultants--config` or
-`/get-advice` skill failed with `command not found` before v1.1.0
-because Claude Code's bash subprocess doesn't include the repo's
-`bin/` on PATH on any platform. Symlinks don't fix it either —
-the shims resolve `REPO` via `dirname "$0"` which through a
-symlink points at the symlink dir, not the repo.
+The user's strong preference here was "no new sibling service"
+— and the existing `claude-hooks-daemon` already had a proven
+detached-subprocess lifecycle (`consultants_forwarder.EngineManager`
+spawning the consultants engine, with idle-reap and signal
+ladder). We extracted that pattern as
+[`claude_hooks.embedding_manager.EmbeddingManager`](../claude_hooks/embedding_manager.py)
+and attached it to the daemon:
 
-install.py now drops thin exec-wrappers in a known PATH-friendly
-location for every shim:
+```
+pgvector / sqlite_vec
+   └─ CompositeEmbedder(primary=Ollama, fallback=Llamafile)
+                          │ embed("foo")
+                          ▼
+                 LlamafileEmbedder.embed("foo")
+                   1. RPC → claude-hooks-daemon "_embedding_ensure"
+                   2. daemon spawns llamafile (lazy) or returns
+                      "already up on :38092"
+                   3. embedder POSTs to :38092/embedding
+                   4. on HTTP error → re-ensure, retry once
+                          │
+                          ▼
+                 claude-hooks-daemon (existing TCP RPC :47018)
+                   └─ EmbeddingManager
+                        ├─ subprocess.Popen of the composite
+                        │     --port 38092 --pooling last
+                        │     --ctx-size 16384 [-ngl 99 if GPU]
+                        ├─ last_activity_at touched on every embed
+                        ├─ reaper thread (60s tick, 300s idle)
+                        │   → SIGTERM, 10s grace, SIGKILL
+                        └─ next ensure_running re-spawns transparently
+```
 
-- **POSIX (Linux + macOS)**: `~/.local/bin/<shim>` — POSIX sh
-  wrapper that `exec`s the absolute repo path.
-- **Windows**: `%LOCALAPPDATA%\claude-hooks\bin\<shim>` (POSIX sh
-  wrapper for the MSYS bash that Claude Code uses on Windows)
-  plus a `<shim>.cmd` sibling for native cmd / PowerShell users.
+Three new daemon RPC ops (`_embedding_ensure`,
+`_embedding_status`, `_embedding_shutdown`) ride on the same
+HMAC-signed wire protocol as the existing
+`_ping`/`_shutdown`/hook-dispatch ops. Typed best-effort
+wrappers live in `claude_hooks/daemon_client.py` — daemon-down
+returns `None`, `{ok: false}` returns `{available: false}`, so
+callers never need to special-case the supervision path.
 
-Wrappers carry an install-time tag in their first comment line so
-the installer is fully idempotent — re-running it replaces only
-its own files, hand-rolled wrappers of the same name are left
-alone with a notice. `python install.py --uninstall` removes only
-tagged wrappers.
+### GPU vs CPU — one knob, transparent fallback
 
-### Windows User PATH auto-prepend via `reg add` (not `setx`)
+The installer asks **one** question: `GPU mode [auto/cpu]`. The
+default flips on `gpu_probe.probe()`:
 
-For `/consultants` and `/get-advice` skills to actually resolve
-on Windows, the wrapper directory needs to be on User PATH that
-Claude Code's bash subprocess inherits. install.py now prepends
-`%LOCALAPPDATA%\claude-hooks\bin` to `HKCU\Environment\PATH`
-using `reg add` (NOT `setx` — `setx` silently truncates User
-PATH to 1024 chars, which is destructive on any developer
-machine), then broadcasts `WM_SETTINGCHANGE` so new processes
-pick it up without a logoff. Defensive 16 KB ceiling on the
-resulting PATH.
+- **`auto`** — spawn with `-ngl 99` (offload all layers); the
+  APE runtime auto-detects CUDA / ROCm / Vulkan and picks the
+  best backend. On spawn failure or first-embed timeout, the
+  manager reaps and respawns with `--gpu disable`, marks
+  `gpu_offload_failed=True` for the rest of the session.
+- **`cpu`** — `--gpu disable` from the start. Useful when you're
+  running on a shared box where VRAM is reserved for other
+  workloads (e.g. a host that hosts both claude-hooks and an
+  unrelated ML training run).
 
-### axon-host installer hardening
+There is no need for multiple fat binaries or per-platform dylib
+selection in v1.4. The APE dispatcher inside the upstream binary
+handles all that for free.
 
-The axon-unified service's installer pre-flight now verifies
-(a) the dedicated dependencies (`axoniq`, `uvicorn`,
-`httpx-sse`, `pydantic-settings`, `sse-starlette`) are present
-before enabling the unit, and (b) `/root/.axon` registry directory
-exists. Both prevent the
-`status=226/NAMESPACE` boot loop encountered on solidpc
-2026-05-07.
+### Cold-spawn cost — what to expect
 
----
+Measured on the two deployment hosts after the v1.4 cut, with
+the composite already cached in page cache (cold-start cost is
+roughly half I/O + half kernel exec + APE shell bootstrap):
 
-## Cloud-model evaluation suite
+| Host | Platform | First spawn | Warm embed |
+|---|---|---|---|
+| solidpc | Linux 6.2, RTX 3090, CPU mode | 1.2 s | 50 ms |
+| pandorum | Windows 10 19045, RTX 5080, CPU mode | 7.5–12 s | 80 ms |
 
-`docs/benchmarks/` now houses a **reproducible cloud-model
-evaluation protocol** for `/consultants` — three locked queries
-(smoke + audit-medium + audit-high) run against each model
-candidate, with grading rubric, per-role grades, and per-query
-verdicts:
+The Windows cold-spawn is higher because of how cmd / pythonw
+launch APE binaries through the embedded shell bootstrap. After
+the first spawn the binary sits in memory and every subsequent
+embed is sub-100 ms. With the 5-minute idle-reap default, a
+steadily-used host pays the cold-spawn cost once per 5 min of
+quiet — fine for active sessions, tunable via
+`embedding.idle_timeout_seconds` for sporadic single-prompt
+work.
 
-- [`docs/benchmarks/EVALUATION.md`](benchmarks/EVALUATION.md) —
-  the protocol (cloud-model fairness, multi-run discipline,
-  grading rubric)
-- [`docs/consultants-benchmarks.md`](consultants-benchmarks.md) —
-  the canonical query set (3 locked queries; do not edit
-  without re-baselining everyone)
-- [`docs/benchmarks/index.md`](benchmarks/index.md) — per-label
-  index with the v1.1 release tldr
-- [`docs/benchmarks/<label>/`](benchmarks/) — per-model results.
-  Seven labels as of 2026-05-07: `kimi-k2.6-cloud`,
-  `gemma4-31b-cloud`, `glm-5-1-cloud`, `qwen3-5-cloud`,
-  `qwen3-5-397b-cloud`, `minimax-m2-7-cloud`, plus the
-  retroactive `kimi-k2.6-cloud-pre-harden` baseline.
+### Distribution — GitHub Release asset, SHA-verified at install
 
-All seven labels are graded by Claude (the LLM driving the
-evaluation work) reading the on-disk transcripts per the
-[§3.5 protocol](benchmarks/EVALUATION.md#35-per-role-quality-grading-the-key-to-building-a-model-mix);
-the human operator only verifies model selection in real-world
-skill usage on whichever model gets picked — they don't grade
-transcripts. Headline grades:
+The composite is **not** committed (clones would balloon from
+~10 MB to ~1.5 GB) and **not** rebuilt at install time. The
+release-cut workflow:
 
-| Verdict | Labels |
-|---|---|
-| **PROD-READY** (mix `P:A R:A C:A S:A`) | `kimi-k2.6-cloud`, `gemma4-31b-cloud`, `glm-5-1-cloud`, plus the retroactive `kimi-k2.6-cloud-pre-harden` baseline |
-| **EVALUATED-ONLY** (usable in mixes for specific roles where the per-role grade is A) | `minimax-m2-7-cloud` (strong critic), `qwen3-5-397b-cloud` (strong planner + critic), `qwen3-5-cloud` (cheap sibling, same shape as 397b) |
+1. `make -C vendor/llamafile/dist` builds the composite from the
+   upstream slim binary + a symlink to your local Ollama
+   `qwen3-embedding` blob. The recipe is byte-reproducible (two
+   consecutive `make clean && make` produce identical SHA
+   `414f6166...`).
+2. `gh release upload v1.4.0 vendor/llamafile/dist/qwen3-embedding-0.6b-16k.llamafile`
+   attaches the asset; the SHA file
+   (`vendor/llamafile/dist/SHA256SUMS.composite`) is committed
+   in-tree.
+3. On a fresh install, `install.py` fetches the asset via
+   `gh release download` (or falls back to `urllib.request`),
+   verifies the SHA against the committed checksum, places it at
+   the standard path, chmods +x. Mismatch is a hard error with a
+   `redownload or rebuild` breadcrumb.
 
-Single-run, N=3 confirmation pending per
-[§5](benchmarks/EVALUATION.md#5-multi-run-requirement). The
-recommended on-host mixed config for v1.1.0 (planner / synthesizer
-= `gemma4:31b-cloud`, researcher = gemma4 + glm-5.1 at x-tier,
-critic = glm-5.1 + gemma4 at xmax, synthesizer failure-fallback
-= glm-5.1) draws directly on these grades.
-
-For "which model should I pick?" guidance see [`docs/consultants.md`
-§ Picking models](consultants.md#picking-models).
-
----
-
-## Smaller wins
-
-A handful of v1.1 changes worth surfacing:
-
-- **`/consultants--followup` skill** — the new fifth member of
-  the `/consultants` skill family, exposes
-  `claude-consultants follow-up` directly (previously only
-  reachable via the underlying CLI or by asking Claude to
-  dispatch it).
-- **stop_guard stall-after-commitment check** — prevents Claude
-  from stopping after declaring "I'll do X" without actually
-  doing X. Off by default; opt-in via
-  `hooks.stop_guard.enabled: true`.
-- **pgvector backup + validity canary stack** — ships a periodic
-  pg_dump + a row-count + last-write canary that surfaces
-  silent corruption / index drift. See
-  [`docs/pgvector-runbook.md`](pgvector-runbook.md).
-- **PreCompact hook** — a new event we wire by default. Fires
-  when Claude Code is about to compact context. The handler
-  self-gates on the wrapup skill being installed; a wired entry
-  is a cheap no-op when the skill is absent.
+For custom-GGUF setups (you want a different embedding model),
+the installer fetches only the slim binary from upstream and
+builds a composite locally with your GGUF via the same Makefile.
 
 ---
 
-## What didn't change
+## The installer dialog finally feels v1-shaped
 
-- **Hook contract**: `UserPromptSubmit`, `Stop`, `SessionStart`,
-  `SessionEnd`, `PreToolUse`, `PostToolUse` payload shapes
-  unchanged. Existing hook handlers stay working.
-- **Recall path**: `recall.py`, `hyde.py`, `dedup.py`, `decay.py`
-  unchanged. Memory provider plugin contract unchanged.
-- **Proxy stack**: `claude-hooks-proxy` + `dashboard` + `rollup`
-  unchanged. Stop-phrase guard YAML unchanged.
+Until v1.4, three configuration sections had **zero interactive
+prompts** — they were hard-coded defaults in `config.py` that
+you had to override by hand-editing JSON after the install ran.
+v1.4 closes all three:
+
+### `_setup_ollama_chat` (new)
+
+A single dialog covering:
+
+1. Use Ollama as a chat backend? (Validates `/api/tags`.)
+2. Ollama URL (`/api/generate` endpoint).
+3. **HyDE**: enabled, model, fallback model, `num_ctx`.
+4. **Shared-skills shortcut**: same model + ctx for `/reflect`
+   and `/consolidate`? Default Y — the common case.
+5. Or separate model + ctx per skill if you want them to
+   differ.
+
+Writes `hooks.user_prompt_submit.hyde_*`, `reflect.*`, and
+`consolidate.*` with the chat URL mirrored across all three so a
+model swap is a one-line edit rather than three.
+
+### `_setup_sqlite_vec_mcp` (new)
+
+The sqlite_vec provider had been a registered scaffold for ~5
+versions but `install.py` had no helper for it — users hit
+`embedder` keys that needed manual completion. v1.4 adds a
+proper setup helper that mirrors the pgvector flow:
+db_path / table prompts, embedder choice delegated to the shared
+engine dialog, extension-availability probe.
+
+### `_setup_embedding_engine` (new — drives both pgvector and sqlite_vec)
+
+The same dialog is asked once per local-embed provider you
+enable, with a "same as previous?" shortcut on the second
+invocation so the common case is one dialog total. The choices
+in order:
+
+1. **Use Ollama for embeddings?** Model (default
+   `qwen3-embedding:0.6b`), `num_ctx` (default 16384), with an
+   `ollama pull` offer if the model isn't present.
+2. **OpenAI-compatible primary instead?** Mutually exclusive
+   with Ollama-primary. URL + model + API key (env-var
+   references like `${OPENAI_API_KEY}` accepted). This is the
+   **embeddings** endpoint, not chat — common targets are
+   `https://api.openai.com/v1/embeddings`, an LM Studio
+   instance, or a vLLM `--embed` deployment.
+3. **Use llamafile as fallback?** Default Y when a primary is
+   set; mandatory primary when both Ollama and OpenAI are
+   declined. The dialog warns that model + ctx must match the
+   primary so the vector space stays stable across failover.
+4. **llamafile sub-dialog** — default model + ctx, or custom
+   GGUF path (validated against the GGUF magic bytes); GPU mode
+   `auto` vs `cpu` (default flips on `gpu_probe`).
+
+The composite fetch happens once across providers (not per
+provider) if the default model is chosen anywhere.
+
+### `_validate_qdrant_embedding` + `_validate_memory_kg_embedding` (new)
+
+Both Qdrant and memory_kg embed **server-side** (Qdrant uses
+FastEmbed inside its MCP image; memory_kg has a bundled
+embedder). claude-hooks doesn't override their embedders from
+the client. The new validators only:
+
+- Probe connectivity via the existing `Provider.verify()`.
+- Print a one-line `Probing http://h:32775/mcp ... OK / FAILED`.
+- On OK, surface a short note about where the embedding model
+  lives (`FastEmbed inside the MCP container` /
+  `bundled in the MCP server`).
+
+No prompts beyond connectivity; no mutation of `cfg`. The point
+is to make the install summary report something useful instead
+of silently skipping the server-side providers.
 
 ---
 
-## Acknowledgements
+## Operational details worth knowing
 
-v1.1's `/consultants` engine ate substantial test infrastructure
-(369 tests pass on the consultants suite alone, ~1.6k tests
-passing repo-wide). The benchmark sweep that grounded the
-multi-model x-tier work cost real cloud spend; thanks to the
-tester for running the labels.
+### The 5-minute idle reap, matched to Ollama
+
+`OLLAMA_KEEP_ALIVE=5m` is the de-facto convention on the Ollama
+side. v1.4's `EmbeddingManager` defaults to the same window
+(`idle_timeout_seconds=300`) so the user-visible model-residency
+behavior is consistent across primary + fallback. The reaper
+ticks every 60 s, checks `time.time() - last_activity_at`
+against the threshold, and runs SIGTERM → 10 s → SIGKILL on
+miss. Tunable per-install.
+
+### Windows console-window detachment
+
+Without explicit creationflags, the spawned llamafile inherits
+the parent's console on Windows — visible as a stray `cmd`
+prompt on the user's desktop. v1.4 ships with the right pattern
+borrowed from `claudemem_reindex._spawn_reindex` and
+`lsp_engine.client`: `CREATE_NO_WINDOW | DETACHED_PROCESS` plus
+`stdin=DEVNULL`. Verified on pandorum: the spawned process
+reports `Window Title: N/A` and no window appears.
+
+### APE binary bootstrap on POSIX
+
+llamafile binaries start with `MZqFpD='` magic that the Linux
+kernel doesn't recognize as a binfmt directly (you'd need
+`binfmt_misc` registration for APE, which the upstream README
+recommends but most claude-hooks installs don't have). The bytes
+are simultaneously a valid POSIX shell script whose first action
+is to re-exec the kernel-level entry point — so on POSIX,
+`EmbeddingManager` invokes the binary through `/bin/sh`, which
+runs the shell prefix and lets the embedded `exec` jump to the
+actual program. Windows direct-exec works unchanged (the binary
+is also a valid PE).
+
+### PID-file re-adoption across daemon restarts
+
+The spawned llamafile lives in its own session
+(`start_new_session=True` on POSIX, `DETACHED_PROCESS` on
+Windows) — it survives daemon crashes. On daemon restart,
+`EmbeddingManager` reads `~/.claude/embedding-server.pid`, tries
+to adopt the existing process, and only spawns fresh if the
+adoption fails. The cost of a daemon restart drops from "one
+cold-spawn per restart" to "zero".
+
+---
+
+## Verification — what we ran before the cut
+
+1. **Parity bench** (`vendor/llamafile/dist/bench_parity.py`):
+   23 mixed prompts embedded through both Ollama and llamafile,
+   pairwise cosine similarity. Mean 0.99963, min 0.99928. The
+   vectors are interchangeable for recall purposes.
+2. **Unit tests**: 2333 passed + 24 skipped (up from v1.3.2's
+   2146). The +187 new tests cover the new embedder classes
+   (single + batch + error shapes), spawn lifecycle + APE-wrap +
+   detachment, daemon RPC ops, GPU probe, and the four
+   installer-dialog branches (Ollama / OpenAI / llamafile /
+   no-primary).
+3. **End-to-end on solidpc**: pgvector store + recall through
+   the composite embedder, sentinel string round-tripped, daemon
+   log confirms each embed advanced `last_activity_at`.
+4. **End-to-end on pandorum** (Windows): same flow as solidpc
+   plus the windowless-spawn confirmation.
+
+---
+
+## Out of scope (deliberately)
+
+A few things v1.4 does **not** change, to keep the blast radius
+bounded:
+
+- **Chat-model migration.** llamafile's `--tools all` mode could
+  in principle replace Ollama for HyDE / `/get-advice` /
+  `/consultants`. Embedding-only is the cautious entry — the
+  v1.4 HyDE prompts ask for **Ollama** chat models only.
+  Swapping HyDE / advisor / consultants to llamafile chat is a
+  separate track.
+- **Qdrant / memory_kg client-side embedding.** Both MCPs embed
+  server-side today. Moving them onto our llamafile would need
+  the MCP images to support a "raw vector ingest" mode, which is
+  a separate change to the vendored MCP images.
 
 ---
 
 ## See also
 
-- [`CHANGELOG.md`](../CHANGELOG.md) — release-engineered record
-- [`docs/RELEASING.md`](RELEASING.md) — cut procedure
-- [`docs/consultants.md`](consultants.md) — `/consultants` runbook
-- [`docs/get-advice.md`](get-advice.md) — `/get-advice` runbook
-- [`docs/benchmarks/EVALUATION.md`](benchmarks/EVALUATION.md) —
-  evaluation protocol
+- [`docs/llamafile-integration.md`](llamafile-integration.md) —
+  architecture + installer flow + ops runbook.
+- [`docs/llamafile-embedding-parity.md`](llamafile-embedding-parity.md)
+  — the bench detail that motivated the integration.
+- [`docs/daemon.md`](daemon.md) — daemon RPC protocol + HMAC
+  wire format.
+- [`docs/hyde.md`](hyde.md) — the HyDE recall pipeline the new
+  chat-side prompts feed into.
+- [`docs/pgvector-runbook.md`](pgvector-runbook.md) — full
+  pgvector backend guide; the embedder-choice section now
+  references the v1.4 dialog.
+- [`docs/RELEASING.md`](RELEASING.md) — release-cut procedure.
+- [`CHANGELOG.md`](../CHANGELOG.md) — every commit accounted
+  for.
+- [`docs/whats-new-v1.1.md`](whats-new-v1.1.md) — prior
+  human-readable highlights doc (kept verbatim for the record).

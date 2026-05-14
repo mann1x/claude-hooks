@@ -645,4 +645,5 @@ If you want to read the code:
   runner that backs both `/consultants` and `/get-advice`
 - [`docs/RELEASING.md`](RELEASING.md) — when to expect changes to
   `/consultants`
-- [`docs/whats-new.md`](whats-new.md) — v1.1 highlights
+- [`docs/whats-new.md`](whats-new.md) — latest release
+  highlights (v1.4); prior releases archived alongside
