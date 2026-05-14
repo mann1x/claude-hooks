@@ -257,6 +257,31 @@ class _RequestHandler(socketserver.StreamRequestHandler):
             self.server.request_shutdown()  # type: ignore[attr-defined]
             return {"shutdown": True}
 
+        # Embedding-server lifecycle ops (v1.4). The EmbeddingManager
+        # is only attached to the server when cfg["embedding"]["enabled"]
+        # is true; absent → return a clean ``available=False`` answer so
+        # the client can fall through to its primary embedder or surface
+        # a config-error.
+        if event in ("_embedding_ensure", "_embedding_status",
+                     "_embedding_shutdown"):
+            mgr = getattr(self.server, "embedding_manager", None)
+            if mgr is None:
+                return {"available": False,
+                        "reason": "embedding manager not configured"}
+            try:
+                if event == "_embedding_ensure":
+                    return mgr.ensure_running()
+                if event == "_embedding_status":
+                    return mgr.status()
+                if event == "_embedding_shutdown":
+                    mgr.shutdown()
+                    return {"shutdown": True}
+            except RuntimeError as e:
+                # Spawn / port-busy / health-fail surface here. Return
+                # the structured error rather than crashing the daemon
+                # thread — the CompositeEmbedder uses this to fail over.
+                return {"available": False, "reason": str(e)}
+
         from claude_hooks.dispatcher import dispatch_capture
         return dispatch_capture(event, payload)
 
@@ -288,6 +313,7 @@ class DaemonServer(socketserver.ThreadingTCPServer):
         *,
         secret: str,
         replay_window: int = DEFAULT_REPLAY_WINDOW_SECONDS,
+        embedding_manager=None,
     ):
         if host not in ("127.0.0.1", "localhost", "::1"):
             raise ValueError(
@@ -295,17 +321,58 @@ class DaemonServer(socketserver.ThreadingTCPServer):
             )
         self.secret = secret
         self.replay_window = replay_window
+        # v1.4: optional llamafile lifecycle owner. ``None`` when the
+        # ``embedding`` block is absent / disabled; the
+        # ``_embedding_ensure`` handler returns ``available: false``
+        # in that case rather than crashing the request thread.
+        self.embedding_manager = embedding_manager
         self._stop_event = threading.Event()
         super().__init__((host, port), _RequestHandler)
 
     def request_shutdown(self) -> None:
-        """Trigger a clean shutdown from inside a request handler."""
+        """Trigger a clean shutdown from inside a request handler.
+
+        If an embedding manager is attached, reap the llamafile child
+        before signalling the server-loop shutdown — otherwise the
+        long-running subprocess can outlive the daemon (it was spawned
+        with ``start_new_session=True``) and orphan a 1.5 GB process
+        the next daemon start would have to kill.
+        """
+        if self.embedding_manager is not None:
+            try:
+                self.embedding_manager.shutdown()
+            except Exception as e:  # pragma: no cover - defensive
+                log.warning("embedding manager shutdown failed: %s", e)
         self._stop_event.set()
         threading.Thread(target=self.shutdown, daemon=True).start()
 
     @property
     def stop_event(self) -> threading.Event:
         return self._stop_event
+
+
+def _build_embedding_manager(cfg: dict):
+    """Build an EmbeddingManager from the loaded config or return
+    ``None`` if the ``embedding`` block is missing / disabled.
+
+    Lives outside ``serve()`` for testability — the unit tests patch
+    this to inject a stub manager without needing a real llamafile.
+    """
+    block = cfg.get("embedding") if isinstance(cfg, dict) else None
+    if not isinstance(block, dict) or not block.get("enabled"):
+        return None
+    try:
+        from claude_hooks.embedding_manager import (
+            EmbeddingManager, config_from_dict,
+        )
+    except Exception as e:
+        log.warning("embedding_manager import failed: %s", e)
+        return None
+    try:
+        return EmbeddingManager(config_from_dict(cfg))
+    except Exception as e:
+        log.warning("EmbeddingManager construction failed: %s", e)
+        return None
 
 
 def serve(
@@ -317,8 +384,34 @@ def serve(
 ) -> int:
     """Start the daemon. Blocks until ``serve_forever`` returns. Returns 0."""
     secret = ensure_secret(secret_path)
-    server = DaemonServer(host, port, secret=secret, replay_window=replay_window)
+
+    # Try to wire up the embedding manager from current config. Loading
+    # the config is best-effort — if it fails for any reason we still
+    # serve hooks without the llamafile lifecycle attached, matching the
+    # daemon's "fail open" stance on optional subsystems.
+    embedding_mgr = None
+    try:
+        from claude_hooks.config import load_config
+
+        cfg = load_config()
+        embedding_mgr = _build_embedding_manager(cfg or {})
+    except Exception as e:
+        log.debug("could not load config for embedding manager: %s", e)
+
+    server = DaemonServer(
+        host, port,
+        secret=secret, replay_window=replay_window,
+        embedding_manager=embedding_mgr,
+    )
     log.info("claude-hooks-daemon listening on %s:%d", host, port)
+    if embedding_mgr is not None:
+        embedding_mgr.start_reaper()
+        log.info(
+            "embedding manager attached (idle_timeout=%.0fs, port=%d, mode=%s)",
+            embedding_mgr.cfg.idle_timeout_seconds,
+            embedding_mgr.cfg.port,
+            embedding_mgr.cfg.mode,
+        )
 
     # Background update-check thread: re-reads config on every tick so
     # the user can flip ``update_check.enabled`` at runtime without
@@ -343,6 +436,13 @@ def serve(
         log.info("shutting down on Ctrl-C")
     finally:
         server.server_close()
+        if embedding_mgr is not None:
+            try:
+                embedding_mgr.shutdown()
+            except Exception as e:  # pragma: no cover - defensive
+                log.warning(
+                    "embedding manager shutdown failed at exit: %s", e
+                )
         if update_thread is not None:
             # The thread reads stop_event already; just give it a
             # moment to wake from sleep before we return.
