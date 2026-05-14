@@ -16,8 +16,118 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-_(no entries yet — work since v1.3.2 lands here as it's committed
-on `dev`. See `git log v1.3.2..origin/dev` after fetching.)_
+_(no entries yet — next batch of work since v1.4.0 lands here.)_
+
+## [1.4.0] — 2026-05-14
+
+MINOR — adds **mozilla-ai/llamafile@0.10.1** as a fallback-capable
+embedding engine for the local-embed providers (`pgvector` and
+`sqlite_vec`), supervised by the existing `claude-hooks-daemon`.
+A healthy install can now survive an Ollama outage; a fresh
+install can run without an Ollama dependency at all.
+
+Opt-in: existing installs keep their Ollama-only embedder until
+`install.py` is re-run.
+
+### Added
+
+- **`LlamafileEmbedder` + `CompositeEmbedder`**
+  (`claude_hooks/embedders.py`). The composite tries the primary
+  (Ollama / OpenAI-compatible) on every embed and drops to the
+  fallback on `EmbedderError`, with a dim-mismatch guard so the
+  vector space stays stable across failover.
+- **`EmbeddingManager`** (`claude_hooks/embedding_manager.py`) —
+  daemon-side llamafile lifecycle. Spawn-on-demand, 5-minute idle
+  reap (matches Ollama's `OLLAMA_KEEP_ALIVE=5m`), SIGTERM →
+  10 s → SIGKILL ladder, PID-file at
+  `~/.claude/embedding-server.pid` for re-adoption across daemon
+  restarts. APE-binary `/bin/sh` shim on POSIX so the
+  Cosmopolitan-Libc binary boots without binfmt_misc registration.
+- **`gpu_probe`** (`claude_hooks/gpu_probe.py`) — `nvidia-smi` /
+  `rocm-smi` / `vulkaninfo` chain with 2-second timeout. Used at
+  install time to suggest defaults and at runtime to decide the
+  `-ngl 99` vs `--gpu disable` spawn flag.
+- **Daemon RPC ops** (`claude_hooks/daemon.py`,
+  `claude_hooks/daemon_client.py`): `_embedding_ensure`,
+  `_embedding_status`, `_embedding_shutdown` with typed
+  best-effort wrappers.
+- **HyDE / reflect / consolidate installer dialog**
+  (`install._setup_ollama_chat`). Until v1.4 these sections had
+  zero interactive prompts (hard-coded defaults in `config.py`).
+  The dialog asks for the Ollama chat URL, HyDE model + fallback
+  + `num_ctx`, and offers a shared-skills shortcut so reflect +
+  consolidate inherit by default.
+- **`install._setup_embedding_engine`** — parameterized embedder
+  dialog now drives **both** pgvector and sqlite_vec; "use the
+  previous provider's choice?" shortcut on the second invocation.
+  OpenAI-compatible primary supported alongside Ollama-primary
+  and llamafile-primary.
+- **`install._setup_sqlite_vec_mcp`** — sqlite_vec previously had
+  **zero** installer code; v1.4 pays back that latent gap.
+- **`install._validate_qdrant_embedding` /
+  `_validate_memory_kg_embedding`** — validate-only branches for
+  the server-side-embedding MCPs. Probe connectivity, surface a
+  one-line note about where the embedding model lives, never
+  mutate `cfg`.
+- **`vendor/llamafile/dist/Makefile`** — reproducible
+  composite-build recipe. Two consecutive
+  `make clean && make` invocations produce byte-identical output
+  (verified SHA `414f6166...` for the canonical
+  qwen3-embedding-0.6b-16k composite).
+- **`vendor/llamafile/dist/SHA256SUMS.composite`** — committed
+  in-tree; `install.py` verifies the GH-Release-downloaded asset
+  against it (hard error with `redownload or rebuild` breadcrumb
+  on mismatch).
+- **`docs/llamafile-integration.md`** — architecture + installer
+  flow + ops runbook.
+- **~185 new tests** (now ~2355 total, up from v1.3.2's 2146):
+  `test_embedders_llamafile.py`, `test_gpu_probe.py`,
+  `test_embedding_manager.py` (incl. APE-wrap regressions),
+  `test_daemon_embedding_rpc.py`,
+  `test_install_embedding_engine.py`,
+  `test_install_sqlite_vec_mcp.py`, `test_install_ollama_chat.py`,
+  `test_install_validate_mcp_embedding.py`.
+
+### Changed
+
+- **`install._setup_pgvector_mcp`** now delegates its embedder
+  dialog to `_setup_embedding_engine`; the DSN/schema/init path
+  is unchanged. The Ollama-side model-pull stays in the
+  Ollama-primary branch only.
+- **`main()` ordering**: `_setup_ollama_chat` →
+  `_setup_pgvector_mcp` → `_setup_sqlite_vec_mcp` →
+  `_validate_qdrant_embedding` → `_validate_memory_kg_embedding`
+  → `_setup_proxy_orchestrator`. The chat URL is settled before
+  the embedder dialog uses it; the validate-only providers
+  report after the client-embed providers are configured.
+- **Canonical embedding port `38092`** — adjacent to caliber-proxy
+  (38090) and consultants (38095).
+
+### Fixed
+
+- **Windows console-window detachment** in
+  `EmbeddingManager._spawn_once` (`ff14f3a`). The spawned
+  llamafile was inheriting a console on Windows because the code
+  only passed POSIX `start_new_session=True`. v1.4 ships with
+  `CREATE_NO_WINDOW | DETACHED_PROCESS` on Windows + stdin=DEVNULL,
+  matching the pattern used by `claudemem_reindex._spawn_reindex`
+  and `lsp_engine.client`. Verified on pandorum: the new spawn
+  reports `Window Title: N/A` and no cmd window appears.
+
+### Distribution
+
+- **GitHub Release asset** for the composite (~1.5 GB) —
+  `qwen3-embedding-0.6b-16k.llamafile` attached to the `v1.4.0`
+  release. Clones stay small (~10 MB); `install.py` fetches the
+  asset only when needed, verifies against the committed SHA, and
+  falls back to `urllib.request` if `gh` is absent.
+
+### Verified
+
+- Reproducible composite builds on solidpc (Linux + RTX 3090).
+- End-to-end through standalone daemon: cold-spawn 1.2 s, 1024-dim
+  L2-normalized vector, idle reap clean.
+- Full test suite green: 2331 passed + 24 skipped.
 
 ## [1.3.2] — 2026-05-13
 

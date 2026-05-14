@@ -180,3 +180,91 @@ def shutdown(
         return False
     result = resp.get("result") or {}
     return bool(result.get("shutdown"))
+
+
+# --------------------------------------------------------------------- #
+# v1.4: embedding-server lifecycle wrappers
+# --------------------------------------------------------------------- #
+#
+# Used by :class:`claude_hooks.embedders.LlamafileEmbedder`. The
+# embedder's ``daemon_ensure`` hook calls ``embedding_ensure()`` before
+# each HTTP request; the call is best-effort by design (the
+# LlamafileEmbedder catches all exceptions and falls through to the
+# raw HTTP path), so these wrappers raise only on programming errors,
+# never on daemon-down / auth-fail / handler-error.
+
+def embedding_ensure(
+    *,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    secret_path: Path = DEFAULT_SECRET_PATH,
+    timeout: float = 60.0,
+) -> Optional[dict]:
+    """Ask the daemon's embedding manager to spawn (or adopt) the
+    llamafile process. Returns the manager's status dict on success::
+
+        {"ready": True, "port": 38092, "mode": "cpu"|"auto",
+         "spawned": bool, "gpu_fallback": bool?}
+
+    Returns ``None`` when the daemon is unreachable; returns a dict
+    with ``available: False`` when the daemon is up but no
+    embedding manager is configured or the spawn failed. The 60 s
+    default timeout is generous because cold spawn can include
+    model load + GPU init.
+    """
+    resp = call(
+        "_embedding_ensure", {},
+        host=host, port=port, secret_path=secret_path, timeout=timeout,
+    )
+    if resp is None:
+        return None
+    if not resp.get("ok"):
+        return {"available": False,
+                "reason": resp.get("error", "unknown")}
+    return resp.get("result") or {}
+
+
+def embedding_status(
+    *,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    secret_path: Path = DEFAULT_SECRET_PATH,
+    timeout: float = 5.0,
+) -> Optional[dict]:
+    """Snapshot of the embedding manager's runtime state. Returns the
+    inner ``EmbeddingManager.status()`` dict on success, ``None`` if the
+    daemon is unreachable, or ``{"available": False, ...}`` if the
+    daemon is up but the manager isn't configured.
+    """
+    resp = call(
+        "_embedding_status", {},
+        host=host, port=port, secret_path=secret_path, timeout=timeout,
+    )
+    if resp is None:
+        return None
+    if not resp.get("ok"):
+        return {"available": False,
+                "reason": resp.get("error", "unknown")}
+    return resp.get("result") or {}
+
+
+def embedding_shutdown(
+    *,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    secret_path: Path = DEFAULT_SECRET_PATH,
+    timeout: float = 15.0,
+) -> bool:
+    """Tell the daemon to reap the llamafile child (without stopping
+    the daemon itself). Used by ``install.py --uninstall`` and by ops
+    tooling. Returns True on confirmed reap, False on any other
+    outcome.
+    """
+    resp = call(
+        "_embedding_shutdown", {},
+        host=host, port=port, secret_path=secret_path, timeout=timeout,
+    )
+    if not resp or not resp.get("ok"):
+        return False
+    result = resp.get("result") or {}
+    return bool(result.get("shutdown"))

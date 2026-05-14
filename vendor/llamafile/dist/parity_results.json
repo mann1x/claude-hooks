@@ -1,0 +1,209 @@
+[
+  {
+    "idx": 0,
+    "prompt": "hello world",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9997665807800168,
+    "t_o_ms": 61.616875987965614,
+    "t_l_ms": 38.67379401344806
+  },
+  {
+    "idx": 1,
+    "prompt": "what is the meaning of life?",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9995321679063243,
+    "t_o_ms": 67.68856800044887,
+    "t_l_ms": 81.03206800296903
+  },
+  {
+    "idx": 2,
+    "prompt": "the quick brown fox jumps over the lazy dog",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9994623710195832,
+    "t_o_ms": 67.70179499289952,
+    "t_l_ms": 76.39450300484896
+  },
+  {
+    "idx": 3,
+    "prompt": "def fibonacci(n):\n    return n if n < 2 else fibonacci(n-1) + fibonacci(n-2)",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9995495731831954,
+    "t_o_ms": 100.82515800604597,
+    "t_l_ms": 197.72184500470757
+  },
+  {
+    "idx": 4,
+    "prompt": "SELECT id, name FROM users WHERE active = true LIMIT 10;",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9997277472270154,
+    "t_o_ms": 68.47190199187025,
+    "t_l_ms": 89.24224699148908
+  },
+  {
+    "idx": 5,
+    "prompt": "git rebase -i HEAD~3 --autosquash",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9996636208476504,
+    "t_o_ms": 67.75257500703447,
+    "t_l_ms": 95.93066299566999
+  },
+  {
+    "idx": 6,
+    "prompt": "claude_hooks/dispatcher.py:136",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9996116293272526,
+    "t_o_ms": 67.50970598659478,
+    "t_l_ms": 71.52854700689204
+  },
+  {
+    "idx": 7,
+    "prompt": "v1.3.2 fixes the __version__ drift bug",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9995736532715569,
+    "t_o_ms": 70.21218299632892,
+    "t_l_ms": 73.81831499515101
+  },
+  {
+    "idx": 8,
+    "prompt": "le chat est sur la table",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.99941490169189,
+    "t_o_ms": 64.86619097995572,
+    "t_l_ms": 49.96807599673048
+  },
+  {
+    "idx": 9,
+    "prompt": "il gatto \u00e8 sul tavolo",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9996309260743002,
+    "t_o_ms": 53.216639993479475,
+    "t_l_ms": 65.93069501104765
+  },
+  {
+    "idx": 10,
+    "prompt": "der Hund l\u00e4uft im Park",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9993927878456064,
+    "t_o_ms": 56.70082202414051,
+    "t_l_ms": 58.816570992348716
+  },
+  {
+    "idx": 11,
+    "prompt": "\u732b\u304c\u673a\u306e\u4e0a\u306b\u3044\u308b",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9995316953289403,
+    "t_o_ms": 56.18426500586793,
+    "t_l_ms": 60.60394199448638
+  },
+  {
+    "idx": 12,
+    "prompt": "Yesterday we cut v1.3.1 to fix the sqlite_vec dispatcher bug reported in issue #2. The fix is a single line in claude_ho",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9997368947216785,
+    "t_o_ms": 58.019515010528266,
+    "t_l_ms": 425.37816998083144
+  },
+  {
+    "idx": 13,
+    "prompt": "The HyDE pipeline generates a hallucinated answer to the user prompt, then embeds that answer to use as the query vector",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9995188769057562,
+    "t_o_ms": 58.10857500182465,
+    "t_l_ms": 446.40155098750256
+  },
+  {
+    "idx": 14,
+    "prompt": "how do I fix bcache cache-set superblock corruption?",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9997574532878839,
+    "t_o_ms": 56.8225420138333,
+    "t_l_ms": 107.29607500252314
+  },
+  {
+    "idx": 15,
+    "prompt": "what context size does qwen3-embedding support natively?",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9998141572022441,
+    "t_o_ms": 56.93746102042496,
+    "t_l_ms": 103.22393599199131
+  },
+  {
+    "idx": 16,
+    "prompt": "asdf qwer zxcv",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9996520759470529,
+    "t_o_ms": 56.87055102316663,
+    "t_l_ms": 59.81049602269195
+  },
+  {
+    "idx": 18,
+    "prompt": "\ud83c\udf89 emoji test \ud83d\ude80",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9998025803946151,
+    "t_o_ms": 55.481288000009954,
+    "t_l_ms": 66.50393200106919
+  },
+  {
+    "idx": 19,
+    "prompt": "the cat is on the table",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9995526894426622,
+    "t_o_ms": 54.86342200310901,
+    "t_l_ms": 59.639546991093084
+  },
+  {
+    "idx": 20,
+    "prompt": "a cat sits on the table",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9996735174520835,
+    "t_o_ms": 53.382158977910876,
+    "t_l_ms": 58.59844299266115
+  },
+  {
+    "idx": 21,
+    "prompt": "the cat is on the mat",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9996804430683573,
+    "t_o_ms": 56.63655299576931,
+    "t_l_ms": 58.55581199284643
+  },
+  {
+    "idx": 22,
+    "prompt": "store a new memory in pgvector with the kg-create tool",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9997382856101725,
+    "t_o_ms": 55.28438801411539,
+    "t_l_ms": 100.43034100090154
+  },
+  {
+    "idx": 23,
+    "prompt": "the consultants engine runs planner researcher critic synthesizer",
+    "dim_o": 1024,
+    "dim_l": 1024,
+    "cos": 0.9997322666045032,
+    "t_o_ms": 55.82883601891808,
+    "t_l_ms": 74.56494099460542
+  }
+]
