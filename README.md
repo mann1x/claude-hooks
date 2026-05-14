@@ -431,6 +431,24 @@ installer handles all three).
 | **Postgres + pgvector** | Local docker stack — see [`docs/pgvector-runbook.md`](docs/pgvector-runbook.md). `install.py` handles DSN probe, schema init, embedder pull, and registers a system-wide `pgvector-mcp` stdio server in `~/.claude.json` so other MCP clients (Cursor/Codex/OpenWebUI) can use the same store. | `pip install -r requirements-pgvector.txt` | single SQL backend that replaces both Qdrant + Memory KG; hybrid recall (vector + BM25 RRF); native KG entities/relations/observations |
 | **sqlite-vec** | Standalone SQLite file at `~/.claude/claude-hooks-memory.db` | `pip install -r requirements-sqlite-vec.txt` | zero-server, single-file, low-footprint |
 
+### Embedding engines (v1.4+) — for the local-embed providers
+
+The `pgvector` and `sqlite-vec` providers need an embedder. Qdrant and
+Memory KG embed server-side (FastEmbed inside the MCP container /
+bundled embedder) and don't need this section — `install.py` validates
+their connectivity and surfaces a one-line note instead.
+
+| Engine | When | Notes |
+|---|---|---|
+| **Ollama** | Default primary when Ollama is reachable | `qwen3-embedding:0.6b` at `num_ctx=16384` by default; installer probes `/api/tags` and offers `ollama pull` if missing |
+| **OpenAI-compatible** | Alternative primary | Any `/v1/embeddings` endpoint (OpenAI, LM Studio, vLLM, …); API key may be a `${VAR}` reference |
+| **llamafile** (v1.4+) | **Fallback** by default; primary if Ollama is disabled | mozilla-ai/llamafile@0.10.1; supervised by `claude-hooks-daemon` with 5-min idle reap; composite ships as a GitHub Release asset and is fetched + SHA-verified at install time. See [`docs/llamafile-integration.md`](docs/llamafile-integration.md). |
+
+`CompositeEmbedder` tries the primary on every embed and drops to the
+fallback on `EmbedderError`. Primary and fallback must agree on
+embedding dim (1024 for `qwen3-embedding-0.6b`) — the installer
+warns and the runtime guards.
+
 ### Conda env + dependency files
 
 The installer creates a `claude-hooks` conda env (Python 3.11) by default

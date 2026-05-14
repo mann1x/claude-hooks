@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.3.2** — ~1.6k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.4.0** — ~2.3k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -48,6 +48,25 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > `~/.claude/skills/<variant>` dirs idempotently on upgrade. Schema
 > for the consultants transcript.db sidecar at
 > [`docs/consultants-transcript-db-schema.md`](docs/consultants-transcript-db-schema.md).
+> v1.4 adds **mozilla-ai/llamafile@0.10.1** as a fallback-capable
+> embedding engine for the `pgvector` + `sqlite_vec` providers,
+> supervised by the existing `claude-hooks-daemon` (spawn-on-demand,
+> 5-minute idle reap to match Ollama's `OLLAMA_KEEP_ALIVE=5m`,
+> SIGTERM → 10 s → SIGKILL ladder). The composite
+> `qwen3-embedding-0.6b-16k.llamafile` (1.5 GB, dim 1024, mean cosine
+> 0.99963 vs Ollama in parity bench) ships as a GitHub Release asset
+> and is fetched by `install.py` only on hosts that enable the
+> engine. `CompositeEmbedder` tries Ollama (or an OpenAI-compatible
+> primary) first and falls back to llamafile on `EmbedderError`,
+> with a dim-mismatch guard so the vector space stays stable across
+> failover. Installer dialog rounds out three long-standing gaps —
+> interactive HyDE / reflect / consolidate prompts
+> (`_setup_ollama_chat`), embedder dialog for `sqlite_vec`
+> (`_setup_sqlite_vec_mcp`, previously absent), and validate-only
+> connectivity reports for the server-side-embedding MCPs
+> (`_validate_qdrant_embedding` / `_validate_memory_kg_embedding`).
+> See [`docs/llamafile-integration.md`](docs/llamafile-integration.md)
+> for the architecture + installer flow + ops runbook.
 
 ---
 
