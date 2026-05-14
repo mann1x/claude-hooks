@@ -1,0 +1,18 @@
+#!/usr/bin/env sh
+# claude-hooks-models — POSIX entry point for the llamafile chat-model
+# registry CLI. Manages ~/.claude/llamafile-models.json: list / add /
+# remove / rename / copy / show / path / probe / gc.
+#
+# See docs/llamafile-chat-models.md for the full reference.
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+
+. "$HERE/_resolve_python.sh"
+
+if [ -z "$PY" ]; then
+    echo "claude-hooks-models: no python found" >&2
+    exit 1
+fi
+
+exec "$PY" -m claude_hooks.models_cli "$@"
