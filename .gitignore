@@ -71,3 +71,15 @@ graphify-out/.code-graph-build.lock
 /bench-*.json
 /config/claude-hooks.json.bak-*
 /modelfiles/
+
+# Vendored llamafile binaries + composite artifacts. The binary
+# blobs are huge (100s of MB) and reproducible from upstream via
+# the committed SHA256SUMS file. We commit the per-version README,
+# LICENSE.upstream, and SHA256SUMS — not the binaries themselves.
+vendor/llamafile/v*/llamafile-*
+vendor/llamafile/v*/zipalign-*
+vendor/llamafile/v*/whisperfile-*
+vendor/llamafile/v*/*.zip
+vendor/llamafile/models/*.gguf
+vendor/llamafile/models/*.gguf.symlink
+vendor/llamafile/dist/*.llamafile
