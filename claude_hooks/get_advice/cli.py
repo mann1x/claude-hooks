@@ -26,7 +26,7 @@ from claude_hooks.get_advice import (
     config as advisor_config,
     state as advisor_state,
 )
-from claude_hooks.get_advice.chat_client import ChatClient
+from claude_hooks.get_advice.chat_client import ChatClient, make_agent_chat_client
 from claude_hooks.get_advice.ctx_probe import base_url_default, probe_max_ctx
 
 
@@ -236,7 +236,11 @@ def cmd_turn(args: argparse.Namespace) -> int:
         "options": options,
     }
 
-    client = ChatClient(base_url)
+    # v1.5+: routes ``llamafile://<label>`` refs to a daemon-ensured
+    # llamafile speaking OpenAI ``/v1/chat/completions``; bare Ollama
+    # refs (and ``:cloud`` suffix) continue through the existing
+    # native ``/api/chat`` client.
+    client = make_agent_chat_client(cfg.model, base_url)
     result = agent_loop_runner.run_loop(
         payload,
         str(cwd),

@@ -29,7 +29,7 @@ def make_runner(*, ollama_base_url: str):
     ChatClient for clean usage tracking.
     """
     # Lazy imports — none of these are present in the main test env.
-    from claude_hooks.get_advice.chat_client import ChatClient
+    from claude_hooks.get_advice.chat_client import ChatClient, make_agent_chat_client
     from claude_hooks.caliber_proxy.tools import (
         openai_tool_specs, execute as tool_execute,
     )
@@ -83,9 +83,17 @@ def make_runner(*, ollama_base_url: str):
         # One ChatClient per role so retries and timing don't bleed.
         # Each is wrapped with TracedChat so every .chat() call emits
         # an llm_call span tagged with role, model, tokens, duration.
+        # v1.5+: ``llamafile://<label>`` refs in the role's model spec
+        # route to a daemon-ensured llamafile via
+        # ``make_agent_chat_client``; bare refs continue through the
+        # existing native ``/api/chat`` ChatClient. Both expose the
+        # same ``chat(payload) -> dict`` + ``last_usage`` so the
+        # TracedChat wrapper and agent loop are unchanged.
         chat_clients = {
-            r: TracedChat(ChatClient(ollama_base_url),
-                          role=r, tracer=tracer)
+            r: TracedChat(
+                make_agent_chat_client(cfg.roles[r].model, ollama_base_url),
+                role=r, tracer=tracer,
+            )
             for r in enabled
         }
         models = {r: cfg.roles[r].model for r in enabled}
@@ -322,7 +330,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
     creating fresh ChatClients if the parent's are gone (e.g. the
     parent was reaped between completion and follow-up).
     """
-    from claude_hooks.get_advice.chat_client import ChatClient
+    from claude_hooks.get_advice.chat_client import ChatClient, make_agent_chat_client
     from claude_hooks.caliber_proxy.tools import (
         openai_tool_specs, execute as tool_execute,
     )
@@ -370,10 +378,14 @@ def make_follow_up_runner(*, ollama_base_url: str):
                 # the parent didn't run that role). Cold-start —
                 # the follow-up still works but pays the
                 # /api/show probe cost on first use.
-                raw = ChatClient(ollama_base_url)
+                # v1.5+: dispatch based on the role's model_ref so
+                # cold-start follow-ups land on the right backend.
+                role_model = cfg.roles[role].model
+                raw = make_agent_chat_client(role_model, ollama_base_url)
                 log.info(
                     "follow-up %s: cold ChatClient for role=%s "
-                    "(no warm parent client)", state.sid, role,
+                    "(no warm parent client; model=%s)",
+                    state.sid, role, role_model,
                 )
             chat_clients[role] = TracedChat(raw, role=role, tracer=tracer)
 
