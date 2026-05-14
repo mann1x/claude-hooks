@@ -2842,6 +2842,112 @@ def _setup_embedding_engine(
     print(f"    -> {provider}.embedder = {pcfg['embedder']}")
 
 
+def _sqlite_vec_extension_available() -> bool:
+    """Return True iff the ``sqlite_vec`` Python package is importable.
+
+    The provider lazy-loads it on first use; checking at install time
+    lets us surface a clear "pip install sqlite-vec" breadcrumb
+    instead of waiting for the first hook to fail.
+    """
+    try:
+        import sqlite_vec  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _setup_sqlite_vec_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
+    """Ask if sqlite_vec is wanted and wire its config block (v1.4).
+
+    Unlike pgvector, sqlite_vec is a strictly local provider — no
+    MCP server, no system-wide launcher, no schema migration.
+    The provider lazily creates the table on first ``store()``.
+    All we do here is:
+
+    1. Ask whether to enable the provider.
+    2. Prompt for the SQLite db_path (default
+       ``~/.claude/claude-hooks-memory.db``).
+    3. Surface a one-line ``pip install sqlite-vec`` breadcrumb if
+       the Python dep is missing.
+    4. Delegate the embedder choice (Ollama / OpenAI / llamafile) to
+       :func:`_setup_embedding_engine`.
+
+    Idempotent: if ``cfg.providers.sqlite_vec.embedder`` is already
+    set the dialog runs but proposes the existing values as
+    defaults; brand-new installs get the full prompt sequence.
+
+    Skipped silently in non-interactive mode when the provider isn't
+    already enabled — same precedent as ``_setup_pgvector_mcp``.
+    """
+    pcfg = (cfg.get("providers") or {}).get("sqlite_vec") or {}
+    already_enabled = bool(pcfg.get("enabled"))
+    existing_db = pcfg.get("db_path") or "~/.claude/claude-hooks-memory.db"
+
+    print("\n--- sqlite_vec ---")
+    print("  Optional: local-only persistent memory backed by SQLite + sqlite-vec.")
+    print("  Strictly single-host (no MCP server). Lower setup cost than pgvector;")
+    print("  shared embedder dialog so failover with llamafile works the same way.")
+
+    if non_interactive:
+        if not already_enabled:
+            print("  --non-interactive and not currently enabled -> skipping sqlite_vec.")
+            return
+        ans = "y"
+        print("  --non-interactive: keeping existing sqlite_vec config.")
+    else:
+        default = "Y" if already_enabled else "N"
+        ans = input(
+            f"  Set up sqlite_vec? [{default}/{'n' if default == 'Y' else 'y'}]: "
+        ).strip().lower() or default.lower()
+        if ans not in ("y", "yes"):
+            print("  Skipped.")
+            return
+
+    # 1. db_path — preserve existing when present.
+    if non_interactive:
+        db_path = existing_db
+    else:
+        raw = input(f"  SQLite db path [{existing_db}]: ").strip()
+        db_path = raw or existing_db
+
+    expanded = os.path.expanduser(db_path)
+    parent = Path(expanded).parent
+    if not parent.exists():
+        if dry_run:
+            print(f"  [dry-run] Would mkdir -p {parent}")
+        else:
+            try:
+                parent.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                print(f"  Cannot create {parent}: {e}")
+                print("  Pick a different db_path and re-run install.py.")
+                return
+
+    # 2. Python dep breadcrumb.
+    if not _sqlite_vec_extension_available():
+        print("  Note: the 'sqlite-vec' Python package isn't installed in the")
+        print("  current env. Install with: pip install sqlite-vec  (or include")
+        print("  the [sqlite-vec] extra: pip install claude-hooks[sqlite-vec]).")
+
+    # 3. Apply config + drive embedder dialog (only on a fresh wire-up;
+    # re-runs respect an existing embedder choice).
+    cfg.setdefault("providers", {}).setdefault("sqlite_vec", {})
+    sv = cfg["providers"]["sqlite_vec"]
+    sv["enabled"] = True
+    sv["db_path"] = db_path
+    sv.setdefault("table", "memory")
+    sv.setdefault("recall_k", 5)
+    sv.setdefault("store_mode", "auto")
+    sv.setdefault("timeout", 10.0)
+    if not sv.get("embedder"):
+        _setup_embedding_engine(
+            cfg, provider="sqlite_vec",
+            non_interactive=non_interactive, dry_run=dry_run,
+        )
+
+    print(f"  Done. sqlite_vec.enabled = True, db_path = {db_path}")
+
+
 def _pgvector_launcher_path() -> Path:
     """Choose the system-wide install location for the launcher script.
 
@@ -4464,6 +4570,16 @@ def main() -> int:
     # in mcpServers. Self-contained -- no detect/verify path through the
     # generic loop above.
     _setup_pgvector_mcp(
+        cfg,
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
+
+    # sqlite_vec (v1.4): purely local provider — no MCP server, no
+    # schema migration. The embedder dialog is shared with pgvector
+    # so a user running both gets a "same as pgvector?" shortcut
+    # (handled inside _setup_embedding_engine's idempotency check).
+    _setup_sqlite_vec_mcp(
         cfg,
         non_interactive=args.non_interactive,
         dry_run=args.dry_run,
