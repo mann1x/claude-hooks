@@ -408,7 +408,7 @@ installer handles all three).
 | `claude-hooks-dashboard.service` | Read-only stats dashboard on port 38081. |
 | `claude-hooks-rollup.service` + `.timer` | Ingests daily JSONL files into `stats.db` every 5 min, plus a 1-min boot delay. `Persistent=true` so a missed tick triggers once on wake. |
 | `claude-hooks-health.service` + `.timer` | Daily one-line health summary (default 09:07 UTC). Appends to `~/.claude/proxy-health-daily.log` and the journal. |
-| `claude-hooks-daemon.service` | Long-lived per-session hook executor — lets each hook answer in milliseconds instead of paying the 100–300 ms Python cold-start. |
+| `claude-hooks-daemon.service` | Long-lived per-session hook executor — lets each hook answer in milliseconds instead of paying the 100–300 ms Python cold-start. **v1.4+ also supervises the llamafile embedding engine** (spawn on demand, 5-min idle reap; see [`docs/llamafile-integration.md`](docs/llamafile-integration.md)). |
 | `claude-hooks-pgvector-mcp.service` | System-wide stdio MCP server fronting pgvector. Useful when other clients (Cursor, Codex, OpenWebUI) want the same Postgres recall as Claude Code. |
 | `caliber-grounding-proxy.service` | Caliber grounding proxy (port 38090) with project-aware tools (`survey_project`, `recall`). |
 | `axon-host.service` | Optional Axon code-graph engine companion (Python, Neo4j-based). See [`COMPANION_TOOLS.md`](COMPANION_TOOLS.md). |
@@ -420,8 +420,14 @@ installer handles all three).
 - **Claude Code** with hooks support.
 - **At least one memory backend** — pick from the table below. Multiple can
   run simultaneously; the dispatcher fans out recall in parallel.
-- *(Optional)* **Ollama** for HyDE, /reflect, /consolidate, and the embedder
-  side of the pgvector / sqlite-vec providers.
+- *(Optional)* **Ollama** for HyDE, /reflect, /consolidate, and as
+  the embedder primary for the pgvector / sqlite-vec providers.
+  As of **v1.4+**, Ollama is no longer strictly required for the
+  embedder side — the bundled
+  [llamafile engine](docs/llamafile-integration.md) (~1.5 GB,
+  daemon-supervised) can serve as an Ollama fallback or replace it
+  entirely. HyDE / reflect / consolidate still need an Ollama
+  (or OpenAI-compatible) chat backend.
 
 ### Memory backends — pick at install time
 
