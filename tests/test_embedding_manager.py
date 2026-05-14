@@ -297,6 +297,68 @@ class TestApeWrap:
         assert captured["args"][1] == str(binp)
 
 
+class TestSpawnDetachment:
+    """Regression: on Windows the llamafile child must not allocate
+    or inherit a visible console. The fix is
+    ``creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS``, matching
+    the pattern in ``claudemem_reindex._spawn_reindex`` and
+    ``lsp_engine.client``. On POSIX we keep ``start_new_session=True``
+    so the child outlives the daemon session.
+    """
+
+    def _spy_popen(self, em_mod, captured):
+        def _spy(args, **kw):
+            captured["args"] = list(args)
+            captured["kwargs"] = dict(kw)
+            return FakeProc()
+        return _spy
+
+    def test_windows_passes_no_window_and_detached(self, tmp_path):
+        binp = tmp_path / "llamafile.exe"
+        binp.write_bytes(b"")
+        m = em.EmbeddingManager(_base_cfg(llamafile_path=str(binp), mode="cpu"))
+        captured: dict = {}
+        # Make the CREATE_NO_WINDOW / DETACHED_PROCESS attributes
+        # exist regardless of the host OS — subprocess only defines
+        # them on Windows, but the manager references them through
+        # the ``subprocess`` module so we can pin them here.
+        win_flags = {
+            "CREATE_NO_WINDOW": 0x08000000,
+            "DETACHED_PROCESS": 0x00000008,
+        }
+        with patch.object(em.sys, "platform", "win32"):
+            with patch.multiple(em.subprocess, **win_flags, create=True):
+                with patch.object(em.subprocess, "Popen",
+                                  side_effect=self._spy_popen(em, captured)):
+                    m._spawn_once(cwd=None)
+        kw = captured["kwargs"]
+        assert "creationflags" in kw, (
+            "Windows spawn must set creationflags to hide the console"
+        )
+        expected = win_flags["CREATE_NO_WINDOW"] | win_flags["DETACHED_PROCESS"]
+        assert kw["creationflags"] == expected
+        # start_new_session is a POSIX knob; passing it alongside the
+        # Windows creationflags is harmless but we keep them mutually
+        # exclusive for clarity.
+        assert "start_new_session" not in kw
+        # Stdin must be DEVNULL so the child cannot pin a console alive.
+        assert kw.get("stdin") is em.subprocess.DEVNULL
+
+    def test_posix_passes_start_new_session(self, tmp_path):
+        binp = tmp_path / "llamafile"
+        binp.write_bytes(b"")
+        m = em.EmbeddingManager(_base_cfg(llamafile_path=str(binp), mode="cpu"))
+        captured: dict = {}
+        with patch.object(em.sys, "platform", "linux"):
+            with patch.object(em.subprocess, "Popen",
+                              side_effect=self._spy_popen(em, captured)):
+                m._spawn_once(cwd=None)
+        kw = captured["kwargs"]
+        assert kw.get("start_new_session") is True
+        assert "creationflags" not in kw
+        assert kw.get("stdin") is em.subprocess.DEVNULL
+
+
 # --------------------------------------------------------------------- #
 # ensure_running / spawn lifecycle
 # --------------------------------------------------------------------- #

@@ -316,17 +316,41 @@ class EmbeddingManager:
         ``/bin/sh``, which runs the shell prefix and lets the
         embedded ``exec`` jump to the actual program. On Windows the
         binary is a normal PE and Popen launches it directly.
+
+        Windows detachment: ``start_new_session=True`` is a POSIX
+        knob and silently no-ops on Windows. To prevent the spawned
+        llamafile from inheriting (or creating) a visible console
+        window we pass ``CREATE_NO_WINDOW | DETACHED_PROCESS`` in
+        ``creationflags`` — the same pair the rest of claude-hooks
+        uses for detached background processes
+        (`claudemem_reindex._spawn_reindex`, `lsp_engine.client`).
+        Stdin is wired to DEVNULL because a detached process has no
+        usable stdin handle and inheriting one can pin a console
+        alive.
         """
         cmd = self._build_cmd()
         log.info("spawning llamafile: %s", " ".join(cmd))
         wrapped = self._maybe_wrap_for_ape(cmd)
-        return subprocess.Popen(
-            wrapped,
-            cwd=cwd or None,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        kwargs: dict = {
+            "cwd": cwd or None,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if sys.platform.startswith("win"):
+            # CREATE_NO_WINDOW suppresses the console allocation that
+            # would otherwise appear when the daemon (which itself may
+            # be running under a scheduled task with a console) spawns
+            # a child. DETACHED_PROCESS severs the inherited console
+            # entirely so the child survives the parent's window
+            # being closed by the user.
+            kwargs["creationflags"] = (
+                subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+                | subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+            )
+        else:
+            kwargs["start_new_session"] = True
+        return subprocess.Popen(wrapped, **kwargs)
 
     @staticmethod
     def _maybe_wrap_for_ape(cmd: list[str]) -> list[str]:
