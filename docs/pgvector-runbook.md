@@ -290,8 +290,13 @@ What `install.py` does in `_setup_pgvector_mcp`:
 1. Probes Postgres + the `vector` extension via the existing
    `PgvectorProvider.verify` (DSN already in your config, or prompts
    for one).
-2. Probes Ollama for the configured embedder model (`qwen3-embedding:0.6b`
-   by default); offers to `/api/pull` it if missing.
+2. Delegates to `_setup_embedding_engine` (v1.4+) for the
+   embedder choice. The Ollama-side `/api/tags` probe + offer to
+   `/api/pull` the model only fires when the user picks
+   Ollama-primary in the dialog; the llamafile fallback path
+   skips the Ollama step entirely. See
+   [`llamafile-integration.md`](llamafile-integration.md) for
+   the full dialog.
 3. Initializes the qwen3 + KG schema if `memories_qwen3` doesn't
    exist (CREATE EXTENSION vector + pg_trgm; create kg_entities,
    kg_relations, memories_qwen3, kg_observations_qwen3 — all

@@ -181,8 +181,9 @@ payload.
 - `claude_hooks/` — shared recall + memory modules:
   - **Recall pipeline**: `recall.py`, `hyde.py`, `hyde_cache.py`, `decay.py`, `dedup.py`
   - **Stop pipeline**: `instincts.py`, `reflect.py`, `consolidate.py`, `store_async.py` (Tier 1.3 detached store)
-  - **Daemon stack**: `daemon.py`, `daemon_client.py`, `daemon_ctl.py` (Tier 3.8 long-lived hook executor)
-  - **Concurrency / utility**: `_parallel.py` (provider fan-out), `mcp_client.py`, `embedders.py`
+  - **Daemon stack**: `daemon.py`, `daemon_client.py`, `daemon_ctl.py` (Tier 3.8 long-lived hook executor; v1.4+ also hosts the `EmbeddingManager`)
+  - **Concurrency / utility**: `_parallel.py` (provider fan-out), `mcp_client.py`, `embedders.py` (incl. v1.4 `LlamafileEmbedder` + `CompositeEmbedder`)
+  - **Embedding engine (v1.4+)**: `embedding_manager.py` (daemon-side llamafile lifecycle: spawn-on-demand, 5-min idle reap, PID-file re-adoption), `gpu_probe.py` (nvidia/amd/vulkan detection chain)
   - **Companion integrations**: `openwolf.py`, `axon_integration.py`, `gitnexus_integration.py`, `companion_integration.py`
   - **Opt-in advisory**: `stop_guard.py`, `safety_scan.py` + `safety_patterns.py`, `rtk_rewrite.py`
   - **Index management**: `claudemem_reindex.py`

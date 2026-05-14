@@ -27,6 +27,33 @@ stop`, …), the client returns `None` and the shim falls back to
 in-process dispatch silently. The daemon is **strictly optional** —
 nothing breaks without it, you just lose the latency savings.
 
+## Responsibilities
+
+The daemon owns three things in a single process:
+
+1. **Hook dispatch** (the original v1.0 responsibility). Routes
+   inbound events through `claude_hooks.dispatcher.dispatch`.
+2. **Llamafile lifecycle** (v1.4+). When
+   `cfg["embedding"]["enabled"]` is true, the daemon instantiates
+   a [`claude_hooks.embedding_manager.EmbeddingManager`](../claude_hooks/embedding_manager.py)
+   that spawns the bundled llamafile binary on demand, idle-reaps
+   it after 5 minutes (configurable), and exposes three new RPC
+   ops to clients. See
+   [`docs/llamafile-integration.md`](llamafile-integration.md)
+   for the architecture; the wire-protocol entries are at the
+   bottom of the next section.
+3. **Graceful shutdown** of both — `request_shutdown()` reaps the
+   llamafile (if alive), drains in-flight hooks, then exits.
+
+The daemon does **not** own:
+- Provider connections (qdrant, memory_kg, pgvector, sqlite_vec)
+  — those are constructed per-dispatch and torn down at end of
+  request.
+- The `/consultants` engine — that runs as its own service (or
+  the `consultants_forwarder` smart-start shim on port 38096).
+- The API proxy (`claude-hooks-proxy`, port 38080) and stats
+  dashboard (port 38081) — separate units.
+
 ## Wire protocol
 
 One JSON line per request, one JSON line per response. The signed
@@ -43,6 +70,29 @@ RESPONSE: {"id":N, "ok":true, "result":{...}}            on success
 Replay-window (default 60 s) and HMAC bind to a per-host secret at
 `~/.claude/claude-hooks-daemon-secret` (mode 0600, generated on first
 start by `claude_hooks.daemon.ensure_secret`).
+
+### Protocol-level ops (v1.4+)
+
+Three RPC ops exist alongside the hook-event ops; they pass the
+same HMAC envelope but the `event` field starts with `_` (the
+dispatcher's underscore-prefix is how it tells "internal protocol
+op" from "user-facing hook event"). All are best-effort:
+daemon-down returns `None` to the client wrapper; manager-disabled
+returns `{ok: true, result: {available: false}}`.
+
+| `event` | Returns | Used by |
+|---------|---------|---------|
+| `_ping` | `{ok: true, result: {alive: true, version: ...}}` | `claude-hooks-daemon-ctl status` |
+| `_shutdown` | `{ok: true, result: {stopping: true}}` | `claude-hooks-daemon-ctl kill` |
+| `_embedding_ensure` | `{port: 38092, ready: true, mode: "gpu"\|"cpu", spawned: bool}` | `LlamafileEmbedder` on cold-start |
+| `_embedding_status` | `{alive, pid, port, mode, idle_seconds, idle_timeout_seconds, gpu_offload_failed}` | dashboards / debug / smoke tests |
+| `_embedding_shutdown` | `{stopped: true}` | `install.py --uninstall`, daemon graceful-stop |
+
+Typed wrappers in `claude_hooks/daemon_client.py`:
+`embedding_ensure(timeout=60)`, `embedding_status(timeout=5)`,
+`embedding_shutdown(timeout=15)`. Each returns `None` on daemon
+unreachable, `{available: false}` on `ok=false`, or the unwrapped
+result dict on success.
 
 ## Install / autostart
 
