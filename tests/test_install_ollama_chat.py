@@ -291,12 +291,13 @@ class TestExistingConfig:
 # --------------------------------------------------------------------- #
 
 class TestMainWiring:
-    def test_main_calls_ollama_chat_before_pgvector(self):
-        """Regression guard: _setup_ollama_chat must run BEFORE
-        _setup_pgvector_mcp so the chat URL is established before
-        the embedder dialog uses it."""
+    def test_main_calls_chat_backends_before_pgvector(self):
+        """Regression guard: _setup_chat_backends (v1.5+, was
+        _setup_ollama_chat in v1.4) must run BEFORE _setup_pgvector_mcp
+        so the chat URL is established before the embedder dialog
+        uses it."""
         src = (REPO / "install.py").read_text(encoding="utf-8")
-        i_chat = src.find("_setup_ollama_chat(\n        cfg,")
+        i_chat = src.find("_setup_chat_backends(\n        cfg,")
         i_pg = src.find("_setup_pgvector_mcp(\n        cfg,")
         i_sv = src.find("_setup_sqlite_vec_mcp(\n        cfg,")
         assert i_chat > 0 and i_pg > 0 and i_sv > 0

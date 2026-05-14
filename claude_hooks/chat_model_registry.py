@@ -276,8 +276,14 @@ class Registry:
     place.
     """
 
-    def __init__(self, path: Path = DEFAULT_REGISTRY_PATH):
-        self.path = Path(path)
+    def __init__(self, path: Optional[Path] = None):
+        # Resolve ``DEFAULT_REGISTRY_PATH`` at call time, not function-
+        # definition time, so a test or wrapper can monkeypatch the
+        # module-level constant and have new ``Registry()`` instances
+        # pick it up. (Captured at def time would lock the install
+        # walkthrough to ~/.claude/llamafile-models.json with no test
+        # injection point.)
+        self.path = Path(path if path is not None else DEFAULT_REGISTRY_PATH)
 
     # -------- load / save --------
 
