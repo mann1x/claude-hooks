@@ -1249,6 +1249,10 @@ by default; the proxy supports a LAN-listen mode for shared installs.
 | 38080 | API proxy | `proxy.listen_port` |
 | 38081 | Stats dashboard | `proxy_dashboard.listen_port` |
 | 38090 | Caliber grounding proxy | `caliber_proxy.listen_port` |
+| 38092 | **Llamafile embedding engine** (v1.4+, daemon-supervised; HTTP `/embedding`) | `embedding.port` (see [`docs/llamafile-integration.md`](docs/llamafile-integration.md)) |
+| 38095 | `/consultants` engine HTTP server (opt-in) | `consultants.http_port` (see [`docs/consultants.md`](docs/consultants.md)) |
+| 38096 | `/consultants` smart-start forwarder shim (opt-in mode only) | `consultants_forwarder.listen_port` |
+| 47018 | claude-hooks-daemon HMAC RPC (long-lived hook executor) | `--port` to `claude-hooks-daemon` (see [`docs/daemon.md`](docs/daemon.md)) |
 | 11435 | Episodic-memory HTTP server | `episodic_server.listen_port` (see [`docs/episodic-server.md`](docs/episodic-server.md)) |
 | 11433 | (host-specific) Ollama upstream — used as `CALIBER_GROUNDING_UPSTREAM` default; **override for your install** | env / systemd drop-in |
 
