@@ -2371,16 +2371,17 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
     # defaults if nothing is set.
     cfg["providers"]["pgvector"].setdefault("table", "memories_qwen3")
     cfg["providers"]["pgvector"].setdefault("additional_tables", ["kg_observations_qwen3"])
-    cfg["providers"]["pgvector"].setdefault("embedder", "ollama")
-    cfg["providers"]["pgvector"].setdefault("embedder_options", {
-        "url": "http://192.168.178.2:11433/api/embeddings",
-        "model": "qwen3-embedding:0.6b",
-        "timeout": 30.0,
-        "num_ctx": 16384,
-        "max_chars": 30000,
-    })
     cfg["providers"]["pgvector"].setdefault("recall_k", 5)
     cfg["providers"]["pgvector"].setdefault("store_mode", "auto")
+    # Embedder choice: drives the Ollama / OpenAI-compat / llamafile
+    # dialog. v1.4 replaces the hard-coded ``embedder_options``
+    # default with this interactive flow so users can pick a
+    # llamafile fallback, run llamafile-only, or stick with Ollama.
+    if not cfg["providers"]["pgvector"].get("embedder"):
+        _setup_embedding_engine(
+            cfg, provider="pgvector",
+            non_interactive=non_interactive, dry_run=dry_run,
+        )
 
     # 5. Register in ~/.claude.json mcpServers (root level so it's
     # visible to every project -- this is the user-installed shape).
@@ -2393,6 +2394,452 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
     print(f"  Done. After Claude Code restart, tools surface as:")
     print(f"    mcp__pgvector__pgvector-find / -find-hybrid / -store / -count")
     print(f"    mcp__pgvector__pgvector-kg-search / -kg-create / -kg-observe / -kg-relate")
+
+
+# ===================================================================== #
+# v1.4: embedding-engine setup (Ollama / OpenAI-compat / llamafile +
+# composite-fallback). Drives both pgvector and sqlite_vec via the
+# same dialog (parameterised by provider name); the underlying
+# embedder lives in claude_hooks/embedders.py and the daemon-side
+# llamafile lifecycle is in claude_hooks/embedding_manager.py.
+# ===================================================================== #
+
+
+# Default composite asset shipped with each v1.4+ release. The SHA is
+# committed alongside install.py and verified at download time.
+_DEFAULT_LLAMAFILE_RELEASE_TAG = "v1.4.0"
+_DEFAULT_LLAMAFILE_ASSET = "qwen3-embedding-0.6b-16k.llamafile"
+_DEFAULT_LLAMAFILE_MODEL = "qwen3-embedding:0.6b"
+_DEFAULT_LLAMAFILE_CTX = 16384
+_LLAMAFILE_SHA_FILE = HERE / "vendor" / "llamafile" / "dist" / "SHA256SUMS.composite"
+_LLAMAFILE_DIST_DIR = HERE / "vendor" / "llamafile" / "dist"
+
+
+def _read_committed_composite_sha() -> str:
+    """Return the SHA256 committed for the default composite asset, or
+    ``""`` if the file is absent (typical until the v1.4.0 release
+    cut). Format mirrors ``sha256sum`` output: ``<hex>  <filename>``.
+    """
+    try:
+        text = _LLAMAFILE_SHA_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and parts[1].endswith(_DEFAULT_LLAMAFILE_ASSET):
+            return parts[0].lower()
+        if len(parts) == 1:
+            return parts[0].lower()
+    return ""
+
+
+def _gguf_magic_ok(path: str) -> bool:
+    """Cheap sanity check: a GGUF file starts with the ASCII bytes
+    ``GGUF``. Used at install time to fail fast on a typo'd custom
+    GGUF path before we waste time wiring it into the config."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"GGUF"
+    except OSError:
+        return False
+
+
+def _verify_sha256(path: Path, expected_hex: str) -> bool:
+    """Stream-verify ``path``'s SHA256 against ``expected_hex``. Used by
+    the composite-asset downloader. Returns False on any read error so
+    the caller can surface a clean reinstall-needed message."""
+    import hashlib as _h
+    h = _h.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(64 * 1024), b""):
+                h.update(chunk)
+    except OSError:
+        return False
+    return h.hexdigest().lower() == expected_hex.lower()
+
+
+def _download_composite_llamafile(
+    target: Path,
+    *,
+    tag: str = _DEFAULT_LLAMAFILE_RELEASE_TAG,
+    asset: str = _DEFAULT_LLAMAFILE_ASSET,
+    sha256: str = "",
+    repo: str = "mann1x/claude-hooks",
+    dry_run: bool = False,
+) -> bool:
+    """Fetch the composite llamafile from a GitHub Release asset.
+
+    Tries ``gh release download`` first (preserves SHA via the
+    --output-clobber convention) and falls back to ``urllib.request``
+    against the public release URL. After download, verifies SHA when
+    one is provided; aborts (and removes the partial file) if it
+    doesn't match.
+
+    Returns True on success, False on any failure. The caller is
+    responsible for surfacing the error to the user; this function
+    only logs to stdout.
+    """
+    if dry_run:
+        print(f"  [dry-run] Would fetch {asset} from {repo}@{tag} -> {target}")
+        return True
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Prefer ``gh`` when present — it handles auth + redirects cleanly.
+    use_gh = shutil.which("gh") is not None if "shutil" in globals() else False
+    if not use_gh:
+        import shutil as _sh
+        use_gh = _sh.which("gh") is not None
+
+    tmp = target.with_suffix(target.suffix + ".part")
+    if tmp.exists():
+        tmp.unlink()
+
+    ok = False
+    if use_gh:
+        try:
+            rc = subprocess.run(
+                ["gh", "release", "download", tag,
+                 "--repo", repo,
+                 "--pattern", asset,
+                 "--dir", str(target.parent),
+                 "--output", asset,
+                 "--clobber"],
+                check=False, capture_output=True, text=True,
+            )
+            ok = (rc.returncode == 0)
+            if not ok:
+                print(f"  gh release download failed: "
+                      f"{rc.stderr.strip()[:200] or rc.stdout.strip()[:200]}")
+        except OSError as e:
+            print(f"  gh invocation failed: {e}")
+    if not ok:
+        # Fallback: direct HTTPS download.
+        import urllib.request as _u
+        url = (f"https://github.com/{repo}/releases/download/{tag}/{asset}")
+        print(f"  Downloading {url}")
+        try:
+            with _u.urlopen(url, timeout=300) as r, open(tmp, "wb") as fout:
+                while True:
+                    chunk = r.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    fout.write(chunk)
+            tmp.replace(target)
+            ok = True
+        except Exception as e:
+            print(f"  download failed: {e}")
+            if tmp.exists():
+                tmp.unlink()
+            ok = False
+
+    if not ok:
+        return False
+
+    if sha256:
+        print(f"  Verifying SHA256...", end=" ", flush=True)
+        if not _verify_sha256(target, sha256):
+            print("FAILED")
+            print(f"  Removing corrupted artifact at {target}")
+            try:
+                target.unlink()
+            except OSError:
+                pass
+            return False
+        print("OK")
+    try:
+        os.chmod(target, 0o755)
+    except OSError:
+        pass
+    return True
+
+
+def _setup_llamafile_engine(
+    cfg: dict, *,
+    non_interactive: bool,
+    dry_run: bool,
+    propose_model: str = _DEFAULT_LLAMAFILE_MODEL,
+    propose_ctx: int = _DEFAULT_LLAMAFILE_CTX,
+) -> dict:
+    """Walk the user through llamafile-specific knobs and return a
+    dict ready to merge into ``cfg["embedding"]``.
+
+    Dialog:
+      1. Default settings (qwen3-embedding-0.6b, 16k ctx, auto GPU)
+         or custom (GGUF path + ctx).
+      2. Mode: auto (try GPU, transparent CPU fallback) vs cpu only.
+      3. Composite-asset download / custom-GGUF compose (in
+         non-dry-run mode).
+
+    The returned dict has the EmbeddingConfig-compatible shape::
+
+        {"enabled": True, "llamafile_path": "...",
+         "model_gguf": "" | "/path/to/custom.gguf",
+         "port": 38092, "ctx_size": N, "pooling": "last",
+         "mode": "auto" | "cpu", "idle_timeout_seconds": 300}
+    """
+    existing = cfg.get("embedding") or {}
+    target_default = _LLAMAFILE_DIST_DIR / _DEFAULT_LLAMAFILE_ASSET
+
+    print("\n  llamafile engine settings:")
+    if non_interactive:
+        use_default = True
+        print("    --non-interactive: keeping default model + 16k ctx.")
+    else:
+        ans = input(
+            f"    Use default settings ({propose_model}, "
+            f"{propose_ctx // 1024}k ctx)? [Y/n]: "
+        ).strip().lower() or "y"
+        use_default = ans in ("y", "yes")
+
+    if use_default:
+        llamafile_path = str(target_default)
+        model_gguf = ""
+        ctx_size = propose_ctx
+        if not target_default.is_file():
+            sha = _read_committed_composite_sha()
+            if not sha:
+                print(f"    No committed SHA at {_LLAMAFILE_SHA_FILE} — "
+                      "skipping pre-fetch. The daemon will surface a clean "
+                      "error on first embed; build the composite manually "
+                      "with `make -C vendor/llamafile/dist`.")
+            else:
+                print(f"    Fetching composite from "
+                      f"{_DEFAULT_LLAMAFILE_RELEASE_TAG}...")
+                ok = _download_composite_llamafile(
+                    target_default, sha256=sha, dry_run=dry_run,
+                )
+                if not ok:
+                    print("    Composite fetch failed. Edit the config "
+                          "manually or re-run install.py once the GH "
+                          "Release is reachable.")
+    else:
+        gguf = ""
+        while not gguf:
+            existing_gguf = existing.get("model_gguf") or ""
+            prompt = (f"    Path to custom embedding GGUF"
+                      f"{' [' + existing_gguf + ']' if existing_gguf else ''}: ")
+            gguf = input(prompt).strip() or existing_gguf
+            if not gguf:
+                print("    Path required.")
+                continue
+            gguf = os.path.expanduser(gguf)
+            if not os.path.isfile(gguf):
+                print(f"    Not a file: {gguf}")
+                gguf = ""
+                continue
+            if not _gguf_magic_ok(gguf):
+                print(f"    Not a GGUF (magic mismatch): {gguf}")
+                gguf = ""
+                continue
+        # Custom-context prompt.
+        try:
+            raw = input(
+                f"    Context size [{existing.get('ctx_size') or propose_ctx}]: "
+            ).strip()
+            ctx_size = int(raw) if raw else (existing.get("ctx_size") or propose_ctx)
+        except ValueError:
+            ctx_size = propose_ctx
+        # The slim binary is the same fat binary as the composite —
+        # we just don't bake a GGUF into it. For v1.4 we point at the
+        # composite path as a fallback (it can still run an external
+        # GGUF via -m). A future revision will fetch the slim binary
+        # separately.
+        llamafile_path = str(target_default)
+        model_gguf = gguf
+
+    # Mode (auto / cpu).
+    if non_interactive:
+        mode = existing.get("mode") or "auto"
+        print(f"    --non-interactive: GPU mode = {mode}.")
+    else:
+        from claude_hooks import gpu_probe
+        gpu = gpu_probe.probe()
+        hint = (f"detected {gpu['vendor']} GPU"
+                if gpu.get("vendor") != "none"
+                else "no GPU detected; CPU recommended")
+        default = "auto" if gpu.get("vendor") != "none" else "cpu"
+        ans = input(
+            f"    GPU mode [auto/cpu] ({hint}) [{default}]: "
+        ).strip().lower() or default
+        mode = "cpu" if ans in ("cpu", "c") else "auto"
+
+    block = {
+        "enabled": True,
+        "llamafile_path": llamafile_path,
+        "model_gguf": model_gguf,
+        "host": "127.0.0.1",
+        "port": int(existing.get("port") or 38092),
+        "ctx_size": int(ctx_size),
+        "pooling": "last",
+        "mode": mode,
+        "idle_timeout_seconds": float(existing.get("idle_timeout_seconds") or 300.0),
+    }
+    return block
+
+
+def _setup_embedding_engine(
+    cfg: dict, *,
+    provider: str,
+    non_interactive: bool,
+    dry_run: bool,
+) -> None:
+    """Drive the v1.4 embedding-engine dialog for ``provider`` (one of
+    ``pgvector`` / ``sqlite_vec``) and write the resulting
+    ``embedder`` + ``embedder_options`` keys into
+    ``cfg["providers"][provider]``. Also writes the shared
+    ``cfg["embedding"]`` block when llamafile is selected as primary
+    or fallback.
+
+    The dialog mirrors the user's stated structure:
+      1. "Use Ollama for embeddings?" Y/n -> if Y, model + ctx,
+         validate via /api/tags.
+      2. If Ollama=no, offer OpenAI-compatible primary (e.g.
+         text-embedding-3-small against an LM Studio endpoint).
+      3. "Use llamafile as fallback?" Y/n (defaults to Y when
+         Ollama=Y, mandatory when both Ollama+OpenAI=N).
+      4. Llamafile sub-dialog (default vs custom GGUF, GPU mode).
+    """
+    cfg.setdefault("providers", {}).setdefault(provider, {})
+    pcfg = cfg["providers"][provider]
+    existing_options = pcfg.get("embedder_options") or {}
+    existing_kind = pcfg.get("embedder") or ""
+
+    print(f"\n  Embedding engine for {provider}:")
+
+    # ----- 1. Ollama primary --------------------------------------
+    ollama_default_url = (existing_options.get("url")
+                          if existing_kind in ("ollama", "composite")
+                          else "") or "http://localhost:11434/api/embeddings"
+    ollama_default_model = (existing_options.get("model")
+                            if existing_kind in ("ollama", "composite")
+                            else "") or _DEFAULT_LLAMAFILE_MODEL
+    ollama_default_ctx = int(existing_options.get("num_ctx") or 16384)
+
+    if non_interactive:
+        use_ollama = (existing_kind in ("ollama", "composite")
+                      or not existing_kind)
+        print(f"    --non-interactive: Ollama primary = {use_ollama}.")
+    else:
+        ans = input("    Use Ollama for embeddings? [Y/n]: ").strip().lower() or "y"
+        use_ollama = ans in ("y", "yes")
+
+    ollama_block: Optional[dict] = None
+    openai_block: Optional[dict] = None
+
+    if use_ollama:
+        if non_interactive:
+            url = ollama_default_url
+            model = ollama_default_model
+            num_ctx = ollama_default_ctx
+        else:
+            url = input(f"    Ollama URL [{ollama_default_url}]: ").strip() or ollama_default_url
+            model = input(f"    Model [{ollama_default_model}]: ").strip() or ollama_default_model
+            raw = input(f"    num_ctx [{ollama_default_ctx}]: ").strip()
+            try:
+                num_ctx = int(raw) if raw else ollama_default_ctx
+            except ValueError:
+                num_ctx = ollama_default_ctx
+        # Best-effort validation.
+        base = _ollama_base_from_embed_url(url)
+        print(f"    Probing {base} for {model}...", end=" ", flush=True)
+        present = _ollama_model_present(base, model)
+        print("present" if present else "missing")
+        if not present and not non_interactive:
+            ans = input(f"    Pull {model} now? [Y/n]: ").strip().lower() or "y"
+            if ans in ("y", "yes") and not dry_run:
+                _ollama_pull(base, model)
+        ollama_block = {
+            "url": url, "model": model,
+            "timeout": 30.0, "num_ctx": num_ctx, "max_chars": 30000,
+        }
+    else:
+        # Offer OpenAI-compatible primary as an alternative.
+        if non_interactive:
+            use_openai = existing_kind in ("openai", "openai_compatible")
+        else:
+            ans = input(
+                "    Use OpenAI-compatible embeddings as primary? [y/N]: "
+            ).strip().lower()
+            use_openai = ans in ("y", "yes")
+        if use_openai:
+            existing_url = existing_options.get("url") or "https://api.openai.com/v1/embeddings"
+            existing_model = existing_options.get("model") or "text-embedding-3-small"
+            existing_key = existing_options.get("api_key") or "${OPENAI_API_KEY}"
+            if non_interactive:
+                url = existing_url
+                model = existing_model
+                api_key = existing_key
+            else:
+                url = input(f"    Endpoint URL [{existing_url}]: ").strip() or existing_url
+                model = input(f"    Model [{existing_model}]: ").strip() or existing_model
+                api_key = input(f"    API key (env-var ref OK) [{existing_key}]: ").strip() or existing_key
+            openai_block = {
+                "url": url, "model": model, "api_key": api_key, "timeout": 30.0,
+            }
+
+    # ----- 2. Llamafile fallback (or primary) ---------------------
+    have_primary = bool(ollama_block or openai_block)
+    if have_primary:
+        if non_interactive:
+            use_llamafile = True
+            print("    --non-interactive: llamafile fallback = on.")
+        else:
+            ans = input(
+                "    Use llamafile as embedding fallback? [Y/n]: "
+            ).strip().lower() or "y"
+            use_llamafile = ans in ("y", "yes")
+    else:
+        # No primary configured -> llamafile is mandatory.
+        print("    No Ollama / OpenAI primary -> llamafile becomes primary.")
+        use_llamafile = True
+
+    llamafile_block: Optional[dict] = None
+    if use_llamafile:
+        if have_primary:
+            print(
+                "    Note: fallback model + ctx should match the primary "
+                "to keep the recall vector space stable across failover."
+            )
+        embedding_block = _setup_llamafile_engine(
+            cfg, non_interactive=non_interactive, dry_run=dry_run,
+            propose_ctx=ollama_block["num_ctx"] if ollama_block else _DEFAULT_LLAMAFILE_CTX,
+        )
+        cfg["embedding"] = embedding_block
+        llamafile_block = {
+            "url": f"http://127.0.0.1:{embedding_block['port']}/embedding",
+            "timeout": 30.0,
+        }
+
+    # ----- 3. Compose final embedder config -----------------------
+    if have_primary and llamafile_block:
+        # Composite: primary + llamafile fallback.
+        primary_kind = "ollama" if ollama_block else "openai_compatible"
+        primary_opts = ollama_block or openai_block
+        pcfg["embedder"] = "composite"
+        pcfg["embedder_options"] = {
+            "primary": primary_kind,
+            "primary_options": primary_opts,
+            "fallback": "llamafile",
+            "fallback_options": llamafile_block,
+        }
+    elif have_primary:
+        # Primary-only (user declined llamafile fallback).
+        if ollama_block:
+            pcfg["embedder"] = "ollama"
+            pcfg["embedder_options"] = ollama_block
+        else:
+            pcfg["embedder"] = "openai_compatible"
+            pcfg["embedder_options"] = openai_block
+    else:
+        # llamafile-only.
+        pcfg["embedder"] = "llamafile"
+        pcfg["embedder_options"] = llamafile_block
+
+    print(f"    -> {provider}.embedder = {pcfg['embedder']}")
 
 
 def _pgvector_launcher_path() -> Path:
