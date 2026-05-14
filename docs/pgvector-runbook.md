@@ -22,9 +22,9 @@ embedder pick.
 ## TL;DR
 
 The fast path — `install.py` handles everything from step 2 onward
-(probes the DSN, pulls the embedder, creates the qwen3 + KG schema,
-drops the system-wide `pgvector-mcp` launcher, registers it in
-`~/.claude.json`):
+(probes the DSN, drives the embedder dialog, creates the qwen3 + KG
+schema, drops the system-wide `pgvector-mcp` launcher, registers it
+in `~/.claude.json`):
 
 ```bash
 # 0. Bring up the pgvector docker stack
@@ -33,12 +33,24 @@ cp .env.example .env && ${EDITOR} .env       # set POSTGRES_PASSWORD
 docker compose up -d
 docker exec mcp-pgvector psql -U claude -d memory -c "\dx"   # vector 0.8.x present?
 
-# 1. Run the claude-hooks installer — it'll prompt for the DSN,
-#    everything else uses sensible defaults (qwen3-embedding:0.6b,
-#    memories_qwen3, kg_observations_qwen3, local Ollama).
+# 1. Run the claude-hooks installer — it'll prompt for the DSN, the
+#    embedder choice (Ollama / OpenAI-compatible / llamafile, with
+#    llamafile as fallback by default), and schema names. Defaults:
+#    qwen3-embedding:0.6b, memories_qwen3, kg_observations_qwen3,
+#    local Ollama as primary + llamafile as fallback.
 cd /srv/dev-disk-by-label-opt/dev/claude-hooks
 python install.py
 ```
+
+> **v1.4+ embedder dialog.** The pgvector setup section now
+> delegates the embedder choice to a shared
+> `_setup_embedding_engine` helper that drives **both** pgvector
+> and sqlite_vec. You can pick an Ollama or OpenAI-compatible
+> primary with a llamafile fallback (recommended — survives Ollama
+> outage with no recall hit), or llamafile-only if you'd rather
+> avoid an Ollama dependency entirely. See
+> [llamafile-integration.md](llamafile-integration.md) for the
+> architecture, supervision model, and ops runbook.
 
 That's it for fresh installs. The runbook below covers the
 manual / advanced paths: bulk-migrating existing Qdrant + Memory-KG

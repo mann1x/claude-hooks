@@ -94,6 +94,26 @@
       "dsn": "postgresql://claude:CHANGE_ME@127.0.0.1:5432/memory",
       "table": "memories_qwen3",
       "additional_tables": ["kg_observations_qwen3"],
+      "_embedder_examples": [
+        "Three valid shapes — pick one and assign to embedder / embedder_options:",
+        "  1) Ollama-only (legacy, pre-v1.4):",
+        "     embedder='ollama'",
+        "     embedder_options={url, model, num_ctx, max_chars, timeout}",
+        "  2) Composite (v1.4+, RECOMMENDED — survives Ollama outage):",
+        "     embedder='composite'",
+        "     embedder_options={",
+        "       primary: 'ollama',",
+        "       primary_options: { url, model, num_ctx, ... },",
+        "       fallback: 'llamafile',",
+        "       fallback_options: { url: 'http://127.0.0.1:38092/embedding',",
+        "                           timeout: 30.0, daemon_ensure: true } }",
+        "  3) llamafile-only (v1.4+, no Ollama dependency):",
+        "     embedder='llamafile'",
+        "     embedder_options={ url: 'http://127.0.0.1:38092/embedding',",
+        "                        timeout: 30.0, daemon_ensure: true }",
+        "When using shapes 2 or 3, the top-level 'embedding' block below",
+        "configures the daemon-managed llamafile engine."
+      ],
       "embedder": "ollama",
       "embedder_options": {
         "url": "http://YOUR-HOST:11434/api/embeddings",
@@ -119,6 +139,25 @@
       "store_mode": "auto",
       "timeout": 10.0
     }
+  },
+  "embedding": {
+    "_comment": [
+      "v1.4+ daemon-managed llamafile engine. Written by install.py when",
+      "you pick 'composite' or 'llamafile' as the embedder for any local",
+      "provider. The daemon spawns the binary on demand and idle-reaps",
+      "after idle_timeout_seconds. Single engine shared across providers.",
+      "Set enabled=false to disable the engine even if providers still",
+      "reference http://127.0.0.1:38092/embedding (they will hard-fail)."
+    ],
+    "enabled": false,
+    "llamafile_path": "vendor/llamafile/dist/qwen3-embedding-0.6b-16k.llamafile",
+    "model_gguf": "",
+    "host": "127.0.0.1",
+    "port": 38092,
+    "ctx_size": 16384,
+    "pooling": "last",
+    "mode": "auto",
+    "idle_timeout_seconds": 300
   },
   "hooks": {
     "user_prompt_submit": {

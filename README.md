@@ -499,24 +499,59 @@ The installer will:
    Wrappers carry an install-time tag string in their first comment
    line so re-runs are idempotent and `--uninstall` removes only the
    tagged ones — hand-rolled wrappers of the same name are left alone.
-7. Asks **"Install /consultants engine?"**. On yes (opt-in, off by
-   default — declines cleanly): creates a dedicated
-   `claude-hooks-consultants` conda env (Py 3.11), pip-installs the
-   `consultants/` package with its LangGraph + LangServe stack, and
-   wires the per-OS service. Two modes:
-   - **Always-on** (default): systemd / launchd / Task Scheduler unit
-     keeps the engine resident, ~250 MB steady-state RAM. First-turn
-     latency is sub-second.
-   - **Smart-start** (opt-in): the daemon spawns the engine on
-     demand and reaps it after `idle_timeout_seconds` (default
-     30 min). Zero RAM idle, ~5-10 s cold start on first request
-     after a quiet period.
-   Conda is required — install.py aborts with a clear message
-   pointing at Miniconda if it's missing, no silent fallback to
-   bare venv. Everything goes through the dedicated env so the
-   LangGraph dep tree never leaks into the main `claude-hooks`
-   conda env that the test suite runs in.
-8. Asks **"Use the API proxy?"**. On yes:
+7. **Ollama chat-side prompts** (v1.4+, `_setup_ollama_chat`).
+   First asks whether to use Ollama as a chat backend (validates
+   `/api/tags`), then prompts for HyDE model + fallback +
+   `num_ctx`, and offers a shared-skills shortcut so the
+   `/reflect` and `/consolidate` skills inherit the same model
+   and context. Until v1.4 these settings were hard-coded in
+   `config.py`; the dialog closes that gap. Writes
+   `hooks.user_prompt_submit.hyde_*`, `reflect.*`, `consolidate.*`.
+8. **pgvector + sqlite_vec setup with the embedding-engine
+   dialog** (v1.4+, `_setup_embedding_engine`). For each
+   local-embed provider you enable, the installer asks:
+   - Use Ollama for embeddings? (model + `num_ctx`; offers
+     `ollama pull` if missing.)
+   - OpenAI-compatible primary instead? (mutually exclusive with
+     Ollama.)
+   - Use llamafile as fallback? (default Yes if a primary is set;
+     primary if both Ollama and OpenAI are declined.)
+   - llamafile sub-dialog: default model (`qwen3-embedding-0.6b`,
+     16 k ctx) or custom GGUF; **GPU mode `auto` vs `cpu`** —
+     `auto` spawns with `-ngl 99` and transparently falls back to
+     CPU on VRAM exhaustion; `cpu` passes `--gpu disable`.
+   On default-model picks the installer downloads the composite
+   `qwen3-embedding-0.6b-16k.llamafile` (~1.5 GB) from the v1.4+
+   GitHub Release asset and verifies it against the in-tree
+   `vendor/llamafile/dist/SHA256SUMS.composite`. Second-provider
+   invocations default to "same as previous? [Y/n]" so the
+   common case is one dialog total. See
+   [`docs/llamafile-integration.md`](docs/llamafile-integration.md)
+   for the full architecture.
+9. **Qdrant + memory_kg validate-only** (v1.4+,
+   `_validate_qdrant_embedding` / `_validate_memory_kg_embedding`).
+   Both MCPs embed server-side (FastEmbed inside the Qdrant
+   container; bundled embedder in memory_kg); the installer
+   probes connectivity, surfaces a one-line note about where the
+   model lives, and never overrides their config.
+10. Asks **"Install /consultants engine?"**. On yes (opt-in, off
+    by default — declines cleanly): creates a dedicated
+    `claude-hooks-consultants` conda env (Py 3.11), pip-installs
+    the `consultants/` package with its LangGraph + LangServe
+    stack, and wires the per-OS service. Two modes:
+    - **Always-on** (default): systemd / launchd / Task Scheduler
+      unit keeps the engine resident, ~250 MB steady-state RAM.
+      First-turn latency is sub-second.
+    - **Smart-start** (opt-in): the daemon spawns the engine on
+      demand and reaps it after `idle_timeout_seconds` (default
+      30 min). Zero RAM idle, ~5-10 s cold start on first request
+      after a quiet period.
+    Conda is required — install.py aborts with a clear message
+    pointing at Miniconda if it's missing, no silent fallback to
+    bare venv. Everything goes through the dedicated env so the
+    LangGraph dep tree never leaks into the main `claude-hooks`
+    conda env that the test suite runs in.
+11. Asks **"Use the API proxy?"**. On yes:
    - **`[1]` Local install** — pip-installs `httpx[http2]>=0.27` into
      the chosen Python env, then drops the per-OS service:
      - **Linux** — `claude-hooks-proxy.service` + `rollup.service` +
