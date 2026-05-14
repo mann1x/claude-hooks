@@ -2842,6 +2842,78 @@ def _setup_embedding_engine(
     print(f"    -> {provider}.embedder = {pcfg['embedder']}")
 
 
+def _validate_qdrant_embedding(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
+    """Probe the configured Qdrant MCP server (v1.4 validate-only).
+
+    Qdrant embeds **server-side** (the FastEmbed bundle baked into
+    ``mcp-server-qdrant``); claude-hooks doesn't override the model
+    from the client side. All we do here is print a connectivity
+    summary so the user knows the MCP is reachable and can spot a
+    misconfigured URL early. Pure status — never writes to cfg,
+    never prompts.
+
+    No-op when the provider isn't enabled or has no ``mcp_url``.
+    """
+    pcfg = (cfg.get("providers") or {}).get("qdrant") or {}
+    if not pcfg.get("enabled"):
+        return
+    url = pcfg.get("mcp_url") or ""
+    if not url:
+        return
+
+    print("\n--- Qdrant (validate-only) ---")
+    print(f"  Probing {url} ...", end=" ", flush=True)
+    try:
+        from claude_hooks.providers.qdrant import QdrantProvider
+        candidate = ServerCandidate(
+            server_key="qdrant", url=url,
+            headers=pcfg.get("headers") or {},
+            source="config", confidence="manual",
+        )
+        ok = QdrantProvider.verify(candidate, timeout=5.0)
+    except Exception as e:
+        print(f"FAILED ({e})")
+        return
+    print("OK" if ok else "no signature tools (qdrant-find/qdrant-store)")
+    print("  Embedding is configured **inside** the MCP server (FastEmbed)."
+          " To change the embedding model, edit your mcp-server-qdrant"
+          " environment (e.g. EMBEDDING_MODEL=...) and restart the container.")
+
+
+def _validate_memory_kg_embedding(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
+    """Probe the configured Memory KG MCP server (v1.4 validate-only).
+
+    Same shape as :func:`_validate_qdrant_embedding`: the MCP server
+    owns its own embedding model; this helper just surfaces
+    connectivity so the user knows it's reachable. Never prompts,
+    never mutates cfg.
+    """
+    pcfg = (cfg.get("providers") or {}).get("memory_kg") or {}
+    if not pcfg.get("enabled"):
+        return
+    url = pcfg.get("mcp_url") or ""
+    if not url:
+        return
+
+    print("\n--- Memory KG (validate-only) ---")
+    print(f"  Probing {url} ...", end=" ", flush=True)
+    try:
+        from claude_hooks.providers.memory_kg import MemoryKgProvider
+        candidate = ServerCandidate(
+            server_key="memory_kg", url=url,
+            headers=pcfg.get("headers") or {},
+            source="config", confidence="manual",
+        )
+        ok = MemoryKgProvider.verify(candidate, timeout=5.0)
+    except Exception as e:
+        print(f"FAILED ({e})")
+        return
+    print("OK" if ok else "no signature tools (search_nodes / create_entities)")
+    print("  Embedding lives inside the MCP server; claude-hooks doesn't"
+          " override it. To change models, edit the MCP server's config"
+          " and restart it.")
+
+
 def _setup_ollama_chat(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
     """Walk the user through Ollama chat-backend settings (v1.4).
 
@@ -4809,6 +4881,21 @@ def main() -> int:
     # so a user running both gets a "same as pgvector?" shortcut
     # (handled inside _setup_embedding_engine's idempotency check).
     _setup_sqlite_vec_mcp(
+        cfg,
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
+
+    # Qdrant + Memory KG (v1.4): both embed server-side; the
+    # installer only validates connectivity and surfaces that the
+    # embedding model lives inside the MCP container. No prompts,
+    # no config mutation.
+    _validate_qdrant_embedding(
+        cfg,
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
+    _validate_memory_kg_embedding(
         cfg,
         non_interactive=args.non_interactive,
         dry_run=args.dry_run,
