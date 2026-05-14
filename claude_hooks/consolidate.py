@@ -80,7 +80,8 @@ def consolidate(
             log.info("  merge candidate: '%s...' ≈ '%s...'", a.text[:50], b.text[:50])
 
     # Compress long memories.
-    model = con_cfg.get("ollama_model", "gemma4:e2b")
+    # ``model_ref`` (v1.5+) takes precedence over ``ollama_model``.
+    model = con_cfg.get("model_ref") or con_cfg.get("ollama_model", "gemma4:e2b")
     url = con_cfg.get("ollama_url", "http://localhost:11434/api/generate")
     num_ctx = int(con_cfg.get("num_ctx", 16384))
     for mem in all_mems:
@@ -164,14 +165,32 @@ def _find_merge_candidates(
 def _compress(
     text: str, *, model: str, url: str, num_ctx: int = 16384,
 ) -> Optional[str]:
-    """Use Ollama to compress a long memory into a shorter summary."""
+    """Use the configured chat backend (Ollama or llamafile://) to
+    compress a long memory into a shorter summary. ``llamafile://<label>``
+    refs dispatch through ``chat_backend``; bare refs use the legacy
+    Ollama ``/api/generate`` path."""
+    system = "Compress this memory entry to under half its length while keeping all key facts."
+    user = text[:2000]
+    if model.startswith("llamafile://"):
+        from claude_hooks import chat_backend
+        out = chat_backend.call(
+            user_prompt=user,
+            system_prompt=system,
+            model_ref=model,
+            ollama_url=url,
+            timeout=10.0,
+            max_tokens=300,
+            num_ctx=num_ctx,
+        )
+        return out or None
+
     options: dict = {"num_predict": 300}
     if num_ctx and num_ctx > 0:
         options["num_ctx"] = int(num_ctx)
     body = json.dumps({
         "model": model,
-        "system": "Compress this memory entry to under half its length while keeping all key facts.",
-        "prompt": text[:2000],
+        "system": system,
+        "prompt": user,
         "stream": False,
         "think": False,
         "options": options,

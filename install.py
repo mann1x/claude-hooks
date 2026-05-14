@@ -3132,6 +3132,167 @@ def _setup_ollama_chat(cfg: dict, *, non_interactive: bool, dry_run: bool) -> No
         print(f"  Consolidate: {consolidate_model} @ ctx={consolidate_ctx}")
 
 
+def _setup_llamafile_chat_models(
+    cfg: dict, *, non_interactive: bool, dry_run: bool,
+) -> None:
+    """Walk the user through registering one or more llamafile chat
+    models for HyDE / reflect / consolidate (v1.5+).
+
+    Independent of the Ollama dialog — both can be configured. The
+    llamafile registry lives at ``~/.claude/llamafile-models.json``
+    and the daemon supervises spawn / LRU evict / idle reap. Setting
+    a ``model_ref`` of ``llamafile://<label>`` on any of HyDE / reflect
+    / consolidate routes that flow through the daemon-ensured llamafile;
+    bare Ollama identifiers keep the v1.4 path.
+
+    Skipped silently in non-interactive mode (registry-state is too
+    install-time-specific to assume defaults).
+    """
+    print("\n--- llamafile chat models (v1.5+) ---")
+    print("  Optional. Lets HyDE / reflect / consolidate (and "
+          "/get-advice / /consultants if you wire them up) talk to "
+          "a local llamafile chat model instead of Ollama. Registry "
+          "lives at ~/.claude/llamafile-models.json; the daemon "
+          "supervises spawn + idle reap.")
+
+    if non_interactive:
+        print("  --non-interactive: skipping llamafile chat-model "
+              "registration. Use `claude-hooks-models add` to register "
+              "models after install.")
+        return
+
+    ans = input(
+        "  Register a llamafile chat model now? [y/N]: "
+    ).strip().lower()
+    if ans not in ("y", "yes"):
+        print("  Skipped — register models later with "
+              "`claude-hooks-models add <label> <gguf-path>`.")
+        return
+
+    # Lazy import — keeps install.py importable on hosts that haven't
+    # installed the package yet (the registry has no third-party deps,
+    # but failing fast is unfriendly during initial setup).
+    try:
+        from claude_hooks.chat_model_registry import (
+            Registry, LabelCollision, InvalidGguf, InvalidLabel,
+            PortCollision, NoFreePort,
+        )
+    except ImportError as e:  # pragma: no cover
+        print(f"  WARN: cannot import registry module ({e}); skipping.")
+        return
+
+    if dry_run:
+        print("  --dry-run: would prompt for GGUF path + label.")
+        return
+
+    reg = Registry()
+    existing = reg.list_labels()
+    if existing:
+        print(f"  Existing labels: {', '.join(existing)}")
+        ans = input(
+            "  Add another model? [y/N]: "
+        ).strip().lower()
+        if ans not in ("y", "yes"):
+            return
+
+    while True:
+        gguf_path = input(
+            "  GGUF path: "
+        ).strip()
+        if not gguf_path:
+            print("  (empty; aborting llamafile setup)")
+            return
+        gguf_abs = str(Path(gguf_path).expanduser().resolve())
+        if not Path(gguf_abs).is_file():
+            print(f"  Not a file: {gguf_abs}")
+            continue
+        if not _gguf_magic_ok(gguf_abs):
+            print(f"  {gguf_abs} doesn't start with GGUF magic; "
+                  "is this really a GGUF?")
+            continue
+        break
+
+    while True:
+        label = input(
+            "  Label for this model (lowercase, dots/dashes/underscores): "
+        ).strip()
+        if not label:
+            print("  (empty; aborting llamafile setup)")
+            return
+        if label in existing:
+            print(f"  Label {label!r} already registered; pick another.")
+            continue
+        break
+
+    ctx_raw = input("  Context size [16384]: ").strip()
+    try:
+        ctx_size = int(ctx_raw) if ctx_raw else 16384
+    except ValueError:
+        ctx_size = 16384
+
+    mode_raw = input("  GPU mode [auto/cpu] [auto]: ").strip().lower()
+    mode = mode_raw if mode_raw in ("auto", "cpu") else "auto"
+
+    port_raw = input(
+        "  Port [auto-allocate from 38093-38099]: "
+    ).strip()
+    port: Optional[int]
+    if port_raw:
+        try:
+            port = int(port_raw)
+        except ValueError:
+            print(f"  Invalid port {port_raw!r}; auto-allocating.")
+            port = None
+    else:
+        port = None
+
+    try:
+        spec = reg.add(
+            label, gguf_path=gguf_abs,
+            ctx_size=ctx_size, port=port, mode=mode,
+        )
+    except (LabelCollision, InvalidGguf, InvalidLabel,
+            PortCollision, NoFreePort) as e:
+        print(f"  Registry add failed: {e}")
+        return
+
+    print(f"  Registered: {spec.label} -> {spec.gguf_path}")
+    print(f"             port={spec.port} ctx={spec.ctx_size} "
+          f"mode={spec.mode}")
+
+    # Offer to wire HyDE / reflect / consolidate to this label.
+    ans = input(
+        "  Use this model for HyDE + reflect + consolidate? [Y/n]: "
+    ).strip().lower() or "y"
+    if ans in ("y", "yes"):
+        ref = f"llamafile://{spec.label}"
+        cfg.setdefault("hooks", {}).setdefault("user_prompt_submit", {})
+        cfg["hooks"]["user_prompt_submit"]["hyde_model_ref"] = ref
+        cfg.setdefault("reflect", {})["model_ref"] = ref
+        cfg.setdefault("consolidate", {})["model_ref"] = ref
+        print(f"  Wired hyde_model_ref / reflect.model_ref / "
+              f"consolidate.model_ref to {ref}")
+    else:
+        print(f"  Skipped wiring. Set ``hyde_model_ref: "
+              f"'llamafile://{spec.label}'`` manually in your "
+              "config to enable.")
+
+
+def _setup_chat_backends(
+    cfg: dict, *, non_interactive: bool, dry_run: bool,
+) -> None:
+    """Top-level chat-backend dialog (v1.5+). Runs the Ollama half
+    first (covers HyDE / reflect / consolidate base config), then the
+    optional llamafile registry walk-through. Either or both can be
+    used — Ollama-bare names and ``llamafile://<label>`` refs coexist
+    in the same flows.
+    """
+    _setup_ollama_chat(cfg, non_interactive=non_interactive, dry_run=dry_run)
+    _setup_llamafile_chat_models(
+        cfg, non_interactive=non_interactive, dry_run=dry_run,
+    )
+
+
 def _sqlite_vec_extension_available() -> bool:
     """Return True iff the ``sqlite_vec`` Python package is importable.
 
@@ -4861,7 +5022,7 @@ def main() -> int:
     # an explicit dialog so users without an Ollama instance get
     # a clean skip path. NOT used by /get-advice or /consultants
     # (those have their own model configs).
-    _setup_ollama_chat(
+    _setup_chat_backends(
         cfg,
         non_interactive=args.non_interactive,
         dry_run=args.dry_run,

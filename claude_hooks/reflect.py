@@ -76,8 +76,10 @@ def reflect(
     # Build a text block for Ollama.
     text_block = _format_for_analysis(grouped)
 
-    # Call Ollama to find patterns.
-    model = reflect_cfg.get("ollama_model", "gemma4:e2b")
+    # Call backend (Ollama or llamafile://) to find patterns.
+    # ``model_ref`` (v1.5+) takes precedence over the legacy
+    # ``ollama_model``+``ollama_url`` pair.
+    model = reflect_cfg.get("model_ref") or reflect_cfg.get("ollama_model", "gemma4:e2b")
     url = reflect_cfg.get("ollama_url", "http://localhost:11434/api/generate")
     num_ctx = int(reflect_cfg.get("num_ctx", 16384))
     rules = _call_ollama_reflect(text_block, model=model, url=url, num_ctx=num_ctx)
@@ -148,28 +150,49 @@ def _format_for_analysis(grouped: dict[str, list[Memory]]) -> str:
 def _call_ollama_reflect(
     text: str, *, model: str, url: str, num_ctx: int = 16384,
 ) -> list[str]:
-    """Call Ollama to find patterns and return rules."""
-    options: dict = {"num_predict": 500}
-    if num_ctx and num_ctx > 0:
-        options["num_ctx"] = int(num_ctx)
-    body = json.dumps({
-        "model": model,
-        "system": _REFLECT_SYSTEM,
-        "prompt": f"Analyze these memory entries:\n\n{text}",
-        "stream": False,
-        "think": False,
-        "options": options,
-    }).encode("utf-8")
+    """Call the configured chat backend (Ollama or llamafile://) to find
+    patterns and return rules.
 
-    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=15.0) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, socket.timeout, OSError) as e:
-        log.warning("reflect: ollama call failed: %s", e)
-        return []
+    The name is kept for backwards compatibility with tests; the body
+    dispatches to ``chat_backend.call`` for ``llamafile://<label>`` refs
+    and to the legacy Ollama ``/api/generate`` for everything else.
+    """
+    if model.startswith("llamafile://"):
+        from claude_hooks import chat_backend
+        response = chat_backend.call(
+            user_prompt=f"Analyze these memory entries:\n\n{text}",
+            system_prompt=_REFLECT_SYSTEM,
+            model_ref=model,
+            ollama_url=url,
+            timeout=15.0,
+            max_tokens=500,
+            num_ctx=num_ctx,
+        )
+        if not response:
+            log.warning("reflect: llamafile call failed for %s", model)
+            return []
+    else:
+        options: dict = {"num_predict": 500}
+        if num_ctx and num_ctx > 0:
+            options["num_ctx"] = int(num_ctx)
+        body = json.dumps({
+            "model": model,
+            "system": _REFLECT_SYSTEM,
+            "prompt": f"Analyze these memory entries:\n\n{text}",
+            "stream": False,
+            "think": False,
+            "options": options,
+        }).encode("utf-8")
 
-    response = (data.get("response") or "").strip()
+        req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=15.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, urllib.error.HTTPError, socket.timeout, OSError) as e:
+            log.warning("reflect: ollama call failed: %s", e)
+            return []
+        response = (data.get("response") or "").strip()
+
     if "no patterns found" in response.lower():
         return []
 

@@ -3,6 +3,13 @@
 > **Status:** shipped in v1.4.0 (2026-05-14). Opt-in: existing
 > installs keep their Ollama-only embedder until `install.py` is
 > re-run.
+>
+> **Scope** — this doc covers the **embedding-side** integration only.
+> The chat-completion side (HyDE / reflect / consolidate / get-advice
+> / consultants / caliber-grounding-proxy) is a separate subsystem
+> shipped in v1.5; see
+> [`docs/llamafile-chat-models.md`](llamafile-chat-models.md) for
+> that runbook.
 
 claude-hooks v1.4 adds **mozilla-ai/llamafile@0.10.1** as a
 fallback-capable embedding engine for the `pgvector` and

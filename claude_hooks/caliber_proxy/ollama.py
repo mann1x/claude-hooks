@@ -56,6 +56,31 @@ def default_upstream() -> str:
     )
 
 
+def default_upstream_backend() -> str:
+    """Configured upstream backend dialect.
+
+    - ``ollama`` (default, v1.4 and earlier behaviour): the upstream
+      speaks Ollama's native ``/api/chat`` and the proxy translates
+      between OpenAI ChatCompletion inbound and Ollama outbound.
+    - ``openai_compat`` (v1.5+): the upstream is already OpenAI-shape
+      (llamafile, LM-Studio, vLLM, etc.). Skip translation — POST the
+      OpenAI payload directly to ``<upstream>/v1/chat/completions``
+      and return the response verbatim. Retry budget + empty-content
+      detection still apply.
+    """
+    val = os.environ.get(
+        "CALIBER_GROUNDING_UPSTREAM_BACKEND", "ollama",
+    ).strip().lower()
+    if val not in ("ollama", "openai_compat"):
+        log.warning(
+            "CALIBER_GROUNDING_UPSTREAM_BACKEND=%r is not recognised; "
+            "valid values are 'ollama' or 'openai_compat'. Falling back "
+            "to 'ollama'.", val,
+        )
+        return "ollama"
+    return val
+
+
 def _base_url(upstream: Optional[str] = None) -> str:
     """Strip a trailing ``/v1`` from the upstream so we can hit the
     native ``/api/*`` endpoints. Backwards-compatible with configs that
@@ -351,11 +376,19 @@ def chat_completions(payload: dict[str, Any],
     Per-process flap counters expose via ``server.py``'s ``/health``.
     """
     base = _base_url(upstream)
-    url = base + "/api/chat"
+    backend = default_upstream_backend()
+    if backend == "openai_compat":
+        # v1.5+: upstream is already OpenAI-shape (llamafile, vLLM,
+        # LM-Studio). Skip request/response translation; pass the
+        # payload through verbatim (with ``stream:false`` enforced).
+        url = base + "/v1/chat/completions"
+        ollama_payload = dict(payload)
+        ollama_payload["stream"] = False
+    else:
+        url = base + "/api/chat"
+        ollama_payload = _to_ollama_request(payload)
     client = _get_client()
-    log.debug("ollama POST %s", url)
-
-    ollama_payload = _to_ollama_request(payload)
+    log.debug("caliber POST %s (backend=%s)", url, backend)
 
     dump_dir = os.environ.get("CALIBER_GROUNDING_DUMP_DIR")
     if dump_dir:
@@ -457,7 +490,14 @@ def chat_completions(payload: dict[str, Any],
                 f"{resp.text[:200]}"
             ) from e
 
-        translated = _to_openai_response(ollama_resp)
+        # openai_compat upstream returns OpenAI shape directly — no
+        # translation needed. ``ollama`` upstream needs the
+        # ``message{content,tool_calls}`` -> ``choices[].message``
+        # transform applied by ``_to_openai_response``.
+        if backend == "openai_compat":
+            translated = ollama_resp
+        else:
+            translated = _to_openai_response(ollama_resp)
 
         if cfg.retry_on_empty and is_retryable_empty_response(translated):
             if empty_attempt < cfg.empty_max:

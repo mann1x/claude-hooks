@@ -16,7 +16,109 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-_(no entries yet — next batch of work since v1.4.0 lands here.)_
+_(no entries yet — next batch of work since v1.5.0 lands here.)_
+
+## [1.5.0] — 2026-05-14
+
+MINOR — extends v1.4's llamafile integration from embedding-only to
+the **chat-completion side**. HyDE, `/reflect`, `/consolidate`,
+`/get-advice`, `/consultants`, and the `caliber-grounding-proxy`
+can now route to a daemon-supervised local llamafile via a new
+`llamafile://<label>` model identifier prefix. Bare-Ollama
+identifiers and `:cloud` suffix continue to route to Ollama
+unchanged — opt-in for existing installs.
+
+### Added
+
+- **Chat-model registry**: `~/.claude/llamafile-models.json`
+  (schema v1), `claude_hooks/chat_model_registry.py` (load / save /
+  list / add / remove / rename / copy with port-collision +
+  GGUF-magic validation, schema migration).
+- **Daemon-side `ChatModelManager`**: multi-instance variant of
+  v1.4's `EmbeddingManager`. `dict[label, ProcessHandle]`, LRU
+  eviction at `max_concurrent_loaded`, per-label idle reap
+  (default 600 s; streaming chat calls update `last_activity_at`
+  per chunk so long generations can't be reaped mid-call),
+  per-label sticky CPU fallback on GPU spawn failure, registry
+  mtime hot-reload, orphan GC.
+- **Daemon RPC ops** (`_chat_model_ensure / _chat_model_status /
+  _chat_model_shutdown / _chat_model_gc`) with typed wrappers in
+  `daemon_client.py`. Best-effort semantics match v1.4 embedding ops.
+- **Shared chat backend** (`claude_hooks/chat_backend.py`):
+  `parse_model_ref`, `OllamaChatClient` (extracted from pre-v1.5
+  `_call_ollama`), `LlamafileChatClient` (daemon-ensured, OpenAI
+  `/v1/chat/completions`, port-cache TTL, retry-on-failure with
+  re-ensure), `make_chat_client` factory, `call()` one-shot helper.
+- **Agent-loop chat client factory** in `get_advice/chat_client.py`:
+  `LlamafileAgentChatClient` (same `chat(payload) -> dict` interface
+  as `ChatClient`, talks OpenAI `/v1/chat/completions` directly,
+  maps OpenAI `usage` -> Ollama `last_usage` field names) +
+  `make_agent_chat_client` factory. Both `/get-advice` CLI and
+  `/consultants` runner construction sites use it.
+- **caliber-grounding-proxy openai_compat mode**: new env var
+  `CALIBER_GROUNDING_UPSTREAM_BACKEND=openai_compat` skips the
+  OpenAI ↔ Ollama translation entirely (targets
+  `<upstream>/v1/chat/completions`). Retry budget, empty-content
+  detection, and FlapCounters still apply. Surfaced at `/health`
+  for ops visibility.
+- **`claude-hooks-models` CLI** (`bin/claude-hooks-models` +
+  `.cmd`, `claude_hooks/models_cli.py`). Subcommands:
+  `list / add / remove / rename / copy / show / path / probe /
+  gc`. Daemon-talking subcommands degrade gracefully when the
+  daemon is down.
+- **`install.py` chat-backend dialog**: new
+  `_setup_chat_backends` dispatcher wraps the existing
+  `_setup_ollama_chat` and a new `_setup_llamafile_chat_models`
+  sub-dialog (GGUF path + label + ctx + mode + port, optional
+  wiring of `hyde_model_ref` / `reflect.model_ref` /
+  `consolidate.model_ref`).
+- **`*_model_ref` config keys**: `hooks.user_prompt_submit.{hyde_model_ref,
+  hyde_fallback_model_ref}`, `reflect.model_ref`,
+  `consolidate.model_ref`. Take precedence over the legacy
+  `*_model` / `*_url` keys when set.
+
+### Changed
+
+- `hyde.py` / `reflect.py` / `consolidate.py`: bare-ref calls keep
+  using the existing `_call_ollama` helper (so tests that
+  monkeypatch it stay valid); `llamafile://<label>` refs dispatch
+  through `chat_backend.call`.
+- `Registry.__init__` resolves `DEFAULT_REGISTRY_PATH` at call time
+  (was function-definition time) so test fixtures and installers
+  can monkeypatch the constant.
+- README `Where the system listens` table adds the 38093-38099
+  chat-llamafile port range.
+- CLAUDE.md status banner v1.4.0 -> v1.5.0; new Key directories
+  bullet for the chat engine.
+
+### Tests
+
+2558 passing, 24 skipped (+225 from v1.4's 2333). Coverage:
+registry CRUD + schema migration (61), `ChatModelManager`
+lifecycle (36), daemon chat RPC (28), `chat_backend` (32), HyDE /
+reflect / consolidate dispatch (10), agent-loop factory (12),
+caliber openai_compat (7), models CLI (29), install dialog (10).
+
+### Known limitations
+
+- Cross-backend `extra_models` fan-out in `/consultants` reuses
+  the role's primary client; same-backend fan-out works. Deferred
+  to v1.5.1.
+- llamafile picks one device per process; multi-GPU placement
+  deferred.
+- Registry is per-host; remote `llamafile://<host>/<label>` deferred.
+
+### Docs
+
+- New: [`docs/llamafile-chat-models.md`](docs/llamafile-chat-models.md),
+  [`docs/whats-new.md`](docs/whats-new.md) (v1.5).
+- Archived: `docs/whats-new.md` (v1.4) -> `docs/whats-new-v1.4.md`.
+- Updated: [`docs/daemon.md`](docs/daemon.md) (new RPC ops table +
+  chat-model lifecycle section),
+  [`docs/caliber-proxy.md`](docs/caliber-proxy.md) (new
+  "Pointing at llamafile" section),
+  [`docs/llamafile-integration.md`](docs/llamafile-integration.md)
+  (scope clarification), [`README.md`](README.md), [`CLAUDE.md`](CLAUDE.md).
 
 ## [1.4.0] — 2026-05-14
 

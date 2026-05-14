@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.4.0** — ~2.3k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.5.0** — ~2.5k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -67,6 +67,29 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > (`_validate_qdrant_embedding` / `_validate_memory_kg_embedding`).
 > See [`docs/llamafile-integration.md`](docs/llamafile-integration.md)
 > for the architecture + installer flow + ops runbook.
+> v1.5 extends the llamafile integration to the **chat-completion
+> side**: HyDE / reflect / consolidate / get-advice / consultants
+> / caliber-grounding-proxy can now route to a daemon-supervised
+> local llamafile via a new `llamafile://<label>` model identifier
+> prefix. A host-state registry at `~/.claude/llamafile-models.json`
+> (schema v1) maps labels to GGUF paths + ports + ctx + mode;
+> `claude-hooks-models` is the management CLI (list/add/remove/
+> rename/copy/show/path/probe/gc). The daemon's new
+> `ChatModelManager` is a multi-instance variant of v1.4's
+> `EmbeddingManager`: dict-of-ProcessHandle keyed by label, LRU
+> eviction at `max_concurrent_loaded`, per-label idle reap (default
+> 600 s), per-label sticky CPU fallback on GPU spawn failure. Three
+> new daemon RPC ops (`_chat_model_ensure / _chat_model_status /
+> _chat_model_shutdown / _chat_model_gc`); typed wrappers in
+> `daemon_client`. caliber-grounding-proxy gains an OpenAI-shape
+> passthrough mode for llamafile / vLLM / LM-Studio upstreams via
+> `CALIBER_GROUNDING_UPSTREAM_BACKEND=openai_compat`. Bare-Ollama
+> identifiers and `:cloud` suffix continue to route to Ollama
+> unchanged; v1.4 configs upgrade in place. See
+> [`docs/llamafile-chat-models.md`](docs/llamafile-chat-models.md)
+> for the chat-side architecture + CLI reference + ops runbook,
+> and [`docs/whats-new.md`](docs/whats-new.md) for the v1.5
+> highlights.
 
 ---
 
@@ -184,6 +207,7 @@ payload.
   - **Daemon stack**: `daemon.py`, `daemon_client.py`, `daemon_ctl.py` (Tier 3.8 long-lived hook executor; v1.4+ also hosts the `EmbeddingManager`)
   - **Concurrency / utility**: `_parallel.py` (provider fan-out), `mcp_client.py`, `embedders.py` (incl. v1.4 `LlamafileEmbedder` + `CompositeEmbedder`)
   - **Embedding engine (v1.4+)**: `embedding_manager.py` (daemon-side llamafile lifecycle: spawn-on-demand, 5-min idle reap, PID-file re-adoption), `gpu_probe.py` (nvidia/amd/vulkan detection chain)
+  - **Chat engine (v1.5+)**: `chat_model_registry.py` (host-state `~/.claude/llamafile-models.json` schema v1), `chat_model_manager.py` (multi-llamafile daemon-side lifecycle: dict-of-ProcessHandle, LRU evict, per-label idle reap + CPU fallback), `chat_backend.py` (shared client + `llamafile://` prefix dispatch for hyde/reflect/consolidate), `models_cli.py` (subcommand dispatcher for `claude-hooks-models`); `get_advice/chat_client.py` adds `LlamafileAgentChatClient` + `make_agent_chat_client` factory for the agent-loop callers
   - **Companion integrations**: `openwolf.py`, `axon_integration.py`, `gitnexus_integration.py`, `companion_integration.py`
   - **Opt-in advisory**: `stop_guard.py`, `safety_scan.py` + `safety_patterns.py`, `rtk_rewrite.py`
   - **Index management**: `claudemem_reindex.py`

@@ -32,6 +32,8 @@ import socket
 import urllib.error
 import urllib.request
 
+from claude_hooks import chat_backend
+
 log = logging.getLogger("claude_hooks.hyde")
 
 _SYSTEM_PROMPT = (
@@ -57,6 +59,8 @@ def expand_query(
     model: str = "gemma4:e2b",
     fallback_model: str = "gemma4:e4b",
     url: str = "http://localhost:11434/api/generate",
+    model_ref: str | None = None,
+    fallback_model_ref: str | None = None,
     timeout: float = 30.0,
     max_tokens: int = 150,
     keep_alive: str = "15m",
@@ -77,21 +81,29 @@ def expand_query(
     if not prompt.strip():
         return prompt
 
+    # ``model_ref`` (v1.5+) takes precedence over the legacy
+    # ``model`` + ``url`` pair. When unset, fall back to bare Ollama
+    # identifiers, which chat_backend routes to OllamaChatClient.
+    primary = model_ref or model
+    fallback = fallback_model_ref or fallback_model
+
     if cache_enabled:
         try:
             from claude_hooks.hyde_cache import get as cache_get
-            cached = cache_get(prompt, model, grounding="", ttl_seconds=cache_ttl_seconds)
+            cached = cache_get(prompt, primary, grounding="", ttl_seconds=cache_ttl_seconds)
             if cached:
-                log.debug("hyde cache HIT (%s): %s", model, cached[:80])
+                log.debug("hyde cache HIT (%s): %s", primary, cached[:80])
                 return cached
         except Exception as exc:  # pragma: no cover — cache must never break recall
             log.debug("hyde cache read failed: %s", exc)
 
-    for m in [model, fallback_model]:
-        result = _call_ollama(
+    for m in [primary, fallback]:
+        if not m:
+            continue
+        result = _dispatch(
             user_prompt=prompt,
             system_prompt=_SYSTEM_PROMPT,
-            model=m,
+            model_ref=m,
             url=url,
             timeout=timeout,
             max_tokens=max_tokens,
@@ -119,6 +131,8 @@ def expand_query_with_context(
     model: str = "gemma4:e2b",
     fallback_model: str = "gemma4:e4b",
     url: str = "http://localhost:11434/api/generate",
+    model_ref: str | None = None,
+    fallback_model_ref: str | None = None,
     timeout: float = 30.0,
     max_tokens: int = 150,
     keep_alive: str = "15m",
@@ -146,6 +160,9 @@ def expand_query_with_context(
     if not memories:
         return prompt
 
+    primary = model_ref or model
+    fallback = fallback_model_ref or fallback_model
+
     context = _format_context(memories, max_context_chars)
     user_prompt = (
         f"Relevant memories:\n{context}\n\n"
@@ -156,18 +173,20 @@ def expand_query_with_context(
     if cache_enabled:
         try:
             from claude_hooks.hyde_cache import get as cache_get
-            cached = cache_get(prompt, model, grounding=context, ttl_seconds=cache_ttl_seconds)
+            cached = cache_get(prompt, primary, grounding=context, ttl_seconds=cache_ttl_seconds)
             if cached:
-                log.debug("hyde (grounded) cache HIT (%s): %s", model, cached[:80])
+                log.debug("hyde (grounded) cache HIT (%s): %s", primary, cached[:80])
                 return cached
         except Exception as exc:  # pragma: no cover
             log.debug("hyde (grounded) cache read failed: %s", exc)
 
-    for m in [model, fallback_model]:
-        result = _call_ollama(
+    for m in [primary, fallback]:
+        if not m:
+            continue
+        result = _dispatch(
             user_prompt=user_prompt,
             system_prompt=_GROUNDED_SYSTEM_PROMPT,
-            model=m,
+            model_ref=m,
             url=url,
             timeout=timeout,
             max_tokens=max_tokens,
@@ -204,6 +223,53 @@ def _format_context(memories: list[str], max_chars: int) -> str:
         lines.append(line)
         total += len(line) + 1
     return "\n".join(lines)
+
+
+def _dispatch(
+    *,
+    user_prompt: str,
+    system_prompt: str,
+    model_ref: str,
+    url: str,
+    timeout: float,
+    max_tokens: int,
+    keep_alive: str,
+    num_ctx: int,
+) -> str:
+    """Route a single (prompt, system, model_ref) call to the right backend.
+
+    ``llamafile://<label>`` refs go through :mod:`chat_backend` (which
+    talks to the daemon-supervised llamafile on a resolved port).
+    Bare identifiers — and anything with Ollama-side conventions like
+    ``:cloud`` — go through the legacy :func:`_call_ollama` helper so
+    the existing test surface (which monkeypatches ``_call_ollama``)
+    stays valid.
+    """
+    if model_ref.startswith("llamafile://"):
+        out = chat_backend.call(
+            user_prompt=user_prompt,
+            system_prompt=system_prompt,
+            model_ref=model_ref,
+            ollama_url=url,
+            timeout=timeout,
+            max_tokens=max_tokens,
+            num_ctx=num_ctx,
+            keep_alive=keep_alive,
+        )
+        # match the legacy minimum-length guard
+        if not out or len(out) < 10:
+            return ""
+        return out
+    return _call_ollama(
+        user_prompt=user_prompt,
+        system_prompt=system_prompt,
+        model=model_ref,
+        url=url,
+        timeout=timeout,
+        max_tokens=max_tokens,
+        keep_alive=keep_alive,
+        num_ctx=num_ctx,
+    )
 
 
 def _call_ollama(

@@ -251,6 +251,42 @@ Common failure shapes:
 | `bind: address already in use` | Another process on `:38090` | Override `CALIBER_GROUNDING_PORT` |
 | Caliber gives up on long audit with `Request timed out.` even though the proxy eventually returned | Some odd network in front of caliber strips SSE comments | Raise heartbeat cadence — set `CALIBER_GROUNDING_SSE_HEARTBEAT_SECONDS=10` so something arrives more often than any intermediate's idle timer |
 
+## Pointing at llamafile (v1.5+)
+
+The default upstream is Ollama-native `/api/chat`. v1.5 adds a
+passthrough mode for OpenAI-shape upstreams (llamafile, LM-Studio,
+vLLM). Set two env vars on the systemd unit:
+
+```bash
+sudo systemctl edit caliber-grounding-proxy
+# [Service]
+# Environment="CALIBER_GROUNDING_UPSTREAM=http://127.0.0.1:38094"
+# Environment="CALIBER_GROUNDING_UPSTREAM_BACKEND=openai_compat"
+
+sudo systemctl restart caliber-grounding-proxy
+```
+
+When `CALIBER_GROUNDING_UPSTREAM_BACKEND=openai_compat`:
+
+- Proxy POSTs to `<upstream>/v1/chat/completions` with no shape
+  translation in either direction.
+- 15-attempt HTTP/network retry budget + 5-attempt empty-content
+  detection still apply.
+- Tool calls round-trip unchanged — llamafile / llama.cpp 0.10.1
+  honours the OpenAI `tools` + `tool_choice` shape natively.
+
+Verify via `/health`:
+
+```bash
+curl -s http://127.0.0.1:38090/health | jq '.upstream_backend'
+# "openai_compat"
+```
+
+The default `ollama` value (or omitting the env var) preserves the
+v1.4 path exactly — no behaviour change for existing installs. For
+chat-model registry + ops (label, port, idle reap, CPU fallback)
+see [`docs/llamafile-chat-models.md`](llamafile-chat-models.md).
+
 ## Disable
 
 ```jsonc

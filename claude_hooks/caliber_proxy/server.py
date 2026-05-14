@@ -653,6 +653,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._write_json(200, {
                 "ok": True,
                 "service": "caliber-grounding-proxy",
+                "upstream": ollama.default_upstream(),
+                "upstream_backend": ollama.default_upstream_backend(),
                 "upstream_flaps": counters().snapshot(),
             })
             return

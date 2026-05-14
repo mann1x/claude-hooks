@@ -392,3 +392,243 @@ class ChatClient:
                 "total_tokens": prompt_tokens + completion_tokens,
             },
         }
+
+
+# --------------------------------------------------------------------- #
+# v1.5+: llamafile-backed agent ChatClient
+# --------------------------------------------------------------------- #
+
+class LlamafileAgentChatClient:
+    """``chat(payload) -> dict`` for llamafile-backed agent loops.
+
+    Same interface as :class:`ChatClient` but speaks OpenAI
+    ``/v1/chat/completions`` directly on the daemon-resolved port. No
+    translation layer because llamafile is already OpenAI-shape
+    inbound; the response is also OpenAI-shape so the agent-loop
+    runner consumes it unchanged.
+
+    Cold-start: each request resolves the port via
+    ``daemon_client.chat_model_ensure(label)``; the port is cached for
+    ``port_cache_ttl`` seconds so steady traffic skips the RPC.
+    On connection refusal mid-call (the daemon may have idle-reaped
+    between the last ensure and this POST), the cache is invalidated,
+    we re-ensure once, and retry.
+    """
+
+    def __init__(
+        self, label: str, *,
+        host: str = "127.0.0.1",
+        port_cache_ttl: float = 60.0,
+        timeout_s: float = DEFAULT_TIMEOUT_S,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        retry_base_delay_s: float = DEFAULT_RETRY_BASE_DELAY_S,
+        retry_max_delay_s: float = DEFAULT_RETRY_MAX_DELAY_S,
+    ):
+        if not label:
+            raise ValueError("LlamafileAgentChatClient requires a label")
+        self.label = label
+        self.host = host
+        self.port_cache_ttl = port_cache_ttl
+        self.timeout_s = timeout_s
+        self.max_retries = max_retries
+        self.retry_base_delay_s = retry_base_delay_s
+        self.retry_max_delay_s = retry_max_delay_s
+        self.last_usage: dict[str, int] = {
+            "prompt_eval_count": 0,
+            "eval_count": 0,
+        }
+        self._cached_port: Optional[int] = None
+        self._cached_at: float = 0.0
+
+    # --- daemon-ensure / port resolution ---
+
+    def _resolve_port(self, *, force_refresh: bool = False) -> int:
+        now = time.monotonic()
+        if (not force_refresh
+                and self._cached_port is not None
+                and (now - self._cached_at) < self.port_cache_ttl):
+            return self._cached_port
+        import importlib
+        dc = importlib.import_module("claude_hooks.daemon_client")
+        try:
+            resp = dc.chat_model_ensure(self.label, timeout=120.0)
+        except Exception as e:
+            raise RuntimeError(
+                f"daemon RPC chat_model_ensure({self.label!r}) failed: {e}"
+            ) from e
+        if resp is None:
+            raise RuntimeError(
+                f"daemon unreachable; cannot resolve "
+                f"llamafile://{self.label}"
+            )
+        if not resp.get("ready") or "port" not in resp:
+            raise RuntimeError(
+                f"daemon refused to bring up llamafile://{self.label}: "
+                f"{resp.get('reason', 'unknown')}"
+            )
+        self._cached_port = int(resp["port"])
+        self._cached_at = now
+        return self._cached_port
+
+    # --- chat ---
+
+    def chat(self, payload: dict) -> dict:
+        """POST OpenAI-shape payload to /v1/chat/completions on the
+        resolved port. Retries on 5xx with exponential backoff; the
+        retry budget matches :class:`ChatClient` so cross-backend
+        timing stays predictable.
+        """
+        body = self._to_openai(payload)
+        encoded = json.dumps(body).encode()
+
+        port = self._resolve_port()
+        url = f"http://{self.host}:{port}/v1/chat/completions"
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(self.max_retries + 1):
+            req = urllib.request.Request(
+                url, data=encoded, method="POST",
+                headers={"Content-Type": "application/json",
+                         "Connection": "close"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
+                    data = json.loads(resp.read())
+                if attempt > 0:
+                    log.info(
+                        "llamafile chat: succeeded on retry %d/%d",
+                        attempt, self.max_retries,
+                    )
+                return self._from_openai(data)
+            except urllib.error.HTTPError as e:
+                last_exc = e
+                try:
+                    err_body = e.read().decode(errors="replace")[:500]
+                except Exception:
+                    err_body = "<unreadable>"
+                if e.code in RETRYABLE_STATUS and attempt < self.max_retries:
+                    delay = min(
+                        self.retry_base_delay_s * (2 ** attempt),
+                        self.retry_max_delay_s,
+                    )
+                    log.warning(
+                        "llamafile chat: HTTP %d on attempt %d/%d, "
+                        "retrying in %.1fs (body: %s)",
+                        e.code, attempt + 1, self.max_retries + 1, delay,
+                        err_body,
+                    )
+                    time.sleep(delay)
+                    continue
+                log.error("llamafile chat: HTTP %d (giving up) body=%s",
+                          e.code, err_body)
+                raise RuntimeError(
+                    f"llamafile chat HTTP {e.code}: {err_body}"
+                ) from e
+            except (urllib.error.URLError, OSError) as e:
+                last_exc = e
+                # First refusal: invalidate cache, re-ensure, retry
+                # this attempt without consuming the retry budget.
+                if attempt == 0:
+                    log.info(
+                        "llamafile chat: connection failure on first "
+                        "attempt (%s); invalidating port cache + "
+                        "re-ensuring", e,
+                    )
+                    try:
+                        port = self._resolve_port(force_refresh=True)
+                        url = f"http://{self.host}:{port}/v1/chat/completions"
+                    except Exception as re_err:
+                        # Fall through to backoff with the original exc.
+                        log.warning("llamafile re-ensure failed: %s", re_err)
+                if attempt < self.max_retries:
+                    delay = min(
+                        self.retry_base_delay_s * (2 ** attempt),
+                        self.retry_max_delay_s,
+                    )
+                    log.warning(
+                        "llamafile chat: %s on attempt %d/%d, retrying in %.1fs",
+                        e, attempt + 1, self.max_retries + 1, delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                log.error("llamafile chat: %s (giving up)", e)
+                raise
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("llamafile chat: no attempts made")
+
+    def _to_openai(self, payload: dict) -> dict:
+        """Pass OpenAI-shape payload through largely unchanged.
+
+        llamafile / llama.cpp server natively accepts the OpenAI
+        ``messages`` + ``tools`` + ``tool_choice`` shape. The only
+        normalization needed is converting Ollama's
+        ``options.num_predict`` -> ``max_tokens`` so configs that
+        target both backends interchangeably work.
+        """
+        body: dict = {
+            "model": payload.get("model") or self.label,
+            "messages": list(payload.get("messages") or []),
+            "stream": False,
+        }
+        opts = dict(payload.get("options") or {})
+        if "num_predict" in opts:
+            body["max_tokens"] = int(opts["num_predict"])
+        if "temperature" in opts:
+            body["temperature"] = opts["temperature"]
+        if "tools" in payload and payload["tools"]:
+            body["tools"] = payload["tools"]
+        if "tool_choice" in payload:
+            body["tool_choice"] = payload["tool_choice"]
+        # llama.cpp 0.10.1 doesn't honor a top-level ``think``; reasoning
+        # is governed by the GGUF + sampling params. We accept the field
+        # so the runner doesn't have to special-case backend, then
+        # silently drop it.
+        return body
+
+    def _from_openai(self, data: dict) -> dict:
+        """Pass OpenAI-shape response through, recording usage.
+
+        The agent-loop runner expects ``choices[0].message`` +
+        optional ``choices[0].finish_reason`` + ``usage`` — all of
+        which llamafile emits natively. The only transform: copy
+        ``usage.prompt_tokens`` / ``completion_tokens`` into
+        ``self.last_usage`` under Ollama's field names so the get-advice
+        / consultants accounting code (which reads
+        ``prompt_eval_count`` / ``eval_count``) works without a
+        per-backend branch.
+        """
+        usage = data.get("usage") or {}
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+        self.last_usage = {
+            "prompt_eval_count": prompt_tokens,
+            "eval_count": completion_tokens,
+        }
+        # llamafile returns the OpenAI shape verbatim — just return it.
+        return data
+
+
+# --------------------------------------------------------------------- #
+# Factory
+# --------------------------------------------------------------------- #
+
+def make_agent_chat_client(
+    model_ref: str,
+    ollama_base_url: str,
+    **kwargs,
+):
+    """Pick an agent-loop-capable ChatClient for ``model_ref``.
+
+    - ``llamafile://<label>`` -> :class:`LlamafileAgentChatClient`
+      (daemon-ensured, OpenAI ``/v1/chat/completions``).
+    - Anything else -> existing :class:`ChatClient` (Ollama native
+      ``/api/chat``).
+
+    Both expose the same ``chat(payload) -> dict`` + ``last_usage``
+    interface so the agent loop and tracing layers are unchanged.
+    """
+    if model_ref and model_ref.startswith("llamafile://"):
+        label = model_ref[len("llamafile://"):]
+        return LlamafileAgentChatClient(label, **kwargs)
+    return ChatClient(ollama_base_url, **kwargs)
