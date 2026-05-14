@@ -87,12 +87,36 @@ returns `{ok: true, result: {available: false}}`.
 | `_embedding_ensure` | `{port: 38092, ready: true, mode: "gpu"\|"cpu", spawned: bool}` | `LlamafileEmbedder` on cold-start |
 | `_embedding_status` | `{alive, pid, port, mode, idle_seconds, idle_timeout_seconds, gpu_offload_failed}` | dashboards / debug / smoke tests |
 | `_embedding_shutdown` | `{stopped: true}` | `install.py --uninstall`, daemon graceful-stop |
+| `_chat_model_ensure` (v1.5+) | `{label, port, ready, mode, spawned, evicted: [...]}` | `LlamafileChatClient` / `LlamafileAgentChatClient` cold-start |
+| `_chat_model_status` (v1.5+) | `{models: [{label, alive, pid, port, idle_seconds, ...}]}` | `claude-hooks-models show / list-live`, ops dashboards |
+| `_chat_model_shutdown` (v1.5+) | `{stopped: [...]}` (omit label = all) | `claude-hooks-models remove`, daemon graceful-stop |
+| `_chat_model_gc` (v1.5+) | `{reaped: [...]}` | `claude-hooks-models gc` |
 
 Typed wrappers in `claude_hooks/daemon_client.py`:
 `embedding_ensure(timeout=60)`, `embedding_status(timeout=5)`,
-`embedding_shutdown(timeout=15)`. Each returns `None` on daemon
+`embedding_shutdown(timeout=15)`, plus v1.5's
+`chat_model_ensure(label, timeout=120)`,
+`chat_model_status(label=None, timeout=5)`,
+`chat_model_shutdown(label=None, timeout=15)`,
+`chat_model_gc(timeout=30)`. Each returns `None` on daemon
 unreachable, `{available: false}` on `ok=false`, or the unwrapped
 result dict on success.
+
+### Chat-model lifecycle (v1.5+)
+
+`ChatModelManager` is a multi-instance variant of v1.4's singleton
+`EmbeddingManager`. State is a `dict[label, ProcessHandle]` with
+threading-lock guarding mutation; LRU eviction kicks in when
+`len(handles) >= max_concurrent_loaded` (configurable per-host).
+The reaper thread polls every 60 s and per-label reaps when
+`now - last_activity_at >= spec.idle_timeout_seconds` (default
+600 s; streaming chat calls update `last_activity_at` per chunk
+so long generations can't be reaped mid-call). Registry mtime is
+watched on every ensure so `claude-hooks-models add` followed by
+a recall picks up the new entry without restart. Per-label
+GPU-spawn failure flips that label to CPU mode for the daemon's
+lifetime (mirrors the v1.4 manager-global behaviour, scoped down
+to one label).
 
 ## Install / autostart
 

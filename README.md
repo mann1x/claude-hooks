@@ -1256,6 +1256,7 @@ by default; the proxy supports a LAN-listen mode for shared installs.
 | 38081 | Stats dashboard | `proxy_dashboard.listen_port` |
 | 38090 | Caliber grounding proxy | `caliber_proxy.listen_port` |
 | 38092 | **Llamafile embedding engine** (v1.4+, daemon-supervised; HTTP `/embedding`) | `embedding.port` (see [`docs/llamafile-integration.md`](docs/llamafile-integration.md)) |
+| 38093–38099 | **Llamafile chat engine** (v1.5+, one port per registered label; HTTP `/v1/chat/completions`) | `claude-hooks-models add ... --port N` (see [`docs/llamafile-chat-models.md`](docs/llamafile-chat-models.md)) |
 | 38095 | `/consultants` engine HTTP server (opt-in) | `consultants.http_port` (see [`docs/consultants.md`](docs/consultants.md)) |
 | 38096 | `/consultants` smart-start forwarder shim (opt-in mode only) | `consultants_forwarder.listen_port` |
 | 47018 | claude-hooks-daemon HMAC RPC (long-lived hook executor) | `--port` to `claude-hooks-daemon` (see [`docs/daemon.md`](docs/daemon.md)) |
