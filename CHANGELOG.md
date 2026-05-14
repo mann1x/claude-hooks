@@ -103,6 +103,17 @@ Opt-in: existing installs keep their Ollama-only embedder until
 - **Canonical embedding port `38092`** — adjacent to caliber-proxy
   (38090) and consultants (38095).
 
+### Fixed
+
+- **Windows console-window detachment** in
+  `EmbeddingManager._spawn_once` (`ff14f3a`). The spawned
+  llamafile was inheriting a console on Windows because the code
+  only passed POSIX `start_new_session=True`. v1.4 ships with
+  `CREATE_NO_WINDOW | DETACHED_PROCESS` on Windows + stdin=DEVNULL,
+  matching the pattern used by `claudemem_reindex._spawn_reindex`
+  and `lsp_engine.client`. Verified on pandorum: the new spawn
+  reports `Window Title: N/A` and no cmd window appears.
+
 ### Distribution
 
 - **GitHub Release asset** for the composite (~1.5 GB) —
