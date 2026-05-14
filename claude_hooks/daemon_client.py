@@ -268,3 +268,140 @@ def embedding_shutdown(
         return False
     result = resp.get("result") or {}
     return bool(result.get("shutdown"))
+
+
+# --------------------------------------------------------------------- #
+# v1.5 chat-model RPC wrappers
+# --------------------------------------------------------------------- #
+#
+# Mirror the v1.4 ``embedding_*`` shape but with per-label routing.
+# All three follow the same error contract:
+#   - None              -> daemon unreachable (caller falls back to
+#                          inline / surfaces a connect error)
+#   - {"available":False, "reason":"..."} -> daemon up but the chat
+#                          model manager isn't attached (no
+#                          ``chat_models`` block, or registry empty),
+#                          or the operation failed (unknown label,
+#                          spawn timeout, port collision).
+#   - <result dict>     -> success; shape matches ChatModelManager
+#                          method's return.
+
+
+def chat_model_ensure(
+    label: str,
+    *,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    secret_path: Path = DEFAULT_SECRET_PATH,
+    timeout: float = 120.0,
+) -> Optional[dict]:
+    """Ask the daemon's chat-model manager to spawn (or adopt) the
+    llamafile process for ``label``. Returns the manager's
+    ``ensure_running`` dict on success::
+
+        {"label": "...", "ready": True, "port": 38093,
+         "mode": "cpu"|"auto", "spawned": bool,
+         "gpu_fallback": bool?, "evicted": [...]}
+
+    Default timeout is 120 s because chat-model cold spawn includes
+    model load (potentially 30+ GB of weights, then GPU init).
+    Set lower if the caller has its own deadline.
+    """
+    resp = call(
+        "_chat_model_ensure", {"label": label},
+        host=host, port=port, secret_path=secret_path, timeout=timeout,
+    )
+    if resp is None:
+        return None
+    if not resp.get("ok"):
+        return {"available": False,
+                "reason": resp.get("error", "unknown")}
+    return resp.get("result") or {}
+
+
+def chat_model_status(
+    label: Optional[str] = None,
+    *,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    secret_path: Path = DEFAULT_SECRET_PATH,
+    timeout: float = 5.0,
+) -> Optional[dict]:
+    """Snapshot of one or all chat-model handles.
+
+    With ``label=None`` returns ``{"models": [<row>...], "loaded": N,
+    "max_concurrent_loaded": M}``. With ``label="foo"`` the
+    ``models`` list contains exactly one row for ``foo``.
+
+    Daemon down → ``None``. Manager not configured →
+    ``{"available": False, "reason": ...}``.
+    """
+    payload: dict = {}
+    if label is not None:
+        payload["label"] = label
+    resp = call(
+        "_chat_model_status", payload,
+        host=host, port=port, secret_path=secret_path, timeout=timeout,
+    )
+    if resp is None:
+        return None
+    if not resp.get("ok"):
+        return {"available": False,
+                "reason": resp.get("error", "unknown")}
+    return resp.get("result") or {}
+
+
+def chat_model_shutdown(
+    label: Optional[str] = None,
+    *,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    secret_path: Path = DEFAULT_SECRET_PATH,
+    timeout: float = 15.0,
+) -> Optional[dict]:
+    """Tell the daemon to reap one chat-model handle (or all when
+    ``label`` is ``None``). Used by the CLI's ``remove`` subcommand
+    (to free the port before deleting the registry entry) and by
+    ``install.py --uninstall``.
+
+    Returns the manager's reply dict on success. Note that this is
+    distinct from ``embedding_shutdown`` (whose terser ``bool``
+    contract is preserved for backwards compat).
+    """
+    payload: dict = {}
+    if label is not None:
+        payload["label"] = label
+    resp = call(
+        "_chat_model_shutdown", payload,
+        host=host, port=port, secret_path=secret_path, timeout=timeout,
+    )
+    if resp is None:
+        return None
+    if not resp.get("ok"):
+        return {"available": False,
+                "reason": resp.get("error", "unknown")}
+    return resp.get("result") or {}
+
+
+def chat_model_gc(
+    *,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    secret_path: Path = DEFAULT_SECRET_PATH,
+    timeout: float = 30.0,
+) -> Optional[dict]:
+    """Ask the daemon to reap any chat-model handle whose label is
+    no longer in the registry. Useful after ``claude-hooks-models
+    remove`` runs without the daemon up — re-running ``gc`` once the
+    daemon is back catches the orphan.
+    """
+    resp = call(
+        "_chat_model_gc", {},
+        host=host, port=port, secret_path=secret_path, timeout=timeout,
+    )
+    if resp is None:
+        return None
+    if not resp.get("ok"):
+        return {"available": False,
+                "reason": resp.get("error", "unknown")}
+    return resp.get("result") or {}

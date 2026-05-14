@@ -282,6 +282,41 @@ class _RequestHandler(socketserver.StreamRequestHandler):
                 # thread — the CompositeEmbedder uses this to fail over.
                 return {"available": False, "reason": str(e)}
 
+        # Chat-model lifecycle ops (v1.5). Mirror the embedding ops
+        # but with per-label routing — the payload's ``label`` field
+        # selects which entry in the chat-model registry the manager
+        # should ensure/inspect/reap. Same fail-open semantics: missing
+        # manager → ``available=False``; UnknownLabel → structured
+        # error the client can surface to the user.
+        if event in ("_chat_model_ensure", "_chat_model_status",
+                     "_chat_model_shutdown", "_chat_model_gc"):
+            mgr = getattr(self.server, "chat_model_manager", None)
+            if mgr is None:
+                return {"available": False,
+                        "reason": "chat model manager not configured"}
+            try:
+                if event == "_chat_model_ensure":
+                    label = payload.get("label") if payload else None
+                    if not label:
+                        return {"available": False,
+                                "reason": "label is required"}
+                    return mgr.ensure_running(label)
+                if event == "_chat_model_status":
+                    label = payload.get("label") if payload else None
+                    return mgr.status(label)
+                if event == "_chat_model_shutdown":
+                    label = payload.get("label") if payload else None
+                    return mgr.shutdown(label)
+                if event == "_chat_model_gc":
+                    return mgr.gc()
+            except RuntimeError as e:
+                # Spawn / port-busy / health-fail surface here.
+                return {"available": False, "reason": str(e)}
+            except Exception as e:
+                # UnknownLabel and other registry errors land here.
+                # Surface the message verbatim so the CLI can show it.
+                return {"available": False, "reason": str(e)}
+
         from claude_hooks.dispatcher import dispatch_capture
         return dispatch_capture(event, payload)
 
@@ -314,6 +349,7 @@ class DaemonServer(socketserver.ThreadingTCPServer):
         secret: str,
         replay_window: int = DEFAULT_REPLAY_WINDOW_SECONDS,
         embedding_manager=None,
+        chat_model_manager=None,
     ):
         if host not in ("127.0.0.1", "localhost", "::1"):
             raise ValueError(
@@ -326,6 +362,10 @@ class DaemonServer(socketserver.ThreadingTCPServer):
         # ``_embedding_ensure`` handler returns ``available: false``
         # in that case rather than crashing the request thread.
         self.embedding_manager = embedding_manager
+        # v1.5: optional multi-llamafile chat-model lifecycle owner.
+        # Same fail-open shape — ``None`` means the chat ops report
+        # ``available: false`` to the client.
+        self.chat_model_manager = chat_model_manager
         self._stop_event = threading.Event()
         super().__init__((host, port), _RequestHandler)
 
@@ -336,13 +376,20 @@ class DaemonServer(socketserver.ThreadingTCPServer):
         before signalling the server-loop shutdown — otherwise the
         long-running subprocess can outlive the daemon (it was spawned
         with ``start_new_session=True``) and orphan a 1.5 GB process
-        the next daemon start would have to kill.
+        the next daemon start would have to kill. v1.5 extends the
+        same logic to the chat-model manager, which may own multiple
+        long-lived llamafile children.
         """
         if self.embedding_manager is not None:
             try:
                 self.embedding_manager.shutdown()
             except Exception as e:  # pragma: no cover - defensive
                 log.warning("embedding manager shutdown failed: %s", e)
+        if self.chat_model_manager is not None:
+            try:
+                self.chat_model_manager.shutdown()
+            except Exception as e:  # pragma: no cover - defensive
+                log.warning("chat model manager shutdown failed: %s", e)
         self._stop_event.set()
         threading.Thread(target=self.shutdown, daemon=True).start()
 
@@ -375,6 +422,35 @@ def _build_embedding_manager(cfg: dict):
         return None
 
 
+def _build_chat_model_manager(cfg: dict):
+    """Build a ChatModelManager from the loaded config + the host's
+    registry file. Returns ``None`` when the ``chat_models`` block
+    is missing / disabled, or when the registry file doesn't exist
+    yet (a fresh install with no chat models registered).
+
+    Same fail-open shape as :func:`_build_embedding_manager`: any
+    import/construction error is logged and downgraded to ``None``
+    so the daemon still serves hooks.
+    """
+    block = cfg.get("chat_models") if isinstance(cfg, dict) else None
+    if not isinstance(block, dict) or not block.get("enabled"):
+        return None
+    try:
+        from claude_hooks.chat_model_manager import (
+            ChatModelManager, config_from_dict,
+        )
+        from claude_hooks.chat_model_registry import Registry
+    except Exception as e:
+        log.warning("chat_model_manager import failed: %s", e)
+        return None
+    try:
+        mcfg = config_from_dict(cfg)
+        return ChatModelManager(mcfg, registry=Registry(mcfg.registry_path))
+    except Exception as e:
+        log.warning("ChatModelManager construction failed: %s", e)
+        return None
+
+
 def serve(
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
@@ -390,18 +466,21 @@ def serve(
     # serve hooks without the llamafile lifecycle attached, matching the
     # daemon's "fail open" stance on optional subsystems.
     embedding_mgr = None
+    chat_mgr = None
     try:
         from claude_hooks.config import load_config
 
         cfg = load_config()
         embedding_mgr = _build_embedding_manager(cfg or {})
+        chat_mgr = _build_chat_model_manager(cfg or {})
     except Exception as e:
-        log.debug("could not load config for embedding manager: %s", e)
+        log.debug("could not load config for manager(s): %s", e)
 
     server = DaemonServer(
         host, port,
         secret=secret, replay_window=replay_window,
         embedding_manager=embedding_mgr,
+        chat_model_manager=chat_mgr,
     )
     log.info("claude-hooks-daemon listening on %s:%d", host, port)
     if embedding_mgr is not None:
@@ -411,6 +490,13 @@ def serve(
             embedding_mgr.cfg.idle_timeout_seconds,
             embedding_mgr.cfg.port,
             embedding_mgr.cfg.mode,
+        )
+    if chat_mgr is not None:
+        chat_mgr.start_reaper()
+        log.info(
+            "chat model manager attached (cap=%d, registry=%s)",
+            chat_mgr._effective_max_loaded(),
+            chat_mgr.cfg.registry_path,
         )
 
     # Background update-check thread: re-reads config on every tick so
