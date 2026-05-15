@@ -16,7 +16,66 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-_(no entries yet — next batch of work since v1.5.0 lands here.)_
+_(no entries yet — next batch of work since v1.5.1 lands here.)_
+
+## [1.5.1] — 2026-05-15
+
+PATCH — install.py hook-path drift safeguard + every-write backup
+trail. Closes a silent destructive-rewrite bug that bit a real
+deployment: running `install.py` from a second clone at a
+different filesystem path used to rewrite all existing
+`_managedBy: claude-hooks` hook entries in `~/.claude/settings.json`
+to point at the new location with no warning, effectively
+un-deploying the working install.
+
+### Added
+
+- **Path-drift detection** in `install_hooks`: compares the existing
+  `_managedBy` hook commands' repo path against the current
+  install.py invocation's repo path. On mismatch, raises
+  `HookPathDrift` (exit 2) in `--non-interactive` mode; in
+  interactive mode, prompts with a side-by-side path diff and only
+  rewrites on explicit `y`. New `--rewire` flag overrides the
+  refusal when an intentional clone migration is desired.
+- **Semantic backup names**: `backup_path(p, reason="...")` now
+  embeds a kebab-case reason tag in the timestamped backup filename
+  (e.g. `settings.json.bak-20260515-074559-hook-rewrite`,
+  `...-plugin-marketplace`, `...-env-vars`, `...-uninstall`). A
+  directory of backups becomes readable at a glance.
+- New `_backed_up_save_json(path, data, *, reason, dry_run=False)`
+  helper that funnels every settings.json save through the
+  backup-then-write path. Replaces three previously-unbacked
+  `_save_json(settings_path, ...)` call sites (plugin marketplace
+  registration, recommended-plugin enable, uninstall).
+- 19 new tests in `tests/test_install_path_drift.py`:
+  `backup_path` reason sanitization + suffix, `_backed_up_save_json`
+  behaviour (writes / no-write / dry-run / backup-content),
+  `_extract_existing_hook_repo_path` (empty / no-managed / POSIX /
+  Windows / backslash command / most-common tie-break),
+  `install_hooks` drift (non-interactive refuse, --rewire override,
+  interactive Y/N, same-path idempotent, fresh-install no-prompt,
+  semantic backup name verification).
+
+### Fixed
+
+- `_save_json(settings_path, ...)` calls at three sites that
+  previously wrote without backing up (plugin marketplace
+  registration, recommended-plugin enable, uninstall) now go
+  through `_backed_up_save_json` so every mutation leaves a
+  recovery trail.
+
+### Background
+
+The 2026-05-12 incident on pandorum: an install.py run from
+`C:\Users\manni\dev\claude-hooks` (a second clone created
+inadvertently) silently rewrote all 6 hook entries in settings.json
+to point at the `\dev\` path. The scheduled tasks still ran the
+daemon from `C:\Users\manni\claude-hooks`, leaving hooks and the
+daemon out of sync for three days. Repaired manually 2026-05-15;
+this patch makes the regression impossible in non-interactive mode
+and loud in interactive mode.
+
+Test count: 2577 passing, 24 skipped (+19 new, +0 regressions).
 
 ## [1.5.0] — 2026-05-14
 

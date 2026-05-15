@@ -462,7 +462,7 @@ def _set_settings_env_vars(
     settings = _load_json(settings_path) if settings_path.exists() else {}
     if settings_path.exists():
         try:
-            shutil.copy(settings_path, backup_path(settings_path))
+            shutil.copy(settings_path, backup_path(settings_path, reason="env-vars"))
         except OSError as e:
             if _print:
                 print(f"  [!!] Could not back up {settings_path}: {e}")
@@ -4940,6 +4940,13 @@ def main() -> int:
         help="never prompt -- fail if a decision is needed",
     )
     ap.add_argument("--uninstall", action="store_true", help="remove claude-hooks from settings.json")
+    ap.add_argument(
+        "--rewire", action="store_true",
+        help="override hook-path drift detection (v1.5.1+) and rewrite "
+             "existing hook entries to this install.py's repo path. Without "
+             "this flag, --non-interactive refuses to rewrite when existing "
+             "hooks point at a different location.",
+    )
     ap.add_argument("--probe", action="store_true", help="force tool-probe detection")
     ap.add_argument("--config", type=str, default=None, help="alternate claude-hooks.json path")
     ap.add_argument(
@@ -5192,6 +5199,8 @@ def main() -> int:
         # cheap no-op when the skill is absent.
         include_pre_compact=bool(((cfg.get("hooks") or {}).get("pre_compact") or {}).get("enabled", True)),
         dry_run=args.dry_run,
+        non_interactive=args.non_interactive,
+        rewire=bool(getattr(args, "rewire", False)),
     )
 
     # PATH-friendly wrappers for every bin/* shim. Required so skills
@@ -5299,12 +5308,40 @@ def install_hooks(
     include_post_tool_use: bool,
     include_pre_compact: bool = True,
     dry_run: bool,
+    non_interactive: bool = False,
+    rewire: bool = False,
 ) -> None:
+    """Merge claude-hooks entries into ``settings.json``.
+
+    v1.5.1+ path-drift safeguard: if existing ``_managedBy``
+    entries point at a different ``repo_path`` than this run,
+    refuse in ``--non-interactive`` mode (raises
+    :class:`HookPathDrift` with exit code 2) and prompt in
+    interactive mode unless ``rewire=True`` is explicitly passed.
+    Backup is named ``.bak-<ts>-hook-rewrite`` so the recovery
+    trail is obvious.
+    """
     settings = _load_json(settings_path)
-    backup = backup_path(settings_path)
-    if settings_path.exists() and not dry_run:
-        shutil.copy2(settings_path, backup)
-        print(f"  Backup written: {backup}")
+
+    # ---- Path-drift detection ------------------------------------ #
+    existing_repo = _extract_existing_hook_repo_path(settings)
+    current_repo = Path(str(repo_path).replace("\\", "/"))
+    drift = (
+        existing_repo is not None
+        and existing_repo != current_repo
+    )
+    if drift and not rewire:
+        if non_interactive:
+            raise HookPathDrift(current_repo, existing_repo)
+        print(
+            f"\n  [!!] Existing hooks point at: {existing_repo}\n"
+            f"       This install.py is from:   {current_repo}\n"
+            f"       Rewriting will un-deploy the existing install.\n"
+        )
+        ans = input("  Rewire hooks to the new path? [y/N]: ").strip().lower()
+        if ans not in ("y", "yes"):
+            print("  Skipped hook rewrite. Existing wiring preserved.")
+            return
 
     cmd = build_command(repo_path)
     print(f"  Hook command:   {cmd}")
@@ -5348,8 +5385,12 @@ def install_hooks(
         print(f"\n[dry-run] Would write to {settings_path}:")
         print(json.dumps(settings, indent=2))
         return
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    _save_json(settings_path, settings)
+    reason = "hook-rewrite" if drift else "hook-install"
+    bak = _backed_up_save_json(
+        settings_path, settings, reason=reason, dry_run=False,
+    )
+    if bak is not None:
+        print(f"  Backup written: {bak}")
     print(f"  Settings updated: {settings_path}")
 
 
@@ -5392,10 +5433,11 @@ def uninstall(*, dry_run: bool) -> int:
     if dry_run:
         print("[dry-run] Not writing.")
         return 0
-    backup = backup_path(settings_path)
-    shutil.copy2(settings_path, backup)
-    print(f"  Backup written: {backup}")
-    _save_json(settings_path, settings)
+    bak = _backed_up_save_json(
+        settings_path, settings, reason="uninstall",
+    )
+    if bak is not None:
+        print(f"  Backup written: {bak}")
     return 0
 
 
@@ -5423,9 +5465,106 @@ def build_command(repo_path: Path) -> str:
     return cmd.replace("\\", "/")
 
 
-def backup_path(p: Path) -> Path:
+def backup_path(p: Path, reason: str = "save") -> Path:
+    """Return a timestamped backup path with a semantic reason suffix.
+
+    ``reason`` is a short kebab-case tag (e.g. ``hook-rewrite``,
+    ``plugin-enable``, ``env-vars``) so a directory full of
+    ``settings.json.bak-*`` files is readable at a glance. Defaults
+    to ``save`` for callers that don't supply context.
+    """
     ts = time.strftime("%Y%m%d-%H%M%S")
-    return p.with_suffix(p.suffix + f".bak-{ts}")
+    safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in reason)
+    return p.with_suffix(p.suffix + f".bak-{ts}-{safe}")
+
+
+def _backed_up_save_json(
+    path: Path, data: dict, *, reason: str, dry_run: bool = False,
+) -> Optional[Path]:
+    """Atomically replace ``path`` with ``data`` as JSON, making a
+    timestamped backup first when ``path`` already exists.
+
+    Returns the backup path that was written (or ``None`` if no
+    backup was made — fresh file or dry-run). Every save against
+    ``settings.json`` should funnel through here so a destructive
+    change always leaves a recovery trail. The ``reason`` tag is
+    embedded in the backup filename so ``dir /b settings.json.bak-*``
+    tells you what each backup is for.
+    """
+    if dry_run:
+        return None
+    bak: Optional[Path] = None
+    if path.exists():
+        bak = backup_path(path, reason=reason)
+        shutil.copy2(path, bak)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _save_json(path, data)
+    return bak
+
+
+# --------------------------------------------------------------------- #
+# Hook-path drift detection (v1.5.1+)
+# --------------------------------------------------------------------- #
+
+def _extract_existing_hook_repo_path(settings: dict) -> Optional[Path]:
+    """Inspect existing ``_managedBy: claude-hooks`` entries in
+    ``settings`` and return the repo path they currently point at.
+
+    Returns ``None`` if no managed entries exist (fresh install) or
+    if their commands don't follow the expected
+    ``<repo>/bin/claude-hook[.cmd] <Event>`` shape. When multiple
+    distinct repo paths are detected (truly broken state), returns
+    the one that appears most often — the caller's path-drift
+    comparison still surfaces the mismatch.
+    """
+    counts: dict[Path, int] = {}
+    hooks = (settings or {}).get("hooks") or {}
+    for blocks in hooks.values():
+        if not isinstance(blocks, list):
+            continue
+        for blk in blocks:
+            if not isinstance(blk, dict):
+                continue
+            if blk.get("_managedBy") != "claude-hooks":
+                continue
+            for h in (blk.get("hooks") or []):
+                cmd = (h or {}).get("command") or ""
+                # Command shape:
+                #   "<repo>/bin/claude-hook <Event>"   (POSIX)
+                #   "<repo>\\bin\\claude-hook.cmd <Event>"  (Windows alt)
+                # Strip the trailing event word and the bin/* segment.
+                for marker in ("/bin/claude-hook", "\\bin\\claude-hook"):
+                    idx = cmd.find(marker)
+                    if idx > 0:
+                        repo = cmd[:idx]
+                        # Normalize Windows backslashes for comparison
+                        repo_norm = Path(repo.replace("\\", "/"))
+                        counts[repo_norm] = counts.get(repo_norm, 0) + 1
+                        break
+    if not counts:
+        return None
+    # Most common wins; ties broken by lexical order for determinism.
+    return sorted(counts.items(), key=lambda kv: (-kv[1], str(kv[0])))[0][0]
+
+
+class HookPathDrift(SystemExit):
+    """Raised when install.py is invoked from a different repo path
+    than the one currently wired into ``settings.json`` and the user
+    has not explicitly confirmed the rewrite."""
+
+    def __init__(self, current: Path, existing: Path):
+        msg = (
+            f"\n  [REFUSED] Hook-path drift detected.\n"
+            f"  Existing _managedBy hooks point at: {existing}\n"
+            f"  This install.py is running from:    {current}\n"
+            f"  Rewriting would silently un-deploy the existing install.\n"
+            f"  Re-run interactively to confirm, or run install.py from\n"
+            f"  the existing path, or pass --rewire to override.\n"
+        )
+        super().__init__(msg)
+        self.code = 2
+        self.current = current
+        self.existing = existing
 
 
 def _load_json(path: Path) -> dict:
@@ -5534,7 +5673,11 @@ def _ensure_marketplace() -> None:
         print(f"\n  [!!] Plugin marketplace: {MARKETPLACE_KEY} not registered")
         markets[MARKETPLACE_KEY] = MARKETPLACE_VALUE
         settings["extraKnownMarketplaces"] = markets
-        _save_json(settings_path, settings)
+        bak = _backed_up_save_json(
+            settings_path, settings, reason="plugin-marketplace",
+        )
+        if bak is not None:
+            print(f"  Backup written: {bak}")
         print(f"  [ok] Registered {MARKETPLACE_KEY} in {settings_path}")
     else:
         print(f"\n  [ok] Plugin marketplace: {MARKETPLACE_KEY} (registered)")
@@ -5554,7 +5697,11 @@ def _ensure_marketplace() -> None:
         else:
             print(f"  [ok] Plugin: {plugin_id} (already enabled)")
     if changed:
-        _save_json(settings_path, settings)
+        bak = _backed_up_save_json(
+            settings_path, settings, reason="plugin-enable",
+        )
+        if bak is not None:
+            print(f"  Backup written: {bak}")
 
     # Fix stale plugin install paths (e.g. Linux paths on Windows or vice versa).
     _fix_plugin_paths()
@@ -5939,7 +6086,7 @@ def _prompt_env_vars(
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings = _load_json(settings_path) if settings_path.exists() else {}
 
-    bak = backup_path(settings_path)
+    bak = backup_path(settings_path, reason="env-vars-cli")
     if settings_path.exists():
         try:
             shutil.copy(settings_path, bak)
