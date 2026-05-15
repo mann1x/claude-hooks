@@ -148,6 +148,14 @@ class SqliteVecProvider(Provider):
             except json.JSONDecodeError:
                 meta = {}
             meta["_distance"] = distance
+            # Surface the source table so MCP formatters can render
+            # ``[memory dist=0.5]`` instead of the ``[? dist=0.5]``
+            # placeholder. sqlite_vec only ever queries one table, so
+            # this is constant per-call, but the MCP formatter is
+            # shared with pgvector_mcp which DOES use ``_table`` to
+            # distinguish hits across multiple tables — populating it
+            # here keeps the output shape symmetric.
+            meta["_table"] = table
             result.append(Memory(text=content, metadata=meta))
         return result
 

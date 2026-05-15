@@ -112,6 +112,16 @@ class TestSqliteVecIntegration(unittest.TestCase):
         self.assertGreater(len(results), 0)
         self.assertIn("_distance", results[0].metadata)
 
+    def test_03b_recall_returns_table_metadata(self):
+        """Recall should surface the source table name so the MCP
+        formatter renders ``[<table> dist=X]`` instead of ``[? dist=X]``.
+        Regression guard for the cosmetic v1.6.0 ship.
+        """
+        prov = self._make_provider("table_meta_test")
+        results = prov.recall("nginx proxy", k=2)
+        self.assertGreater(len(results), 0)
+        self.assertEqual(results[0].metadata.get("_table"), "table_meta_test")
+
     def test_04_empty_query_returns_empty(self):
         prov = self._make_provider("recall_test")
         self.assertEqual(prov.recall("", k=5), [])
