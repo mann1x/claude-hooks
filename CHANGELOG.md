@@ -16,7 +16,83 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-_(no entries yet — next batch of work since v1.7.0 lands here.)_
+### Added — multi-root tool sandbox for `/get-advice`, `/consultants`, and `caliber-grounding-proxy`
+
+All three tool-using runners now align with Claude Code's own
+session allow-list. The shared read-only tool layer at
+`claude_hooks/caliber_proxy/tools.py` accepts paths whose realpath
+sits under **any** allowed root, where "allowed" is the union of:
+
+- the runner's primary `cwd`;
+- `permissions.additionalDirectories` from `~/.claude/settings.json`
+  (user-global);
+- `permissions.additionalDirectories` from
+  `<cwd>/.claude/settings.json` (project-shared);
+- `permissions.additionalDirectories` from
+  `<cwd>/.claude/settings.local.json` (project-local, gitignored);
+- runner-specific opt-ins: `--add-dir <path>` on the advisor +
+  consultants CLIs (repeatable); `CALIBER_GROUNDING_ADD_DIRS` env
+  var (`os.pathsep`-separated) on the grounding proxy.
+
+The advisor caught the bug first — a session whose primary cwd
+sat under `backup_models/` couldn't read
+`/srv/.../vllm-source/...`, and the skill's "no inline code blocks"
+rule turned the limit into an unbreakable wall. The grounding proxy
+had the identical sandbox; it just hadn't tripped yet.
+
+* **New shared helper** `claude_hooks/allowed_roots.py` with
+  `discover_allowed_roots(cwd, *, add_dirs=(), settings_files=None)`.
+  Single read path so every runner sees the same allow-list.
+  Missing files, malformed JSON, and wrong-shape values are logged
+  at DEBUG and silently skipped — discovery never fails the runner.
+* **Tool layer** gains `resolve_in_roots(raw, primary_cwd, extra_roots)`
+  and `make_executor(extra_roots) -> ToolExecutor` (closure
+  factory). The four path-aware tools (`list_files`, `read_file`,
+  `glob`, `grep`) accept an `extra_roots` kwarg; `glob` still walks
+  only the primary cwd (cross-root glob is out of scope). The
+  legacy `resolve_in_cwd(raw, cwd)` is now a thin shim around
+  `resolve_in_roots(raw, cwd, ())` so external callers keep working.
+  Error message renamed from `path escapes cwd` to
+  `path escapes allowed roots: ...` with the full allow-list
+  rendered, so the model can self-correct on retry.
+* **The three-arg `ToolExecutor` type alias is unchanged.** Empty
+  `extra_roots` returns the bare `execute` function (closure-free
+  fast path), so any caller that doesn't opt in stays byte-identical.
+* **`/get-advice`**: `claude-advisor turn` gains `--add-dir <path>`
+  (repeatable). Resolved roots logged at INFO once per turn.
+* **`/consultants`**: `consult` and `follow-up` subcommands gain
+  `--add-dir` (repeatable). `SessionState` persists `extra_roots`
+  so follow-ups inherit the parent's reach and may extend it
+  (parent's list first, then this turn's, dedup'd).
+* **`caliber-grounding-proxy`**: per-request executor is built from
+  the union of `CALIBER_GROUNDING_ADD_DIRS` (operator-trusted env
+  var) and settings-file discovery. **Deliberately does NOT** honor
+  body-supplied roots — same posture as `_cwd_for_request`: the
+  body is constructed by the LLM and is prompt-injectable.
+
+### Tests
+
+44 new tests across `test_allowed_roots.py` (18),
+`test_caliber_proxy_multi_root.py` (20),
+`test_caliber_proxy_server_multi_root.py` (6),
+`test_get_advice_multi_root.py` (7), and
+`test_consultants_multi_root.py` (10). Full suite: 2794 passed,
+25 skipped.
+
+### Out of scope (deferred)
+
+- **Cross-root `glob` / `grep`** that walks every allowed root.
+  Would need a separate output budget; out of scope for this PR.
+- **Upward `.claude/` discovery** from a sub-directory of the
+  project. Matches Claude Code's own contract (it only reads
+  settings from the cwd's `.claude/`). Users in sub-dirs pass
+  `--add-dir <project-root>` or `cd` first.
+
+### Notes
+
+This entry is in `[Unreleased]` — no version bump, no tag, no
+release notes finalisation. v1.8.0 will batch this with other
+pending work before the cut.
 
 ## [1.7.0] — 2026-05-15
 
