@@ -89,6 +89,27 @@ Use a stable session id like `advice-<short-tag>-<timestamp>`:
 claude-advisor turn <sid> --first --message "<your message>" --cwd "$(pwd)"
 ```
 
+**Reaching files outside cwd.** The advisor's tools are sandboxed
+to its primary `cwd`, plus any directories Claude Code itself has
+been granted in `~/.claude/settings.json` and the project's
+`.claude/settings.local.json` (`permissions.additionalDirectories`).
+That auto-discovery covers most cases. When the user's question
+references files outside that union, pass `--add-dir <path>` once
+per extra root:
+
+```
+claude-advisor turn <sid> --first \
+  --message "review <file>" \
+  --cwd "$(pwd)" \
+  --add-dir /shared/dev/lightseek \
+  --add-dir /opt/llama.cpp
+```
+
+Without the right roots in scope the advisor's `read_file` returns
+`error: path escapes allowed roots: ...` with the full allow-list
+rendered, and you'll have to retry — feed `--add-dir` upfront when
+you know the answer is going to require it.
+
 Parse the JSON response:
 
 - `reply` — the advisor's text
