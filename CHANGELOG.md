@@ -16,7 +16,95 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-_(no entries yet — next batch of work since v1.6.0 lands here.)_
+_(no entries yet — next batch of work since v1.6.1 lands here.)_
+
+## [1.6.1] — 2026-05-15
+
+PATCH — three small UX fixes that surfaced during the v1.6.0
+deploy. No schema changes; safe in-place upgrade from v1.6.x.
+
+### Fixed
+
+- **`install.py` API-proxy dialog: split into install + use**
+  (`7c52980`). Before this commit the single
+  ``Use the API proxy? (current: yes/no)`` question used
+  ``cfg.proxy.enabled`` (which means *"is the proxy installed
+  locally on this host"*) as the "current state" probe. Hosts
+  pointing at a **remote** proxy via ``ANTHROPIC_BASE_URL`` (e.g.
+  pandorum routing through solidpc:38080) saw ``current: no``
+  even though they were clearly using a proxy. The detection was
+  conflating two orthogonal concerns.
+
+  New shape, two questions:
+
+  - **Q1 — install locally?** ``Install the API proxy locally? [y/N]``
+    (or, when the service is already on disk, ``[V]erify /
+    [R]e-install / [S]kip? [V/r/s]`` with V default running a
+    health probe).
+  - **Q2 — use the API proxy?** ``Use the API proxy? (current:
+    <label>) [Y/n or y/N]`` where ``<label>`` reflects what's in
+    ``settings.json``: ``remote @ <url>`` / ``local @ <url>`` /
+    ``will install local @ <url>, not wired yet`` / ``no``. If Y,
+    asks for the endpoint with a sensible default (currently
+    configured URL, else local address if just installed).
+
+  New helpers: ``_proxy_locally_installed()``,
+  ``_read_current_anthropic_base_url(settings_path)``,
+  ``_classify_proxy_url(url)``, ``_verify_proxy_health(url)``.
+
+- **`install.py` companion-tools: don't flag episodic-memory as
+  MISSING on CLIENT-mode hosts** (`e3dfff4`). Same shape as the
+  proxy fix above — ``shutil.which("episodic-memory")`` was
+  asserting *"is this binary on PATH?"* while the meaningful
+  question is *"is this host supposed to have it?"*. On
+  CLIENT-mode hosts (the install POSTs to a remote episodic
+  server), the local Node binary is never invoked, only the
+  server host needs it. Detector now reads
+  ``cfg.episodic.mode`` and reports ``n/a (CLIENT)`` with the
+  ``[ok]`` marker instead of the ``MISSING`` warning. Server mode
+  and the never-configured ``off`` state still warn so operators
+  who lost the binary or haven't discovered episodic yet still
+  see it.
+
+- **`sqlite_vec.recall`: populate `_table` metadata for MCP
+  formatter symmetry** (`9a79f3f`). The sqlite-vec-mcp formatter
+  is shared with pgvector_mcp and renders results as
+  ``[<table> dist=X] <text>``. pgvector populates ``_table`` per
+  hit because it queries across multiple tables; sqlite_vec only
+  ever queries the one configured table, but the formatter still
+  expected ``_table`` — so without it we got ``[? dist=X]``.
+  Trivial one-line fix; cosmetic only.
+
+### Tests
+
+- 22 new tests in ``tests/test_install_proxy_dialog.py`` covering
+  the new dialog shape (classifier, current-URL reader,
+  install-detection, Q1 prompts for both states, Q2 labels for
+  all four states, endpoint-default priority, skip-path
+  preserves settings.json).
+- 6 new tests in ``tests/test_install_companion_tools.py``
+  covering the episodic-memory CLIENT/SERVER/off branches and
+  the special case's scope (other tools still warn).
+- 1 new regression test in
+  ``tests/test_sqlite_vec_integration.py`` pinning the
+  ``_table`` metadata field.
+- ``tests/test_install_proxy_orchestrator.py`` trimmed of the
+  obsolete ``[1/2]`` two-mode tests (legacy dialog shape from
+  v1.5 and earlier).
+- Full suite: **2659 passed**, 25 skipped on solidpc.
+
+### Upgrade
+
+```bash
+git pull --tags
+git checkout v1.6.1
+python install.py
+```
+
+Interactive re-run shows the new two-question proxy shape with
+your existing ``ANTHROPIC_BASE_URL`` reflected in the Q2 label.
+Non-interactive upgrades are silently safe — no destructive
+changes, no schema migrations.
 
 ## [1.6.0] — 2026-05-15
 
