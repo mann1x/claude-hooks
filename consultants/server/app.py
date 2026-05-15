@@ -72,6 +72,12 @@ class SessionState:
     # children. The chain is reconstructable in either direction.
     parent_sid: Optional[str] = None
     follow_up_sids: list[str] = field(default_factory=list)
+    # v1.8+: extra allowed directories for the tool sandbox. Set on
+    # creation from the request body's ``extra_roots`` field (already
+    # auto-unioned with settings-file discovery by the HTTP layer).
+    # Follow-ups inherit this list and may extend it; ``run_follow_up``
+    # in the runner merges the parent's roots with the follow-up's.
+    extra_roots: list[str] = field(default_factory=list)
     # Lifecycle. ``closed`` flips on explicit close OR idle reap;
     # downstream follow-up requests against a closed sid 410.
     # ``last_activity_at`` is bumped on every poll, follow-up start,
@@ -155,6 +161,22 @@ def _new_sid() -> str:
     import secrets
     ts = time.strftime("%Y-%m-%d-%H%M")
     return f"csl-{ts}-{secrets.token_hex(2)}"
+
+
+def _merge_extra_roots(parent: list[str], follow_up: list[str]) -> list[str]:
+    """Union parent's extra_roots with follow-up's, preserving order
+    and de-duplicating. Used at follow-up creation time so the child
+    SessionState records the full effective allow-list.
+
+    Reused by tests so the merge contract is one definition.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in list(parent) + list(follow_up):
+        if r and r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
 
 
 # Live-session lifecycle defaults — see EVALUATION.md and the
@@ -246,6 +268,28 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         if err:
             raise HTTPException(status_code=400, detail=err)
 
+        # v1.8+: union of (a) extra_roots from the body (CLI's --add-dir)
+        # and (b) auto-discovered settings.json roots. The HTTP server
+        # is invoked by the CLI which is operator-driven (not LLM-driven
+        # like caliber-grounding-proxy), so body-supplied roots are
+        # operator-trusted here. Settings-file values come from disk
+        # files the operator wrote.
+        from claude_hooks.allowed_roots import discover_allowed_roots
+        body_extras = body.get("extra_roots") or []
+        if not isinstance(body_extras, list) or not all(
+            isinstance(x, str) for x in body_extras
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="extra_roots must be a list of strings",
+            )
+        discovered = discover_allowed_roots(
+            str(cwd_path), add_dirs=body_extras,
+        )
+        # discover_allowed_roots prepends the primary cwd; the runner
+        # wants extras only.
+        session_extra_roots: list[str] = list(discovered[1:])
+
         sid = _new_sid()
         state = SessionState(
             sid=sid,
@@ -254,6 +298,7 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             effort=cfg.effort,
             topology=cfg.topology,
             progress={r: "pending" for r in cc.enabled_roles(cfg)},
+            extra_roots=session_extra_roots,
         )
         with app.state.sessions_lock:
             app.state.sessions[sid] = state
@@ -290,6 +335,7 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             "cwd": str(cwd_path),
             "question": question,
             "trace": trace_flag,
+            "extra_roots": session_extra_roots,
         }
 
         # Hand off to the executor. The runner mutates ``state`` and
@@ -380,6 +426,18 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         child_progress = {"researcher": "pending", "synthesizer": "pending"}
         if cfg.effort in ("high", "max") and "critic" in cc.enabled_roles(cfg):
             child_progress["critic"] = "pending"
+        # v1.8+: follow-up may extend the parent's extra_roots with its
+        # own --add-dir entries. Validate the body shape, then let the
+        # runner do the parent+follow-up merge so both lists round-trip
+        # cleanly.
+        followup_body_extras = body.get("extra_roots") or []
+        if not isinstance(followup_body_extras, list) or not all(
+            isinstance(x, str) for x in followup_body_extras
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="extra_roots must be a list of strings",
+            )
         child = SessionState(
             sid=child_sid,
             cwd=parent.cwd,
@@ -388,6 +446,13 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             topology=parent.topology,
             progress=child_progress,
             parent_sid=sid,
+            # Stored extra_roots = parent's + this follow-up's, merged
+            # in order with dedup. The runner does the same merge for
+            # the in-flight executor; we persist it so disk-reopen of
+            # the child surfaces the full set.
+            extra_roots=_merge_extra_roots(
+                parent.extra_roots, followup_body_extras,
+            ),
         )
         with app.state.sessions_lock:
             app.state.sessions[child_sid] = child
@@ -416,6 +481,10 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             "question": message,
             "trace": trace_flag,
             "parent_state": parent,   # warm ChatClients + prior data
+            # New follow-up extras only; the runner merges with
+            # parent_state.extra_roots so a follow-up always sees the
+            # parent's reach plus whatever this turn added.
+            "extra_roots": followup_body_extras,
         }
         future = app.state.executor.submit(
             _run_with_state, app.state.run_follow_up, child, runner_input,

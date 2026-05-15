@@ -88,7 +88,26 @@ claude-consultants consult --message "<your framing>" --cwd "$(pwd)"
 ```
 
 Optional `--effort low|medium|high|max|xmedium|xhigh|xmax` to
-override the configured tier for this call. Returns:
+override the configured tier for this call.
+
+**Reaching files outside cwd.** The council's tools are sandboxed
+to `cwd` plus whatever Claude Code's
+`permissions.additionalDirectories` (auto-discovered from
+`~/.claude/settings.json` and `.claude/settings.local.json`) already
+permits. When the question references files outside that union,
+pass `--add-dir <path>` once per extra root (repeatable). Follow-ups
+inherit the parent session's `extra_roots` and may extend them with
+their own `--add-dir`:
+
+```
+claude-consultants consult --message "<framing>" --cwd "$(pwd)" \
+  --add-dir /shared/dev/lightseek
+
+claude-consultants follow-up <parent_sid> --message "<focused>" \
+  --cwd "$(pwd)" --add-dir /opt/llama.cpp
+```
+
+Returns:
 
 ```json
 {"ok": true, "sid": "csl-2026-05-06-1730-3f9a",

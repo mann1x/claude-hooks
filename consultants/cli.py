@@ -149,6 +149,11 @@ def cmd_consult(args, base: str) -> int:
     }
     if args.effort:
         body["effort"] = args.effort
+    if getattr(args, "add_dir", None):
+        # v1.8+: forward extra allowed roots to the engine. The engine
+        # unions them with settings-file auto-discovery and stores the
+        # result on the session record so follow-ups inherit.
+        body["extra_roots"] = list(args.add_dir)
     # --trace / --no-trace are deprecated in v1.1 (the JSONL trace
     # was replaced by the per-session transcript.db). The flag is
     # still accepted but no longer forwarded to the engine; warn
@@ -183,6 +188,11 @@ def cmd_follow_up(args, base: str) -> int:
     # service restarted) can reopen from disk without a separate
     # reopen call.
     body["cwd"] = str(Path(args.cwd or os.getcwd()).resolve())
+    if getattr(args, "add_dir", None):
+        # v1.8+: extends the parent's extra_roots with this follow-up's
+        # entries. The engine merges the two lists (parent first, then
+        # this turn's, dedup'd) before running the executor.
+        body["extra_roots"] = list(args.add_dir)
     out = _http("POST",
                 f"{base}/v1/consult/{args.parent_sid}/follow-up",
                 body=body)
@@ -597,6 +607,16 @@ def build_parser() -> argparse.ArgumentParser:
                         "in v1.2.")
     c.add_argument("--no-trace", dest="trace", action="store_false",
                    help="DEPRECATED: no-op in v1.1.")
+    c.add_argument(
+        "--add-dir", action="append", default=[], metavar="PATH",
+        help=(
+            "Additional directory the consultants' tools may read from "
+            "(repeatable). Unioned with permissions.additionalDirectories "
+            "from ~/.claude/settings.json and the project's "
+            ".claude/settings*.json. Persisted on the session record so "
+            "follow-ups inherit."
+        ),
+    )
     c.set_defaults(fn=cmd_consult)
 
     # status
@@ -633,6 +653,15 @@ def build_parser() -> argparse.ArgumentParser:
                          "parent isn't in engine memory (default: "
                          "current dir). Always sent so closed / "
                          "evicted parents auto-reopen.")
+    fu.add_argument(
+        "--add-dir", action="append", default=[], metavar="PATH",
+        help=(
+            "Additional directory (repeatable) for the follow-up's "
+            "tool sandbox. Merged with the parent's extra_roots "
+            "(parent first, then this turn, dedup'd) before the "
+            "executor runs."
+        ),
+    )
     fu.set_defaults(fn=cmd_follow_up)
 
     # reopen — disk-fallback to restore a closed / evicted session.

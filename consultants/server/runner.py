@@ -29,9 +29,12 @@ def make_runner(*, ollama_base_url: str):
     ChatClient for clean usage tracking.
     """
     # Lazy imports — none of these are present in the main test env.
+    from claude_hooks.allowed_roots import (
+        discover_allowed_roots, render_for_log,
+    )
     from claude_hooks.get_advice.chat_client import ChatClient, make_agent_chat_client
     from claude_hooks.caliber_proxy.tools import (
-        openai_tool_specs, execute as tool_execute,
+        openai_tool_specs, make_executor,
     )
     from claude_hooks.caliber_proxy.prompt import build_grounding_messages
     from consultants.engine.graph import GraphDeps, build_council_graph
@@ -44,6 +47,11 @@ def make_runner(*, ollama_base_url: str):
         cfg: cc.ConsultantsConfig = runner_input["config"]
         cwd: str = runner_input["cwd"]
         question: str = runner_input["question"]
+        # v1.8+: extra allowed roots for the tool sandbox. Sourced from
+        # the CLI's ``--add-dir`` (already merged with settings-file
+        # auto-discovery by the HTTP layer). Empty tuple → tool layer
+        # falls back to the bare ``execute`` fast path.
+        extra_roots = tuple(runner_input.get("extra_roots") or ())
         enabled = tuple(cc.enabled_roles(cfg))
 
         # Effort-based critic strategy:
@@ -173,12 +181,19 @@ def make_runner(*, ollama_base_url: str):
             cfg.roles["synthesizer"].extra_models or []
         )
 
+        if extra_roots:
+            log.info(
+                "consultants sid=%s allowed roots:\n%s",
+                state.sid, render_for_log([cwd, *extra_roots]),
+            )
         deps = GraphDeps(
             chat_clients=chat_clients,
             models=models,
             enabled_roles=enabled,
             cwd=cwd,
-            tool_executor=traced_tool(tool_execute, tracer=tracer),
+            tool_executor=traced_tool(
+                make_executor(extra_roots), tracer=tracer,
+            ),
             tool_specs=openai_tool_specs(),
             grounding_msgs=grounding_msgs,
             think_by_role=think_by_role,
@@ -330,9 +345,12 @@ def make_follow_up_runner(*, ollama_base_url: str):
     creating fresh ChatClients if the parent's are gone (e.g. the
     parent was reaped between completion and follow-up).
     """
+    from claude_hooks.allowed_roots import (
+        discover_allowed_roots, render_for_log,
+    )
     from claude_hooks.get_advice.chat_client import ChatClient, make_agent_chat_client
     from claude_hooks.caliber_proxy.tools import (
-        openai_tool_specs, execute as tool_execute,
+        openai_tool_specs, make_executor,
     )
     from claude_hooks.caliber_proxy.prompt import build_grounding_messages
     from consultants.engine.graph import GraphDeps, build_follow_up_graph
@@ -346,6 +364,20 @@ def make_follow_up_runner(*, ollama_base_url: str):
         cwd: str = runner_input["cwd"]
         question: str = runner_input["question"]
         parent_state = runner_input.get("parent_state")
+        # v1.8+: merge follow-up extras with whatever the parent had,
+        # so a follow-up inherits the parent's reach plus any new
+        # --add-dir on this turn. Order is preserved + dedup'd.
+        follow_extras = tuple(runner_input.get("extra_roots") or ())
+        parent_extras = tuple(
+            getattr(parent_state, "extra_roots", None) or ()
+        )
+        seen: set[str] = set()
+        merged: list[str] = []
+        for r in parent_extras + follow_extras:
+            if r and r not in seen:
+                seen.add(r)
+                merged.append(r)
+        extra_roots = tuple(merged)
 
         # Topology: researcher + synthesizer always; critic only at
         # high/max effort (matches the main runner's gate). x-tiers
@@ -437,12 +469,19 @@ def make_follow_up_runner(*, ollama_base_url: str):
             cfg.roles["synthesizer"].extra_models or []
         )
 
+        if extra_roots:
+            log.info(
+                "consultants follow-up sid=%s allowed roots:\n%s",
+                state.sid, render_for_log([cwd, *extra_roots]),
+            )
         deps = GraphDeps(
             chat_clients=chat_clients,
             models=models,
             enabled_roles=enabled_t,
             cwd=cwd,
-            tool_executor=traced_tool(tool_execute, tracer=tracer),
+            tool_executor=traced_tool(
+                make_executor(extra_roots), tracer=tracer,
+            ),
             tool_specs=openai_tool_specs(),
             grounding_msgs=grounding_msgs,
             think_by_role=think_by_role,
