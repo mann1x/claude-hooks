@@ -59,11 +59,13 @@ _SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 from claude_hooks.config import expand_user_path
 from claude_hooks.embedders import Embedder, EmbedderError, make_embedder
+from claude_hooks.providers._content_hash import content_hash
 from claude_hooks.providers.base import (
     Memory,
     Provider,
     ServerCandidate,
 )
+from claude_hooks.providers.sqlite_vec_schema import migrate_schema
 
 log = logging.getLogger("claude_hooks.providers.sqlite_vec")
 
@@ -170,13 +172,37 @@ class SqliteVecProvider(Provider):
 
         table = _safe_table(self.options.get("table") or "memory")
         vec_blob = _pack_vec(vec)
+        ch = content_hash(content)
         try:
             with self._conn:  # type: ignore[union-attr]
+                # v1.7.0: idempotent on content_hash. Re-storing the
+                # same (whitespace-normalised) content is a silent
+                # no-op — same posture as pgvector's ON CONFLICT
+                # (content_hash) DO NOTHING. ``RETURNING rowid``
+                # gives us the new rowid on insert and nothing on
+                # conflict, so we know whether to also push the
+                # embedding into the _vec table.
                 cur = self._conn.execute(  # type: ignore[union-attr]
-                    f"INSERT INTO {table} (content, metadata) VALUES (?, ?)",
-                    (content, json.dumps(metadata or {})),
+                    # Partial unique index ``WHERE content_hash IS
+                    # NOT NULL`` requires the same predicate in the
+                    # conflict target so SQLite recognises the
+                    # constraint. See ``CREATE UNIQUE INDEX`` in
+                    # sqlite_vec_schema.py.
+                    f"INSERT INTO {table}(content, content_hash, metadata) "
+                    f"VALUES (?, ?, ?) "
+                    f"ON CONFLICT(content_hash) "
+                    f"  WHERE content_hash IS NOT NULL "
+                    f"  DO NOTHING "
+                    f"RETURNING rowid",
+                    (content, ch, json.dumps(metadata or {})),
                 )
-                rowid = cur.lastrowid
+                row = cur.fetchone()
+                if row is None:
+                    # Duplicate — content already in the store, with
+                    # an embedding in _vec from the original insert.
+                    # Nothing to do; silent no-op.
+                    return
+                rowid = row[0]
                 self._conn.execute(  # type: ignore[union-attr]
                     f"INSERT INTO {table}_vec (rowid, embedding) VALUES (?, ?)",
                     (rowid, vec_blob),
@@ -184,6 +210,113 @@ class SqliteVecProvider(Provider):
         except sqlite3.Error as e:
             log.warning("sqlite_vec insert failed: %s", e)
             raise
+
+    def recall_hybrid(self, query: str, k: int = 5,
+                       alpha: float = 0.5, rrf_k: int = 60) -> list[Memory]:
+        """Hybrid recall = RRF blend of vector cosine + BM25 (FTS5).
+
+        Mirror of pgvector's ``recall_hybrid``:
+
+            score(doc) = alpha * 1/(rrf_k + rank_vec)
+                       + (1-alpha) * 1/(rrf_k + rank_kw)
+
+        Single-table version — sqlite_vec stores one logical table per
+        provider instance, so no multi-table merging. Empty query →
+        empty list. Either signal pass can fail silently (vector
+        backend down, FTS5 query parse error) and the surviving signal
+        still drives the ranking.
+        """
+        if not query.strip():
+            return []
+        try:
+            self._ensure_ready()
+            qvec = self._embedder.embed(query)  # type: ignore[union-attr]
+        except (ImportError, EmbedderError) as e:
+            log.warning("sqlite_vec hybrid unavailable: %s", e)
+            return []
+        table = _safe_table(self.options.get("table") or "memory")
+        qblob = _pack_vec(qvec)
+        # keyed by content_hash (bytes) so the vector and BM25 hits
+        # for the same row land on the same entry; rows with NULL
+        # content_hash (legacy duplicates surviving the migration)
+        # are skipped because they can't be deduped.
+        fused: dict[bytes, dict] = {}
+
+        # vector pass
+        try:
+            vec_rows = self._conn.execute(  # type: ignore[union-attr]
+                f"SELECT m.content, m.metadata, v.distance, m.content_hash "
+                f"FROM {table}_vec v JOIN {table} m ON m.rowid = v.rowid "
+                f"WHERE v.embedding MATCH ? AND k = ? "
+                f"ORDER BY v.distance",
+                (qblob, max(k * 4, 20)),
+            ).fetchall()
+        except sqlite3.Error as e:
+            log.warning("sqlite_vec hybrid vector pass failed: %s", e)
+            vec_rows = []
+        for rank, (content, meta_json, distance, ch) in enumerate(
+            vec_rows, start=1,
+        ):
+            if ch is None:
+                continue
+            entry = fused.setdefault(
+                bytes(ch),
+                _new_fused_entry(content, meta_json, table),
+            )
+            entry["vec_rank"] = rank
+            entry["vec_distance"] = distance
+
+        # BM25 pass via FTS5. bm25() returns a NEGATIVE score where
+        # more-negative is more-relevant — same direction as ORDER BY
+        # ASC, which is what we want for the LIMIT.
+        try:
+            kw_rows = self._conn.execute(  # type: ignore[union-attr]
+                f"SELECT m.content, m.metadata, m.content_hash "
+                f"FROM {table}_fts JOIN {table} m "
+                f"  ON m.rowid = {table}_fts.rowid "
+                f"WHERE {table}_fts MATCH ? "
+                f"ORDER BY bm25({table}_fts) "
+                f"LIMIT ?",
+                (_fts5_query(query), max(k * 4, 20)),
+            ).fetchall()
+        except sqlite3.Error as e:
+            log.debug("sqlite_vec hybrid BM25 pass skipped: %s", e)
+            kw_rows = []
+        for rank, (content, meta_json, ch) in enumerate(kw_rows, start=1):
+            if ch is None:
+                continue
+            entry = fused.setdefault(
+                bytes(ch),
+                _new_fused_entry(content, meta_json, table),
+            )
+            entry["kw_rank"] = rank
+
+        # RRF fusion
+        for entry in fused.values():
+            s = 0.0
+            if entry["vec_rank"] is not None:
+                s += alpha * (1.0 / (rrf_k + entry["vec_rank"]))
+            if entry["kw_rank"] is not None:
+                s += (1.0 - alpha) * (1.0 / (rrf_k + entry["kw_rank"]))
+            entry["_score"] = s
+
+        ranked = sorted(
+            fused.values(), key=lambda e: e["_score"], reverse=True,
+        )[:k]
+        out: list[Memory] = []
+        for e in ranked:
+            try:
+                meta = json.loads(e["metadata"]) if e["metadata"] else {}
+            except json.JSONDecodeError:
+                meta = {}
+            meta["_table"] = e["table"]
+            meta["_score"] = e["_score"]
+            if e["vec_distance"] is not None:
+                meta["_distance"] = e["vec_distance"]
+            meta["_vec_rank"] = e["vec_rank"]
+            meta["_kw_rank"] = e["kw_rank"]
+            out.append(Memory(text=e["content"], metadata=meta))
+        return out
 
     def count(self) -> int:
         """Return the number of stored memories."""
@@ -222,22 +355,18 @@ class SqliteVecProvider(Provider):
             self._create_tables()
 
     def _create_tables(self) -> None:
-        """Create the content + vec tables if they don't exist."""
+        """Bring the on-disk schema up to v1.7.0 (idempotent).
+
+        Delegates to :mod:`sqlite_vec_schema.migrate_schema` which
+        creates or extends the memory table + ``_vec`` + ``_fts`` +
+        the KG cluster + bookkeeping in a single transaction.
+        Re-runs are no-ops once the version row reads ``1``.
+        """
         table = _safe_table(self.options.get("table") or "memory")
         dim = self._embedder.dim if self._embedder and self._embedder.dim else 0  # type: ignore[union-attr]
-
-        # Check if tables already exist.
-        cur = self._conn.execute(  # type: ignore[union-attr]
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-            (table,),
-        )
-        if cur.fetchone():
-            self._tables_created = True
-            return
-
-        # Need the embedding dimension. If the embedder hasn't set it yet,
-        # do a probe embed to discover it.
         if dim == 0:
+            # Need the embedding dimension before creating the vec0
+            # virtual table. Probe the embedder once.
             try:
                 probe = self._embedder.embed("dimension probe")  # type: ignore[union-attr]
                 dim = len(probe)
@@ -245,21 +374,9 @@ class SqliteVecProvider(Provider):
                 raise RuntimeError(
                     f"cannot create tables: need embedding dimension but embedder failed: {e}"
                 )
-
-        self._conn.execute(  # type: ignore[union-attr]
-            f"""CREATE TABLE IF NOT EXISTS {table} (
-                rowid       INTEGER PRIMARY KEY,
-                content     TEXT NOT NULL,
-                metadata    TEXT,
-                created_at  TEXT DEFAULT (datetime('now'))
-            )"""
-        )
-        self._conn.execute(  # type: ignore[union-attr]
-            f"CREATE VIRTUAL TABLE IF NOT EXISTS {table}_vec USING vec0(embedding float[{dim}])"
-        )
-        self._conn.commit()  # type: ignore[union-attr]
+        migrate_schema(self._conn, embedding_dim=dim, table=table)  # type: ignore[arg-type]
         self._tables_created = True
-        log.info("created sqlite_vec tables: %s, %s_vec (dim=%d)", table, table, dim)
+        log.info("sqlite_vec schema ready: %s (dim=%d)", table, dim)
 
 
 def _safe_table(name: str) -> str:
@@ -272,3 +389,40 @@ def _safe_table(name: str) -> str:
 def _pack_vec(vec: list[float]) -> bytes:
     """sqlite-vec accepts float32 little-endian blobs."""
     return struct.pack(f"{len(vec)}f", *vec)
+
+
+def _new_fused_entry(content: str, meta_json: Optional[str], table: str) -> dict:
+    """Per-doc accumulator used by :meth:`recall_hybrid`.
+
+    Mirrors pgvector's fused-entry shape so the downstream RRF + sort
+    + Memory[] code paths line up byte-for-byte.
+    """
+    return {
+        "content": content,
+        "metadata": meta_json,
+        "table": table,
+        "vec_rank": None,
+        "kw_rank": None,
+        "vec_distance": None,
+        "_score": 0.0,
+    }
+
+
+# FTS5 syntax characters that would otherwise let user input mean
+# something special (NEAR/N, OR, *, -, "...", :, parentheses). For
+# free-text recall we want everything taken literally — equivalent
+# of pgvector's ``websearch_to_tsquery('english', %s)`` posture.
+_FTS5_QUOTE_RE = re.compile(r'"')
+
+
+def _fts5_query(query: str) -> str:
+    """Wrap a free-text query so FTS5 treats it as a literal phrase.
+
+    Quotes are doubled (FTS5's escape) and the whole thing is wrapped
+    in ``"..."``. Empty / whitespace-only input becomes the empty
+    string, which FTS5 will reject — the caller must guard upstream.
+    """
+    q = query.strip()
+    if not q:
+        return ""
+    return '"' + _FTS5_QUOTE_RE.sub('""', q) + '"'
