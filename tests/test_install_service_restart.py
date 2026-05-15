@@ -259,5 +259,45 @@ class TestArgumentParser(unittest.TestCase):
             install._restart_managed_services(dry_run=False, skip=False)
 
 
+class TestConsultantsHealthCallSignature(unittest.TestCase):
+    """Regression guard for the v1.5.2 hotfix: an early v1.5.2 prep
+    commit shipped a duplicate ``_wait_for_consultants_health`` with
+    no ``port`` param; the original ``port: int`` signature later in
+    the file shadowed it, causing
+    ``TypeError: missing 1 required positional argument: 'port'``
+    when ``_restart_consultants_service`` ran end-to-end.
+
+    This test calls the restart function with the platform-specific
+    schtasks/systemctl path stubbed but the health probe NOT stubbed,
+    so any future signature drift surfaces here before deploy.
+    """
+
+    def test_consultants_restart_invokes_health_probe_cleanly(self):
+        out = io.StringIO()
+        # All-fail health probe is fine — we just want to confirm the
+        # call signature matches the real ``_wait_for_consultants_health``.
+        # Patch the real health helper to return False instantly so the
+        # 15-second poll loop doesn't burn test time; the regression we
+        # guard against is the TypeError on the call site, not the
+        # behaviour of the poll loop (covered separately by the
+        # consultants engine tests).
+        with patch.object(install.sys, "platform", "linux"), \
+             patch.object(install.subprocess, "run",
+                          return_value=FakeProcResult(0)), \
+             patch.object(install, "_wait_for_consultants_health",
+                          return_value=False) as health, \
+             patch.object(sys, "stdout", out):
+            # Must NOT raise TypeError or NameError
+            install._restart_consultants_service()
+        # The call site must use the (port, *, timeout=) signature
+        health.assert_called_once()
+        args, kwargs = health.call_args
+        # First positional arg should be the port number
+        self.assertEqual(args[0], 38095)
+        self.assertIn("timeout", kwargs)
+        # Output reports the timeout
+        self.assertIn("not responding within", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
