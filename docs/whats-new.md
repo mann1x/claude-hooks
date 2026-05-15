@@ -1,3 +1,53 @@
+# What's new in v1.7
+
+> Released 2026-05-15. Previous release notes: v1.5 (below),
+> [v1.4](whats-new-v1.4.md), [v1.1](whats-new-v1.1.md). Full
+> changelog: [`CHANGELOG.md`](../CHANGELOG.md).
+
+v1.6 brought the `sqlite-vec-mcp` launcher to **transport** parity
+with `pgvector-mcp` (same shape, same install path, same 3 memory
+tools); **v1.7 closes the data-model gap**. After this release the
+`sqlite_vec` provider exposes the same eight semantic operations
+pgvector does — `recall`, `recall_hybrid`, idempotent `store`,
+`count`, plus the full knowledge graph.
+
+## At a glance
+
+- **Hybrid recall**: `SqliteVecProvider.recall_hybrid` (and
+  `sqlite-vec-find-hybrid` over MCP) — Reciprocal Rank Fusion over
+  vector cosine + BM25 via FTS5. Same RRF formula, same defaults,
+  same metadata fields as pgvector. Best for factual / named
+  queries that contain specific keywords.
+- **Idempotent store**: `INSERT … ON CONFLICT(content_hash) DO
+  NOTHING RETURNING rowid`. Re-storing whitespace-normalised
+  identical content is a silent no-op. Shared `content_hash`
+  helper means the same memory hashes to the same bytes on both
+  pgvector and sqlite_vec — cross-store migration tools collide
+  on the same key.
+- **Knowledge graph**: full set of `kg_*` methods on
+  `SqliteVecProvider` and matching tools in `sqlite-vec-mcp`
+  (`-kg-search / -kg-create / -kg-observe / -kg-relate`). FTS5
+  trigram tokenizer for name-fuzzy match (with `LIKE %query%`
+  fallback if the host's stdlib SQLite is too old); three-pass
+  search (name → observation hybrid → observation fill).
+- **In-place schema migration**: existing v1.6.x `.db` files
+  migrate to v1 on first call after upgrade. Non-destructive
+  (legacy tables stay intact), idempotent (re-runs are no-ops),
+  resumable (each step is its own transaction).
+- **Shared MCP output**: `pgvector-mcp` and `sqlite-vec-mcp` now
+  both import `claude_hooks/mcp_format.py`. The rendered text
+  payload for the same data is byte-identical across backends.
+
+## See also
+
+- [`sqlite-vec-runbook.md`](sqlite-vec-runbook.md) — schema +
+  migration walkthrough, RRF tuning, KG usage examples.
+- [`sqlite-vec-mcp.md`](sqlite-vec-mcp.md) — updated tool catalog.
+- [`pgvector-runbook.md`](pgvector-runbook.md) — the original
+  reference implementation `sqlite_vec` now mirrors.
+
+---
+
 # What's new in v1.5
 
 > Released 2026-05-14. Previous release notes: [v1.4](whats-new-v1.4.md),

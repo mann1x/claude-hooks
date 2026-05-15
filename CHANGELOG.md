@@ -16,7 +16,83 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-_(no entries yet — next batch of work since v1.6.1 lands here.)_
+_(no entries yet — next batch of work since v1.7.0 lands here.)_
+
+## [1.7.0] — 2026-05-15
+
+### Added — full pgvector parity for `sqlite_vec`
+
+`sqlite_vec` (and the bundled `sqlite-vec-mcp` launcher) now expose
+the same eight semantic operations `pgvector` does — `recall`,
+`recall_hybrid`, `store` (idempotent), `count`, plus the knowledge
+graph: `kg_create_entities`, `kg_add_observations`,
+`kg_create_relations`, `kg_search_nodes`. External MCP clients
+(Cursor, Codex, OpenWebUI, Claude Desktop) get a complete
+local-file analogue to pgvector — zero infra, same surface.
+
+* **Hybrid recall** (`SqliteVecProvider.recall_hybrid`) — two-pass
+  Reciprocal Rank Fusion over vector cosine (sqlite-vec) and BM25
+  (FTS5 with `unicode61 remove_diacritics 2` tokenizer). Same RRF
+  formula, alpha/k/rrf_k defaults, score/distance/rank metadata
+  shape as pgvector.
+* **Idempotent store** — `INSERT … ON CONFLICT(content_hash)
+  DO NOTHING RETURNING rowid`. Re-storing whitespace-normalised
+  identical content is a silent no-op; same `content_hash`
+  algorithm as pgvector for cross-store dedup.
+* **Knowledge graph** — full set of `kg_*` methods returning the
+  same shape (`{name, entity_type, metadata, observations[],
+  _score, _match}`). Name-fuzzy via FTS5 trigram tokenizer
+  (SQLite ≥3.34, with `LIKE %query%` fallback for older builds,
+  probed once at migration); observation hybrid via the same RRF
+  body as `recall_hybrid`; three-pass search (name → obs hybrid
+  → obs-fill).
+* **In-place schema migration**
+  (`claude_hooks/providers/sqlite_vec_schema.py`) — one-shot lazy
+  migration on first `_ensure_ready()` after upgrade. v0 (legacy
+  v1.6.x) → v1 in a single transaction: ALTER TABLE for
+  `content_hash`, backfill from existing rows
+  (whitespace-normalised SHA-256), partial UNIQUE index, FTS5
+  external-content tables + AFTER triggers, the KG cluster
+  (entities + relations + observations + their vec/fts mirrors),
+  and a `claude_hooks_schema` bookkeeping table. Idempotent —
+  re-runs that find v1 are no-ops. **Non-destructive** — the
+  original `<table>` + `<table>_vec` are never dropped, so
+  downgrade to v1.6.x keeps recall + store working on the legacy
+  surface.
+* **`sqlite-vec-mcp` tool catalog: 3 → 8 tools.** Adds
+  `sqlite-vec-find-hybrid`, `sqlite-vec-kg-search`,
+  `sqlite-vec-kg-create`, `sqlite-vec-kg-observe`,
+  `sqlite-vec-kg-relate`. Renders byte-identical output to
+  `pgvector-mcp` via shared `claude_hooks/mcp_format.py`.
+
+### Changed
+
+* `Provider` ABC gains default `kg_*` + `recall_hybrid` stubs that
+  raise `NotImplementedError` (or fall back to `recall` for the
+  hybrid case). Providers without KG support (`qdrant`,
+  `memory_kg`) keep working unchanged.
+* Shared `content_hash` helper extracted to
+  `claude_hooks/providers/_content_hash.py`. Same SHA-256-of-
+  whitespace-normalised-UTF-8 used by both pgvector + sqlite_vec
+  + the cross-store migration tool.
+* `pgvector_mcp/server.py` formatters now live in
+  `claude_hooks/mcp_format.py` — sourced by both MCP servers.
+
+### Migration notes
+
+Existing v1.6.x sqlite_vec `.db` files migrate **in place** on
+first `_ensure_ready()` after upgrade. No re-embedding, no row
+loss; the legacy table + vec tables are extended, never rewritten.
+A re-run of `install.py` triggers the migration immediately. If
+the host's stdlib SQLite lacks the FTS5 trigram tokenizer (very
+rare on modern builds), `kg_search_nodes` falls back to a
+`LIKE %query%` name match — documented in
+`docs/sqlite-vec-runbook.md`.
+
+### Tests
+
+75 new tests (21 migration, 13 hybrid, 18 KG, 14 MCP full-tools,
+9 content_hash). Full suite: 2733 passed, 25 skipped.
 
 ## [1.6.1] — 2026-05-15
 

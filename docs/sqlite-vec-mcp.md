@@ -1,4 +1,4 @@
-# sqlite-vec MCP (v1.6+)
+# sqlite-vec MCP (v1.6+, full parity v1.7+)
 
 Same shape as [`pgvector-mcp`](pgvector-runbook.md): a system-wide
 stdio MCP launcher (with optional HTTP daemon) that lets external
@@ -9,13 +9,19 @@ sqlite_vec store, two access paths.
 
 ## What the server exposes
 
-Three tools in v1.6.0 (memory only — no KG, no FTS5 hybrid):
+Eight tools in v1.7+ — full parity with
+[`pgvector-mcp`](pgvector-runbook.md):
 
 | Tool | Backs onto | Notes |
 |------|------------|-------|
 | `sqlite-vec-find` | `SqliteVecProvider.recall(query, k)` | Pure vector cosine distance. `k` default 5, max 50. |
-| `sqlite-vec-store` | `SqliteVecProvider.store(content, metadata)` | SQLite serialises writers, so concurrent stores from multiple MCP clients will queue rather than collide. |
+| `sqlite-vec-find-hybrid` *(v1.7+)* | `SqliteVecProvider.recall_hybrid(query, k, alpha)` | RRF blend of vector cosine + BM25 (FTS5). `alpha=0.5` default. |
+| `sqlite-vec-store` | `SqliteVecProvider.store(content, metadata)` | v1.7+ is idempotent on `content_hash`. SQLite serialises writers, so concurrent stores from multiple MCP clients will queue rather than collide. |
 | `sqlite-vec-count` | `SqliteVecProvider.count()` | Row count in the configured primary table. |
+| `sqlite-vec-kg-search` *(v1.7+)* | `kg_search_nodes(query, k)` | Three-pass: name fuzzy (FTS5 trigram) → observation hybrid → observation fill. |
+| `sqlite-vec-kg-create` *(v1.7+)* | `kg_create_entities(entities)` | Bulk-create, idempotent on `name`. |
+| `sqlite-vec-kg-observe` *(v1.7+)* | `kg_add_observations(items)` | Embeds + inserts, idempotent on `(entity_id, content_hash)`. |
+| `sqlite-vec-kg-relate` *(v1.7+)* | `kg_create_relations(relations)` | Idempotent on `(from_id, to_id, type)`. |
 
 The embedder used by the server is whatever
 `cfg.providers.sqlite_vec.embedder` is set to — Ollama, llamafile,
@@ -23,9 +29,8 @@ OpenAI-compat. Same config the hook pipeline reads. If the embedder
 is unavailable, the server returns a clean JSON-RPC tool error
 instead of crashing; the loop keeps running for the next request.
 
-Hybrid recall (FTS5) and a KG layer are out of scope for v1.6.0 —
-they'd require new methods on `SqliteVecProvider` + new tables.
-Filed as follow-ups; bring it up if you want them prioritised.
+See [`sqlite-vec-runbook.md`](sqlite-vec-runbook.md) for the schema,
+RRF tuning, KG usage, and the v0 → v1 migration walkthrough.
 
 ## Wire-up at install time
 
@@ -112,7 +117,7 @@ curl -sX POST http://127.0.0.1:32777/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq
 ```
 
-Returns the three-tool catalog.
+Returns the eight-tool catalog (v1.7+).
 
 ## Port-and-name table
 
@@ -128,12 +133,7 @@ Returns the three-tool catalog.
   `.db` file. Two MCP clients calling `sqlite-vec-store`
   simultaneously will queue rather than fail, but the latency
   shows. For high-write workloads run pgvector instead.
-- **No FTS5 hybrid in v1.6.** Tool catalog ships
-  `sqlite-vec-find` (pure vector) only. Hybrid lands when
-  `SqliteVecProvider.recall_hybrid` does.
-- **No KG.** sqlite_vec has no entity/observation/relation tables.
-  Use pgvector if you need the KG side.
-- **HTTP daemon is Linux/systemd only in v1.6.** Stdio launcher is
+- **HTTP daemon is Linux/systemd only.** Stdio launcher is
   cross-platform; the systemd unit is not yet wrapped as a Windows
   scheduled task. File an issue if you want it.
 
