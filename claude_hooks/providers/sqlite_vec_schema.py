@@ -116,6 +116,13 @@ def migrate_schema(conn: sqlite3.Connection, *, embedding_dim: int,
     if current < 1:
         _migrate_v0_to_v1(conn, embedding_dim=embedding_dim, table=table)
         _write_version(conn, 1, _build_v1_metadata(conn))
+        # Python's sqlite3 implicitly opens a transaction before DML
+        # statements but doesn't commit until conn.commit() or
+        # ``with conn:`` exits. Without this explicit commit, the
+        # whole migration silently rolls back when the connection
+        # closes — including the version row, so the next open
+        # thinks it's a fresh v0 DB and runs the migration again.
+        conn.commit()
         log.info("sqlite_vec schema migrated to v1 (table=%s, dim=%d)",
                  table, embedding_dim)
     return LATEST_VERSION
@@ -270,19 +277,16 @@ def _migrate_v0_to_v1(conn: sqlite3.Connection, *, embedding_dim: int,
         """
     )
 
-    # Step 5: populate FTS5 from existing rows that aren't there yet.
-    # We use ``INSERT INTO … SELECT … WHERE NOT EXISTS`` so re-runs
-    # don't double-insert (the trigger catches new rows; this one-shot
-    # backfill catches everything that existed before the migration).
-    conn.execute(
-        f"""
-        INSERT INTO {table}_fts(rowid, content)
-        SELECT m.rowid, m.content FROM {table} m
-        WHERE NOT EXISTS (
-            SELECT 1 FROM {table}_fts WHERE rowid = m.rowid
-        )
-        """
-    )
+    # Step 5: populate FTS5 from existing rows via the canonical
+    # 'rebuild' command. External-content FTS5 (content=<table>,
+    # content_rowid=...) treats INSERT INTO ft(rowid, content) as
+    # an index-only operation that DOESN'T actually tokenize the
+    # supplied content — the index ends up with rowids but no
+    # tokens, so MATCH returns nothing. ``INSERT INTO ft(ft)
+    # VALUES('rebuild')`` is FTS5's documented way to (re)build an
+    # external-content index from the source table. Idempotent —
+    # re-running 'rebuild' wipes and re-creates the index.
+    conn.execute(f"INSERT INTO {table}_fts({table}_fts) VALUES('rebuild')")
 
     # Step 6: KG tables + indexes.
     _create_kg_entities(conn)
@@ -362,46 +366,60 @@ def _backfill_content_hash(conn: sqlite3.Connection, *, table: str,
                            batch: int = 500) -> int:
     """Populate ``content_hash`` for any rows where it's NULL.
 
-    Returns the number of rows updated. Runs in batches so a huge
-    legacy DB doesn't load every row at once.
+    Returns the number of rows updated.
 
     Duplicate-content rows: collapsing them under a UNIQUE
     constraint would be destructive (which row wins?). Instead the
     backfill assigns the hash to whichever row it sees first;
-    subsequent duplicates of the same content collide on the
-    partial UNIQUE index we create next, and the migration steps
-    skip them — they keep their existing rowid and content but get
-    a NULL ``content_hash``. They're still queryable; they just
-    won't participate in future ON-CONFLICT idempotency.
+    subsequent duplicates of the same content keep their existing
+    rowid and content but get a NULL ``content_hash``. They're
+    still queryable; they just won't participate in future
+    ON-CONFLICT idempotency.
+
+    Implementation note: we SELECT all NULL-hash rowids up front
+    rather than re-query the same WHERE clause in a loop. A
+    re-query would re-select skipped duplicates (their hash stays
+    NULL by design), and the loop would spin forever. SELECT-once
+    + in-memory chunked UPDATE handles arbitrarily-large legacy
+    DBs without that footgun.
     """
-    seen: set[bytes] = set()
+    seen_hashes: set[bytes] = set()
+    rowids = [
+        r[0] for r in conn.execute(
+            f"SELECT rowid FROM {table} WHERE content_hash IS NULL"
+        )
+    ]
+    if not rowids:
+        return 0
     total = 0
-    while True:
+    # Process in chunks so we commit periodically on huge DBs.
+    for start in range(0, len(rowids), batch):
+        chunk = rowids[start:start + batch]
+        placeholders = ",".join("?" * len(chunk))
         rows = conn.execute(
             f"SELECT rowid, content FROM {table} "
-            f"WHERE content_hash IS NULL LIMIT ?",
-            (batch,),
+            f"WHERE rowid IN ({placeholders})",
+            chunk,
         ).fetchall()
-        if not rows:
-            break
         for rowid, content in rows:
             if not content:
                 continue
             h = content_hash(content)
-            if h in seen:
-                # Will collide on UNIQUE; skip this row's update
-                # so it stays NULL (intentional — see docstring).
+            if h in seen_hashes:
+                # Duplicate of an earlier row in this backfill —
+                # leave NULL (documented behavior; partial UNIQUE
+                # index lets it stay there).
                 continue
             try:
                 conn.execute(
                     f"UPDATE {table} SET content_hash = ? WHERE rowid = ?",
                     (h, rowid),
                 )
-                seen.add(h)
+                seen_hashes.add(h)
                 total += 1
             except sqlite3.IntegrityError:
-                # UNIQUE collision against a hash that was already
-                # written in an earlier migration attempt. Skip.
+                # UNIQUE collision against a hash already on disk
+                # from a prior partial-migration attempt. Skip.
                 continue
     if total:
         log.info("backfilled content_hash for %d row(s) in %s", total, table)
