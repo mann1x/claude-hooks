@@ -1,6 +1,6 @@
 [project]
 name = "claude-hooks"
-version = "1.5.4"
+version = "1.6.0"
 description = "Cross-platform Claude Code hooks for deterministic memory recall and storage"
 readme = "README.md"
 license = "MIT"
@@ -32,6 +32,11 @@ Repository = "https://github.com/mann1x/claude-hooks"
 # installer also drops a hand-rolled wrapper at ~/.local/bin/pgvector-mcp
 # for users who run install.py without a pip install of the package.
 pgvector-mcp = "claude_hooks.pgvector_mcp.__main__:main"
+# System-wide stdio MCP launcher for the sqlite-vec store (v1.6+).
+# Same role as pgvector-mcp but for the local-file sqlite_vec
+# provider — lets external MCP clients (Cursor, Codex, OpenWebUI,
+# Claude Desktop) share the same .db file the hook framework uses.
+sqlite-vec-mcp = "claude_hooks.sqlite_vec_mcp.__main__:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "coverage>=7.0"]

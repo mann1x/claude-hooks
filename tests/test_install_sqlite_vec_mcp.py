@@ -73,6 +73,24 @@ def stub_gpu_probe():
         yield
 
 
+@pytest.fixture(autouse=True)
+def stub_sqlite_vec_launcher(tmp_path):
+    """v1.6.0+: ``_setup_sqlite_vec_mcp`` now drops a system-wide MCP
+    launcher and registers it in ``~/.claude.json``. These v1.4 tests
+    pre-date that path — pin a non-existent launcher path so the
+    "Install launcher? [Y/n]" prompt fires (consumed by an extra "n"
+    in each script) and stub the writers so we don't touch the real
+    ~/.local/bin or ~/.claude.json. Tests that exercise the launcher
+    path itself live in ``tests/test_install_sqlite_vec_launcher.py``.
+    """
+    fake = tmp_path / "no-existing-launcher" / "sqlite-vec-mcp"
+    with patch.object(install, "_sqlite_vec_launcher_path",
+                      return_value=fake), \
+         patch.object(install, "_write_sqlite_vec_launcher"), \
+         patch.object(install, "_register_sqlite_vec_mcp_in_claude_json"):
+        yield
+
+
 # --------------------------------------------------------------------- #
 # Skip paths
 # --------------------------------------------------------------------- #
@@ -119,6 +137,8 @@ class TestEnable:
             "y",                # llamafile fallback? yes
             "",                 # llamafile defaults
             "cpu",              # CPU mode
+            "n",                # v1.6: skip MCP launcher drop (covered
+                                # by test_install_sqlite_vec_launcher.py)
         ]))
         install._setup_sqlite_vec_mcp(
             cfg, non_interactive=False, dry_run=False,
@@ -144,6 +164,7 @@ class TestEnable:
             "n",    # use OpenAI? no
             "",     # llamafile defaults
             "cpu",  # CPU mode
+            "n",    # v1.6: skip MCP launcher drop
         ]))
         install._setup_sqlite_vec_mcp(
             cfg, non_interactive=False, dry_run=True,
@@ -199,7 +220,8 @@ class TestEnable:
         monkeypatch.setattr("builtins.input", _scripted_input([
             "",          # accept default Y (already enabled)
             str(db),     # accept db_path
-            # No further inputs — embedder dialog is skipped.
+            # Embedder dialog skipped (already configured).
+            "n",         # v1.6: skip MCP launcher drop
         ]))
         install._setup_sqlite_vec_mcp(
             cfg, non_interactive=False, dry_run=False,
@@ -220,6 +242,7 @@ class TestEnable:
             "n",   # use OpenAI? no
             "",    # llamafile defaults
             "cpu", # CPU mode
+            "n",   # v1.6: skip MCP launcher drop
         ]))
         with patch.object(install, "_sqlite_vec_extension_available",
                           return_value=False):
@@ -241,6 +264,7 @@ class TestEnable:
             "n",
             "",
             "cpu",
+            "n",  # v1.6: skip MCP launcher drop
         ]))
         with patch.object(install, "_sqlite_vec_extension_available",
                           return_value=True):
