@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.5.4** — ~2.6k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.6.0** — ~2.6k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -216,6 +216,7 @@ payload.
 - `claude_hooks/proxy/` — opt-in HTTP proxy in front of `api.anthropic.com` (`server.py`, `forwarder.py`, `metadata.py`, `stats_db.py`, `dashboard.py`, `sse.py`, `stop_phrase_guard.py`, `ratelimit_state.py`)
 - `claude_hooks/caliber_proxy/` — Caliber grounding proxy (`server.py`, `tools.py`, `prompt.py`, `ollama.py`, `recall.py`)
 - `claude_hooks/pgvector_mcp/` — system-wide stdio MCP server exposing pgvector recall + KG ops to any MCP-aware client
+- `claude_hooks/sqlite_vec_mcp/` — v1.6+: parity launcher for the sqlite_vec store (stdio + optional HTTP on 32777). Same shape as `pgvector_mcp`, trimmed to 3 memory tools (`sqlite-vec-find` / `-store` / `-count`). Lets Cursor / Codex / OpenWebUI / Claude Desktop share the same `.db` file the hook pipeline reads in-process
 - `episodic_server/` — HTTP front-end for [obra/episodic-memory](https://github.com/obra/episodic-memory) (`server.py`, `Dockerfile`, systemd unit)
 - `systemd/` — service templates: `claude-hooks-proxy`, `claude-hooks-dashboard`, `claude-hooks-rollup{.service,.timer}`, `claude-hooks-health{.service,.timer}`, `claude-hooks-daemon`, `claude-hooks-pgvector-mcp`, `caliber-grounding-proxy`, `axon-host`
 - `config/` — `claude-hooks.json` (gitignored) + `claude-hooks.example.json` + `stop_phrases.yaml` (canary phrases for the in-stream stop_phrase_guard)

@@ -1,0 +1,30 @@
+[Unit]
+Description=claude-hooks sqlite-vec MCP — HTTP streamable JSON-RPC frontend for the local sqlite-vec memory store (Claude Desktop and any remote MCP client)
+Documentation=https://github.com/mann1x/claude-hooks/blob/main/claude_hooks/sqlite_vec_mcp/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# install.py substitutes __REPO_PATH__ on install; edit here only if
+# you manage the unit yourself. Override defaults in a drop-in file
+# under /etc/systemd/system/claude-hooks-sqlite-vec-mcp.service.d/*.conf
+User=root
+WorkingDirectory=__REPO_PATH__
+Environment=SQLITE_VEC_MCP_HTTP_HOST=0.0.0.0
+Environment=SQLITE_VEC_MCP_HTTP_PORT=32777
+ExecStart=__REPO_PATH__/bin/claude-hook-sqlite-vec-mcp --http
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=10s
+SendSIGKILL=yes
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__REPO_PATH__
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

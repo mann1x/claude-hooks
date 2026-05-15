@@ -3565,8 +3565,10 @@ def _setup_sqlite_vec_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) ->
 
     print("\n--- sqlite_vec ---")
     print("  Optional: local-only persistent memory backed by SQLite + sqlite-vec.")
-    print("  Strictly single-host (no MCP server). Lower setup cost than pgvector;")
-    print("  shared embedder dialog so failover with llamafile works the same way.")
+    print("  v1.6+: also installs a system-wide MCP launcher so external")
+    print("  clients (Cursor / Codex / OpenWebUI / Claude Desktop) can share")
+    print("  the same .db file. Shared embedder dialog so failover with")
+    print("  llamafile works the same way as pgvector.")
 
     if non_interactive:
         if not already_enabled:
@@ -3625,7 +3627,61 @@ def _setup_sqlite_vec_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) ->
             non_interactive=non_interactive, dry_run=dry_run,
         )
 
+    # 4. System-wide MCP launcher (v1.6+).
+    #
+    # Same shape as ``_setup_pgvector_mcp`` — drops a tiny script at
+    # ``~/.local/bin/sqlite-vec-mcp`` (POSIX) or
+    # ``%LOCALAPPDATA%\claude-hooks\bin\sqlite-vec-mcp.cmd`` (Windows)
+    # and registers it under ``~/.claude.json`` -> mcpServers.sqlite_vec.
+    # Other MCP-aware tools (Cursor, Codex, OpenWebUI, Claude Desktop)
+    # can point at the absolute path to share the same .db file the
+    # hook framework reads in-process.
+    #
+    # ``--non-interactive`` always installs (matches the pgvector
+    # behavior); skip explicitly with --skip-sqlite-vec-launcher if you
+    # ever need to (no flag today; add when there's a use case).
+    py_path = find_conda_env_python()
+    py = str(py_path) if py_path.exists() else sys.executable
+    launcher_path = _sqlite_vec_launcher_path()
+    if non_interactive:
+        install_launcher = True
+    else:
+        if launcher_path.exists():
+            print(f"  Existing launcher: {launcher_path}")
+            choice = input(
+                "  [V]alidate only / [R]e-install / [S]kip? [V/r/s]: "
+            ).strip().lower() or "v"
+            if choice in ("s", "skip", "n", "no"):
+                install_launcher = False
+                validate_only = False
+            elif choice in ("v", "validate", "y", "yes"):
+                install_launcher = False
+                validate_only = True
+            else:
+                install_launcher = True
+                validate_only = False
+        else:
+            ans = input("  Install system-wide MCP launcher? [Y/n]: ").strip().lower()
+            install_launcher = ans in ("", "y", "yes")
+            validate_only = False
+
+    if install_launcher:
+        if dry_run:
+            print(f"  [dry-run] Would write launcher: {launcher_path}")
+            print(f"  [dry-run] Would register mcpServers.sqlite_vec in ~/.claude.json")
+        else:
+            _write_sqlite_vec_launcher(launcher_path, py=py, repo=str(HERE))
+            print(f"  Launcher: {launcher_path}")
+            _register_sqlite_vec_mcp_in_claude_json(launcher_path)
+            print(f"  ~/.claude.json: registered mcpServers.sqlite_vec -> {launcher_path}")
+    elif not non_interactive and locals().get("validate_only"):
+        # Read-only spawn + initialize + immediate shutdown.
+        ok = _validate_sqlite_vec_launcher(launcher_path)
+        print(f"  Launcher validate: {'OK' if ok else 'FAIL'}")
+
     print(f"  Done. sqlite_vec.enabled = True, db_path = {db_path}")
+    print(f"  After Claude Code restart, tools surface as:")
+    print(f"    mcp__sqlite_vec__sqlite-vec-find / -store / -count")
 
 
 def _pgvector_launcher_path() -> Path:
@@ -3674,6 +3730,98 @@ def _write_pgvector_launcher(path: Path, *, py: str, repo: str) -> None:
     if str(path.parent) not in (os.environ.get("PATH") or "").split(os.pathsep):
         print(f"  [!] {path.parent} is not in PATH -- only Claude Code can find it (absolute path).")
         print(f"      Add to PATH if you want Cursor/Codex/etc. to spawn `pgvector-mcp` by name.")
+
+
+def _sqlite_vec_launcher_path() -> Path:
+    """Choose the system-wide install location for the sqlite-vec MCP
+    launcher. Mirrors ``_pgvector_launcher_path`` so both stores share
+    the same install convention.
+
+    POSIX: ``~/.local/bin/sqlite-vec-mcp``.
+    Windows: ``%LOCALAPPDATA%/claude-hooks/bin/sqlite-vec-mcp.cmd``.
+    """
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local"))
+        return base / "claude-hooks" / "bin" / "sqlite-vec-mcp.cmd"
+    return Path(os.path.expanduser("~/.local/bin/sqlite-vec-mcp"))
+
+
+def _write_sqlite_vec_launcher(path: Path, *, py: str, repo: str) -> None:
+    """Write the sqlite-vec MCP launcher script with interpreter +
+    PYTHONPATH baked in. Mirrors ``_write_pgvector_launcher`` exactly
+    apart from the module name and identifying comment.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        body = (
+            "@echo off\r\n"
+            "REM sqlite-vec-mcp launcher (claude-hooks) -- generated by install.py\r\n"
+            f'set PYTHONPATH={repo};%PYTHONPATH%\r\n'
+            f'"{py}" -m claude_hooks.sqlite_vec_mcp %*\r\n'
+            "exit /b %ERRORLEVEL%\r\n"
+        )
+        path.write_text(body, encoding="utf-8")
+    else:
+        body = (
+            "#!/usr/bin/env sh\n"
+            "# sqlite-vec-mcp launcher (claude-hooks) -- generated by install.py\n"
+            f'PYTHONPATH="{repo}:${{PYTHONPATH:-}}" exec "{py}" -m claude_hooks.sqlite_vec_mcp "$@"\n'
+        )
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+    if str(path.parent) not in (os.environ.get("PATH") or "").split(os.pathsep):
+        print(f"  [!] {path.parent} is not in PATH -- only Claude Code can find it (absolute path).")
+        print(f"      Add to PATH if you want Cursor/Codex/etc. to spawn `sqlite-vec-mcp` by name.")
+
+
+def _validate_sqlite_vec_launcher(launcher_path: Path) -> bool:
+    """Spawn the launcher, send a single ``initialize`` request, read
+    one response, kill it. Returns True if the server reported its
+    serverInfo with ``name == "claude-hooks-sqlite-vec"``.
+
+    Read-only — does not touch the .db file. Used by the re-run
+    ``Validate only`` path.
+    """
+    import subprocess as _sp
+    import json as _json
+    if not launcher_path.exists():
+        return False
+    try:
+        proc = _sp.Popen(
+            [str(launcher_path)] if os.name == "nt" else ["/bin/sh", str(launcher_path)],
+            stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.PIPE,
+            text=True,
+        )
+    except OSError:
+        return False
+    try:
+        req = _json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize"}) + "\n"
+        assert proc.stdin is not None and proc.stdout is not None
+        proc.stdin.write(req)
+        proc.stdin.flush()
+        # Block for one line of stdout, with a short timeout.
+        import select
+        if hasattr(select, "select"):
+            rdy, _, _ = select.select([proc.stdout], [], [], 5.0)
+            if not rdy:
+                return False
+        line = proc.stdout.readline()
+        if not line:
+            return False
+        resp = _json.loads(line)
+        info = (((resp.get("result") or {}).get("serverInfo")) or {})
+        return info.get("name") == "claude-hooks-sqlite-vec"
+    except (OSError, ValueError, _json.JSONDecodeError):
+        return False
+    finally:
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
 
 # -- bin/ shim wrappers (cross-platform PATH glue) ----------------------- #
@@ -4008,6 +4156,31 @@ def _register_pgvector_mcp_in_claude_json(launcher_path: Path) -> None:
     cfg = json.loads(raw)
     mcps = cfg.setdefault("mcpServers", {})
     mcps["pgvector"] = {
+        "type": "stdio",
+        "command": str(launcher_path),
+        "args": [],
+        "env": {},
+    }
+    p.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+
+def _register_sqlite_vec_mcp_in_claude_json(launcher_path: Path) -> None:
+    """Register ``mcpServers.sqlite_vec`` at the root of ``~/.claude.json``.
+
+    Mirrors ``_register_pgvector_mcp_in_claude_json`` — root-level entry
+    visible to every project, semantic-tagged backup before write, same
+    stdio shape so Claude Code spawns the launcher per session.
+    """
+    p = Path(os.path.expanduser("~/.claude.json"))
+    if not p.exists():
+        p.write_text("{}", encoding="utf-8")
+    raw = p.read_text(encoding="utf-8")
+    ts = _now_ts()
+    bak = p.with_suffix(f".json.bak-{ts}-sqlite-vec-mcp")
+    bak.write_text(raw, encoding="utf-8")
+    cfg = json.loads(raw)
+    mcps = cfg.setdefault("mcpServers", {})
+    mcps["sqlite_vec"] = {
         "type": "stdio",
         "command": str(launcher_path),
         "args": [],
@@ -5232,17 +5405,18 @@ def main() -> int:
     # For each provider, ask the user to pick (or skip).
     chosen: dict[str, Optional[ServerCandidate]] = {}
     for cls in REGISTRY:
-        # pgvector has bespoke setup (we own its MCP server, install
-        # the launcher system-wide, configure DSN+embedder). Handled
-        # by ``_setup_pgvector_mcp`` after the standard pick loop.
-        if cls.name == "pgvector":
+        # pgvector and sqlite_vec have bespoke setup (we own their MCP
+        # servers, install launchers system-wide, configure DSN/db-path
+        # + embedder). Handled by ``_setup_pgvector_mcp`` /
+        # ``_setup_sqlite_vec_mcp`` after the standard pick loop.
+        if cls.name in ("pgvector", "sqlite_vec"):
             continue
         chosen[cls.name] = pick_provider(cls, report, args.non_interactive)
 
     # Verify each chosen provider.
     print("\n==> Verifying chosen servers...")
     for cls in REGISTRY:
-        if cls.name == "pgvector":
+        if cls.name in ("pgvector", "sqlite_vec"):
             continue
         candidate = chosen.get(cls.name)
         pcfg = (cfg.get("providers") or {}).get(cls.name) or {}

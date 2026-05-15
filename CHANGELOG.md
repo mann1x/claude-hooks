@@ -16,7 +16,98 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-_(no entries yet — next batch of work since v1.5.4 lands here.)_
+_(no entries yet — next batch of work since v1.6.0 lands here.)_
+
+## [1.6.0] — 2026-05-15
+
+MINOR — `sqlite-vec-mcp` system-wide launcher achieves full parity
+with `pgvector-mcp`. External MCP clients (Cursor, Codex, OpenWebUI,
+Claude Desktop) can now recall + store against the **same**
+sqlite-vec `.db` file the claude-hooks hook pipeline reads
+in-process. No new schema; one store, two access paths.
+
+### Added
+
+- New module `claude_hooks/sqlite_vec_mcp/` (`__init__.py` +
+  `__main__.py` + `server.py`) — mirrors `pgvector_mcp/` in shape.
+  Same `McpServer` JSON-RPC dispatcher, same stdio + HTTP transport,
+  same OPTIONS/CORS/batch/413 plumbing. Trimmed to 3 tools for v1.6
+  (memory only — no KG, no FTS5 hybrid):
+  - `sqlite-vec-find` → `SqliteVecProvider.recall(query, k)`
+  - `sqlite-vec-store` → `SqliteVecProvider.store(content, metadata)`
+  - `sqlite-vec-count` → `SqliteVecProvider.count()`
+- `pyproject.toml` `[project.scripts]` entry
+  `sqlite-vec-mcp = "claude_hooks.sqlite_vec_mcp.__main__:main"` —
+  `pip install claude-hooks` now exposes the launcher as a real
+  console-script on PATH.
+- `bin/claude-hook-sqlite-vec-mcp` + `.cmd` — POSIX + Windows shims
+  matching the pgvector launcher pattern. Resolve the conda env's
+  Python via `bin/_resolve_python.sh` (POSIX) or the same fallback
+  chain as `claude-hook-pgvector-mcp.cmd` (Windows).
+- `systemd/claude-hooks-sqlite-vec-mcp.service` — optional HTTP
+  daemon, default port **32777**, env-var overrides
+  `SQLITE_VEC_MCP_HTTP_HOST` / `SQLITE_VEC_MCP_HTTP_PORT`. Drop-in
+  under `/etc/systemd/system/claude-hooks-sqlite-vec-mcp.service.d/`
+  for per-host customisation.
+- `install.py` gets three new helpers mirroring the pgvector ones:
+  - `_sqlite_vec_launcher_path()` — chooses `~/.local/bin/sqlite-vec-mcp`
+    (POSIX) or `%LOCALAPPDATA%\claude-hooks\bin\sqlite-vec-mcp.cmd`
+    (Windows).
+  - `_write_sqlite_vec_launcher(path, *, py, repo)` — emits the
+    launcher script with interpreter + PYTHONPATH baked in.
+  - `_register_sqlite_vec_mcp_in_claude_json(launcher_path)` —
+    registers the launcher under `mcpServers.sqlite_vec` at the
+    root of `~/.claude.json`; semantic backup written first
+    (`.claude.json.bak-<ts>-sqlite-vec-mcp`).
+  - `_validate_sqlite_vec_launcher(launcher_path)` — read-only
+    `initialize` round-trip for the V/r/s re-run path.
+- `_setup_sqlite_vec_mcp` extended with the launcher dialog
+  (`Install system-wide MCP launcher? [Y/n]:`) and the v1.5.4-style
+  `[V]alidate only / [R]e-install / [S]kip? [V/r/s]:` prompt for
+  re-runs. `--non-interactive` installs the launcher when sqlite_vec
+  is enabled.
+- New runbook `docs/sqlite-vec-mcp.md` — install flow, external
+  client wire-up, port table, known limitations.
+
+### Fixed
+
+- The generic `pick_provider` loop in `install.py` no longer asks
+  "Enter MCP URL for SQLite + sqlite-vec" before the bespoke
+  `_setup_sqlite_vec_mcp` dialog. The dead prompt is gone; sqlite_vec
+  joins pgvector on the `pick_provider` skip-list. The
+  `_setup_sqlite_vec_mcp` dialog owns the URL via the launcher path
+  now.
+
+### Tests
+
+- `tests/test_sqlite_vec_mcp.py` — 24 unit tests for the dispatcher
+  (handshake, tools/list shape, tools/call dispatch for each tool,
+  error paths, formatters, full HTTP transport coverage). Mirrors
+  the shape of `tests/test_pgvector_mcp.py`.
+- `tests/test_install_sqlite_vec_launcher.py` — 12 tests for the new
+  launcher path helpers (POSIX + Windows path shape via source
+  inspection, writer body, ~/.claude.json registration with semantic
+  backup, non-interactive setup drops launcher, dry-run skips writes,
+  interactive yes/no paths, pick_provider skip-list guard).
+- `tests/test_install_sqlite_vec_mcp.py` updated with an autouse
+  fixture stubbing the new launcher helpers + one extra "n" answer
+  in each interactive script (skip the launcher prompt; the launcher
+  itself is covered by the new test file).
+- Full suite: **2643 passed**, 24 skipped on solidpc (+36 vs v1.5.4).
+
+### Upgrade
+
+```bash
+git pull --tags
+git checkout v1.6.0
+python install.py
+```
+
+On re-run, the existing sqlite_vec config is preserved; if the
+launcher isn't already present the dialog asks whether to install
+it (Y default). External clients (Cursor, Codex, ...) need their
+own MCP-server config pointing at the new launcher path — see
+`docs/sqlite-vec-mcp.md` for the recipe.
 
 ## [1.5.4] — 2026-05-15
 
