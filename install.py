@@ -1832,6 +1832,163 @@ def _write_daemon_task_xml(
     return Path(path)
 
 
+def _restart_managed_services(*, dry_run: bool, skip: bool) -> None:
+    """End-of-install hook (v1.5.2+): restart the long-lived
+    ``claude-hooks-daemon`` and the always-on
+    ``claude-hooks-consultants`` engine so they pick up code that was
+    pulled in this install pass.
+
+    Without this, a ``git pull && python install.py`` cycle leaves
+    the running pythonw / python process executing whatever bytecode
+    was loaded at its original spawn — newly-pulled modules sit on
+    disk but are never imported until the host reboots or someone
+    runs ``claude-hooks-daemon-ctl restart`` manually. The 2026-05-15
+    v1.5.0 deploy exposed this gap when the daemon kept answering
+    pings on the v1.4 protocol after install.py declared success.
+
+    Skips silently when:
+      - ``dry_run`` is set (planning mode)
+      - ``skip`` is set (the ``--skip-daemon-restart`` escape hatch)
+      - the service isn't installed on this host
+      - the service isn't currently running
+    """
+    if dry_run or skip:
+        if skip and not dry_run:
+            print("\n==> Service restart")
+            print("  --skip-daemon-restart: leaving claude-hooks-daemon "
+                  "and claude-hooks-consultants alone.")
+            print("  Restart manually to pick up new code: "
+                  "claude-hooks-daemon-ctl restart")
+        return
+    print("\n==> Restarting managed services to load new code")
+    _restart_claude_hooks_daemon()
+    _restart_consultants_service()
+
+
+def _restart_claude_hooks_daemon() -> None:
+    """Restart the claude-hooks-daemon process on whichever platform
+    manages it. No-op when the service isn't installed."""
+    plat = sys.platform
+    if plat == "win32":
+        if not _windows_task_exists(_DAEMON_TASK_NAME):
+            print("  claude-hooks-daemon: not installed (no scheduled task)"
+                  " — skipping restart")
+            return
+        # End existing instances (best-effort — task may not be running),
+        # then trigger a fresh Run. Using subprocess directly so we don't
+        # require UAC elevation for the End+Run cycle (the task is owned
+        # by the current user).
+        subprocess.run(["schtasks", "/End", "/TN", _DAEMON_TASK_NAME],
+                       capture_output=True, text=True)
+        rc = subprocess.run(["schtasks", "/Run", "/TN", _DAEMON_TASK_NAME],
+                            capture_output=True, text=True)
+        if rc.returncode != 0:
+            print(f"  claude-hooks-daemon: schtasks /Run failed:"
+                  f" {rc.stderr.strip()[-200:]}")
+            return
+    elif plat == "darwin":
+        plist = Path.home() / "Library" / "LaunchAgents" / "com.claude-hooks.daemon.plist"
+        if not plist.exists():
+            print("  claude-hooks-daemon: not installed (no LaunchAgent)"
+                  " — skipping restart")
+            return
+        subprocess.run(["launchctl", "unload", str(plist)],
+                       capture_output=True)
+        subprocess.run(["launchctl", "load", "-w", str(plist)],
+                       capture_output=True)
+    else:
+        unit_path = Path("/etc/systemd/system") / _DAEMON_UNIT
+        if not unit_path.exists():
+            print("  claude-hooks-daemon: not installed (no systemd unit)"
+                  " — skipping restart")
+            return
+        rc = subprocess.run(["systemctl", "restart", _DAEMON_UNIT],
+                            capture_output=True, text=True)
+        if rc.returncode != 0:
+            print(f"  claude-hooks-daemon: systemctl restart failed: "
+                  f"{rc.stderr.strip()[-200:]}")
+            return
+    # Verify the daemon came back. Cold-start can take a few seconds
+    # (secret-file creation, port bind, embedding-manager init).
+    if _wait_for_daemon(timeout=20.0):
+        print("  claude-hooks-daemon: restarted + responding on 127.0.0.1:47018")
+    else:
+        print("  [!!] claude-hooks-daemon: restarted but not responding "
+              "within 20 s. Check logs at ~/.claude/claude-hooks-daemon.log")
+
+
+def _restart_consultants_service() -> None:
+    """Restart the claude-hooks-consultants engine if installed.
+
+    The consultants engine has two service modes (``always-on`` and
+    ``smart-start``); only always-on has a long-lived process to
+    restart. smart-start lazily spawns on demand so there's nothing
+    to recycle here — it'll get fresh code on its next cold spawn.
+    """
+    plat = sys.platform
+    if plat == "win32":
+        if not _windows_task_exists(_CONSULTANTS_TASK_NAME):
+            print("  claude-hooks-consultants: not installed (always-on)"
+                  " — skipping restart")
+            return
+        subprocess.run(["schtasks", "/End", "/TN", _CONSULTANTS_TASK_NAME],
+                       capture_output=True, text=True)
+        rc = subprocess.run(["schtasks", "/Run", "/TN", _CONSULTANTS_TASK_NAME],
+                            capture_output=True, text=True)
+        if rc.returncode != 0:
+            print(f"  claude-hooks-consultants: schtasks /Run failed:"
+                  f" {rc.stderr.strip()[-200:]}")
+            return
+    else:
+        # Linux + macOS: systemd --user unit
+        unit = "claude-hooks-consultants.service"
+        # Check if user is configured for systemd --user
+        rc = subprocess.run(
+            ["systemctl", "--user", "is-enabled", unit],
+            capture_output=True, text=True,
+        )
+        if rc.returncode != 0:
+            print("  claude-hooks-consultants: not installed (no systemd "
+                  "--user unit) — skipping restart")
+            return
+        rc = subprocess.run(
+            ["systemctl", "--user", "restart", unit],
+            capture_output=True, text=True,
+        )
+        if rc.returncode != 0:
+            print(f"  claude-hooks-consultants: systemctl --user restart "
+                  f"failed: {rc.stderr.strip()[-200:]}")
+            return
+    # Best-effort health check. The engine listens on a configurable
+    # port (default 38095); confirming requires loading the user's
+    # config, which we already did above. Probe with a short timeout.
+    _wait_for_consultants_health(timeout=15.0)
+
+
+def _wait_for_consultants_health(*, timeout: float = 15.0) -> None:
+    """Poll the consultants /health endpoint to confirm it came back.
+    Silent on success/failure beyond the restart message itself —
+    this is a courtesy probe, not a hard gate."""
+    import time as _time
+    import urllib.error
+    import urllib.request
+    port = 38095  # default; could be made configurable via cfg
+    url = f"http://127.0.0.1:{port}/health"
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=1.0) as r:
+                if 200 <= r.status < 300:
+                    print(f"  claude-hooks-consultants: restarted + "
+                          f"responding on 127.0.0.1:{port}")
+                    return
+        except (urllib.error.URLError, OSError):
+            pass
+        _time.sleep(0.5)
+    print(f"  [!!] claude-hooks-consultants: restarted but not responding "
+          f"within {timeout:.0f} s on 127.0.0.1:{port}")
+
+
 def _wait_for_daemon(*, timeout: float = 15.0) -> bool:
     """Poll the daemon until ping succeeds or the deadline elapses.
 
@@ -4947,6 +5104,14 @@ def main() -> int:
              "this flag, --non-interactive refuses to rewrite when existing "
              "hooks point at a different location.",
     )
+    ap.add_argument(
+        "--skip-daemon-restart", action="store_true",
+        help="skip the end-of-install restart of claude-hooks-daemon "
+             "and claude-hooks-consultants (v1.5.2+). Without this flag, "
+             "install.py restarts running services at completion so they "
+             "load newly-pulled code; pass this to leave the running "
+             "processes alone (advanced).",
+    )
     ap.add_argument("--probe", action="store_true", help="force tool-probe detection")
     ap.add_argument("--config", type=str, default=None, help="alternate claude-hooks.json path")
     ap.add_argument(
@@ -5235,6 +5400,17 @@ def main() -> int:
         settings_path,
         non_interactive=args.non_interactive,
         dry_run=args.dry_run,
+    )
+
+    # v1.5.2+: pick up newly-pulled code by restarting the long-lived
+    # daemon (and the consultants engine if installed). Without this,
+    # the running pythonw process keeps executing whatever bytecode
+    # was loaded at its spawn time, so `git pull && python install.py`
+    # has no observable effect until the next host reboot or manual
+    # restart.
+    _restart_managed_services(
+        dry_run=args.dry_run,
+        skip=bool(getattr(args, "skip_daemon_restart", False)),
     )
 
     conda_py = find_conda_env_python()

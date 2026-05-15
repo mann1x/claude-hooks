@@ -16,7 +16,70 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-_(no entries yet — next batch of work since v1.5.1 lands here.)_
+_(no entries yet — next batch of work since v1.5.2 lands here.)_
+
+## [1.5.2] — 2026-05-15
+
+PATCH — install.py end-of-install service restart. Closes a gap
+that bit the 2026-05-15 v1.5.0 deploy: install.py declared
+"daemon: responding ✓" while the running daemon process was still
+executing pre-pull bytecode (newly-pulled code was on disk but
+never imported until the daemon was killed manually). After this
+fix, `git pull && python install.py` consistently picks up new
+code without any manual restart step.
+
+### Added
+
+- `_restart_managed_services(dry_run, skip)` runs at end of
+  `main()` and restarts both `claude-hooks-daemon` and the always-on
+  `claude-hooks-consultants` service when they exist.
+- `_restart_claude_hooks_daemon()` — cross-platform restart:
+  - **Linux**: `systemctl restart claude-hooks-daemon.service` if
+    `/etc/systemd/system/claude-hooks-daemon.service` exists.
+  - **macOS**: `launchctl unload + load -w` on
+    `com.claude-hooks.daemon.plist`.
+  - **Windows**: `schtasks /End /TN claude-hooks-daemon` then
+    `/Run /TN claude-hooks-daemon`. No UAC prompt since the task
+    is owned by the current user.
+  - After restart, polls the daemon's HMAC port (47018) for up to
+    20 s. Prints `restarted + responding` on success; warns
+    without failing the install on timeout.
+- `_restart_consultants_service()` — same shape, targets the
+  consultants engine. Linux uses `systemctl --user restart
+  claude-hooks-consultants.service`; Windows uses
+  `schtasks /End + /Run` on `claude-hooks-consultants`. Health
+  check polls `http://127.0.0.1:38095/health` for up to 15 s.
+  Smart-start mode (lazy-spawn) has nothing long-lived to recycle
+  so it's silently skipped — the next cold spawn picks up new code.
+- New `--skip-daemon-restart` flag for the rare case the user
+  wants install.py to leave running processes alone. Prints a hint
+  reminding them to run `claude-hooks-daemon-ctl restart` manually
+  when they want the new code loaded.
+
+### Fixed
+
+- Both Linux (`_setup_systemd_daemon`, install.py:1573-1581) and
+  Windows (`_install_daemon_windows_steps`, install.py:2044-2077)
+  previously had a "if service already exists, just probe port +
+  return" branch with no restart. That meant a re-run of
+  `install.py` after `git pull` left the daemon running stale
+  Python bytecode until something else killed the process.
+  v1.5.2 layers the unconditional end-of-install restart on top,
+  preserving the existing "don't recreate the systemd unit / task
+  file if it's identical" idempotency.
+
+### Tests
+
+15 new tests in `tests/test_install_service_restart.py`:
+`--dry-run` skips, `--skip-daemon-restart` skips + prints hint,
+default calls both restarts; Linux systemctl path (skip when unit
+missing, call with unit present, warn when systemctl fails, warn
+when daemon doesn't come back); Windows schtasks path (skip when
+task missing, /End-then-/Run sequencing, warn when /Run fails);
+consultants service (skip when missing on Linux/Windows, restart
+when present on both platforms); argparse flag wiring.
+
+Full suite: 2592 passing, 24 skipped (+15 new, +0 regressions).
 
 ## [1.5.1] — 2026-05-15
 
