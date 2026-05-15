@@ -35,6 +35,7 @@ from typing import Any, Optional
 
 from claude_hooks.config import load_config
 from claude_hooks.dispatcher import build_providers
+from claude_hooks.mcp_format import format_kg_nodes, format_memories
 from claude_hooks.providers.base import Provider
 from claude_hooks.providers.sqlite_vec import SqliteVecProvider
 
@@ -69,11 +70,34 @@ def _tool_catalog() -> list[dict]:
             },
         },
         {
+            "name": "sqlite-vec-find-hybrid",
+            "description": (
+                "Hybrid recall: RRF blend of vector cosine + BM25 (FTS5) "
+                "against the local sqlite-vec store. Best for factual / "
+                "named queries that contain specific keywords."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "k": {"type": "integer", "default": 5, "minimum": 1, "maximum": 50},
+                    "alpha": {
+                        "type": "number", "default": 0.5,
+                        "minimum": 0, "maximum": 1,
+                        "description": "Weight on vector signal (0=BM25 only, 1=vector only)",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+        {
             "name": "sqlite-vec-store",
             "description": (
                 "Insert a single memory into the configured primary table. "
-                "SQLite serialises writers on the .db file, so concurrent "
-                "stores from multiple MCP clients will queue."
+                "v1.7+ is idempotent on whitespace-normalised content_hash — "
+                "re-storing identical content is a silent no-op. SQLite "
+                "serialises writers on the .db file, so concurrent stores "
+                "from multiple MCP clients will queue."
             ),
             "inputSchema": {
                 "type": "object",
@@ -88,6 +112,99 @@ def _tool_catalog() -> list[dict]:
             "name": "sqlite-vec-count",
             "description": "Count rows in the configured primary memories table.",
             "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "sqlite-vec-kg-search",
+            "description": (
+                "Search KG entities by name (FTS5 trigram fuzzy) and "
+                "observation content (RRF hybrid). Returns nodes with their "
+                "entity_type, metadata, and top observations."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "k": {"type": "integer", "default": 5, "minimum": 1, "maximum": 30},
+                },
+                "required": ["query"],
+            },
+        },
+        {
+            "name": "sqlite-vec-kg-create",
+            "description": (
+                "Bulk-create KG entities. Idempotent on entity name. Each "
+                "entity: {name, entity_type, metadata?}. Returns rows actually inserted."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "entities": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "entity_type": {"type": "string"},
+                                "metadata": {"type": "object", "default": {}},
+                            },
+                            "required": ["name", "entity_type"],
+                        },
+                    },
+                },
+                "required": ["entities"],
+            },
+        },
+        {
+            "name": "sqlite-vec-kg-observe",
+            "description": (
+                "Add observations to existing entities. Each item: "
+                "{entity_name, content}. Embeds and inserts into the "
+                "kg_observations table. Idempotent on (entity_id, content_hash). "
+                "Entity must already exist (call sqlite-vec-kg-create first)."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "entity_name": {"type": "string"},
+                                "content": {"type": "string"},
+                            },
+                            "required": ["entity_name", "content"],
+                        },
+                    },
+                },
+                "required": ["items"],
+            },
+        },
+        {
+            "name": "sqlite-vec-kg-relate",
+            "description": (
+                "Create relations between entities. Each: {from, to, "
+                "relation_type, metadata?}. Idempotent on (from, to, type)."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "relations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "from": {"type": "string"},
+                                "to": {"type": "string"},
+                                "relation_type": {"type": "string"},
+                                "metadata": {"type": "object", "default": {}},
+                            },
+                            "required": ["from", "to", "relation_type"],
+                        },
+                    },
+                },
+                "required": ["relations"],
+            },
         },
     ]
 
@@ -154,7 +271,12 @@ class McpServer:
         if name == "sqlite-vec-find":
             q = str(args.get("query") or "")
             k = int(args.get("k") or 5)
-            return _format_memories(self.provider.recall(q, k=k))
+            return format_memories(self.provider.recall(q, k=k))
+        if name == "sqlite-vec-find-hybrid":
+            q = str(args.get("query") or "")
+            k = int(args.get("k") or 5)
+            alpha = float(args.get("alpha") if args.get("alpha") is not None else 0.5)
+            return format_memories(self.provider.recall_hybrid(q, k=k, alpha=alpha))
         if name == "sqlite-vec-store":
             content = str(args.get("content") or "")
             metadata = args.get("metadata") or {}
@@ -162,31 +284,33 @@ class McpServer:
             return f"stored 1 memory ({len(content)} chars)"
         if name == "sqlite-vec-count":
             return f"primary table count: {self.provider.count()}"
+        if name == "sqlite-vec-kg-search":
+            q = str(args.get("query") or "")
+            k = int(args.get("k") or 5)
+            nodes = self.provider.kg_search_nodes(q, k=k)
+            return format_kg_nodes(nodes)
+        if name == "sqlite-vec-kg-create":
+            entities = args.get("entities") or []
+            n = self.provider.kg_create_entities(list(entities))
+            return (
+                f"created {n} new entit{'y' if n == 1 else 'ies'} "
+                f"({len(entities)} requested; collisions are no-ops)"
+            )
+        if name == "sqlite-vec-kg-observe":
+            items = args.get("items") or []
+            n = self.provider.kg_add_observations(list(items))
+            return (
+                f"inserted {n} observation{'s' if n != 1 else ''} "
+                f"({len(items)} requested)"
+            )
+        if name == "sqlite-vec-kg-relate":
+            rels = args.get("relations") or []
+            n = self.provider.kg_create_relations(list(rels))
+            return (
+                f"created {n} new relation{'s' if n != 1 else ''} "
+                f"({len(rels)} requested)"
+            )
         raise ValueError(f"unknown tool: {name}")
-
-
-def _format_memories(mems: list) -> str:
-    """Mirror of pgvector_mcp's formatter — same Memory shape, same
-    output. Distance lives in ``metadata['_distance']`` for sqlite-vec
-    (set by SqliteVecProvider.recall); score isn't computed for the
-    pure-vector path so the head shows distance only.
-    """
-    if not mems:
-        return "(no results)"
-    out = []
-    for m in mems:
-        meta = getattr(m, "metadata", None) or {}
-        score = meta.get("_score")
-        dist = meta.get("_distance")
-        tbl = meta.get("_table") or "?"
-        head = f"[{tbl}"
-        if score is not None:
-            head += f" score={score:.4f}"
-        if dist is not None:
-            head += f" dist={dist:.4f}"
-        head += "]"
-        out.append(f"{head} {getattr(m, 'text', '')}")
-    return "\n\n---\n\n".join(out)
 
 
 def serve_stdio(provider: Optional[Provider] = None) -> int:

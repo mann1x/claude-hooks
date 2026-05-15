@@ -301,36 +301,12 @@ class McpServer:
         raise ValueError(f"unknown tool: {name}")
 
 
-def _format_memories(mems: list) -> str:
-    if not mems:
-        return "(no results)"
-    out = []
-    for m in mems:
-        meta = getattr(m, "metadata", None) or {}
-        score = meta.get("_score")
-        dist = meta.get("_distance")
-        tbl = meta.get("_table") or "?"
-        head = f"[{tbl}"
-        if score is not None:
-            head += f" score={score:.4f}"
-        if dist is not None:
-            head += f" dist={dist:.4f}"
-        head += "]"
-        out.append(f"{head} {getattr(m, 'text', '')}")
-    return "\n\n---\n\n".join(out)
-
-
-def _format_kg_nodes(nodes: list[dict]) -> str:
-    if not nodes:
-        return "(no results)"
-    out = []
-    for n in nodes:
-        head = f"# {n['name']} ({n['entity_type']})  score={n.get('_score', 0):.3f} match={n.get('_match', '?')}"
-        body = "\n".join(f"  - {o}" for o in n.get("observations", []))
-        if not body:
-            body = "  (no observations)"
-        out.append(f"{head}\n{body}")
-    return "\n\n".join(out)
+# Shared formatters live in claude_hooks.mcp_format so sqlite-vec-mcp
+# renders the same output for the same data — see commit history for
+# the v1.7.0 extraction. Module-level aliases keep the call sites in
+# this file unchanged.
+from claude_hooks.mcp_format import format_memories as _format_memories  # noqa: E402
+from claude_hooks.mcp_format import format_kg_nodes as _format_kg_nodes  # noqa: E402
 
 
 def serve_stdio(provider: Optional[Provider] = None) -> int:

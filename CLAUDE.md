@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.6.1** — ~2.7k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.7.0** — ~2.7k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -90,6 +90,25 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > for the chat-side architecture + CLI reference + ops runbook,
 > and [`docs/whats-new.md`](docs/whats-new.md) for the v1.5
 > highlights.
+> v1.7 brings the `sqlite_vec` provider to **full pgvector parity**:
+> hybrid recall (RRF over vector cosine + BM25 via FTS5),
+> idempotent `store` on whitespace-normalised `content_hash`, and
+> a complete knowledge-graph surface
+> (`kg_create_entities / kg_add_observations / kg_create_relations
+> / kg_search_nodes`) with FTS5 trigram name fuzzy + observation
+> hybrid + observation fill. The bundled `sqlite-vec-mcp` launcher
+> grows from 3 to 8 tools (full pgvector-mcp parity); both servers
+> render byte-identical output via the new
+> `claude_hooks/mcp_format.py`. A one-shot lazy schema migration
+> (`claude_hooks/providers/sqlite_vec_schema.py`) carries existing
+> v1.6.x `.db` files to v1 in place (idempotent, non-destructive,
+> resumable). Schema version bookkeeping lives in a new
+> `claude_hooks_schema` table; `claude_hooks/providers/_content_hash.py`
+> is the single shared hash function used by both pgvector and
+> sqlite_vec so cross-store migration tools collide on the same
+> key. See [`docs/sqlite-vec-runbook.md`](docs/sqlite-vec-runbook.md)
+> for the schema + migration walkthrough, RRF tuning, and KG usage
+> examples.
 
 ---
 

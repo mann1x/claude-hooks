@@ -51,11 +51,10 @@ import re
 from typing import Optional
 
 
-def _content_hash(text: str) -> bytes:
-    """SHA-256 of normalised text — matches scripts/migrate_to_pgvector.py
-    so production stores collide on the same content_hash key as migrated rows."""
-    normalised = " ".join(text.split())
-    return hashlib.sha256(normalised.encode("utf-8")).digest()
+# Shared content_hash lives in _content_hash.py so SqliteVecProvider
+# (v1.7+) collides on the exact same key. Aliased to the private name
+# so the rest of this file keeps its existing call sites verbatim.
+from claude_hooks.providers._content_hash import content_hash as _content_hash
 
 from claude_hooks.embedders import Embedder, EmbedderError, make_embedder
 from claude_hooks.providers.base import (
