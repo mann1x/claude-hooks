@@ -16,7 +16,43 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-_(no entries yet — next batch of work since v1.5.3 lands here.)_
+_(no entries yet — next batch of work since v1.5.4 lands here.)_
+
+## [1.5.4] — 2026-05-15
+
+PATCH — fixes a UX paper-cut in ``install.py``'s pgvector
+sub-dialog. When pgvector was already fully configured (DSN set,
+enabled, system-wide launcher present), running ``install.py``
+interactively still asked ``Set up pgvector? [Y/n]`` with **Y** as
+the default — implying a fresh setup was about to overwrite the
+working configuration. The only way out was to type ``n`` even
+though the install was working.
+
+### Fixed
+
+- ``install.py:_setup_pgvector_mcp`` now detects the
+  fully-configured state (DSN + enabled + launcher) and offers a
+  ``[V]alidate only / [R]e-install / [S]kip? [V/r/s]`` prompt with
+  **V** as the default. ``V`` runs a read-only round-trip against
+  the configured DSN and reports the result; ``R`` falls through
+  to the existing re-install flow; ``S`` exits the sub-dialog
+  untouched. Partially configured states (DSN-without-enabled,
+  enabled-without-launcher) keep the legacy ``[Y/n]`` prompt so
+  the install dialog still walks the user through completing the
+  setup.
+- New ``install._validate_pgvector_only(cfg)`` helper performs the
+  read-only check so the validate path doesn't touch the running
+  configuration.
+
+### Tests
+
+- ``tests/test_install_pgvector_validate.py`` — 14 tests covering
+  the fully-configured / partially-configured / launcher-missing
+  branches, each interactive choice (``V`` / ``R`` / ``S`` plus
+  empty-default), the validate-only round-trip, and the
+  non-interactive fast-path (which stays at ``assume yes`` for
+  scripted installs that genuinely want a re-install).
+- Full suite: 2607 passed, 24 skipped on solidpc.
 
 ## [1.5.3] — 2026-05-15
 

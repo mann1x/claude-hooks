@@ -2363,6 +2363,61 @@ def _verify_pgvector_dsn(dsn: str) -> tuple[bool, str]:
     return bool(result.get("ok")), str(result.get("reason") or "")
 
 
+def _validate_pgvector_only(cfg: dict) -> None:
+    """Validate-only path for pgvector (v1.5.4+): probe Postgres +
+    pgvector extension + embedder reachability without touching the
+    config, the launcher script, or ``~/.claude.json``.
+
+    Mirrors the read-only diagnostic shape of
+    :func:`_validate_qdrant_embedding` and
+    :func:`_validate_memory_kg_embedding`. The point is to give the
+    user a confidence check on an already-working install without the
+    side effects of a full re-install pass (idempotent in theory, but
+    every write is a chance for a transient failure or a partial
+    re-write).
+    """
+    pcfg = (cfg.get("providers") or {}).get("pgvector") or {}
+    dsn = pcfg.get("dsn") or ""
+    if not dsn:
+        print("  [!!] No DSN in config — can't validate.")
+        return
+
+    print("  Probing Postgres + pgvector extension...", end=" ", flush=True)
+    ok, reason = _verify_pgvector_dsn(dsn)
+    print("OK" if ok else f"FAILED ({reason})")
+    if not ok:
+        print(f"  Couldn't reach pgvector: {reason}")
+        return
+
+    embedder_opts = pcfg.get("embedder_options") or {}
+    embed_url = embedder_opts.get("url") or ""
+    model = embedder_opts.get("model") or ""
+    embedder = pcfg.get("embedder") or "ollama"
+    if embedder == "llamafile":
+        # llamafile is daemon-managed; the daemon will spawn it on
+        # demand. Validate by hitting the daemon's chat_model_status-
+        # equivalent embedding probe rather than the embedder URL
+        # directly (the embedder URL may be unbound when the daemon
+        # has reaped the llamafile child).
+        print(f"  Embedder: llamafile (daemon-managed @ {embed_url})")
+        print("  Note: daemon spawns llamafile on demand; URL may be "
+              "unbound until first recall.")
+    elif model and embed_url:
+        base = _ollama_base_from_embed_url(embed_url)
+        print(f"  Probing Ollama at {base} for {model}...", end=" ", flush=True)
+        present = _ollama_model_present(base, model)
+        print("present" if present else "missing")
+        if not present:
+            print(f"  Run `ollama pull {model}` against {base} to repair.")
+    else:
+        print("  Embedder options incomplete in config — skipping embedder probe.")
+
+    launcher = _pgvector_launcher_path()
+    print(f"  Launcher: {launcher} "
+          f"({'present' if launcher.exists() else 'MISSING'})")
+    print("  pgvector: validate-only complete. No writes performed.")
+
+
 def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
     """Ask if pgvector is available and set up the system-wide MCP server.
 
@@ -2392,6 +2447,12 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
     """
     pcfg = (cfg.get("providers") or {}).get("pgvector") or {}
     existing_dsn = pcfg.get("dsn") or ""
+    existing_enabled = bool(pcfg.get("enabled", False))
+    launcher_path = _pgvector_launcher_path()
+    launcher_present = launcher_path.exists()
+    fully_configured = bool(
+        existing_dsn and existing_enabled and launcher_present
+    )
 
     print("\n--- pgvector ---")
     print("  Optional: persistent memory + KG store backed by Postgres + pgvector.")
@@ -2405,6 +2466,32 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
             return
         ans = "y"
         print("  --non-interactive: assuming yes (DSN already in config).")
+    elif fully_configured:
+        # v1.5.4+: when pgvector is already fully configured (DSN +
+        # enabled + launcher dropped), offer a validate-only path
+        # instead of forcing a full re-install. Matches the
+        # _validate_qdrant_embedding / _validate_memory_kg_embedding
+        # pattern from v1.4. Default V so the lowest-impact action
+        # is the easy one.
+        print(f"  Currently configured: enabled, DSN set, launcher at")
+        print(f"  {launcher_path}")
+        choice = input(
+            "  [V]alidate only / [R]e-install / [S]kip? [V/r/s]: "
+        ).strip().lower()
+        if not choice:
+            choice = "v"
+        if choice in ("s", "skip", "n", "no"):
+            print("  Skipped.")
+            return
+        if choice in ("v", "validate", "y", "yes"):
+            # Yes/y maps to validate here because the most natural
+            # "yes I want this" answer for an already-working install
+            # is "yes, confirm it's working" — not "yes, redo it".
+            _validate_pgvector_only(cfg)
+            return
+        # Anything else (r / re-install / "reinstall") falls through
+        # to the full setup path below.
+        ans = "y"
     else:
         default = "Y" if existing_dsn else "N"
         ans = input(f"  Set up pgvector? [{default}/{'n' if default == 'Y' else 'y'}]: ").strip().lower()
