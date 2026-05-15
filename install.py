@@ -440,6 +440,81 @@ def _install_proxy_stack_systemd(
             print(f"  [!!] {name} enable failed:\n{rc.stderr.strip()[-300:]}")
 
 
+def _proxy_locally_installed() -> tuple[bool, str]:
+    """Detect whether the claude-hooks-proxy service is installed on
+    this host. Returns ``(installed, kind)`` where ``kind`` is one of
+    ``"systemd"``, ``"launchd"``, ``"task"`` or ``""``.
+
+    Checks the same install destinations the proxy stack writes to
+    (systemd unit file on Linux, LaunchAgent plist on macOS, scheduled
+    task on Windows). Drives the v1.6.1 ``[V]erify / [R]e-install /
+    [S]kip`` re-run path in ``_setup_proxy``.
+    """
+    if os.name == "nt":
+        if _windows_task_exists(_PROXY_TASK_NAME):
+            return True, "task"
+        return False, ""
+    if sys.platform == "darwin":
+        plist = Path.home() / "Library" / "LaunchAgents" / _PROXY_LAUNCHD_FILENAME
+        if plist.exists():
+            return True, "launchd"
+        # fall through; an admin could still ship the proxy via systemd
+        # on macOS, but that's nonstandard.
+    if Path("/etc/systemd/system/claude-hooks-proxy.service").exists():
+        return True, "systemd"
+    return False, ""
+
+
+def _read_current_anthropic_base_url(settings_path: Path) -> str:
+    """Return ``ANTHROPIC_BASE_URL`` currently set in settings.json's
+    top-level ``env`` block (the same place
+    ``_set_settings_env_vars`` writes), or '' if not set / missing /
+    unreadable.
+    """
+    if not settings_path.exists():
+        return ""
+    try:
+        data = _load_json(settings_path)
+    except (json.JSONDecodeError, OSError):
+        return ""
+    env = (data.get("env") or {})
+    return (env.get("ANTHROPIC_BASE_URL") or "").strip()
+
+
+def _classify_proxy_url(url: str) -> str:
+    """Return ``"local"`` / ``"remote"`` / ``"official"`` / ``"none"``
+    for the API-proxy dialog label. ``"official"`` means the user is
+    pointing straight at Anthropic with no proxy in between.
+    """
+    if not url:
+        return "none"
+    low = url.lower().rstrip("/")
+    if low in ("https://api.anthropic.com", "http://api.anthropic.com"):
+        return "official"
+    if "127.0.0.1" in low or "localhost" in low or low.startswith("http://0.0.0.0"):
+        return "local"
+    return "remote"
+
+
+def _verify_proxy_health(url: str, *, timeout: float = 3.0) -> tuple[bool, str]:
+    """GET ``<url>/health`` (or ``<url>`` if no /health endpoint
+    exists) and report status. Used by the V/r/s re-run path so users
+    can confirm an installed proxy is responding without a full
+    re-install.
+    """
+    if not url:
+        return False, "no URL configured"
+    from urllib.request import Request, urlopen
+    health = url.rstrip("/") + "/health"
+    try:
+        req = Request(health, method="GET")
+        with urlopen(req, timeout=timeout) as resp:
+            body = resp.read(512).decode("utf-8", errors="replace")
+            return resp.status < 400, f"HTTP {resp.status} — {body[:160].strip()}"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
 def _set_settings_env_vars(
     settings_path: Path, vars_to_set: dict, *,
     dry_run: bool = False, _print: bool = True,
@@ -567,70 +642,108 @@ def _setup_proxy_orchestrator(
     )
 
     proxy_cfg = cfg.setdefault("proxy", {})
-    currently_enabled = bool(proxy_cfg.get("enabled", False))
+    listen_host = proxy_cfg.get("listen_host", "127.0.0.1")
+    listen_port = proxy_cfg.get("listen_port", 38080)
+    local_advertise = "127.0.0.1" if listen_host == "0.0.0.0" else listen_host
+    local_url = f"http://{local_advertise}:{listen_port}"
 
-    # Default the prompt to the current state — empty input keeps
-    # things as they are, which matches every other re-install
-    # prompt in this script. The previous version showed `[y/N]`
-    # regardless of state, so a re-run with proxy already enabled
-    # would silently switch it off if the user just hit Enter.
-    suffix = "[Y/n]" if currently_enabled else "[y/N]"
+    installed_locally, kind = _proxy_locally_installed()
+    current_url = _read_current_anthropic_base_url(settings_path)
+    current_class = _classify_proxy_url(current_url)
+
+    # ─── Question 1: install the proxy locally on this host? ──────────
+    #
+    # Two shapes, picked off the live install state:
+    #   - installed already → [V]erify / [R]e-install / [S]kip (V default)
+    #   - not installed     → Install the API proxy locally? [y/N]
+    #
+    # "Install" is the right verb here — this question is ONLY about
+    # the local service. Whether the host actually routes traffic
+    # through any proxy is decided by question 2 below.
+    install_locally = False
+    if installed_locally:
+        print(f"\n  Local proxy: installed ({kind})")
+        choice = input(
+            "  [V]erify / [R]e-install / [S]kip? [V/r/s]: "
+        ).strip().lower() or "v"
+        if choice in ("v", "verify", "y", "yes"):
+            ok, msg = _verify_proxy_health(local_url)
+            print(f"  · health probe ({local_url}/health): "
+                  f"{'OK' if ok else 'FAIL'} — {msg}")
+            install_locally = False
+            proxy_cfg["enabled"] = True  # service is on disk; reflect it
+        elif choice in ("r", "reinstall", "re-install"):
+            install_locally = True
+            proxy_cfg["enabled"] = True
+            print("  · marking for re-install (per-OS installer runs below).")
+        else:  # skip
+            install_locally = False
+            # Don't lie about the on-disk reality: leave enabled=true
+            # since the service file is there, even on skip.
+            proxy_cfg["enabled"] = True
+            print("  · leaving local install untouched.")
+    else:
+        ans = input("\n  Install the API proxy locally? [y/N]: ").strip().lower()
+        install_locally = ans in ("y", "yes")
+        proxy_cfg["enabled"] = install_locally
+        if install_locally:
+            print("  · marking for install (per-OS installer runs below).")
+
+    # ─── Question 2: route Claude Code through a proxy on this host? ──
+    #
+    # Independent of Q1 — pandorum points at solidpc's proxy without
+    # installing one locally. Label reflects what's already in
+    # settings.json:
+    #   - remote @ http://192.168.178.2:38080  (anything non-local,
+    #                                           non-anthropic)
+    #   - local  @ http://127.0.0.1:38080      (loopback / localhost)
+    #   - no                                   (unset or official URL)
+    if current_class == "remote":
+        label = f"remote @ {current_url}"
+        default = "Y"
+    elif current_class == "local":
+        label = f"local @ {current_url}"
+        default = "Y"
+    elif install_locally:
+        # Just installed; offer to wire it through.
+        label = f"will install local @ {local_url}, not wired yet"
+        default = "Y"
+    else:
+        label = "no"
+        default = "N"
+
+    suffix = "[Y/n]" if default == "Y" else "[y/N]"
     ans = input(
-        f"  Use the API proxy? (current: "
-        f"{'yes' if currently_enabled else 'no'}) {suffix}: "
-    ).strip().lower()
-    if not ans:
-        ans = "y" if currently_enabled else "n"
+        f"\n  Use the API proxy? (current: {label}) {suffix}: "
+    ).strip().lower() or default.lower()
     if ans not in ("y", "yes"):
-        # Don't flip an already-true value to false silently -- if the
-        # user has it on, they probably want to keep it. Only set the
-        # default when it wasn't already enabled.
-        if not currently_enabled:
-            proxy_cfg["enabled"] = False
+        # User explicitly said no. If they had something configured
+        # before, leave it — don't silently strip ANTHROPIC_BASE_URL.
+        # If they want to unset it, that's a separate manual edit.
         return
 
-    print("\n  Two options:")
-    print("    [1] Install the proxy on THIS host.")
-    print("        Service runs locally; Claude Code points at 127.0.0.1.")
-    print("    [2] Use an existing proxy already on the network.")
-    print("        Skip local install -- just set ANTHROPIC_BASE_URL on")
-    print("        this host to the URL you supply.")
-    while True:
-        choice = input("  Choose [1/2] (default 1): ").strip() or "1"
-        if choice in ("1", "2"):
-            break
-        print("  Please enter 1 or 2.")
-
-    if choice == "1":
-        proxy_cfg["enabled"] = True
-        print("  · proxy.enabled = true; per-OS service installer will run.")
-        host = proxy_cfg.get("listen_host", "127.0.0.1")
-        port = proxy_cfg.get("listen_port", 38080)
-        advertise = "127.0.0.1" if host == "0.0.0.0" else host
-        url = f"http://{advertise}:{port}"
-        ans = input(
-            f"  Also set ANTHROPIC_BASE_URL={url} in {settings_path} now? [Y/n]: "
-        ).strip().lower()
-        if ans in ("", "y", "yes"):
-            _set_settings_env_vars(
-                settings_path, {"ANTHROPIC_BASE_URL": url}, dry_run=dry_run,
-            )
-        else:
-            print(f"  · Set it manually later: {url}")
+    # Yes → ask for the endpoint, with a sensible default.
+    #
+    # Priority:
+    #   1. The currently-configured URL (if any) — re-runs keep working.
+    #   2. The local URL if we just installed locally and no URL set yet.
+    #   3. The local URL as a safe fallback offer.
+    if current_url:
+        proposed = current_url
+    elif install_locally or installed_locally:
+        proposed = local_url
     else:
-        # Remote -- don't install locally.
-        proxy_cfg["enabled"] = False
-        while True:
-            url = input(
-                "  URL of the existing proxy (e.g. http://192.168.178.2:38080): "
-            ).strip().rstrip("/")
-            if url.startswith(("http://", "https://")):
-                break
-            print("  Please enter a URL beginning with http:// or https://")
-        _set_settings_env_vars(
-            settings_path, {"ANTHROPIC_BASE_URL": url}, dry_run=dry_run,
-        )
-        print(f"  · Local proxy NOT installed. ANTHROPIC_BASE_URL={url}")
+        proposed = local_url  # last-resort hint; user can paste a LAN URL
+    while True:
+        url = (input(f"  Endpoint URL [{proposed}]: ").strip().rstrip("/")
+               or proposed)
+        if url.startswith(("http://", "https://")):
+            break
+        print("  Please enter a URL beginning with http:// or https://")
+    _set_settings_env_vars(
+        settings_path, {"ANTHROPIC_BASE_URL": url}, dry_run=dry_run,
+    )
+    print(f"  · ANTHROPIC_BASE_URL = {url}")
 
 
 _PROXY_LAUNCHD_LABEL = "com.claude-hooks.proxy"
@@ -5624,7 +5737,7 @@ def main() -> int:
 
     # Detect companion tools and install skills.
     print("\n==> Companion tools")
-    installed_tools = _detect_companion_tools()
+    installed_tools = _detect_companion_tools(cfg)
 
     # /consultants engine — opt-in install of the dedicated conda env
     # + service unit. Mutates installed_tools so the consultants
@@ -6052,11 +6165,30 @@ LEGACY_SKILL_DIRS: tuple[str, ...] = (
 )
 
 
-def _detect_companion_tools() -> dict[str, bool]:
-    """Check which companion tools are installed. Returns {name: bool}."""
+def _detect_companion_tools(cfg: Optional[dict] = None) -> dict[str, bool]:
+    """Check which companion tools are installed. Returns {name: bool}.
+
+    Special-case: the ``episodic-memory`` Node binary is only needed
+    on hosts that run the server. On a CLIENT-mode host (cfg.episodic
+    .mode == "client") the host POSTs to a remote server and never
+    invokes the local binary; report ``n/a (CLIENT)`` instead of
+    ``MISSING`` so the warning doesn't keep nagging users to install
+    a tool they don't need. Same shape as the v1.6.1 proxy-detection
+    fix — don't conflate "is this binary on disk?" with "is this
+    host supposed to have it?".
+    """
+    ep_mode = ((cfg or {}).get("episodic") or {}).get("mode", "off")
     result: dict[str, bool] = {}
     for bin_name, npm_pkg, importance, description in COMPANION_TOOLS:
         found = shutil.which(bin_name) is not None
+        if bin_name == "episodic-memory" and not found and ep_mode == "client":
+            print(f"  [ok] {bin_name:24} {'n/a (CLIENT)':12} "
+                  f"[{importance}] server-only; this host posts to a remote")
+            # Record as found so the "can install via npm" hint below
+            # doesn't bait the user. The actual install pathway runs
+            # on the server host.
+            result[bin_name] = True
+            continue
         status = "installed" if found else "MISSING"
         marker = "  [ok]" if found else "  [!!]"
         print(f"{marker} {bin_name:24} {status:12} [{importance}] {description}")
