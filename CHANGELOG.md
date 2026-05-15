@@ -16,7 +16,46 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-_(no entries yet — next batch of work since v1.5.2 lands here.)_
+_(no entries yet — next batch of work since v1.5.3 lands here.)_
+
+## [1.5.3] — 2026-05-15
+
+PATCH — emergency hotfix for v1.5.2. The v1.5.2 prep accidentally
+introduced a duplicate ``_wait_for_consultants_health`` function in
+``install.py``. The original at line 4732 has the signature
+``(port: int, *, timeout: float = 30.0) -> bool``; the new one I
+added at line 1968 had ``(*, timeout: float = 15.0) -> None``.
+Python's last-def-wins overrode the new one with the original, so
+my caller at line 1965 (``_wait_for_consultants_health(timeout=15.0)``)
+raised ``TypeError: missing 1 required positional argument: 'port'``
+on any host with the consultants engine installed.
+
+Test coverage missed it because the unit tests
+``patch.object(install, "_wait_for_consultants_health")`` — patching
+replaces whichever def Python resolved, so the wrong signature
+slipped through.
+
+### Fixed
+
+- Removed the duplicate ``_wait_for_consultants_health`` definition.
+  ``_restart_consultants_service`` now reuses the existing
+  ``_wait_for_consultants_health(port, timeout)`` helper (which polls
+  ``/v1/health``, matching what the consultants engine actually
+  serves) instead of duplicating the loop with a different endpoint.
+- Restart still completes successfully; the success / timeout
+  messages are formatted by the caller now that the helper returns
+  bool rather than printing itself.
+
+### Tests
+
+New regression guard in ``tests/test_install_service_restart.py``:
+``test_consultants_restart_invokes_health_probe_cleanly`` calls the
+real ``_restart_consultants_service`` end-to-end with the real
+``_wait_for_consultants_health`` patched only at the return value.
+Asserts the call uses the ``(port, *, timeout=...)`` signature so
+any future signature drift raises in CI instead of in production.
+
+Full suite: 2593 passing, 24 skipped (+1 over v1.5.2).
 
 ## [1.5.2] — 2026-05-15
 

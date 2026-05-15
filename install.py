@@ -1959,34 +1959,19 @@ def _restart_consultants_service() -> None:
             print(f"  claude-hooks-consultants: systemctl --user restart "
                   f"failed: {rc.stderr.strip()[-200:]}")
             return
-    # Best-effort health check. The engine listens on a configurable
-    # port (default 38095); confirming requires loading the user's
-    # config, which we already did above. Probe with a short timeout.
-    _wait_for_consultants_health(timeout=15.0)
-
-
-def _wait_for_consultants_health(*, timeout: float = 15.0) -> None:
-    """Poll the consultants /health endpoint to confirm it came back.
-    Silent on success/failure beyond the restart message itself —
-    this is a courtesy probe, not a hard gate."""
-    import time as _time
-    import urllib.error
-    import urllib.request
-    port = 38095  # default; could be made configurable via cfg
-    url = f"http://127.0.0.1:{port}/health"
-    deadline = _time.monotonic() + timeout
-    while _time.monotonic() < deadline:
-        try:
-            with urllib.request.urlopen(url, timeout=1.0) as r:
-                if 200 <= r.status < 300:
-                    print(f"  claude-hooks-consultants: restarted + "
-                          f"responding on 127.0.0.1:{port}")
-                    return
-        except (urllib.error.URLError, OSError):
-            pass
-        _time.sleep(0.5)
-    print(f"  [!!] claude-hooks-consultants: restarted but not responding "
-          f"within {timeout:.0f} s on 127.0.0.1:{port}")
+    # Best-effort health check. Default engine port is 38095 — same
+    # port _setup_consultants_engine binds when service_mode="always-on".
+    # The existing `_wait_for_consultants_health(port, timeout)` helper
+    # (defined later in the file alongside the consultants installer)
+    # polls /v1/health and returns bool. Reuse it rather than
+    # duplicating the loop; reads cleaner and avoids name collisions.
+    port = 38095
+    if _wait_for_consultants_health(port, timeout=15.0):
+        print(f"  claude-hooks-consultants: restarted + responding on "
+              f"127.0.0.1:{port}")
+    else:
+        print(f"  [!!] claude-hooks-consultants: restarted but not "
+              f"responding within 15 s on 127.0.0.1:{port}/v1/health")
 
 
 def _wait_for_daemon(*, timeout: float = 15.0) -> bool:
