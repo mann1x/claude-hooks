@@ -1,8 +1,18 @@
-"""Tests for the proxy orchestrator and the settings.json env-var helper.
+"""Tests for the settings.json env-var helper and the non-interactive
+fast-path of the proxy orchestrator.
 
-Covers ``install._setup_proxy_orchestrator`` (local vs remote-URL
-choice) and ``install._set_settings_env_vars`` (idempotent merge into
-the env block).
+The proxy dialog itself was redesigned in v1.6.1 (single
+"Use the API proxy?" question split into "Install locally?" +
+"Use the API proxy?" with state-aware labels). Full dialog
+coverage lives in ``tests/test_install_proxy_dialog.py``; the
+legacy ``[1/2]`` two-mode tests that used to live here have been
+removed because the shape they checked no longer exists.
+
+What remains here:
+
+- ``_set_settings_env_vars`` — pure helper, unchanged by v1.6.1.
+- ``_setup_proxy_orchestrator`` non-interactive skip — verifies the
+  installer never prompts when ``--non-interactive`` is set.
 """
 from __future__ import annotations
 
@@ -126,176 +136,9 @@ class TestOrchestratorSkip:
         # No header printed in non-interactive mode -- silent skip.
         assert "claude-hooks API proxy" not in capsys.readouterr().out
 
-    def test_user_says_no_when_currently_disabled(
-        self, settings_path, capsys,
-    ):
-        cfg = {}
-        with patch("builtins.input", side_effect=["n"]):
-            install._setup_proxy_orchestrator(
-                cfg, settings_path,
-                non_interactive=False, dry_run=False,
-            )
-        assert cfg["proxy"]["enabled"] is False
-        assert not settings_path.exists()
-
-    def test_user_says_no_preserves_existing_enabled_state(
-        self, settings_path,
-    ):
-        # If the user already had it on and answers "n" by accident,
-        # don't silently flip to off -- prefer preserving existing state.
-        cfg = {"proxy": {"enabled": True, "listen_port": 38080}}
-        with patch("builtins.input", side_effect=["n"]):
-            install._setup_proxy_orchestrator(
-                cfg, settings_path,
-                non_interactive=False, dry_run=False,
-            )
-        assert cfg["proxy"]["enabled"] is True
-
-    def test_empty_input_keeps_currently_disabled_off(
-        self, settings_path,
-    ):
-        # Empty input + currently disabled -> stays off (matches [y/N]).
-        cfg = {"proxy": {"enabled": False}}
-        with patch("builtins.input", side_effect=[""]):
-            install._setup_proxy_orchestrator(
-                cfg, settings_path,
-                non_interactive=False, dry_run=False,
-            )
-        assert cfg["proxy"]["enabled"] is False
-
-    def test_empty_input_keeps_currently_enabled_on(
-        self, settings_path, tmp_path,
-    ):
-        # Regression for solidpc 2026-05-06: when proxy is already
-        # enabled, the prompt now shows [Y/n] and an empty answer
-        # MUST keep proxy on (Step 2 path runs) — previously empty
-        # input silently flipped proxy.enabled to false.
-        cfg = {"proxy": {"enabled": True,
-                         "listen_host": "127.0.0.1",
-                         "listen_port": 38080}}
-        # Empty (treated as yes), then choose remote (2), then URL.
-        with patch("builtins.input",
-                   side_effect=["", "2", "http://existing:38080"]):
-            install._setup_proxy_orchestrator(
-                cfg, settings_path,
-                non_interactive=False, dry_run=False,
-            )
-        # Proxy reached the [1/2] branch — we know that because
-        # ANTHROPIC_BASE_URL got written to settings.json via the
-        # remote-proxy code path.
-        import json as _json
-        data = _json.loads(settings_path.read_text(encoding="utf-8"))
-        assert data["env"]["ANTHROPIC_BASE_URL"] == \
-            "http://existing:38080"
-
-
-class TestOrchestratorLocal:
-    def test_local_choice_enables_and_writes_base_url(
-        self, settings_path, capsys,
-    ):
-        cfg = {"proxy": {"listen_host": "127.0.0.1", "listen_port": 38080}}
-        # Inputs: yes, choice 1, yes (set base URL)
-        with patch("builtins.input", side_effect=["y", "1", "y"]):
-            install._setup_proxy_orchestrator(
-                cfg, settings_path,
-                non_interactive=False, dry_run=False,
-            )
-        assert cfg["proxy"]["enabled"] is True
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
-        assert data["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:38080"
-
-    def test_local_choice_skip_base_url(self, settings_path, capsys):
-        cfg = {"proxy": {"listen_port": 38090}}
-        with patch("builtins.input", side_effect=["y", "1", "n"]):
-            install._setup_proxy_orchestrator(
-                cfg, settings_path,
-                non_interactive=False, dry_run=False,
-            )
-        assert cfg["proxy"]["enabled"] is True
-        # No settings.json written.
-        assert not settings_path.exists()
-        assert "Set it manually later" in capsys.readouterr().out
-
-    def test_local_choice_translates_zero_host_to_loopback(
-        self, settings_path,
-    ):
-        cfg = {"proxy": {"listen_host": "0.0.0.0", "listen_port": 38080}}
-        with patch("builtins.input", side_effect=["y", "1", "y"]):
-            install._setup_proxy_orchestrator(
-                cfg, settings_path,
-                non_interactive=False, dry_run=False,
-            )
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
-        # Client should always use loopback when listen_host is 0.0.0.0,
-        # not 0.0.0.0 itself.
-        assert data["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:38080"
-
-
-class TestOrchestratorRemote:
-    def test_remote_choice_writes_base_url_and_disables_local(
-        self, settings_path, capsys,
-    ):
-        cfg = {"proxy": {"enabled": True}}  # was on, switching to remote
-        with patch(
-            "builtins.input",
-            side_effect=["y", "2", "http://192.168.178.2:38080"],
-        ):
-            install._setup_proxy_orchestrator(
-                cfg, settings_path,
-                non_interactive=False, dry_run=False,
-            )
-        # Local install must NOT run.
-        assert cfg["proxy"]["enabled"] is False
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
-        assert data["env"]["ANTHROPIC_BASE_URL"] == "http://192.168.178.2:38080"
-        assert "Local proxy NOT installed" in capsys.readouterr().out
-
-    def test_remote_choice_strips_trailing_slash(self, settings_path):
-        cfg = {}
-        with patch(
-            "builtins.input",
-            side_effect=["y", "2", "http://lan:38080/"],
-        ):
-            install._setup_proxy_orchestrator(
-                cfg, settings_path,
-                non_interactive=False, dry_run=False,
-            )
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
-        assert data["env"]["ANTHROPIC_BASE_URL"] == "http://lan:38080"
-
-    def test_remote_choice_rejects_bare_hostname(self, settings_path):
-        cfg = {}
-        # First URL bad, second URL good.
-        with patch(
-            "builtins.input",
-            side_effect=["y", "2", "lan:38080", "http://lan:38080"],
-        ):
-            install._setup_proxy_orchestrator(
-                cfg, settings_path,
-                non_interactive=False, dry_run=False,
-            )
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
-        assert data["env"]["ANTHROPIC_BASE_URL"] == "http://lan:38080"
-
-
-class TestOrchestratorBadInputs:
-    def test_invalid_choice_re_prompts(self, settings_path):
-        cfg = {}
-        # Inputs: yes, "3" (bad), "1", "n" (skip base url)
-        with patch("builtins.input", side_effect=["y", "3", "1", "n"]):
-            install._setup_proxy_orchestrator(
-                cfg, settings_path,
-                non_interactive=False, dry_run=False,
-            )
-        assert cfg["proxy"]["enabled"] is True
-
-    def test_default_choice_is_local(self, settings_path):
-        # Empty answer to the choice prompt should default to "1"
-        # (local install).
-        cfg = {}
-        with patch("builtins.input", side_effect=["y", "", "n"]):
-            install._setup_proxy_orchestrator(
-                cfg, settings_path,
-                non_interactive=False, dry_run=False,
-            )
-        assert cfg["proxy"]["enabled"] is True
+    # All other TestOrchestrator* classes that used to live here
+    # exercised the v1.x ``[1/2]`` two-mode prompt. v1.6.1 replaced
+    # that shape entirely (see ``tests/test_install_proxy_dialog.py``
+    # for the new coverage). The non-interactive test above is the
+    # only orchestrator-level assertion that still applies — the
+    # dialog itself is exercised in the v1.6.1 suite.
