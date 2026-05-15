@@ -318,6 +318,335 @@ class SqliteVecProvider(Provider):
             out.append(Memory(text=e["content"], metadata=meta))
         return out
 
+    # ------------------------------------------------------------------ #
+    # Knowledge-graph surface (v1.7.0)
+    # ------------------------------------------------------------------ #
+    # Port of pgvector.py's kg_* bodies translated to SQLite idioms:
+    #   * executemany over individual cursors (sqlite3's cursor API is
+    #     flatter than psycopg's — we use connection.execute directly)
+    #   * ON CONFLICT … DO NOTHING (SQLite ≥3.24 supports the same
+    #     keyword form as Postgres; older "INSERT OR IGNORE" is the
+    #     fallback but we target ≥3.35 anyway for RETURNING)
+    #   * name → id resolution via ``WHERE name IN (?, ?, ...)`` instead
+    #     of Postgres's ``WHERE name = ANY(%s)``
+    #   * FTS5 trigram tokenizer (or LIKE fallback if the host's stdlib
+    #     SQLite lacks trigram, probed once at migration time) for the
+    #     name-fuzzy pass
+
+    def kg_create_entities(self, entities: list[dict]) -> int:
+        """Bulk-create entities. Each dict: ``{name, entity_type, metadata?}``.
+        Idempotent on ``name`` — duplicates are a no-op via
+        ``ON CONFLICT(name) DO NOTHING``. Returns rows inserted."""
+        rows = []
+        for e in entities:
+            name = (e.get("name") or "").strip()
+            etype = (e.get("entity_type") or e.get("type") or "").strip()
+            if not name or not etype:
+                continue
+            rows.append((name, etype, json.dumps(e.get("metadata") or {})))
+        if not rows:
+            return 0
+        self._ensure_ready()
+        try:
+            with self._conn:  # type: ignore[union-attr]
+                before = self._conn.execute(  # type: ignore[union-attr]
+                    "SELECT COUNT(*) FROM kg_entities"
+                ).fetchone()[0]
+                self._conn.executemany(  # type: ignore[union-attr]
+                    "INSERT INTO kg_entities (name, entity_type, metadata) "
+                    "VALUES (?, ?, ?) ON CONFLICT(name) DO NOTHING",
+                    rows,
+                )
+                after = self._conn.execute(  # type: ignore[union-attr]
+                    "SELECT COUNT(*) FROM kg_entities"
+                ).fetchone()[0]
+                return after - before
+        except sqlite3.Error as e:
+            log.warning("sqlite_vec kg_create_entities failed: %s", e)
+            raise
+
+    def kg_add_observations(self, items: list[dict]) -> int:
+        """Add observations. Each item: ``{entity_name, content}``.
+        Idempotent on ``(entity_id, content_hash)``. Skips items
+        whose entity name is unknown — caller should
+        :meth:`kg_create_entities` first. Returns rows inserted."""
+        pairs = [(i.get("entity_name", "").strip(), (i.get("content") or "").strip())
+                 for i in items if isinstance(i, dict)]
+        pairs = [(n, c) for (n, c) in pairs if n and c]
+        if not pairs:
+            return 0
+        self._ensure_ready()
+        try:
+            vectors = self._embedder.embed_batch([c for _, c in pairs])  # type: ignore[union-attr]
+        except EmbedderError as e:
+            raise RuntimeError(f"sqlite_vec kg_add_observations embed failed: {e}")
+        names = list({n for n, _ in pairs})
+        placeholders = ",".join("?" * len(names))
+        try:
+            with self._conn:  # type: ignore[union-attr]
+                cur = self._conn.execute(  # type: ignore[union-attr]
+                    f"SELECT name, id FROM kg_entities WHERE name IN ({placeholders})",
+                    names,
+                )
+                name_to_id = {row[0]: row[1] for row in cur.fetchall()}
+                inserted = 0
+                for (n, c), v in zip(pairs, vectors):
+                    eid = name_to_id.get(n)
+                    if eid is None:
+                        log.debug("kg_add_observations: entity %r missing", n)
+                        continue
+                    ch = content_hash(c)
+                    res = self._conn.execute(  # type: ignore[union-attr]
+                        "INSERT INTO kg_observations (entity_id, content, content_hash) "
+                        "VALUES (?, ?, ?) "
+                        "ON CONFLICT(entity_id, content_hash) DO NOTHING "
+                        "RETURNING id",
+                        (eid, c, ch),
+                    )
+                    row = res.fetchone()
+                    if row is None:
+                        continue  # duplicate
+                    obs_id = row[0]
+                    # vec0 is not FK-linked; populate by rowid on each insert.
+                    self._conn.execute(  # type: ignore[union-attr]
+                        "INSERT INTO kg_observations_vec (rowid, embedding) "
+                        "VALUES (?, ?)",
+                        (obs_id, _pack_vec(v)),
+                    )
+                    inserted += 1
+                return inserted
+        except sqlite3.Error as e:
+            log.warning("sqlite_vec kg_add_observations failed: %s", e)
+            raise
+
+    def kg_create_relations(self, relations: list[dict]) -> int:
+        """Create relations. Each dict:
+        ``{from, to, relation_type, metadata?}``.
+        Idempotent on ``(from_entity_id, to_entity_id, relation_type)``."""
+        rows = []
+        for r in relations:
+            f = (r.get("from") or r.get("from_name") or "").strip()
+            t = (r.get("to") or r.get("to_name") or "").strip()
+            rt = (r.get("relation_type") or r.get("type") or "").strip()
+            if not f or not t or not rt:
+                continue
+            rows.append((f, t, rt, json.dumps(r.get("metadata") or {})))
+        if not rows:
+            return 0
+        self._ensure_ready()
+        inserted = 0
+        try:
+            with self._conn:  # type: ignore[union-attr]
+                for f, t, rt, meta in rows:
+                    # SQLite has no SELECT … INTO INSERT short-form; the
+                    # cleanest equivalent is an INSERT … SELECT with the
+                    # name-resolution join inline. ON CONFLICT keeps it
+                    # idempotent on the unique triple.
+                    res = self._conn.execute(  # type: ignore[union-attr]
+                        "INSERT INTO kg_relations "
+                        "  (from_entity_id, to_entity_id, relation_type, metadata) "
+                        "SELECT a.id, b.id, ?, ? FROM kg_entities a, kg_entities b "
+                        "  WHERE a.name = ? AND b.name = ? "
+                        "ON CONFLICT(from_entity_id, to_entity_id, relation_type) "
+                        "  DO NOTHING "
+                        "RETURNING id",
+                        (rt, meta, f, t),
+                    )
+                    if res.fetchone() is not None:
+                        inserted += 1
+            return inserted
+        except sqlite3.Error as e:
+            log.warning("sqlite_vec kg_create_relations failed: %s", e)
+            raise
+
+    def kg_search_nodes(self, query: str, k: int = 5) -> list[dict]:
+        """Search KG entities by name (FTS5 trigram fuzzy) +
+        observation content (RRF hybrid). Returns
+        ``[{name, entity_type, metadata, observations: [...],
+        _score, _match}]``.
+
+        Three passes — mirror of pgvector's kg_search_nodes:
+          1. entity-name fuzzy via FTS5 trigram tokenizer (or LIKE
+             fallback if the host's stdlib SQLite lacks trigram)
+          2. observation hybrid → resolve content to entity
+          3. observation-fill: for entities found by name only, fetch
+             their 3 most recent observations so the caller gets a
+             useful payload either way
+        """
+        if not query.strip():
+            return []
+        self._ensure_ready()
+        # cache the trigram-availability flag once per provider
+        # instance — read from the schema-metadata row written by
+        # migrate_schema().
+        if not hasattr(self, "_name_fts_tokenizer"):
+            from claude_hooks.providers.sqlite_vec_schema import read_schema_metadata
+            try:
+                meta = read_schema_metadata(self._conn)  # type: ignore[arg-type]
+            except Exception:
+                meta = {}
+            self._name_fts_tokenizer = meta.get("name_fts", "trigram")
+
+        out: dict[str, dict] = {}
+
+        # Pass 1: entity-name fuzzy.
+        try:
+            if self._name_fts_tokenizer == "trigram":
+                cur = self._conn.execute(  # type: ignore[union-attr]
+                    "SELECT e.id, e.name, e.entity_type, e.metadata "
+                    "FROM kg_entities e "
+                    "WHERE e.id IN ("
+                    "  SELECT rowid FROM kg_entities_name_fts "
+                    "  WHERE name MATCH ? LIMIT ?"
+                    ")",
+                    (_fts5_query(query), k * 2),
+                )
+            else:
+                cur = self._conn.execute(  # type: ignore[union-attr]
+                    "SELECT id, name, entity_type, metadata FROM kg_entities "
+                    "WHERE name LIKE '%' || ? || '%' "
+                    "ORDER BY length(name) LIMIT ?",
+                    (query, k * 2),
+                )
+            for eid, name, etype, meta_json in cur.fetchall():
+                try:
+                    meta = json.loads(meta_json) if meta_json else {}
+                except json.JSONDecodeError:
+                    meta = {}
+                out[name] = {
+                    "id": eid, "name": name, "entity_type": etype,
+                    "metadata": meta,
+                    "observations": [],
+                    "_score": 1.0,  # name match gets a base score
+                    "_match": "name",
+                }
+        except sqlite3.Error as e:
+            log.debug("sqlite_vec kg_search name pass failed: %s", e)
+
+        # Pass 2: observation hybrid → entity.
+        obs_hits = self._hybrid_search_observations(query, k * 2)
+        if obs_hits:
+            contents = [c for c, _ in obs_hits]
+            placeholders = ",".join("?" * len(contents))
+            try:
+                cur = self._conn.execute(  # type: ignore[union-attr]
+                    f"SELECT e.id, e.name, e.entity_type, e.metadata, o.content "
+                    f"FROM kg_observations o "
+                    f"JOIN kg_entities e ON e.id = o.entity_id "
+                    f"WHERE o.content IN ({placeholders})",
+                    contents,
+                )
+                for eid, name, etype, meta_json, content in cur.fetchall():
+                    try:
+                        meta = json.loads(meta_json) if meta_json else {}
+                    except json.JSONDecodeError:
+                        meta = {}
+                    node = out.setdefault(name, {
+                        "id": eid, "name": name, "entity_type": etype,
+                        "metadata": meta,
+                        "observations": [],
+                        "_score": 0.0,
+                        "_match": "observation",
+                    })
+                    if content not in node["observations"]:
+                        node["observations"].append(content)
+                    node["_score"] += 0.5  # same constant as pgvector
+            except sqlite3.Error as e:
+                log.debug("sqlite_vec kg_search obs pass failed: %s", e)
+
+        # Pass 3: observation-fill for name-matched entities.
+        if out:
+            need_obs = [n["id"] for n in out.values() if not n["observations"]][:k]
+            if need_obs:
+                placeholders = ",".join("?" * len(need_obs))
+                try:
+                    cur = self._conn.execute(  # type: ignore[union-attr]
+                        f"SELECT entity_id, content FROM ("
+                        f"  SELECT entity_id, content, "
+                        f"    ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY id DESC) AS rn "
+                        f"  FROM kg_observations "
+                        f"  WHERE entity_id IN ({placeholders})"
+                        f") WHERE rn <= 3",
+                        need_obs,
+                    )
+                    by_id: dict[int, list[str]] = {}
+                    for eid, content in cur.fetchall():
+                        by_id.setdefault(eid, []).append(content)
+                    for n in out.values():
+                        if not n["observations"]:
+                            n["observations"] = by_id.get(n["id"], [])
+                except sqlite3.Error as e:
+                    log.debug("sqlite_vec kg_search obs-fill failed: %s", e)
+
+        ranked = sorted(out.values(), key=lambda n: n["_score"], reverse=True)[:k]
+        for n in ranked:
+            n.pop("id", None)  # internal — don't leak to callers
+        return ranked
+
+    def _hybrid_search_observations(self, query: str, k: int) -> list[tuple[str, float]]:
+        """Inner RRF search over ``kg_observations``. Returns
+        ``[(content, score)]`` — caller resolves content→entity."""
+        if not query.strip():
+            return []
+        try:
+            qvec = self._embedder.embed(query)  # type: ignore[union-attr]
+        except EmbedderError as e:
+            log.debug("kg obs embed failed: %s", e)
+            qvec = None
+        qblob = _pack_vec(qvec) if qvec is not None else None
+        fused: dict[bytes, dict] = {}
+
+        if qblob is not None:
+            try:
+                vec_rows = self._conn.execute(  # type: ignore[union-attr]
+                    "SELECT o.content, o.content_hash, v.distance "
+                    "FROM kg_observations_vec v "
+                    "JOIN kg_observations o ON o.id = v.rowid "
+                    "WHERE v.embedding MATCH ? AND k = ? "
+                    "ORDER BY v.distance",
+                    (qblob, max(k * 4, 20)),
+                ).fetchall()
+            except sqlite3.Error as e:
+                log.debug("kg obs vec pass failed: %s", e)
+                vec_rows = []
+            for rank, (content, ch, dist) in enumerate(vec_rows, start=1):
+                if ch is None:
+                    continue
+                fused.setdefault(bytes(ch), {
+                    "content": content, "vec_rank": None, "kw_rank": None,
+                })["vec_rank"] = rank
+
+        try:
+            kw_rows = self._conn.execute(  # type: ignore[union-attr]
+                "SELECT o.content, o.content_hash "
+                "FROM kg_observations_fts JOIN kg_observations o "
+                "  ON o.id = kg_observations_fts.rowid "
+                "WHERE kg_observations_fts MATCH ? "
+                "ORDER BY bm25(kg_observations_fts) LIMIT ?",
+                (_fts5_query(query), max(k * 4, 20)),
+            ).fetchall()
+        except sqlite3.Error as e:
+            log.debug("kg obs BM25 pass failed: %s", e)
+            kw_rows = []
+        for rank, (content, ch) in enumerate(kw_rows, start=1):
+            if ch is None:
+                continue
+            fused.setdefault(bytes(ch), {
+                "content": content, "vec_rank": None, "kw_rank": None,
+            })["kw_rank"] = rank
+
+        rrf_k = 60
+        out: list[tuple[str, float]] = []
+        for entry in fused.values():
+            s = 0.0
+            if entry["vec_rank"] is not None:
+                s += 0.5 / (rrf_k + entry["vec_rank"])
+            if entry["kw_rank"] is not None:
+                s += 0.5 / (rrf_k + entry["kw_rank"])
+            out.append((entry["content"], s))
+        out.sort(key=lambda t: t[1], reverse=True)
+        return out[:k]
+
     def count(self) -> int:
         """Return the number of stored memories."""
         if self._conn is None:

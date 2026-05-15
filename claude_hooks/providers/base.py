@@ -150,6 +150,40 @@ class Provider(ABC):
         parallel_map(lambda it: self.store(it[0], metadata=it[1]), items)
 
     # ------------------------------------------------------------------ #
+    # Knowledge-graph surface (optional, pgvector + sqlite_vec only)
+    # ------------------------------------------------------------------ #
+    # Providers that don't ship KG support inherit these defaults and
+    # surface a clean ``NotImplementedError`` — qdrant + memory_kg keep
+    # their existing recall/store contract unchanged. pgvector and
+    # sqlite_vec override all four.
+
+    def kg_create_entities(self, entities: list[dict]) -> int:
+        raise NotImplementedError(
+            f"{self.name} does not implement kg_create_entities"
+        )
+
+    def kg_add_observations(self, items: list[dict]) -> int:
+        raise NotImplementedError(
+            f"{self.name} does not implement kg_add_observations"
+        )
+
+    def kg_create_relations(self, relations: list[dict]) -> int:
+        raise NotImplementedError(
+            f"{self.name} does not implement kg_create_relations"
+        )
+
+    def kg_search_nodes(self, query: str, k: int = 5) -> list[dict]:
+        raise NotImplementedError(
+            f"{self.name} does not implement kg_search_nodes"
+        )
+
+    def recall_hybrid(self, query: str, k: int = 5,
+                       alpha: float = 0.5, rrf_k: int = 60) -> list[Memory]:
+        # Default falls back to plain recall (no BM25 signal). pgvector
+        # and sqlite_vec override with a real RRF fusion.
+        return self.recall(query, k=k)
+
+    # ------------------------------------------------------------------ #
     # Helpers shared by all providers
     # ------------------------------------------------------------------ #
     def _client(self, timeout: float = 5.0):
