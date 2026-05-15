@@ -5737,7 +5737,7 @@ def main() -> int:
 
     # Detect companion tools and install skills.
     print("\n==> Companion tools")
-    installed_tools = _detect_companion_tools()
+    installed_tools = _detect_companion_tools(cfg)
 
     # /consultants engine — opt-in install of the dedicated conda env
     # + service unit. Mutates installed_tools so the consultants
@@ -6165,11 +6165,30 @@ LEGACY_SKILL_DIRS: tuple[str, ...] = (
 )
 
 
-def _detect_companion_tools() -> dict[str, bool]:
-    """Check which companion tools are installed. Returns {name: bool}."""
+def _detect_companion_tools(cfg: Optional[dict] = None) -> dict[str, bool]:
+    """Check which companion tools are installed. Returns {name: bool}.
+
+    Special-case: the ``episodic-memory`` Node binary is only needed
+    on hosts that run the server. On a CLIENT-mode host (cfg.episodic
+    .mode == "client") the host POSTs to a remote server and never
+    invokes the local binary; report ``n/a (CLIENT)`` instead of
+    ``MISSING`` so the warning doesn't keep nagging users to install
+    a tool they don't need. Same shape as the v1.6.1 proxy-detection
+    fix — don't conflate "is this binary on disk?" with "is this
+    host supposed to have it?".
+    """
+    ep_mode = ((cfg or {}).get("episodic") or {}).get("mode", "off")
     result: dict[str, bool] = {}
     for bin_name, npm_pkg, importance, description in COMPANION_TOOLS:
         found = shutil.which(bin_name) is not None
+        if bin_name == "episodic-memory" and not found and ep_mode == "client":
+            print(f"  [ok] {bin_name:24} {'n/a (CLIENT)':12} "
+                  f"[{importance}] server-only; this host posts to a remote")
+            # Record as found so the "can install via npm" hint below
+            # doesn't bait the user. The actual install pathway runs
+            # on the server host.
+            result[bin_name] = True
+            continue
         status = "installed" if found else "MISSING"
         marker = "  [ok]" if found else "  [!!]"
         print(f"{marker} {bin_name:24} {status:12} [{importance}] {description}")
