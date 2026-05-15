@@ -12,11 +12,9 @@ from typing import Any, Optional
 
 import pytest
 
+from claude_hooks.mcp_format import format_memories as _format_memories
 from claude_hooks.providers.base import Memory
-from claude_hooks.sqlite_vec_mcp.server import (
-    McpServer,
-    _format_memories,
-)
+from claude_hooks.sqlite_vec_mcp.server import McpServer
 
 
 class FakeSqliteVecProvider:
@@ -91,26 +89,26 @@ class TestHandshake:
 
 
 # --------------------------------------------------------------------- #
-# tools/list — 3 tools, no kg-* and no hybrid
+# tools/list — full v1.7+ catalog (8 tools, full pgvector-mcp parity)
 # --------------------------------------------------------------------- #
 
 
 class TestToolsList:
-    def test_returns_exactly_three_tools(self, server):
+    def test_returns_full_catalog_shape(self, server):
         resp = server.handle(_request("tools/list"))
         tools = resp["result"]["tools"]
         names = {t["name"] for t in tools}
-        assert names == {"sqlite-vec-find", "sqlite-vec-store", "sqlite-vec-count"}
-
-    def test_no_kg_tools_present(self, server):
-        # Guard rail — sqlite_vec has no KG layer; tool catalog must
-        # NOT advertise the pgvector kg-* tools.
-        resp = server.handle(_request("tools/list"))
-        names = {t["name"] for t in resp["result"]["tools"]}
-        for forbidden in ("sqlite-vec-kg-search", "sqlite-vec-kg-create",
-                          "sqlite-vec-kg-observe", "sqlite-vec-kg-relate",
-                          "sqlite-vec-find-hybrid"):
-            assert forbidden not in names
+        # Full parity with pgvector-mcp's eight tools.
+        assert names == {
+            "sqlite-vec-find",
+            "sqlite-vec-find-hybrid",
+            "sqlite-vec-store",
+            "sqlite-vec-count",
+            "sqlite-vec-kg-search",
+            "sqlite-vec-kg-create",
+            "sqlite-vec-kg-observe",
+            "sqlite-vec-kg-relate",
+        }
 
     def test_each_tool_has_required_fields(self, server):
         tools = server.handle(_request("tools/list"))["result"]["tools"]
