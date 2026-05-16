@@ -771,9 +771,13 @@ def make_dry_run_loop_runner(*, file_path: str, content: str,
     def _runner(payload, cwd, *, config, tool_specs, chat_fn,
                 tool_executor, on_iter=None, on_tool=None,
                 preseed_builder=None):
-        # Simulate one write_file call.
+        # Simulate one write_file call. Mirrors the real
+        # ``run_loop`` call shape (3 positional args:
+        # name, args_json_str, cwd) so signature drift between the
+        # dry-run path and the live path is caught at smoke time
+        # rather than after a full cloud run.
         args = json.dumps({"path": file_path, "content": content})
-        tool_output = tool_executor("write_file", args)
+        tool_output = tool_executor("write_file", args, cwd)
         if on_tool is not None:
             on_tool("write_file", args, tool_output, 5, None)
         if on_iter is not None:

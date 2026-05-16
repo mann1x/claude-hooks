@@ -343,6 +343,46 @@ class TestTrialRoundTrip(unittest.TestCase):
 
 
 # ============================================================== #
+# Dry-run loop runner signature contract
+# ============================================================== #
+
+class TestDryRunRunnerSignature(unittest.TestCase):
+    """Pin the contract between the dry-run stub and the real
+    ``run_loop`` it stands in for. The 2026-05-16 smoke run failed
+    every coder trial because the live executor was called with 3
+    positional args (``name, args, cwd``) but the sandboxed
+    executor only accepted 2 — and the dry-run stub also only
+    passed 2, so the bug was invisible until the live run. These
+    tests pin the 3-positional shape on both sides so the dry-run
+    path can no longer mask a live-path bug of the same shape.
+    """
+
+    def test_runner_passes_three_positional_to_executor(self):
+        captured = []
+
+        def fake_executor(*args, **kw):
+            captured.append((args, dict(kw)))
+            return "ok"
+
+        runner = make_dry_run_loop_runner(
+            file_path="x.py", content="print('hi')",
+        )
+        runner(
+            payload={"messages": []},
+            cwd="/some/cwd",
+            config={}, tool_specs=[], chat_fn=lambda *_a, **_k: None,
+            tool_executor=fake_executor,
+        )
+        self.assertEqual(len(captured), 1,
+                         "expected exactly one write_file call")
+        args, _kw = captured[0]
+        self.assertEqual(len(args), 3,
+                         f"expected 3 positional args, got {args!r}")
+        self.assertEqual(args[0], "write_file")
+        self.assertEqual(args[2], "/some/cwd")
+
+
+# ============================================================== #
 # End-to-end dry-run smoke
 # ============================================================== #
 

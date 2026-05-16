@@ -360,6 +360,54 @@ class TestSandboxToolExecutor(unittest.TestCase):
             self.assertIn("error", out)
             self.assertIn("per-file cap", out)
 
+    def test_signature_matches_run_loop_three_positional(self):
+        # Regression: ``run_loop`` in
+        # ``claude_hooks/agent_loop/runner.py`` calls the executor
+        # as ``tool_executor(name, args_str, cwd)`` — 3 positional
+        # args. The 2026-05-16 smoke run failed every coder trial
+        # because the executor only accepted ``(name, args)``. Pin
+        # the 3-positional contract so this can't recur.
+        import inspect
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            sb = CoderSandbox(
+                root=Path(tmp), max_file_bytes=1024,
+                max_total_bytes=1024, max_files=4,
+            )
+            executor = make_sandbox_tool_executor(sb)
+            sig = inspect.signature(executor)
+            # First three positional names should be name/args/cwd
+            # (kw names are advisory but stable).
+            param_names = list(sig.parameters.keys())
+            self.assertGreaterEqual(len(param_names), 3,
+                f"executor must accept >= 3 positional args, "
+                f"got {param_names!r}")
+            # Exercise the 3-positional call shape end-to-end.
+            out = executor("write_file",
+                           '{"path": "x.txt", "content": "hi"}',
+                           "/some/cwd")
+            self.assertIn("wrote x.txt", out)
+            self.assertEqual(len(sb.writes), 1)
+
+    def test_signature_accepts_runner_kwargs(self):
+        # The real ``run_loop`` doesn't currently pass extra kwargs
+        # but the executor should tolerate them via ``**kw`` to
+        # remain forward-compatible (Caliber's executor evolves the
+        # passed metadata bag over time).
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            sb = CoderSandbox(
+                root=Path(tmp), max_file_bytes=1024,
+                max_total_bytes=1024, max_files=4,
+            )
+            executor = make_sandbox_tool_executor(sb)
+            out = executor("write_file",
+                           '{"path": "x.txt", "content": "hi"}',
+                           "/some/cwd",
+                           call_id="abc",
+                           role="coder")
+            self.assertIn("wrote x.txt", out)
+
 
 # ============================================================== #
 # build_coder_messages

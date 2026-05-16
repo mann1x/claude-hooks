@@ -367,14 +367,22 @@ def make_coder_sandbox(*, cwd: str, sid: str,
 def make_sandbox_tool_executor(sandbox: CoderSandbox):
     """Return an executor callable that the agent_loop runner uses
     to dispatch tool calls. Honors the same shape as
-    ``caliber_proxy.tools.make_executor`` — a ``(name, args, **kw)``
-    callable that returns the tool's string output.
+    ``caliber_proxy.tools.make_executor``:
+
+        executor(name: str, args_json_str: str, cwd: str, **kw) -> str
+
+    ``cwd`` is the agent loop's working directory — irrelevant to
+    the coder sandbox because the per-lane sandbox root was baked
+    in at ``make_coder_sandbox`` time. The third positional is
+    accepted (and ignored) so the signature matches
+    ``run_loop`` (claude_hooks/agent_loop/runner.py:147 calls
+    ``tool_executor(name, args_str, cwd)``).
 
     Only the ``write_file`` tool is accepted; any other tool name
     returns an error string so the model self-corrects on the next
     iteration.
     """
-    def _exec(name: str, args: str, **kw) -> str:
+    def _exec(name: str, args: str, cwd: str = "", **kw) -> str:
         if name != "write_file":
             return (
                 f"error: tool {name!r} not available to the coder "
