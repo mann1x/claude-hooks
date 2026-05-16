@@ -44,6 +44,43 @@ from consultants.engine.storage import RoleTurn
 log = logging.getLogger("consultants.engine.council")
 
 
+# ---------- v2 event emission (M4) -------------------------------- #
+# ``events.emit`` is a defensive no-op outside a LangGraph runnable
+# context, so sprinkling these calls in node bodies is safe for
+# plain-Python unit tests. When the node runs through a compiled
+# graph, the events surface on ``astream_events``' custom channel
+# and the SSE bridge demuxes them to the wire.
+
+def _emit_started(role: str, *,
+                  round: int = 1,
+                  lane_idx: Optional[int] = None,
+                  model: Optional[str] = None) -> None:
+    """Emit a :class:`NodeStarted` event. Never raises."""
+    try:
+        from consultants.engine.events import NodeStarted, emit
+        emit(NodeStarted(role=role, round=round,
+                          lane_idx=lane_idx, model=model))
+    except Exception:  # pragma: no cover
+        log.exception("emit NodeStarted raised; ignored")
+
+
+def _emit_finished(role: str, *,
+                   round: int = 1,
+                   lane_idx: Optional[int] = None,
+                   duration_ms: int = 0,
+                   ok: bool = True,
+                   error: Optional[str] = None) -> None:
+    """Emit a :class:`NodeFinished` event. Never raises."""
+    try:
+        from consultants.engine.events import NodeFinished, emit
+        emit(NodeFinished(role=role, round=round,
+                           lane_idx=lane_idx,
+                           duration_ms=duration_ms,
+                           ok=ok, error=error))
+    except Exception:  # pragma: no cover
+        log.exception("emit NodeFinished raised; ignored")
+
+
 # ----------------------- effort -> budget ------------------------- #
 # Each effort tier maps to (researcher_rounds_max, critic_reroutes_max,
 # critic_enabled_when_optional). Critic enabledness here is the budget
@@ -676,6 +713,7 @@ def _compose_degraded_answer(state: dict, *, error: str) -> str:
 def planner_node(state: dict, *, chat_client, model: str,
                  think: Any = True, recorder=None) -> dict:
     t0 = time.monotonic()
+    _emit_started("planner", round=1, model=model)
     if recorder is not None:
         try:
             recorder.record_node(role="planner", kind="node_enter")
@@ -689,6 +727,11 @@ def planner_node(state: dict, *, chat_client, model: str,
         )
     except Exception as e:
         log.exception("planner_node failed: %s", e)
+        _emit_finished(
+            "planner", round=1,
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            ok=False, error=f"{type(e).__name__}: {e}",
+        )
         # Tombstone return: keep the graph progressing with a
         # visible failure marker. ``plan`` is non-additive so the
         # err_text replaces the empty initial value, which the
@@ -722,6 +765,8 @@ def planner_node(state: dict, *, chat_client, model: str,
             )
         except Exception:  # pragma: no cover
             log.exception("recorder.record_node raised; ignored")
+    _emit_finished("planner", round=1,
+                    duration_ms=int(dt * 1000), ok=True)
     # Delta-only return — additive reducers in CouncilState merge
     # ``turns``, ``total_*_tokens``, ``research_rounds_used`` across
     # parallel fan-out lanes.
@@ -774,6 +819,8 @@ def researcher_node(state: dict, *,
     model_override = state.get("model_override")
     if isinstance(model_override, str) and model_override.strip():
         model = model_override.strip()
+    _emit_started("researcher", round=this_round,
+                   lane_idx=lane_idx, model=model)
     if recorder is not None:
         try:
             recorder.record_node(
@@ -949,6 +996,11 @@ def researcher_node(state: dict, *,
         final = loop_runner(payload, cwd, **loop_kwargs)
     except Exception as e:
         log.exception("researcher_node failed: %s", e)
+        _emit_finished(
+            "researcher", round=this_round, lane_idx=lane_idx,
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            ok=False, error=f"{type(e).__name__}: {e}",
+        )
         # Tombstone return so the additive reducers record the
         # failure visibly. Without this, a crashed lane silently
         # contributes nothing — the synthesizer never sees the gap
@@ -1072,6 +1124,8 @@ def researcher_node(state: dict, *,
             )
         except Exception:  # pragma: no cover
             log.exception("recorder.record_node raised; ignored")
+    _emit_finished("researcher", round=this_round, lane_idx=lane_idx,
+                    duration_ms=int(dt * 1000), ok=True)
     return {
         "research": [text],
         "research_rounds_used": 1,
@@ -1092,6 +1146,8 @@ def critic_node(state: dict, *, chat_client, model: str,
     if isinstance(model_override, str) and model_override.strip():
         model = model_override.strip()
     lane_idx = state.get("lane_idx")
+    _emit_started("critic", round=max(rounds_used_pre, 1),
+                   lane_idx=lane_idx, model=model)
     if recorder is not None:
         try:
             recorder.record_node(
@@ -1113,6 +1169,11 @@ def critic_node(state: dict, *, chat_client, model: str,
         )
     except Exception as e:
         log.exception("critic_node failed: %s", e)
+        _emit_finished(
+            "critic", round=max(rounds_used_pre, 1), lane_idx=lane_idx,
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            ok=False, error=f"{type(e).__name__}: {e}",
+        )
         # On critic failure default to "ready" so the council still
         # produces an answer rather than stalling forever. Tombstone
         # the critique so the synthesizer sees the failure note and
@@ -1164,6 +1225,9 @@ def critic_node(state: dict, *, chat_client, model: str,
     #    blowing the re-route cap C× faster than intended. Meta-
     #    critic owns the single increment based on ITS final
     #    decision.
+    _emit_finished("critic", round=max(rounds_used, 1),
+                    lane_idx=lane_idx,
+                    duration_ms=int(dt * 1000), ok=True)
     if lane_idx is not None:
         return {
             "turns": [turn],
@@ -1200,6 +1264,7 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
     rounds_used = int(state.get("research_rounds_used") or 0)
     this_round = max(rounds_used, 1)
 
+    _emit_started("meta_critic", round=this_round, model=model)
     if recorder is not None:
         try:
             recorder.record_node(
@@ -1234,6 +1299,11 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
         )
     except Exception as e:
         log.exception("meta_critic_node failed: %s", e)
+        _emit_finished(
+            "meta_critic", round=this_round,
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            ok=False, error=f"{type(e).__name__}: {e}",
+        )
         # Failure mode: keep the council moving by defaulting to
         # ready and surfacing the error in critique. The C critics'
         # raw turns are still on the transcript so an audit can see
@@ -1274,6 +1344,8 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
             )
         except Exception:  # pragma: no cover
             log.exception("recorder.record_node raised; ignored")
+    _emit_finished("meta_critic", round=this_round,
+                    duration_ms=int(dt * 1000), ok=True)
     return {
         # Synthesizer reads ``critique`` + ``critic_decision``. In
         # multi-critic mode the C parallel critics deliberately don't
@@ -1293,6 +1365,7 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                      recorder=None,
                      prior_messages: Optional[list[dict]] = None,
                      fallback_models: Optional[list[str]] = None) -> dict:
+    _emit_started("synthesizer", round=1, model=model)
     if recorder is not None:
         try:
             recorder.record_node(role="synthesizer", kind="node_enter")
@@ -1385,6 +1458,13 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                 model, list(fallback_models or []), e,
             )
     if text is None:
+        _emit_finished(
+            "synthesizer", round=1,
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            ok=False,
+            error=f"{type(last_exc).__name__}: {last_exc}" if last_exc
+                  else "synthesizer failed",
+        )
         # Synthesizer failure is terminal — propagate as an error
         # but try to surface the researcher + critic work that DID
         # complete as a "degraded answer" so the user gets the raw
@@ -1414,6 +1494,8 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
             )
         except Exception:  # pragma: no cover
             log.exception("recorder.record_node raised; ignored")
+    _emit_finished("synthesizer", round=1,
+                    duration_ms=int(dt * 1000), ok=True)
     return {
         "final_answer": text,
         "turns": [turn],

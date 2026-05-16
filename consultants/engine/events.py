@@ -213,6 +213,19 @@ class Resumed(CouncilEvent):
 def emit(event: CouncilEvent) -> bool:
     """Push ``event`` onto LangGraph's custom-event stream.
 
+    Uses ``langchain_core.callbacks.manager.dispatch_custom_event``
+    (sync) which surfaces on ``compiled.astream_events(version="v2")``
+    as records of shape::
+
+        {"event": "on_custom_event",
+         "name":  event.kind,
+         "data":  event.to_dict(),
+         "metadata": {...},
+         "run_id": ...}
+
+    The M4 SSE bridge demuxes those records into
+    ``event: <kind>`` SSE messages on the wire.
+
     Defensive: when there's no runnable context (test code that
     isn't running through a compiled graph), this silently returns
     ``False`` instead of raising. That makes ``emit()`` safe to
@@ -226,23 +239,20 @@ def emit(event: CouncilEvent) -> bool:
     depend on a live consumer.
     """
     try:
-        from langgraph.config import get_stream_writer
+        from langchain_core.callbacks.manager import (
+            dispatch_custom_event,
+        )
     except ImportError:
         return False
     try:
-        writer = get_stream_writer()
+        dispatch_custom_event(event.kind, event.to_dict())
+        return True
     except RuntimeError:
         # Called outside of a runnable context (node ran as plain
         # function in a test). Drop silently.
         return False
-    except Exception:  # pragma: no cover — defensive
-        log.exception("emit: get_stream_writer raised; event dropped")
-        return False
-    try:
-        writer(event.to_dict())
-        return True
     except Exception:  # pragma: no cover
-        log.exception("emit: writer raised; event dropped")
+        log.exception("emit: dispatch_custom_event raised; event dropped")
         return False
 
 

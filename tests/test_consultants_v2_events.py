@@ -161,45 +161,58 @@ class TestEmitDefensive(unittest.TestCase):
         result = emit(e)
         self.assertFalse(result)
 
-    def test_emit_returns_true_when_writer_succeeds(self):
-        """Patch get_stream_writer to return a recording callable;
-        emit should call it with the dict form."""
-        captured: list[dict] = []
-        fake_writer = captured.append
+    def test_emit_returns_true_when_dispatch_succeeds(self):
+        """Patch ``dispatch_custom_event`` to record calls;
+        emit should pass (event.kind, event.to_dict()) to it."""
+        captured: list[tuple[str, dict]] = []
 
-        # The function imports get_stream_writer inside the function
-        # body, so we patch ``langgraph.config.get_stream_writer``
-        # at the source.
-        fake_config = type(
-            "fake_module", (), {"get_stream_writer": lambda: fake_writer},
-        )
+        def fake_dispatch(name, data, **_kw):
+            captured.append((name, data))
+
+        # The function imports the dispatcher inside the function
+        # body, so we patch ``langchain_core.callbacks.manager``
+        # at the module source.
         import sys
-        sys.modules["langgraph.config"] = fake_config
+        fake_module = type(
+            "fake_module", (),
+            {"dispatch_custom_event": fake_dispatch},
+        )
+        prior = sys.modules.get("langchain_core.callbacks.manager")
+        sys.modules["langchain_core.callbacks.manager"] = fake_module
         try:
             e = NodeFinished(role="planner", duration_ms=42, ok=True)
             ok = emit(e)
             self.assertTrue(ok)
             self.assertEqual(len(captured), 1)
-            self.assertEqual(captured[0]["kind"], "node_finished")
-            self.assertEqual(captured[0]["duration_ms"], 42)
+            name, data = captured[0]
+            self.assertEqual(name, "node_finished")
+            self.assertEqual(data["duration_ms"], 42)
+            self.assertEqual(data["ok"], True)
         finally:
-            # Restore — don't leak the fake into other test modules.
-            del sys.modules["langgraph.config"]
+            if prior is not None:
+                sys.modules["langchain_core.callbacks.manager"] = prior
+            else:
+                del sys.modules["langchain_core.callbacks.manager"]
 
-    def test_emit_writer_exception_returns_false_no_raise(self):
-        def boom_writer(_payload):
-            raise RuntimeError("downstream consumer crashed")
+    def test_emit_dispatch_exception_returns_false_no_raise(self):
+        def boom_dispatch(_name, _data, **_kw):
+            raise Exception("downstream consumer crashed")
 
-        fake_config = type(
-            "fake_module", (), {"get_stream_writer": lambda: boom_writer},
-        )
         import sys
-        sys.modules["langgraph.config"] = fake_config
+        fake_module = type(
+            "fake_module", (),
+            {"dispatch_custom_event": boom_dispatch},
+        )
+        prior = sys.modules.get("langchain_core.callbacks.manager")
+        sys.modules["langchain_core.callbacks.manager"] = fake_module
         try:
             result = emit(NodeStarted(role="r"))
             self.assertFalse(result)
         finally:
-            del sys.modules["langgraph.config"]
+            if prior is not None:
+                sys.modules["langchain_core.callbacks.manager"] = prior
+            else:
+                del sys.modules["langchain_core.callbacks.manager"]
 
 
 # ============================================================== #

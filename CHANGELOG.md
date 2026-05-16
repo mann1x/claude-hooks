@@ -16,6 +16,88 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — `/consultants` v2 SSE bridge + node instrumentation (M4b)
+
+Closes M4 — real council nodes now emit typed events that surface
+on `compiled.astream_events(version="v2")` as `on_custom_event`
+records, and the SSE bridge demuxes them into a `text/event-stream`
+response the M9 endpoint will hand to consumers.
+
+`consultants/engine/events.py`:
+
+- `emit(event)` switched from `langgraph.config.get_stream_writer`
+  (which routes to `astream(stream_mode="custom")`) to
+  `langchain_core.callbacks.manager.dispatch_custom_event` (which
+  routes to `astream_events(version="v2")` as `on_custom_event`).
+  Same defensive-no-op behavior outside a runnable context;
+  sync-callable so it works from sync nodes without an event-loop
+  hop.
+
+`consultants/engine/council.py` — node instrumentation:
+
+- Every role node (`planner_node`, `researcher_node`,
+  `critic_node`, `meta_critic_node`, `synthesizer_node`) now
+  emits `NodeStarted` at entry and `NodeFinished` at exit. Both
+  happy-path and tombstone returns emit `NodeFinished` with
+  `ok=False` + `error="<Type>: <msg>"` when the role failed.
+- Two helpers `_emit_started` / `_emit_finished` near the top of
+  the module are catch-all wrappers that never raise — defensive
+  emit() means plain-Python tests (test_consultants_council.py's
+  109 tests stay green without modification) see them as no-ops,
+  while live consumers get every transition.
+
+`consultants/server/events_sse.py` (NEW):
+
+- `format_sse_event(*, event_id, event_type, data, retry_ms)` —
+  pure formatter that builds the wire-format bytes per the SSE
+  spec (id/event/retry/data lines with trailing blank).
+- `format_sse_heartbeat()` — SSE comment-line heartbeat that
+  keeps reverse-proxies from closing idle connections.
+- `classify_astream_event(raw, *, sid)` — pure demultiplexer
+  over one `astream_events` v2 record. Maps `on_custom_event` to
+  the event's `kind`, `on_chat_model_stream` to a `token` event
+  with `{"role", "delta"}`, `on_chain_start`/`on_chain_end` to
+  `lifecycle` events with `{"phase", "name"}`, drops everything
+  else.
+- `sse_from_astream_events(astream_iter, *, sid, heartbeat_s,
+  start_event_id, initial_retry_ms)` — async iterator. Races
+  the upstream `__anext__()` task against a heartbeat deadline
+  using `asyncio.wait` (not `wait_for`, which would cancel the
+  inner async generator). Yields SSE bytes ready for FastAPI's
+  `StreamingResponse`. Cleans up the pending task on consumer
+  disconnect via `try/finally`.
+- `sse_replay_from_rows(rows, *, start_event_id)` — Last-Event-ID
+  resume path. Replays recorded `runtime_events` rows before
+  attaching the live stream. Caller passes
+  `highest_event_id(rows)` as `start_event_id` to
+  `sse_from_astream_events` so numbering stays monotonic across
+  replay + live.
+
+**Tests:** 32 new tests across two files, all green on both
+envs:
+
+- `tests/test_consultants_v2_events_sse.py` (28 tests) — wire
+  formatters (basic shape, retry hint, JSON one-line,
+  empty-event-type rejection, non-ASCII, default-str fallback,
+  comment-line heartbeat); demux (custom event uses kind as
+  type, sid injection, sid preservation, chat-model-stream →
+  token, empty chunk dropped, chain start/end → lifecycle,
+  other events dropped, non-dict dropped); live iterator
+  (events in order, retry hint on first event only,
+  uninteresting events dropped, start_event_id offset,
+  heartbeat fires when upstream silent); replay iterator
+  (rows in order, since_event_id skip, empty rows yields
+  nothing); highest_event_id (max, empty=0, missing field
+  treated as 0).
+- `tests/test_consultants_v2_events_integration.py` (2 tests,
+  consultants env only) — end-to-end: a real LangGraph node
+  calling `emit(NodeStarted(...))` surfaces on the bridge as
+  `event: node_started` in SSE wire format, with sid injection
+  + all dataclass fields preserved.
+
+Full-suite count: 2984 passing on the main `claude-hooks` env
+(+28 from M3b close). Zero regressions.
+
 ### Added — `/consultants` v2 typed event taxonomy + recorder runtime_events table (M4a)
 
 The streaming-events plumbing layer for v2. M4a lands the
