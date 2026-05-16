@@ -311,6 +311,128 @@ class TestParseJudgeResponse(unittest.TestCase):
         self.assertEqual(rationale, "")
 
 
+class TestCommitReportArtifacts(unittest.TestCase):
+    """Pin the ``--commit-report`` post-run behavior: rendered
+    artifacts are force-added to the git index, raw trial dumps
+    remain ignored, the helper never creates a commit.
+    """
+
+    def _make_repo(self, tmp: Path) -> Path:
+        import subprocess
+        subprocess.run(
+            ["git", "init", "-q", "-b", "main", str(tmp)],
+            check=True,
+        )
+        # Match the project's .gitignore shape for the results tree
+        # so the negation pattern works against the helper.
+        (tmp / ".gitignore").write_text(
+            "benchmarks/consultants/results/**/*\n"
+            "!benchmarks/consultants/results/**/\n"
+            "!benchmarks/consultants/results/**/report.md\n"
+            "!benchmarks/consultants/results/**/quota.md\n"
+            "!benchmarks/consultants/results/**/metadata.json\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "-C", str(tmp), "add", ".gitignore"], check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@x",
+             "-C", str(tmp), "commit", "-q", "-m", "init"],
+            check=True,
+        )
+        return tmp
+
+    def test_stages_present_artifacts(self):
+        import subprocess
+        import tempfile
+        from benchmarks.consultants import coder_bench
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._make_repo(Path(tmp))
+            out = repo / "benchmarks/consultants/results/2026-05-99/coder"
+            out.mkdir(parents=True)
+            (out / "report.md").write_text("# rendered\n", encoding="utf-8")
+            (out / "metadata.json").write_text('{"ok": true}\n', encoding="utf-8")
+            (out / "quota.md").write_text("# quota\n", encoding="utf-8")
+            (out / "trials.jsonl").write_text("not staged\n", encoding="utf-8")
+            coder_bench._commit_report_artifacts(out)
+            staged = subprocess.check_output(
+                ["git", "-C", str(repo), "diff", "--cached", "--name-only"],
+                text=True,
+            ).splitlines()
+            self.assertIn(
+                "benchmarks/consultants/results/2026-05-99/coder/report.md",
+                staged,
+            )
+            self.assertIn(
+                "benchmarks/consultants/results/2026-05-99/coder/metadata.json",
+                staged,
+            )
+            self.assertIn(
+                "benchmarks/consultants/results/2026-05-99/coder/quota.md",
+                staged,
+            )
+            # trials.jsonl stays ignored AND unstaged.
+            self.assertNotIn(
+                "benchmarks/consultants/results/2026-05-99/coder/trials.jsonl",
+                staged,
+            )
+
+    def test_skips_missing_artifacts(self):
+        # quota.md is optional (user-authored). Helper must not fail
+        # when it's absent.
+        import subprocess
+        import tempfile
+        from benchmarks.consultants import coder_bench
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._make_repo(Path(tmp))
+            out = repo / "benchmarks/consultants/results/2026-05-99/coder"
+            out.mkdir(parents=True)
+            (out / "report.md").write_text("# rendered\n", encoding="utf-8")
+            # No metadata.json, no quota.md.
+            coder_bench._commit_report_artifacts(out)
+            staged = subprocess.check_output(
+                ["git", "-C", str(repo), "diff", "--cached", "--name-only"],
+                text=True,
+            ).splitlines()
+            self.assertEqual(
+                staged,
+                ["benchmarks/consultants/results/2026-05-99/coder/report.md"],
+            )
+
+    def test_no_commit_created(self):
+        # The helper must NEVER commit — it only stages. Operator
+        # decides when to write history.
+        import subprocess
+        import tempfile
+        from benchmarks.consultants import coder_bench
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._make_repo(Path(tmp))
+            out = repo / "benchmarks/consultants/results/2026-05-99/coder"
+            out.mkdir(parents=True)
+            (out / "report.md").write_text("# rendered\n", encoding="utf-8")
+            head_before = subprocess.check_output(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"],
+                text=True,
+            ).strip()
+            coder_bench._commit_report_artifacts(out)
+            head_after = subprocess.check_output(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"],
+                text=True,
+            ).strip()
+            self.assertEqual(head_before, head_after)
+
+    def test_no_git_repo_is_warning_not_crash(self):
+        # If output_dir isn't under a git tree, the helper logs and
+        # returns — does not raise.
+        import tempfile
+        from benchmarks.consultants import coder_bench
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "no_git"
+            out.mkdir()
+            (out / "report.md").write_text("# rendered\n", encoding="utf-8")
+            # Should not raise.
+            coder_bench._commit_report_artifacts(out)
+
+
 class TestJudgeTrialQualityRetry(unittest.TestCase):
     """Pin the retry-on-empty behaviour added in the post-mortem of
     the 2026-05-16 M11b full run (kimi judging kimi returned empty

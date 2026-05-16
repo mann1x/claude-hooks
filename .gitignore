@@ -85,8 +85,18 @@ vendor/llamafile/models/*.gguf.symlink
 vendor/llamafile/dist/*.llamafile
 
 # Skill-eval per-run outputs (M11 protocol). The bench produces
-# large per-trial sandboxes with the model-generated code on disk;
-# the rendered report.md gets committed selectively to
-# docs/consultants-skill-eval-baselines.md (just the summary row),
-# not the raw run dirs.
-benchmarks/consultants/results/
+# large per-trial sandboxes with the model-generated code on disk
+# — those stay ignored. The small per-run conclusions
+# (``report.md`` / ``quota.md`` / ``metadata.json``) are
+# commit-eligible: the ``--commit-report`` flag on ``coder_bench``
+# force-adds them after a run, so the ledger row in
+# ``docs/consultants-skill-eval-baselines.md`` always has a
+# clickable artifact alongside it. Manual ``git add -f`` of
+# specific files also works.
+benchmarks/consultants/results/**/*
+!benchmarks/consultants/results/**/
+!benchmarks/consultants/results/**/report.md
+!benchmarks/consultants/results/**/smoke-report.md
+!benchmarks/consultants/results/**/quota.md
+!benchmarks/consultants/results/**/metadata.json
+!benchmarks/consultants/results/**/smoke-metadata.json

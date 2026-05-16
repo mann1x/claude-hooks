@@ -27,7 +27,8 @@ issue.
 
 | Sub-protocol     | Bench dir / file                                          | Role(s) it gates                              | Manifest version |
 |------------------|-----------------------------------------------------------|-----------------------------------------------|------------------|
-| **coder**        | [`benchmarks/consultants/questions/coder/`](../benchmarks/consultants/questions/coder/) | `cfg.roles.coder.model`                       | v1.0 (2026-05-16)|
+| **coder**        | [`benchmarks/consultants/questions/coder/`](../benchmarks/consultants/questions/coder/) | `cfg.roles.coder.model` (Python; global)      | v1.0 (2026-05-16) — `glm-5.1:cloud` |
+| **coder_mlang**  | [`benchmarks/consultants/questions/coder_mlang/`](../benchmarks/consultants/questions/coder_mlang/) | `cfg.roles.coder.model` (per-language + global override) | v1.0 (2026-05-16, build-out in progress) |
 | **stall**        | _(M11a; lands in a later commit)_                         | M3 stall thresholds; informs every role's caps| not yet shipped   |
 | **tool_executor**| _(M11c; lands in a later commit)_                         | `cfg.roles.tool_executor.model` + the role's default-on bit | not yet shipped |
 
@@ -35,6 +36,17 @@ Each sub-protocol has its own SUITE.md manifest, decision rubric,
 and metric set; they share the harness (`benchmarks/consultants/
 harness.py`), the trial schema, and the markdown report renderer
 so a model's results across the three protocols are comparable.
+
+The two coder sub-protocols answer **different decision
+questions**: `coder` picks "best Python coder" against a wide
+question set covering trivial→hard; `coder_mlang` picks "best
+coder for Rust / Go / C / C++ / C# / Python" against a
+deliberately harder question set that drops trivial+easy tiers
+because the v1.0 `coder` run found those tiers stopped
+discriminating between top models. The two coexist — re-baselining
+one does not invalidate the other. See
+[`consultants-skill-eval-mlang-suite.md`](consultants-skill-eval-mlang-suite.md)
+for the multi-language design + manifest.
 
 ---
 
@@ -123,16 +135,40 @@ has drifted. Investigate before spending tokens on a live run.
 
 ```bash
 python benchmarks/consultants/coder_bench.py --live --accept-cost \
-    --models kimi-k2.6:cloud,qwen3-next:cloud,glm-5.1:cloud,gemma4:31b-cloud \
+    --models kimi-k2.6:cloud,qwen3-coder-next:cloud,glm-5.1:cloud,gemma4:31b-cloud \
     --ollama-base http://192.168.178.2:11433 \
-    --judge-model kimi-k2.6:cloud
+    --judge-model kimi-k2.6:cloud \
+    --commit-report
 ```
 
 The summary line at run start declares the estimated token cost.
 `--accept-cost` is mandatory with `--live`; without it the script
 prints the estimate and exits 2.
 
+`--commit-report` (added 2026-05-16): after the run, `git add -f`
+the rendered `report.md` + `metadata.json` (+ `quota.md` if
+present) so they're staged alongside the baselines.md row in the
+next commit. Raw `trials.jsonl` + per-trial sandboxes stay
+gitignored (recreatable from a re-run). The flag does **not**
+create a commit — the operator decides when to write history.
+
+For the **multi-language** sub-protocol the only change is the
+`--questions-dir`:
+
+```bash
+python benchmarks/consultants/coder_bench.py --live --accept-cost \
+    --questions-dir benchmarks/consultants/questions/coder_mlang \
+    --models glm-5.1:cloud,kimi-k2.6:cloud,deepseek-v4-flash:cloud,deepseek-v4-pro:cloud,minimax-m2.7:cloud \
+    --ollama-base http://192.168.178.2:11433 \
+    --judge-model kimi-k2.6:cloud \
+    --commit-report
+```
+
 ### 3. Render the report
+
+`coder_bench.py` now renders `report.md` automatically at the
+end of every run, so step 3 is implicit. The manual command is
+still supported:
 
 ```bash
 python benchmarks/consultants/analyze.py \
@@ -148,11 +184,16 @@ result line** to
 [`docs/consultants-skill-eval-baselines.md`](consultants-skill-eval-baselines.md):
 
 ```
-| 2026-05-16 | coder | 1.0 | kimi-k2.6:cloud | 87% | 4.1 | 8240 | 9aa6eaf0... |
+| 2026-05-16 | 1.0 | glm-5.1:cloud | 100% | 4.88 | 1841 | 4.9s | 9aa6eaf0 | ... |
 ```
 
 The baselines ledger is the running record across runs; future
 sessions consult it to see the trend per model + suite version.
+
+When `--commit-report` was passed to the live run, `report.md` +
+`quota.md` + `metadata.json` are already staged. Just `git add
+docs/consultants-skill-eval-baselines.md` (and the per-suite
+defaults file if a new winner is being adopted) and commit.
 
 ### 5. (Optional) update the consultant default
 

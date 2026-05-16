@@ -558,8 +558,17 @@ def run_bench(*,
               judge_model: Optional[str],
               tier_filter: Optional[set[str]],
               id_filter: Optional[set[str]],
-              pytest_python: str) -> int:
-    """Execute the bench. Returns the count of trials run."""
+              pytest_python: str,
+              commit_report: bool = False) -> int:
+    """Execute the bench. Returns the count of trials run.
+
+    When ``commit_report`` is true: after the run finishes, render
+    ``report.md`` from ``trials.jsonl`` and force-add it +
+    ``metadata.json`` (+ ``quota.md`` if present, but user-authored
+    so not always there) to the git index via ``git add -f``. The
+    actual commit is left to the operator — the bench's job is to
+    make the artifacts staged + ready, not to write history.
+    """
     suite = load_suite_manifest(questions_dir)
     questions = load_questions(
         questions_dir,
@@ -659,10 +668,91 @@ def run_bench(*,
             print(f"{status} ({wall:.1f}s)", flush=True)
             append_trial(trials_path, trial)
     print(flush=True)
-    print(f"==== done. {n_done} trials in {trials_path}. "
-          f"Run analyze.py to produce the markdown report. ====",
+    # Always render report.md at end of run — it's cheap (small
+    # file) and removes the manual ``python -m
+    # benchmarks.consultants.analyze`` step that the user kept
+    # tripping over. ``--commit-report`` then force-adds the
+    # rendered artifact so the ``baselines.md`` row has a clickable
+    # artifact next to it in git.
+    report_path = output_dir / "report.md"
+    try:
+        from . import analyze as _analyze_mod  # local import: bench
+                                               # is sometimes loaded
+                                               # without analyze on path
+        rendered = _analyze_mod.render_report(
+            _analyze_mod.load_trials(trials_path),
+            metadata=metadata,
+        )
+        report_path.write_text(rendered, encoding="utf-8")
+        print(f"     wrote report.md ({report_path})", flush=True)
+    except Exception as e:
+        log.warning("could not render report.md inline: %s", e)
+    if commit_report:
+        _commit_report_artifacts(output_dir)
+    print(f"==== done. {n_done} trials in {trials_path}. ====",
           flush=True)
     return n_done
+
+
+def _commit_report_artifacts(output_dir: Path) -> None:
+    """Force-add the report-side artifacts so they're staged for
+    the next commit. Never touches commit history — the operator
+    decides when to commit.
+
+    Files staged (each guarded by existence):
+
+    - ``report.md`` and ``smoke-report.md``
+    - ``metadata.json`` and ``smoke-metadata.json``
+    - ``quota.md`` (user-authored; optional)
+
+    Raw trial dumps (``trials.jsonl`` / ``trials/`` / ``*.log``)
+    stay ignored — they're recreatable from a re-run.
+    """
+    candidates = (
+        "report.md", "smoke-report.md",
+        "metadata.json", "smoke-metadata.json",
+        "quota.md",
+    )
+    to_add: list[str] = []
+    for name in candidates:
+        path = output_dir / name
+        if path.is_file():
+            to_add.append(str(path))
+    if not to_add:
+        log.info("commit-report: no artifacts to stage in %s",
+                 output_dir)
+        return
+    # Resolve repo root for git invocation. The bench may be run
+    # from anywhere — we honor the layout under ``--output-dir``
+    # rather than CWD.
+    repo_root = output_dir.resolve()
+    while repo_root != repo_root.parent and not (repo_root / ".git").is_dir():
+        repo_root = repo_root.parent
+    if not (repo_root / ".git").is_dir():
+        log.warning(
+            "commit-report: could not find a git repo above %s "
+            "— skipping git add",
+            output_dir,
+        )
+        return
+    import subprocess
+    cmd = ["git", "-C", str(repo_root), "add", "-f", *to_add]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except FileNotFoundError:
+        log.warning("commit-report: 'git' not on PATH — skipping")
+        return
+    except subprocess.CalledProcessError as e:
+        log.warning(
+            "commit-report: git add failed (exit %d): %s",
+            e.returncode, (e.stderr or "").strip(),
+        )
+        return
+    print(
+        f"     commit-report: staged {len(to_add)} files via "
+        f"git add -f (commit when ready)",
+        flush=True,
+    )
 
 
 # ============================================================== #
@@ -738,6 +828,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=("Python interpreter used to run oracle pytest. Default: "
               "the harness's own interpreter."),
     )
+    p.add_argument(
+        "--commit-report", action="store_true",
+        help=(
+            "After the run, force-add report.md + metadata.json "
+            "(+ quota.md if present) to the git index so the "
+            "next commit can carry the durable artifacts next to "
+            "the baselines.md row. Does NOT create a commit — "
+            "operator decides when to write history."
+        ),
+    )
     return p
 
 
@@ -784,6 +884,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         tier_filter=tier_set,
         id_filter=id_set,
         pytest_python=args.pytest_python,
+        commit_report=args.commit_report,
     )
     return 0 if n > 0 else 1
 

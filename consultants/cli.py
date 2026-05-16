@@ -833,6 +833,8 @@ def cmd_skill_eval_coder(args, base: str) -> int:
         argv.extend(["--id", qid])
     if args.smoke:
         argv.append("--smoke")
+    if getattr(args, "commit_report", False):
+        argv.append("--commit-report")
     return int(_bench_main(argv))
 
 
@@ -1227,6 +1229,16 @@ def build_parser() -> argparse.ArgumentParser:
     se_coder.add_argument(
         "--smoke", action="store_true",
         help="Shorthand for --tier trivial.",
+    )
+    se_coder.add_argument(
+        "--commit-report", action="store_true",
+        dest="commit_report",
+        help=(
+            "After the run, force-add report.md + metadata.json "
+            "(+ quota.md if present) so they're staged for the "
+            "next commit alongside the baselines.md row. Does NOT "
+            "create a commit."
+        ),
     )
     se_coder.set_defaults(fn=cmd_skill_eval_coder)
 
