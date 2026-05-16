@@ -50,6 +50,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from benchmarks.consultants.harness import (  # noqa: E402
     HARNESS_VERSION, CoderTrial, append_trial, build_judge_messages,
+    build_judge_system, judge_lang_for_path,
     count_code_lines, estimate_cost, load_questions, load_suite_manifest,
     load_trials, make_dry_run_loop_runner, parse_judge_response,
     run_pytest_against_sandbox,
@@ -282,6 +283,77 @@ class TestJudgeMessages(unittest.TestCase):
         self.assertEqual(msgs[1]["role"], "user")
         self.assertIn("Write a fizzbuzz", msgs[1]["content"])
         self.assertIn("def fizzbuzz", msgs[1]["content"])
+        # Default fence + persona are Python (back-compat).
+        self.assertIn("```python", msgs[1]["content"])
+        self.assertIn("senior Python code reviewer", msgs[0]["content"])
+
+    def test_build_judge_messages_language_aware_rust(self):
+        """Rust code is wrapped in a ```rust fence and the system
+        prompt names a Rust reviewer — regression guard for the
+        2026-05-16 coder_mlang abort (10/10 C trials returned
+        quality=1.0 regardless of pass/fail because the judge saw
+        them as broken Python)."""
+        msgs = build_judge_messages(
+            "Implement a thread-safe Bank::transfer",
+            "fn transfer(&self, from: u32, to: u32) { ... }",
+            language="Rust",
+            fence="rust",
+        )
+        self.assertIn("```rust", msgs[1]["content"])
+        self.assertNotIn("```python", msgs[1]["content"])
+        self.assertIn("senior Rust code reviewer", msgs[0]["content"])
+        # Rubric line 3 must name the active language, not Python.
+        self.assertIn("Rust idioms", msgs[0]["content"])
+
+    def test_build_judge_messages_csharp_fence(self):
+        msgs = build_judge_messages(
+            "Build a DI container",
+            "public class Container { }",
+            language="C#",
+            fence="csharp",
+        )
+        self.assertIn("```csharp", msgs[1]["content"])
+        self.assertIn("senior C# code reviewer", msgs[0]["content"])
+
+    def test_build_judge_system_default_matches_back_compat(self):
+        # The module-level JUDGE_SYSTEM constant must equal the
+        # Python-flavoured factory output verbatim so callers that
+        # imported it stay on the original prompt.
+        from benchmarks.consultants.harness import JUDGE_SYSTEM as J
+        self.assertEqual(J, build_judge_system("Python"))
+
+    def test_judge_lang_for_path_known_extensions(self):
+        self.assertEqual(judge_lang_for_path("solution.py"),
+                         ("Python", "python"))
+        self.assertEqual(judge_lang_for_path("solution.rs"),
+                         ("Rust", "rust"))
+        self.assertEqual(judge_lang_for_path("solution.go"),
+                         ("Go", "go"))
+        self.assertEqual(judge_lang_for_path("solution.c"),
+                         ("C", "c"))
+        self.assertEqual(judge_lang_for_path("solution.cpp"),
+                         ("C++", "cpp"))
+        self.assertEqual(judge_lang_for_path("solution.cs"),
+                         ("C#", "csharp"))
+
+    def test_judge_lang_for_path_falls_back_to_python(self):
+        # Unknown extensions + empty path default to Python so
+        # zero-extension legacy callers stay on the previous
+        # behavior.
+        self.assertEqual(judge_lang_for_path(""), ("Python", "python"))
+        self.assertEqual(judge_lang_for_path("README"),
+                         ("Python", "python"))
+        self.assertEqual(judge_lang_for_path("solution.zzz"),
+                         ("Python", "python"))
+
+    def test_judge_lang_handles_nested_paths(self):
+        # The helper has its own suffix walker; confirm dots in
+        # directory names don't confuse it.
+        self.assertEqual(judge_lang_for_path("a.dir/b.test/solution.rs"),
+                         ("Rust", "rust"))
+        # And backslashes (windows-style sandbox paths).
+        self.assertEqual(judge_lang_for_path(r"a\b\solution.go"),
+                         ("Go", "go"))
 
 
 class TestParseJudgeResponse(unittest.TestCase):

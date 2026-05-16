@@ -630,25 +630,75 @@ def measure_complexity(file_path: Path) -> Optional[int]:
 # Judge LLM helper (M11b — code-quality scoring)
 # ============================================================== #
 
-JUDGE_SYSTEM = (
-    "You are a senior Python code reviewer. You are given a "
-    "code-generation task and the code a junior engineer produced. "
-    "Score the code on a single integer scale 1-5 with this rubric:\n\n"
-    "1 — Broken. Doesn't solve the task or has obvious bugs.\n"
-    "2 — Solves the basic case but misses obvious edge cases or "
-    "uses confusing structure.\n"
-    "3 — Correct for the spec, but overly verbose / non-idiomatic / "
-    "missing simple Python idioms (e.g. uses manual indexing where "
-    "slicing fits).\n"
-    "4 — Correct and idiomatic. Reasonable structure, edge cases "
-    "considered.\n"
-    "5 — Excellent. Minimal, idiomatic, robust. The kind of code "
-    "you'd ship without changes.\n\n"
-    "Output EXACTLY two lines:\n"
-    "Line 1: ``SCORE: <integer 1-5>``\n"
-    "Line 2: One short sentence (max 25 words) justifying the score.\n\n"
-    "Do not add preamble, headings, or markdown."
-)
+# Mapping from sandbox-file extension to (display_name, fence_tag).
+# Drives the language-aware judge prompt — the 2026-05-16 coder_mlang
+# full run abort caught a bug where every submission was wrapped in a
+# ```python fence and the judge was told "you are a senior Python code
+# reviewer", so all 10 C trials returned quality=1.0 regardless of
+# whether the C source passed the oracle.
+_JUDGE_LANG_BY_EXT: dict[str, tuple[str, str]] = {
+    ".py":   ("Python", "python"),
+    ".rs":   ("Rust",   "rust"),
+    ".go":   ("Go",     "go"),
+    ".c":    ("C",      "c"),
+    ".h":    ("C",      "c"),
+    ".cpp":  ("C++",    "cpp"),
+    ".cc":   ("C++",    "cpp"),
+    ".cxx":  ("C++",    "cpp"),
+    ".hpp":  ("C++",    "cpp"),
+    ".cs":   ("C#",     "csharp"),
+    ".java": ("Java",   "java"),
+    ".ts":   ("TypeScript", "typescript"),
+    ".js":   ("JavaScript", "javascript"),
+}
+
+
+def judge_lang_for_path(sandbox_path: str) -> tuple[str, str]:
+    """Return ``(display_name, fence_tag)`` for a sandbox file path.
+    Falls back to ``("Python", "python")`` for unknown extensions so
+    pre-existing Python-only callers stay on the original behavior."""
+    if not sandbox_path:
+        return ("Python", "python")
+    suffix = ""
+    # Tolerate plain filenames (no Path import to keep the helper
+    # zero-cost for the dry-run hot path).
+    for i in range(len(sandbox_path) - 1, -1, -1):
+        if sandbox_path[i] == ".":
+            suffix = sandbox_path[i:].lower()
+            break
+        if sandbox_path[i] in "/\\":
+            break
+    return _JUDGE_LANG_BY_EXT.get(suffix, ("Python", "python"))
+
+
+def build_judge_system(language: str = "Python") -> str:
+    """Build a language-aware judge-system prompt. ``language`` is
+    interpolated into the reviewer persona + rubric so a Rust judge
+    rates Rust idioms (not Python idioms) and a C judge does not
+    treat manual indexing as a code smell."""
+    return (
+        f"You are a senior {language} code reviewer. You are given a "
+        "code-generation task and the code a junior engineer produced. "
+        "Score the code on a single integer scale 1-5 with this rubric:\n\n"
+        "1 — Broken. Doesn't solve the task or has obvious bugs.\n"
+        "2 — Solves the basic case but misses obvious edge cases or "
+        "uses confusing structure.\n"
+        f"3 — Correct for the spec, but overly verbose / non-idiomatic / "
+        f"missing simple {language} idioms.\n"
+        "4 — Correct and idiomatic. Reasonable structure, edge cases "
+        "considered.\n"
+        "5 — Excellent. Minimal, idiomatic, robust. The kind of code "
+        "you'd ship without changes.\n\n"
+        "Output EXACTLY two lines:\n"
+        "Line 1: ``SCORE: <integer 1-5>``\n"
+        "Line 2: One short sentence (max 25 words) justifying the score.\n\n"
+        "Do not add preamble, headings, or markdown."
+    )
+
+
+# Back-compat constant for callers / tests that expect the Python
+# judge system prompt verbatim.
+JUDGE_SYSTEM = build_judge_system("Python")
 
 
 _JUDGE_SCORE_RE = re.compile(
@@ -656,17 +706,36 @@ _JUDGE_SCORE_RE = re.compile(
 )
 
 
-def build_judge_messages(task: str, code: str) -> list[dict]:
+def build_judge_messages(
+    task: str,
+    code: str,
+    language: str = "Python",
+    fence: str = "python",
+) -> list[dict]:
     """Construct the conversation for the judge model. Keeps the
     prompt short on purpose — judge is a single fast call, not an
-    agent loop."""
+    agent loop.
+
+    ``language`` / ``fence`` are language-aware:
+
+    - ``language`` is interpolated into the reviewer persona + rubric
+      so the judge rates the right idioms.
+    - ``fence`` is the markdown fence tag (``python``, ``rust``,
+      ``cpp``, ``csharp``, ``c``, ``go``, ...) so the judge doesn't
+      see C / Rust / Go code wrapped in a ```python fence and
+      auto-penalize it for not parsing as Python.
+
+    Defaults preserve the pre-mlang Python-only behavior. The
+    coder_bench caller derives both from the question's ``sandbox_path``
+    extension via ``judge_lang_for_path``.
+    """
     user = (
         f"TASK GIVEN TO THE JUNIOR ENGINEER:\n{task.strip()}\n\n"
-        f"CODE THE JUNIOR PRODUCED:\n```python\n{code}\n```\n\n"
+        f"CODE THE JUNIOR PRODUCED:\n```{fence}\n{code}\n```\n\n"
         "Score the code per the rubric. Two lines only."
     )
     return [
-        {"role": "system", "content": JUDGE_SYSTEM},
+        {"role": "system", "content": build_judge_system(language)},
         {"role": "user", "content": user},
     ]
 
@@ -813,8 +882,10 @@ __all__ = [
     "TIERS",
     "append_trial",
     "build_judge_messages",
+    "build_judge_system",
     "count_code_lines",
     "estimate_cost",
+    "judge_lang_for_path",
     "load_questions",
     "load_trials",
     "make_dry_run_loop_runner",

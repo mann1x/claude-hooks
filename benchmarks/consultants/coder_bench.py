@@ -63,8 +63,8 @@ if str(_REPO_ROOT) not in sys.path:
 from benchmarks.consultants.harness import (  # noqa: E402
     HARNESS_VERSION, BenchQuestion, CoderTrial, SuiteManifest,
     append_trial, build_judge_messages, count_code_lines,
-    estimate_cost, load_questions, load_suite_manifest,
-    make_dry_run_loop_runner, measure_complexity,
+    estimate_cost, judge_lang_for_path, load_questions,
+    load_suite_manifest, make_dry_run_loop_runner, measure_complexity,
     parse_judge_response, run_pytest_against_sandbox,
 )
 
@@ -171,7 +171,8 @@ def _judge_trial_quality(*, judge_chat_client, judge_model: str,
         code = code_path.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
         return None, f"could not read produced file: {e}"
-    msgs = build_judge_messages(task, code)
+    language, fence = judge_lang_for_path(sandbox_path)
+    msgs = build_judge_messages(task, code, language=language, fence=fence)
 
     def _call_once() -> str:
         try:
