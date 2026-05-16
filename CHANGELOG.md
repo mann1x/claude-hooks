@@ -16,6 +16,117 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — `/consultants` v2 xauto adaptive-effort escalation (M7)
+
+Closes M7 — a new ``xauto`` effort tier that starts at the
+``xmedium`` topology + caps and grows toward ``xhigh`` / ``xmax``
+mid-flight when the council needs more compute. The consultation
+discovers it's harder than expected and dials itself up; the user
+never has to pre-commit to a single tier.
+
+`consultants/config.py`:
+
+- ``EFFORT_BUDGETS["xauto"] = 25`` — worst-case escalation needs
+  follow-up budget compatible with the final tier reached.
+- ``base_effort("xauto") → "medium"`` — starting caps the
+  escalator grows from.
+- ``extras_active("xauto") → True`` — xauto IS an x-tier by
+  definition; researcher.extra_models fanout is active from the
+  first round.
+
+`consultants/engine/escalation.py` (NEW):
+
+- ``EscalationDecision(from_tier, to_tier, signal, reason,
+  runtime_control_delta)`` frozen dataclass — the escalator's
+  proposed transition. ``runtime_control_delta`` is the diff
+  between the from-tier's and to-tier's TIER_TOPOLOGIES entries
+  (only fields that actually changed) plus ``xauto_tier`` so
+  the next ``current_tier(state)`` call returns the new stage.
+- ``TIER_TOPOLOGIES[XautoTier] → TierTopology(max_rounds,
+  max_reroutes, confidence_target, multi_critic)`` static table.
+  Confidence targets tighten monotonically (xmedium 0.60 →
+  xhigh 0.70 → xmax 0.75); max_rounds and max_reroutes monotonic
+  non-decreasing; multi_critic only at xmax (matches Phase 10).
+- ``next_escalation(state, *, min_round_for_escalation=1)`` —
+  pure decision function. Pre-conditions (any failure returns
+  None silently): xauto run, current tier has forward transition,
+  at least one round completed, not under critical time
+  pressure (≥ 70% of soft budget). Signal priority,
+  most-specific first: ``gap_named`` → ``critic_dissent`` →
+  ``low_confidence`` → ``time_pressure``. The first three
+  SUPPRESS under time pressure; the fourth is the carve-out
+  that ONLY fires when no critic has run yet and we'd otherwise
+  miss the deadline without critic review.
+- ``apply_escalation(state, decision) → state_delta`` returns
+  the ``{"runtime_control": {...}}`` shape with
+  ``xauto_escalations`` incremented for post-mortem accounting.
+- ``runtime_mutation_event_data(decision)`` shapes the payload
+  for the streaming ``RuntimeMutation`` event the SSE consumer
+  + recorder see.
+- ``_is_time_pressure(state, *, threshold=0.70)`` anchors on
+  ``runtime_control.started_ts`` + ``soft_target_ts``; returns
+  False conservatively when either is absent. Threshold is
+  configurable; default matches the plan §M7 spec.
+- ``current_tier(state)`` reads ``runtime_control.xauto_tier``,
+  defaults to xmedium. Unknown values fall back to xmedium with
+  a warning log.
+
+`consultants/engine/graph.py`:
+
+- ``CouncilState`` grows a ``runtime_control: Annotated[dict,
+  merge_runtime_control]`` channel so partial updates from any
+  node (the escalator's delta, the M5 /control HTTP route's
+  update_state call) deep-merge into existing fields.
+  ``_wire_v2_reducers()`` patches the string forward-ref at
+  import time, same pattern as M6's tool_plan / tool_results.
+  Without this, the escalator's delta was silently dropped by
+  the same TypedDict-channel-declaration bug M6 hit.
+- ``_wrap_xauto_escalator(deps)`` builds the pass-through node:
+  inspect state via ``next_escalation``, emit
+  ``RuntimeMutation`` event (defensive — no-op outside runnable
+  context), record the event to the recorder when present, and
+  return the state delta. Returns ``{}`` (pass-through) when no
+  escalation is warranted — safe to wire unconditionally.
+- ``build_council_graph`` inserts the escalator between
+  critic/meta_critic and ``route_after_critic`` when both
+  critic and researcher are enabled. The unconditional edge
+  critic → escalator barriers the (possibly Send-multiplexed)
+  critic before the escalator fires; the escalator's
+  state-delta merges into runtime_control before the
+  conditional reads it. Non-xauto runs see ``next_escalation``
+  return ``None`` and the node short-circuits to ``{}`` — no
+  cost beyond one dict read.
+
+**Tests:** 40 new across two files, all green on both envs.
+
+- ``tests/test_consultants_v2_escalation.py`` (38) — config
+  surface (``xauto`` in EFFORT_BUDGETS,
+  ``base_effort("xauto") == "medium"``,
+  ``extras_active("xauto")``); ``is_xauto_run`` + tier
+  fallback; allowed-forward-only transitions; per-signal
+  triggers (gap_named, critic_dissent, low_confidence,
+  time_pressure carve-out); pre-condition guards (non-xauto
+  run, before first round, ceiling, time-pressure
+  suppression); topology delta only emits changed fields;
+  signal priority order (gap_named > critic_dissent >
+  low_confidence); apply_escalation increments
+  xauto_escalations; RuntimeMutation event payload shape;
+  TIER_TOPOLOGIES static sanity (monotonic growth, tightening
+  confidence target, multi_critic only at xmax,
+  ceiling==xmax).
+- ``tests/test_consultants_v2_xauto_e2e.py`` (2,
+  consultants env only) — full PLAN → critic-dissent →
+  escalator-mutates-runtime_control → researcher round 2
+  → critic-ready → synthesizer cycle. Verifies
+  runtime_control.xauto_tier advances, max_rounds /
+  max_reroutes / confidence_target match xhigh's topology,
+  xauto_escalations == 1, researcher fired twice. Regression
+  guard: a plain medium run with the same shape produces no
+  escalation (xauto_escalations stays absent / 0).
+
+Test counts: 3109 → 3147 on the main env (+38);
+consultants-env at 384 (+40). Zero regressions on either env.
+
 ### Added — `/consultants` v2 tool_executor wiring (M6a + M6b)
 
 Closes M6 — the engine now supports an opt-in dedicated

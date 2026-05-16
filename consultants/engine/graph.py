@@ -85,7 +85,11 @@ class CouncilState(TypedDict, total=False):
     # eager-importing state_v2 at module load.
     tool_plan_item: Optional["ToolPlanItem"]
 
-    # ---- v2 channels (M5, M6) ----
+    # ---- v2 channels (M2, M5, M6, M7) ----
+    # M2: mutable runtime knobs. Merged with a shallow dict-merge
+    # so partial updates (e.g. ``{"max_rounds": 5}``) don't clobber
+    # the rest. Same reducer as state_v2.merge_runtime_control.
+    runtime_control: Annotated[dict, "merge_runtime_control"]
     # M5: append-only injected context, hash-deduped by reducer.
     additional_context: Annotated[list["Doc"], "append_doc"]
     # M6: append-only across re-routes / parallel researcher lanes.
@@ -116,14 +120,19 @@ def _wire_v2_reducers():
     try:
         from consultants.engine.state_v2 import (
             Doc, ToolPlanItem, ToolResult, append_doc,
+            merge_runtime_control,
         )
     except ImportError:  # pragma: no cover
         return
     hints = CouncilState.__annotations__
-    # ``additional_context``: replace "append_doc" placeholder with
-    # the real reducer + the Doc type.
     from typing import Annotated as _Ann
+    # M2: runtime_control shallow-merge reducer so partial updates
+    # from any node (xauto escalator, /control endpoint via
+    # update_state) preserve sibling fields.
+    hints["runtime_control"] = _Ann[dict, merge_runtime_control]
+    # M5: additional_context with hash-dedup append.
     hints["additional_context"] = _Ann[list[Doc], append_doc]
+    # M6: tool_plan / tool_results additive concat across Send lanes.
     hints["tool_plan"] = _Ann[list[ToolPlanItem], operator.add]
     hints["tool_results"] = _Ann[list[ToolResult], operator.add]
     hints["tool_plan_item"] = Optional[ToolPlanItem]
@@ -265,6 +274,69 @@ def _wrap_critic(deps: GraphDeps):
             think=_think_for(deps, "critic"),
             recorder=deps.recorder,
         )
+    return _node
+
+
+def _wrap_xauto_escalator(deps: GraphDeps):
+    """M7: build the xauto escalator pass-through node.
+
+    The node runs after the critic / meta_critic and BEFORE
+    ``route_after_critic`` fires. It inspects state via
+    :func:`consultants.engine.escalation.next_escalation` and, when
+    a decision is returned, emits a ``RuntimeMutation`` event +
+    returns the matching state delta. The next routing pass sees
+    the updated ``runtime_control`` caps and behaves accordingly
+    (e.g. higher ``max_rounds`` allows another researcher round).
+
+    Returns ``{}`` (pass-through, no mutation) when:
+    - The run is not xauto.
+    - No escalation signal is active.
+    - Already at the ceiling tier.
+
+    All cases are safe to wire unconditionally; the node is fast
+    when there's nothing to do.
+    """
+    from consultants.engine.escalation import (
+        apply_escalation,
+        next_escalation,
+        runtime_mutation_event_data,
+    )
+
+    def _node(state: dict) -> dict:
+        decision = next_escalation(state)
+        if decision is None:
+            return {}
+        # Emit the RuntimeMutation event so SSE consumers / live
+        # dashboards see the topology grow in real time. Defensive
+        # — emit() is a no-op outside a runnable context, so this
+        # is safe in plain-Python unit tests.
+        try:
+            from consultants.engine.events import (
+                RuntimeMutation, emit,
+            )
+            ev_data = runtime_mutation_event_data(decision)
+            emit(RuntimeMutation(
+                changes=ev_data["changes"],
+                reason=ev_data["reason"],
+            ))
+        except Exception:  # pragma: no cover — defensive
+            log.exception("xauto escalator: emit RuntimeMutation "
+                           "raised; ignoring")
+        # Recorder receives the same event for post-mortem audit.
+        if deps.recorder is not None:
+            try:
+                deps.recorder.record_event(
+                    kind="runtime_mutation",
+                    role="xauto_escalator",
+                    round=int(state.get("research_rounds_used") or 0),
+                    lane_idx=None,
+                    payload=runtime_mutation_event_data(decision),
+                )
+            except Exception:  # pragma: no cover
+                log.exception(
+                    "xauto escalator: recorder.record_event raised",
+                )
+        return apply_escalation(state, decision)
     return _node
 
 
@@ -838,6 +910,36 @@ def build_council_graph(deps: GraphDeps,
         # tool_results reducer's merged list is visible.
         sg.add_edge("tool_executor", "researcher")
 
+    # M7: xauto escalator wiring.
+    #
+    # Inserts a pass-through node BEFORE the critic's conditional
+    # edge. The node inspects state via next_escalation() and, when
+    # the xauto signals fire, mutates runtime_control (max_rounds,
+    # max_reroutes, confidence_target, multi_critic) so the
+    # subsequent route_after_critic call sees the bigger caps and
+    # allows another reroute that previously would have been
+    # disallowed.
+    #
+    # Active only on xauto runs — the runner sets cfg.effort first
+    # at session start; the escalator node short-circuits to {}
+    # (no mutation) when state.effort != "xauto", so wiring it
+    # unconditionally is safe and avoids a topology-time branch.
+    xauto_active = "xauto" == (
+        # cfg.effort isn't directly visible here, but the deps
+        # carries it indirectly via state at run time. We always
+        # wire the node when there's a critic; the node itself
+        # honors the is_xauto_run guard.
+        # (Could be plumbed via deps for a topology-time check,
+        # but the runtime guard is cheaper and equivalent.)
+        "xauto"  # placeholder — actual gating is at the node body
+    )
+    use_escalator = ("critic" in enabled) and "researcher" in enabled
+    if use_escalator:
+        sg.add_node(
+            "xauto_escalator",
+            _wrap("xauto_escalator", _wrap_xauto_escalator(deps)),
+        )
+
     # Critic's conditional edge: needs_more_research -> researcher,
     # else -> synthesizer. In single-critic mode the critic itself
     # owns the conditional; in multi-critic mode meta_critic does.
@@ -846,6 +948,13 @@ def build_council_graph(deps: GraphDeps,
     # fan-out has already merged its results into state['research'];
     # the re-route does targeted follow-up on whatever gaps were
     # named.
+    #
+    # M7: when the escalator is wired, the conditional source
+    # becomes the escalator (unconditional edge from
+    # critic/meta_critic to escalator, then conditional from
+    # escalator to researcher/synthesizer). The escalator's
+    # state-delta merges into runtime_control before the conditional
+    # reads it.
     if multi_critic_active:
         decider = "meta_critic"
     elif "critic" in enabled:
@@ -853,9 +962,16 @@ def build_council_graph(deps: GraphDeps,
     else:
         decider = None
     if decider is not None:
+        if use_escalator:
+            # Route critic/meta_critic → escalator unconditionally,
+            # then escalator → researcher/synthesizer conditionally.
+            sg.add_edge(decider, "xauto_escalator")
+            conditional_source = "xauto_escalator"
+        else:
+            conditional_source = decider
         if "researcher" in enabled:
             sg.add_conditional_edges(
-                decider,
+                conditional_source,
                 council.route_after_critic,
                 {
                     council.ROUTE_RESEARCHER: "researcher",
@@ -865,7 +981,7 @@ def build_council_graph(deps: GraphDeps,
         else:
             # No researcher to loop back to; the critic-side is
             # effectively advisory — straight to synthesizer.
-            sg.add_edge(decider, "synthesizer")
+            sg.add_edge(conditional_source, "synthesizer")
 
     # M5: static interrupt_before plumbing. LangGraph 1.2's
     # ``StateGraph.compile(interrupt_before=[...])`` parks execution

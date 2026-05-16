@@ -72,22 +72,44 @@ EFFORT_BUDGETS: dict[str, int] = {
     "xmedium": 3,
     "xhigh": 5,
     "xmax": 25,
+    # M7: ``xauto`` — adaptive effort tier. Starts at the xmedium
+    # topology + caps; the ``escalation`` module mutates
+    # runtime_control mid-flight to grow to xhigh or xmax when the
+    # critic flags ``needs_more_research`` or the synthesizer's
+    # self-rated confidence drops below the threshold. Budget caps
+    # match xmax's so a worst-case escalation has a follow-up
+    # budget compatible with the final tier reached.
+    "xauto": 25,
 }
 
 
 def base_effort(effort: str) -> str:
     """Strip the ``x`` prefix from x-tiers; returns the base tier
     whose caps and budget should be used. ``"xhigh"`` -> ``"high"``;
-    ``"high"`` -> ``"high"``."""
+    ``"high"`` -> ``"high"``.
+
+    M7: ``xauto`` resolves to ``"medium"`` — the starting topology
+    when the consultation begins. The escalator rewrites
+    ``runtime_control`` to grow toward the xhigh/xmax topologies
+    in flight; the resolved base never changes during the run.
+    """
     if effort.startswith("x") and effort[1:] in ("low", "medium", "high", "max"):
         return effort[1:]
+    if effort == "xauto":
+        return "medium"
     return effort
 
 
 def extras_active(effort: str) -> bool:
     """True when the tier is x-prefixed — i.e. the engine should
     fan out to ``extra_models`` for fan-outable roles. False for
-    every base tier; ``extra_models`` is unused at those tiers."""
+    every base tier; ``extra_models`` is unused at those tiers.
+
+    M7: ``xauto`` is an x-tier by definition — it starts at xmedium
+    and can escalate to xhigh/xmax, both of which use extras.
+    """
+    if effort == "xauto":
+        return True
     return effort.startswith("x") and effort[1:] in (
         "low", "medium", "high", "max"
     )
