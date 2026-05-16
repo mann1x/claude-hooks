@@ -16,6 +16,68 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — `/consultants` v2 typed event taxonomy + recorder runtime_events table (M4a)
+
+The streaming-events plumbing layer for v2. M4a lands the
+event dataclasses + recorder persistence; M4b will wire them up
+to node entry/exit + the SSE bridge.
+
+`consultants/engine/events.py`:
+
+- Nine frozen dataclasses for the council's streaming-event
+  taxonomy: `NodeStarted`, `NodeFinished`, `ToolCall`,
+  `PartialSynthesis`, `ConfidenceUpdate`, `DeadlineWarning`,
+  `RuntimeMutation`, `Interrupt`, `Resumed`. Each carries a
+  per-class `kind` discriminator (used as the SSE `event:` name
+  + the recorder row type), a `ts` default of `time.time()`, and
+  an optional `sid` for cross-thread aggregation. Common base
+  class `CouncilEvent` exposes `to_dict()` → JSON-serializable
+  shallow dict (round-trips through `json.dumps`).
+- `emit(event)` — defensive bridge to LangGraph's
+  `get_stream_writer()`. Catches `ImportError` (when langgraph
+  isn't installed in the test env), `RuntimeError` (when called
+  outside a runnable context — tests running nodes as plain
+  Python), and `Exception` from the writer (downstream consumer
+  crash). Returns `True` on success, `False` otherwise — callers
+  use this as a should-still-record signal so the recorder path
+  fires regardless of live stream delivery.
+
+`consultants/engine/recorder.py` — `MessageRecorder` extensions:
+
+- Schema bump v1 → v2: adds `runtime_events` table mirroring the
+  CouncilEvent dataclasses (`event_id`, `ts`, `kind`, `role`,
+  `round`, `lane_idx`, `payload` JSON blob). Separate from the
+  existing `events` table so the LLM/tool/node-boundary rows
+  stay untouched and old post-mortem tooling keeps working. Two
+  indices (`kind`, `ts`) for fast filtered scans.
+- `record_event(*, kind, role, round, lane_idx, payload)` — the
+  M3 stall layer's `on_event` sink and the M4 SSE bridge both
+  call this. Belt-and-braces: backfills `kind` into the payload
+  dict so a consumer reading just the JSON blob doesn't need to
+  cross-reference the indexed `kind` column. No-op when the
+  recorder is closed (mirrors the rest of the recorder's API).
+- `list_runtime_events(*, since_event_id=0, limit=1000)` — the
+  SSE bridge's `Last-Event-ID` resume path. Returns parsed-payload
+  dicts in insertion order; corrupt JSON gets a sentinel
+  `__parse_error__` rather than crashing the lister.
+
+**Tests:** 24 new tests, all green on both `claude-hooks` and
+`claude-hooks-consultants` envs:
+
+- `tests/test_consultants_v2_events.py` — event dataclass shape
+  (every type's `kind` default + field accessors), frozen-ness,
+  JSON round-trip, ts override, kind override; emit() defensive
+  paths (outside runnable context → False, writer succeeds →
+  True, writer raises → False); record_event persistence
+  + kind-required + payload-optional + no-op when closed;
+  list_runtime_events paging + parse-error tolerance + dataclass
+  round-trip; stall-layer integration (a `chat_with_stall_protection`
+  call with on_event=record_event lands `stall.attempt.ok` in
+  `runtime_events`).
+
+Full-suite count: 2956 passing on the main env, +24 from M3
+close. Zero regressions.
+
 ### Added — `/consultants` v2 streaming chat + researcher stall wire-up (M3b)
 
 Closes M3 — real LLM calls now route through the stall watchdog

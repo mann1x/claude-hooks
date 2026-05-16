@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 _SCHEMA_SQL = """\
@@ -75,6 +75,23 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_role_kind ON events(role, kind, round);
 CREATE INDEX IF NOT EXISTS idx_events_ts        ON events(ts);
+
+-- v2 (M4): typed CouncilEvent stream. Separate table from
+-- ``events`` so the existing LLM/tool/node-boundary rows stay
+-- untouched and old post-mortem tooling keeps working. The SSE
+-- bridge reads from this table for ``Last-Event-ID`` resume.
+CREATE TABLE IF NOT EXISTS runtime_events (
+    event_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          REAL    NOT NULL,
+    kind        TEXT    NOT NULL,
+    role        TEXT,
+    round       INTEGER,
+    lane_idx    INTEGER,
+    payload     TEXT    NOT NULL  -- json blob of the full event dict
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_events_kind ON runtime_events(kind);
+CREATE INDEX IF NOT EXISTS idx_runtime_events_ts   ON runtime_events(ts);
 """
 
 
@@ -332,6 +349,104 @@ class MessageRecorder:
             (time.time(), kind, role, round, lane_idx, duration_ms, error),
         )
         conn.commit()
+
+    def record_event(
+        self,
+        *,
+        kind: str,
+        role: Optional[str] = None,
+        round: Optional[int] = None,
+        lane_idx: Optional[int] = None,
+        payload: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Append a typed CouncilEvent row to ``runtime_events``.
+
+        The M3 stall layer's ``on_event`` sink and the M4 SSE
+        bridge both call this. Schema is intentionally narrow:
+        the ``payload`` JSON column carries the full event dict so
+        new event types don't need a schema migration. The
+        indexed top-level columns (kind, role, round, lane_idx)
+        let post-mortem queries filter without parsing JSON.
+
+        ``ts`` is read from ``payload["ts"]`` when present; falls
+        back to ``time.time()``. This keeps the wall-clock the
+        emitter saw consistent with what the consumer sees, even
+        if the recorder write is slightly delayed.
+
+        No-op when the recorder is closed (the same pattern as
+        ``record_llm`` / ``record_tool`` / ``record_node``).
+        """
+        if self._closed:
+            return
+        if not kind:
+            raise ValueError("record_event: kind is required")
+        payload_dict = dict(payload or {})
+        ts = float(payload_dict.get("ts") or time.time())
+        # Belt and braces: ensure 'kind' is in the payload so a
+        # consumer reading just the JSON blob doesn't have to
+        # cross-reference the row's ``kind`` column.
+        payload_dict.setdefault("kind", kind)
+        conn = self._conn()
+        conn.execute(
+            """
+            INSERT INTO runtime_events (
+                ts, kind, role, round, lane_idx, payload
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (ts, kind, role, round, lane_idx,
+             _safe_dumps(payload_dict) or "{}"),
+        )
+        conn.commit()
+
+    def list_runtime_events(
+        self,
+        *,
+        since_event_id: int = 0,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Read back runtime_events rows in insertion order.
+
+        Used by the SSE bridge's ``Last-Event-ID`` resume path:
+        the consumer sends ``Last-Event-ID: 42`` and we replay
+        every row with ``event_id > 42`` before resuming the live
+        stream. ``limit`` caps replay so a long-disconnected
+        consumer doesn't choke the bridge.
+
+        Returns a list of dicts shaped
+        ``{"event_id": int, "ts": float, "kind": str,
+        "role": str|None, "round": int|None,
+        "lane_idx": int|None, "payload": dict}`` — the payload is
+        parsed back from JSON for caller convenience.
+        """
+        if self._closed:
+            return []
+        conn = self._conn()
+        rows = conn.execute(
+            """
+            SELECT event_id, ts, kind, role, round, lane_idx, payload
+            FROM runtime_events
+            WHERE event_id > ?
+            ORDER BY event_id ASC
+            LIMIT ?
+            """,
+            (int(since_event_id), int(limit)),
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            try:
+                payload = json.loads(r[6]) if r[6] else {}
+            except json.JSONDecodeError:
+                payload = {"__parse_error__": r[6][:200]}
+            out.append({
+                "event_id": r[0],
+                "ts": r[1],
+                "kind": r[2],
+                "role": r[3],
+                "round": r[4],
+                "lane_idx": r[5],
+                "payload": payload,
+            })
+        return out
 
     # ------------------------------------------------------------------ #
     # Lifecycle
