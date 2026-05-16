@@ -577,6 +577,212 @@ def cmd_config_list_models(args, base: str) -> int:
     return 0
 
 
+# ----------------------- M9 control verbs ----------------------- #
+# These mirror the seven HTTP control endpoints exposed by
+# consultants.server.control_routes. Each handler is a thin
+# adapter: parse argv → POST/GET → pretty-print the response.
+
+
+def _parse_relative_time(spec: str) -> float:
+    """Parse a relative-time string like ``+30m`` / ``+2h`` / ``+45s``.
+
+    Returns the absolute ``time.time()`` value to put into
+    ``deadline_ts``. The CLI's ``--time`` flag is the only entry
+    point — the HTTP layer takes absolute timestamps because that's
+    less ambiguous across daylight-saving rolls.
+
+    Empty / non-prefixed strings raise CLIError. Bare integers
+    (``30m``, ``2h``) are accepted in addition to the ``+`` prefix
+    for ergonomic reasons.
+    """
+    import time as _time
+    s = (spec or "").strip().lstrip("+").lower()
+    if not s:
+        raise CLIError("--time requires a value like +30m / +2h / +45s")
+    unit = s[-1]
+    if unit in ("s", "m", "h", "d"):
+        try:
+            n = float(s[:-1])
+        except ValueError:
+            raise CLIError(f"--time: cannot parse {spec!r}")
+        mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+        delta = n * mult
+    else:
+        try:
+            delta = float(s)
+        except ValueError:
+            raise CLIError(f"--time: cannot parse {spec!r}")
+    if delta <= 0:
+        raise CLIError("--time must be a positive delta")
+    return _time.time() + delta
+
+
+def cmd_state(args, base: str) -> int:
+    """GET /v1/consult/<sid>/state — the M9 deep-state view (vs
+    ``status``, which is the v1 lightweight progress poll)."""
+    out = _http("GET", f"{base}/v1/consult/{args.sid}/state")
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
+
+
+def cmd_inject(args, base: str) -> int:
+    """POST /v1/consult/<sid>/inject — inject additional context
+    into the in-flight consultation. The text can come from
+    ``--message`` directly or from ``--file`` (whole-file read)."""
+    if args.file:
+        try:
+            text = Path(args.file).read_text(encoding="utf-8")
+        except OSError as e:
+            raise CLIError(f"could not read {args.file}: {e}")
+    else:
+        text = args.message or ""
+    body = {
+        "role": args.role,
+        "text": text,
+        "source": args.source or "user",
+    }
+    out = _http("POST",
+                f"{base}/v1/consult/{args.sid}/inject", body=body)
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
+
+
+def cmd_control(args, base: str) -> int:
+    """POST /v1/consult/<sid>/control — mutate one or more
+    RuntimeControl knobs. Multiple flags coalesce into a single
+    PATCH body; an empty PATCH is a 400 from the server."""
+    rc: dict = {}
+    if args.time:
+        rc["deadline_ts"] = _parse_relative_time(args.time)
+    if args.soft_target:
+        rc["soft_target_ts"] = _parse_relative_time(args.soft_target)
+    if args.max_rounds is not None:
+        rc["max_rounds"] = int(args.max_rounds)
+    if args.max_reroutes is not None:
+        rc["max_reroutes"] = int(args.max_reroutes)
+    if args.confidence is not None:
+        rc["confidence_target"] = float(args.confidence)
+    if args.strictness:
+        rc["critic_strictness"] = args.strictness
+    if args.enable:
+        rc["enabled_roles"] = sorted({r.strip() for r in args.enable})
+    if args.disable:
+        # The server-side delta replaces enabled_roles outright, so
+        # `disable` only makes sense when the caller knows the
+        # current set. For ergonomics we GET /state first and
+        # subtract.
+        snap = _http("GET", f"{base}/v1/consult/{args.sid}/state")
+        current = (
+            (snap.get("runtime_control") or {}).get("enabled_roles")
+            or []
+        )
+        kill = {r.strip() for r in args.disable}
+        rc["enabled_roles"] = [r for r in current if r not in kill]
+    if not rc:
+        raise CLIError(
+            "control requires at least one knob: "
+            "--time / --soft-target / --max-rounds / --max-reroutes / "
+            "--confidence / --strictness / --enable / --disable",
+        )
+    out = _http(
+        "POST", f"{base}/v1/consult/{args.sid}/control",
+        body={"runtime_control": rc},
+    )
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
+
+
+def cmd_pause(args, base: str) -> int:
+    """POST /v1/consult/<sid>/interrupt — flip pause_requested.
+    ``pause`` is the friendlier verb name; the HTTP route is
+    ``/interrupt`` because that matches LangGraph's terminology."""
+    body = {"reason": args.reason or "user-pause"}
+    out = _http("POST",
+                f"{base}/v1/consult/{args.sid}/interrupt", body=body)
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
+
+
+def cmd_resume(args, base: str) -> int:
+    """POST /v1/consult/<sid>/resume — clear the interrupt and
+    re-enter via Command(resume=value). The actual graph re-invoke
+    runs on the server's executor pool; this returns 200 with a
+    ``mode: scheduled`` payload and the caller polls /state."""
+    value: Any = None
+    if args.value:
+        try:
+            value = json.loads(args.value)
+        except json.JSONDecodeError:
+            # Treat bare strings as the literal resume value.
+            value = args.value
+    body = {"value": value, "decision": args.decision or ""}
+    out = _http("POST",
+                f"{base}/v1/consult/{args.sid}/resume", body=body)
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
+
+
+def cmd_cancel(args, base: str) -> int:
+    """POST /v1/consult/<sid>/cancel — flip cancel_requested.
+    ``--keep-partial`` is the default; pass ``--discard-partial`` to
+    delete the checkpoint file too."""
+    body = {
+        "discard_partial": bool(args.discard_partial),
+        "reason": args.reason or "user-cancel",
+    }
+    out = _http("POST",
+                f"{base}/v1/consult/{args.sid}/cancel", body=body)
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
+
+
+def cmd_events(args, base: str) -> int:
+    """GET /v1/consult/<sid>/events — SSE stream over runtime_events.
+
+    Streams indefinitely (until the session terminates or the user
+    hits ^C). The endpoint supports Last-Event-ID resume; pass
+    ``--since`` to skip events older than the given id.
+    """
+    headers = {}
+    if args.since:
+        headers["Last-Event-ID"] = str(int(args.since))
+    url = f"{base}/v1/consult/{args.sid}/events"
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        # Long timeout — SSE connections are long-lived by design.
+        resp = urllib.request.urlopen(req, timeout=86400.0)
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = e.read().decode(errors="replace")
+        except Exception:
+            err_body = "<unreadable>"
+        raise CLIError(f"HTTP {e.code} from {url}: {err_body}")
+    except urllib.error.URLError as e:
+        raise CLIError(
+            f"Could not reach {url}: {e.reason}",
+        )
+    # Read line-by-line and pretty-print each event block. SSE
+    # records are separated by a blank line, so we accumulate
+    # lines until we see one.
+    try:
+        record_lines: list[str] = []
+        while True:
+            raw = resp.readline()
+            if not raw:
+                break
+            line = raw.decode("utf-8", errors="replace").rstrip("\n")
+            if line == "":
+                if record_lines:
+                    print("\n".join(record_lines))
+                    print()  # blank line separator in the CLI output
+                    record_lines = []
+                continue
+            record_lines.append(line)
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
 # ----------------------- argparse wiring ------------------------- #
 
 def build_parser() -> argparse.ArgumentParser:
@@ -724,6 +930,131 @@ def build_parser() -> argparse.ArgumentParser:
              "= unlimited.",
     )
     sh.set_defaults(fn=cmd_show)
+
+    # ---- M9 control verbs: drive an in-flight consultation ---- #
+
+    # state — deep state snapshot (vs ``status`` which is the v1
+    # progress-poll alias).
+    st = sub.add_parser(
+        "state",
+        help="Fetch the live v2 state snapshot (runtime_control, "
+             "interrupts, partial_synthesis, …).",
+    )
+    st.add_argument("sid")
+    st.set_defaults(fn=cmd_state)
+
+    # inject — surface additional context into a live consult.
+    inj = sub.add_parser(
+        "inject",
+        help="Inject additional_context into a live consultation. "
+             "Text from --message or --file.",
+    )
+    inj.add_argument("sid")
+    inj.add_argument("--role", default="any",
+                     choices=("any", "planner", "researcher",
+                                "critic", "synthesizer"),
+                     help="Target role for the inject (default: any).")
+    src = inj.add_mutually_exclusive_group(required=True)
+    src.add_argument("-m", "--message",
+                     help="The text to inject inline.")
+    src.add_argument("-f", "--file",
+                     help="Read the inject text from a file.")
+    inj.add_argument("--source", default="user",
+                     help="Source label on the injected Doc "
+                          "(default: user).")
+    inj.set_defaults(fn=cmd_inject)
+
+    # control — mutate one or more runtime_control knobs.
+    ctl = sub.add_parser(
+        "control",
+        help="Mutate RuntimeControl knobs on a live consultation. "
+             "Multiple flags batch into one PATCH.",
+    )
+    ctl.add_argument("sid")
+    ctl.add_argument(
+        "--time",
+        help="Relative deadline extension (e.g. +30m / +2h / +45s). "
+             "Sets deadline_ts to now + delta.",
+    )
+    ctl.add_argument(
+        "--soft-target",
+        help="Same shape as --time but for soft_target_ts.",
+    )
+    ctl.add_argument("--max-rounds", type=int,
+                     help="Researcher max-rounds cap (non-negative).")
+    ctl.add_argument("--max-reroutes", type=int,
+                     help="Critic max-reroutes cap (non-negative).")
+    ctl.add_argument("--confidence", type=float,
+                     help="confidence_target in [0, 1].")
+    ctl.add_argument(
+        "--strictness",
+        choices=("lax", "normal", "strict"),
+        help="Critic strictness preset.",
+    )
+    ctl.add_argument(
+        "--enable", action="append", default=[],
+        help="Role to enable (repeatable). Replaces enabled_roles.",
+    )
+    ctl.add_argument(
+        "--disable", action="append", default=[],
+        help="Role to disable (repeatable). Subtracts from the "
+             "current enabled_roles snapshot (issues a GET /state "
+             "first).",
+    )
+    ctl.set_defaults(fn=cmd_control)
+
+    # pause — friendlier alias for /interrupt.
+    pause = sub.add_parser(
+        "pause",
+        help="Request a cooperative pause at the next node entry.",
+    )
+    pause.add_argument("sid")
+    pause.add_argument("--reason", default="user-pause",
+                       help="Human-readable reason (logged).")
+    pause.set_defaults(fn=cmd_pause)
+
+    # resume — Command(resume=...) re-entry.
+    res = sub.add_parser(
+        "resume",
+        help="Resume a paused consultation with a value.",
+    )
+    res.add_argument("sid")
+    res.add_argument(
+        "--value",
+        help="Resume value (JSON). Bare strings are accepted as "
+             "literals.",
+    )
+    res.add_argument(
+        "--decision", default="",
+        help="Optional human-readable decision label.",
+    )
+    res.set_defaults(fn=cmd_resume)
+
+    # cancel — flip cancel_requested.
+    can = sub.add_parser(
+        "cancel",
+        help="Cancel a running consultation cooperatively.",
+    )
+    can.add_argument("sid")
+    can.add_argument(
+        "--discard-partial", action="store_true",
+        help="Also delete the checkpoint file (default: keep).",
+    )
+    can.add_argument("--reason", default="user-cancel",
+                     help="Human-readable cancel reason (logged).")
+    can.set_defaults(fn=cmd_cancel)
+
+    # events — SSE stream.
+    ev = sub.add_parser(
+        "events",
+        help="Tail the SSE event stream for a session.",
+    )
+    ev.add_argument("sid")
+    ev.add_argument(
+        "--since", type=int,
+        help="Resume from this event_id (Last-Event-ID).",
+    )
+    ev.set_defaults(fn=cmd_events)
 
     # config
     cfg = sub.add_parser("config", help="Inspect or modify config.")

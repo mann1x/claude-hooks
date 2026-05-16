@@ -16,6 +16,134 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — `/consultants` v2 HTTP control surface + CLI subcommands (M9)
+
+Closes M9 — the seven control endpoints exposed by
+``consultants.server.app`` for in-flight consultations + mirrored
+CLI subcommands. M5 shipped the pure-Python payload builders;
+M9 is the FastAPI+HTTP layer that applies them to the live
+LangGraph and the CLI that drives them.
+
+`consultants/server/control_routes.py` (NEW):
+
+- ``register_control_routes(app)`` — attaches 7 endpoints under
+  ``/v1/consult/{sid}/`` to the FastAPI app:
+  * ``GET /state`` — live or last-known StateSnapshot, summarized
+    via M5's ``summarize_state_for_get``. Returns a static
+    snapshot from SessionState fields when the run is over and the
+    live graph handle is cleared.
+  * ``POST /inject`` — applies ``build_inject_delta`` via
+    ``graph.update_state(..., as_node="researcher")``.
+  * ``POST /control`` — applies ``build_runtime_control_delta``
+    (validates per-key, rejects unknown keys with 400).
+  * ``POST /interrupt`` — flips ``runtime_control.pause_requested``.
+  * ``POST /resume`` — clears ``interrupt_state``, then schedules a
+    ``Command(resume=value)`` re-invoke on the app's executor pool
+    (returns 202-equivalent ``{"mode": "scheduled"}`` so the HTTP
+    request stays short; caller polls ``GET /state``).
+  * ``POST /cancel`` — flips ``runtime_control.cancel_requested``;
+    optional ``discard_partial=true`` triggers checkpoint cleanup.
+    Idempotent on completed sessions (200, no-op).
+  * ``GET /events`` — SSE stream over the recorder's
+    ``runtime_events`` table. Replays everything with
+    ``event_id > Last-Event-ID``, then tails for new rows every
+    200 ms; heartbeats every 15 s; terminates cleanly when the
+    session reaches a final state. Polling-based rather than
+    ``astream_events`` subscription because the runner already
+    pumps events to the recorder — a second ``astream_events``
+    call would kick off a fresh invocation.
+- Lifecycle helpers ``_require_session`` / ``_require_live_session``
+  / ``_safe_apply_state_delta`` express the HTTP contract once:
+  * ``404`` — session not found in memory.
+  * ``410`` — session has been closed (idle reap / explicit).
+  * ``409`` — session is ``completed`` / ``failed`` (mutations
+    rejected explicitly rather than silently swallowed).
+  * ``503`` — runner hasn't attached the live graph handles yet
+    (millisecond race between ``executor.submit`` and runner's
+    first line; clients should retry).
+  * ``400`` — payload validation surfaced from the builders.
+- FastAPI imports lifted to module level so ``Request`` resolves
+  at registration time (a lazy import would leave the annotation
+  as a string and FastAPI 422s on the path).
+
+`consultants/server/app.py`:
+
+- ``SessionState._compiled`` / ``_thread_config`` / ``_recorder``
+  — live LangGraph handles attached by the runner. Cleared at
+  session close so the checkpointer file lock + ChatClient caches
+  are released.
+- ``create_app`` calls ``register_control_routes`` after the
+  v1 routes register. Failure is non-fatal — the app comes up
+  without M9 endpoints if the import path is unhappy.
+
+`consultants/server/runner.py`:
+
+- Both the primary and follow-up runners build a
+  ``thread_config = {"configurable": {"thread_id": state.sid}}``
+  and pass it to ``compiled.stream(...)`` so the checkpointer
+  scopes the run to the SessionState's sid. Without this LangGraph
+  would generate a synthetic thread_id that the control routes
+  can't address.
+- ``state._compiled`` / ``_thread_config`` / ``_recorder`` set
+  just before the stream loop so an HTTP route that hits the
+  endpoint immediately gets a live snapshot (no 503 race except
+  in the millisecond window between ``executor.submit`` and the
+  first runner line).
+
+`consultants/cli.py`:
+
+- Eight new subcommands mirror the endpoints:
+  * ``state <sid>`` — deep state view (vs the v1 ``status``).
+  * ``inject <sid> [--role ROLE] (-m TEXT | -f FILE) [--source]``
+  * ``control <sid> [--time +30m | --soft-target SPEC |
+    --max-rounds N | --max-reroutes N | --confidence FLOAT |
+    --strictness lax|normal|strict | --enable ROLE | --disable ROLE]``
+  * ``pause <sid> [--reason …]`` (friendlier name for /interrupt)
+  * ``resume <sid> [--value JSON] [--decision …]``
+  * ``cancel <sid> [--discard-partial] [--reason …]``
+  * ``events <sid> [--since EVENT_ID]`` — line-by-line SSE tail
+    with ``Last-Event-ID`` resume.
+- New helper ``_parse_relative_time(spec)`` parses ``+30m`` /
+  ``+2h`` / ``+45s`` / ``+1d`` / bare seconds into an absolute
+  ``time.time()`` value for ``deadline_ts`` / ``soft_target_ts``.
+- ``control --disable ROLE`` ergonomically issues a ``GET /state``
+  first and subtracts from the current ``enabled_roles`` snapshot
+  before posting (the wire-level delta replaces outright).
+
+Tests:
+
+- ``tests/test_consultants_v2_control_routes.py`` (24 tests,
+  fastapi-gated):
+  * GET /state — 404 unknown, snapshot summary live, static
+    snapshot when graph cleared, 500 on get_state raise (4)
+  * POST /inject — happy path, 400 bad role, 400 empty text,
+    404 unknown sid, 409 completed, 410 closed, 503 missing graph (7)
+  * POST /control — applies delta, 400 invalid payload, 400
+    unknown field, 400 invalid value (4)
+  * POST /interrupt — sets pause_requested, default reason (2)
+  * POST /resume — clears interrupt + schedules re-invoke (1,
+    langgraph-gated)
+  * POST /cancel — flips cancel_requested, no-op on completed,
+    410 on closed (3)
+  * GET /events — 404 unknown, replays then terminates on
+    completed, Last-Event-ID skips replayed (3)
+- ``tests/test_consultants_cli_v2_m9.py`` (26 tests, main env):
+  * argv dispatch wiring for every new subparser (6)
+  * ``_parse_relative_time`` — minutes/hours/seconds/days, bare
+    number, plus-optional, empty/garbage/zero/negative rejected (10)
+  * Handler HTTP shaping — method, URL, body via monkeypatched
+    ``_http`` (8)
+  * ``control --disable`` snapshot-subtract path (1)
+  * ``cmd_control`` empty-knobs CLIError (1)
+
+Verification:
+
+- Consultants env: 3187 pass / 30 skip — up from 3137 (+50:
+  24 routes + 26 CLI).
+- Main env: 3215 pass / 83 skip — up from 3166 (+49: 23 routes
+  (resume class langgraph-gated) + 26 CLI).
+- Zero regressions on M0-M8.
+
 ### Added — `/consultants` v2 long-term-memory BaseStore adapter (M8)
 
 Closes M8 — a LangGraph `BaseStore` adapter that gives the council

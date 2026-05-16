@@ -248,6 +248,17 @@ def make_runner(*, ollama_base_url: str):
         else:
             compiled = build_council_graph(deps, tracer=tracer)
 
+        # M9: attach the live graph + thread config + recorder to
+        # SessionState so the HTTP control route handlers can read
+        # state, apply injects, mutate runtime_control, interrupt,
+        # resume, and replay events. Set BEFORE streaming so a fast
+        # consumer that pings /state immediately gets the live
+        # snapshot (not a 503).
+        thread_config: dict = {"configurable": {"thread_id": state.sid}}
+        state._compiled = compiled
+        state._thread_config = thread_config
+        state._recorder = recorder
+
         # Build initial state, mark planner in_progress for the first
         # progress poll (it's the entry node by default).
         initial = council_mod.initial_state(
@@ -271,7 +282,8 @@ def make_runner(*, ollama_base_url: str):
         final_state: dict = dict(initial)
         try:
             for mode, payload in compiled.stream(
-                    initial, stream_mode=["updates", "values"]):
+                    initial, config=thread_config,
+                    stream_mode=["updates", "values"]):
                 if mode == "values" and isinstance(payload, dict):
                     final_state = payload
                     continue
@@ -555,6 +567,14 @@ def make_follow_up_runner(*, ollama_base_url: str):
             sid=state.sid,
         )
         compiled = build_follow_up_graph(deps, tracer=tracer)
+        # M9: follow-ups expose their own compiled graph + thread
+        # config under the follow-up's own sid (not the parent's).
+        # The control routes resolve a session by sid → SessionState;
+        # both the parent and the follow-up have distinct entries.
+        thread_config: dict = {"configurable": {"thread_id": state.sid}}
+        state._compiled = compiled
+        state._thread_config = thread_config
+        state._recorder = recorder
 
         # Initial state for the follow-up. Two cases:
         #
@@ -601,7 +621,8 @@ def make_follow_up_runner(*, ollama_base_url: str):
         final_state: dict = dict(initial)
         try:
             for mode, payload in compiled.stream(
-                    initial, stream_mode=["updates", "values"]):
+                    initial, config=thread_config,
+                    stream_mode=["updates", "values"]):
                 if mode == "values" and isinstance(payload, dict):
                     final_state = payload
                     continue

@@ -113,6 +113,20 @@ class SessionState:
     _role_lane_messages: Optional[dict[str, dict[int, list[dict]]]] = field(
         default=None, repr=False,
     )
+    # M9 (HTTP control surface): live LangGraph handles so the
+    # control route handlers can read state, mutate runtime_control,
+    # apply injects, schedule interrupts, and resume. Set by the
+    # runner just before it calls ``compiled.stream(...)``. Cleared
+    # to None when the session is closed/idle-reaped, freeing the
+    # checkpointer file lock + ChatClient caches.
+    #
+    # ``_compiled`` — the LangGraph CompiledStateGraph object.
+    # ``_thread_config`` — ``{"configurable": {"thread_id": sid}}``.
+    # ``_recorder`` — MessageRecorder instance for SSE event replay
+    # via runtime_events table. None when recorder is disabled.
+    _compiled: Optional[Any] = field(default=None, repr=False)
+    _thread_config: Optional[dict] = field(default=None, repr=False)
+    _recorder: Optional[Any] = field(default=None, repr=False)
 
     def public_dict(self) -> dict:
         return {
@@ -219,6 +233,22 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
     app.state.reaper_stop = threading.Event()
     if start_reaper:
         _start_idle_reaper(app)
+
+    # M9: register the control-surface routes (GET /state, POST
+    # /inject / /control / /interrupt / /resume / /cancel, GET
+    # /events SSE). Lazy import so test envs that only need the
+    # builders (consultants.server.control) don't pay the routes
+    # cost. Failure is non-fatal — the app comes up without M9
+    # routes when the import path is unhappy.
+    try:
+        from consultants.server.control_routes import (
+            register_control_routes,
+        )
+        register_control_routes(app)
+    except Exception:  # pragma: no cover — defensive
+        log.exception(
+            "register_control_routes failed; M9 endpoints unavailable",
+        )
 
     # ----------------------- health ------------------------------ #
     @app.get("/v1/health")
