@@ -156,9 +156,17 @@ the researcher's frontier model owns the semantic planning.
 
 **Scope note for M6b graph wiring:** the initial wiring is for
 the non-fanout researcher path (single researcher, no x-tier
-Phase 9 multi-model). Combination with x-tier fanout is
-deferred — config defaults gate this by leaving tool_executor
-disabled and recommending non-x effort tiers in the docs.
+Phase 9 multi-model). Proper composition with x-tier fanout is
+the design goal — Phase 9's N×M multi-model researcher diversity
+is a core feature of the engine and must be preserved end-to-end
+when tool_executor is enabled. The M11c tool-executor benchmark
+will drive the architectural choice: per-lane subgraphs vs
+lane-tagged tool_results + manual REPORT-mode dispatcher. If the
+benchmark shows proper composition is unaffordable, an auto-gate
+(disable tool_executor when ``extras_active(effort)``) is the
+fallback — last-resort only, never the recommended path.
+Disabled-by-default in M6 reflects deferred wiring, not an
+intentional combination boundary.
 
 **Tests:** 48 new across two files, all green on both envs.
 
