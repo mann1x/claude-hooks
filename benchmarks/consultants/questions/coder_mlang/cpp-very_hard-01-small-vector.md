@@ -1,3 +1,12 @@
+---
+id: cpp-very_hard-01-small-vector
+tier: very_hard
+source: cpp-idiom
+task: 'SmallVector<T,N> template with stack-then-heap storage. Placement new, move semantics. NO std::vector.'
+sandbox_path: solution.cpp
+oracle: cpp-very_hard-01-small-vector-oracle.py
+---
+
 # cpp-very_hard-01-small-vector
 
 Implement a `SmallVector<T, N>` template with **stack-then-heap

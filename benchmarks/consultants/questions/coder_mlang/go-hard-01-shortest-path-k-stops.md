@@ -1,3 +1,12 @@
+---
+id: go-hard-01-shortest-path-k-stops
+tier: hard
+source: leetcode-787
+task: 'Cheapest src->dst with at most K intermediate stops. Stdin: n m src dst K, edges. Use Bellman-Ford or state-augmented Dijkstra.'
+sandbox_path: solution.go
+oracle: go-hard-01-shortest-path-k-stops-oracle.py
+---
+
 # go-hard-01-shortest-path-k-stops
 
 Given a weighted directed graph of flights, find the **cheapest

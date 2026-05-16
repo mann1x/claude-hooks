@@ -1,3 +1,12 @@
+---
+id: python-medium-01-meeting-rooms
+tier: medium
+source: leetcode-253
+task: 'Given N (start,end) intervals, return the minimum number of conference rooms required (half-open). O(N log N).'
+sandbox_path: solution.py
+oracle: python-medium-01-meeting-rooms-oracle.py
+---
+
 # python-medium-01-meeting-rooms
 
 Given a list of meeting time intervals where `intervals[i] =

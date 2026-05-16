@@ -1,3 +1,12 @@
+---
+id: go-very_hard-01-spsc-queue
+tier: very_hard
+source: concurrency
+task: 'Lock-free SPSC ring buffer using only sync/atomic (no Mutex). Producer + consumer goroutines must conserve all items.'
+sandbox_path: solution.go
+oracle: go-very_hard-01-spsc-queue-oracle.py
+---
+
 # go-very_hard-01-spsc-queue
 
 Implement a **lock-free single-producer single-consumer (SPSC)

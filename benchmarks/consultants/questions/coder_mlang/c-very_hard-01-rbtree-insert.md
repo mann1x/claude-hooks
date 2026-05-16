@@ -1,3 +1,12 @@
+---
+id: c-very_hard-01-rbtree-insert
+tier: very_hard
+source: cs-classic
+task: "Red-black tree insert with rebalancing. After all inserts: in-order traversal + 'ok'/'bad' invariants verifier."
+sandbox_path: solution.c
+oracle: c-very_hard-01-rbtree-insert-oracle.py
+---
+
 # c-very_hard-01-rbtree-insert
 
 Implement a left-leaning red-black tree's **insert** operation

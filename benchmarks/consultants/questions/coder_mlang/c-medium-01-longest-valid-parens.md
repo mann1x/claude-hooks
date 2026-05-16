@@ -1,3 +1,12 @@
+---
+id: c-medium-01-longest-valid-parens
+tier: medium
+source: leetcode-32
+task: "Length of the longest valid parentheses substring in stdin's line of '(' and ')'. O(N)."
+sandbox_path: solution.c
+oracle: c-medium-01-longest-valid-parens-oracle.py
+---
+
 # c-medium-01-longest-valid-parens
 
 Given a string containing only the characters `(` and `)`, find

@@ -1,3 +1,12 @@
+---
+id: c-hard-01-quicksort-3way
+tier: hard
+source: bentley-mcilroy
+task: 'In-place 3-way Dutch-flag quicksort with median-of-three pivot. Stdin: n, values. No qsort() allowed.'
+sandbox_path: solution.c
+oracle: c-hard-01-quicksort-3way-oracle.py
+---
+
 # c-hard-01-quicksort-3way
 
 Implement an in-place **3-way quicksort** (Dutch National Flag

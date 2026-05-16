@@ -1,3 +1,12 @@
+---
+id: csharp-hard-01-async-debounce
+tier: hard
+source: csharp-idiom
+task: 'Async debouncer<T> with CancellationTokenSource — coalesces rapid pushes; emits latest after 100ms quiet window. FlushAsync on EOF.'
+sandbox_path: solution.cs
+oracle: csharp-hard-01-async-debounce-oracle.py
+---
+
 # csharp-hard-01-async-debounce
 
 Implement an **async debounce wrapper** that consumes a stream

@@ -1,3 +1,12 @@
+---
+id: rust-medium-01-search-rotated
+tier: medium
+source: leetcode-33
+task: 'Find target in a sorted-then-rotated i64 array in O(log N). Stdin: n, values, target. Stdout: index or -1.'
+sandbox_path: solution.rs
+oracle: rust-medium-01-search-rotated-oracle.py
+---
+
 # rust-medium-01-search-rotated
 
 Given a sorted-then-rotated array of distinct `i64` values and a

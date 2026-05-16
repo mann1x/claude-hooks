@@ -1,3 +1,12 @@
+---
+id: go-medium-01-koko-bananas
+tier: medium
+source: leetcode-875
+task: 'Min eating speed K such that all piles finish in H hours (ceiling division). Stdin: n H, piles. O((sum or max) log) — binary search on answer.'
+sandbox_path: solution.go
+oracle: go-medium-01-koko-bananas-oracle.py
+---
+
 # go-medium-01-koko-bananas
 
 Koko has `n` piles of bananas, where `pile[i]` is the number of

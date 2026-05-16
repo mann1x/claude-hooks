@@ -1,3 +1,12 @@
+---
+id: rust-very_hard-01-bank-transfer
+tier: very_hard
+source: concurrency
+task: 'Thread-safe Bank::transfer with deadlock-free Mutex strategy under random concurrent transfers. Stdlib only.'
+sandbox_path: solution.rs
+oracle: rust-very_hard-01-bank-transfer-oracle.py
+---
+
 # rust-very_hard-01-bank-transfer
 
 Implement a thread-safe `Bank` type that supports concurrent

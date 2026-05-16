@@ -1,3 +1,12 @@
+---
+id: rust-hard-01-iter-window-pairs
+tier: hard
+source: rust-idiom
+task: "Build a custom Iterator adapter WindowPairs<I> + extension trait WindowPairsExt; emit consecutive pairs from stdin's int sequence."
+sandbox_path: solution.rs
+oracle: rust-hard-01-iter-window-pairs-oracle.py
+---
+
 # rust-hard-01-iter-window-pairs
 
 Write a Rust program that reads a sequence of integers from

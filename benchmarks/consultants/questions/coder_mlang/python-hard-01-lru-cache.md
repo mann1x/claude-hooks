@@ -1,3 +1,12 @@
+---
+id: python-hard-01-lru-cache
+tier: hard
+source: leetcode-146
+task: 'Fixed-capacity LRU cache class with O(1) get/put. __contains__ must NOT promote.'
+sandbox_path: solution.py
+oracle: python-hard-01-lru-cache-oracle.py
+---
+
 # python-hard-01-lru-cache
 
 Implement a fixed-capacity **LRU (Least Recently Used) cache**

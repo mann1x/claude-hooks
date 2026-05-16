@@ -1,3 +1,32 @@
+---
+suite: coder_mlang
+suite_version: "1.0"
+released: 2026-05-16
+manifest:
+  - python-medium-01-meeting-rooms
+  - rust-medium-01-search-rotated
+  - go-medium-01-koko-bananas
+  - c-medium-01-longest-valid-parens
+  - cpp-medium-01-cycle-list
+  - csharp-medium-01-trapped-rainwater
+  - python-hard-01-lru-cache
+  - rust-hard-01-iter-window-pairs
+  - go-hard-01-shortest-path-k-stops
+  - c-hard-01-quicksort-3way
+  - cpp-hard-01-expr-eval
+  - csharp-hard-01-async-debounce
+  - python-very_hard-01-parser-combinator
+  - rust-very_hard-01-bank-transfer
+  - go-very_hard-01-spsc-queue
+  - c-very_hard-01-rbtree-insert
+  - cpp-very_hard-01-small-vector
+  - csharp-very_hard-01-di-container
+rubric:
+  pass_rate_floor: 0.70
+  quality_score_floor: 3.5
+  tie_breaker: median_tokens
+---
+
 # Coder Multi-Language Suite v1.0
 
 Per-language stress test of the coder role. Question content
@@ -6,171 +35,50 @@ language-idiomatic engineering challenges. See
 [`docs/consultants-skill-eval-mlang-suite.md`](../../../../docs/consultants-skill-eval-mlang-suite.md)
 for the design + rationale.
 
-The v1.0 manifest deliberately strips **all** "Hint" sections
-and tightens "Required structure" blocks to API contracts only
-— the v1 `coder@1.0` suite saturated because its specs read
-like tutorials. Models here must reason about the
-problem, not transcribe the prompt.
+The v1.0 manifest deliberately strips **all** "Hint" sections and
+tightens "Required structure" blocks to API contracts only — the
+v1 `coder@1.0` suite saturated because its specs read like
+tutorials. Models here must reason about the problem, not
+transcribe the prompt.
 
-## Suite metadata
+## What this suite measures
 
-```yaml
-suite: coder_mlang
-suite_version: 1.0
-released: 2026-05-16
-languages:
-  - python
-  - rust
-  - go
-  - c
-  - cpp
-  - csharp
-tiers:
-  - medium
-  - hard
-  - very_hard
-```
+A candidate model's fitness for the `coder` role across the
+languages the user writes: **Python, Rust, Go, C, C++, C#**.
+Six questions per tier × three tiers (medium / hard / very_hard)
+= 18 questions × 5-model cohort = 90 trials per full run.
 
-## Rubric
+## Manifest (3 tiers × 6 languages = 18 questions)
 
-```yaml
-pass_rate_floor: 0.70
-quality_score_floor: 3.5
-tie_breaker: median_tokens
-per_language_decision: true
-global_decision_tie_break: python
-```
+| Tier        | Python                                | Rust                                   | Go                                          | C                              | C++                          | C#                              |
+|-------------|---------------------------------------|----------------------------------------|---------------------------------------------|--------------------------------|------------------------------|---------------------------------|
+| medium      | meeting-rooms (LC 253)                | search-rotated (LC 33)                 | koko-bananas (LC 875)                       | longest-valid-parens (LC 32)   | cycle-list (LC 142, Floyd)   | trapped-rainwater (LC 42)       |
+| hard        | lru-cache (LC 146)                    | iter-window-pairs (Iterator trait)     | shortest-path-k-stops (LC 787, Dijkstra)    | quicksort-3way (Dutch flag)    | expr-eval (recursive descent)| async-debounce (Task.Delay+CTS) |
+| very_hard   | parser-combinator (Seq/Or/Many)       | bank-transfer (Mutex deadlock-free)    | spsc-queue (lock-free atomics)              | rbtree-insert (RB invariants)  | small-vector (placement new) | di-container (reflection+cycle) |
 
-`per_language_decision = true` means the suite recommends one
-default model **per language** in addition to the global pick.
-The decision lands in
-`consultants/engine/coder_defaults.py:RECOMMENDED_CODER_MODEL_BY_LANGUAGE`.
+## Rubric (the decision)
 
-## Manifest
+Decision rule baked into the YAML frontmatter:
 
-```yaml
-questions:
-  # ----- medium tier (LCB-derived algorithmic problems) -----
-  - id: python-medium-01-meeting-rooms
-    tier: medium
-    language: python
-    sandbox_path: solution.py
-    task: python-medium-01-meeting-rooms.md
-    oracle: oracle_python-medium-01-meeting-rooms.py
-  - id: rust-medium-01-search-rotated
-    tier: medium
-    language: rust
-    sandbox_path: solution.rs
-    task: rust-medium-01-search-rotated.md
-    oracle: oracle_rust-medium-01-search-rotated.py
-  - id: go-medium-01-koko-bananas
-    tier: medium
-    language: go
-    sandbox_path: solution.go
-    task: go-medium-01-koko-bananas.md
-    oracle: oracle_go-medium-01-koko-bananas.py
-  - id: c-medium-01-longest-valid-parens
-    tier: medium
-    language: c
-    sandbox_path: solution.c
-    task: c-medium-01-longest-valid-parens.md
-    oracle: oracle_c-medium-01-longest-valid-parens.py
-  - id: cpp-medium-01-cycle-list
-    tier: medium
-    language: cpp
-    sandbox_path: solution.cpp
-    task: cpp-medium-01-cycle-list.md
-    oracle: oracle_cpp-medium-01-cycle-list.py
-  - id: csharp-medium-01-trapped-rainwater
-    tier: medium
-    language: csharp
-    sandbox_path: solution.cs
-    task: csharp-medium-01-trapped-rainwater.md
-    oracle: oracle_csharp-medium-01-trapped-rainwater.py
+> A model **qualifies** iff `pass_rate ≥ 0.70` AND
+> `avg_quality_score ≥ 3.5`. Among qualifying models, the
+> **recommended default** is the one with the highest
+> `pass_rate`. Ties break on `median_tokens` (cheaper wins).
+>
+> If no model qualifies, the role's default stays at the
+> project-global DEFAULT_MODEL and a follow-up run evaluates a
+> different candidate set — never silently flip the default on
+> a sub-threshold model.
 
-  # ----- hard tier (engineering challenges + LCB-hard) -----
-  - id: python-hard-01-lru-cache
-    tier: hard
-    language: python
-    sandbox_path: solution.py
-    task: python-hard-01-lru-cache.md
-    oracle: oracle_python-hard-01-lru-cache.py
-  - id: rust-hard-01-iter-window-pairs
-    tier: hard
-    language: rust
-    sandbox_path: solution.rs
-    task: rust-hard-01-iter-window-pairs.md
-    oracle: oracle_rust-hard-01-iter-window-pairs.py
-  - id: go-hard-01-shortest-path-k-stops
-    tier: hard
-    language: go
-    sandbox_path: solution.go
-    task: go-hard-01-shortest-path-k-stops.md
-    oracle: oracle_go-hard-01-shortest-path-k-stops.py
-  - id: c-hard-01-quicksort-3way
-    tier: hard
-    language: c
-    sandbox_path: solution.c
-    task: c-hard-01-quicksort-3way.md
-    oracle: oracle_c-hard-01-quicksort-3way.py
-  - id: cpp-hard-01-expr-eval
-    tier: hard
-    language: cpp
-    sandbox_path: solution.cpp
-    task: cpp-hard-01-expr-eval.md
-    oracle: oracle_cpp-hard-01-expr-eval.py
-  - id: csharp-hard-01-async-debounce
-    tier: hard
-    language: csharp
-    sandbox_path: solution.cs
-    task: csharp-hard-01-async-debounce.md
-    oracle: oracle_csharp-hard-01-async-debounce.py
+Per-language decisions (recommended default per language) land
+in `consultants/engine/coder_defaults.py:RECOMMENDED_CODER_MODEL_BY_LANGUAGE`.
 
-  # ----- very_hard tier (data-structure design + concurrency) -----
-  - id: python-very_hard-01-parser-combinator
-    tier: very_hard
-    language: python
-    sandbox_path: solution.py
-    task: python-very_hard-01-parser-combinator.md
-    oracle: oracle_python-very_hard-01-parser-combinator.py
-  - id: rust-very_hard-01-bank-transfer
-    tier: very_hard
-    language: rust
-    sandbox_path: solution.rs
-    task: rust-very_hard-01-bank-transfer.md
-    oracle: oracle_rust-very_hard-01-bank-transfer.py
-  - id: go-very_hard-01-spsc-queue
-    tier: very_hard
-    language: go
-    sandbox_path: solution.go
-    task: go-very_hard-01-spsc-queue.md
-    oracle: oracle_go-very_hard-01-spsc-queue.py
-  - id: c-very_hard-01-rbtree-insert
-    tier: very_hard
-    language: c
-    sandbox_path: solution.c
-    task: c-very_hard-01-rbtree-insert.md
-    oracle: oracle_c-very_hard-01-rbtree-insert.py
-  - id: cpp-very_hard-01-small-vector
-    tier: very_hard
-    language: cpp
-    sandbox_path: solution.cpp
-    task: cpp-very_hard-01-small-vector.md
-    oracle: oracle_cpp-very_hard-01-small-vector.py
-  - id: csharp-very_hard-01-di-container
-    tier: very_hard
-    language: csharp
-    sandbox_path: solution.cs
-    task: csharp-very_hard-01-di-container.md
-    oracle: oracle_csharp-very_hard-01-di-container.py
-```
-
-## Provenance of the question set
+## Provenance
 
 Of the 18 questions in v1.0:
 
 - 8 are **LCB / LeetCode-derived** algorithmic problems with no
-  implementation hints in the spec: meeting-rooms,
+  implementation hints in the prompt: meeting-rooms,
   search-rotated, koko-bananas, longest-valid-parens, cycle-list,
   trapped-rainwater, shortest-path-k-stops, lru-cache.
 - 10 are **language-idiom engineering challenges**: iterator
@@ -179,14 +87,13 @@ Of the 18 questions in v1.0:
   bank transfer (Rust), SPSC queue (Go), async debounce (C#),
   DI container (C#), SmallVector storage (C++).
 
-Both categories were drafted with **no implementation guidance
-in the prompt** — `Hint` sections explicitly omitted, `Required
-structure` blocks tightened to API contracts only. Adversarial
-test cases (large input that breaks naïve `O(N^2)`, deadlock-
-prone access patterns, edge cases like empty input + boundary
-overflow) are pinned in every oracle.
+Both categories ship with NO implementation guidance — `Hint`
+sections explicitly omitted, `Required structure` blocks
+tightened to API contracts only. Adversarial test cases (large
+input that breaks naïve `O(N^2)`, deadlock-prone access
+patterns, edge cases like empty input + boundary overflow) are
+pinned in every oracle.
 
 The full design rationale + the 2026-05-16 scoping decisions
-(why these 18 specifically, why drop trivial/easy tiers, why
-the 5-model cohort) live in
+live in
 [`docs/consultants-skill-eval-mlang-suite.md`](../../../../docs/consultants-skill-eval-mlang-suite.md).

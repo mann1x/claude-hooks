@@ -1,3 +1,12 @@
+---
+id: cpp-medium-01-cycle-list
+tier: medium
+source: leetcode-142
+task: "Build a singly-linked list from stdin; detect cycle and return the entry-node value (or 'none'). Use Floyd's tortoise+hare (O(N) time, O(1) space)."
+sandbox_path: solution.cpp
+oracle: cpp-medium-01-cycle-list-oracle.py
+---
+
 # cpp-medium-01-cycle-list
 
 Build a singly-linked list from stdin, then determine whether it

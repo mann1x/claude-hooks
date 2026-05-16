@@ -1,3 +1,12 @@
+---
+id: csharp-very_hard-01-di-container
+tier: very_hard
+source: csharp-idiom
+task: 'Minimal DI container via reflection: constructor resolution + singleton cache + cycle detection (CircularDependencyException).'
+sandbox_path: solution.cs
+oracle: csharp-very_hard-01-di-container-oracle.py
+---
+
 # csharp-very_hard-01-di-container
 
 Implement a minimal **dependency-injection container** in C#

@@ -1,3 +1,12 @@
+---
+id: cpp-hard-01-expr-eval
+tier: hard
+source: cs-classic
+task: "Recursive-descent evaluator for `expr := term (('+'|'-') term)*; term := factor (('*'|'/') factor)*; factor := NUMBER | '(' expr ')'`."
+sandbox_path: solution.cpp
+oracle: cpp-hard-01-expr-eval-oracle.py
+---
+
 # cpp-hard-01-expr-eval
 
 Implement a **recursive-descent expression evaluator** for the

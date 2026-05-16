@@ -1,3 +1,12 @@
+---
+id: csharp-medium-01-trapped-rainwater
+tier: medium
+source: leetcode-42
+task: 'Total trapped rainwater given a bar-height array. O(N) — stdin: n, heights. Stdout: total water.'
+sandbox_path: solution.cs
+oracle: csharp-medium-01-trapped-rainwater-oracle.py
+---
+
 # csharp-medium-01-trapped-rainwater
 
 Given `n` non-negative integers representing an elevation map
