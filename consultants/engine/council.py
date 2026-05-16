@@ -453,25 +453,51 @@ ROUTE_RESEARCHER = "researcher"
 def route_after_critic(state: dict) -> str:
     """Decide whether to loop back to researcher or fall through to
     synthesizer. Pure function of the state — LangGraph's conditional
-    edge calls this."""
+    edge calls this.
+
+    v2 (2026-05-16): reads ``runtime_control.max_rounds`` and
+    ``max_reroutes`` when present, falling back to the v1 effort
+    caps when absent. This makes a mid-flight ``graph.update_state(
+    {"runtime_control": {"max_rounds": 5}})`` immediately tighten or
+    loosen the loop ceiling. Also short-circuits to synthesizer if
+    the runtime deadline has passed — the synthesizer composes from
+    whatever evidence is ready rather than burning more time.
+    """
     decision = state.get("critic_decision") or "ready"
     if decision == "ready":
         return ROUTE_SYNTHESIZER
+    # Lazy import — keeps council.py importable without state_v2's
+    # deps if a caller has a stripped-down env. control imports only
+    # config + stdlib.
+    from consultants.engine.control import (
+        runtime_max_rounds, runtime_max_reroutes, runtime_deadline_passed,
+    )
     rounds_used = int(state.get("research_rounds_used") or 1)
     reroutes_used = int(state.get("critic_reroutes_used") or 0)
     effort = str(state.get("effort") or "medium")
     caps = caps_for(effort)
-    if reroutes_used >= caps.critic_reroutes_max:
+    if runtime_deadline_passed(state):
         log.info(
-            "route_after_critic: reroute cap hit (%d >= %d); -> synthesizer",
-            reroutes_used, caps.critic_reroutes_max,
+            "route_after_critic: runtime deadline passed; -> synthesizer",
         )
         return ROUTE_SYNTHESIZER
-    if rounds_used >= caps.researcher_rounds_max:
+    max_reroutes = runtime_max_reroutes(
+        state, fallback=caps.critic_reroutes_max,
+    )
+    max_rounds = runtime_max_rounds(
+        state, fallback=caps.researcher_rounds_max,
+    )
+    if reroutes_used >= max_reroutes:
+        log.info(
+            "route_after_critic: reroute cap hit (%d >= %d); -> synthesizer",
+            reroutes_used, max_reroutes,
+        )
+        return ROUTE_SYNTHESIZER
+    if rounds_used >= max_rounds:
         log.info(
             "route_after_critic: researcher round cap hit (%d >= %d); "
             "-> synthesizer",
-            rounds_used, caps.researcher_rounds_max,
+            rounds_used, max_rounds,
         )
         return ROUTE_SYNTHESIZER
     return ROUTE_RESEARCHER

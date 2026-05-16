@@ -16,6 +16,63 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — `/consultants` v2 RuntimeControl defaults + node reads (M2)
+
+`consultants/engine/control.py` is the single source of truth for
+runtime-knob defaults and the node-side accessor helpers:
+
+- `time_target_for(effort, n_fanout_extras) -> (soft_s, hard_s)` —
+  the timing formula as a function over per-effort `(base_s,
+  per_extra_s)` tuples. Hard multiplier is 3× for base/x tiers, 4×
+  for `xauto` (the escalator may grow topology mid-session).
+- `runtime_control_defaults(cfg, effort, n_fanout_extras)` — boot-time
+  `RuntimeControl` from the effort tier. Used by the runner at
+  session start; the M9 HTTP `/control` endpoint mutates it via
+  `graph.update_state`.
+- Accessor helpers: `runtime_get(state, key, default)`,
+  `runtime_max_rounds(state, fallback=...)`,
+  `runtime_max_reroutes(state, fallback=...)`,
+  `runtime_deadline_passed(state)`,
+  `runtime_enabled_roles(state, fallback=...)`,
+  `runtime_critic_strictness(state, fallback="normal")`. Node code
+  uses these to read live values with the v1 effort-cap fallback.
+
+`consultants/engine/council.route_after_critic` is the first v1
+function to consume RuntimeControl: it now reads `max_rounds` and
+`max_reroutes` from `state["runtime_control"]` when present (else
+the v1 `caps_for(effort)`), and short-circuits to synthesizer when
+`deadline_ts` has passed. The conditional edge is the most-mutated
+control point — making it RuntimeControl-aware means a mid-flight
+`POST /v1/consult/<sid>/control` body `{"runtime_control":
+{"max_rounds": 5}}` *immediately* tightens the loop without waiting
+for the next session.
+
+Timing formula data (grounded in the 2026-05-16 historical analysis
+across 35 csl-* sessions; see
+`/root/.claude/plans/recursive-petting-planet.md` § "time-target
+formula"):
+
+  effort   base_s  per_extra_s  hard_mult  per_lane_hard_s
+  low          60            0       3.0      3600
+  medium      180            0       3.0      3600
+  high        480            0       3.0      3600
+  max         900            0       3.0      3600
+  xmedium     240           90       3.0      3600
+  xhigh       600          180       3.0      3600
+  xmax       1080          300       3.0      3600
+  xauto       720          180       4.0      3600
+
+Async migration deferred to M3 — streaming chat (and the stall
+detector that wraps it) is where async actually pays off.
+RuntimeControl reads work the same in sync code as async, so the
+M2 split is clean.
+
+**Tests:** 31 new tests across timing formula + defaults +
+accessor helpers + the route_after_critic v1/v2 paths. 462
+consultants tests + 12 smoke pass on the consultants env. The full
+suite picks up 31 tests on the main `claude-hooks` env too — the
+control module is pure Python and runs without langgraph.
+
 ### Added — `/consultants` v2 state schema + checkpointer factory (M1)
 
 `consultants/engine/state_v2.py` defines `CouncilStateV2`, the
