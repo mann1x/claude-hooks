@@ -24,7 +24,15 @@ def isolated_home(tmp_path: Path, monkeypatch):
 
 class TestDefaults:
     def test_roles_listed_in_order(self):
-        assert cc.ROLES == ("planner", "researcher", "critic", "synthesizer")
+        # M6: tool_executor joins the role registry as opt-in. Order
+        # matters because cc.enabled_roles() returns roles in
+        # ROLES-order and the runner builds the graph topology
+        # accordingly: planner → researcher → tool_executor (optional)
+        # → critic (optional) → synthesizer.
+        assert cc.ROLES == (
+            "planner", "researcher", "tool_executor",
+            "critic", "synthesizer",
+        )
 
     def test_synthesizer_mandatory(self):
         assert "synthesizer" in cc.MANDATORY_ROLES
@@ -33,14 +41,38 @@ class TestDefaults:
         cfg = cc.ConsultantsConfig()
         assert cc.validate_pipeline(cfg) is None
 
+    def test_tool_executor_disabled_by_default(self):
+        # M6: tool_executor is the one role that ships disabled. The
+        # rest stay enabled-by-default to preserve v1 behavior across
+        # the schema bump.
+        cfg = cc.ConsultantsConfig()
+        assert cfg.roles["tool_executor"].enabled is False
+        for r in cc.ROLES:
+            if r == "tool_executor":
+                continue
+            assert cfg.roles[r].enabled is True
+
+    def test_tool_executor_default_model(self):
+        # M6: tool_executor uniquely defaults to a tool-call specialist
+        # model; the M11c bench will decide whether to flip the default.
+        cfg = cc.ConsultantsConfig()
+        assert cfg.roles["tool_executor"].model == "gemma4:31b-cloud"
+
     def test_load_with_no_files_returns_defaults(self, isolated_home):
         cfg = cc.load_config()
         assert cfg.topology == cc.DEFAULT_TOPOLOGY
         assert cfg.effort == cc.DEFAULT_EFFORT
         assert cfg.service.mode == cc.DEFAULT_SERVICE_MODE
         for r in cc.ROLES:
-            assert cfg.roles[r].enabled is True
-            assert cfg.roles[r].model == cc.DEFAULT_MODEL
+            # tool_executor is the one role that ships disabled +
+            # carries a different primary; every other role uses
+            # the v1 DEFAULT_MODEL.
+            if r == "tool_executor":
+                assert cfg.roles[r].enabled is False
+                assert cfg.roles[r].model == "gemma4:31b-cloud"
+            else:
+                assert cfg.roles[r].enabled is True
+                assert cfg.roles[r].model == cc.DEFAULT_MODEL
 
 
 # ----------------------- save + load round-trip ------------------- #

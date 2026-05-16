@@ -37,7 +37,20 @@ except ImportError:  # pragma: no cover — only on 3.10
 
 # ----------------------- defaults ----------------------------------- #
 
-ROLES: tuple[str, ...] = ("planner", "researcher", "critic", "synthesizer")
+# M6 (v2): ``tool_executor`` joins the role registry but is OPTIONAL
+# and DISABLED by default. When enabled (per-session or globally via
+# cfg.roles.tool_executor.enabled = true), the researcher emits a
+# semantic ``tool_plan`` block instead of running tools inline, and
+# each plan item fans out to a tool_executor Send lane that runs the
+# full agent_loop tool subloop with a tool-call-specialist model
+# (default gemma4:31b-cloud). The role is omitted from v1
+# parity-check enabled lists (handled by the v1 config-load fallback)
+# so existing sessions are unaffected.
+ROLES: tuple[str, ...] = (
+    "planner", "researcher", "tool_executor", "critic", "synthesizer",
+)
+# Synthesizer alone is mandatory — every other role is opt-out (or in
+# tool_executor's case opt-in via cfg.roles.tool_executor.enabled).
 MANDATORY_ROLES: frozenset[str] = frozenset({"synthesizer"})
 
 DEFAULT_TOPOLOGY = "council"
@@ -130,9 +143,50 @@ class RoleConfig:
 DEFAULT_THINK_BY_ROLE: dict[str, Any] = {
     "planner":     "medium",
     "researcher":  "high",
+    # M6: tool_executor is a tool-call specialist — gemma4 is a
+    # non-reasoning model, and disabling think on every tool-call
+    # ChatClient request keeps the response shape clean for the
+    # agent_loop runner. Override per-config if running with a
+    # reasoning-capable specialist.
+    "tool_executor": False,
     "critic":      "medium",
     "synthesizer": "high",
 }
+
+
+# M6: per-role model defaults. Every role except tool_executor uses
+# the global DEFAULT_MODEL — that preserves v1 behavior for
+# planner/researcher/critic/synthesizer (they keep tracking the
+# user-set DEFAULT_MODEL across upgrades). tool_executor uniquely
+# defaults to ``gemma4:31b-cloud`` because the user's observation +
+# the M11c bench will confirm gemma4 leads frontier models on
+# tool-calling fluency on this proxy.
+DEFAULT_MODEL_BY_ROLE: dict[str, str] = {
+    "tool_executor": "gemma4:31b-cloud",
+}
+
+
+# M6: tool_executor is the one role that ships disabled-by-default.
+# Every other role's RoleConfig starts ``enabled=True``; the runner
+# strips disabled roles from the compiled graph topology. Opting in
+# is one TOML line: ``[role.tool_executor] enabled = true``.
+DEFAULT_ENABLED_BY_ROLE: dict[str, bool] = {
+    "tool_executor": False,
+}
+
+
+def _default_role_config(role: str) -> "RoleConfig":
+    """Return the per-role boot-time defaults.
+
+    Centralizes the special-casing for tool_executor (different
+    primary model + disabled-by-default) so the dataclass factory
+    on ``ConsultantsConfig.roles`` stays a one-liner and every
+    role-iteration site sees consistent defaults.
+    """
+    return RoleConfig(
+        enabled=DEFAULT_ENABLED_BY_ROLE.get(role, True),
+        model=DEFAULT_MODEL_BY_ROLE.get(role, DEFAULT_MODEL),
+    )
 
 
 def role_think(cfg: "ConsultantsConfig", role: str) -> Any:
@@ -207,7 +261,7 @@ class ConsultantsConfig:
     checkpointer: CheckpointerConfig = field(default_factory=CheckpointerConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     roles: dict[str, RoleConfig] = field(default_factory=lambda: {
-        r: RoleConfig() for r in ROLES
+        r: _default_role_config(r) for r in ROLES
     })
 
     def role(self, name: str) -> RoleConfig:

@@ -71,6 +71,54 @@ class Doc:
         return h.hexdigest()
 
 
+# ---------- M6: tool_executor channels ----------------------------- #
+
+@dataclass(frozen=True)
+class ToolPlanItem:
+    """One entry in the researcher's ``tool_plan`` — a semantic
+    intent ("find the function that handles X and list its
+    callers") the tool_executor lane will execute via its own
+    agent_loop tool subloop.
+
+    ``why`` is the researcher's reason for the plan item, surfaced
+    to the tool_executor's prompt so the specialist model has the
+    *intent* not just the literal request. ``lane_idx`` is set by
+    the dispatcher; ``parent_round`` records which researcher round
+    emitted this plan (so a critic-reroute round-2 plan's results
+    don't merge into the round-1 result set).
+    """
+    intent: str
+    why: str = ""
+    lane_idx: Optional[int] = None
+    parent_round: int = 1
+    suggested_tools: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ToolResult:
+    """One ``tool_executor`` lane's output, merged via additive
+    reducer back into state. ``content`` is the final text the
+    specialist model produced after running its tool subloop;
+    ``transcript_summary`` is a short tracer of which tools were
+    called (e.g. "read_file, grep, read_file → 3 results") so the
+    researcher's round-2 prompt can decide whether the plan item
+    was actually satisfied.
+
+    ``error`` is set when the lane failed (model exception or
+    tool-loop runaway); the researcher should treat that intent as
+    unaddressed and re-plan around it. ``duration_ms`` lets the
+    M11c bench correlate per-lane wall time with answer quality.
+    """
+    intent: str
+    content: str = ""
+    transcript_summary: str = ""
+    tools_called: list[str] = field(default_factory=list)
+    lane_idx: Optional[int] = None
+    parent_round: int = 1
+    duration_ms: int = 0
+    error: Optional[str] = None
+
+
 @dataclass(frozen=True)
 class InterruptState:
     """What the dynamic ``interrupt()`` call posted. Stored on state
@@ -230,6 +278,11 @@ class CouncilStateV2(TypedDict, total=False):
     plan_item: Optional[str]
     lane_idx: Optional[int]
     model_override: Optional[str]
+    # M6: when the graph dispatches a tool_executor lane, the per-
+    # lane slice carries exactly one ToolPlanItem to execute.
+    # tool_executor_node reads it (not the aggregate tool_plan
+    # channel) so each lane is independent.
+    tool_plan_item: Optional[ToolPlanItem]
 
     # ---- v2-only channels (below this line) ----
 
@@ -251,6 +304,18 @@ class CouncilStateV2(TypedDict, total=False):
 
     # Set by the dynamic interrupt() call; cleared on Command(resume).
     interrupt_state: Optional[InterruptState]
+
+    # M6: ``tool_plan`` carries the full set of plan items the
+    # researcher emitted for this round (the graph dispatcher reads
+    # it to emit one Send per item). Additive across re-routes so
+    # a critic-driven round-2 plan appends to the historical
+    # transcript rather than overwriting.
+    tool_plan: Annotated[list[ToolPlanItem], operator.add]
+    # ``tool_results`` is the corresponding additive merge of every
+    # tool_executor lane's output. The researcher's next-round
+    # prompt renders unconsumed results (filtered by parent_round)
+    # so it can reason over the evidence without re-running tools.
+    tool_results: Annotated[list[ToolResult], operator.add]
 
 
 # ---------- public helpers --------------------------------------- #
@@ -282,6 +347,23 @@ def unconsumed_context_for(state: dict, role: str) -> list[Doc]:
     for d in state.get("additional_context") or []:
         if d.role == role or d.role == "any":
             out.append(d)
+    return out
+
+
+def tool_results_for_round(state: dict, round: int) -> list["ToolResult"]:
+    """Return tool_executor results matching ``round`` so the
+    researcher's prompt at round N+1 only sees the round-N evidence.
+
+    The reducer is additive (results from every round persist on
+    state for post-mortems), so the filter is the read-side
+    contract: caller asks for "round 1" and gets round-1 results
+    only. Robust against a row where ``parent_round`` is missing —
+    treats it as 1.
+    """
+    out: list[ToolResult] = []
+    for r in state.get("tool_results") or []:
+        if int(getattr(r, "parent_round", 1) or 1) == int(round):
+            out.append(r)
     return out
 
 
