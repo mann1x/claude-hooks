@@ -311,6 +311,97 @@ class TestParseJudgeResponse(unittest.TestCase):
         self.assertEqual(rationale, "")
 
 
+class TestJudgeTrialQualityRetry(unittest.TestCase):
+    """Pin the retry-on-empty behaviour added in the post-mortem of
+    the 2026-05-16 M11b full run (kimi judging kimi returned empty
+    content on trial 29; the harness now retries once and tags the
+    rationale so the failure mode is recoverable from
+    ``trials.jsonl`` alone).
+    """
+
+    def _make_client(self, responses: list[str]):
+        # Returns a stub whose .chat() yields successive responses
+        # from the supplied list. After exhaustion, returns "".
+        class _StubClient:
+            def __init__(self, queue):
+                self.queue = list(queue)
+                self.calls = 0
+
+            def chat(self, _payload):
+                self.calls += 1
+                content = self.queue.pop(0) if self.queue else ""
+                return {"choices": [
+                    {"message": {"role": "assistant", "content": content}},
+                ]}
+        return _StubClient(responses)
+
+    def test_first_attempt_succeeds_no_retry(self):
+        import tempfile
+        from benchmarks.consultants import coder_bench
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Path(tmp)
+            (sandbox / "x.py").write_text("def f(): pass\n")
+            client = self._make_client(["SCORE: 4\nGood code."])
+            score, rationale = coder_bench._judge_trial_quality(
+                judge_chat_client=client, judge_model="kimi:test",
+                task="Write f", sandbox=sandbox, sandbox_path="x.py",
+            )
+            self.assertEqual(score, 4.0)
+            self.assertIn("Good code", rationale)
+            self.assertEqual(client.calls, 1)
+
+    def test_empty_then_success_retries_once(self):
+        import tempfile
+        from benchmarks.consultants import coder_bench
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Path(tmp)
+            (sandbox / "x.py").write_text("def f(): pass\n")
+            client = self._make_client(["", "SCORE: 5\nGreat."])
+            score, rationale = coder_bench._judge_trial_quality(
+                judge_chat_client=client, judge_model="kimi:test",
+                task="Write f", sandbox=sandbox, sandbox_path="x.py",
+            )
+            self.assertEqual(score, 5.0)
+            self.assertEqual(client.calls, 2)
+            self.assertIn("Great", rationale)
+
+    def test_empty_then_empty_returns_diagnostic(self):
+        import tempfile
+        from benchmarks.consultants import coder_bench
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Path(tmp)
+            (sandbox / "x.py").write_text("def f(): pass\n")
+            client = self._make_client(["", ""])
+            score, rationale = coder_bench._judge_trial_quality(
+                judge_chat_client=client, judge_model="kimi:test",
+                task="Write f", sandbox=sandbox, sandbox_path="x.py",
+            )
+            self.assertIsNone(score)
+            self.assertEqual(client.calls, 2)
+            self.assertIn("empty content twice", rationale)
+            self.assertIn("kimi:test", rationale)
+
+    def test_call_raises_returns_diagnostic(self):
+        import tempfile
+        from benchmarks.consultants import coder_bench
+
+        class _RaisingClient:
+            def chat(self, _payload):
+                raise RuntimeError("HTTP 500: cloud flap")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Path(tmp)
+            (sandbox / "x.py").write_text("def f(): pass\n")
+            score, rationale = coder_bench._judge_trial_quality(
+                judge_chat_client=_RaisingClient(),
+                judge_model="kimi:test",
+                task="Write f", sandbox=sandbox, sandbox_path="x.py",
+            )
+            self.assertIsNone(score)
+            self.assertIn("judge call raised", rationale)
+            self.assertIn("HTTP 500", rationale)
+
+
 # ============================================================== #
 # Trial JSON round-trip
 # ============================================================== #

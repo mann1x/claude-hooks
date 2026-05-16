@@ -154,6 +154,13 @@ def _judge_trial_quality(*, judge_chat_client, judge_model: str,
     - judge_chat_client is None (no judging configured)
     - the produced file doesn't exist
     - the judge response is unparseable
+    - the judge returns empty content (one retry, then give up)
+
+    Discriminating ``rationale`` tags help post-mortems tell the
+    failure modes apart (the 2026-05-16 M11b full run had a
+    ``(None, '')`` trial whose root cause was unrecoverable because
+    the rationale was empty — that observability gap is closed
+    here).
     """
     if judge_chat_client is None:
         return None, ""
@@ -165,23 +172,53 @@ def _judge_trial_quality(*, judge_chat_client, judge_model: str,
     except OSError as e:
         return None, f"could not read produced file: {e}"
     msgs = build_judge_messages(task, code)
-    try:
-        resp = judge_chat_client.chat({
-            "model": judge_model,
-            "messages": msgs,
-            "stream": False,
-        })
-    except Exception as e:
-        log.exception("judge call raised; treating as no-score")
-        return None, f"judge call raised: {e}"
-    # Tolerant content extraction.
-    text = ""
-    if isinstance(resp, dict):
+
+    def _call_once() -> str:
+        try:
+            resp = judge_chat_client.chat({
+                "model": judge_model,
+                "messages": msgs,
+                "stream": False,
+            })
+        except Exception as e:
+            log.exception("judge call raised; treating as no-score")
+            raise RuntimeError(f"judge call raised: {e}") from e
+        if not isinstance(resp, dict):
+            return ""
         choices = resp.get("choices") or []
-        if choices and isinstance(choices[0], dict):
-            msg = choices[0].get("message") or {}
-            text = msg.get("content") or ""
+        if not choices or not isinstance(choices[0], dict):
+            return ""
+        msg = choices[0].get("message") or {}
+        return msg.get("content") or ""
+
+    # First attempt.
+    try:
+        text = _call_once()
+    except RuntimeError as e:
+        return None, str(e)
+    # Retry once on empty content — cheap insurance against a
+    # transient judge silence (observed once-in-32 on the
+    # 2026-05-16 M11b full run, kimi judging kimi).
+    if not text.strip():
+        try:
+            text = _call_once()
+        except RuntimeError as e:
+            return None, f"judge empty then raised: {e}"
+        if not text.strip():
+            return None, (
+                f"judge returned empty content twice "
+                f"(model={judge_model})"
+            )
     score, rationale = parse_judge_response(text)
+    if score is None and not rationale:
+        # parse_judge_response returns ("", "") only when text was
+        # empty after strip — already handled above. So a non-None
+        # text that yields no score should always leave the first
+        # 200 chars in rationale; defend against drift anyway.
+        rationale = (
+            f"judge text unparseable "
+            f"(first 200 chars: {text.strip()[:200]!r})"
+        )
     return score, rationale
 
 

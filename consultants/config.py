@@ -34,6 +34,11 @@ try:
 except ImportError:  # pragma: no cover — only on 3.10
     import tomli as tomllib  # type: ignore[no-redef]
 
+# Imported here at module top to avoid the mid-file import smell.
+# ``coder_defaults`` is a sibling-package leaf with no back-edges
+# (it imports nothing from this module), so the cycle risk is nil.
+from .engine.coder_defaults import RECOMMENDED_CODER_MODEL
+
 
 # ----------------------- defaults ----------------------------------- #
 
@@ -181,15 +186,23 @@ DEFAULT_THINK_BY_ROLE: dict[str, Any] = {
 }
 
 
-# M6: per-role model defaults. Every role except tool_executor uses
-# the global DEFAULT_MODEL — that preserves v1 behavior for
-# planner/researcher/critic/synthesizer (they keep tracking the
-# user-set DEFAULT_MODEL across upgrades). tool_executor uniquely
-# defaults to ``gemma4:31b-cloud`` because the user's observation +
-# the M11c bench will confirm gemma4 leads frontier models on
-# tool-calling fluency on this proxy.
+# M6 / M10: per-role model defaults. Every role except
+# tool_executor and coder uses the global DEFAULT_MODEL — that
+# preserves v1 behavior for planner/researcher/critic/synthesizer
+# (they keep tracking the user-set DEFAULT_MODEL across upgrades).
+# tool_executor and coder default to model-specific picks grounded
+# in the M11b/M11c skill-eval bench results.
+#
+# - ``tool_executor`` → ``gemma4:31b-cloud`` per the user's
+#   observation + the M11c bench (pending).
+# - ``coder`` → ``glm-5.1:cloud`` per the 2026-05-16 M11b run
+#   (suite v1.0 rubric winner: pass=100%, avg_quality=4.88,
+#   median_tokens=1841, median_wall=4.9 s). The constant lives in
+#   ``consultants/engine/coder_defaults.py`` and is sourced from
+#   the baselines ledger; imported at module top.
 DEFAULT_MODEL_BY_ROLE: dict[str, str] = {
     "tool_executor": "gemma4:31b-cloud",
+    "coder": RECOMMENDED_CODER_MODEL,
 }
 
 

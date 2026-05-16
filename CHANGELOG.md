@@ -16,6 +16,83 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — M11b coder skill-eval first live baseline (2026-05-16)
+
+The Consultancy Skill-Eval Protocol's coder sub-protocol now has
+its first **recorded baseline**. The M11b harness shipped in the
+previous commit (`4d2da90`) was fired against the live
+`192.168.178.2:11433` Ollama Pro proxy — once as an 8-trial smoke
+to validate the pipeline end-to-end, then again as a 32-trial
+full run to crown a default model. Headline: **all four candidate
+models qualified the rubric**, `glm-5.1:cloud` wins on
+`avg_quality` (4.88) and the tokens tie-breaker (1841 median).
+
+**`docs/consultants-skill-eval-baselines.md`** — first four rows
+landed in the coder table (one per candidate). The `Recommended
+default` block names `glm-5.1:cloud` and links to the
+results-dir + the constant that holds it.
+
+**`consultants/engine/coder_defaults.py`** (NEW): single-file
+home for the recommended coder model + provenance (the run date,
+the suite version, the suite hash prefix, the qualifying-models
+list at decision time). `consultants/config.py` imports
+`RECOMMENDED_CODER_MODEL` and seeds `DEFAULT_MODEL_BY_ROLE`
+with it — so the coder role inherits the evidence-based pick
+when its TOML doesn't override `[role.coder].model`.
+
+**`benchmarks/consultants/results/2026-05-16/coder/`** — full
+artifact dump for the run:
+- `quota.md` — pre-smoke / pre-full / post-full Ollama Pro usage
+  readings (session 0% → 1.6%, weekly 4% → 4.3%).
+- `smoke-trials.jsonl` + `smoke-metadata.json` + `smoke-report.md` +
+  `smoke-trials/` — 8 trivial-tier trials, 4 models × 2 questions
+  (2 trials failed against the **wrong** `qwen3-next:cloud` name
+  before the user-confirmed `qwen3-coder-next:cloud` was wired).
+- `trials.jsonl` + `metadata.json` + `report.md` + `trials/` —
+  full 32-trial run, all PASS, all 4 models qualifying.
+- `full-run.log` + `smoke-runlog.log` — captured stdout for both
+  passes.
+- `*.broken-2026-05-16-1556` — the pre-fix smoke artifacts where
+  every coder trial errored on the tool-executor signature bug,
+  kept for the post-mortem record.
+
+**Post-mortem hardening** (`benchmarks/consultants/coder_bench.py`
+`_judge_trial_quality`): trial 29 (`trivial-02-strlen ×
+kimi-k2.6:cloud`) recorded `quality_score=None` with empty
+`quality_rationale` — the kimi judge returned empty content and
+the harness coerced that to the same `(None, "")` shape as
+"parse failure" / "call raised". Three changes close the
+observability gap:
+
+1. Empty-content path now retries the judge call once (cheap
+   insurance, mirrors the consultants stall-retry pattern at
+   1-call scope).
+2. Every failure mode writes a *discriminating* rationale string
+   (`"judge returned empty content twice (model=…)"` /
+   `"judge call raised: …"` / `"judge text unparseable (first 200
+   chars: …)"`) so future trials.jsonl entries fingerprint the
+   exact failure without needing the raw response preserved.
+3. `tests/test_consultants_v2_benchmarks_smoke.py` gains
+   `TestJudgeTrialQualityRetry` (4 cases pinning happy path,
+   retry-then-succeed, retry-then-give-up, and call-raised).
+
+**Signature fix** (`consultants/engine/coder.py`
+`make_sandbox_tool_executor`): the 2026-05-16 smoke caught a
+2-vs-3-positional-arg mismatch between the sandboxed executor
+and `claude_hooks/agent_loop/runner.py:147`'s actual call shape.
+`_exec(name, args, cwd='', **kw)` now matches the runner; the
+dry-run stub in `benchmarks/consultants/harness.py
+make_dry_run_loop_runner` also calls with 3 positional args so
+future signature drift is caught at smoke time, not after a full
+cloud run. Three new regression tests pin the contract.
+
+**Tests**: 3322 main-env pass (+7 over the previous M11b
+baseline). Two `tests/test_consultants_config.py` cases were
+updated to assert the evidence-based default (`glm-5.1:cloud`
+for coder) instead of inheriting global `DEFAULT_MODEL`.
+
+---
+
 ### Added — Consultancy Skill-Eval Protocol + coder bench (M11b)
 
 The M11b coder skill-eval is the **first** sub-protocol of a new

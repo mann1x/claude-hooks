@@ -58,12 +58,17 @@ class TestDefaults:
         cfg = cc.ConsultantsConfig()
         assert cfg.roles["tool_executor"].model == "gemma4:31b-cloud"
 
-    def test_coder_default_model_is_global_default(self):
-        # M10 ships the coder role infrastructure without picking a
-        # default model — the M11b bench will fill in the choice. So
-        # coder inherits DEFAULT_MODEL like every non-special role.
+    def test_coder_default_model_is_rubric_winner(self):
+        # M11b 2026-05-16 baseline crowned ``glm-5.1:cloud`` as
+        # the coder rubric winner (pass=100%, avg_quality=4.88,
+        # median_tokens=1841). The constant lives in
+        # consultants.engine.coder_defaults so future re-baselines
+        # are a single-file edit + a CHANGELOG / baselines-ledger
+        # row. See docs/consultants-skill-eval-baselines.md.
+        from consultants.engine.coder_defaults import RECOMMENDED_CODER_MODEL
         cfg = cc.ConsultantsConfig()
-        assert cfg.roles["coder"].model == cc.DEFAULT_MODEL
+        assert cfg.roles["coder"].model == RECOMMENDED_CODER_MODEL
+        assert RECOMMENDED_CODER_MODEL == "glm-5.1:cloud"
 
     def test_coder_limits_defaults(self):
         # M10: 50 KB per file, 1 MB total, 16 files max — the
@@ -74,21 +79,23 @@ class TestDefaults:
         assert cfg.coder_limits.max_files == 16
 
     def test_load_with_no_files_returns_defaults(self, isolated_home):
+        from consultants.engine.coder_defaults import RECOMMENDED_CODER_MODEL
         cfg = cc.load_config()
         assert cfg.topology == cc.DEFAULT_TOPOLOGY
         assert cfg.effort == cc.DEFAULT_EFFORT
         assert cfg.service.mode == cc.DEFAULT_SERVICE_MODE
         for r in cc.ROLES:
-            # tool_executor is the one role that ships disabled +
-            # carries a different primary; every other role (incl.
-            # coder, which is also disabled-by-default but uses the
-            # global DEFAULT_MODEL) uses DEFAULT_MODEL.
+            # tool_executor and coder both ship disabled-by-default
+            # AND carry role-specific model picks grounded in the
+            # skill-eval bench (M11c pending for tool_executor;
+            # M11b 2026-05-16 baseline for coder). Every other role
+            # tracks the global DEFAULT_MODEL.
             if r == "tool_executor":
                 assert cfg.roles[r].enabled is False
                 assert cfg.roles[r].model == "gemma4:31b-cloud"
             elif r == "coder":
                 assert cfg.roles[r].enabled is False
-                assert cfg.roles[r].model == cc.DEFAULT_MODEL
+                assert cfg.roles[r].model == RECOMMENDED_CODER_MODEL
             else:
                 assert cfg.roles[r].enabled is True
                 assert cfg.roles[r].model == cc.DEFAULT_MODEL
