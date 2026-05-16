@@ -335,13 +335,29 @@ def _run_one_trial(*,
     # importable" — which is the intended consequence.
     code_file = produced_dir / question.sandbox_path
     if code_file.is_file():
-        trial.compiles = True
-        try:
-            import py_compile
-            py_compile.compile(str(code_file), doraise=True)
-        except Exception as e:
-            trial.compiles = False
-            trial.error = f"compile failed: {e}"
+        # Pre-compile-style parse check. Python: py_compile catches
+        # ``SyntaxError`` before pytest runs (fast-fail). Non-
+        # Python: skip — the oracle's ``compile_and_run`` invokes
+        # the real toolchain (rustc / gcc / g++ / go build /
+        # dotnet) which produces an authoritative diagnostic.
+        # Determined by sandbox_path's extension, not by language
+        # name, so a future suite using ``.cs`` / ``.rs`` / ``.go``
+        # / ``.c`` / ``.cpp`` files routes correctly.
+        suffix = code_file.suffix.lower()
+        if suffix == ".py":
+            trial.compiles = True
+            try:
+                import py_compile
+                py_compile.compile(str(code_file), doraise=True)
+            except Exception as e:
+                trial.compiles = False
+                trial.error = f"compile failed: {e}"
+        else:
+            # Non-Python: let the oracle's compile-and-run be the
+            # source of truth. Set compiles=True so the oracle
+            # runs; oracle failure → trial.passes_tests=False with
+            # the compiler stderr captured.
+            trial.compiles = True
         trial.code_lines = count_code_lines(code_file)
         trial.complexity = measure_complexity(code_file)
     else:
