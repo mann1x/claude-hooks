@@ -16,6 +16,97 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — `/consultants` v2 streaming chat + researcher stall wire-up (M3b)
+
+Closes M3 — real LLM calls now route through the stall watchdog
+when `runtime_control` is on state. Three concrete pieces:
+
+`claude_hooks/get_advice/chat_client.py` — `ChatClient.chat_streamed`:
+
+- Streaming counterpart to `chat()`. POSTs `/api/chat` with
+  `stream=true`, reads NDJSON line by line, calls `on_token(delta)`
+  per content chunk, returns the same OpenAI-shape dict `chat()`
+  would have returned (`{"choices": [...], "usage": {...}}`).
+- `cancel_check` callable polled between lines for cooperative
+  abort; raises `CancelledByOrchestrator` when the stall watchdog
+  asks the call to stop.
+- Same retry policy as `chat()`: transient 5xx / retryable
+  4xx-bodies / `URLError`s restart the stream from scratch with
+  exponential backoff. Think-rejection 400s still trigger the
+  graceful-degrade path.
+- Tool-call deltas accumulate the same way `_from_ollama` already
+  normalizes them, so a model emitting tool calls mid-stream OR on
+  the final `done=true` record both produce identical agent-loop
+  dict shapes.
+
+`consultants/engine/stall_chat.py` — adapter factories:
+
+- `make_stall_protected_chat_fn(chat_streamed, *, stall_threshold_s,
+  hard_cap_s, retries, ...) -> chat_fn` — wraps a `chat_streamed`
+  method in a `StallMonitor` so each invocation gets a fresh
+  `StallController`, watchdog, and retry budget. Returns a sync
+  `chat(payload) -> dict` callable the agent loop runner consumes
+  unchanged.
+- `make_hard_cap_only_chat_fn(chat, *, hard_cap_s) -> chat_fn` —
+  fallback for clients without streaming. Worker thread + absolute
+  hard-cap timer. No stall detection (no token visibility) but
+  the wall-clock ceiling still fires. Good enough for local
+  llamafile where stalls are rare.
+- `stall_protected_chat_fn_for(chat_client, ...)` — dispatcher.
+  Picks the streaming protector when `chat_streamed` is available,
+  hard-cap-only otherwise. Caller passes live thresholds derived
+  from `RuntimeControl` so mid-flight mutation rebuilds the
+  protector at the next round.
+
+`consultants/engine/council.py` — `researcher_node` wire-up:
+
+- When `state["runtime_control"]` is set AND the chat_client
+  exposes `chat_streamed`, the bound chat callable handed to the
+  loop runner is the protected wrapper. The cloud
+  gemini-3-flash stall pathology (csl-2026-05-15-1439-4ff0: two
+  lanes that held 31min / 27min single-call wall time with no
+  useful output) is now caught at `stall_threshold_s` and retried
+  once before tombstoning.
+- When `runtime_control` is absent (v1 legacy sessions), the loop
+  runner receives `chat_client.chat` unwrapped — v1 behavior
+  bit-for-bit. The 462 existing consultants tests in the
+  consultants env stay green without modification.
+- A stall-event sink wired to `recorder.record_event` lets every
+  retry / hard-cap fire land in the events table for post-mortem
+  visibility. Best-effort — a sink failure never breaks the
+  researcher.
+
+**Tests:** 28 new tests across three files; all 268 M3-adjacent
+tests (M3a + M3b + the existing consultants suite) green:
+
+- `tests/test_chat_streamed.py` (10 tests) — NDJSON happy path
+  (assembly, per-token callbacks, tool-call passthrough,
+  malformed-line tolerance, blank-line ignore), cooperative
+  cancel raises `CancelledByOrchestrator`, retry policy
+  (503-then-success, exhausted-after-max, 4xx-non-retryable
+  fails-fast), shape-parity with `chat()` for the same canonical
+  Ollama response. Uses `urllib.request.urlopen` patching with a
+  `_FakeResponse` that yields lines from a list — fast (~40ms
+  total) and no network dependency.
+- `tests/test_consultants_v2_stall_chat.py` (13 tests) — both
+  factories (happy path, stall+retry, retry-exhausted, hard-cap-
+  fires, error-propagation, event-sink-feedback) and the
+  dispatcher (streaming client → streaming protector,
+  non-streaming → hard-cap-only, hard-cap actually fires on slow
+  inner call).
+- `tests/test_consultants_v2_researcher_stall_wire.py` (5 tests)
+  — researcher_node integration parity (no runtime_control →
+  plain `chat_fn`; legacy client → also plain even with
+  runtime_control; streaming client + runtime_control → wrapped;
+  wrapped chat_fn actually returns sensible response when
+  invoked through the loop runner; `StallRetryExhausted` inside
+  the loop runner tombstones the lane via the existing exception
+  handler).
+
+Full-suite count: 2932 passing on the main `claude-hooks` env;
+the 47 skips are langgraph-dependent tests that pass on the
+`claude-hooks-consultants` env. Zero regressions across both.
+
 ### Added — `/consultants` v2 stall-detection + soft time-target prompts (M3 building blocks)
 
 Two new pure-Python modules under `consultants/engine/` deliver the

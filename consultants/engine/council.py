@@ -871,6 +871,60 @@ def researcher_node(state: dict, *,
         on_iter_cb = _on_iter
         on_tool_cb = _on_tool
 
+    # M3 (v2): when state["runtime_control"] is wired through, route
+    # each iteration's chat call through a stall monitor. The
+    # researcher is the first role to consume this — the cloud
+    # gemini-3-flash stall pathology in csl-2026-05-15-1439-4ff0
+    # showed up on a researcher lane. Critic / synthesizer can
+    # follow in a later milestone if their failure mode shows up
+    # in the wild.
+    #
+    # When runtime_control isn't on state (v1 legacy path), we pass
+    # ``chat_client.chat`` unwrapped — preserves v1 behavior bit-for-bit.
+    chat_fn = chat_client.chat
+    rc = state.get("runtime_control") or {}
+    if rc and hasattr(chat_client, "chat_streamed"):
+        try:
+            # Lazy import — keeps council.py importable in envs
+            # where the consultants package partial-installs (the
+            # main claude-hooks test env runs without langgraph,
+            # but stall_chat is pure-Python and imports cleanly).
+            from consultants.engine.stall_chat import (
+                stall_protected_chat_fn_for,
+            )
+            stall_event_sink = None
+            if recorder is not None and hasattr(
+                    recorder, "record_event"):
+                def stall_event_sink(  # noqa: E306
+                        ev: dict, _round=this_round,
+                        _lane=lane_idx) -> None:
+                    try:
+                        recorder.record_event(
+                            kind=ev.get("kind") or "stall.event",
+                            role="researcher", round=_round,
+                            lane_idx=_lane, payload=ev,
+                        )
+                    except Exception:  # pragma: no cover
+                        log.exception(
+                            "recorder.record_event raised; ignored")
+            chat_fn = stall_protected_chat_fn_for(
+                chat_client,
+                stall_threshold_s=float(
+                    rc.get("stall_threshold_s") or 300.0),
+                hard_cap_s=float(
+                    rc.get("per_lane_hard_s") or 3600.0),
+                retries=int(rc.get("stall_retries") or 1),
+                on_event=stall_event_sink,
+            )
+        except Exception:  # pragma: no cover
+            # Never break the researcher because of stall-wrapper
+            # plumbing — fall back to the unwrapped chat fn.
+            log.exception(
+                "researcher: stall_protected_chat_fn_for failed; "
+                "falling back to chat_client.chat unwrapped"
+            )
+            chat_fn = chat_client.chat
+
     t0 = time.monotonic()
     try:
         # Tests pass a stub loop_runner; inspect its signature so we
@@ -879,7 +933,7 @@ def researcher_node(state: dict, *,
         loop_kwargs = dict(
             config=cfg,
             tool_specs=tool_specs,
-            chat_fn=chat_client.chat,
+            chat_fn=chat_fn,
             tool_executor=tool_executor,
         )
         if on_iter_cb is not None or on_tool_cb is not None:
