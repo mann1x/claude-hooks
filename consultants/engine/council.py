@@ -899,13 +899,32 @@ def researcher_node(state: dict, *,
                     think: Any = True,
                     loop_runner=None,
                     recorder=None,
-                    prior_messages: Optional[list[dict]] = None) -> dict:
+                    prior_messages: Optional[list[dict]] = None,
+                    tool_executor_enabled: bool = False) -> dict:
     """Researcher uses agent_loop.runner.run_loop for a tool sub-loop.
 
     ``loop_runner`` defaults to ``claude_hooks.agent_loop.runner.run_loop``
     but is injectable for tests. We import lazily to keep the module
     importable in environments where claude_hooks isn't on the path
     (although in practice it always is — this is just defensive).
+
+    M6: when ``tool_executor_enabled`` is True (set by the graph
+    wrapper when the tool_executor role is in deps.enabled_roles),
+    the researcher operates in a two-phase mode:
+
+    - **PLAN mode** (first entry of a research cycle): emit a
+      JSON ``tool_plan`` block instead of running tools inline.
+      Returns ``{"tool_plan": [items], "awaiting_tool_results":
+      True}``; the graph fans the items out to tool_executor
+      Send lanes.
+    - **REPORT mode** (re-entry after lanes complete): consume
+      ``state.tool_results`` filtered to the current round, weave
+      them into the standard research report, clear the awaiting
+      flag. No inline tool loop in either mode — the executor
+      lanes are the only tool callers.
+
+    ``tool_executor_enabled=False`` (default) preserves v1
+    behavior bit-for-bit: full inline agent_loop subloop.
     """
     if loop_runner is None:
         from claude_hooks.agent_loop.runner import run_loop  # lazy
@@ -917,6 +936,10 @@ def researcher_node(state: dict, *,
     except Exception:  # pragma: no cover — only if claude_hooks missing
         LoopConfig = None  # type: ignore[assignment]
 
+    # Single timestamp covers both the M6 PLAN/REPORT branch and
+    # the v1 inline-agent-loop branch — each branch's exit emits
+    # its own duration delta from this anchor.
+    t0 = time.monotonic()
     rounds_used = int(state.get("research_rounds_used") or 0)
     this_round = rounds_used + 1
     prior_rounds: list[str] = list(state.get("research") or [])
@@ -993,6 +1016,163 @@ def researcher_node(state: dict, *,
                 grounding_msgs,
                 additional_context=extra_ctx_res,
             )
+    # ---------- M6: tool_executor branch ----------------------- #
+    # When the tool_executor role is in the enabled set, the
+    # researcher does NOT run an inline tool subloop. Instead it
+    # alternates between two single-shot LLM calls:
+    #
+    #   PLAN MODE  — first entry of this research cycle.
+    #     Append the PLAN_MODE_BLOCK to the user message,
+    #     call chat once (no agent_loop, no tools_available),
+    #     parse the JSON ``tool_plan`` from the response, return
+    #     {"tool_plan": [items], "awaiting_tool_results": True}.
+    #     The graph fans out one tool_executor Send per item.
+    #
+    #   REPORT MODE — re-entry after lanes complete.
+    #     Append the PRIOR TOOL RESULTS block (rendered from
+    #     ``tool_results_for_round(state, this_round)``) to the
+    #     user message, call chat once, return the v1 shape
+    #     {"research": [text], "awaiting_tool_results": False,
+    #      "research_rounds_used": 1}.
+    #
+    # The mode is decided by whether tool_results exist for
+    # ``this_round``: if any do, the lanes already ran for this
+    # round and we're consuming their output (REPORT); otherwise
+    # we're emitting the plan (PLAN). The graph re-enters the
+    # researcher after the Send-fanout completes; LangGraph's
+    # state-merge ensures the new tool_results are visible here.
+    if tool_executor_enabled:
+        from consultants.engine.state_v2 import (
+            tool_results_for_round,
+        )
+        from consultants.engine.tool_executor import (
+            RESEARCHER_PLAN_MODE_BLOCK,
+            build_tool_plan_user_appendix,
+            parse_tool_plan,
+        )
+
+        prior_for_round = tool_results_for_round(state, this_round)
+        report_mode = bool(prior_for_round)
+        # Append the mode-specific appendix to the user message.
+        # Both append to msgs[-1] (the v1 user message) so the
+        # researcher's existing context (plan, prior rounds,
+        # additional_context) stays intact.
+        appendix = (
+            build_tool_plan_user_appendix(prior_for_round)
+            if report_mode else RESEARCHER_PLAN_MODE_BLOCK
+        )
+        msgs = list(msgs)
+        msgs[-1] = dict(msgs[-1])
+        msgs[-1]["content"] = msgs[-1]["content"] + (
+            "\n\n" + appendix if appendix and report_mode else appendix
+        )
+
+        try:
+            text, pt, ct = _single_shot(
+                chat_client, model, msgs, think=think,
+                recorder=recorder, role="researcher",
+                round=this_round, lane_idx=lane_idx,
+            )
+        except Exception as e:
+            log.exception("researcher_node (M6 mode) failed: %s", e)
+            dt_ms = int((time.monotonic() - t0) * 1000)
+            _emit_finished(
+                "researcher", round=this_round, lane_idx=lane_idx,
+                duration_ms=dt_ms, ok=False,
+                error=f"{type(e).__name__}: {e}",
+            )
+            tomb_text = f"(researcher lane failed: {e})"
+            return {
+                "error": f"researcher failed: {e}",
+                "_role_failed": "researcher",
+                "research": [tomb_text] if not report_mode else [],
+                "awaiting_tool_results": False,
+                "turns": [RoleTurn(
+                    role="researcher", round=this_round,
+                    content=tomb_text,
+                    prompt_tokens=0, completion_tokens=0,
+                    duration_seconds=0.0,
+                )],
+            }
+        dt = time.monotonic() - t0
+        if report_mode:
+            # Tools already ran — write the report as the v1 shape.
+            turn = RoleTurn(
+                role="researcher", round=this_round, content=text,
+                prompt_tokens=pt, completion_tokens=ct,
+                duration_seconds=dt,
+            )
+            if recorder is not None:
+                try:
+                    recorder.record_node(
+                        role="researcher", kind="node_exit",
+                        round=this_round, lane_idx=lane_idx,
+                        duration_ms=int(dt * 1000),
+                    )
+                except Exception:  # pragma: no cover
+                    log.exception("recorder.record_node raised")
+            _emit_finished(
+                "researcher", round=this_round, lane_idx=lane_idx,
+                duration_ms=int(dt * 1000), ok=True,
+            )
+            return {
+                "research": [text],
+                "research_rounds_used": 1,
+                "awaiting_tool_results": False,
+                "turns": [turn],
+                "total_prompt_tokens": pt,
+                "total_completion_tokens": ct,
+            }
+        # PLAN MODE — parse the tool_plan JSON. An empty parse
+        # is a soft failure: the dispatcher's conditional edge
+        # falls through to the standard continuation rather than
+        # looping forever on an empty Send list.
+        items = parse_tool_plan(text, parent_round=this_round)
+        turn = RoleTurn(
+            role="researcher", round=this_round, content=text,
+            prompt_tokens=pt, completion_tokens=ct,
+            duration_seconds=dt,
+        )
+        if recorder is not None:
+            try:
+                recorder.record_node(
+                    role="researcher", kind="node_exit",
+                    round=this_round, lane_idx=lane_idx,
+                    duration_ms=int(dt * 1000),
+                )
+            except Exception:  # pragma: no cover
+                log.exception("recorder.record_node raised")
+        _emit_finished(
+            "researcher", round=this_round, lane_idx=lane_idx,
+            duration_ms=int(dt * 1000), ok=True,
+        )
+        if not items:
+            # Empty plan — degrade to the v1 inline-report shape:
+            # treat the raw researcher text as the research report
+            # so the council still produces an answer. The graph's
+            # awaiting_tool_results=False flag ensures the next
+            # edge skips the tool_executor fanout.
+            log.warning(
+                "researcher M6 PLAN-mode returned empty/unparseable "
+                "tool_plan; falling back to inline research from raw text"
+            )
+            return {
+                "research": [text],
+                "research_rounds_used": 1,
+                "awaiting_tool_results": False,
+                "turns": [turn],
+                "total_prompt_tokens": pt,
+                "total_completion_tokens": ct,
+            }
+        return {
+            "tool_plan": items,
+            "awaiting_tool_results": True,
+            "turns": [turn],
+            "total_prompt_tokens": pt,
+            "total_completion_tokens": ct,
+        }
+    # ---------- end M6 branch ------------------------------------ #
+
     caps = caps_for(state.get("effort") or "medium")
 
     payload = {
@@ -1090,6 +1270,10 @@ def researcher_node(state: dict, *,
             )
             chat_fn = chat_client.chat
 
+    # Re-anchor t0 just before the inline agent_loop so its duration
+    # is measured from when the loop actually starts (not from the
+    # node entry — M6 branch hoists the anchor earlier for its own
+    # exit paths, so legacy timing semantics stay intact here).
     t0 = time.monotonic()
     try:
         # Tests pass a stub loop_runner; inspect its signature so we

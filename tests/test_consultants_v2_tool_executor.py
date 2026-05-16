@@ -32,8 +32,11 @@ from consultants.engine.state_v2 import (
     tool_results_for_round,
 )
 from consultants.engine.tool_executor import (
+    RESEARCHER_PLAN_MODE_BLOCK,
     TOOL_EXECUTOR_SYSTEM,
     build_tool_executor_messages,
+    build_tool_plan_user_appendix,
+    parse_tool_plan,
     tool_executor_node,
     _extract_final_content,
     _summarize_tools,
@@ -415,6 +418,159 @@ class TestChannelReducer(unittest.TestCase):
         l3 = [ToolResult(intent="c")]
         merged = operator.add(operator.add(l1, l2), l3)
         self.assertEqual([r.intent for r in merged], ["a", "b", "c"])
+
+
+# ============================================================== #
+# M6b — parse_tool_plan
+# ============================================================== #
+
+class TestParseToolPlan(unittest.TestCase):
+
+    def test_empty_input_returns_empty(self):
+        self.assertEqual(parse_tool_plan(""), [])
+        self.assertEqual(parse_tool_plan(None), [])  # type: ignore
+        self.assertEqual(parse_tool_plan("   \n  "), [])
+
+    def test_fenced_json_with_tool_plan_key(self):
+        text = (
+            'Plan:\n```json\n{"tool_plan": ['
+            '{"intent": "find login()", "why": "audit"},'
+            '{"intent": "check sessions"}'
+            ']}\n```'
+        )
+        items = parse_tool_plan(text, parent_round=3)
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0].intent, "find login()")
+        self.assertEqual(items[0].why, "audit")
+        self.assertEqual(items[0].parent_round, 3)
+        self.assertEqual(items[0].lane_idx, 0)
+        self.assertEqual(items[1].intent, "check sessions")
+        self.assertEqual(items[1].lane_idx, 1)
+
+    def test_fenced_json_without_json_tag(self):
+        # Some models fence with bare ``` not ```json.
+        text = '```\n{"tool_plan": [{"intent": "x"}]}\n```'
+        items = parse_tool_plan(text)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].intent, "x")
+
+    def test_bare_json_object(self):
+        text = '{"tool_plan": [{"intent": "bare"}]}'
+        items = parse_tool_plan(text)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].intent, "bare")
+
+    def test_bare_json_array(self):
+        # Sometimes the model omits the wrapper and emits the list.
+        text = '[{"intent": "first"}, {"intent": "second"}]'
+        items = parse_tool_plan(text)
+        self.assertEqual(len(items), 2)
+        self.assertEqual([i.intent for i in items], ["first", "second"])
+
+    def test_unparseable_text_returns_empty(self):
+        # Non-JSON narrative — the M6 PLAN-mode fallback path
+        # depends on this returning empty.
+        self.assertEqual(
+            parse_tool_plan("Just a research summary, no plan."),
+            [],
+        )
+
+    def test_malformed_json_returns_empty(self):
+        self.assertEqual(parse_tool_plan('{"tool_plan": [malformed'), [])
+
+    def test_items_missing_intent_skipped(self):
+        text = '{"tool_plan": [{"why": "no intent"}, {"intent": "ok"}]}'
+        items = parse_tool_plan(text)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].intent, "ok")
+
+    def test_suggested_tools_optional(self):
+        text = ('{"tool_plan": [{"intent": "x", '
+                '"suggested_tools": ["grep", "read_file"]}]}')
+        items = parse_tool_plan(text)
+        self.assertEqual(items[0].suggested_tools,
+                         ["grep", "read_file"])
+
+    def test_suggested_tools_filters_non_strings(self):
+        text = ('{"tool_plan": [{"intent": "x", '
+                '"suggested_tools": ["grep", 42, null, "glob"]}]}')
+        items = parse_tool_plan(text)
+        self.assertEqual(items[0].suggested_tools, ["grep", "glob"])
+
+    def test_empty_intent_skipped(self):
+        text = '{"tool_plan": [{"intent": "   "}, {"intent": "real"}]}'
+        items = parse_tool_plan(text)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].intent, "real")
+
+    def test_multiple_fences_prefers_first_with_valid_plan(self):
+        text = (
+            'first: ```{"foo": "bar"}```\n'
+            'second: ```json\n{"tool_plan": [{"intent": "use this"}]}\n```'
+        )
+        items = parse_tool_plan(text)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].intent, "use this")
+
+
+# ============================================================== #
+# M6b — PLAN-mode prompt fragment + REPORT-mode appendix
+# ============================================================== #
+
+class TestPlanModeBlock(unittest.TestCase):
+
+    def test_contains_required_anchors(self):
+        # The PLAN-mode block must declare DO-NOT-CALL-TOOLS,
+        # name the output shape (JSON tool_plan), and bound the
+        # item count.
+        b = RESEARCHER_PLAN_MODE_BLOCK
+        self.assertIn("DO NOT CALL TOOLS", b)
+        self.assertIn("tool_plan", b)
+        self.assertIn("```json", b)
+        self.assertIn("1-6 items", b)
+
+
+class TestBuildToolPlanUserAppendix(unittest.TestCase):
+
+    def test_empty_returns_empty_string(self):
+        self.assertEqual(build_tool_plan_user_appendix([]), "")
+
+    def test_renders_single_result(self):
+        r = ToolResult(
+            intent="find login()", content="auth.py:42 has it",
+            transcript_summary="read_file ×2",
+        )
+        out = build_tool_plan_user_appendix([r])
+        self.assertIn("PRIOR TOOL RESULTS", out)
+        self.assertIn("find login()", out)
+        self.assertIn("auth.py:42 has it", out)
+        self.assertIn("read_file ×2", out)
+
+    def test_renders_tombstone_compactly(self):
+        r = ToolResult(
+            intent="x", content="",
+            error="RuntimeError: upstream down",
+        )
+        out = build_tool_plan_user_appendix([r])
+        self.assertIn("FAILED", out)
+        self.assertIn("upstream down", out)
+
+    def test_truncates_long_content(self):
+        big = "Z" * 3000
+        r = ToolResult(intent="x", content=big)
+        out = build_tool_plan_user_appendix([r])
+        self.assertIn("truncated", out)
+        # Content body is capped — total length is bounded.
+        self.assertLess(len(out), 3000)
+
+    def test_multiple_results_numbered(self):
+        a = ToolResult(intent="a", content="found A")
+        b = ToolResult(intent="b", content="found B")
+        out = build_tool_plan_user_appendix([a, b])
+        # Items numbered 1, 2 — order preserved.
+        idx1 = out.index("1.")
+        idx2 = out.index("2.")
+        self.assertLess(idx1, idx2)
 
 
 if __name__ == "__main__":

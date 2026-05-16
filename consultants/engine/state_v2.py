@@ -316,6 +316,13 @@ class CouncilStateV2(TypedDict, total=False):
     # prompt renders unconsumed results (filtered by parent_round)
     # so it can reason over the evidence without re-running tools.
     tool_results: Annotated[list[ToolResult], operator.add]
+    # ``awaiting_tool_results`` flips True after the researcher
+    # emits a plan in PLAN MODE; the graph's route_after_researcher
+    # reads it to decide between tool_executor fanout vs the
+    # critic/synthesizer continuation. Cleared back to False by
+    # the researcher's REPORT MODE return so subsequent rounds
+    # don't loop forever. Non-additive (last-writer-wins).
+    awaiting_tool_results: Optional[bool]
 
 
 # ---------- public helpers --------------------------------------- #

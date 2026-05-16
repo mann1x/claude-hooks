@@ -78,6 +78,58 @@ class CouncilState(TypedDict, total=False):
     # on the single-researcher path used by critic re-routes.
     plan_item: Optional[str]
     lane_idx: Optional[int]
+    model_override: Optional[str]
+    # M6: per-lane Send-injected payload for the tool_executor node.
+    # Carries exactly one ToolPlanItem the lane will execute. The
+    # quoted forward-ref keeps the v1 schema importable without
+    # eager-importing state_v2 at module load.
+    tool_plan_item: Optional["ToolPlanItem"]
+
+    # ---- v2 channels (M5, M6) ----
+    # M5: append-only injected context, hash-deduped by reducer.
+    additional_context: Annotated[list["Doc"], "append_doc"]
+    # M6: append-only across re-routes / parallel researcher lanes.
+    tool_plan: Annotated[list["ToolPlanItem"], operator.add]
+    # M6: append-only across parallel tool_executor Send lanes.
+    tool_results: Annotated[list["ToolResult"], operator.add]
+    # M6: non-additive flag flipped True after PLAN mode and back to
+    # False after REPORT mode. Read by route_after_researcher.
+    awaiting_tool_results: Optional[bool]
+
+
+# M5/M6: lazily attach the real reducer callables to the
+# ``Annotated`` metadata. TypedDict class-body string forward refs
+# are evaluated by ``get_type_hints`` at StateGraph construction
+# time, but they can't see callable objects defined in another
+# module. So we patch the Annotated metadata in place at import
+# time once state_v2 is loaded — gives LangGraph the actual
+# reducer function it needs.
+
+def _wire_v2_reducers():
+    """Resolve the string forward-refs in CouncilState's v2
+    channel annotations to the actual callables from state_v2.
+
+    Called at module import time. Idempotent — re-running is a
+    no-op because we replace strings with callables only when
+    they're still strings.
+    """
+    try:
+        from consultants.engine.state_v2 import (
+            Doc, ToolPlanItem, ToolResult, append_doc,
+        )
+    except ImportError:  # pragma: no cover
+        return
+    hints = CouncilState.__annotations__
+    # ``additional_context``: replace "append_doc" placeholder with
+    # the real reducer + the Doc type.
+    from typing import Annotated as _Ann
+    hints["additional_context"] = _Ann[list[Doc], append_doc]
+    hints["tool_plan"] = _Ann[list[ToolPlanItem], operator.add]
+    hints["tool_results"] = _Ann[list[ToolResult], operator.add]
+    hints["tool_plan_item"] = Optional[ToolPlanItem]
+
+
+_wire_v2_reducers()
 
 log = logging.getLogger("consultants.engine.graph")
 
@@ -180,6 +232,13 @@ def _wrap_planner(deps: GraphDeps):
 
 
 def _wrap_researcher(deps: GraphDeps):
+    # M6: when the tool_executor role is enabled in this build, flip
+    # the researcher into PLAN/REPORT mode (no inline tool subloop —
+    # the executor lanes are the only tool callers). Closure captures
+    # the flag at compile time so the per-invocation overhead is one
+    # boolean read.
+    tool_exec_on = "tool_executor" in deps.enabled_roles
+
     def _node(state: dict) -> dict:
         return council.researcher_node(
             state,
@@ -192,6 +251,7 @@ def _wrap_researcher(deps: GraphDeps):
             think=_think_for(deps, "researcher"),
             recorder=deps.recorder,
             prior_messages=deps.prior_messages_by_role.get("researcher"),
+            tool_executor_enabled=tool_exec_on,
         )
     return _node
 
@@ -203,6 +263,34 @@ def _wrap_critic(deps: GraphDeps):
             chat_client=deps.chat_clients["critic"],
             model=deps.models["critic"],
             think=_think_for(deps, "critic"),
+            recorder=deps.recorder,
+        )
+    return _node
+
+
+def _wrap_tool_executor(deps: GraphDeps):
+    """Bind the role's deps to ``tool_executor_node`` so the
+    LangGraph node closure signature stays ``(state) -> dict``.
+
+    The tool_executor uses its own ChatClient (per-role pool) +
+    the SHARED ``deps.tool_executor`` callable + ``deps.tool_specs``
+    from the runner. Recorder rows land tagged
+    ``role="tool_executor"`` — the audit-trail separation that
+    motivated the dedicated lane.
+    """
+    from consultants.engine.tool_executor import tool_executor_node
+    role = "tool_executor"
+
+    def _node(state: dict) -> dict:
+        return tool_executor_node(
+            state,
+            chat_client=deps.chat_clients[role],
+            tool_executor=deps.tool_executor,
+            tool_specs=deps.tool_specs,
+            grounding_msgs=deps.grounding_msgs,
+            model=deps.models[role],
+            cwd=deps.cwd,
+            think=_think_for(deps, role),
             recorder=deps.recorder,
         )
     return _node
@@ -413,6 +501,15 @@ def build_council_graph(deps: GraphDeps,
             "meta_critic",
             _wrap("meta_critic", _wrap_meta_critic(deps)),
         )
+    # M6: register the tool_executor node when the role is enabled.
+    # The conditional edge from researcher (added below) decides per
+    # invocation whether to fan out to this node via Send. Disabled
+    # by default — when absent, the researcher's classic inline tool
+    # subloop runs unchanged.
+    tool_executor_enabled = "tool_executor" in enabled
+    if tool_executor_enabled and "researcher" in enabled:
+        sg.add_node("tool_executor",
+                    _wrap("tool_executor", _wrap_tool_executor(deps)))
     _maybe_cached(
         "synthesizer",
         _wrap("synthesizer", _wrap_synthesizer(deps)),
@@ -550,17 +647,36 @@ def build_council_graph(deps: GraphDeps,
                 critic_predecessor = src
                 break
 
+    # M6: when tool_executor is enabled, the researcher's downstream
+    # is the conditional dispatcher (Send fanout to tool_executor OR
+    # falls through to the natural-topology next role). Find that
+    # natural next role here so the conditional knows where to fall
+    # through on REPORT-mode completion.
+    researcher_downstream_natural: Optional[str] = None
+    if tool_executor_enabled and "researcher" in enabled:
+        for src, dst in plan_topology(enabled):
+            if src == "researcher":
+                researcher_downstream_natural = (
+                    None if dst == "END" else dst
+                )
+                break
+
     # Unconditional edges from plan_topology — skip:
     # 1. The planner -> researcher edge when researcher fan-out is
     #    wired (replaced by Phase 9 conditional below).
     # 2. The {predecessor} -> critic edge when multi-critic is
     #    active (replaced by the Phase 10 conditional fan-out).
+    # 3. M6: The researcher -> {next} edge when tool_executor is
+    #    enabled (replaced by the route_after_researcher conditional
+    #    below).
     for src, dst in plan_topology(enabled):
         if (fanout_router is not None
                 and src == "planner" and dst == "researcher"):
             continue
         if (multi_critic_active and dst == "critic"
                 and src == critic_predecessor):
+            continue
+        if tool_executor_enabled and src == "researcher":
             continue
         src_node = START if src == "START" else src
         dst_node = END if dst == "END" else dst
@@ -611,6 +727,116 @@ def build_council_graph(deps: GraphDeps,
         # additive reducer on ``turns`` has merged C critic
         # critiques into state["turns"].
         sg.add_edge("critic", "meta_critic")
+
+    # M6: tool_executor wiring.
+    #
+    # When the role is enabled, the researcher becomes a PLAN/REPORT
+    # alternator (see researcher_node's tool_executor_enabled branch).
+    # The conditional below reads ``state["awaiting_tool_results"]``:
+    #
+    # - True  -> the researcher just emitted a tool_plan; fan out one
+    #             Send per item to the tool_executor node.
+    # - False -> we're either past the lanes (REPORT mode just
+    #             completed) or skipping tool_executor entirely (empty
+    #             plan / fallback path); route to the next pipeline
+    #             role from plan_topology (critic or synthesizer).
+    #
+    # After the lanes complete, an unconditional edge from
+    # tool_executor back to researcher re-enters REPORT mode. The
+    # additive tool_results reducer barriers Send-multiplexed
+    # tool_executor invocations before the next researcher fire — the
+    # researcher's PRIOR TOOL RESULTS block sees all merged lanes in
+    # one prompt.
+    #
+    # Scope note: this initial wiring assumes the non-fanout
+    # researcher path. Combination with x-tier Phase 9 fanout
+    # (multiple parallel researcher lanes) is a follow-up; the
+    # config-layer guidance gates this by leaving tool_executor
+    # disabled-by-default and recommending it for non-x effort tiers
+    # in the docs.
+    if tool_executor_enabled and "researcher" in enabled:
+        def _route_after_researcher(state: dict) -> Any:
+            awaiting = bool(state.get("awaiting_tool_results"))
+            if not awaiting:
+                # REPORT mode or fallback: fall through to the
+                # natural next role from plan_topology. ``None``
+                # means END (researcher was the last pipeline
+                # stage before synthesizer); router contract
+                # accepts the destination string OR a list of
+                # Sends, so we return the string here.
+                return researcher_downstream_natural or "synthesizer"
+            # PLAN mode just completed: emit one Send per
+            # unconsumed tool_plan item. We filter by:
+            # - parent_round == current researcher round (so a
+            #   critic-reroute cycle's leftover items don't re-fire),
+            # - no matching tool_results yet (so a partial-failure
+            #   re-entry doesn't double-execute completed lanes).
+            plan = list(state.get("tool_plan") or [])
+            results = list(state.get("tool_results") or [])
+            # Compute "completed" lane indexes for the current round
+            # via parent_round + lane_idx matching.
+            rounds_used = int(state.get("research_rounds_used") or 0)
+            current_round = rounds_used + 1
+            completed: set[tuple[int, Optional[int]]] = set()
+            for r in results:
+                rr = int(getattr(r, "parent_round", 1) or 1)
+                if rr == current_round:
+                    completed.add(
+                        (rr, getattr(r, "lane_idx", None))
+                    )
+            sends: list[Send] = []
+            for item in plan:
+                pr = int(getattr(item, "parent_round", 1) or 1)
+                if pr != current_round:
+                    continue
+                lane = getattr(item, "lane_idx", None)
+                if (pr, lane) in completed:
+                    continue
+                sends.append(Send(
+                    "tool_executor",
+                    {
+                        "question": state.get("question"),
+                        "cwd": state.get("cwd"),
+                        "effort": state.get("effort"),
+                        "models": state.get("models", {}),
+                        "topology": state.get("topology"),
+                        # The per-lane item the executor node will
+                        # consume; carries intent + parent_round so
+                        # the lane stamps its ToolResult correctly.
+                        "tool_plan_item": item,
+                        "lane_idx": lane,
+                        # Empty deltas so additive reducers don't
+                        # double-count anything from the outer
+                        # researcher state.
+                        "turns": [],
+                        "total_prompt_tokens": 0,
+                        "total_completion_tokens": 0,
+                    },
+                ))
+            if not sends:
+                # Defensive: PLAN mode fired but no items survived
+                # the filter. Fall through to the next role so the
+                # graph doesn't stall on an empty fanout.
+                return researcher_downstream_natural or "synthesizer"
+            return sends
+        # The conditional's target list must enumerate every node
+        # the router can route to. Include the natural downstream +
+        # tool_executor; LangGraph uses these to build the static
+        # graph topology hints.
+        targets: list[str] = ["tool_executor"]
+        if researcher_downstream_natural:
+            targets.append(researcher_downstream_natural)
+        elif "synthesizer" in enabled:
+            targets.append("synthesizer")
+        sg.add_conditional_edges(
+            "researcher", _route_after_researcher, targets,
+        )
+        # Unconditional edge back to researcher: after all
+        # tool_executor Sends complete (LangGraph barriers on
+        # Send-multiplexed sources before unconditional successors
+        # fire), researcher re-enters in REPORT mode and the
+        # tool_results reducer's merged list is visible.
+        sg.add_edge("tool_executor", "researcher")
 
     # Critic's conditional edge: needs_more_research -> researcher,
     # else -> synthesizer. In single-critic mode the critic itself

@@ -16,6 +16,180 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — `/consultants` v2 tool_executor wiring (M6a + M6b)
+
+Closes M6 — the engine now supports an opt-in dedicated
+``tool_executor`` role that offloads the researcher's tool-call
+subloop into parallel ``Send`` fanout lanes. Addresses the user's
+trace observation that frontier models (kimi-k2.6, glm-5.1,
+deepseek-v4) sometimes mishandle multi-tool sequences; the
+specialist (default gemma4:31b-cloud) runs the mechanics while
+the researcher's frontier model owns the semantic planning.
+
+**M6a — Infrastructure (state + node):**
+
+`consultants/config.py`:
+
+- ``ROLES`` grows from 4 to 5; ``tool_executor`` joins as opt-in
+  with disabled-by-default. Order matters because
+  ``cc.enabled_roles()`` returns roles in ROLES order and the
+  runner builds graph topology accordingly: planner → researcher
+  → tool_executor (optional) → critic (optional) → synthesizer.
+- ``DEFAULT_MODEL_BY_ROLE`` / ``DEFAULT_ENABLED_BY_ROLE`` lookup
+  tables drive a ``_default_role_config(role)`` factory. Every
+  role except tool_executor keeps the global ``DEFAULT_MODEL`` and
+  ships enabled — v1 byte-parity. tool_executor uniquely defaults
+  to ``gemma4:31b-cloud`` (M11c will decide whether to flip the
+  default) and ships disabled.
+- ``DEFAULT_THINK_BY_ROLE["tool_executor"] = False`` — gemma4 is
+  non-reasoning; disabling think on the tool-call ChatClient
+  keeps the response shape clean for the agent_loop runner.
+
+`consultants/engine/state_v2.py`:
+
+- ``ToolPlanItem(intent, why, lane_idx, parent_round,
+  suggested_tools)`` — one entry in the researcher's semantic
+  tool_plan.
+- ``ToolResult(intent, content, transcript_summary, tools_called,
+  lane_idx, parent_round, duration_ms, error)`` — one
+  tool_executor lane's output; tombstone shape is intent + error.
+- ``CouncilStateV2`` grows three channels: ``tool_plan``
+  (additive list[ToolPlanItem]), ``tool_results`` (additive
+  list[ToolResult] across Send lanes), and the per-lane
+  Send-injected ``tool_plan_item``. ``awaiting_tool_results``
+  non-additive flag flips True after PLAN mode, False after
+  REPORT mode — the graph's route_after_researcher reads it.
+- ``tool_results_for_round(state, round)`` helper filters by
+  ``parent_round`` so the researcher's round-2 prompt only sees
+  round-1 evidence (no cross-round leakage on critic re-routes).
+
+`consultants/engine/tool_executor.py` (NEW):
+
+- ``TOOL_EXECUTOR_SYSTEM`` — short specialist instructions
+  (execute one intent, smallest tool sequence, cite path:line,
+  do NOT write the report).
+- ``build_tool_executor_messages(item, grounding_msgs, *,
+  question)`` composes the lane's conversation seed: grounding
+  first (matches researcher pattern), then system prompt, then
+  user message carrying INTENT + optional WHY + SUGGESTED TOOLS
+  + PARENT QUESTION blocks.
+- ``tool_executor_node(state, *, chat_client, tool_executor,
+  tool_specs, grounding_msgs, model, cwd, think=False,
+  loop_runner=None, recorder=None)`` — runs one lane via
+  ``agent_loop.runner.run_loop``. Returns ``{"tool_results":
+  [ToolResult(...)]}`` for additive merge. Tombstones cleanly on
+  missing/empty intent or loop_runner exception; preserves
+  parent_round + lane_idx so the researcher's round filter
+  surfaces the gap. Recorder rows tagged ``role="tool_executor"``
+  — the audit-trail separation that motivated the dedicated
+  role.
+
+**M6b — Researcher prompt-mode + graph wiring:**
+
+`consultants/engine/tool_executor.py`:
+
+- ``parse_tool_plan(text, *, parent_round)`` extracts the
+  researcher's PLAN-mode JSON output. Tolerant across three
+  fence styles: fenced with ``json``, bare fence, bare JSON
+  object/array. Items missing intent or with empty intent are
+  skipped silently; malformed JSON returns ``[]``. Lane indexes
+  assigned in parse order.
+- ``RESEARCHER_PLAN_MODE_BLOCK`` — prompt fragment appended to
+  the researcher's user message in PLAN mode. Declares
+  DO-NOT-CALL-TOOLS, names the output shape, bounds to 1-6
+  items.
+- ``build_tool_plan_user_appendix(prior_results)`` — renders the
+  PRIOR TOOL RESULTS block for REPORT-mode entry. Renders each
+  ToolResult as intent + tools_called summary + truncated
+  content (2K char cap per result). Tombstones in compact
+  ``FAILED: error`` form.
+
+`consultants/engine/council.py`:
+
+- ``researcher_node`` grows a ``tool_executor_enabled: bool``
+  kwarg. When True, two-phase alternation:
+  - PLAN mode (first entry of cycle): append PLAN_MODE_BLOCK to
+    user msg, single _single_shot call (no agent_loop), parse
+    tool_plan, return ``{"tool_plan": items,
+    "awaiting_tool_results": True}``.
+  - REPORT mode (re-entry after lanes complete): append
+    PRIOR TOOL RESULTS to user msg from
+    ``tool_results_for_round(state, this_round)``, single chat
+    call, return v1-shape ``{"research": [text],
+    "research_rounds_used": 1, "awaiting_tool_results":
+    False}``.
+- ``tool_executor_enabled=False`` (default) preserves v1
+  bit-for-bit: full inline agent_loop subloop.
+- Empty/unparseable plan in PLAN mode degrades gracefully to
+  the v1 inline-report shape so the council doesn't loop forever
+  on a model that won't emit JSON.
+- ``t0`` anchor hoisted to the top of the function so both M6
+  branches and the legacy inline-loop branch share one timing
+  origin.
+
+`consultants/engine/graph.py`:
+
+- ``CouncilState`` TypedDict extended with the v2 channels —
+  ``additional_context`` (M5), ``tool_plan`` / ``tool_results``
+  / ``tool_plan_item`` / ``awaiting_tool_results`` (M6). The
+  string forward-refs in the ``Annotated`` metadata are resolved
+  at import time by ``_wire_v2_reducers()`` so LangGraph's
+  ``get_type_hints``-based schema introspection sees the real
+  reducer callables. Without this, the graph silently dropped
+  M6 channels from node return deltas — the bug surfaced as
+  "researcher M6 PLAN-mode returned empty/unparseable tool_plan"
+  in the e2e test even though the parser worked standalone.
+- ``_wrap_tool_executor(deps)`` wraps the node for LangGraph.
+- ``_wrap_researcher(deps)`` reads ``"tool_executor" in
+  deps.enabled_roles`` at compile time and passes the flag to
+  the researcher node — one boolean read per invocation.
+- ``build_council_graph`` adds the ``tool_executor`` node when
+  the role is enabled, skips the researcher → next-role
+  unconditional edge in that case, and installs a conditional
+  ``route_after_researcher`` that fans out one Send per pending
+  ``tool_plan`` item (filtered to the current round + lanes not
+  already completed) OR falls through to the natural next role
+  on REPORT-mode completion. An unconditional edge
+  ``tool_executor → researcher`` provides the REPORT loop.
+  Send-multiplexed barrier semantics from LangGraph mean all
+  tool_executor lanes complete before researcher re-enters.
+
+**Scope note for M6b graph wiring:** the initial wiring is for
+the non-fanout researcher path (single researcher, no x-tier
+Phase 9 multi-model). Combination with x-tier fanout is
+deferred — config defaults gate this by leaving tool_executor
+disabled and recommending non-x effort tiers in the docs.
+
+**Tests:** 48 new across two files, all green on both envs.
+
+- ``tests/test_consultants_v2_tool_executor.py`` (46) — M6a
+  dataclass construction + frozen contract, round-filter
+  helper, prompt-builder shape + optional-block omission,
+  happy-path node returns populated ToolResult +
+  transcript_summary + tools_called, recorder callbacks fire
+  with role="tool_executor", tombstones for
+  missing/empty/exception paths, ``_extract_final_content``
+  tolerance, ``_summarize_tools`` ordering + duplicate
+  collapse, additive channel reducer merge; M6b parser tests
+  (empty / fenced+json / fenced bare / bare object / bare
+  array / unparseable / malformed / missing-intent /
+  suggested_tools optional + filter / multi-fence preference),
+  PLAN-mode prompt anchors, REPORT-mode appendix renderer
+  (empty / single / tombstone / truncate / multi-numbered).
+- ``tests/test_consultants_v2_tool_executor_e2e.py`` (2,
+  consultants env only) — end-to-end PLAN → fanout → REPORT
+  cycle with a 2-item tool_plan that produces 2 lanes merging
+  cleanly via the additive reducer; regression guard verifying
+  the role-disabled path keeps the v1 inline tool subloop
+  unchanged.
+- ``tests/test_consultants_config.py`` (+2) — ROLES order
+  assertion updated to include tool_executor in position 3;
+  disabled-by-default + default-model assertions lock the M6
+  contract into the pre-existing defaults test.
+
+Test counts: 3091 → 3109 on the main env (+18); consultants-env
+total at 344 (+18 vs M5 close). Zero regressions on either env.
+
 ### Added — `/consultants` v2 mid-flight injection + HITL interrupts (M5)
 
 Closes M5 — the engine now accepts mid-flight context injects, the

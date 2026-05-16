@@ -455,8 +455,177 @@ def _summarize_tools(names: list[str]) -> str:
     return ", ".join(f"{n} ×{counts[n]}" for n in order)
 
 
+# ============================================================== #
+# Tool-plan parser (extracts ``tool_plan`` from researcher output)
+# ============================================================== #
+
+TOOL_PLAN_FENCE_RE = None  # Lazy-compiled in _import_re
+
+def _import_re():
+    """Cache the regex import so the module loads without ``re``
+    pulled into the namespace at top level (cheap micro-opt to
+    keep the importer cold-start tight)."""
+    global TOOL_PLAN_FENCE_RE
+    import re
+    if TOOL_PLAN_FENCE_RE is None:
+        TOOL_PLAN_FENCE_RE = re.compile(
+            r"```(?:json)?\s*(\{.*?\})\s*```",
+            re.DOTALL | re.IGNORECASE,
+        )
+    return re, TOOL_PLAN_FENCE_RE
+
+
+def parse_tool_plan(text: str, *,
+                    parent_round: int = 1) -> list[ToolPlanItem]:
+    """Extract ``ToolPlanItem`` entries from the researcher's
+    PLAN-mode response.
+
+    Accepts three input shapes (tolerance is the contract — models
+    don't all fence JSON the same way):
+
+    1. **Fenced JSON**: ``\\`\\`\\`json\\n{"tool_plan": [...]}\\n\\`\\`\\``.
+       Extract via regex.
+    2. **Bare JSON object**: response starts with ``{`` — parse the
+       whole thing.
+    3. **Bare JSON array**: response is ``[{...}, {...}]`` — wrap.
+
+    The JSON shape we accept::
+
+        {"tool_plan": [
+            {"intent": "...", "why": "...",
+             "suggested_tools": ["grep"]},
+            ...
+        ]}
+
+    OR a bare list of those objects (the wrapper is convenience).
+
+    Items missing ``intent`` are skipped silently — they're a sign
+    the model malformed one row, not the whole plan. Empty input
+    returns an empty list (caller decides how to handle).
+
+    ``parent_round`` stamps every emitted item; the graph wires this
+    from the researcher's ``this_round`` so the M6 round-filter
+    works downstream.
+    """
+    import json
+
+    if not text or not isinstance(text, str):
+        return []
+    body = text.strip()
+    if not body:
+        return []
+
+    # Try fenced first.
+    re_mod, fence_re = _import_re()
+    candidates: list[str] = []
+    for m in fence_re.finditer(body):
+        candidates.append(m.group(1))
+    # If no fence match, try the bare body.
+    if not candidates:
+        candidates.append(body)
+
+    for raw in candidates:
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        items: list = []
+        if isinstance(data, dict) and "tool_plan" in data:
+            maybe = data["tool_plan"]
+            if isinstance(maybe, list):
+                items = maybe
+        elif isinstance(data, list):
+            items = data
+        else:
+            continue
+        out: list[ToolPlanItem] = []
+        for idx, raw_item in enumerate(items):
+            if not isinstance(raw_item, dict):
+                continue
+            intent = (raw_item.get("intent") or "").strip()
+            if not intent:
+                continue
+            why = (raw_item.get("why") or "").strip()
+            suggested = raw_item.get("suggested_tools") or []
+            if not isinstance(suggested, list):
+                suggested = []
+            else:
+                suggested = [
+                    str(s) for s in suggested if isinstance(s, str)
+                ]
+            out.append(ToolPlanItem(
+                intent=intent, why=why,
+                lane_idx=idx,
+                parent_round=int(parent_round),
+                suggested_tools=suggested,
+            ))
+        if out:
+            return out
+    return []
+
+
+# ============================================================== #
+# Researcher PLAN-mode prompt fragment
+# ============================================================== #
+
+RESEARCHER_PLAN_MODE_BLOCK = (
+    "\n\nTOOL-EXECUTOR MODE — DO NOT CALL TOOLS YOURSELF. Instead, "
+    "decompose the plan above into a short list of focused tool-use "
+    "intents that a specialist model will execute in parallel. "
+    "Output ONLY a JSON object on a single fenced ```json block at "
+    "the end of your response, shaped:\n\n"
+    "```json\n"
+    "{\"tool_plan\": ["
+    "{\"intent\": \"<one-sentence what to find/check>\", "
+    "\"why\": \"<one-line reason>\", "
+    "\"suggested_tools\": [\"<tool>\", ...]}"
+    "]}\n"
+    "```\n\n"
+    "Rules: 1-6 items per plan; each intent must be self-contained "
+    "(the executor will not see your other intents); prefer "
+    "specifics ('find function handle_payment in /api/...') over "
+    "vagueness ('look around'). Available tools: survey_project, "
+    "list_files, read_file, glob, grep, recall_memory. Suggested-"
+    "tools is advisory only."
+)
+
+
+def build_tool_plan_user_appendix(prior_results: list[ToolResult]) -> str:
+    """Build the 'PRIOR TOOL RESULTS' block the researcher's
+    REPORT-mode prompt appends after the v1 user message.
+
+    Renders each ToolResult as: intent + tools_called summary +
+    truncated content. Tombstones (error set) are rendered in a
+    compact "(intent: '...' FAILED: error)" form so the model
+    knows the gap exists and re-plans around it.
+    """
+    if not prior_results:
+        return ""
+    lines = ["PRIOR TOOL RESULTS (from the tool_executor lanes):"]
+    for i, r in enumerate(prior_results, start=1):
+        if r.error:
+            lines.append(
+                f"\n{i}. (intent: {r.intent!r} FAILED: {r.error})"
+            )
+            continue
+        # Truncate content to keep round-2 prompt bounded; the
+        # full text is in the recorder for post-mortems.
+        snippet = (r.content or "").strip()
+        if len(snippet) > 2000:
+            snippet = snippet[:2000] + "... [truncated]"
+        lines.append(
+            f"\n{i}. INTENT: {r.intent}\n"
+            f"   TOOLS: {r.transcript_summary or '(none)'}\n"
+            f"   EVIDENCE:\n{snippet}"
+        )
+    return "\n".join(lines)
+
+
 __all__ = [
+    "RESEARCHER_PLAN_MODE_BLOCK",
     "TOOL_EXECUTOR_SYSTEM",
     "build_tool_executor_messages",
+    "build_tool_plan_user_appendix",
+    "parse_tool_plan",
     "tool_executor_node",
 ]
