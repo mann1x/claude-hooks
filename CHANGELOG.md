@@ -16,6 +16,91 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — `/consultants` v2 stall-detection + soft time-target prompts (M3 building blocks)
+
+Two new pure-Python modules under `consultants/engine/` deliver the
+M3 watchdog + budget-injection primitives. Wire-up into the
+researcher node + actual streaming on `chat_client.py` comes in the
+M3b follow-up commit; this commit lands the orchestrator + tests so
+the contract is locked before any real LLM call runs through it.
+
+`consultants/engine/stall.py` — the stall detector + retry
+orchestrator:
+
+- `classify_stall(*, started_ts, last_token_ts, tokens_emitted,
+  now_ts, stall_threshold_s, hard_cap_s) -> StallOutcome` —
+  pure decision function. Returns `PROGRESSING` / `STARTUP_STALL`
+  (no first token past threshold) / `MID_STREAM_STALL` (token
+  cadence broke) / `HARD_CAP_EXCEEDED`. Hard cap wins over stall —
+  once we're past the per-lane ceiling, there's no point retrying.
+- `StallController` — cooperation primitive passed into the
+  streaming chat callable. Thread-safe. The chat fn calls
+  `mark_token()` per token and polls `is_cancelled()` between
+  chunks. `progress()` snapshots the (started_ts, last_token_ts,
+  tokens_emitted) tuple for the watchdog.
+- `StallMonitor(cfg)` — orchestrator. Runs `chat_streamed_fn` in a
+  worker thread + a watchdog that wakes every `check_interval_s`,
+  classifies the call's progress, and either lets it run, retries
+  on stall, or raises `HardCapExceeded` / `StallRetryExhausted`.
+  Per-attempt audit trail on `.attempts`. Best-effort `on_event`
+  sink lets the recorder log every stall/retry without coupling
+  the orchestrator to a specific event bus.
+- `CancelledByOrchestrator` — well-behaved chat fns raise this
+  when they notice `controller.is_cancelled()` mid-stream so the
+  orchestrator can distinguish cooperative aborts from real
+  upstream errors. Uncoop chat fns that ignore the cancel flag
+  don't block the orchestrator either — the worker is `daemon=True`
+  and the watchdog moves on after `join_grace_s`.
+- `chat_with_stall_protection(fn, payload, *, stall_threshold_s,
+  hard_cap_s, retries=1, ...)` — thin sync wrapper the researcher
+  node will call from inside `asyncio.to_thread`.
+
+Default thresholds (300 s stall / 3600 s hard cap / 1 retry) match
+the conservative-wide values pinned in `engine/control.py` from M2.
+M11a benchmarks will produce per-model tighter values in a
+follow-up.
+
+`consultants/engine/timing.py` — pure prompt-injection helpers:
+
+- `planner_soft_target_block(state)` — composes the "SOFT TIME
+  TARGET: aim to finish in **N min**. The hard cap is M min;
+  past that the consultation is cancelled..." block from
+  `runtime_control.soft_target_ts` + `deadline_ts`. Returns `""`
+  when no budget is on state (legacy v1 path).
+- `researcher_remaining_block(state)` — live "REMAINING TIME
+  BUDGET" computed at researcher entry. Each round sees the
+  current value, so a 15-min budget at planner time renders as
+  "7 min until the hard cap" by researcher round 2.
+- `time_pressure_signal(state) -> "ample"|"normal"|"tight"
+  |"critical"|"none"` — categorical pressure classifier the M7
+  xauto escalator + critic strictness chooser will consume. Keeps
+  consumers side-effect-free and trivially testable.
+
+Both modules are pure Python; no langgraph dependency. The
+orchestrator uses `threading` + `time.monotonic` only.
+
+**Tests:** 48 new tests, all passing on both `claude-hooks` and
+`claude-hooks-consultants` envs:
+
+- `tests/test_consultants_v2_timing.py` (24 tests) — covers the
+  duration formatter (sub-second clamp, hour split, rounding),
+  planner / researcher block rendering, time-pressure signal
+  classification including the no-budget / no-soft-target cases.
+- `tests/test_consultants_v2_stall.py` (24 tests) — covers
+  `classify_stall` in every state (progressing, startup stall,
+  mid-stream stall, hard-cap-wins-over-stall, defensive
+  none-handling), `StallController` thread-safety under
+  concurrent marks, and `StallMonitor` orchestration with real
+  threads + stub chat fns (happy path, retry-on-stall-then-ok,
+  retry-also-stalls-raises-exhausted, startup-stall-detection,
+  zero-retries=one-attempt, hard-cap-no-retry,
+  upstream-error-propagation, event-sink-failure-doesn't-break,
+  uncoop-chat-fn-doesn't-block).
+
+Threaded stall tests use sub-second thresholds (0.3-1.0s
+`stall_threshold_s`, 0.05s `check_interval_s`) so the full
+24-test suite runs in ~4 seconds.
+
 ### Added — `/consultants` v2 RuntimeControl defaults + node reads (M2)
 
 `consultants/engine/control.py` is the single source of truth for
