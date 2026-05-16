@@ -1,8 +1,16 @@
 # Coder Multi-Language Suite v1.0
 
-Per-language stress test of the coder role. See
+Per-language stress test of the coder role. Question content
+ported from LCB / LeetCode-hard-tier algorithmic problems and
+language-idiomatic engineering challenges. See
 [`docs/consultants-skill-eval-mlang-suite.md`](../../../../docs/consultants-skill-eval-mlang-suite.md)
 for the design + rationale.
+
+The v1.0 manifest deliberately strips **all** "Hint" sections
+and tightens "Required structure" blocks to API contracts only
+— the v1 `coder@1.0` suite saturated because its specs read
+like tutorials. Models here must reason about the
+problem, not transcribe the prompt.
 
 ## Suite metadata
 
@@ -40,50 +48,47 @@ The decision lands in
 
 ## Manifest
 
-The question list is enumerated explicitly so the suite hash is
-stable across file-system orderings.
-
 ```yaml
 questions:
-  # ----- medium tier -----
-  - id: python-medium-01-flatten-nested
+  # ----- medium tier (LCB-derived algorithmic problems) -----
+  - id: python-medium-01-meeting-rooms
     tier: medium
     language: python
     sandbox_path: solution.py
-    task: python-medium-01-flatten-nested.md
-    oracle: oracle_python-medium-01-flatten-nested.py
-  - id: rust-medium-01-rotate-vec
+    task: python-medium-01-meeting-rooms.md
+    oracle: oracle_python-medium-01-meeting-rooms.py
+  - id: rust-medium-01-search-rotated
     tier: medium
     language: rust
     sandbox_path: solution.rs
-    task: rust-medium-01-rotate-vec.md
-    oracle: oracle_rust-medium-01-rotate-vec.py
-  - id: go-medium-01-sum-channels
+    task: rust-medium-01-search-rotated.md
+    oracle: oracle_rust-medium-01-search-rotated.py
+  - id: go-medium-01-koko-bananas
     tier: medium
     language: go
     sandbox_path: solution.go
-    task: go-medium-01-sum-channels.md
-    oracle: oracle_go-medium-01-sum-channels.py
-  - id: c-medium-01-strrev-inplace
+    task: go-medium-01-koko-bananas.md
+    oracle: oracle_go-medium-01-koko-bananas.py
+  - id: c-medium-01-longest-valid-parens
     tier: medium
     language: c
     sandbox_path: solution.c
-    task: c-medium-01-strrev-inplace.md
-    oracle: oracle_c-medium-01-strrev-inplace.py
-  - id: cpp-medium-01-string-trim
+    task: c-medium-01-longest-valid-parens.md
+    oracle: oracle_c-medium-01-longest-valid-parens.py
+  - id: cpp-medium-01-cycle-list
     tier: medium
     language: cpp
     sandbox_path: solution.cpp
-    task: cpp-medium-01-string-trim.md
-    oracle: oracle_cpp-medium-01-string-trim.py
-  - id: csharp-medium-01-distinct-by
+    task: cpp-medium-01-cycle-list.md
+    oracle: oracle_cpp-medium-01-cycle-list.py
+  - id: csharp-medium-01-trapped-rainwater
     tier: medium
     language: csharp
     sandbox_path: solution.cs
-    task: csharp-medium-01-distinct-by.md
-    oracle: oracle_csharp-medium-01-distinct-by.py
+    task: csharp-medium-01-trapped-rainwater.md
+    oracle: oracle_csharp-medium-01-trapped-rainwater.py
 
-  # ----- hard tier -----
+  # ----- hard tier (engineering challenges + LCB-hard) -----
   - id: python-hard-01-lru-cache
     tier: hard
     language: python
@@ -96,12 +101,12 @@ questions:
     sandbox_path: solution.rs
     task: rust-hard-01-iter-window-pairs.md
     oracle: oracle_rust-hard-01-iter-window-pairs.py
-  - id: go-hard-01-worker-pool
+  - id: go-hard-01-shortest-path-k-stops
     tier: hard
     language: go
     sandbox_path: solution.go
-    task: go-hard-01-worker-pool.md
-    oracle: oracle_go-hard-01-worker-pool.py
+    task: go-hard-01-shortest-path-k-stops.md
+    oracle: oracle_go-hard-01-shortest-path-k-stops.py
   - id: c-hard-01-quicksort-3way
     tier: hard
     language: c
@@ -121,7 +126,7 @@ questions:
     task: csharp-hard-01-async-debounce.md
     oracle: oracle_csharp-hard-01-async-debounce.py
 
-  # ----- very_hard tier -----
+  # ----- very_hard tier (data-structure design + concurrency) -----
   - id: python-very_hard-01-parser-combinator
     tier: very_hard
     language: python
@@ -134,12 +139,12 @@ questions:
     sandbox_path: solution.rs
     task: rust-very_hard-01-bank-transfer.md
     oracle: oracle_rust-very_hard-01-bank-transfer.py
-  - id: go-very_hard-01-rate-limiter
+  - id: go-very_hard-01-spsc-queue
     tier: very_hard
     language: go
     sandbox_path: solution.go
-    task: go-very_hard-01-rate-limiter.md
-    oracle: oracle_go-very_hard-01-rate-limiter.py
+    task: go-very_hard-01-spsc-queue.md
+    oracle: oracle_go-very_hard-01-spsc-queue.py
   - id: c-very_hard-01-rbtree-insert
     tier: very_hard
     language: c
@@ -160,18 +165,28 @@ questions:
     oracle: oracle_csharp-very_hard-01-di-container.py
 ```
 
-## Status
+## Provenance of the question set
 
-**v1.0 staged but incomplete** — design + manifest pinned in
-this commit. Of the 18 questions:
+Of the 18 questions in v1.0:
 
-| Status                       | Questions                                                                            |
-|------------------------------|--------------------------------------------------------------------------------------|
-| ✅ task.md + oracle landed   | `python-medium-01-flatten-nested`, `rust-medium-01-rotate-vec`                       |
-| ⏳ pending (next commit)     | the other 16                                                                         |
+- 8 are **LCB / LeetCode-derived** algorithmic problems with no
+  implementation hints in the spec: meeting-rooms,
+  search-rotated, koko-bananas, longest-valid-parens, cycle-list,
+  trapped-rainwater, shortest-path-k-stops, lru-cache.
+- 10 are **language-idiom engineering challenges**: iterator
+  adapters (Rust), recursive descent (C++), red-black tree (C),
+  3-way quicksort (C), parser combinators (Python), thread-safe
+  bank transfer (Rust), SPSC queue (Go), async debounce (C#),
+  DI container (C#), SmallVector storage (C++).
 
-The 2 landed questions exercise both oracle paths (Python
-import vs subprocess compile-and-run) end-to-end, so the suite
-harness is provably wired before the build-out commit. Once
-all 18 land, the live run cohort + decision rule per the
-design doc applies.
+Both categories were drafted with **no implementation guidance
+in the prompt** — `Hint` sections explicitly omitted, `Required
+structure` blocks tightened to API contracts only. Adversarial
+test cases (large input that breaks naïve `O(N^2)`, deadlock-
+prone access patterns, edge cases like empty input + boundary
+overflow) are pinned in every oracle.
+
+The full design rationale + the 2026-05-16 scoping decisions
+(why these 18 specifically, why drop trivial/easy tiers, why
+the 5-model cohort) live in
+[`docs/consultants-skill-eval-mlang-suite.md`](../../../../docs/consultants-skill-eval-mlang-suite.md).
