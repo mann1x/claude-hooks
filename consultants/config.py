@@ -153,11 +153,33 @@ class ServiceConfig:
     http_port: int = DEFAULT_HTTP_PORT
 
 
+VALID_CHECKPOINTER_BACKENDS: tuple[str, ...] = ("sqlite", "postgres")
+DEFAULT_CHECKPOINTER_BACKEND = "sqlite"
+
+
+@dataclass
+class CheckpointerConfig:
+    """v2 checkpointer settings.
+
+    Default is per-session SQLite under
+    ``<cwd>/.claude-hooks/consultants/<sid>/checkpoints.db`` — zero
+    new dependency. Postgres is opt-in via the [postgres] extra
+    (``pip install -e 'consultants[postgres]'``); set ``backend =
+    "postgres"`` AND a connection ``url`` to enable.
+    """
+    backend: str = DEFAULT_CHECKPOINTER_BACKEND
+    url: Optional[str] = None
+    postgres_pool_min: int = 1
+    postgres_pool_max: int = 10
+    postgres_pool_timeout_s: float = 30.0
+
+
 @dataclass
 class ConsultantsConfig:
     topology: str = DEFAULT_TOPOLOGY
     effort: str = DEFAULT_EFFORT
     service: ServiceConfig = field(default_factory=ServiceConfig)
+    checkpointer: CheckpointerConfig = field(default_factory=CheckpointerConfig)
     roles: dict[str, RoleConfig] = field(default_factory=lambda: {
         r: RoleConfig() for r in ROLES
     })
@@ -280,6 +302,25 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
         if isinstance(svc.get("http_port"), int) and 1 <= svc["http_port"] <= 65535:
             base.service.http_port = svc["http_port"]
 
+    # checkpointer (v2)
+    cp = raw.get("checkpointer") or {}
+    if isinstance(cp, dict):
+        if isinstance(cp.get("backend"), str) \
+                and cp["backend"] in VALID_CHECKPOINTER_BACKENDS:
+            base.checkpointer.backend = cp["backend"]
+        if isinstance(cp.get("url"), str) and cp["url"].strip():
+            base.checkpointer.url = cp["url"].strip()
+        if isinstance(cp.get("postgres_pool_min"), int) \
+                and cp["postgres_pool_min"] >= 1:
+            base.checkpointer.postgres_pool_min = cp["postgres_pool_min"]
+        if isinstance(cp.get("postgres_pool_max"), int) \
+                and cp["postgres_pool_max"] >= 1:
+            base.checkpointer.postgres_pool_max = cp["postgres_pool_max"]
+        if isinstance(cp.get("postgres_pool_timeout_s"), (int, float)) \
+                and cp["postgres_pool_timeout_s"] > 0:
+            base.checkpointer.postgres_pool_timeout_s = \
+                float(cp["postgres_pool_timeout_s"])
+
     # roles
     roles = raw.get("role") or {}
     if isinstance(roles, dict):
@@ -333,6 +374,18 @@ def _render(cfg: ConsultantsConfig) -> str:
     L.append("[service]")
     L.append(f"mode = {_toml_str(cfg.service.mode)}")
     L.append(f"http_port = {cfg.service.http_port}")
+    L.append("")
+    L.append("[checkpointer]")
+    L.append(f"backend = {_toml_str(cfg.checkpointer.backend)}")
+    if cfg.checkpointer.url:
+        L.append(f"url = {_toml_str(cfg.checkpointer.url)}")
+    else:
+        # Emit an empty-key line as a hint for hand-edit; commented
+        # out so non-postgres configs round-trip cleanly.
+        L.append("# url = \"postgresql://user:pass@host:5432/db\"  # required when backend = \"postgres\"")
+    L.append(f"postgres_pool_min = {cfg.checkpointer.postgres_pool_min}")
+    L.append(f"postgres_pool_max = {cfg.checkpointer.postgres_pool_max}")
+    L.append(f"postgres_pool_timeout_s = {cfg.checkpointer.postgres_pool_timeout_s}")
     L.append("")
     for role in ROLES:
         rc = cfg.roles[role]

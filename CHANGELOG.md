@@ -16,6 +16,76 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — `/consultants` v2 state schema + checkpointer factory (M1)
+
+`consultants/engine/state_v2.py` defines `CouncilStateV2`, the
+forward-compatible TypedDict schema that the v2 overhaul will swap
+the v1 graph onto incrementally. Every v1 channel keeps its name +
+reducer semantics so v1 nodes continue reading the same shape during
+the milestone-by-milestone migration. New v2 channels:
+
+- `runtime_control: Annotated[RuntimeControl, merge_runtime_control]`
+  — per-session mutable knobs (`deadline_ts`, `max_rounds`,
+  `max_reroutes`, `enabled_roles`, `confidence_target`,
+  `critic_strictness`, `stall_threshold_s`, `tool_permissions`,
+  `xauto_tier`). The merge reducer means partial
+  `graph.update_state` mutations preserve unmentioned keys instead
+  of clobbering them — the M9 control endpoint relies on this for
+  clean partial-update UX.
+- `additional_context: Annotated[list[Doc], append_doc]` — mid-flight
+  inject payloads. Append-only with `Doc.content_hash` dedup so a
+  retried inject is idempotent. Reducer drops `None` sides cleanly
+  and preserves first-occurrence order across left + right merges
+  (concurrent inject during fanout merges cleanly).
+- `confidence: Annotated[list[float], latest_or_none]` — synthesizer
+  + critic self-rating series. `latest_confidence(state)` helper for
+  the xauto escalator (reads the last entry).
+- `partial_synthesis: Optional[str]` — synthesizer work-in-progress
+  for the HITL `interrupt_before=["synthesizer"]` preview path.
+- `interrupt_state: Optional[InterruptState]` — what the dynamic
+  `interrupt()` posted. Set by the node serializing the interrupt,
+  cleared on `Command(resume=...)`. Lets `GET /v1/consult/<sid>/state`
+  return a usable "council is waiting for X" payload without scraping
+  the event stream.
+
+Helpers: `latest_confidence(state)`, `unconsumed_context_for(state,
+role)`, `time_remaining_s(state)`. All pure-Python — the module
+imports cleanly without langgraph (the main `claude-hooks` test env
+exercises the reducers via the 26 new state tests).
+
+`consultants/engine/checkpointer.py` is the durable-execution factory:
+
+- `make_checkpointer(cfg, cwd, sid)` returns a `CheckpointerHandle`
+  the runner holds for the session's lifetime.
+- **SQLite (default)** — per-session file at
+  `<cwd>/.claude-hooks/consultants/<sid>/checkpoints.db` with
+  `PRAGMA journal_mode=WAL` + `busy_timeout=5000`. Zero new
+  dependency (sqlite3 is stdlib).
+- **Postgres (opt-in)** — `make_postgres_pool(cfg)` at app startup
+  builds a shared `psycopg_pool.ConnectionPool`; every per-session
+  `make_checkpointer(cfg, ..., postgres_pool=pool)` wraps a
+  `PostgresSaver` around it. Requires the `[postgres]` extra
+  (`pip install -e 'consultants[postgres]'`); a clean
+  `RuntimeError` with a copy-pasteable install hint fires when the
+  extra is missing.
+- `CheckpointerHandle` wraps the saver with explicit `close()` so
+  SQLite per-session conns clean up; Postgres handles' `close()` is
+  a no-op (pool lifecycle is app-wide).
+
+Config gains a `[checkpointer]` block in
+`<cwd>/.claude-hooks/consultants.toml` and the user-global
+`~/.claude/consultants-config.toml`. Default config produces
+`backend = "sqlite"`; the TOML round-trip preserves a `postgres` +
+`url` config. Invalid backend values fall back to `sqlite` with a
+DEBUG log (matches the lenient-loader pattern the other config
+sections use).
+
+**Tests:** 26 state tests + 14 checkpointer tests + 4 config
+integration tests = 44 new tests. Pre-existing 391 consultants
+tests stay green. The state tests run in the main `claude-hooks`
+env (no langgraph dep); the checkpointer tests gate on langgraph
+import and skip cleanly when absent.
+
 ### Changed — `/consultants` env: LangGraph 1.2 pin (v2 overhaul M0)
 
 The `claude-hooks-consultants` conda env now pins the LangGraph 1.x
