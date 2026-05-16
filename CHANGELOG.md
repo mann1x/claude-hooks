@@ -16,6 +16,149 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — `/consultants` v2 long-term-memory BaseStore adapter (M8)
+
+Closes M8 — a LangGraph `BaseStore` adapter that gives the council
+a shared namespaced read/write surface for findings. Two concrete
+wins motivate the milestone:
+
+1. **Within-session cross-lane recall.** A researcher lane in round 2
+   can search what other lanes (or earlier rounds) already discovered
+   for the same plan-item, instead of duplicating tool calls and
+   re-discovering the same evidence. Cheap protection against
+   redundant work at x-tier diversity fanout.
+2. **Cross-session follow-up recall.** When a follow-up's parent
+   transcript.db is cold (v1.0 parent, or recorder-disabled run),
+   `recall_for_follow_up(store, parent_sid, question)` falls back to
+   semantic search over the parent's research namespace — replacing
+   today's chronological pre-seed with relevance-ranked recall.
+
+The store is **opt-in** and **effort-gated** so the v1 zero-cost
+path is the default: low/medium tiers stay store-free, high / max /
+x-tiers can be wired to it via a single `[store]` config block.
+
+`consultants/engine/store.py` (NEW):
+
+- ``Namespaces`` factory with canonical tuples
+  (``(sid, "research")``, ``(sid, "tool_results")``,
+  ``("project", project_id)``, ``("user", user_id)``). Hand-rolled
+  tuples are an easy way to silently split the store; always go
+  through these.
+- ``ProviderBackedStore(BaseStore)`` — concrete adapter wrapping any
+  `claude_hooks` provider that exposes ``store(content, metadata)``
+  + ``recall_hybrid(query, k)``. Both ``PgvectorProvider`` and
+  ``SqliteVecProvider`` (post-v1.7 parity) already implement this
+  duck-typed surface — no provider changes needed.
+  * ``put`` writes to both an in-process ``(ns, key) → Item`` index
+    AND the provider (for vector recall).
+  * ``get`` / ``delete`` / ``list_namespaces`` hit the in-process
+    index (O(1), session-scoped; durability is the provider's job).
+  * ``search`` with a query goes to ``provider.recall_hybrid`` and
+    post-filters by namespace prefix + `_consultants_store` marker
+    (defensive against the same provider being shared with the
+    general claude-hooks recall pipeline).
+  * ``search`` without a query falls back to in-process scan ranked
+    by ``updated_at`` descending — useful for "list everything
+    under this namespace" patterns without polluting the vector
+    index.
+- ``make_consultants_store(cfg, *, sid, project_id, user_id,
+  effort, provider_loader)`` factory — returns ``None`` on every
+  short-circuit (langgraph missing, ``cfg.store.enabled = False``,
+  ``effort`` below the gate, unknown backend, provider load
+  failure). Recall + record helpers tolerate ``None`` so callers
+  use the same code path either way.
+- ``recall_research(store, sid, query, limit)`` /
+  ``record_research(store, sid, lane_idx, plan_item, finding)`` /
+  ``recall_for_follow_up(store, parent_sid, question, limit)`` —
+  convenience helpers. Every one is a no-op when the store is
+  ``None`` or the input is empty.
+- ``format_findings_block(items)`` — renders a SearchItem list into
+  the markdown block the researcher prompt embeds. Truncates each
+  finding at 800 chars by default and caps at 8 items; dedups on
+  identical text so a noisy hybrid index doesn't repeat itself.
+
+`consultants/config.py`:
+
+- New ``StoreConfig`` dataclass on ``ConsultantsConfig.store``:
+  * ``enabled`` (default ``False``) — zero-cost path is the default.
+  * ``backend`` (default ``"memory"``) — ``memory`` (InMemoryStore) |
+    ``pgvector`` (PgvectorProvider) | ``sqlite_vec``
+    (SqliteVecProvider).
+  * ``enable_at_efforts`` (default
+    ``("high", "max", "xmedium", "xhigh", "xmax", "xauto")``) —
+    effort tiers at which the store is wired in. Lower tiers stay
+    free.
+  * ``recall_limit`` (default ``5``).
+  * ``pgvector_dsn`` / ``pgvector_table`` / ``sqlite_vec_path`` —
+    backend-specific endpoints.
+- TOML parser reads ``[store]`` block; TOML emitter writes it back
+  with hint comments for the optional DSN / path fields.
+
+`consultants/engine/graph.py`:
+
+- ``GraphDeps.store: Optional[Any]`` + ``GraphDeps.sid:
+  Optional[str]`` — wired through both ``_wrap_researcher``
+  (so the node sees them) and ``.compile(store=...)`` (so LangGraph
+  registers the store for any future code path that prefers the
+  runtime ``get_store()`` helper). Follow-up builder shares the
+  same plumbing.
+
+`consultants/engine/council.py`:
+
+- ``researcher_node`` accepts new ``store=None, sid=None`` kwargs.
+  * **Recall** — before message build (lane-focused + full-plan
+    paths both), call ``recall_research`` with the focused plan
+    item (or the full plan when there's no fanout). Skip findings
+    from this same lane (dedup against the lane's own
+    ``prior_rounds``). Render via ``format_findings_block`` into a
+    new ``peer_findings`` kwarg on ``build_researcher_messages``.
+  * **Record** — closure ``_record_finding_to_store`` writes the
+    final report to ``(sid, "research")`` at all three "report
+    produced" return sites (v1 inline-agent-loop success path, M6
+    REPORT-mode success, M6 PLAN-mode empty-plan fallback). PLAN-
+    mode plan-only returns do NOT record (no report produced).
+- ``build_researcher_messages`` grows ``peer_findings:
+  Optional[str]`` kwarg — surfaced after ``prior_rounds`` and
+  before ``additional_context``. Empty/None → no block (zero-cost).
+
+`consultants/server/runner.py`:
+
+- Both the primary runner and the follow-up runner build the store
+  via ``make_consultants_store(cfg, sid=state.sid, effort=cfg.effort)``
+  and thread it through ``GraphDeps``. Factory failures (import
+  errors, provider init errors) log + fall back to ``None`` so a
+  broken store config never breaks a consultation.
+
+Tests:
+
+- ``tests/test_consultants_v2_store.py`` (42 tests):
+  * Namespaces canonical tuples (5)
+  * ``recall_research`` / ``record_research`` no-op on ``None``
+    store (5)
+  * ``format_findings_block`` empty / dedup / truncation /
+    metadata rendering / max_items (6)
+  * Factory short-circuits — no cfg.store / disabled / below-gate /
+    InMemoryStore at enabled effort / unknown backend / provider
+    loader injection (7, langgraph-gated paths skip on main env)
+  * ``ProviderBackedStore`` full op surface — put/get/delete,
+    overwrite preserves created_at, search namespace-prefix filter,
+    search ignores rows without marker (provider-shared safety),
+    no-query falls back to index scan, recall failure returns empty,
+    dedup, list_namespaces with max_depth, recall_research +
+    record_research integration, deterministic key, provider.store
+    failure doesn't break put (19)
+- ``tests/test_consultants_v2_store_e2e.py`` (3 tests, consultants
+  env only): pre-seeded peer finding lands in the researcher's
+  prompt; researcher's report lands in the store after invoke;
+  no store → no peer-findings block (zero-cost path verified e2e).
+
+Verification:
+
+- Main env: 3166 pass / 82 skip — up from 3147 (+19 store unit
+  tests now run on main env, langgraph-gated tests skip cleanly).
+- Consultants env: 404 v2 tests pass — up from 384 (+45 added for
+  M8: 42 unit + 3 e2e), zero regressions.
+
 ### Added — `/consultants` v2 xauto adaptive-effort escalation (M7)
 
 Closes M7 — a new ``xauto`` effort tier that starts at the

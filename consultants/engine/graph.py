@@ -214,6 +214,16 @@ class GraphDeps:
     # ``cfg.roles["synthesizer"].extra_models`` at every effort tier
     # (not gated by x-prefix — cloud flaps don't care about effort).
     synthesizer_fallback_models: list[str] = field(default_factory=list)
+    # M8: optional LangGraph BaseStore for cross-lane / cross-session
+    # recall. ``None`` means "no store wired" — the researcher's
+    # recall helpers no-op and the council behaves exactly as in
+    # pre-M8. Built by the runner via
+    # :func:`consultants.engine.store.make_consultants_store`.
+    store: Optional[Any] = None
+    # M8: session id, needed to namespace store entries. Constant
+    # for the lifetime of a single consultation. ``None`` is safe
+    # — recall/record helpers tolerate it.
+    sid: Optional[str] = None
 
 
 # ----------------------- node wrappers --------------------------- #
@@ -261,6 +271,8 @@ def _wrap_researcher(deps: GraphDeps):
             recorder=deps.recorder,
             prior_messages=deps.prior_messages_by_role.get("researcher"),
             tool_executor_enabled=tool_exec_on,
+            store=deps.store,
+            sid=deps.sid,
         )
     return _node
 
@@ -1007,6 +1019,13 @@ def build_council_graph(deps: GraphDeps,
         valid = [n for n in interrupt_before if n in existing_nodes]
         if valid:
             compile_kwargs["interrupt_before"] = valid
+    # M8: thread the BaseStore through compile so LangGraph wires
+    # it into the runtime context. Nodes still read it via
+    # ``deps.store`` (the GraphDeps field) — this just makes the
+    # store available to any future code paths that prefer
+    # LangGraph's ``get_store()`` runtime helper.
+    if deps.store is not None:
+        compile_kwargs["store"] = deps.store
     return sg.compile(**compile_kwargs)
 
 
@@ -1080,4 +1099,8 @@ def build_follow_up_graph(deps: GraphDeps,
         sg.add_edge("researcher", "synthesizer")
     sg.add_edge("synthesizer", END)
 
-    return sg.compile(checkpointer=checkpointer)
+    # M8: follow-up graphs share the same store as the parent.
+    compile_kwargs: dict[str, Any] = {"checkpointer": checkpointer}
+    if deps.store is not None:
+        compile_kwargs["store"] = deps.store
+    return sg.compile(**compile_kwargs)

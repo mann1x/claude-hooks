@@ -410,7 +410,8 @@ def build_researcher_messages(question: str, plan: str,
                               prior_rounds: list[str],
                               grounding_msgs: list[dict],
                               *,
-                              additional_context=None) -> list[dict]:
+                              additional_context=None,
+                              peer_findings: Optional[str] = None) -> list[dict]:
     """Researcher's conversation seed.
 
     Grounding (anchor files + structure map + addendum) goes first, so
@@ -421,6 +422,13 @@ def build_researcher_messages(question: str, plan: str,
     surfaced on each researcher round entry — covers both the
     fanout-lane case (Send-injected) and the multi-round re-entry
     case (critic asked for more research).
+
+    ``peer_findings`` (M8) is the rendered block from
+    :func:`consultants.engine.store.format_findings_block`, surfaced
+    just before ``additional_context`` so the researcher sees what
+    sibling lanes / prior rounds already discovered before formulating
+    its own report. Empty / None -> no block emitted (zero-cost path
+    when the store is disabled).
     """
     msgs: list[dict] = list(grounding_msgs)
     msgs.append({"role": "system", "content": RESEARCHER_SYSTEM})
@@ -438,6 +446,8 @@ def build_researcher_messages(question: str, plan: str,
             "in the next round; do not repeat findings already "
             "covered above."
         )
+    if peer_findings and peer_findings.strip():
+        user_parts.append("\n" + peer_findings.rstrip())
     extra = _additional_context_block(additional_context)
     if extra:
         user_parts.append("\n" + extra)
@@ -900,7 +910,9 @@ def researcher_node(state: dict, *,
                     loop_runner=None,
                     recorder=None,
                     prior_messages: Optional[list[dict]] = None,
-                    tool_executor_enabled: bool = False) -> dict:
+                    tool_executor_enabled: bool = False,
+                    store: Any = None,
+                    sid: Optional[str] = None) -> dict:
     """Researcher uses agent_loop.runner.run_loop for a tool sub-loop.
 
     ``loop_runner`` defaults to ``claude_hooks.agent_loop.runner.run_loop``
@@ -944,6 +956,29 @@ def researcher_node(state: dict, *,
     this_round = rounds_used + 1
     prior_rounds: list[str] = list(state.get("research") or [])
     lane_idx = state.get("lane_idx")
+
+    # M8: closure that writes a successful research report to the
+    # shared store. Captures store + sid + lane + plan_item so each
+    # of the three "successful report" return sites (v1 inline,
+    # M6 REPORT, M6 PLAN-mode fallback) calls the same single
+    # function. No-op when store is None / sid missing / text empty.
+    def _record_finding_to_store(report_text: str) -> None:
+        if store is None or not sid:
+            return
+        try:
+            from consultants.engine.store import record_research
+            record_research(
+                store, sid,
+                lane_idx=lane_idx,
+                plan_item=state.get("plan_item"),
+                finding=report_text,
+            )
+        except Exception:  # pragma: no cover — defensive
+            log.exception(
+                "record_research raised in researcher lane "
+                "%s; lane continues",
+                lane_idx,
+            )
     # Phase 9: per-lane multi-model fan-out. The dispatcher sets
     # ``state["model_override"]`` on each Send so different lanes
     # talk to different Ollama models. Falls back to the role's
@@ -1001,6 +1036,40 @@ def researcher_node(state: dict, *,
         # next time it enters.
         extra_ctx_res = _additional_context_for(state, "researcher")
         plan_item = state.get("plan_item")
+        # M8: shared-store recall — ask the store for findings that
+        # other lanes (this session) or prior consultations (when
+        # cross-session namespaces are wired) already produced for
+        # this plan item. Cheap protection against duplicate work,
+        # no-op when store is disabled. Query prefers the focused
+        # plan_item (high signal) and falls back to the full plan
+        # for the single-researcher path. Recall failures are
+        # swallowed inside the helper — they never break the lane.
+        peer_findings_block = None
+        if store is not None and sid:
+            from consultants.engine.store import (
+                format_findings_block,
+                recall_research,
+            )
+            recall_query = (
+                plan_item
+                if plan_item
+                else (state.get("plan") or state.get("question") or "")
+            )
+            hits = recall_research(
+                store, sid, recall_query, limit=5,
+            )
+            # Optional dedup: don't surface this lane's own prior
+            # findings (they're already in ``prior_rounds`` above).
+            my_lane = state.get("lane_idx")
+            if my_lane is not None:
+                hits = [
+                    h for h in hits
+                    if (getattr(h, "value", None) or {}).get(
+                        "lane_idx") != my_lane
+                ]
+            peer_findings_block = (
+                format_findings_block(hits) if hits else None
+            )
         if plan_item:
             focused_plan = (
                 f"Sub-research lane {state.get('lane_idx', 0) + 1}: "
@@ -1009,12 +1078,14 @@ def researcher_node(state: dict, *,
             msgs = build_researcher_messages(
                 state["question"], focused_plan, [], grounding_msgs,
                 additional_context=extra_ctx_res,
+                peer_findings=peer_findings_block,
             )
         else:
             msgs = build_researcher_messages(
                 state["question"], state["plan"], prior_rounds,
                 grounding_msgs,
                 additional_context=extra_ctx_res,
+                peer_findings=peer_findings_block,
             )
     # ---------- M6: tool_executor branch ----------------------- #
     # When the tool_executor role is in the enabled set, the
@@ -1115,6 +1186,7 @@ def researcher_node(state: dict, *,
                 "researcher", round=this_round, lane_idx=lane_idx,
                 duration_ms=int(dt * 1000), ok=True,
             )
+            _record_finding_to_store(text)
             return {
                 "research": [text],
                 "research_rounds_used": 1,
@@ -1156,6 +1228,7 @@ def researcher_node(state: dict, *,
                 "researcher M6 PLAN-mode returned empty/unparseable "
                 "tool_plan; falling back to inline research from raw text"
             )
+            _record_finding_to_store(text)
             return {
                 "research": [text],
                 "research_rounds_used": 1,
@@ -1428,6 +1501,7 @@ def researcher_node(state: dict, *,
             log.exception("recorder.record_node raised; ignored")
     _emit_finished("researcher", round=this_round, lane_idx=lane_idx,
                     duration_ms=int(dt * 1000), ok=True)
+    _record_finding_to_store(text)
     return {
         "research": [text],
         "research_rounds_used": 1,

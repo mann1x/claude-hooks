@@ -276,12 +276,59 @@ class RuntimeConfig:
 
 
 @dataclass
+class StoreConfig:
+    """M8: long-term memory BaseStore settings.
+
+    A LangGraph :class:`BaseStore` lets researcher lanes recall what
+    other lanes already discovered (within a session) and lets the
+    follow-up runner semantically replay the parent's research
+    (across sessions). The store is **opt-in** and **effort-gated**:
+
+    - ``enabled = false`` (default) — no store is wired; recall + record
+      helpers in :mod:`consultants.engine.store` are no-ops. Zero cost.
+    - ``backend = "memory"`` — LangGraph's bundled InMemoryStore (per-
+      process, no durability). Useful for users who want intra-session
+      recall without a database.
+    - ``backend = "pgvector"`` — wraps :class:`PgvectorProvider`. Shares
+      the Postgres instance the recall hook pipeline already uses.
+      Cross-session persistence + KG-style relations.
+    - ``backend = "sqlite_vec"`` — file-backed alternative for hosts
+      that don't run Postgres.
+
+    The ``enable_at_efforts`` gate keeps the zero-cost path for the
+    light tiers and turns the store on for the deep ones, where the
+    multi-lane x-tier diversity benefits the most from cross-lane
+    recall. Pass ``effort=None`` to the factory to bypass the gate
+    entirely (used by the follow-up runner).
+    """
+    enabled: bool = False
+    backend: str = "memory"  # "memory" | "pgvector" | "sqlite_vec"
+    # Effort tiers at which the store is wired into the graph. Lower
+    # tiers stay zero-cost. ``xauto`` is explicitly included because
+    # it inherits the xmedium baseline and can escalate; we want the
+    # store available the whole climb, not just at xhigh+.
+    enable_at_efforts: tuple[str, ...] = (
+        "high", "max",
+        "xmedium", "xhigh", "xmax", "xauto",
+    )
+    # Default search budget when researcher_node calls recall_research.
+    # Kept conservative — recall is a "did anyone else find this?"
+    # check, not the primary evidence source.
+    recall_limit: int = 5
+    # Backend-specific endpoints (only the relevant one is consulted).
+    pgvector_dsn: Optional[str] = None
+    pgvector_table: Optional[str] = None
+    sqlite_vec_path: Optional[str] = None
+
+
+@dataclass
 class ConsultantsConfig:
     topology: str = DEFAULT_TOPOLOGY
     effort: str = DEFAULT_EFFORT
     service: ServiceConfig = field(default_factory=ServiceConfig)
     checkpointer: CheckpointerConfig = field(default_factory=CheckpointerConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    store: StoreConfig = field(default_factory=StoreConfig)
     roles: dict[str, RoleConfig] = field(default_factory=lambda: {
         r: _default_role_config(r) for r in ROLES
     })
@@ -433,6 +480,30 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
             base.runtime.interrupt_on_low_confidence = \
                 bool(rt["interrupt_on_low_confidence"])
 
+    # store (M8)
+    st = raw.get("store") or {}
+    if isinstance(st, dict):
+        if "enabled" in st:
+            base.store.enabled = bool(st["enabled"])
+        if "backend" in st and isinstance(st["backend"], str):
+            base.store.backend = st["backend"].strip() or base.store.backend
+        if "enable_at_efforts" in st and isinstance(
+                st["enable_at_efforts"], (list, tuple)):
+            base.store.enable_at_efforts = tuple(
+                str(x) for x in st["enable_at_efforts"]
+            )
+        if "recall_limit" in st:
+            try:
+                base.store.recall_limit = max(1, int(st["recall_limit"]))
+            except (TypeError, ValueError):
+                pass
+        if "pgvector_dsn" in st and isinstance(st["pgvector_dsn"], str):
+            base.store.pgvector_dsn = st["pgvector_dsn"].strip() or None
+        if "pgvector_table" in st and isinstance(st["pgvector_table"], str):
+            base.store.pgvector_table = st["pgvector_table"].strip() or None
+        if "sqlite_vec_path" in st and isinstance(st["sqlite_vec_path"], str):
+            base.store.sqlite_vec_path = st["sqlite_vec_path"].strip() or None
+
     # roles
     roles = raw.get("role") or {}
     if isinstance(roles, dict):
@@ -508,6 +579,29 @@ def _render(cfg: ConsultantsConfig) -> str:
              "self-rates below confidence_target")
     L.append("interrupt_on_low_confidence = "
              f"{'true' if cfg.runtime.interrupt_on_low_confidence else 'false'}")
+    L.append("")
+    L.append("[store]")
+    L.append("# Long-term memory BaseStore for cross-lane / cross-session recall.")
+    L.append("# enabled = false  -> no store wired (zero cost, default).")
+    L.append("# backend choices: memory | pgvector | sqlite_vec")
+    L.append(f"enabled = {'true' if cfg.store.enabled else 'false'}")
+    L.append(f"backend = {_toml_str(cfg.store.backend)}")
+    L.append(
+        "enable_at_efforts = ["
+        + ", ".join(_toml_str(t) for t in cfg.store.enable_at_efforts)
+        + "]"
+    )
+    L.append(f"recall_limit = {cfg.store.recall_limit}")
+    if cfg.store.pgvector_dsn:
+        L.append(f"pgvector_dsn = {_toml_str(cfg.store.pgvector_dsn)}")
+    else:
+        L.append('# pgvector_dsn = "postgresql://user:pass@host:5432/db"')
+    if cfg.store.pgvector_table:
+        L.append(f"pgvector_table = {_toml_str(cfg.store.pgvector_table)}")
+    if cfg.store.sqlite_vec_path:
+        L.append(f"sqlite_vec_path = {_toml_str(cfg.store.sqlite_vec_path)}")
+    else:
+        L.append('# sqlite_vec_path = "~/.claude/consultants-store.db"')
     L.append("")
     for role in ROLES:
         rc = cfg.roles[role]

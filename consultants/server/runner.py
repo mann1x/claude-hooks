@@ -186,6 +186,23 @@ def make_runner(*, ollama_base_url: str):
                 "consultants sid=%s allowed roots:\n%s",
                 state.sid, render_for_log([cwd, *extra_roots]),
             )
+        # M8: build the long-term-memory store if cfg.store.enabled is
+        # true and the current effort tier is in the enable list.
+        # The factory returns None for every short-circuit case
+        # (disabled, below-gate, unknown backend, missing deps), so
+        # the v1 zero-store behavior is the default. Recall + record
+        # helpers downstream tolerate a None store.
+        try:
+            from consultants.engine.store import make_consultants_store
+            consultants_store = make_consultants_store(
+                cfg, sid=state.sid, effort=cfg.effort,
+            )
+        except Exception:  # pragma: no cover — defensive
+            log.exception(
+                "make_consultants_store raised; continuing with no store",
+            )
+            consultants_store = None
+
         deps = GraphDeps(
             chat_clients=chat_clients,
             models=models,
@@ -202,6 +219,8 @@ def make_runner(*, ollama_base_url: str):
             recorder=recorder,
             extra_models_by_role=extra_models_by_role,
             synthesizer_fallback_models=synthesizer_fallback,
+            store=consultants_store,
+            sid=state.sid,
         )
         # M5: static review-before-synthesis interrupt. When the
         # user opted in via cfg.runtime.review_before_synthesis,
@@ -498,6 +517,24 @@ def make_follow_up_runner(*, ollama_base_url: str):
                 "consultants follow-up sid=%s allowed roots:\n%s",
                 state.sid, render_for_log([cwd, *extra_roots]),
             )
+        # M8: follow-ups share the store config with their parent.
+        # The store is keyed by the follow-up's own sid (each
+        # follow-up records under its own ``(sid, "research")``
+        # namespace) — but the follow-up runner's recall path can
+        # also fall back to ``(parent_sid, "research")`` via
+        # ``recall_for_follow_up`` when needed.
+        try:
+            from consultants.engine.store import make_consultants_store
+            consultants_store_followup = make_consultants_store(
+                cfg, sid=state.sid, effort=cfg.effort,
+            )
+        except Exception:  # pragma: no cover — defensive
+            log.exception(
+                "make_consultants_store (follow-up) raised; "
+                "continuing with no store",
+            )
+            consultants_store_followup = None
+
         deps = GraphDeps(
             chat_clients=chat_clients,
             models=models,
@@ -514,6 +551,8 @@ def make_follow_up_runner(*, ollama_base_url: str):
             recorder=recorder,
             prior_messages_by_role=prior_messages_by_role,
             synthesizer_fallback_models=synthesizer_fallback_followup,
+            store=consultants_store_followup,
+            sid=state.sid,
         )
         compiled = build_follow_up_graph(deps, tracer=tracer)
 
