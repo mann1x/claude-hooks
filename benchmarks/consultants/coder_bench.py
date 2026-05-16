@@ -1,0 +1,755 @@
+#!/usr/bin/env python3
+"""M11b coder skill-eval runner.
+
+Drives the canonical coder-suite v1.0 (see
+``benchmarks/consultants/questions/coder/SUITE.md``) against one or
+more candidate models for the M10 ``coder`` role. Two phases:
+
+- ``--dry-run`` — uses a stub ChatClient + stub run_loop that
+  simulates a correct submission. Validates the harness pipeline
+  end-to-end without cloud spend. Fast (~5 s for 32 trials).
+- ``--live --accept-cost`` — uses the real
+  ``claude_hooks.get_advice.chat_client.make_agent_chat_client``
+  against the configured Ollama proxy (default
+  ``http://192.168.178.2:11433``). Real cloud calls; the summary
+  cost line prints once at the start so the run's token footprint
+  is visible upfront.
+
+Per the Consultancy Skill-Eval Protocol (docs/consultants-skill-eval-
+protocol.md):
+
+- Suite version + content hash are recorded in every results file
+  so baselines are comparable across runs.
+- Trial JSON is append-only — Ctrl-C mid-run keeps everything
+  produced so far.
+- The decision rubric (pass_rate ≥ 0.70, quality ≥ 3.5,
+  tie-broken by median_tokens) is enforced by ``analyze.py`` against
+  the recorded trials; this script only collects data.
+
+CLI:
+
+    coder_bench.py --dry-run \\
+        --models kimi-k2.6:cloud,qwen3-next:cloud \\
+        --output-dir results/2026-05-16/coder
+
+    coder_bench.py --live --accept-cost \\
+        --models kimi-k2.6:cloud,qwen3-next:cloud,glm-5.1:cloud,gemma4:31b-cloud \\
+        --ollama-base http://192.168.178.2:11433 \\
+        --output-dir results/2026-05-16/coder \\
+        --judge-model kimi-k2.6:cloud
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import json
+import logging
+import os
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any, Optional
+
+# Add repo root to sys.path so ``consultants`` and
+# ``benchmarks.consultants`` import cleanly when this script is run
+# from any cwd.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from benchmarks.consultants.harness import (  # noqa: E402
+    HARNESS_VERSION, BenchQuestion, CoderTrial, SuiteManifest,
+    append_trial, build_judge_messages, count_code_lines,
+    estimate_cost, load_questions, load_suite_manifest,
+    make_dry_run_loop_runner, measure_complexity,
+    parse_judge_response, run_pytest_against_sandbox,
+)
+
+log = logging.getLogger("benchmarks.consultants.coder_bench")
+
+
+DEFAULT_MODELS = [
+    "kimi-k2.6:cloud",
+    "qwen3-next:cloud",
+    "glm-5.1:cloud",
+    "gemma4:31b-cloud",
+]
+DEFAULT_OLLAMA_BASE = "http://192.168.178.2:11433"
+DEFAULT_JUDGE_MODEL = "kimi-k2.6:cloud"
+DEFAULT_QUESTIONS_DIR = (
+    _REPO_ROOT / "benchmarks" / "consultants" / "questions" / "coder"
+)
+
+
+# ============================================================== #
+# Provenance helpers
+# ============================================================== #
+
+def _git_commit() -> str:
+    """Return the current HEAD commit short hash, or '' on error."""
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=_REPO_ROOT,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+        )
+        return out.decode("utf-8").strip()
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return ""
+
+
+def _run_metadata(*, suite: SuiteManifest, models: list[str],
+                  mode: str, ollama_base: Optional[str],
+                  judge_model: Optional[str]) -> dict:
+    """Reproducibility metadata for the run header. Every results
+    file starts with one of these so the analyzer can confirm
+    suite version + harness version + git commit before scoring.
+    """
+    return {
+        "harness_version": HARNESS_VERSION,
+        "suite": suite.suite,
+        "suite_version": suite.suite_version,
+        "suite_hash": suite.suite_hash,
+        "suite_released": suite.released,
+        "manifest": list(suite.manifest),
+        "rubric": dict(suite.rubric),
+        "models": list(models),
+        "mode": mode,                # "dry-run" | "live"
+        "ollama_base": ollama_base,
+        "judge_model": judge_model,
+        "git_commit": _git_commit(),
+        "host": socket.gethostname(),
+        "run_started_at": datetime.datetime.utcnow().isoformat() + "Z",
+    }
+
+
+# ============================================================== #
+# Trial runner — common path for both dry-run and live
+# ============================================================== #
+
+def _build_trial_sandbox(output_dir: Path,
+                        question: BenchQuestion, model: str,
+                        idx: int) -> Path:
+    """Produce a per-trial sandbox dir under
+    ``<output_dir>/trials/<NN>-<model>-<qid>/``. The slugged model
+    name keeps the path filesystem-safe.
+    """
+    model_slug = model.replace(":", "_").replace("/", "_")
+    trial_id = f"{idx:03d}-{model_slug}-{question.id}"
+    sandbox = output_dir / "trials" / trial_id
+    sandbox.mkdir(parents=True, exist_ok=True)
+    return sandbox
+
+
+def _judge_trial_quality(*, judge_chat_client, judge_model: str,
+                         task: str, sandbox: Path,
+                         sandbox_path: str) -> tuple[Optional[float], str]:
+    """Call the judge LLM on the produced code; return
+    ``(score, rationale)``. ``score`` is None when:
+
+    - judge_chat_client is None (no judging configured)
+    - the produced file doesn't exist
+    - the judge response is unparseable
+    """
+    if judge_chat_client is None:
+        return None, ""
+    code_path = sandbox / sandbox_path
+    if not code_path.is_file():
+        return None, "code file not produced"
+    try:
+        code = code_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return None, f"could not read produced file: {e}"
+    msgs = build_judge_messages(task, code)
+    try:
+        resp = judge_chat_client.chat({
+            "model": judge_model,
+            "messages": msgs,
+            "stream": False,
+        })
+    except Exception as e:
+        log.exception("judge call raised; treating as no-score")
+        return None, f"judge call raised: {e}"
+    # Tolerant content extraction.
+    text = ""
+    if isinstance(resp, dict):
+        choices = resp.get("choices") or []
+        if choices and isinstance(choices[0], dict):
+            msg = choices[0].get("message") or {}
+            text = msg.get("content") or ""
+    score, rationale = parse_judge_response(text)
+    return score, rationale
+
+
+def _run_one_trial(*,
+                   question: BenchQuestion, model: str,
+                   idx: int,
+                   coder_chat_client,
+                   loop_runner,
+                   judge_chat_client,
+                   judge_model: Optional[str],
+                   output_dir: Path,
+                   pytest_python: str) -> CoderTrial:
+    """Execute one (question × model) trial.
+
+    Returns a populated CoderTrial. Never raises — failures are
+    recorded as ``error`` strings.
+    """
+    from consultants.engine.coder import coder_node
+    from consultants.engine.state_v2 import CoderTaskItem
+
+    trial = CoderTrial(
+        question_id=question.id,
+        tier=question.tier,
+        model=model,
+        timestamp=datetime.datetime.utcnow().isoformat() + "Z",
+    )
+    sandbox = _build_trial_sandbox(output_dir, question, model, idx)
+    trial.sandbox_dir = str(sandbox)
+
+    # The coder_node runs inside a per-session sandbox at
+    # <cwd>/.claude-hooks/consultants/<sid>/coder-out/. We point
+    # cwd at the trial dir and pass a synthetic sid so the produced
+    # file lands directly under <sandbox>/.claude-hooks/...; then
+    # we re-root the oracle's $CODER_SANDBOX to that produced dir.
+    sid = "bench"
+    bench_cwd = sandbox  # sandbox is the cwd for this trial
+    produced_dir = (
+        bench_cwd / ".claude-hooks" / "consultants" / sid / "coder-out"
+    )
+
+    # Track per-iteration token usage via the recorder shim. We
+    # don't need the full recorder — just a tiny collector.
+    iterations = 0
+    tokens_prompt = 0
+    tokens_completion = 0
+
+    class _Collector:
+        def record_node(self, **kw):
+            pass
+
+        def record_llm(self, **kw):
+            nonlocal iterations, tokens_prompt, tokens_completion
+            iterations += 1
+            tokens_prompt += int(kw.get("prompt_tokens") or 0)
+            tokens_completion += int(kw.get("completion_tokens") or 0)
+
+        def record_tool(self, **kw):
+            pass
+
+    rec = _Collector()
+    task_item = CoderTaskItem(
+        task=question.task,
+        path=question.sandbox_path,
+        lane_idx=0,
+        parent_round=1,
+    )
+    state = {
+        "coder_task_item": task_item,
+        "lane_idx": 0,
+        "question": question.task,
+        "plan": "",          # no plan in bench — the task IS the plan
+        "research": [],      # no researcher findings
+    }
+    t0 = time.monotonic()
+    try:
+        result = coder_node(
+            state,
+            chat_client=coder_chat_client,
+            grounding_msgs=[],
+            model=model,
+            cwd=str(bench_cwd),
+            sid=sid,
+            think="high",
+            loop_runner=loop_runner,
+            recorder=rec,
+        )
+    except Exception as e:
+        log.exception("trial %s × %s raised", question.id, model)
+        trial.wall_s = time.monotonic() - t0
+        trial.iterations = iterations
+        trial.tokens_prompt = tokens_prompt
+        trial.tokens_completion = tokens_completion
+        trial.error = f"{type(e).__name__}: {e}"
+        return trial
+    trial.wall_s = time.monotonic() - t0
+    trial.iterations = iterations
+    trial.tokens_prompt = tokens_prompt
+    trial.tokens_completion = tokens_completion
+
+    # Extract artifact + files-written summary.
+    artifacts = result.get("coder_artifacts") or []
+    if not artifacts:
+        trial.error = "no coder_artifacts in result"
+        return trial
+    art = artifacts[0]
+    trial.files_written = list(getattr(art, "files", []) or [])
+    if art.error:
+        trial.error = art.error
+
+    # Locate the produced file. The coder may have ignored our
+    # suggested path; per the suite contract the task asks for an
+    # exact filename, so we look for that path. If the model wrote
+    # to a different name, the oracle will report "module not
+    # importable" — which is the intended consequence.
+    code_file = produced_dir / question.sandbox_path
+    if code_file.is_file():
+        trial.compiles = True
+        try:
+            import py_compile
+            py_compile.compile(str(code_file), doraise=True)
+        except Exception as e:
+            trial.compiles = False
+            trial.error = f"compile failed: {e}"
+        trial.code_lines = count_code_lines(code_file)
+        trial.complexity = measure_complexity(code_file)
+    else:
+        trial.compiles = False
+
+    # Oracle pytest run — only when something compiled. A non-
+    # compiling submission can't pass tests, so we skip pytest
+    # entirely (saves ~1 s per trial across 32 trials = 30+ s).
+    if trial.compiles:
+        oracle_result = run_pytest_against_sandbox(
+            question.oracle_path,
+            produced_dir,
+            python_executable=pytest_python,
+            timeout_s=60.0,
+        )
+        trial.passes_tests = oracle_result.passed
+        # Keep stdout truncated so the JSON stays bounded.
+        trial.test_output = (
+            oracle_result.stdout[-2000:]
+            + ("\n--STDERR--\n" + oracle_result.stderr[-1000:]
+               if oracle_result.stderr else "")
+        )
+
+        # Judge call — only on trials that compiled (no point
+        # judging code that can't run). Skip if no judge model.
+        if judge_chat_client is not None and judge_model:
+            score, rationale = _judge_trial_quality(
+                judge_chat_client=judge_chat_client,
+                judge_model=judge_model,
+                task=question.task,
+                sandbox=produced_dir,
+                sandbox_path=question.sandbox_path,
+            )
+            trial.quality_score = score
+            trial.quality_rationale = rationale
+    return trial
+
+
+# ============================================================== #
+# Live-mode ChatClient factory
+# ============================================================== #
+
+def _make_live_clients(models: list[str], ollama_base: str,
+                       judge_model: Optional[str]) -> tuple[dict, Any]:
+    """Build per-model ChatClients via
+    ``make_agent_chat_client``. Returns
+    ``(coder_clients_by_model, judge_client_or_None)``. Lazy import
+    so dry-run mode works in envs without the full claude_hooks
+    stack.
+    """
+    from claude_hooks.get_advice.chat_client import make_agent_chat_client
+    coder_clients: dict[str, Any] = {}
+    for m in models:
+        coder_clients[m] = make_agent_chat_client(m, ollama_base)
+    judge_client = None
+    if judge_model:
+        judge_client = make_agent_chat_client(judge_model, ollama_base)
+    return coder_clients, judge_client
+
+
+# ============================================================== #
+# Dry-run client factory — same shape as live, but with a stub
+# ChatClient that returns sensible token counts + a stub run_loop
+# that synthesizes a "I wrote the file" trace.
+# ============================================================== #
+
+class _DryRunChatClient:
+    """Stub ChatClient — never actually issues HTTP calls. Returns
+    a tiny response shape with token counts so the harness's
+    metrics path produces real numbers."""
+    def __init__(self, *, prompt_tokens: int = 500,
+                 completion_tokens: int = 200):
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+
+    def chat(self, payload, *, think=False):
+        return {
+            "choices": [{
+                "message": {"role": "assistant",
+                             "content": "stub response"},
+            }],
+            "usage": {
+                "prompt_tokens": self.prompt_tokens,
+                "completion_tokens": self.completion_tokens,
+            },
+        }
+
+
+# Hand-written "correct" submissions used by the dry-run path so
+# every oracle's pytest passes when --dry-run is active. The
+# dry-run pretends the model wrote these files. Useful for
+# validating the bench end-to-end without cloud spend.
+_DRY_RUN_SUBMISSIONS: dict[str, str] = {
+    "trivial-01-truncate": (
+        "def truncate(s: str, n: int) -> str:\n"
+        "    if n <= 0:\n"
+        "        return ''\n"
+        "    return s[:n]\n"
+    ),
+    "trivial-02-strlen": (
+        "def strlen(s: str) -> int:\n"
+        "    count = 0\n"
+        "    for _ in s:\n"
+        "        count += 1\n"
+        "    return count\n"
+    ),
+    "easy-01-dedupe": (
+        "def dedupe(items):\n"
+        "    seen = set()\n"
+        "    out = []\n"
+        "    for x in items:\n"
+        "        if x not in seen:\n"
+        "            seen.add(x)\n"
+        "            out.append(x)\n"
+        "    return out\n"
+    ),
+    "easy-02-fib": (
+        "def fib(n: int) -> int:\n"
+        "    if n < 0:\n"
+        "        raise ValueError('n must be non-negative')\n"
+        "    if n < 2:\n"
+        "        return n\n"
+        "    a, b = 0, 1\n"
+        "    for _ in range(n - 1):\n"
+        "        a, b = b, a + b\n"
+        "    return b\n"
+    ),
+    "medium-01-balance": (
+        "def is_balanced(s: str) -> bool:\n"
+        "    pairs = {')': '(', ']': '[', '}': '{'}\n"
+        "    opens = set(pairs.values())\n"
+        "    stack = []\n"
+        "    for ch in s:\n"
+        "        if ch in opens:\n"
+        "            stack.append(ch)\n"
+        "        elif ch in pairs:\n"
+        "            if not stack or stack[-1] != pairs[ch]:\n"
+        "                return False\n"
+        "            stack.pop()\n"
+        "    return not stack\n"
+    ),
+    "medium-02-prime-length": (
+        "def prime_length(s: str) -> bool:\n"
+        "    n = len(s)\n"
+        "    if n < 2:\n"
+        "        return False\n"
+        "    if n < 4:\n"
+        "        return True\n"
+        "    if n % 2 == 0:\n"
+        "        return False\n"
+        "    i = 3\n"
+        "    while i * i <= n:\n"
+        "        if n % i == 0:\n"
+        "            return False\n"
+        "        i += 2\n"
+        "    return True\n"
+    ),
+    "hard-01-matrix-path": (
+        "def min_path_sum(grid):\n"
+        "    if not grid or not grid[0]:\n"
+        "        raise ValueError('grid is empty')\n"
+        "    m = len(grid)\n"
+        "    n = len(grid[0])\n"
+        "    for row in grid:\n"
+        "        if len(row) != n:\n"
+        "            raise ValueError('grid is jagged')\n"
+        "    dp = [row[:] for row in grid]\n"
+        "    for j in range(1, n):\n"
+        "        dp[0][j] += dp[0][j - 1]\n"
+        "    for i in range(1, m):\n"
+        "        dp[i][0] += dp[i - 1][0]\n"
+        "    for i in range(1, m):\n"
+        "        for j in range(1, n):\n"
+        "            dp[i][j] += min(dp[i - 1][j], dp[i][j - 1])\n"
+        "    return dp[-1][-1]\n"
+    ),
+    "hard-02-digit-filter": (
+        "def sum_odd_first_last(nums):\n"
+        "    count = 0\n"
+        "    for v in nums:\n"
+        "        if v <= 10:\n"
+        "            continue\n"
+        "        s = str(abs(v))\n"
+        "        if int(s[0]) % 2 == 1 and int(s[-1]) % 2 == 1:\n"
+        "            count += 1\n"
+        "    return count\n"
+    ),
+}
+
+
+def _make_dry_run_loop_runner_for(question: BenchQuestion):
+    """Return a stub loop_runner specifically for ``question`` —
+    pre-loaded with the correct submission so the oracle passes.
+    This is the dry-run's promise: "if the bench plumbing is
+    correct, every question produces a passing trial."
+    """
+    code = _DRY_RUN_SUBMISSIONS.get(question.id, "# stub\n")
+    return make_dry_run_loop_runner(
+        file_path=question.sandbox_path, content=code,
+        iterations=3, prompt_tokens=500, completion_tokens=200,
+    )
+
+
+# ============================================================== #
+# Main runner
+# ============================================================== #
+
+def run_bench(*,
+              models: list[str],
+              questions_dir: Path,
+              output_dir: Path,
+              mode: str,                  # "dry-run" | "live"
+              ollama_base: Optional[str],
+              judge_model: Optional[str],
+              tier_filter: Optional[set[str]],
+              id_filter: Optional[set[str]],
+              pytest_python: str) -> int:
+    """Execute the bench. Returns the count of trials run."""
+    suite = load_suite_manifest(questions_dir)
+    questions = load_questions(
+        questions_dir,
+        tier_filter=tier_filter,
+        id_filter=id_filter,
+    )
+    if not questions:
+        log.error("no questions matched the filters; nothing to run")
+        return 0
+    metadata = _run_metadata(
+        suite=suite, models=models, mode=mode,
+        ollama_base=ollama_base, judge_model=judge_model,
+    )
+    estimate = estimate_cost(questions, models, judge_model=judge_model)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "metadata.json").write_text(
+        json.dumps(
+            {**metadata,
+             "questions": [q.id for q in questions],
+             "estimate": estimate},
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    trials_path = output_dir / "trials.jsonl"
+    # Banner.
+    print(f"==== coder-bench v{HARNESS_VERSION} | "
+          f"suite={suite.suite}@{suite.suite_version} "
+          f"(hash {suite.suite_hash[:12]}) | mode={mode} ====",
+          flush=True)
+    print(f"     {estimate['summary_line']}", flush=True)
+    print(f"     output: {output_dir}", flush=True)
+    print(flush=True)
+
+    # Build the clients up-front (one shot in dry-run, real factories
+    # in live mode).
+    coder_clients_by_model: dict
+    judge_client: Any
+    if mode == "dry-run":
+        coder_clients_by_model = {
+            m: _DryRunChatClient() for m in models
+        }
+        judge_client = None  # dry-run skips the judge call
+    else:
+        if not ollama_base:
+            raise SystemExit("--live requires --ollama-base")
+        coder_clients_by_model, judge_client = _make_live_clients(
+            models, ollama_base, judge_model,
+        )
+
+    n_done = 0
+    n_total = len(questions) * len(models)
+    for q_idx, q in enumerate(questions):
+        for m_idx, m in enumerate(models):
+            n_done += 1
+            trial_idx = n_done
+            print(
+                f"  [{n_done}/{n_total}] {q.id} × {m} ... ",
+                end="", flush=True,
+            )
+            t0 = time.monotonic()
+            if mode == "dry-run":
+                loop_runner = _make_dry_run_loop_runner_for(q)
+            else:
+                loop_runner = None  # let coder_node lazy-import run_loop
+            try:
+                trial = _run_one_trial(
+                    question=q, model=m, idx=trial_idx,
+                    coder_chat_client=coder_clients_by_model[m],
+                    loop_runner=loop_runner,
+                    judge_chat_client=judge_client,
+                    judge_model=judge_model,
+                    output_dir=output_dir,
+                    pytest_python=pytest_python,
+                )
+            except KeyboardInterrupt:
+                print("INTERRUPTED", flush=True)
+                return n_done - 1
+            wall = time.monotonic() - t0
+            # Short status line per trial.
+            if trial.error:
+                status = f"ERROR ({trial.error[:60]})"
+            elif not trial.compiles:
+                status = "no-compile"
+            elif not trial.passes_tests:
+                status = "tests-fail"
+            else:
+                qs = (
+                    f", quality={trial.quality_score:.1f}"
+                    if trial.quality_score is not None else ""
+                )
+                status = (
+                    f"PASS ({trial.iterations} iters, "
+                    f"{trial.tokens_prompt + trial.tokens_completion} tok"
+                    f"{qs})"
+                )
+            print(f"{status} ({wall:.1f}s)", flush=True)
+            append_trial(trials_path, trial)
+    print(flush=True)
+    print(f"==== done. {n_done} trials in {trials_path}. "
+          f"Run analyze.py to produce the markdown report. ====",
+          flush=True)
+    return n_done
+
+
+# ============================================================== #
+# CLI
+# ============================================================== #
+
+def _parse_csv(value: str) -> list[str]:
+    return [s.strip() for s in value.split(",") if s.strip()]
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="coder_bench",
+        description=(
+            "M11b coder skill-eval runner. See "
+            "docs/consultants-skill-eval-protocol.md for the "
+            "protocol context."
+        ),
+    )
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
+        "--dry-run", action="store_true",
+        help="Stub ChatClient + stub run_loop. Validates the "
+             "harness end-to-end without cloud spend.",
+    )
+    mode.add_argument(
+        "--live", action="store_true",
+        help="Real ChatClients via make_agent_chat_client against "
+             "--ollama-base. Requires --accept-cost.",
+    )
+    p.add_argument(
+        "--accept-cost", action="store_true",
+        help="Required with --live. Acknowledges the run will "
+             "spend real Ollama Pro tokens (see the summary line).",
+    )
+    p.add_argument(
+        "--models", type=_parse_csv, default=DEFAULT_MODELS,
+        metavar="M1,M2,...",
+        help=f"Comma-separated model list. Default: {','.join(DEFAULT_MODELS)}",
+    )
+    p.add_argument(
+        "--ollama-base", default=DEFAULT_OLLAMA_BASE,
+        help=f"Ollama proxy base URL. Default: {DEFAULT_OLLAMA_BASE}",
+    )
+    p.add_argument(
+        "--judge-model", default=DEFAULT_JUDGE_MODEL,
+        help=("Model used as the code-quality judge. Set to '' to "
+              f"skip judging. Default: {DEFAULT_JUDGE_MODEL}"),
+    )
+    p.add_argument(
+        "--questions-dir", type=Path, default=DEFAULT_QUESTIONS_DIR,
+        help=f"Directory of bench questions. Default: {DEFAULT_QUESTIONS_DIR}",
+    )
+    p.add_argument(
+        "--output-dir", type=Path, default=None,
+        help=("Per-run output directory. Default: "
+              "benchmarks/consultants/results/<YYYY-MM-DD>/coder/"),
+    )
+    p.add_argument(
+        "--tier", action="append", choices=("trivial", "easy", "medium", "hard"),
+        help="Filter by tier (repeatable). Default: all tiers.",
+    )
+    p.add_argument(
+        "--id", action="append",
+        help="Filter by question id (repeatable). Default: all.",
+    )
+    p.add_argument(
+        "--smoke", action="store_true",
+        help="Shorthand for --tier trivial — 2 questions per model.",
+    )
+    p.add_argument(
+        "--pytest-python", default=sys.executable,
+        help=("Python interpreter used to run oracle pytest. Default: "
+              "the harness's own interpreter."),
+    )
+    return p
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    logging.basicConfig(
+        level=os.environ.get("CODER_BENCH_LOG", "INFO"),
+        format="%(asctime)s [%(name)s] %(message)s",
+    )
+    args = build_parser().parse_args(argv)
+    if args.live and not args.accept_cost:
+        # Print the cost summary then bail. This is the "show the
+        # estimate before you spend tokens" gate per the M11 design.
+        suite = load_suite_manifest(args.questions_dir)
+        tier_set = set(args.tier) if args.tier else None
+        if args.smoke:
+            tier_set = {"trivial"}
+        id_set = set(args.id) if args.id else None
+        qs = load_questions(
+            args.questions_dir,
+            tier_filter=tier_set, id_filter=id_set,
+        )
+        est = estimate_cost(qs, args.models, judge_model=args.judge_model)
+        print("--live requires --accept-cost. Cost summary:")
+        print(f"  suite: {suite.suite}@{suite.suite_version}")
+        print(f"  {est['summary_line']}")
+        print("Re-run with --accept-cost to proceed.")
+        return 2
+    mode = "live" if args.live else "dry-run"
+    tier_set = set(args.tier) if args.tier else None
+    if args.smoke:
+        tier_set = {"trivial"}
+    id_set = set(args.id) if args.id else None
+    output_dir = args.output_dir or (
+        _REPO_ROOT / "benchmarks" / "consultants" / "results"
+        / datetime.datetime.utcnow().strftime("%Y-%m-%d") / "coder"
+    )
+    n = run_bench(
+        models=args.models,
+        questions_dir=args.questions_dir,
+        output_dir=output_dir,
+        mode=mode,
+        ollama_base=args.ollama_base if args.live else None,
+        judge_model=args.judge_model or None,
+        tier_filter=tier_set,
+        id_filter=id_set,
+        pytest_python=args.pytest_python,
+    )
+    return 0 if n > 0 else 1
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

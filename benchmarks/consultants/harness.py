@@ -1,0 +1,820 @@
+"""Shared infrastructure for the M11 benchmark suite.
+
+Three responsibilities:
+
+1. **Question loading** — markdown files with YAML-ish frontmatter
+   live under ``benchmarks/consultants/questions/<bench>/``. Frontmatter
+   declares id / tier / source / task / sandbox_path / oracle / notes.
+   The loader returns a typed ``BenchQuestion`` per file and lets the
+   runner filter by tier or id.
+
+2. **Trial result schema** — ``CoderTrial`` (M11b) records every
+   measurable metric the bench computes per (question × model) trial.
+   Pydantic-free dataclass with a ``to_dict()`` for JSON dump; the
+   harness writes one trial per row as soon as it completes so a
+   Ctrl-C mid-run preserves the prior trials.
+
+3. **Cost estimator** — token-budget summary surfaced BEFORE a live
+   run starts. Per the 2026-05-16 design discussion: this is
+   informational (you opted in via --accept-cost) not a hard gate,
+   so it's a single summary line. The estimator pulls per-model
+   per-token coefficients from internal heuristics tuned against the
+   actual 192.168.178.2:11433 cloud-Ollama trace from the M0-M9
+   sessions.
+
+Plus a few subprocess helpers for the M11b coder bench specifically:
+``run_pytest_against_sandbox`` (does the model's code pass tests?)
+and ``measure_complexity`` (radon-based cyclomatic complexity,
+soft-deps so the bench runs even without radon installed).
+
+Pure-Python; importable in the main ``claude-hooks`` env. Live runs
+need the consultants env (langgraph + claude_hooks.agent_loop on the
+path) — same as the rest of the v2 stack.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import re
+import subprocess
+import sys
+import time
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Iterable, Optional
+
+log = logging.getLogger("benchmarks.consultants.harness")
+
+# Bumped when the trial schema or core API contract changes in a
+# non-backwards-compat way. Old results JSON with a lower version
+# is readable (additive-only changes); the renderer warns when
+# mixing versions.
+HARNESS_VERSION = "1.0"
+
+
+# ============================================================== #
+# Question schema
+# ============================================================== #
+
+# Tiers are advisory — the runner reports per-tier breakdowns but
+# doesn't gate on them. Order matters for tier-filter parsing and
+# for the markdown report layout.
+TIERS: tuple[str, ...] = ("trivial", "easy", "medium", "hard")
+
+
+@dataclass(frozen=True)
+class BenchQuestion:
+    """One bench item loaded from disk. ``oracle_path`` is the
+    absolute path to the pytest file that verifies the produced
+    code; the harness sets ``CODER_SANDBOX`` env var before
+    invoking pytest so the oracle imports relative to the
+    coder's per-trial sandbox dir.
+    """
+    id: str
+    tier: str
+    source: str               # e.g. "humaneval/23"
+    task: str                 # natural-language instruction the coder sees
+    sandbox_path: str         # required filename, e.g. "truncate.py"
+    oracle_path: Path
+    notes: str = ""
+    body: str = ""            # the markdown body after the frontmatter
+
+
+# Lazy frontmatter parser — accepts the common pattern
+#   ---
+#   key: value
+#   multi: |
+#     line one
+#     line two
+#   ---
+# without pulling PyYAML as a hard dep. Limited but covers our
+# schema; we never need YAML inline lists / nested maps for the
+# bench questions.
+_FRONTMATTER_RE = re.compile(
+    r"^---\n(.*?)\n---\n(.*)$", re.DOTALL,
+)
+
+
+def _parse_frontmatter(text: str) -> tuple[dict, str]:
+    """Return (frontmatter_dict, remaining_body). On no-match,
+    returns ({}, text)."""
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return {}, text
+    fm_text, body = m.group(1), m.group(2)
+    return _parse_simple_yaml(fm_text), body
+
+
+def _strip_quotes(s: str) -> str:
+    """Strip a single layer of surrounding ASCII quotes."""
+    if (s.startswith('"') and s.endswith('"')) \
+            or (s.startswith("'") and s.endswith("'")):
+        return s[1:-1]
+    return s
+
+
+def _parse_simple_yaml(text: str) -> dict:
+    """Subset YAML supporting:
+
+    - ``key: value`` (one per line)
+    - ``key: |`` block scalars (indented continuation lines)
+    - ``key:`` followed by indented ``- item`` lines → list[str]
+    - ``key:`` followed by indented ``subkey: value`` lines → dict
+    - ``#`` line comments (full-line only)
+
+    Inline list / map syntax (``[a, b]``, ``{k: v}``) is NOT
+    supported on purpose — keeping the surface small avoids a
+    PyYAML dep and a bench-question can be re-written if it tries
+    something fancier.
+    """
+    out: dict = {}
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip() or line.lstrip().startswith("#"):
+            i += 1
+            continue
+        # Top-level key must start at column 0.
+        if line[:1] in (" ", "\t"):
+            i += 1
+            continue
+        if ":" not in line:
+            i += 1
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if value == "|":
+            # Block scalar — consume indented lines.
+            i += 1
+            block: list[str] = []
+            while i < len(lines):
+                lookahead = lines[i]
+                if lookahead.strip() == "":
+                    block.append("")
+                    i += 1
+                    continue
+                if not lookahead.startswith(("  ", "\t")):
+                    break
+                block.append(lookahead.lstrip())
+                i += 1
+            out[key] = "\n".join(block).rstrip()
+            continue
+        if value == "":
+            # Bare key — collect indented children (list of '- item'
+            # OR map of 'subkey: subvalue'). Peek at the first
+            # non-blank indented line to decide which.
+            i += 1
+            children: list[str] = []
+            while i < len(lines):
+                lookahead = lines[i]
+                if lookahead.strip() == "":
+                    i += 1
+                    continue
+                if not lookahead.startswith(("  ", "\t")):
+                    break
+                children.append(lookahead)
+                i += 1
+            if not children:
+                out[key] = ""
+                continue
+            # Decide shape by inspecting the first child.
+            first = children[0].lstrip()
+            if first.startswith("- "):
+                # List of strings.
+                items: list[str] = []
+                for c in children:
+                    s = c.lstrip()
+                    if s.startswith("- "):
+                        items.append(_strip_quotes(s[2:].strip()))
+                out[key] = items
+            else:
+                # Nested map. Re-parse with dedent.
+                # We must compute the indent of the first child line
+                # then strip exactly that many leading spaces from
+                # each child before recursing.
+                indent = len(children[0]) - len(children[0].lstrip())
+                dedented = "\n".join(
+                    c[indent:] if len(c) >= indent else c
+                    for c in children
+                )
+                out[key] = _parse_simple_yaml(dedented)
+            continue
+        # Inline ``key: value`` — strip wrapping quotes if any.
+        out[key] = _strip_quotes(value)
+        i += 1
+    return out
+
+
+def load_questions(
+    directory: Path,
+    *,
+    tier_filter: Optional[Iterable[str]] = None,
+    id_filter: Optional[Iterable[str]] = None,
+) -> list[BenchQuestion]:
+    """Load every ``*.md`` under ``directory`` whose name does NOT
+    end with ``-oracle.py`` (oracles are .py files alongside the
+    markdown). Returns sorted by id for reproducibility.
+
+    ``tier_filter`` — keep only questions whose ``tier`` is in
+    the set; None means all tiers.
+    ``id_filter`` — keep only questions matching one of the ids;
+    None means all ids.
+    """
+    if not directory.is_dir():
+        raise FileNotFoundError(
+            f"bench questions directory not found: {directory}"
+        )
+    tier_set = set(tier_filter) if tier_filter else None
+    id_set = set(id_filter) if id_filter else None
+    out: list[BenchQuestion] = []
+    for md_path in sorted(directory.glob("*.md")):
+        # SUITE.md is the manifest, not a question; load_suite_manifest
+        # handles it separately. README.md / NOTES.md follow the same
+        # convention.
+        if md_path.name in ("SUITE.md", "README.md", "NOTES.md"):
+            continue
+        text = md_path.read_text(encoding="utf-8")
+        fm, body = _parse_frontmatter(text)
+        if not fm:
+            log.warning(
+                "skipping %s: no frontmatter", md_path,
+            )
+            continue
+        qid = fm.get("id") or md_path.stem
+        tier = fm.get("tier") or "unknown"
+        if tier_set is not None and tier not in tier_set:
+            continue
+        if id_set is not None and qid not in id_set:
+            continue
+        oracle_filename = fm.get("oracle")
+        if not oracle_filename:
+            log.warning(
+                "skipping %s: no oracle frontmatter field", md_path,
+            )
+            continue
+        oracle_path = directory / oracle_filename
+        if not oracle_path.is_file():
+            log.warning(
+                "skipping %s: oracle file %s not found",
+                md_path, oracle_path,
+            )
+            continue
+        out.append(BenchQuestion(
+            id=qid, tier=tier,
+            source=fm.get("source") or "",
+            task=fm.get("task") or "",
+            sandbox_path=fm.get("sandbox_path") or "",
+            oracle_path=oracle_path,
+            notes=fm.get("notes") or "",
+            body=body.strip(),
+        ))
+    return out
+
+
+# ============================================================== #
+# Suite manifest (SUITE.md) — versioning + reproducibility
+# ============================================================== #
+
+@dataclass(frozen=True)
+class SuiteManifest:
+    """Parsed SUITE.md. ``suite_hash`` is computed from the
+    canonical sorted manifest + every question file's content
+    hash, so a non-content-changing whitespace edit doesn't flap
+    the recorded baseline. The renderer surfaces it on every
+    results report so a reader can verify which suite version +
+    content the numbers came from.
+    """
+    suite: str                  # "coder" | "stall" | "tool_executor"
+    suite_version: str          # "1.0", "1.1", ...
+    released: str               # ISO date the suite version landed
+    manifest: tuple[str, ...]   # ordered question ids
+    rubric: dict                # rubric thresholds (suite-specific)
+    suite_hash: str             # sha256(manifest + question file contents)
+
+
+def _hash_for_suite(directory: Path, manifest: list[str]) -> str:
+    """Stable hash over (sorted manifest ids + each question's
+    markdown bytes + oracle bytes). Used to detect undeclared
+    drift — if someone edited a question without bumping
+    suite_version, the hash changes and the report flags it.
+    """
+    h = hashlib.sha256()
+    for qid in sorted(manifest):
+        h.update(qid.encode("utf-8"))
+        h.update(b"\x00")
+        md = directory / f"{qid}.md"
+        if md.is_file():
+            h.update(md.read_bytes())
+        oracle = directory / f"{qid}-oracle.py"
+        if oracle.is_file():
+            h.update(oracle.read_bytes())
+        h.update(b"\x00")
+    return h.hexdigest()
+
+
+def load_suite_manifest(directory: Path) -> SuiteManifest:
+    """Read SUITE.md from ``directory``, parse the frontmatter,
+    and compute the content hash. Raises FileNotFoundError when
+    SUITE.md is missing.
+    """
+    suite_md = directory / "SUITE.md"
+    if not suite_md.is_file():
+        raise FileNotFoundError(
+            f"suite manifest not found: {suite_md}"
+        )
+    fm, _ = _parse_frontmatter(suite_md.read_text(encoding="utf-8"))
+    if not fm:
+        raise ValueError(f"SUITE.md has no frontmatter: {suite_md}")
+    # ``manifest:`` is a list in proper YAML; the simple parser
+    # returns a Python list[str] directly. Tolerate the legacy
+    # string-with-newlines shape too in case someone hand-edits.
+    raw_manifest = fm.get("manifest", [])
+    manifest_ids: list[str] = []
+    if isinstance(raw_manifest, list):
+        manifest_ids = [str(x).strip() for x in raw_manifest if x]
+    elif isinstance(raw_manifest, str):
+        for line in raw_manifest.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("-"):
+                line = line[1:].strip()
+            manifest_ids.append(line)
+    # rubric: parsed as a dict by the simple parser; coerce numeric
+    # values where the canonical rubric expects floats.
+    raw_rubric = fm.get("rubric", {})
+    rubric: dict = {}
+    if isinstance(raw_rubric, dict):
+        for k, v in raw_rubric.items():
+            try:
+                rubric[k] = float(v)
+            except (TypeError, ValueError):
+                rubric[k] = v
+    return SuiteManifest(
+        suite=fm.get("suite") or directory.name,
+        suite_version=str(fm.get("suite_version") or "0.0"),
+        released=fm.get("released") or "",
+        manifest=tuple(manifest_ids),
+        rubric=rubric,
+        suite_hash=_hash_for_suite(directory, manifest_ids),
+    )
+
+
+# ============================================================== #
+# Trial result schema (M11b)
+# ============================================================== #
+
+@dataclass
+class CoderTrial:
+    """One (question × model) trial result. ``compiles`` /
+    ``passes_tests`` / ``test_output`` are the hard-correctness
+    signals; ``quality_score`` is the LLM-judge soft signal (1-5,
+    None when judge skipped or trial didn't compile);
+    ``code_lines`` / ``complexity`` / ``tokens_*`` / ``wall_s`` /
+    ``iterations`` measure cost.
+
+    ``sandbox_dir`` records where the produced files live (under
+    ``benchmarks/consultants/results/<date>/coder/<trial-id>/``) so
+    a post-hoc audit can re-read the actual code the model emitted.
+    """
+    question_id: str
+    tier: str
+    model: str
+    # Hard-correctness signals
+    compiles: bool = False
+    passes_tests: bool = False
+    test_output: str = ""
+    # Cost signals
+    wall_s: float = 0.0
+    iterations: int = 0
+    tokens_prompt: int = 0
+    tokens_completion: int = 0
+    code_lines: int = 0
+    complexity: Optional[int] = None
+    # Soft-quality signal (LLM judge)
+    quality_score: Optional[float] = None
+    quality_rationale: str = ""
+    # Bookkeeping
+    sandbox_dir: str = ""
+    timestamp: str = ""        # ISO-8601 UTC; set at trial start
+    error: Optional[str] = None
+    # The files the coder wrote: list of {"path": str, "bytes": int}
+    files_written: list[dict] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+# ============================================================== #
+# Per-model cost coefficients
+# ============================================================== #
+
+# Heuristic coefficients per model — derived from the
+# csl-2026-05-* trace battery's measured token-per-iteration
+# distributions for code-gen / write-heavy tasks. These are
+# upper-mid estimates so the summary line says "around X" without
+# being scarily wrong on the low side.
+#
+# Schema: model -> (avg_iterations, avg_prompt_tokens_per_iter,
+#                   avg_completion_tokens_per_iter)
+#
+# Unknown models default to a conservative 5-iter / 8000-prompt /
+# 1500-completion mid-point so callers can ship new models without
+# updating this table first.
+_COST_COEFFS: dict[str, tuple[int, int, int]] = {
+    "kimi-k2.6:cloud":               (5, 8000, 1500),
+    "qwen3-next:cloud":              (5, 8000, 1500),
+    "glm-5.1:cloud":                 (5, 8000, 1400),
+    "gemma4:31b-cloud":              (4, 6500, 1200),
+    "deepseek-v4-pro:cloud":         (6, 9000, 1800),
+    "gemini-3-flash-preview:cloud":  (6, 9000, 2000),
+    "nemotron-3-super:cloud":        (5, 8000, 1500),
+    "kimi-k2:cloud":                 (5, 8000, 1500),
+}
+
+
+def _coeffs_for(model: str) -> tuple[int, int, int]:
+    return _COST_COEFFS.get(model, (5, 8000, 1500))
+
+
+def estimate_cost(questions: list[BenchQuestion],
+                  models: list[str],
+                  *,
+                  judge_model: Optional[str] = None) -> dict[str, Any]:
+    """Token-budget estimate for a coder-bench run.
+
+    Returns a dict with:
+
+    - ``trials`` — total trial count (len(questions) * len(models))
+    - ``by_model`` — per-model {iterations, prompt_tokens,
+      completion_tokens, total_tokens}
+    - ``total_tokens`` — grand total across all models + judge
+    - ``judge_tokens`` — separate judge-LLM cost line (one judge
+      call per trial that compiled)
+    - ``summary_line`` — one-line string for the run banner
+
+    The estimate is intentionally a rough single number — refine
+    only when the per-run trace diverges from these coefficients
+    by more than ~30%.
+    """
+    n_q = len(questions)
+    by_model: dict[str, dict[str, int]] = {}
+    total = 0
+    for m in models:
+        iters, pt_per, ct_per = _coeffs_for(m)
+        prompt = iters * pt_per * n_q
+        completion = iters * ct_per * n_q
+        sub_total = prompt + completion
+        by_model[m] = {
+            "iterations": iters * n_q,
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": sub_total,
+        }
+        total += sub_total
+    # Judge: one call per (question × model) that compiles, ~1500
+    # prompt tokens (problem + code + rubric) + ~150 completion (a
+    # score + a sentence). Assume 80% compile rate for the rough
+    # estimate (the real rate per model is in the report).
+    judge_tokens = 0
+    if judge_model:
+        n_compiles = int(0.8 * n_q * len(models))
+        judge_iters, judge_pt, judge_ct = _coeffs_for(judge_model)
+        # Override per-iteration sizes for the judge — it's a
+        # single call, not an agent loop.
+        judge_tokens = n_compiles * (1500 + 150)
+        total += judge_tokens
+    summary_line = (
+        f"{len(models)} models × {n_q} questions = "
+        f"{len(models) * n_q} trials. "
+        f"~{total / 1_000_000:.2f}M tokens estimated"
+        + (
+            f" (+~{judge_tokens / 1_000:.0f}K for the {judge_model} judge)"
+            if judge_model else ""
+        )
+        + "."
+    )
+    return {
+        "trials": len(models) * n_q,
+        "by_model": by_model,
+        "judge_model": judge_model,
+        "judge_tokens": judge_tokens,
+        "total_tokens": total,
+        "summary_line": summary_line,
+    }
+
+
+# ============================================================== #
+# Oracle grader (M11b)
+# ============================================================== #
+
+@dataclass
+class OracleResult:
+    """Outcome of running the oracle pytest file against the
+    produced sandbox. ``passed`` is the hard signal; ``stdout`` /
+    ``stderr`` capture the pytest output for post-hoc inspection.
+    """
+    passed: bool
+    returncode: int
+    stdout: str
+    stderr: str
+    duration_s: float
+
+
+def run_pytest_against_sandbox(oracle_path: Path,
+                               sandbox_dir: Path,
+                               *,
+                               python_executable: str = sys.executable,
+                               timeout_s: float = 60.0) -> OracleResult:
+    """Run the oracle pytest file with ``CODER_SANDBOX`` env var
+    pointing at the produced code's directory. Returns OracleResult.
+
+    The oracle file is responsible for importing relative to
+    ``$CODER_SANDBOX`` (the test files we ship under questions/
+    do exactly that).
+
+    Timeout default 60s — large enough for any reasonable test
+    suite, small enough that a runaway-import-loop in the model's
+    code doesn't hang the bench indefinitely.
+    """
+    import os
+    t0 = time.monotonic()
+    env = dict(os.environ)
+    env["CODER_SANDBOX"] = str(sandbox_dir)
+    # Strip PYTHONDONTWRITEBYTECODE if set — pytest is fine writing
+    # cache files, but inheriting an env that bans them sometimes
+    # confuses old pytest versions.
+    env.pop("PYTHONDONTWRITEBYTECODE", None)
+    try:
+        proc = subprocess.run(
+            [python_executable, "-m", "pytest", str(oracle_path),
+             "-x", "-q", "--no-header"],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired as e:
+        return OracleResult(
+            passed=False, returncode=-1,
+            stdout=(e.stdout or b"").decode("utf-8", errors="replace")
+                   if isinstance(e.stdout, (bytes, bytearray))
+                   else (e.stdout or ""),
+            stderr=f"(pytest timed out after {timeout_s}s)",
+            duration_s=time.monotonic() - t0,
+        )
+    return OracleResult(
+        passed=proc.returncode == 0,
+        returncode=proc.returncode,
+        stdout=proc.stdout,
+        stderr=proc.stderr,
+        duration_s=time.monotonic() - t0,
+    )
+
+
+# ============================================================== #
+# Code-quality measurements (M11b)
+# ============================================================== #
+
+def count_code_lines(file_path: Path) -> int:
+    """Non-empty, non-comment lines in a Python file. Defensive
+    against missing files / decode errors — returns 0 instead of
+    raising so a tombstone trial still has a number to report.
+    """
+    if not file_path.is_file():
+        return 0
+    try:
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+    count = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        count += 1
+    return count
+
+
+def measure_complexity(file_path: Path) -> Optional[int]:
+    """Cyclomatic complexity via ``radon`` if installed, else None.
+
+    Returns the maximum complexity across all functions in the file
+    — a single number per trial is enough signal for the bench
+    summary; per-function granularity is in the trial's
+    ``files_written`` for post-hoc analysis.
+    """
+    if not file_path.is_file():
+        return None
+    try:
+        from radon.complexity import cc_visit  # type: ignore
+    except ImportError:
+        return None
+    try:
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+        results = cc_visit(text)
+    except Exception:  # pragma: no cover — radon parse error
+        log.exception("radon failed on %s", file_path)
+        return None
+    if not results:
+        return 0
+    return max(int(r.complexity) for r in results)
+
+
+# ============================================================== #
+# Judge LLM helper (M11b — code-quality scoring)
+# ============================================================== #
+
+JUDGE_SYSTEM = (
+    "You are a senior Python code reviewer. You are given a "
+    "code-generation task and the code a junior engineer produced. "
+    "Score the code on a single integer scale 1-5 with this rubric:\n\n"
+    "1 — Broken. Doesn't solve the task or has obvious bugs.\n"
+    "2 — Solves the basic case but misses obvious edge cases or "
+    "uses confusing structure.\n"
+    "3 — Correct for the spec, but overly verbose / non-idiomatic / "
+    "missing simple Python idioms (e.g. uses manual indexing where "
+    "slicing fits).\n"
+    "4 — Correct and idiomatic. Reasonable structure, edge cases "
+    "considered.\n"
+    "5 — Excellent. Minimal, idiomatic, robust. The kind of code "
+    "you'd ship without changes.\n\n"
+    "Output EXACTLY two lines:\n"
+    "Line 1: ``SCORE: <integer 1-5>``\n"
+    "Line 2: One short sentence (max 25 words) justifying the score.\n\n"
+    "Do not add preamble, headings, or markdown."
+)
+
+
+_JUDGE_SCORE_RE = re.compile(
+    r"^\s*SCORE\s*:\s*(\d)\b", re.IGNORECASE | re.MULTILINE,
+)
+
+
+def build_judge_messages(task: str, code: str) -> list[dict]:
+    """Construct the conversation for the judge model. Keeps the
+    prompt short on purpose — judge is a single fast call, not an
+    agent loop."""
+    user = (
+        f"TASK GIVEN TO THE JUNIOR ENGINEER:\n{task.strip()}\n\n"
+        f"CODE THE JUNIOR PRODUCED:\n```python\n{code}\n```\n\n"
+        "Score the code per the rubric. Two lines only."
+    )
+    return [
+        {"role": "system", "content": JUDGE_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+
+
+def parse_judge_response(text: str) -> tuple[Optional[float], str]:
+    """Extract ``(score, rationale)`` from the judge's reply.
+    ``score`` is a float (1.0–5.0) when parseable, else None.
+    ``rationale`` is everything after the SCORE line, lightly
+    cleaned. Tolerant of:
+
+    - Extra blank lines
+    - Trailing markdown or quotes
+    - Score lines emitted as ``Score:`` / ``score = 4`` / ``4/5``
+    """
+    if not text or not isinstance(text, str):
+        return None, ""
+    body = text.strip()
+    m = _JUDGE_SCORE_RE.search(body)
+    if m is None:
+        # Fall back to looking for "<n>/5" or "score = <n>".
+        alt = re.search(
+            r"\b([1-5])\s*[/\\]\s*5\b", body,
+        ) or re.search(
+            r"score\s*[=:]\s*([1-5])\b", body, re.IGNORECASE,
+        )
+        if alt is None:
+            return None, body[:200]
+        score = float(alt.group(1))
+        # Everything else is rationale.
+        rationale = re.sub(
+            r"\b([1-5])\s*[/\\]\s*5\b", "", body,
+        ).strip()
+        return score, rationale[:200]
+    score = float(m.group(1))
+    # Rationale = next non-empty line(s) after the SCORE line.
+    after = body[m.end():].strip()
+    rationale = after.split("\n", 1)[0].strip() if after else ""
+    return score, rationale[:200]
+
+
+# ============================================================== #
+# JSON writer — append-only so Ctrl-C preserves prior trials
+# ============================================================== #
+
+def append_trial(trials_path: Path, trial: CoderTrial) -> None:
+    """Append one trial as a JSON line. Creates the parent dir
+    + file if missing. Used by the live bench to checkpoint after
+    every trial so partial runs aren't a total loss.
+    """
+    trials_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(trials_path, "a", encoding="utf-8") as f:
+        json.dump(trial.to_dict(), f, default=str)
+        f.write("\n")
+
+
+def load_trials(trials_path: Path) -> list[CoderTrial]:
+    """Read every JSON line back into ``CoderTrial`` instances.
+    Tolerant of partial files (last line truncated); reports
+    silently as fewer trials, not as an error.
+    """
+    if not trials_path.is_file():
+        return []
+    out: list[CoderTrial] = []
+    with open(trials_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                log.warning("skipping malformed line: %s", line[:80])
+                continue
+            try:
+                out.append(CoderTrial(**data))
+            except TypeError:
+                log.warning(
+                    "skipping line with unknown fields: %s",
+                    list(data.keys()),
+                )
+    return out
+
+
+# ============================================================== #
+# Dry-run stub — emulates a model writing a file via the sandbox
+# tool. Used by the harness self-tests and by ``--dry-run`` so the
+# pipeline can be exercised without cloud spend.
+# ============================================================== #
+
+def make_dry_run_loop_runner(*, file_path: str, content: str,
+                             iterations: int = 1,
+                             prompt_tokens: int = 500,
+                             completion_tokens: int = 200):
+    """Build a stub agent-loop runner that simulates the coder
+    calling ``write_file`` once with the supplied content. The
+    harness's smoke tests + ``--dry-run`` mode use this so every
+    trial path is exercised without hitting the cloud.
+
+    Tracks per-call counters via the closure so the bench's token
+    + iteration metrics still produce sensible numbers on dry runs.
+    """
+    def _runner(payload, cwd, *, config, tool_specs, chat_fn,
+                tool_executor, on_iter=None, on_tool=None,
+                preseed_builder=None):
+        # Simulate one write_file call.
+        args = json.dumps({"path": file_path, "content": content})
+        tool_output = tool_executor("write_file", args)
+        if on_tool is not None:
+            on_tool("write_file", args, tool_output, 5, None)
+        if on_iter is not None:
+            for i in range(iterations):
+                resp = {
+                    "choices": [{
+                        "message": {"role": "assistant",
+                                     "content": f"WROTE {file_path}."},
+                    }],
+                    "usage": {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                    },
+                }
+                on_iter(i, payload, resp, 50)
+        final_text = (
+            f"WROTE {file_path}. Implements the task as requested."
+        )
+        return {
+            "final": {"choices": [
+                {"role": "assistant", "content": final_text,
+                 "message": {"role": "assistant", "content": final_text}},
+            ]},
+        }
+    return _runner
+
+
+__all__ = [
+    "BenchQuestion",
+    "CoderTrial",
+    "JUDGE_SYSTEM",
+    "OracleResult",
+    "TIERS",
+    "append_trial",
+    "build_judge_messages",
+    "count_code_lines",
+    "estimate_cost",
+    "load_questions",
+    "load_trials",
+    "make_dry_run_loop_runner",
+    "measure_complexity",
+    "parse_judge_response",
+    "run_pytest_against_sandbox",
+]

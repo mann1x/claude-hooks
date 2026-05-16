@@ -16,6 +16,181 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — Consultancy Skill-Eval Protocol + coder bench (M11b)
+
+The M11b coder skill-eval is the **first** sub-protocol of a new
+**Consultancy Skill-Eval Protocol** — the canonical evaluation
+procedure for picking the default model of each consultant role
+(coder / tool_executor / researcher / critic / planner /
+synthesizer). The protocol is designed to be **rerun every time** a
+new candidate model lands on the proxy, so the cost of trying a
+candidate is one command + one docs append, not a multi-day effort.
+
+The harness is shared across the three planned sub-protocols
+(M11a stall thresholds, M11b coder, M11c tool_executor — only b
+ships in this commit; a/c land in follow-up commits as the
+infrastructure is ready). The repo also gets a canonical baselines
+ledger (`docs/consultants-skill-eval-baselines.md`) — append-only
+record of every model × suite × date so future-us can compare new
+candidates against the recorded trend.
+
+**`docs/consultants-skill-eval-protocol.md`** (NEW, canonical
+methodology document):
+
+- The three sub-protocols (coder / stall / tool_executor) + which
+  role's default each one gates.
+- Per-trial flow for the coder sub-protocol: sandbox → coder_node
+  → produced-file → py_compile → pytest oracle → optional
+  judge LLM (1-5 rubric).
+- Aggregation + decision rubric (`pass_rate ≥ 70% AND avg_quality
+  ≥ 3.5`, tie-broken by `median_tokens`).
+- Re-run rules: full re-run on new candidate / cloud disruption /
+  suite version bump; smoke re-run on harness change; never
+  re-roll the dice on a sub-threshold model.
+- Adding-a-question workflow + suite-versioning rules (PATCH /
+  MINOR / MAJOR semantics, when a new version requires re-baselining
+  every prior model).
+- Explicit non-goals: doesn't pick the global default, doesn't
+  exercise full council pipeline (that's M12 parity), doesn't
+  measure dollar cost (Ollama Pro is quota-based, not USD).
+
+**`docs/consultants-skill-eval-baselines.md`** (NEW): running
+ledger of every (model × suite × date) score. Append-only; first
+live run lands a row in a follow-up commit.
+
+**`benchmarks/consultants/`** (NEW directory):
+
+- `harness.py` (HARNESS_VERSION = "1.0") — shared infrastructure:
+  - `SuiteManifest` + `load_suite_manifest` parse `SUITE.md` with
+    a tiny in-house YAML subset (no PyYAML dep). Computes a
+    content-stable `suite_hash` over manifest ids + question files
+    + oracles so undeclared drift trips the report.
+  - `BenchQuestion` + `load_questions` discover + filter (by tier
+    or by id). Skips SUITE.md / README.md / NOTES.md.
+  - `CoderTrial` dataclass — every measurable metric per
+    (question × model). `append_trial` is JSONL-append so Ctrl-C
+    mid-run preserves prior trials; `load_trials` round-trips with
+    tolerance for malformed lines.
+  - `estimate_cost(questions, models, judge_model)` — token-budget
+    summary with per-model coefficients tuned from the csl-2026-05-*
+    trace battery. Unknown models fall back to a conservative
+    mid-point so callers can add a model without touching the
+    coeff table.
+  - `run_pytest_against_sandbox` — subprocesses pytest with
+    `CODER_SANDBOX` env var; 60 s default timeout catches
+    runaway-import loops. `OracleResult` captures stdout / stderr /
+    returncode for post-hoc inspection.
+  - `count_code_lines` + `measure_complexity` (radon soft-dep — no
+    hard requirement).
+  - `JUDGE_SYSTEM` + `build_judge_messages` + `parse_judge_response`
+    — strict 1-5 rubric for the LLM judge; tolerates `SCORE: <n>`
+    / `score = <n>` / `<n>/5` shapes.
+  - `make_dry_run_loop_runner` — stub agent loop that simulates
+    write_file calls + iteration accounting, used by `--dry-run`.
+- `coder_bench.py` — M11b runner CLI. Two-phase: `--dry-run`
+  (stub ChatClient + stub run_loop + canonical reference
+  submissions → every trial passes by design, validates the
+  pipeline) and `--live --accept-cost` (real
+  `make_agent_chat_client` against `--ollama-base`, default
+  `192.168.178.2:11433`). `--smoke` shorthand for `--tier trivial`.
+  `--id` / `--tier` filters are repeatable. Estimate prints as a
+  summary line at run start; `--live` without `--accept-cost`
+  prints the estimate and exits 2 (gate, not stop).
+- `analyze.py` — renders `report.md` from a `trials.jsonl`:
+  provenance header (harness + suite version + hash + git commit),
+  per-model summary table, rubric application + recommended
+  default, per-question detail tables, reproducibility footer
+  with the exact re-run command.
+- `questions/coder/SUITE.md` — coder suite v1.0 manifest:
+  - 8 questions × 4 tiers (2 per tier).
+  - Rubric: `pass_rate_floor = 0.70`, `quality_score_floor = 3.5`,
+    `tie_breaker = median_tokens`.
+  - Suite versioning rules (PATCH = oracle tighter only; MINOR =
+    new question added → every prior model needs re-baselining;
+    MAJOR = rubric change).
+- `questions/coder/*.md` + `*-oracle.py` — 8 curated HumanEval-
+  style problems with pytest oracles:
+  - `trivial-01-truncate` (custom) — first N characters; edge cases.
+  - `trivial-02-strlen` (humaneval/23, modified) — length without
+    `len()`; constraint is checked via AST inspection.
+  - `easy-01-dedupe` (humaneval/26) — stable dedupe; the
+    `list(set(items))` trap is caught.
+  - `easy-02-fib` (humaneval/55) — Fibonacci; naive recursion
+    fails the fib(40) 2s timeout.
+  - `medium-01-balance` (custom) — multi-type bracket matching;
+    the counter-trap (`"(]"` → True via counter, False via stack)
+    is caught.
+  - `medium-02-prime-length` (humaneval/82) — prime-length string;
+    edge cases (length 0, 1, 2).
+  - `hard-01-matrix-path` (classic DP) — min path sum; naive
+    recursion fails the 10×10 3s timeout; negatives allowed; input
+    validation (empty / jagged).
+  - `hard-02-digit-filter` (humaneval/146-style) — count
+    multi-digit positives with odd first+last digit; "> 10"
+    boundary + signed-vs-abs digit extraction.
+
+**`consultants/cli.py`** gains `claude-consultants skill-eval coder`
+— thin wrapper over `benchmarks/consultants/coder_bench.py:main`
+so users don't have to remember the script path. Forwards
+`--dry-run` / `--live` / `--accept-cost` / `--models` / `--ollama-base`
+/ `--judge-model` / `--tier` / `--id` / `--smoke` / `--output-dir`.
+
+**`.claude/skills/consultants/SKILL.md`** gains a "Skill-eval —
+pick the right model for a role" section: when to suggest running
+the eval, how to invoke it, where to record results. Two paragraphs
++ a CLI example, in line with the rest of the skill doc's
+verb-by-verb structure.
+
+**`.gitignore`** adds `benchmarks/consultants/results/` so per-run
+sandboxes (which contain model-generated code + pytest stdout) stay
+local. The committed artifact is the rendered `report.md` summary
+that lands in `docs/consultants-skill-eval-baselines.md` as a
+single ledger row.
+
+**Tests**: `tests/test_consultants_v2_benchmarks_smoke.py` — 31
+tests covering:
+
+- Suite manifest loading + hash stability across re-loads.
+- Question loading (tier filter, id filter, oracle resolution,
+  SUITE.md skipped).
+- Cost estimator (basic, unknown model fallback, judge tokens
+  separate).
+- Oracle grader's happy path: **every** canonical reference
+  submission in `_DRY_RUN_SUBMISSIONS` passes its respective
+  oracle (8 subtests, one per question — locks in the bench's
+  "happy path is reachable" guarantee).
+- Oracle correctly rejects buggy code + missing modules.
+- Code-line counter, judge-message builder, judge response parser
+  (canonical / lowercase / slash-5 / no-score / empty).
+- Trial JSONL round-trip preserves every field.
+- End-to-end dry-run smoke: 16 trials, all PASS, metadata.json
+  correct.
+- Analyzer rubric: picks qualifier, refuses on no-qualifier, tie-
+  breaker prefers lower tokens, report renders cleanly.
+- CLI gate: `--live` without `--accept-cost` exits 2 and prints
+  the cost summary.
+
+**Verification**: main env 3315 pass (+31 from M10 baseline 3284),
+89 skipped (unchanged), zero regressions.
+
+**What ships in M11b vs the rest of M11**:
+
+- M11b (this commit): coder sub-protocol infrastructure +
+  questions + bench script + analyzer + skill-eval protocol doc
+  + baselines ledger.
+- M11a (next): stall sub-protocol — GPQA-Diamond-style questions,
+  streaming-token cadence measurement, per-model
+  `stall_threshold_s` + `hard_cap_s` recommendations.
+- M11c (after M11a): tool_executor sub-protocol — multi-tool
+  research tasks, baseline vs gemma4/glm-5.1/qwen3-next
+  configurations, decides whether to flip the M6 default-on bit
+  and unblocks task #103 (x-tier composition).
+
+The first live run of the coder sub-protocol lands in a follow-up
+commit (separate from M11b's infrastructure commit) so the
+infrastructure can be reviewed without the user committing to the
+cloud spend.
+
 ### Added — `/consultants` v2 coder role + sandbox + planner gate (M10)
 
 Closes M10 — the **coder** specialist role for code-generation

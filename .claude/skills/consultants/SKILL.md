@@ -563,6 +563,74 @@ Don't call these to "check in" on a running session — the
 
 ---
 
+## Skill-eval — pick the right model for a role
+
+When the user asks "is X a good model for the coder role?" or
+"should I switch from kimi to qwen3-next for code generation?",
+the answer comes from the **Consultancy Skill-Eval Protocol** —
+the canonical evaluation procedure for any candidate consultant
+model. The full methodology lives at
+[`docs/consultants-skill-eval-protocol.md`](../../docs/consultants-skill-eval-protocol.md);
+the running ledger of every score lives at
+[`docs/consultants-skill-eval-baselines.md`](../../docs/consultants-skill-eval-baselines.md).
+
+The protocol runs three sub-suites (one is shipped today, two
+are scheduled):
+
+- **coder** — 8 HumanEval-style questions × candidate models;
+  rubric is `pass_rate ≥ 70% AND avg_quality ≥ 3.5`.
+- **stall** (M11a, not yet shipped) — inter-token cadence on hard
+  questions; informs M3 stall thresholds.
+- **tool_executor** (M11c, not yet shipped) — multi-tool research
+  tasks; gates the M6 default-on bit.
+
+**Invoke via CLI** (preferred — wraps the bench scripts):
+
+```
+claude-consultants skill-eval coder --dry-run \
+    --models kimi-k2.6:cloud,qwen3-next:cloud,glm-5.1:cloud,gemma4:31b-cloud
+```
+
+Dry-run validates the harness end-to-end without cloud spend
+(~10 s). For a real evaluation:
+
+```
+claude-consultants skill-eval coder --live --accept-cost \
+    --models <comma-separated> \
+    --ollama-base http://192.168.178.2:11433 \
+    --judge-model kimi-k2.6:cloud
+```
+
+Then render the report:
+
+```
+python benchmarks/consultants/analyze.py \
+    benchmarks/consultants/results/<date>/coder/trials.jsonl
+```
+
+The report.md applies the rubric and recommends a default. If a
+new model qualifies, **append** its score to the baselines ledger
+— that's how we accumulate evidence over time.
+
+**When to suggest running the eval:**
+
+- The user is considering a new model for a consultant role.
+- The user reports the council's code-generation output regressed
+  ("it used to write better Python last week") — re-run the eval
+  to see if the proxy upstream shifted.
+- A new model just landed on the cloud upstream and you want to
+  know whether to recommend it.
+
+**When NOT to suggest:**
+
+- For a single ambiguous result. Skill-eval works on an 8-question
+  denominator; one bad answer to the user's actual question isn't
+  enough signal.
+- For non-consultant decisions (general-purpose model picks). The
+  protocol is scoped to the consultant roles.
+
+---
+
 ## Failure handling (all verbs)
 
 - **CLI returns `{"ok": false, ...}`** → surface the error verbatim.

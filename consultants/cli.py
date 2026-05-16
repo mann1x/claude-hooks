@@ -783,6 +783,59 @@ def cmd_events(args, base: str) -> int:
     return 0
 
 
+# ----------------------- skill-eval (M11) ------------------------- #
+
+def cmd_skill_eval_coder(args, base: str) -> int:
+    """Run the coder skill-eval suite. Thin wrapper around
+    ``benchmarks.consultants.coder_bench.main`` — keeps the bench
+    script as the source of truth for behavior while giving users
+    a friendly ``claude-consultants skill-eval coder`` entry point.
+
+    Args translation:
+
+    - The bench script wants ``--models`` as a comma-separated
+      string; this wrapper accepts the same and passes through.
+    - ``--id`` and ``--tier`` are repeatable on both sides.
+    - The wrapper resolves a default ``--output-dir`` to the
+      conventional date-stamped location if the user didn't supply
+      one.
+
+    Exit codes mirror the bench script: 0 on success, 1 on no
+    trials (empty match), 2 when --live is set but --accept-cost
+    isn't.
+    """
+    # Lazy import — keeps the CLI fast on the no-bench paths.
+    try:
+        from benchmarks.consultants.coder_bench import main as _bench_main
+    except ImportError as e:
+        raise CLIError(
+            "benchmarks.consultants.coder_bench is not importable. "
+            f"Run from the repo root or set PYTHONPATH. Underlying: {e}"
+        )
+    argv: list[str] = []
+    if args.dry_run:
+        argv.append("--dry-run")
+    if args.live:
+        argv.append("--live")
+    if args.accept_cost:
+        argv.append("--accept-cost")
+    if args.models:
+        argv.extend(["--models", args.models])
+    if args.ollama_base:
+        argv.extend(["--ollama-base", args.ollama_base])
+    if args.judge_model is not None:
+        argv.extend(["--judge-model", args.judge_model])
+    if args.output_dir:
+        argv.extend(["--output-dir", args.output_dir])
+    for t in (args.tier or []):
+        argv.extend(["--tier", t])
+    for qid in (args.id or []):
+        argv.extend(["--id", qid])
+    if args.smoke:
+        argv.append("--smoke")
+    return int(_bench_main(argv))
+
+
 # ----------------------- argparse wiring ------------------------- #
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1113,6 +1166,69 @@ def build_parser() -> argparse.ArgumentParser:
     clm = cfg_sub.add_parser("list-models",
                              help="Available Ollama tags.")
     clm.set_defaults(fn=cmd_config_list_models)
+
+    # ----- skill-eval (M11) — wraps benchmarks/consultants/*.py ----
+    se = sub.add_parser(
+        "skill-eval",
+        help=("Run the Consultancy Skill-Eval Protocol against one or "
+              "more candidate models. See "
+              "docs/consultants-skill-eval-protocol.md."),
+    )
+    se_sub = se.add_subparsers(dest="protocol", required=True)
+    se_coder = se_sub.add_parser(
+        "coder",
+        help=("Run the coder suite (M11b). Picks the default for "
+              "cfg.roles.coder.model."),
+    )
+    se_coder_mode = se_coder.add_mutually_exclusive_group(required=True)
+    se_coder_mode.add_argument(
+        "--dry-run", action="store_true",
+        help="Stub ChatClient; validates the harness without "
+             "cloud spend.",
+    )
+    se_coder_mode.add_argument(
+        "--live", action="store_true",
+        help="Real ChatClients against --ollama-base. Requires "
+             "--accept-cost.",
+    )
+    se_coder.add_argument(
+        "--accept-cost", action="store_true",
+        help="Required with --live. Acknowledges Ollama-Pro token "
+             "spend (see the summary line).",
+    )
+    se_coder.add_argument(
+        "--models", default=None,
+        help="Comma-separated model list. Default: the 4-model "
+             "candidate set from coder_bench.py.",
+    )
+    se_coder.add_argument(
+        "--ollama-base", default=None,
+        help="Override the cloud proxy URL. Default: read from "
+             "config or 192.168.178.2:11433.",
+    )
+    se_coder.add_argument(
+        "--judge-model", default=None,
+        help="Model used as the code-quality judge. Set to '' to skip.",
+    )
+    se_coder.add_argument(
+        "--output-dir", default=None,
+        help=("Per-run output directory. Default: "
+              "benchmarks/consultants/results/<YYYY-MM-DD>/coder/"),
+    )
+    se_coder.add_argument(
+        "--tier", action="append",
+        choices=("trivial", "easy", "medium", "hard"),
+        help="Filter by tier (repeatable). Default: all tiers.",
+    )
+    se_coder.add_argument(
+        "--id", action="append",
+        help="Filter by question id (repeatable). Default: all.",
+    )
+    se_coder.add_argument(
+        "--smoke", action="store_true",
+        help="Shorthand for --tier trivial.",
+    )
+    se_coder.set_defaults(fn=cmd_skill_eval_coder)
 
     return p
 
