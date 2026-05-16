@@ -375,10 +375,24 @@ def _run_one_trial(*,
             timeout_s=60.0,
         )
         trial.passes_tests = oracle_result.passed
-        # Keep stdout truncated so the JSON stays bounded.
+        # Keep stdout truncated so the JSON stays bounded — but wide
+        # enough to fit the full pytest failure preamble for hard
+        # questions. The 2026-05-16 coder_mlang v1 run kept this at
+        # 2000 chars; mid-run analysis showed multiple very_hard
+        # trials had the FAILURES header consume the visible window
+        # before the assertion message landed. Bumped to 8000 (head)
+        # + 8000 (tail) so both the first failed-test summary AND
+        # the trailing FAILED summary survive.
+        out = oracle_result.stdout
+        if len(out) > 16000:
+            kept = out[:8000] + (
+                f"\n...[{len(out) - 16000} chars elided]...\n"
+            ) + out[-8000:]
+        else:
+            kept = out
         trial.test_output = (
-            oracle_result.stdout[-2000:]
-            + ("\n--STDERR--\n" + oracle_result.stderr[-1000:]
+            kept
+            + ("\n--STDERR--\n" + oracle_result.stderr[-2000:]
                if oracle_result.stderr else "")
         )
 
