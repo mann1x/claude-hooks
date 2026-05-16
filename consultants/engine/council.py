@@ -478,7 +478,8 @@ def build_synthesizer_messages(question: str, plan: str,
                                research_rounds: list[str],
                                critique: Optional[str],
                                *, self_critic: bool = False,
-                               additional_context=None) -> list[dict]:
+                               additional_context=None,
+                               coder_artifacts: Optional[list] = None) -> list[dict]:
     parts = [
         f"USER QUESTION:\n{question.strip()}",
         f"\nPLANNER'S PLAN:\n{plan.strip()}",
@@ -487,6 +488,18 @@ def build_synthesizer_messages(question: str, plan: str,
         parts.append(f"\nRESEARCHER REPORT (round {i}):\n{r.strip()}")
     if critique:
         parts.append(f"\nCRITIC'S VERDICT:\n{critique.strip()}")
+    # M10: surface coder lane outputs (when present) so the
+    # synthesizer can reference the files it wrote in the final
+    # answer. Falsy / empty list -> block omitted entirely so the
+    # v1 prompt shape is byte-identical when the channel is unused.
+    if coder_artifacts:
+        try:
+            from consultants.engine.coder import build_coder_artifacts_block
+            block = build_coder_artifacts_block(coder_artifacts)
+            if block:
+                parts.append("\n" + block)
+        except ImportError:  # pragma: no cover — coder ships in-tree
+            pass
     extra = _additional_context_block(additional_context)
     if extra:
         parts.append("\n" + extra)
@@ -823,7 +836,8 @@ def _compose_degraded_answer(state: dict, *, error: str) -> str:
 # can plug these in directly.
 
 def planner_node(state: dict, *, chat_client, model: str,
-                 think: Any = True, recorder=None) -> dict:
+                 think: Any = True, recorder=None,
+                 coder_enabled: bool = False) -> dict:
     t0 = time.monotonic()
     _emit_started("planner", round=1, model=model)
     if recorder is not None:
@@ -840,6 +854,26 @@ def planner_node(state: dict, *, chat_client, model: str,
     msgs = build_planner_messages(
         state["question"], additional_context=extra_ctx_planner,
     )
+    # M10: when the coder role is enabled, append the PLANNER_CODER_GATE_BLOCK
+    # to the planner's system message so the model knows it can
+    # opt into code-generation tasks. The block is intentionally
+    # surgical (single fenced JSON appendix) so a planner that
+    # decides code isn't needed emits exactly the v1 plan shape.
+    if coder_enabled:
+        try:
+            from consultants.engine.coder import PLANNER_CODER_GATE_BLOCK
+        except ImportError:  # pragma: no cover — coder ships in-tree
+            PLANNER_CODER_GATE_BLOCK = ""
+        if PLANNER_CODER_GATE_BLOCK:
+            # The first message is the system message; append, don't
+            # replace, so the v1 planner instructions still anchor
+            # the conversation.
+            sys_msg = msgs[0]
+            msgs[0] = {
+                "role": sys_msg.get("role", "system"),
+                "content": (sys_msg.get("content") or "")
+                            + PLANNER_CODER_GATE_BLOCK,
+            }
     try:
         plan, pt, ct = _single_shot(
             chat_client, model, msgs, think=think,
@@ -887,6 +921,43 @@ def planner_node(state: dict, *, chat_client, model: str,
             log.exception("recorder.record_node raised; ignored")
     _emit_finished("planner", round=1,
                     duration_ms=int(dt * 1000), ok=True)
+    # M10: when the coder gate was offered, parse the planner's
+    # opt-in declaration. Three outcomes:
+    # - explicit ``true`` + non-empty tasks -> graph fans out to coder
+    # - explicit ``false`` or missing tasks -> bypass coder cleanly
+    # - parse failure on a malformed block -> bypass + log (the
+    #   planner output stays usable for the rest of the graph)
+    coder_delta: dict = {}
+    if coder_enabled:
+        try:
+            from consultants.engine.coder import (
+                parse_coder_preamble, parse_coder_tasks,
+            )
+            wants_code = parse_coder_preamble(plan)
+            if wants_code:
+                tasks = parse_coder_tasks(plan, parent_round=1)
+                if tasks:
+                    coder_delta = {
+                        "requires_code_generation": True,
+                        "coder_tasks": tasks,
+                    }
+                else:
+                    # Asserted code generation but emitted no tasks —
+                    # the planner is confused; treat as a non-coder
+                    # plan so the graph stays predictable.
+                    log.info(
+                        "planner asserted requires_code_generation=true "
+                        "but emitted no coder_tasks; treating as no-op",
+                    )
+                    coder_delta = {"requires_code_generation": False}
+            elif wants_code is False:
+                coder_delta = {"requires_code_generation": False}
+            # wants_code is None -> emit nothing; downstream readers
+            # default to no-coder behavior on missing channel.
+        except Exception:  # pragma: no cover — defensive
+            log.exception(
+                "planner coder-gate parse raised; skipping coder route",
+            )
     # Delta-only return — additive reducers in CouncilState merge
     # ``turns``, ``total_*_tokens``, ``research_rounds_used`` across
     # parallel fan-out lanes.
@@ -896,6 +967,7 @@ def planner_node(state: dict, *, chat_client, model: str,
         "turns": [turn],
         "total_prompt_tokens": pt,
         "total_completion_tokens": ct,
+        **coder_delta,
     }
 
 
@@ -1801,6 +1873,10 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
             state.get("critique"),
             self_critic=self_critic,
             additional_context=extra_ctx_syn,
+            # M10: surface coder lane outputs when the coder role
+            # contributed to this consultation. The block is omitted
+            # when the channel is empty / absent.
+            coder_artifacts=state.get("coder_artifacts") or [],
         )
     # 2026-05-07: serial fallback chain. The synthesizer always tries
     # ``model`` first (with its own ChatClient retry budget — ~15 min

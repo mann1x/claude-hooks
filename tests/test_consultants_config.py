@@ -24,14 +24,13 @@ def isolated_home(tmp_path: Path, monkeypatch):
 
 class TestDefaults:
     def test_roles_listed_in_order(self):
-        # M6: tool_executor joins the role registry as opt-in. Order
-        # matters because cc.enabled_roles() returns roles in
-        # ROLES-order and the runner builds the graph topology
-        # accordingly: planner → researcher → tool_executor (optional)
-        # → critic (optional) → synthesizer.
+        # M6: tool_executor joins the role registry as opt-in.
+        # M10: coder joins too, inserted between critic and synthesizer
+        # so the graph topology fans out coder lanes AFTER the critic
+        # round (when critic enabled) but BEFORE the synthesizer.
         assert cc.ROLES == (
             "planner", "researcher", "tool_executor",
-            "critic", "synthesizer",
+            "critic", "coder", "synthesizer",
         )
 
     def test_synthesizer_mandatory(self):
@@ -41,14 +40,15 @@ class TestDefaults:
         cfg = cc.ConsultantsConfig()
         assert cc.validate_pipeline(cfg) is None
 
-    def test_tool_executor_disabled_by_default(self):
-        # M6: tool_executor is the one role that ships disabled. The
-        # rest stay enabled-by-default to preserve v1 behavior across
-        # the schema bump.
+    def test_opt_in_roles_disabled_by_default(self):
+        # M6 + M10: tool_executor and coder ship disabled. The rest
+        # stay enabled-by-default to preserve v1 behavior across the
+        # schema bump.
         cfg = cc.ConsultantsConfig()
         assert cfg.roles["tool_executor"].enabled is False
+        assert cfg.roles["coder"].enabled is False
         for r in cc.ROLES:
-            if r == "tool_executor":
+            if r in ("tool_executor", "coder"):
                 continue
             assert cfg.roles[r].enabled is True
 
@@ -58,6 +58,21 @@ class TestDefaults:
         cfg = cc.ConsultantsConfig()
         assert cfg.roles["tool_executor"].model == "gemma4:31b-cloud"
 
+    def test_coder_default_model_is_global_default(self):
+        # M10 ships the coder role infrastructure without picking a
+        # default model — the M11b bench will fill in the choice. So
+        # coder inherits DEFAULT_MODEL like every non-special role.
+        cfg = cc.ConsultantsConfig()
+        assert cfg.roles["coder"].model == cc.DEFAULT_MODEL
+
+    def test_coder_limits_defaults(self):
+        # M10: 50 KB per file, 1 MB total, 16 files max — the
+        # CHANGELOG entry pins these as the shipped defaults.
+        cfg = cc.ConsultantsConfig()
+        assert cfg.coder_limits.max_file_bytes == 50 * 1024
+        assert cfg.coder_limits.max_total_bytes == 1024 * 1024
+        assert cfg.coder_limits.max_files == 16
+
     def test_load_with_no_files_returns_defaults(self, isolated_home):
         cfg = cc.load_config()
         assert cfg.topology == cc.DEFAULT_TOPOLOGY
@@ -65,11 +80,15 @@ class TestDefaults:
         assert cfg.service.mode == cc.DEFAULT_SERVICE_MODE
         for r in cc.ROLES:
             # tool_executor is the one role that ships disabled +
-            # carries a different primary; every other role uses
-            # the v1 DEFAULT_MODEL.
+            # carries a different primary; every other role (incl.
+            # coder, which is also disabled-by-default but uses the
+            # global DEFAULT_MODEL) uses DEFAULT_MODEL.
             if r == "tool_executor":
                 assert cfg.roles[r].enabled is False
                 assert cfg.roles[r].model == "gemma4:31b-cloud"
+            elif r == "coder":
+                assert cfg.roles[r].enabled is False
+                assert cfg.roles[r].model == cc.DEFAULT_MODEL
             else:
                 assert cfg.roles[r].enabled is True
                 assert cfg.roles[r].model == cc.DEFAULT_MODEL

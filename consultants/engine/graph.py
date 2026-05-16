@@ -99,6 +99,15 @@ class CouncilState(TypedDict, total=False):
     # M6: non-additive flag flipped True after PLAN mode and back to
     # False after REPORT mode. Read by route_after_researcher.
     awaiting_tool_results: Optional[bool]
+    # M10: planner-emitted coder gate + tasks. ``requires_code_generation``
+    # is non-additive (planner sets it once); ``coder_tasks`` is additive
+    # so a future re-plan path appends rather than clobbers.
+    requires_code_generation: Optional[bool]
+    coder_tasks: Annotated[list["CoderTaskItem"], operator.add]
+    # M10: per-lane Send-injected coder task + additive merge of
+    # coder outputs across Send lanes.
+    coder_task_item: Optional["CoderTaskItem"]
+    coder_artifacts: Annotated[list["CoderArtifact"], operator.add]
 
 
 # M5/M6: lazily attach the real reducer callables to the
@@ -119,6 +128,7 @@ def _wire_v2_reducers():
     """
     try:
         from consultants.engine.state_v2 import (
+            CoderArtifact, CoderTaskItem,
             Doc, ToolPlanItem, ToolResult, append_doc,
             merge_runtime_control,
         )
@@ -136,6 +146,11 @@ def _wire_v2_reducers():
     hints["tool_plan"] = _Ann[list[ToolPlanItem], operator.add]
     hints["tool_results"] = _Ann[list[ToolResult], operator.add]
     hints["tool_plan_item"] = Optional[ToolPlanItem]
+    # M10: coder_tasks / coder_artifacts additive concat across Send
+    # lanes; coder_task_item is the per-lane non-additive slice.
+    hints["coder_tasks"] = _Ann[list[CoderTaskItem], operator.add]
+    hints["coder_artifacts"] = _Ann[list[CoderArtifact], operator.add]
+    hints["coder_task_item"] = Optional[CoderTaskItem]
 
 
 _wire_v2_reducers()
@@ -224,6 +239,13 @@ class GraphDeps:
     # for the lifetime of a single consultation. ``None`` is safe
     # — recall/record helpers tolerate it.
     sid: Optional[str] = None
+    # M10: sandbox caps for the coder role. Consulted only when
+    # ``coder`` appears in enabled_roles. Defaults mirror the
+    # CoderLimitsConfig dataclass so a test caller can build a
+    # GraphDeps without threading cfg through.
+    coder_max_file_bytes: int = 50 * 1024
+    coder_max_total_bytes: int = 1024 * 1024
+    coder_max_files: int = 16
 
 
 # ----------------------- node wrappers --------------------------- #
@@ -239,6 +261,13 @@ def _think_for(deps: GraphDeps, role: str) -> Any:
 
 
 def _wrap_planner(deps: GraphDeps):
+    # M10: when the coder role is enabled in this build, surface the
+    # opt-in gate to the planner so the model can declare
+    # ``requires_code_generation`` + emit ``coder_tasks``. Closure
+    # captures the flag at compile time so per-invocation overhead
+    # is one boolean read.
+    coder_on = "coder" in deps.enabled_roles
+
     def _node(state: dict) -> dict:
         return council.planner_node(
             state,
@@ -246,6 +275,7 @@ def _wrap_planner(deps: GraphDeps):
             model=deps.models["planner"],
             think=_think_for(deps, "planner"),
             recorder=deps.recorder,
+            coder_enabled=coder_on,
         )
     return _node
 
@@ -380,6 +410,36 @@ def _wrap_tool_executor(deps: GraphDeps):
     return _node
 
 
+def _wrap_coder(deps: GraphDeps, *, max_file_bytes: int,
+                max_total_bytes: int, max_files: int):
+    """M10: bind the role's deps to ``coder_node``. The coder uses
+    its own ChatClient + the dedicated sandboxed write_file tool
+    (built per-lane inside ``coder_node`` so the audit buffer stays
+    isolated). ``sid`` comes from ``deps.sid`` — required for the
+    sandbox-root path; if ``deps.sid`` is None the coder tombstones
+    with a "missing sid" error (preserves audit-trail correctness
+    over silent fallback to a shared dir).
+    """
+    from consultants.engine.coder import coder_node
+    role = "coder"
+
+    def _node(state: dict) -> dict:
+        return coder_node(
+            state,
+            chat_client=deps.chat_clients[role],
+            grounding_msgs=deps.grounding_msgs,
+            model=deps.models[role],
+            cwd=deps.cwd,
+            sid=deps.sid or "_unknown_",
+            think=_think_for(deps, role),
+            recorder=deps.recorder,
+            max_file_bytes=max_file_bytes,
+            max_total_bytes=max_total_bytes,
+            max_files=max_files,
+        )
+    return _node
+
+
 def _wrap_synthesizer(deps: GraphDeps):
     def _node(state: dict) -> dict:
         return council.synthesizer_node(
@@ -423,6 +483,13 @@ def plan_topology(enabled: tuple[str, ...]) -> list[tuple[str, str]]:
     into a CONDITIONAL edge — caller adds that separately. Here we
     only emit unconditional edges; conditional from critic is
     handled in ``build_council_graph``.
+
+    M10 note: ``coder`` is NOT in the natural pipeline — it's
+    inserted by a conditional edge from the synthesizer-predecessor
+    in ``build_council_graph`` only when both the role is enabled
+    AND ``state["requires_code_generation"]`` is True. The topology
+    here describes the v1-shape "default" flow that fires when the
+    coder gate is closed.
     """
     enabled_set = set(enabled)
     if "synthesizer" not in enabled_set:
@@ -594,6 +661,34 @@ def build_council_graph(deps: GraphDeps,
     if tool_executor_enabled and "researcher" in enabled:
         sg.add_node("tool_executor",
                     _wrap("tool_executor", _wrap_tool_executor(deps)))
+    # M10: register the coder node when the role is enabled. The
+    # conditional edge from the synthesizer-predecessor (added below)
+    # decides per invocation whether to fan out to one coder lane
+    # per ``coder_tasks`` entry, gated on
+    # ``state["requires_code_generation"]``. Disabled by default;
+    # when absent, the graph behaves exactly as in pre-M10.
+    coder_enabled = "coder" in enabled
+    # When coder is enabled, every edge that would target
+    # ``synthesizer`` in the v1 topology is redirected through a
+    # ``coder_router`` pass-through node first. The router fires a
+    # conditional edge that either fans out Sends to ``coder`` (one
+    # per declared task) OR routes straight to ``synthesizer``. The
+    # substitution is a single string everywhere — the rest of the
+    # topology wiring is unaware of the coder layer.
+    synthesizer_target = "coder_router" if coder_enabled else "synthesizer"
+    if coder_enabled:
+        sg.add_node("coder", _wrap("coder", _wrap_coder(
+            deps,
+            max_file_bytes=deps.coder_max_file_bytes,
+            max_total_bytes=deps.coder_max_total_bytes,
+            max_files=deps.coder_max_files,
+        )))
+        def _coder_router(state: dict) -> dict:
+            # Pass-through; gating logic lives in the conditional
+            # edge below so the static topology hints LangGraph
+            # builds at compile time enumerate all possible targets.
+            return {}
+        sg.add_node("coder_router", _coder_router)
     _maybe_cached(
         "synthesizer",
         _wrap("synthesizer", _wrap_synthesizer(deps)),
@@ -763,6 +858,10 @@ def build_council_graph(deps: GraphDeps,
         if tool_executor_enabled and src == "researcher":
             continue
         src_node = START if src == "START" else src
+        # M10: redirect every "synthesizer" target through the
+        # coder_router when the role is enabled.
+        if dst == "synthesizer" and coder_enabled:
+            dst = synthesizer_target
         dst_node = END if dst == "END" else dst
         sg.add_edge(src_node, dst_node)
 
@@ -848,7 +947,7 @@ def build_council_graph(deps: GraphDeps,
                 # stage before synthesizer); router contract
                 # accepts the destination string OR a list of
                 # Sends, so we return the string here.
-                return researcher_downstream_natural or "synthesizer"
+                return researcher_downstream_natural or synthesizer_target
             # PLAN mode just completed: emit one Send per
             # unconsumed tool_plan item. We filter by:
             # - parent_round == current researcher round (so a
@@ -901,7 +1000,7 @@ def build_council_graph(deps: GraphDeps,
                 # Defensive: PLAN mode fired but no items survived
                 # the filter. Fall through to the next role so the
                 # graph doesn't stall on an empty fanout.
-                return researcher_downstream_natural or "synthesizer"
+                return researcher_downstream_natural or synthesizer_target
             return sends
         # The conditional's target list must enumerate every node
         # the router can route to. Include the natural downstream +
@@ -911,7 +1010,7 @@ def build_council_graph(deps: GraphDeps,
         if researcher_downstream_natural:
             targets.append(researcher_downstream_natural)
         elif "synthesizer" in enabled:
-            targets.append("synthesizer")
+            targets.append(synthesizer_target)
         sg.add_conditional_edges(
             "researcher", _route_after_researcher, targets,
         )
@@ -987,13 +1086,89 @@ def build_council_graph(deps: GraphDeps,
                 council.route_after_critic,
                 {
                     council.ROUTE_RESEARCHER: "researcher",
-                    council.ROUTE_SYNTHESIZER: "synthesizer",
+                    council.ROUTE_SYNTHESIZER: synthesizer_target,
                 },
             )
         else:
             # No researcher to loop back to; the critic-side is
-            # effectively advisory — straight to synthesizer.
-            sg.add_edge(conditional_source, "synthesizer")
+            # effectively advisory — straight to synthesizer (or
+            # the coder gate when M10 active).
+            sg.add_edge(conditional_source, synthesizer_target)
+
+    # M10: coder router conditional. When the coder role is enabled,
+    # every "synthesizer" target was redirected to ``coder_router``
+    # above; here we wire the router's outgoing conditional. The
+    # router returns:
+    # - list of Sends to ``coder`` (one per ``coder_tasks`` entry)
+    #   when the planner declared ``requires_code_generation=True``
+    #   AND the channel is non-empty;
+    # - the string ``"synthesizer"`` otherwise (no coder work needed
+    #   for this consultation).
+    # After the Sends complete, an unconditional edge from coder to
+    # synthesizer fires — LangGraph barriers Send-multiplexed sources
+    # before unconditional successors, so the synthesizer's
+    # ``coder_artifacts`` read sees every lane's output merged.
+    if coder_enabled:
+        def _route_after_coder_gate(state: dict) -> Any:
+            wants = bool(state.get("requires_code_generation"))
+            tasks = list(state.get("coder_tasks") or [])
+            if not wants or not tasks:
+                return "synthesizer"
+            # Filter to the round whose tasks haven't been executed
+            # yet. For M10's planner-emits-once flow this is always
+            # round 1; the filter is forward-compat with a future
+            # re-plan path.
+            artifacts = list(state.get("coder_artifacts") or [])
+            current_round = int(
+                getattr(tasks[0], "parent_round", 1) or 1
+            )
+            completed: set[tuple[int, Optional[int]]] = set()
+            for a in artifacts:
+                ar = int(getattr(a, "parent_round", 1) or 1)
+                if ar == current_round:
+                    completed.add(
+                        (ar, getattr(a, "lane_idx", None))
+                    )
+            sends: list[Send] = []
+            for item in tasks:
+                pr = int(getattr(item, "parent_round", 1) or 1)
+                if pr != current_round:
+                    continue
+                lane = getattr(item, "lane_idx", None)
+                if (pr, lane) in completed:
+                    continue
+                sends.append(Send(
+                    "coder",
+                    {
+                        "question": state.get("question"),
+                        "plan": state.get("plan", ""),
+                        "cwd": state.get("cwd"),
+                        "effort": state.get("effort"),
+                        "models": state.get("models", {}),
+                        "topology": state.get("topology"),
+                        # Researcher findings are needed for the coder
+                        # to fit into existing code structure.
+                        "research": list(state.get("research") or []),
+                        "coder_task_item": item,
+                        "lane_idx": lane,
+                        # Empty deltas so additive reducers don't
+                        # double-count outer state.
+                        "turns": [],
+                        "total_prompt_tokens": 0,
+                        "total_completion_tokens": 0,
+                    },
+                ))
+            if not sends:
+                return "synthesizer"
+            return sends
+        sg.add_conditional_edges(
+            "coder_router", _route_after_coder_gate,
+            ["coder", "synthesizer"],
+        )
+        # After coder Sends complete, the additive ``coder_artifacts``
+        # reducer barriers them — synthesizer sees every lane's
+        # output on its first read.
+        sg.add_edge("coder", "synthesizer")
 
     # M5: static interrupt_before plumbing. LangGraph 1.2's
     # ``StateGraph.compile(interrupt_before=[...])`` parks execution
@@ -1014,7 +1189,8 @@ def build_council_graph(deps: GraphDeps,
         # ["synthesizer"] when synthesizer was disabled doesn't crash.
         existing_nodes: set[str] = {
             "planner", "researcher", "tool_executor",
-            "critic", "meta_critic", "synthesizer",
+            "critic", "meta_critic", "coder", "coder_router",
+            "synthesizer",
         }
         valid = [n for n in interrupt_before if n in existing_nodes]
         if valid:

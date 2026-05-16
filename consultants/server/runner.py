@@ -221,6 +221,12 @@ def make_runner(*, ollama_base_url: str):
             synthesizer_fallback_models=synthesizer_fallback,
             store=consultants_store,
             sid=state.sid,
+            # M10: coder sandbox caps. Consulted only when ``coder``
+            # is in ``enabled`` (otherwise the coder node is never
+            # registered, so these values are irrelevant).
+            coder_max_file_bytes=cfg.coder_limits.max_file_bytes,
+            coder_max_total_bytes=cfg.coder_limits.max_total_bytes,
+            coder_max_files=cfg.coder_limits.max_files,
         )
         # M5: static review-before-synthesis interrupt. When the
         # user opted in via cfg.runtime.review_before_synthesis,
@@ -565,6 +571,12 @@ def make_follow_up_runner(*, ollama_base_url: str):
             synthesizer_fallback_models=synthesizer_fallback_followup,
             store=consultants_store_followup,
             sid=state.sid,
+            # M10: coder sandbox caps. Follow-ups inherit the
+            # parent's effective limits via cfg (which may have
+            # been mutated by a per-session control update).
+            coder_max_file_bytes=cfg.coder_limits.max_file_bytes,
+            coder_max_total_bytes=cfg.coder_limits.max_total_bytes,
+            coder_max_files=cfg.coder_limits.max_files,
         )
         compiled = build_follow_up_graph(deps, tracer=tracer)
         # M9: follow-ups expose their own compiled graph + thread

@@ -404,6 +404,165 @@ Skill defaults to user-global.
 
 ---
 
+---
+
+## Coder role (opt-in, off by default)
+
+The **coder** role is a code-writing specialist that fires only
+when (a) ``cfg.roles.coder.enabled = true`` AND (b) the planner
+declares the question requires writing new code or files (it emits
+``"requires_code_generation": true`` + a ``coder_tasks`` list).
+For audits / analyses / decisions the role stays inert — same plan
+shape as v1.
+
+**What it does.** One ``coder`` lane per declared task; each lane
+gets the plan + researcher findings + the specific task, runs a
+short agent loop with a single ``write_file`` tool, and writes
+files inside a per-session sandbox at
+``<cwd>/.claude-hooks/consultants/<sid>/coder-out/``. The
+synthesizer references the on-disk paths in its answer.
+
+**Sandbox caps.** 50 KB per file, 1 MB total per lane, 16 files
+max per lane (configurable via the ``[coder_limits]`` TOML block).
+Exceeding any cap returns an inline error to the model so the next
+iteration self-corrects. The path guard rejects absolute paths and
+traversal — ``write_file("/etc/passwd", ...)`` and
+``write_file("../escape", ...)`` both error before touching disk.
+
+**When to suggest enabling it.** A user asking "Write me X" or
+"Add a CLI flag for Y" benefits from the role. A user asking
+"Explain how X works" / "Why is Y broken" / "Audit Z" does NOT —
+keep the role off. The planner's gate is the safety: with the role
+on but the question analytical, the planner emits no coder_tasks
+and the graph routes around the lane (zero coder cost). With the
+role off, the gate isn't even offered.
+
+**Enable / disable.**
+
+```
+claude-consultants config set-role coder enabled=true
+```
+
+(or interactively via ``/consultants config`` → Edit a role →
+coder → Toggle enabled.) The pre-M11b default model is the
+project-global ``DEFAULT_MODEL``; users may pick a different model
+per role via the same dialog.
+
+---
+
+## Autonomous control (in-flight consultation)
+
+The v2 engine exposes seven HTTP routes + matching CLI subcommands
+for **mid-flight** session control. Use these when the user wants
+to nudge a running consultation rather than start over. All seven
+verbs operate on the session's ``sid`` and return JSON. The CLI
+calls are thin wrappers around the HTTP endpoints — choose
+whichever fits the surrounding context. Defaults to silent — do
+NOT poll-spam these; use only when the user's request implies it.
+
+### state — peek live state
+
+```
+claude-consultants state <sid>
+```
+
+Returns the current ``StateSnapshot``: ``status``, ``current_node``,
+``research[]``, ``critique``, ``partial_synthesis``,
+``runtime_control``, ``interrupt_state``. Use to answer "what's the
+council doing right now?" without scraping the SSE stream. Returns
+410 when the session has been closed (idle reap), 404 when the
+sid is unknown.
+
+### inject — add context mid-flight
+
+```
+claude-consultants inject <sid> --role researcher -m "Also consider GDPR."
+claude-consultants inject <sid> --role any -f /tmp/extra-notes.md
+```
+
+Append a ``Doc`` to ``additional_context``. The next node entry
+for the target role surfaces it in the prompt. Use when the user
+realizes the council needs a fact they forgot to seed — e.g. "tell
+the researcher to also check the staging branch" or "remind the
+synthesizer to call out latency cost". ``--role any`` is the safe
+default if you don't know which role should see it.
+
+### control — mutate runtime_control mid-flight
+
+```
+claude-consultants control <sid> --time +30m
+claude-consultants control <sid> --max-rounds 5 --confidence 0.7
+claude-consultants control <sid> --strictness strict
+claude-consultants control <sid> --disable critic
+```
+
+Each flag merges into ``runtime_control`` via the shallow-merge
+reducer; unspecified fields stay put. ``--time +30m`` is parsed as
+a relative bump on top of ``deadline_ts`` (so "30 minutes from
+now"). ``--enable`` and ``--disable`` mutate ``enabled_roles`` via
+a snapshot-then-subtract (the CLI reads ``GET /state`` first to
+build the diff). Use to grow / shrink the budget after seeing the
+plan or first researcher round.
+
+### pause + resume — HITL approval flow
+
+```
+claude-consultants pause <sid> --reason "let me read the draft"
+# ... user reads /state, optionally injects ...
+claude-consultants resume <sid>
+claude-consultants resume <sid> --value '{"approve": true}'
+```
+
+``pause`` flips ``runtime_control.pause_requested`` so the next
+node entry calls ``interrupt()``. ``resume`` clears the interrupt
+and schedules a ``Command(resume=value)`` re-invoke. ``--value``
+is forwarded as the resume payload (JSON-decoded if parsable,
+otherwise a literal string). A dynamic interrupt set by the
+synthesizer's low-confidence policy returns the same way.
+
+### cancel — abort with cleanup
+
+```
+claude-consultants cancel <sid>
+claude-consultants cancel <sid> --discard-partial
+```
+
+Cooperative drain. ``--discard-partial`` also deletes the
+checkpointer file. Use when the user has changed their mind about
+the question. Idempotent on completed sessions (200, no-op).
+
+### events — tail the SSE stream
+
+```
+claude-consultants events <sid>
+claude-consultants events <sid> --since 47
+```
+
+Tail the recorder's ``runtime_events`` table as Server-Sent
+Events. ``--since`` replays from a known event_id (useful when
+reconnecting after a network blip). Each event lands as one JSON
+line on stdout. Heartbeats every 15 s keep the connection alive
+through quiet research rounds.
+
+### When to autonomously call these
+
+Sparingly. The bar is: **the user's current turn implies a
+mid-flight intervention.** Examples:
+
+- User says "the council is taking forever — give it 30 more min"
+  → ``control --time +30m``.
+- User says "wait, also tell the researcher to check the staging
+  branch" → ``inject --role researcher -m "..."``.
+- User says "cancel that, I want to ask something different"
+  → ``cancel --discard-partial`` then start the new ask.
+- User says "show me what the council has so far" → ``state``;
+  pretty-print the partial_synthesis + research[].
+
+Don't call these to "check in" on a running session — the
+``ask``-flow's normal status poll already does that.
+
+---
+
 ## Failure handling (all verbs)
 
 - **CLI returns `{"ok": false, ...}`** → surface the error verbatim.

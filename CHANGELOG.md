@@ -16,6 +16,169 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — `/consultants` v2 coder role + sandbox + planner gate (M10)
+
+Closes M10 — the **coder** specialist role for code-generation
+consultations. Same shape as the M6 ``tool_executor`` lane (semantic
+delegation, additive reducer, recorder-tagged transcript rows) but
+with a *sandboxed* tool surface instead of access to the
+researcher's full read/grep/glob stack. Ships disabled by default;
+the M11b benchmark commit will decide whether to flip a default.
+
+`consultants/engine/coder.py` (NEW, 667 lines):
+
+- ``CODER_SYSTEM`` prompt — anchors the role: write code via
+  ``write_file`` only, paths relative to sandbox root, short summary
+  message at the end, do NOT paste code into the summary (the
+  synthesizer reads files via the artifact listing).
+- ``CODER_WRITE_FILE_TOOL_SPEC`` — OpenAI-shape tool spec the agent
+  loop serializes to the model. ``{path, content}`` required;
+  ``additionalProperties: false`` so the model can't append junk
+  fields the executor would silently ignore.
+- ``CoderSandbox`` — per-lane sandbox + audit buffer. Tracks
+  ``writes`` (list of ``{path, bytes, sha256}`` dicts),
+  ``bytes_written`` (running sum), and ``rejections`` (cap-violation
+  reasons). Atomic writes via temp-file + ``os.replace`` so a
+  partial write never lands on disk.
+- ``_normalise_sandbox_path`` — rejects absolute paths, traversal
+  (``..``), empty segments, null bytes, and Windows separators
+  (normalized to forward slashes). Tested against every rejection
+  arm; the path guard is the security boundary, not the tool
+  description.
+- ``make_sandbox_tool_executor(sandbox)`` — returns an
+  ``(name, args, **kw) -> str`` callable the agent_loop runner
+  uses. Wraps ``ValueError`` cap violations into the OpenAI
+  tool-result error shape so the LLM sees ``"error: per-file cap…"``
+  inline and can self-correct rather than crash the lane.
+- ``coder_node`` — node entrypoint. Reads ``state["coder_task_item"]``
+  (Send-injected per-lane), builds the sandbox, builds the prompt
+  via ``build_coder_messages`` (grounding → CODER_SYSTEM → user
+  message with question + plan + research + task + sandbox caps),
+  invokes ``run_loop`` with the sandbox tool, emits NodeStarted /
+  NodeFinished / ToolCall events tagged ``role="coder"``, records
+  every iteration to the recorder, and returns
+  ``{"coder_artifacts": [CoderArtifact(...)]}``. Tombstones cleanly
+  on missing task, empty task, ``run_loop`` exception, and
+  zero-files-with-rejections (so the synthesizer surfaces the gap
+  rather than silently composing past it).
+- ``parse_coder_preamble(text)`` — extracts the planner's
+  ``requires_code_generation`` flag from a fenced ``json`` block.
+  Tolerates bare JSON / missing fence. Returns ``True`` / ``False``
+  / ``None`` (no decidable signal).
+- ``parse_coder_tasks(text, parent_round=N)`` — extracts
+  ``CoderTaskItem`` entries from the planner's coder-gate JSON
+  block. Items missing ``task`` are skipped silently; malformed
+  blocks return ``[]``. ``parent_round`` stamps every emitted item
+  for forward-compat with a future re-plan path.
+- ``PLANNER_CODER_GATE_BLOCK`` — system-prompt fragment appended to
+  ``PLANNER_SYSTEM`` when ``cfg.roles.coder.enabled``. Instructs the
+  planner to emit ONE fenced JSON block at the end of its reply
+  shaped ``{"requires_code_generation": bool, "coder_tasks":
+  [{"task", "path", "why"}]}``. Omitted entirely when the planner
+  decides no code generation is needed — preserving v1 plan shape
+  byte-for-byte for the common case.
+- ``build_coder_artifacts_block(artifacts)`` — renders the
+  ``coder_artifacts`` channel for the synthesizer's user message.
+  Each entry shows the task, file listing with byte counts, and
+  truncated summary; tombstones render as ``(task: '...' FAILED:
+  error)`` so the synthesizer sees the gap.
+
+`consultants/engine/state_v2.py`:
+
+- ``CoderTaskItem`` (frozen dataclass) — ``task``, ``path``,
+  ``why``, ``lane_idx``, ``parent_round``. The Send-payload shape.
+- ``CoderArtifact`` (frozen dataclass) — ``task``, ``summary``,
+  ``files: list[dict]``, ``lane_idx``, ``parent_round``,
+  ``duration_ms``, ``error``. Output shape; ``files`` is plain
+  dicts (not a nested dataclass) so they round-trip through JSON
+  for SSE + transcript.db with no custom encoder.
+- ``CouncilStateV2`` gains ``requires_code_generation``
+  (non-additive flag), ``coder_tasks`` (additive list reducer),
+  ``coder_task_item`` (per-lane Send slice), ``coder_artifacts``
+  (additive list reducer).
+- ``coder_artifacts_for_round(state, round)`` — mirror of
+  ``tool_results_for_round`` for forward-compat with re-plan flows.
+
+`consultants/engine/graph.py`:
+
+- ``GraphDeps`` gains ``coder_max_file_bytes`` / ``_total_bytes`` /
+  ``_files`` fields; consulted only when ``coder`` ∈ ``enabled_roles``.
+- ``CouncilState`` declares the new channels + reducers; the
+  ``_wire_v2_reducers()`` import-time hook resolves the
+  ``CoderArtifact`` / ``CoderTaskItem`` forward refs.
+- ``_wrap_planner`` checks ``"coder" in deps.enabled_roles`` at
+  compile time and passes ``coder_enabled=`` to ``planner_node`` so
+  the gate block is appended.
+- ``_wrap_coder`` (NEW) — same wrapper pattern as
+  ``_wrap_tool_executor``; binds ChatClient + sandbox caps + sid
+  into the node closure.
+- **Coder gate routing.** When the role is enabled,
+  every existing edge that targets ``synthesizer`` (plan_topology's
+  unconditional edges + the critic conditional's ROUTE_SYNTHESIZER
+  + M6's route_after_researcher fallthrough + the critic-disabled
+  fallthrough) is redirected to a new ``coder_router`` pass-through
+  node. The router fires a conditional edge that emits one ``Send``
+  per declared ``coder_tasks`` entry when
+  ``requires_code_generation=True``, OR routes straight to
+  ``synthesizer`` otherwise. After coder Sends complete, an
+  unconditional edge ``coder -> synthesizer`` fires (LangGraph
+  barriers Send-multiplexed sources before unconditional successors,
+  so the synthesizer's ``coder_artifacts`` read sees every lane's
+  output merged). Wiring is bypass-free when ``coder ∉ enabled`` —
+  the v1 topology is byte-identical, the M12 parity suite stays
+  safe.
+- ``interrupt_before`` filter accepts ``coder`` / ``coder_router``
+  so HITL pause-before-codegen is reachable from the M9 control
+  surface.
+
+`consultants/engine/council.py`:
+
+- ``planner_node`` gains ``coder_enabled=False`` kwarg. When True,
+  appends ``PLANNER_CODER_GATE_BLOCK`` to its system message and
+  parses the response for the coder declaration; success returns
+  include ``requires_code_generation`` + ``coder_tasks`` deltas.
+  When the planner asserted ``true`` but emitted no tasks (confused
+  model), the delta is downgraded to ``False`` so the graph routes
+  around the coder cleanly.
+- ``build_synthesizer_messages`` gains ``coder_artifacts=None``
+  kwarg; when non-empty the rendered block is appended to the
+  user message. v1 prompt shape is byte-identical when the channel
+  is empty / absent. ``synthesizer_node`` plumbs the channel.
+
+`consultants/config.py`:
+
+- ``"coder"`` joins ``ROLES`` (inserted between ``critic`` and
+  ``synthesizer`` to keep canonical pipeline order).
+- ``DEFAULT_ENABLED_BY_ROLE["coder"] = False`` — opt-in.
+- ``DEFAULT_THINK_BY_ROLE["coder"] = "high"`` — exploratory; M11b
+  will tighten per-model.
+- No ``DEFAULT_MODEL_BY_ROLE`` override — coder inherits
+  ``DEFAULT_MODEL`` (``kimi-k2.6:cloud``). The plan calls out: M10
+  ships infrastructure with a config-only default; the M11b commit
+  picks the model with evidence.
+- ``CoderLimitsConfig`` dataclass — ``max_file_bytes`` (50 KB),
+  ``max_total_bytes`` (1 MB), ``max_files`` (16). Wired through
+  the TOML parser ``[coder_limits]`` block and the emitter.
+- ``ConsultantsConfig.coder_limits`` field surfaces it.
+
+`consultants/server/runner.py`:
+
+- Both ``run_council`` and the follow-up runner thread
+  ``cfg.coder_limits`` values into ``GraphDeps`` so the per-lane
+  sandbox honors per-session caps.
+
+**Tests**: 73 new tests across two files. ``test_consultants_v2_coder.py``
+(67, main env): dataclasses + reducer, sandbox path normalisation +
+caps, prompt builder, node happy path + tombstones, parsers (preamble
++ tasks), synthesizer block builder, planner gate. ``test_consultants_v2_coder_e2e.py``
+(6, consultants env — langgraph-gated): graph compiles with coder
+on/off, routing fires Sends when ``requires_code_generation=True``
++ tasks, falls through to synthesizer when off/empty.
+
+**Verification**: main env 3284 pass (+69 from M9 baseline 3215),
+consultants env 3276 pass (excl. 24 pre-existing proxy failures on
+both M9 and M10), zero regressions on M0–M9.
+
 ### Added — `/consultants` v2 HTTP control surface + CLI subcommands (M9)
 
 Closes M9 — the seven control endpoints exposed by

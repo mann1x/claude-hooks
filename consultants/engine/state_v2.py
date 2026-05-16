@@ -119,6 +119,57 @@ class ToolResult:
     error: Optional[str] = None
 
 
+# ---------- M10: coder channels ------------------------------------ #
+
+@dataclass(frozen=True)
+class CoderTaskItem:
+    """One entry in the planner's ``coder_tasks`` block — a code-
+    generation intent ("Write parse_iso8601(s: str) -> datetime in
+    iso8601.py") the coder lane will execute via its own agent_loop
+    tool subloop with a sandboxed ``write_file`` tool.
+
+    ``task`` is the natural-language description of what to write;
+    ``path`` (optional, relative) is the planner's suggested filename
+    inside the coder sandbox — the coder honors it unless the model
+    decides a different name fits the result better. ``why`` is the
+    planner's reason, surfaced in the coder's prompt so the
+    specialist model has the *intent* not just the literal request.
+    ``lane_idx`` is set by the dispatcher; ``parent_round`` records
+    which planner round emitted this task (rare today because the
+    planner runs once, but the channel reducer mirrors M6's so a
+    re-plan path lands cleanly).
+    """
+    task: str
+    path: str = ""
+    why: str = ""
+    lane_idx: Optional[int] = None
+    parent_round: int = 1
+
+
+@dataclass(frozen=True)
+class CoderArtifact:
+    """One coder lane's output. The lane wrote zero or more files
+    via ``write_file`` inside its sandbox; this dataclass summarizes
+    what landed on disk so the synthesizer can reference the
+    artifacts in the final answer without re-reading them.
+
+    ``files`` is a list of ``{path, bytes, sha256}`` dicts where
+    ``path`` is the sandbox-relative path; the absolute on-disk path
+    is ``<cwd>/.claude-hooks/consultants/<sid>/coder-out/<path>``.
+    ``summary`` is the coder's terminal message — typically a short
+    explanation of what it wrote and why. ``error`` is set when the
+    lane crashed or every write was rejected by the cap guards; the
+    synthesizer treats the task as unaddressed and surfaces the gap.
+    """
+    task: str
+    summary: str = ""
+    files: list[dict] = field(default_factory=list)
+    lane_idx: Optional[int] = None
+    parent_round: int = 1
+    duration_ms: int = 0
+    error: Optional[str] = None
+
+
 @dataclass(frozen=True)
 class InterruptState:
     """What the dynamic ``interrupt()`` call posted. Stored on state
@@ -324,6 +375,25 @@ class CouncilStateV2(TypedDict, total=False):
     # don't loop forever. Non-additive (last-writer-wins).
     awaiting_tool_results: Optional[bool]
 
+    # ---- M10: coder channels ----
+    # When the planner declares the question needs code generation
+    # AND ``cfg.roles.coder.enabled``, the graph's
+    # ``route_after_research`` fans out one Send per ``coder_tasks``
+    # entry to the coder node. ``requires_code_generation`` is the
+    # gate; non-additive (last-writer-wins).
+    requires_code_generation: Optional[bool]
+    # Planner-emitted code-generation tasks. Additive so a (future)
+    # re-plan path appends rather than clobbers; today's planner
+    # emits these once at session start.
+    coder_tasks: Annotated[list[CoderTaskItem], operator.add]
+    # Per-lane Send-injected slice — exactly one task the coder lane
+    # will execute. Non-additive; each Send is a separate state.
+    coder_task_item: Optional[CoderTaskItem]
+    # Coder lane outputs, additive merge across Send lanes. The
+    # synthesizer renders these alongside research findings so the
+    # final answer can reference the on-disk artifacts.
+    coder_artifacts: Annotated[list[CoderArtifact], operator.add]
+
 
 # ---------- public helpers --------------------------------------- #
 
@@ -371,6 +441,20 @@ def tool_results_for_round(state: dict, round: int) -> list["ToolResult"]:
     for r in state.get("tool_results") or []:
         if int(getattr(r, "parent_round", 1) or 1) == int(round):
             out.append(r)
+    return out
+
+
+def coder_artifacts_for_round(state: dict, round: int) -> list["CoderArtifact"]:
+    """Return coder lane outputs matching ``round``. Mirrors
+    :func:`tool_results_for_round` so the synthesizer's prompt
+    builder can filter to the round whose code generation is being
+    summarized. Robust against rows where ``parent_round`` is
+    missing — treats it as 1 (the only round the M10 planner emits).
+    """
+    out: list[CoderArtifact] = []
+    for a in state.get("coder_artifacts") or []:
+        if int(getattr(a, "parent_round", 1) or 1) == int(round):
+            out.append(a)
     return out
 
 

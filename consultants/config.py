@@ -47,7 +47,8 @@ except ImportError:  # pragma: no cover — only on 3.10
 # parity-check enabled lists (handled by the v1 config-load fallback)
 # so existing sessions are unaffected.
 ROLES: tuple[str, ...] = (
-    "planner", "researcher", "tool_executor", "critic", "synthesizer",
+    "planner", "researcher", "tool_executor", "critic", "coder",
+    "synthesizer",
 )
 # Synthesizer alone is mandatory — every other role is opt-out (or in
 # tool_executor's case opt-in via cfg.roles.tool_executor.enabled).
@@ -172,6 +173,10 @@ DEFAULT_THINK_BY_ROLE: dict[str, Any] = {
     # reasoning-capable specialist.
     "tool_executor": False,
     "critic":      "medium",
+    # M10: coder is exploratory — high reasoning helps with
+    # nontrivial code generation. The M11b bench will tighten this
+    # per-model; default to high until evidence says otherwise.
+    "coder":       "high",
     "synthesizer": "high",
 }
 
@@ -188,12 +193,19 @@ DEFAULT_MODEL_BY_ROLE: dict[str, str] = {
 }
 
 
-# M6: tool_executor is the one role that ships disabled-by-default.
-# Every other role's RoleConfig starts ``enabled=True``; the runner
-# strips disabled roles from the compiled graph topology. Opting in
-# is one TOML line: ``[role.tool_executor] enabled = true``.
+# M6 + M10: tool_executor and coder ship disabled-by-default. Every
+# other role's RoleConfig starts ``enabled=True``; the runner strips
+# disabled roles from the compiled graph topology. Opting in is one
+# TOML line per role:
+#   [role.tool_executor]  enabled = true
+#   [role.coder]          enabled = true
+# Both default off because they fundamentally change council
+# behavior (delegated tool-call mechanics / sandboxed code writes);
+# the M11b/M11c benchmarks will produce the evidence for whether to
+# flip a future default.
 DEFAULT_ENABLED_BY_ROLE: dict[str, bool] = {
     "tool_executor": False,
+    "coder": False,
 }
 
 
@@ -322,6 +334,32 @@ class StoreConfig:
 
 
 @dataclass
+class CoderLimitsConfig:
+    """M10: per-session sandbox caps for the coder role.
+
+    The coder writes files inside an isolated directory at
+    ``<cwd>/.claude-hooks/consultants/<sid>/coder-out/``. These caps
+    bound how much a runaway model can write before the guard
+    rejects further calls — important because a single LLM that
+    misreads the task ("write the whole stdlib") could otherwise
+    fill the disk before a human notices.
+
+    Defaults match the plan:
+    - 50 KB per individual file
+    - 1 MB total bytes per session
+    - 16 distinct files per session
+
+    All caps apply per-lane: each coder Send lane keeps its own
+    audit buffer, so the 1 MB total is per-coder-call. Cross-lane
+    bookkeeping is the synthesizer's job (it reads coder_artifacts
+    and can warn the user if a single lane saturated).
+    """
+    max_file_bytes: int = 50 * 1024
+    max_total_bytes: int = 1024 * 1024
+    max_files: int = 16
+
+
+@dataclass
 class ConsultantsConfig:
     topology: str = DEFAULT_TOPOLOGY
     effort: str = DEFAULT_EFFORT
@@ -329,6 +367,9 @@ class ConsultantsConfig:
     checkpointer: CheckpointerConfig = field(default_factory=CheckpointerConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     store: StoreConfig = field(default_factory=StoreConfig)
+    coder_limits: CoderLimitsConfig = field(
+        default_factory=CoderLimitsConfig,
+    )
     roles: dict[str, RoleConfig] = field(default_factory=lambda: {
         r: _default_role_config(r) for r in ROLES
     })
@@ -504,6 +545,14 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
         if "sqlite_vec_path" in st and isinstance(st["sqlite_vec_path"], str):
             base.store.sqlite_vec_path = st["sqlite_vec_path"].strip() or None
 
+    # coder_limits (M10)
+    cl = raw.get("coder_limits") or {}
+    if isinstance(cl, dict):
+        for k in ("max_file_bytes", "max_total_bytes", "max_files"):
+            v = cl.get(k)
+            if isinstance(v, int) and v > 0:
+                setattr(base.coder_limits, k, v)
+
     # roles
     roles = raw.get("role") or {}
     if isinstance(roles, dict):
@@ -602,6 +651,13 @@ def _render(cfg: ConsultantsConfig) -> str:
         L.append(f"sqlite_vec_path = {_toml_str(cfg.store.sqlite_vec_path)}")
     else:
         L.append('# sqlite_vec_path = "~/.claude/consultants-store.db"')
+    L.append("")
+    L.append("[coder_limits]")
+    L.append("# Sandbox caps for the coder role (M10). Only consulted "
+             "when [role.coder] enabled = true.")
+    L.append(f"max_file_bytes = {cfg.coder_limits.max_file_bytes}")
+    L.append(f"max_total_bytes = {cfg.coder_limits.max_total_bytes}")
+    L.append(f"max_files = {cfg.coder_limits.max_files}")
     L.append("")
     for role in ROLES:
         rc = cfg.roles[role]
