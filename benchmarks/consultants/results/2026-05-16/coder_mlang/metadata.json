@@ -1,0 +1,104 @@
+{
+  "harness_version": "1.0",
+  "suite": "coder_mlang",
+  "suite_version": "1.0",
+  "suite_hash": "861046693fa98d58ad8326ccafb2efbbc4540d0b02b9d95a7c4cf171d565dc1e",
+  "suite_released": "2026-05-16",
+  "manifest": [
+    "python-medium-01-meeting-rooms",
+    "rust-medium-01-search-rotated",
+    "go-medium-01-koko-bananas",
+    "c-medium-01-longest-valid-parens",
+    "cpp-medium-01-cycle-list",
+    "csharp-medium-01-trapped-rainwater",
+    "python-hard-01-lru-cache",
+    "rust-hard-01-iter-window-pairs",
+    "go-hard-01-shortest-path-k-stops",
+    "c-hard-01-quicksort-3way",
+    "cpp-hard-01-expr-eval",
+    "csharp-hard-01-async-debounce",
+    "python-very_hard-01-parser-combinator",
+    "rust-very_hard-01-bank-transfer",
+    "go-very_hard-01-spsc-queue",
+    "c-very_hard-01-rbtree-insert",
+    "cpp-very_hard-01-small-vector",
+    "csharp-very_hard-01-di-container"
+  ],
+  "rubric": {
+    "pass_rate_floor": 0.7,
+    "quality_score_floor": 3.5,
+    "tie_breaker": "median_tokens"
+  },
+  "models": [
+    "kimi-k2.6:cloud",
+    "glm-5.1:cloud",
+    "deepseek-v4-flash:cloud",
+    "deepseek-v4-pro:cloud",
+    "minimax-m2.7:cloud"
+  ],
+  "mode": "live",
+  "ollama_base": "http://192.168.178.2:11433",
+  "judge_model": "kimi-k2.6:cloud",
+  "git_commit": "6b83b09",
+  "host": "solidpc",
+  "run_started_at": "2026-05-16T16:25:28.316349Z",
+  "questions": [
+    "c-hard-01-quicksort-3way",
+    "c-medium-01-longest-valid-parens",
+    "c-very_hard-01-rbtree-insert",
+    "cpp-hard-01-expr-eval",
+    "cpp-medium-01-cycle-list",
+    "cpp-very_hard-01-small-vector",
+    "csharp-hard-01-async-debounce",
+    "csharp-medium-01-trapped-rainwater",
+    "csharp-very_hard-01-di-container",
+    "go-hard-01-shortest-path-k-stops",
+    "go-medium-01-koko-bananas",
+    "go-very_hard-01-spsc-queue",
+    "python-hard-01-lru-cache",
+    "python-medium-01-meeting-rooms",
+    "python-very_hard-01-parser-combinator",
+    "rust-hard-01-iter-window-pairs",
+    "rust-medium-01-search-rotated",
+    "rust-very_hard-01-bank-transfer"
+  ],
+  "estimate": {
+    "trials": 90,
+    "by_model": {
+      "kimi-k2.6:cloud": {
+        "iterations": 90,
+        "prompt_tokens": 720000,
+        "completion_tokens": 135000,
+        "total_tokens": 855000
+      },
+      "glm-5.1:cloud": {
+        "iterations": 90,
+        "prompt_tokens": 720000,
+        "completion_tokens": 126000,
+        "total_tokens": 846000
+      },
+      "deepseek-v4-flash:cloud": {
+        "iterations": 90,
+        "prompt_tokens": 720000,
+        "completion_tokens": 135000,
+        "total_tokens": 855000
+      },
+      "deepseek-v4-pro:cloud": {
+        "iterations": 108,
+        "prompt_tokens": 972000,
+        "completion_tokens": 194400,
+        "total_tokens": 1166400
+      },
+      "minimax-m2.7:cloud": {
+        "iterations": 90,
+        "prompt_tokens": 720000,
+        "completion_tokens": 135000,
+        "total_tokens": 855000
+      }
+    },
+    "judge_model": "kimi-k2.6:cloud",
+    "judge_tokens": 118800,
+    "total_tokens": 4696200,
+    "summary_line": "5 models \u00d7 18 questions = 90 trials. ~4.70M tokens estimated (+~119K for the kimi-k2.6:cloud judge)."
+  }
+}
