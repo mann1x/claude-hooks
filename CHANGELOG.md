@@ -16,6 +16,40 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Changed — `/consultants` env: LangGraph 1.2 pin (v2 overhaul M0)
+
+The `claude-hooks-consultants` conda env now pins the LangGraph 1.x
+stack (1.0 GA Oct 2025, 1.2.0 May 2026) instead of the previous
+0.3.x line:
+
+- `langgraph>=1.2,<2.0` (was `>=0.2,<0.4`)
+- `langgraph-checkpoint>=4.1,<5.0` (new explicit pin)
+- `langgraph-checkpoint-sqlite>=3.1,<4.0` (was `>=2.0,<3.0`)
+- `langgraph-prebuilt>=1.1,<2.0` (new explicit pin)
+- `langchain-core>=1.4,<2.0` (transitive bump from 0.3.x)
+- `langchain-ollama>=1.0,<2.0` (was `>=0.2,<0.4`)
+- new optional `[postgres]` extra:
+  `langgraph-checkpoint-postgres>=3.1,<4.0` + `psycopg[binary,pool]`
+- dropped: `langchain` + `langchain-community` (declared but never
+  imported by the engine)
+
+All 380 existing consultants tests continue to pass on 1.2.0 — the
+v1 graph code is forward-compatible. The bump unlocks the
+1.2-specific features (`TimeoutPolicy`, `RunControl`, `astream_events`
+v3, `DeltaChannel`) that the v2 council overhaul plan
+[`/root/.claude/plans/recursive-petting-planet.md`] depends on.
+
+New `tests/test_langgraph_smoke.py` pins the API contracts the v2
+plan relies on: version checks, trivial graph + Send fanout
+reducers, `Command(goto/update)` routing, interrupt + resume across
+checkpointer backends (`InMemorySaver`, `SqliteSaver` in-memory,
+`SqliteSaver` cross-process file resume, `PostgresSaver` import-only
+when the `[postgres]` extra is installed), `update_state` /
+`get_state` / `get_state_history`, `astream_events(version="v2")`
+shape, and custom event emission via `get_stream_writer()`. Future
+framework bumps that break any of these tests means the v2 plan
+needs revisiting — failing loudly beats silently miscompiling.
+
 ### Added — multi-root tool sandbox for `/get-advice`, `/consultants`, and `caliber-grounding-proxy`
 
 All three tool-using runners now align with Claude Code's own
