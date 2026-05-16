@@ -284,7 +284,8 @@ def plan_topology(enabled: tuple[str, ...]) -> list[tuple[str, str]]:
 
 def build_council_graph(deps: GraphDeps,
                         *, checkpointer: Optional[Any] = None,
-                        tracer: Optional[Any] = None):
+                        tracer: Optional[Any] = None,
+                        interrupt_before: Optional[list[str]] = None):
     """Compile the LangGraph state machine.
 
     Imports langgraph lazily so this module is importable in envs
@@ -295,6 +296,13 @@ def build_council_graph(deps: GraphDeps,
     instance; when provided, every node's enter/exit emits a span.
     A disabled tracer (``CONSULTANTS_TRACE`` unset) is a no-op so
     the wrap is safe to apply unconditionally.
+
+    ``interrupt_before`` (M5) is a list of node names to pause
+    execution before (LangGraph's static HITL primitive). Callers
+    typically pass ``["synthesizer"]`` when
+    ``cfg.runtime.review_before_synthesis`` is on so the human can
+    preview research + inject context before the final answer is
+    composed. ``None`` (default) — no static interrupts.
     """
     try:
         from langgraph.graph import StateGraph, START, END
@@ -633,9 +641,31 @@ def build_council_graph(deps: GraphDeps,
             # effectively advisory — straight to synthesizer.
             sg.add_edge(decider, "synthesizer")
 
+    # M5: static interrupt_before plumbing. LangGraph 1.2's
+    # ``StateGraph.compile(interrupt_before=[...])`` parks execution
+    # before each named node so the consumer (HTTP /state endpoint,
+    # SSE client) can inject context + approve before continuing.
+    # We filter to the set of nodes that actually exist in this
+    # compiled graph — passing a name that wasn't added is a
+    # langgraph TypeError at compile time, which would surprise the
+    # user. The ``compile_kwargs`` dict is the single point of
+    # collecting these so the conditional cache/no-cache fallthrough
+    # below doesn't duplicate the option-handling logic.
+    compile_kwargs: dict[str, Any] = {"checkpointer": checkpointer}
     if cache is not None:
-        return sg.compile(checkpointer=checkpointer, cache=cache)
-    return sg.compile(checkpointer=checkpointer)
+        compile_kwargs["cache"] = cache
+    if interrupt_before:
+        # Names we know are in the graph at this point — see the
+        # ``sg.add_node(...)`` calls above. Filter so a caller passing
+        # ["synthesizer"] when synthesizer was disabled doesn't crash.
+        existing_nodes: set[str] = {
+            "planner", "researcher", "tool_executor",
+            "critic", "meta_critic", "synthesizer",
+        }
+        valid = [n for n in interrupt_before if n in existing_nodes]
+        if valid:
+            compile_kwargs["interrupt_before"] = valid
+    return sg.compile(**compile_kwargs)
 
 
 # ----------------------- follow-up builder ----------------------- #

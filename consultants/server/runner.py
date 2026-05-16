@@ -203,7 +203,31 @@ def make_runner(*, ollama_base_url: str):
             extra_models_by_role=extra_models_by_role,
             synthesizer_fallback_models=synthesizer_fallback,
         )
-        compiled = build_council_graph(deps, tracer=tracer)
+        # M5: static review-before-synthesis interrupt. When the
+        # user opted in via cfg.runtime.review_before_synthesis,
+        # compile with interrupt_before=["synthesizer"] so the
+        # graph pauses just before the final-answer node. The HTTP
+        # /state endpoint exposes the partial research; the human
+        # POSTs /inject + /resume to continue.
+        #
+        # The kwarg is only passed when actually opted in — this
+        # keeps the call signature bit-for-bit identical to v1 for
+        # the default-config path, so test stubs that mock
+        # build_council_graph with a fake `(deps, tracer=...)`
+        # signature don't break.
+        interrupt_before: Optional[list[str]] = None
+        try:
+            if bool(getattr(cfg.runtime, "review_before_synthesis", False)):
+                interrupt_before = ["synthesizer"]
+        except AttributeError:
+            interrupt_before = None
+        if interrupt_before:
+            compiled = build_council_graph(
+                deps, tracer=tracer,
+                interrupt_before=interrupt_before,
+            )
+        else:
+            compiled = build_council_graph(deps, tracer=tracer)
 
         # Build initial state, mark planner in_progress for the first
         # progress poll (it's the entry node by default).

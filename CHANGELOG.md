@@ -16,6 +16,178 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — `/consultants` v2 mid-flight injection + HITL interrupts (M5)
+
+Closes M5 — the engine now accepts mid-flight context injects, the
+HTTP control surface has a typed payload-builder layer for the M9
+FastAPI routes to wrap, and the graph builder honors a static
+`interrupt_before=["synthesizer"]` review when the user opts in.
+
+`consultants/engine/interrupt_policy.py` (NEW):
+
+- `InterruptDecision(kind, prompt, payload, urgent)` frozen
+  dataclass. `kind` is one of `review` / `low_confidence` /
+  `tool_permission` / `user_pause` and doubles as the SSE event
+  discriminator + `InterruptState.kind` literal. `to_payload()`
+  builds the dict the node hands to `langgraph.types.interrupt()`;
+  `to_interrupt_state(posted_at)` materializes the matching
+  `InterruptState` channel value the server's `GET /state` exposes.
+- `should_interrupt_before_synthesis(state, *, cfg)` — static review
+  fires when either `runtime_control.review_before_synthesis` OR
+  `cfg.runtime.review_before_synthesis` is set, and re-fires
+  suppression is keyed on `state.interrupt_state` being already
+  populated (no double-pause after resume).
+- `should_interrupt_on_low_confidence(state, *, threshold)` — opt-in
+  dynamic interrupt. Pre-conditions are conservative: an empty
+  confidence series never fires; the active threshold is the
+  explicit arg if given, else `runtime_control.confidence_target`,
+  else 0.5; off by default because the same signal normally drives
+  xauto escalation.
+- `should_interrupt_on_tool_permission(state, tool_name, *,
+  args_preview)` — fires only when
+  `runtime_control.tool_permissions[tool_name] == "ask"`. `"deny"`
+  is handled by the caller's separate skip path; `"allow"` /
+  missing → no interrupt.
+- `should_interrupt_on_user_pause(state, *, role)` — cooperative
+  pause flag check; honored by the next node entering after the
+  HTTP `/interrupt` route flips `runtime_control.pause_requested`.
+- `clear_interrupt(state)` — composes the state-delta that clears
+  `interrupt_state` and the pause flag, used by nodes that consume
+  a `Command(resume=...)`.
+
+`consultants/server/control.py` (NEW):
+
+- Pure-Python builders for every control-endpoint payload — no
+  FastAPI / langgraph imports at module top so the layer
+  unit-tests cleanly on the main `claude-hooks` env and the M9
+  route plumbing doesn't have to re-test shapes.
+- `build_inject_delta(*, role, text, source, ts)` — validates the
+  role is one of `VALID_INJECT_ROLES` and text is non-empty
+  (after strip), 50K-char ceiling. Returns
+  `{"additional_context": [Doc(...)]}` ready for
+  `graph.update_state(..., delta, as_node=...)`. The
+  state-channel reducer (`append_doc`) hash-dedups so inject
+  retries are idempotent.
+- `build_runtime_control_delta(changes)` — per-key validation
+  for every RuntimeControl field (`deadline_ts` float,
+  `max_rounds` non-negative int, `confidence_target` in [0,1],
+  `critic_strictness` in `lax/normal/strict`, `enabled_roles`
+  list[str], `tool_permissions` dict[str,allow/deny/ask], boolean
+  flags for review-before-synthesis + low-confidence interrupt).
+  Unknown keys are rejected (rather than silently dropped) so the
+  caller knows their request didn't take effect.
+- `build_interrupt_delta(*, reason)` — flips
+  `runtime_control.pause_requested` + records the reason.
+- `build_resume_command(value, *, decision)` → `InterruptResume`
+  value object the M9 layer hands to `Command(resume=...)`.
+- `build_cancel_request(*, discard_partial, reason)` →
+  `CancelRequest(state_delta, discard_partial)` carrying both
+  the cooperative-cancel flag and the checkpoint-keep/-delete
+  intent.
+- `summarize_state_for_get(raw, *, sid)` — turns a LangGraph
+  `StateSnapshot` (or any dict-shaped state) into the user-facing
+  `GET /v1/consult/<sid>/state` body. Drops bulky channels
+  (full research reports), surfaces the high-signal fields, and
+  tolerantly converts either a live `InterruptState` dataclass
+  or a re-loaded-from-checkpoint dict.
+- `ControlInputError(ValueError)` — every validator raises this on
+  bad shape; the M9 layer maps it to a 400 response.
+
+`consultants/engine/council.py`:
+
+- `_additional_context_block(docs)` (pure renderer) and
+  `_additional_context_for(state, role)` (state→Doc lookup
+  delegating to `state_v2.unconsumed_context_for` with defensive
+  fallback) — single source for the prompt-side wiring.
+- All four message builders (`build_planner_messages` /
+  `build_researcher_messages` / `build_critic_messages` /
+  `build_synthesizer_messages`) grow a keyword-only optional
+  `additional_context=None` parameter. When non-empty, an
+  `ADDITIONAL CONTEXT (injected after session start, in order
+  received): 1. ...` block is appended to the user message; when
+  empty/absent the rendered output is byte-identical to v1.
+  For the synthesizer the block lands BEFORE the "Now write the
+  final answer..." directive so the last-instruction primacy holds.
+- The four node functions (`planner_node`, `researcher_node` —
+  both lane-focused and full-plan paths, `critic_node`,
+  `synthesizer_node`) now call `_additional_context_for(state,
+  <role>)` and pass the filtered Doc list into their message
+  builder. Roles see their own targeted docs + `"any"` docs;
+  irrelevant docs (e.g. researcher-only when planning) are
+  filtered out.
+
+`consultants/engine/graph.py`:
+
+- `build_council_graph(...)` grows an optional `interrupt_before:
+  list[str] | None` kwarg. When set, the names are filtered
+  against the actually-compiled node set (so passing
+  `["synthesizer"]` when synthesizer is disabled doesn't crash)
+  and forwarded to `sg.compile(interrupt_before=...)`. Cache /
+  no-cache fallthrough is now collected via a `compile_kwargs`
+  dict so the option-handling logic lives in one place.
+
+`consultants/config.py`:
+
+- New `RuntimeConfig(review_before_synthesis: bool,
+  interrupt_on_low_confidence: bool)` dataclass; both default
+  `False` (v1 parity). `ConsultantsConfig.runtime` holds an
+  instance.
+- TOML loader recognizes a `[runtime]` block with the two flags.
+- TOML emitter round-trips the block with inline comments
+  documenting each flag.
+
+`consultants/server/runner.py`:
+
+- The council runner reads `cfg.runtime.review_before_synthesis`
+  and passes `interrupt_before=["synthesizer"]` to
+  `build_council_graph` when set. `AttributeError` fallthrough
+  preserves v1 behavior on older configs without the runtime
+  block.
+
+**Tests:** 80 new tests across four files, all green on both
+envs:
+
+- `tests/test_consultants_v2_interrupt_policy.py` (24 tests) —
+  `InterruptDecision.to_payload`/`to_interrupt_state` shape,
+  review-before-synthesis static + cfg flag + interrupt-active
+  guard + payload contents, low-confidence opt-in + threshold
+  resolution + empty-series guard + latest-score reading,
+  tool-permission ask/deny/allow distinctions + args-preview
+  truncation, user-pause flag + re-fire guard, `clear_interrupt`
+  delta shape.
+- `tests/test_consultants_v2_inject.py` (16 tests) — block-renderer
+  shape (empty / single / multi / whitespace strip),
+  message-builder v1 parity when channel absent, message-builder
+  appended-block shape (synth: ordering vs final directive,
+  planner: question first), node-level integration via stub
+  chat_client (planner / synthesizer surface injected docs +
+  role-filter `researcher-only` out of planner's prompt), reducer
+  idempotency (hash-dedup on retry).
+- `tests/test_consultants_v2_control_api.py` (37 tests) —
+  per-builder validation: inject (role / text / oversize),
+  runtime_control (every key + range + type + unknown-key reject +
+  partial-merge shape), interrupt (default reason), resume (value
+  + decision passthrough), cancel (discard_partial flag),
+  state-summarizer (basic shape / InterruptState round-trip /
+  None handling / LangGraph snapshot wrap / final_answer_ready
+  truthiness).
+- `tests/test_consultants_v2_hitl.py` (3 tests, consultants env
+  only) — end-to-end pause→inject→resume with a real
+  LangGraph compiled with `interrupt_before=["synthesizer"]`
+  (verifies the synth's final answer reflects the injected doc),
+  dynamic-interrupt with `Command(resume=...)` round-trip
+  (`should_interrupt_on_low_confidence` decision → `interrupt()`
+  → state.tasks[].interrupts inspection → resume value lands on
+  the node's `interrupt()` return), `InterruptDecision`
+  payload-shape integrity (the kind/prompt/payload round-trips
+  through `interrupt()` and surfaces on `state.tasks[i]
+  .interrupts[0].value` unchanged).
+
+Test counts: 3024 → 3064 on the main env (+40 main-env-runnable
+tests; the 3 HITL e2e tests skip-here / pass on the consultants
+env, M5 totals 80 in absolute terms with the HITL trio counted
+on the consultants env's 304-test sweep).
+
 ### Added — `/consultants` v2 SSE bridge + node instrumentation (M4b)
 
 Closes M4 — real council nodes now emit typed events that surface

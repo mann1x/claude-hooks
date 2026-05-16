@@ -81,6 +81,43 @@ def _emit_finished(role: str, *,
         log.exception("emit NodeFinished raised; ignored")
 
 
+# ---------- v2 additional_context channel (M5) -------------------- #
+# The v2 state schema adds an ``additional_context`` channel — an
+# append-only list of ``Doc`` records the HTTP ``/inject`` endpoint
+# populates mid-flight. Each Doc targets a specific role ("researcher",
+# "planner", "synthesizer", "any"). Node prompt builders call
+# ``_additional_context_for(state, role)`` to retrieve the docs that
+# should be surfaced on this role's next entry.
+#
+# When ``state`` carries no v2 channel (v1 path), the helper returns
+# an empty list — message builders see ``additional_context=[]`` and
+# render byte-identical to the v1 prompt shape. The full migration
+# to ``state_v2.unconsumed_context_for`` is gated on whether
+# ``state_v2`` imports cleanly (it should always; the module is
+# pure-Python with no langgraph dep), but we keep the local helper
+# defensive against partial installs.
+
+def _additional_context_for(state: dict, role: str) -> list:
+    """Return injected Docs targeted at ``role`` or ``"any"``.
+
+    Wrapping the v2 helper here keeps council.py importable on hosts
+    where the v2 state module is missing for any reason — the
+    fallback (empty list) preserves v1 prompt rendering exactly.
+    """
+    try:
+        from consultants.engine.state_v2 import (
+            unconsumed_context_for,
+        )
+    except ImportError:  # pragma: no cover — state_v2 ships in-tree
+        return []
+    try:
+        return unconsumed_context_for(state, role)
+    except Exception:  # pragma: no cover — defensive
+        log.exception("_additional_context_for: helper raised; "
+                       "falling back to empty list")
+        return []
+
+
 # ----------------------- effort -> budget ------------------------- #
 # Each effort tier maps to (researcher_rounds_max, critic_reroutes_max,
 # critic_enabled_when_optional). Critic enabledness here is the budget
@@ -317,20 +354,73 @@ SYNTHESIZER_SELF_CRITIC_SYSTEM = _role_prompt(
 )
 
 
-def build_planner_messages(question: str) -> list[dict]:
+def _additional_context_block(additional_context) -> str:
+    """Render the v2 ``additional_context`` channel as a tail block
+    on the user message.
+
+    Accepts a list of Doc-shaped objects (dataclass with ``role`` +
+    ``text`` attributes) or a falsy value. Returns the empty string
+    when nothing to surface — call sites can blindly concatenate the
+    result, no None-guard needed.
+
+    Format::
+
+        ADDITIONAL CONTEXT (injected after session start, in order received):
+        1. <text>
+        2. <text>
+
+    The trailing newline-prefix is the responsibility of the caller
+    (they use ``"\\n".join([..., block])`` style) — keeping the block
+    body free of leading whitespace makes the helper testable in
+    isolation.
+    """
+    if not additional_context:
+        return ""
+    lines = ["ADDITIONAL CONTEXT (injected after session start, "
+             "in order received):"]
+    for i, doc in enumerate(additional_context, start=1):
+        text = getattr(doc, "text", "") or ""
+        lines.append(f"{i}. {text.strip()}")
+    return "\n".join(lines)
+
+
+def build_planner_messages(question: str,
+                           *,
+                           additional_context=None) -> list[dict]:
+    """Planner's conversation seed.
+
+    ``additional_context`` is the v2 ``additional_context`` channel
+    filtered to docs targeted at the planner (or ``"any"``). Appended
+    as a final user-message block so injected context is visible to
+    the planner on its next entry (re-entry case: critic re-route
+    triggered another planning round). Empty / None → unchanged
+    behavior, preserves v1 byte-for-byte.
+    """
+    user_text = question.strip()
+    extra = _additional_context_block(additional_context)
+    if extra:
+        user_text = user_text + "\n\n" + extra
     return [
         {"role": "system", "content": PLANNER_SYSTEM},
-        {"role": "user", "content": question.strip()},
+        {"role": "user", "content": user_text},
     ]
 
 
 def build_researcher_messages(question: str, plan: str,
                               prior_rounds: list[str],
-                              grounding_msgs: list[dict]) -> list[dict]:
+                              grounding_msgs: list[dict],
+                              *,
+                              additional_context=None) -> list[dict]:
     """Researcher's conversation seed.
 
     Grounding (anchor files + structure map + addendum) goes first, so
     it sits at the start of context regardless of multi-round growth.
+
+    ``additional_context`` (v2 channel, see ``build_planner_messages``)
+    appends a final block to the user message so injected docs are
+    surfaced on each researcher round entry — covers both the
+    fanout-lane case (Send-injected) and the multi-round re-entry
+    case (critic asked for more research).
     """
     msgs: list[dict] = list(grounding_msgs)
     msgs.append({"role": "system", "content": RESEARCHER_SYSTEM})
@@ -348,18 +438,26 @@ def build_researcher_messages(question: str, plan: str,
             "in the next round; do not repeat findings already "
             "covered above."
         )
+    extra = _additional_context_block(additional_context)
+    if extra:
+        user_parts.append("\n" + extra)
     msgs.append({"role": "user", "content": "\n".join(user_parts)})
     return msgs
 
 
 def build_critic_messages(question: str, plan: str,
-                          research_rounds: list[str]) -> list[dict]:
+                          research_rounds: list[str],
+                          *,
+                          additional_context=None) -> list[dict]:
     parts = [
         f"USER QUESTION:\n{question.strip()}",
         f"\nPLANNER'S PLAN:\n{plan.strip()}",
     ]
     for i, r in enumerate(research_rounds, start=1):
         parts.append(f"\nRESEARCHER REPORT (round {i}):\n{r.strip()}")
+    extra = _additional_context_block(additional_context)
+    if extra:
+        parts.append("\n" + extra)
     return [
         {"role": "system", "content": CRITIC_SYSTEM},
         {"role": "user", "content": "\n".join(parts)},
@@ -369,7 +467,8 @@ def build_critic_messages(question: str, plan: str,
 def build_synthesizer_messages(question: str, plan: str,
                                research_rounds: list[str],
                                critique: Optional[str],
-                               *, self_critic: bool = False) -> list[dict]:
+                               *, self_critic: bool = False,
+                               additional_context=None) -> list[dict]:
     parts = [
         f"USER QUESTION:\n{question.strip()}",
         f"\nPLANNER'S PLAN:\n{plan.strip()}",
@@ -378,6 +477,9 @@ def build_synthesizer_messages(question: str, plan: str,
         parts.append(f"\nRESEARCHER REPORT (round {i}):\n{r.strip()}")
     if critique:
         parts.append(f"\nCRITIC'S VERDICT:\n{critique.strip()}")
+    extra = _additional_context_block(additional_context)
+    if extra:
+        parts.append("\n" + extra)
     parts.append(
         "\nNow write the final answer for the user. Direct, concrete, "
         "cite `path:line` for any code-dependent claim."
@@ -719,7 +821,15 @@ def planner_node(state: dict, *, chat_client, model: str,
             recorder.record_node(role="planner", kind="node_enter")
         except Exception:  # pragma: no cover
             log.exception("recorder.record_node raised; ignored")
-    msgs = build_planner_messages(state["question"])
+    # M5: surface injected ``additional_context`` docs targeted at the
+    # planner. Returns [] if no v2 channel on state or no matching
+    # docs; the builder appends a final block to the user message
+    # only when non-empty so v1 prompt shape is byte-identical when
+    # the channel is absent.
+    extra_ctx_planner = _additional_context_for(state, "planner")
+    msgs = build_planner_messages(
+        state["question"], additional_context=extra_ctx_planner,
+    )
     try:
         plan, pt, ct = _single_shot(
             chat_client, model, msgs, think=think,
@@ -862,6 +972,11 @@ def researcher_node(state: dict, *,
         # (no plan_item) — used for critic re-routes and unfanned
         # topologies — uses the full plan + prior research rounds
         # for context.
+        # M5: surface injected docs targeted at the researcher. Same
+        # filter logic for both lane-focused and full-plan paths — a
+        # mid-flight inject should reach every researcher lane the
+        # next time it enters.
+        extra_ctx_res = _additional_context_for(state, "researcher")
         plan_item = state.get("plan_item")
         if plan_item:
             focused_plan = (
@@ -870,10 +985,13 @@ def researcher_node(state: dict, *,
             )
             msgs = build_researcher_messages(
                 state["question"], focused_plan, [], grounding_msgs,
+                additional_context=extra_ctx_res,
             )
         else:
             msgs = build_researcher_messages(
-                state["question"], state["plan"], prior_rounds, grounding_msgs,
+                state["question"], state["plan"], prior_rounds,
+                grounding_msgs,
+                additional_context=extra_ctx_res,
             )
     caps = caps_for(state.get("effort") or "medium")
 
@@ -1156,8 +1274,13 @@ def critic_node(state: dict, *, chat_client, model: str,
             )
         except Exception:  # pragma: no cover
             log.exception("recorder.record_node raised; ignored")
+    # M5: surface docs targeted at the critic (rare in practice;
+    # mostly "any" docs naming a quality bar like "must cite path:line
+    # for every claim"). Same defensive helper as the other roles.
+    extra_ctx_critic = _additional_context_for(state, "critic")
     msgs = build_critic_messages(
         state["question"], state["plan"], state.get("research") or [],
+        additional_context=extra_ctx_critic,
     )
     t0 = time.monotonic()
     try:
@@ -1408,11 +1531,18 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
             "role": "user", "content": "\n".join(user_parts),
         }]
     else:
+        # M5: surface injected docs targeted at the synthesizer or
+        # "any". The synthesizer is the place a user-injected
+        # constraint ("call out GDPR risk", "lead with the bottom
+        # line") most often needs to land — it shapes the final
+        # answer the user sees.
+        extra_ctx_syn = _additional_context_for(state, "synthesizer")
         msgs = build_synthesizer_messages(
             state["question"], state.get("plan", ""),
             state.get("research") or [],
             state.get("critique"),
             self_critic=self_critic,
+            additional_context=extra_ctx_syn,
         )
     # 2026-05-07: serial fallback chain. The synthesizer always tries
     # ``model`` first (with its own ChatClient retry budget — ~15 min

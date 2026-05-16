@@ -175,11 +175,37 @@ class CheckpointerConfig:
 
 
 @dataclass
+class RuntimeConfig:
+    """Per-session runtime knobs orthogonal to topology / effort.
+
+    These are **boot-time defaults**; the v2 ``RuntimeControl`` channel
+    is the live mutable surface that ``graph.update_state`` rewrites
+    via the HTTP control endpoints. Whatever the user puts here seeds
+    the channel on session start.
+
+    Fields:
+
+    - ``review_before_synthesis`` (default ``False``) — when ``True``,
+      compile the graph with ``interrupt_before=["synthesizer"]`` so
+      execution pauses just before the synthesizer composes the final
+      answer. The HTTP ``GET /state`` endpoint exposes the partial
+      research so the human can preview + inject before approving.
+    - ``interrupt_on_low_confidence`` (default ``False``) — opt-in
+      dynamic interrupt when the synthesizer's self-rating dips
+      below ``confidence_target``. Off by default because the same
+      signal normally drives xauto escalation, not a human pause.
+    """
+    review_before_synthesis: bool = False
+    interrupt_on_low_confidence: bool = False
+
+
+@dataclass
 class ConsultantsConfig:
     topology: str = DEFAULT_TOPOLOGY
     effort: str = DEFAULT_EFFORT
     service: ServiceConfig = field(default_factory=ServiceConfig)
     checkpointer: CheckpointerConfig = field(default_factory=CheckpointerConfig)
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     roles: dict[str, RoleConfig] = field(default_factory=lambda: {
         r: RoleConfig() for r in ROLES
     })
@@ -321,6 +347,16 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
             base.checkpointer.postgres_pool_timeout_s = \
                 float(cp["postgres_pool_timeout_s"])
 
+    # runtime (M5)
+    rt = raw.get("runtime") or {}
+    if isinstance(rt, dict):
+        if "review_before_synthesis" in rt:
+            base.runtime.review_before_synthesis = \
+                bool(rt["review_before_synthesis"])
+        if "interrupt_on_low_confidence" in rt:
+            base.runtime.interrupt_on_low_confidence = \
+                bool(rt["interrupt_on_low_confidence"])
+
     # roles
     roles = raw.get("role") or {}
     if isinstance(roles, dict):
@@ -386,6 +422,16 @@ def _render(cfg: ConsultantsConfig) -> str:
     L.append(f"postgres_pool_min = {cfg.checkpointer.postgres_pool_min}")
     L.append(f"postgres_pool_max = {cfg.checkpointer.postgres_pool_max}")
     L.append(f"postgres_pool_timeout_s = {cfg.checkpointer.postgres_pool_timeout_s}")
+    L.append("")
+    L.append("[runtime]")
+    L.append("# review_before_synthesis: pause before the final answer to "
+             "approve / inject")
+    L.append("review_before_synthesis = "
+             f"{'true' if cfg.runtime.review_before_synthesis else 'false'}")
+    L.append("# interrupt_on_low_confidence: opt-in HITL when synthesizer "
+             "self-rates below confidence_target")
+    L.append("interrupt_on_low_confidence = "
+             f"{'true' if cfg.runtime.interrupt_on_low_confidence else 'false'}")
     L.append("")
     for role in ROLES:
         rc = cfg.roles[role]
