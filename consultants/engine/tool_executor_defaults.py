@@ -48,10 +48,9 @@ from __future__ import annotations
 # ====================================================================== #
 
 # The date of the most-recent skill-eval run that informed these
-# defaults. In M11c-1 the scaffold is empty so this points at the
-# scaffold-landing date rather than a live-run date; M11c-2 bumps
-# it to the live-run date.
-RECOMMENDED_AS_OF: str = "2026-05-17 (scaffold — no live run yet)"
+# defaults. M11c-2 bumped this from the M11c-1 scaffold-landing
+# date to the live-run date.
+RECOMMENDED_AS_OF: str = "2026-05-17"
 
 # Suite version of the tool_executor skill-eval the recommendation
 # maps to. The suite manifest lives at
@@ -59,39 +58,65 @@ RECOMMENDED_AS_OF: str = "2026-05-17 (scaffold — no live run yet)"
 RECOMMENDED_SUITE_VERSION: str = "1.0"
 
 # First 8 chars of the suite manifest hash this rec was scored
-# against. Empty in M11c-1 (no live data yet); M11c-2 fills it
-# in. If a baselines row claims this suite version but the hash
-# doesn't match, the question content drifted without a version
-# bump — investigate before trusting the score.
-RECOMMENDED_SUITE_HASH_PREFIX: str = ""
+# against. If a baselines row claims this suite version but the
+# hash doesn't match, the question content drifted without a
+# version bump — investigate before trusting the score.
+RECOMMENDED_SUITE_HASH_PREFIX: str = "7921555c"
 
 
 # ====================================================================== #
-# Defaults (M11c-1 scaffold; populated by M11c-2)
+# Defaults (M11c-2 closeout, 2026-05-17)
 # ====================================================================== #
 
 # The recommended model for ``cfg.roles.tool_executor.model``
-# when the role is enabled. Empty string in M11c-1 means "no
-# recommendation yet" — the config layer falls through to the
-# existing ``DEFAULT_MODEL_BY_ROLE["tool_executor"]=
-# "gemma4:31b-cloud"`` from M6.
-RECOMMENDED_TOOL_EXECUTOR_MODEL: str = ""
+# when the role is enabled.
+#
+# **M11c-2 winner**: ``gemma4:31b-cloud``. The M11c-2 live bench
+# (48 trials across the 6-model cohort × 8 questions × 1 trial)
+# produced four models tied on pass rate at 87.5% (glm-5.1,
+# kimi-k2.6, gemma4:31b, deepseek-v4-pro) and one at 75%
+# (gemini-3-flash-preview); qwen3-coder-next failed the rubric
+# at 62.5%. Among the qualifying tie, ``gemma4:31b-cloud`` won
+# every tiebreaker:
+#
+#   - **Perfect avg judge quality**: 5.00 / 5.00 (vs 4.12-4.50
+#     for the other tied models).
+#   - **Fastest avg wall**: 4.9 s per trial (vs 6.7-11.3 s for
+#     the other tied models).
+#   - **Low tool-call cost**: 2.6 calls per trial on average,
+#     beaten only by glm-5.1 (2.2) but glm-5.1's quality drag
+#     (4.12) cost it the tiebreaker.
+#
+# Notably this matches the M6 fallback default
+# (``DEFAULT_MODEL_BY_ROLE["tool_executor"]="gemma4:31b-cloud"``
+# from ``consultants/config.py``) — the empirical bench
+# confirmed the trace-data intuition. Baseline row in
+# ``docs/consultants-skill-eval-baselines.md``.
+RECOMMENDED_TOOL_EXECUTOR_MODEL: str = "gemma4:31b-cloud"
 
-# Whether the role should be enabled by default. ``False`` in
-# M11c-1 (matches ``DEFAULT_ENABLED_BY_ROLE["tool_executor"]
-# =False``). M11c-2 may flip this to ``True`` IF:
+# Whether the role should be enabled by default.
 #
-# 1. The bench winner clears the rubric (``pass_rate >= 70%``
-#    AND ``avg_quality >= 3.5``).
-# 2. Task #103 (x-tier proper composition) is resolved — EITHER
-#    the engine refactor lands (Option 2) so the role composes
-#    correctly under multi-model researcher fanout, OR the role
-#    is explicitly documented as base-tier-only (Option 1 doc
-#    deferral) and runtime gates apply.
+# **M11c-2 decision**: stays ``False``. The bench winner cleared
+# part 1 of the gate (rubric pass: 87.5% / 5.00 — well above the
+# 70% / 3.5 floors). Part 2 (task #103 — x-tier proper
+# composition) is NOT yet resolved, so per the M11c plan
+# (``/root/.claude/plans/recursive-petting-planet.md``) the
+# default-on bit stays disabled until #103 lands:
 #
-# When that two-part gate fires, a separate engine commit reads
-# this constant and wires it into the runtime's
-# ``DEFAULT_ENABLED_BY_ROLE`` lookup. Until then this stays False.
+# 1. ✅ Bench winner clears the rubric (``pass_rate=87.5%`` AND
+#    ``avg_quality=5.00``).
+# 2. ❌ Task #103 (x-tier proper composition) — NOT resolved.
+#    EITHER the engine refactor lands (Option 2) so the role
+#    composes correctly under multi-model researcher fanout, OR
+#    the role is explicitly documented as base-tier-only
+#    (Option 1 doc deferral) and runtime gates apply.
+#
+# When part 2 resolves, a separate engine commit reads this
+# constant and wires it into the runtime's
+# ``DEFAULT_ENABLED_BY_ROLE`` lookup. Until then this stays
+# False — preserving the [[feedback_xtier_diversity_priority]]
+# constraint that Phase 9 multi-model researcher fanout is the
+# council's defining advantage and must NOT be auto-gated off.
 RECOMMENDED_DEFAULT_ON: bool = False
 
 

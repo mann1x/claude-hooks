@@ -29,22 +29,41 @@ class TestToolExecutorDefaultsScaffoldShape(unittest.TestCase):
         self.assertGreater(len(ted.RECOMMENDED_AS_OF), 0)
         self.assertIsInstance(ted.RECOMMENDED_SUITE_VERSION, str)
         self.assertGreater(len(ted.RECOMMENDED_SUITE_VERSION), 0)
-        # Hash prefix MAY be empty in M11c-1; just check the
-        # attribute exists.
+        # Hash prefix is populated in M11c-2 (was empty in M11c-1);
+        # check it's an 8-hex-char string matching the suite hash
+        # prefix the bench writes to its results metadata.
         self.assertIsInstance(ted.RECOMMENDED_SUITE_HASH_PREFIX, str)
+        # Empty is still tolerated for a pre-live scaffold rev, but
+        # when present it MUST be 8 lowercase hex chars (matches
+        # ``SuiteManifest.suite_hash[:8]``).
+        if ted.RECOMMENDED_SUITE_HASH_PREFIX:
+            self.assertEqual(len(ted.RECOMMENDED_SUITE_HASH_PREFIX), 8)
+            self.assertRegex(
+                ted.RECOMMENDED_SUITE_HASH_PREFIX, r"^[0-9a-f]{8}$",
+            )
 
-    def test_recommended_model_is_empty_sentinel(self) -> None:
-        """M11c-1: no model recommendation yet.
-
-        M11c-2 must populate this with a real model tag like
-        ``"gemma4:31b-cloud"`` or whichever wins the rubric.
+    def test_recommended_model_populated_by_m11c2(self) -> None:
+        """M11c-2 (2026-05-17): the live bench picked
+        ``gemma4:31b-cloud`` (87.5% pass rate / 5.00 avg quality /
+        4.9 s avg wall — won every tiebreaker among the four
+        models tied on pass rate). The constant must surface a
+        non-empty value so the config layer can route the role
+        to the bench-validated model when enabled.
         """
-        self.assertEqual(ted.RECOMMENDED_TOOL_EXECUTOR_MODEL, "")
+        self.assertNotEqual(
+            ted.RECOMMENDED_TOOL_EXECUTOR_MODEL, "",
+            "M11c-2 populates this — empty string means the scaffold "
+            "regressed",
+        )
 
-    def test_recommended_default_on_is_false_in_scaffold(self) -> None:
-        """M11c-1: the role stays disabled-by-default until M11c-2
-        proves a model passes the rubric AND task #103 resolves
-        x-tier composition.
+    def test_recommended_default_on_still_false_pending_103(self) -> None:
+        """M11c-2 outcome: rubric clears (87.5% / 5.00), but task
+        #103 (x-tier proper composition) is NOT yet resolved, so
+        the default-on bit stays False per the two-part gate in
+        the M11c plan. When #103 closes (Option 1 doc deferral OR
+        Option 2 proper composition engine refactor), a separate
+        commit flips this to True and wires
+        ``DEFAULT_ENABLED_BY_ROLE["tool_executor"]`` accordingly.
         """
         self.assertEqual(ted.RECOMMENDED_DEFAULT_ON, False)
 
@@ -76,11 +95,15 @@ class TestM12ParityGuarantee(unittest.TestCase):
         )
 
     def test_scaffold_default_on_matches_runtime_default(self) -> None:
-        """The scaffold's ``RECOMMENDED_DEFAULT_ON`` should match
-        the runtime's ``DEFAULT_ENABLED_BY_ROLE["tool_executor"]``
-        bit-for-bit while the scaffold is in M11c-1 state. If they
-        ever drift, the engine wiring fired prematurely — surface
-        as a test failure."""
+        """``RECOMMENDED_DEFAULT_ON`` should match the runtime's
+        ``DEFAULT_ENABLED_BY_ROLE["tool_executor"]`` bit-for-bit
+        for as long as the engine wiring hasn't fired. M11c-1
+        shipped the scaffold with both ``False``; M11c-2 kept
+        ``RECOMMENDED_DEFAULT_ON=False`` because task #103 isn't
+        resolved yet. When #103 closes and a separate commit
+        flips the bit, the engine wiring commit MUST update
+        ``DEFAULT_ENABLED_BY_ROLE`` in the same atomic change so
+        this test stays green."""
         from consultants.config import DEFAULT_ENABLED_BY_ROLE
 
         self.assertEqual(

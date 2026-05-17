@@ -165,12 +165,50 @@ The tool_executor suite (M11c) gates `cfg.roles.tool_executor.model`
 M11c-1 shipped the harness, the 8-question × 4-tier suite, the
 synthetic fixture corpus, and the
 `consultants/engine/tool_executor_defaults.py` scaffold on
-2026-05-17. The first live run + per-model row(s) below land in
-M11c-2.
+2026-05-17. M11c-2 (also 2026-05-17) ran the live bench against
+the 6-model cohort and populated `tool_executor_defaults.py`
+with the winner.
 
-| Date | Suite ver. | Configuration                                | Pass rate | Avg quality | Avg tool calls | Median wall | Suite hash | Notes |
-|------|-----------:|----------------------------------------------|----------:|------------:|---------------:|------------:|------------|-------|
-| _M11c-2 not yet shipped_ |
+### v1.0 baseline (2026-05-17) — `gemma4:31b-cloud` wins
+
+| Date | Suite ver. | Model                            | Pass rate | Avg quality | Avg tool calls | Avg wall | Suite hash | Notes |
+|------|-----------:|----------------------------------|----------:|------------:|---------------:|---------:|------------|-------|
+| 2026-05-17 | 1.0 | `gemma4:31b-cloud`             | 87.5%     | 5.00        | 2.6            | 4.9 s    | `7921555c` | **Recommended default.** Won every tiebreaker among the 4 models tied on pass rate. Perfect judge quality (5.00) on all 7 passing trials; tripped only by the medium-02 redundancy trap (3 redundant calls). Already the M6 fallback default — bench confirms the trace-data intuition. |
+| 2026-05-17 | 1.0 | `kimi-k2.6:cloud`              | 87.5%     | 4.50        | 3.4            | 6.7 s    | `7921555c` | Tied for top pass rate. Lost on quality (4.50 vs 5.00) and wall (6.7 s vs 4.9 s). Single failure: medium-02 redundancy trap (2 calls when the answer was in the prompt). |
+| 2026-05-17 | 1.0 | `deepseek-v4-pro:cloud`        | 87.5%     | 4.50        | 3.5            | 7.6 s    | `7921555c` | Tied for top pass rate. Failed easy-01-grep-read-chain (oracle assertion miss after 2 calls — likely a terse function body). Best discipline on the redundancy test (0 calls on medium-02, although the judge gave it a 1.0 for being too curt). |
+| 2026-05-17 | 1.0 | `glm-5.1:cloud`                | 87.5%     | 4.12        | 2.2            | 11.3 s   | `7921555c` | Tied for top pass rate. Lowest avg quality of the qualifying models (4.12). Single failure: trivial-02-read-section with 0 tool calls — answered the README section from prompt context without reading the file. |
+| 2026-05-17 | 1.0 | `gemini-3-flash-preview:cloud` | 75.0%     | 4.50        | 4.4            | 7.7 s    | `7921555c` | Qualifies on both axes but with 6/8 passes. Failed medium-01 (hit `max_iterations=6` without terminating) and medium-02 (redundancy trap). |
+| 2026-05-17 | 1.0 | `qwen3-coder-next:cloud`       | **62.5%** | 4.12        | 4.2            | 15.8 s   | `7921555c` | **Disqualified** — below the 70% pass-rate floor. Failed medium-01 (5 calls — too many read_files), medium-02 (6 calls — worst redundancy violator), and trivial-01 (cited the wrong line). Notable signal: the M11b-mlang Python coder winner is NOT a good tool_executor — "best at writing code" ≠ "best at mechanical tool chains for reading code." |
+
+### Methodology
+
+- 6 models × 8 questions × 1 trial = 48 trials, ~10 min wall on
+  the live Ollama-Pro proxy. Judge: `gemma4:31b-cloud`. Total
+  cost ~1.38 M tokens + ~74 K judge tokens.
+- Rubric: `pass_rate ≥ 0.70` AND `avg_quality_score ≥ 3.50`.
+  Five models qualify; `gemma4:31b-cloud` wins the tiebreaker
+  on quality first, wall second, tool-call count third.
+- The 8-trial denominator means a single oracle failure costs
+  12.5 pts of pass rate. Models that "almost" qualified
+  (gemini-3-flash-preview at 75%) sit one failure away from
+  qualifying — re-baseline if the suite gains a v1.1 question.
+
+### Default-on decision
+
+`DEFAULT_ENABLED_BY_ROLE["tool_executor"]` stays `False` until
+task #103 (x-tier proper composition) resolves. The rubric clears
+(condition 1 of the two-part gate), but condition 2 — either the
+engine refactor lands or the role is explicitly documented as
+base-tier-only — is still pending. The user-facing #103 decision
+flow follows this commit.
+
+### Bench artifacts
+
+- Results dir:
+  [`benchmarks/consultants/results/2026-05-17/tool_executor/`](../benchmarks/consultants/results/2026-05-17/tool_executor/)
+  (`metadata.json` + `trials.jsonl` + `report.md`).
+- Scaffold + populated defaults:
+  [`consultants/engine/tool_executor_defaults.py`](../consultants/engine/tool_executor_defaults.py).
 
 ---
 

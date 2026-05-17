@@ -1,0 +1,98 @@
+{
+  "harness_version": "1.0",
+  "suite": "tool_executor",
+  "suite_version": "1.0",
+  "suite_hash": "7921555c7f36560ea116cc98a5d1cf833dfec0d995a4a421a0b478a28413fc22",
+  "suite_released": "2026-05-17",
+  "manifest": [
+    "trivial-01-find-symbol",
+    "trivial-02-read-section",
+    "easy-01-grep-read-chain",
+    "easy-02-listfiles-glob",
+    "medium-01-multifile-audit",
+    "medium-02-redundancy-test",
+    "hard-01-ambiguous-survey",
+    "hard-02-cite-correct-line"
+  ],
+  "rubric": {
+    "pass_rate_floor": 0.7,
+    "quality_score_floor": 3.5,
+    "tie_breaker": "median_tokens"
+  },
+  "models": [
+    "glm-5.1:cloud",
+    "kimi-k2.6:cloud",
+    "gemma4:31b-cloud",
+    "qwen3-coder-next:cloud",
+    "deepseek-v4-pro:cloud",
+    "gemini-3-flash-preview:cloud"
+  ],
+  "mode": "live",
+  "ollama_base": "http://192.168.178.2:11433",
+  "judge_model": "gemma4:31b-cloud",
+  "trials_per_question": 1,
+  "git_commit": "336199e7b298286611284d8a265b83802980e101",
+  "host": "solidpc",
+  "run_started_at": "2026-05-17T18:46:01.892144Z",
+  "questions": [
+    "easy-01-grep-read-chain",
+    "easy-02-listfiles-glob",
+    "hard-01-ambiguous-survey",
+    "hard-02-cite-correct-line",
+    "medium-01-multifile-audit",
+    "medium-02-redundancy-test",
+    "trivial-01-find-symbol",
+    "trivial-02-read-section"
+  ],
+  "estimate": {
+    "trials": 48,
+    "by_model": {
+      "glm-5.1:cloud": {
+        "trials": 8,
+        "iterations": 24,
+        "prompt_tokens": 192000,
+        "completion_tokens": 24000,
+        "total_tokens": 216000
+      },
+      "kimi-k2.6:cloud": {
+        "trials": 8,
+        "iterations": 24,
+        "prompt_tokens": 192000,
+        "completion_tokens": 24000,
+        "total_tokens": 216000
+      },
+      "gemma4:31b-cloud": {
+        "trials": 8,
+        "iterations": 24,
+        "prompt_tokens": 156000,
+        "completion_tokens": 24000,
+        "total_tokens": 180000
+      },
+      "qwen3-coder-next:cloud": {
+        "trials": 8,
+        "iterations": 24,
+        "prompt_tokens": 192000,
+        "completion_tokens": 24000,
+        "total_tokens": 216000
+      },
+      "deepseek-v4-pro:cloud": {
+        "trials": 8,
+        "iterations": 24,
+        "prompt_tokens": 216000,
+        "completion_tokens": 24000,
+        "total_tokens": 240000
+      },
+      "gemini-3-flash-preview:cloud": {
+        "trials": 8,
+        "iterations": 24,
+        "prompt_tokens": 216000,
+        "completion_tokens": 24000,
+        "total_tokens": 240000
+      }
+    },
+    "judge_model": "gemma4:31b-cloud",
+    "judge_tokens": 74250,
+    "total_tokens": 1382250,
+    "summary_line": "6 models \u00d7 8 questions \u00d7 1 trial = 48 trials. ~1.38M tokens estimated (+~74K for the gemma4:31b-cloud judge)."
+  }
+}

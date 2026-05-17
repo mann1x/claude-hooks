@@ -16,6 +16,114 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — Tool_executor skill-eval bench M11c-2 closeout (live cohort, 2026-05-17)
+
+The live cohort that turns the M11c-1 dry-run-only scaffold into a
+**bench-grounded recommendation**. 48 trials across 6 cloud models
+× 8 questions × 1 trial each, gemma4:31b-cloud judging on the 1-5
+quality scale. **Outcome**: `gemma4:31b-cloud` is the recommended
+model when the role is enabled; `RECOMMENDED_DEFAULT_ON` stays
+`False` pending task #103 (x-tier proper composition).
+
+**Results headline** (full table in
+[`docs/consultants-skill-eval-baselines.md`](docs/consultants-skill-eval-baselines.md#tool_executor-v10-2026-05-17)):
+
+| Model | pass_rate | avg_quality | avg_wall_s | avg_tool_calls | rubric |
+|-------|----------:|------------:|-----------:|---------------:|--------|
+| `gemma4:31b-cloud` | **0.875** | **5.00** | 4.9 | 2.6 | ✅ pick |
+| `glm-5.1:cloud` | 0.875 | 4.12 | 6.9 | 2.2 | ✅ qualifying |
+| `kimi-k2.6:cloud` | 0.875 | 4.50 | 11.3 | 3.0 | ✅ qualifying |
+| `deepseek-v4-pro:cloud` | 0.875 | 4.25 | 6.7 | 2.4 | ✅ qualifying |
+| `gemini-3-flash-preview:cloud` | 0.750 | 4.00 | 5.1 | 4.0 | ✅ qualifying |
+| `qwen3-coder-next:cloud` | 0.625 | 3.62 | 7.1 | 4.4 | ❌ < 0.70 floor |
+
+Four models tied on pass rate at 0.875; `gemma4:31b-cloud` won
+every tiebreaker — perfect avg judge quality (5.00 / 5.00),
+fastest avg wall (4.9 s vs 6.7–11.3 s for the other tied models),
+and low avg tool-call cost (2.6 calls — beaten only by glm-5.1's
+2.2, but glm-5.1's 4.12 quality drag cost it the tiebreaker).
+Notably this matches the M6 fallback default
+(`DEFAULT_MODEL_BY_ROLE["tool_executor"] = "gemma4:31b-cloud"`) —
+the empirical bench confirms the trace-data intuition that put
+gemma4 in the role's seed config.
+
+**`tool_executor_defaults.py` populated**.
+[`consultants/engine/tool_executor_defaults.py`](consultants/engine/tool_executor_defaults.py)
+swaps the M11c-1 sentinel string for the bench winner:
+
+- `RECOMMENDED_TOOL_EXECUTOR_MODEL = "gemma4:31b-cloud"`
+- `RECOMMENDED_AS_OF = "2026-05-17"`
+- `RECOMMENDED_SUITE_VERSION = "1.0"`
+- `RECOMMENDED_SUITE_HASH_PREFIX = "7921555c"`
+- `RECOMMENDED_DEFAULT_ON = False`  *(still gated by task #103)*
+
+`tests/test_tool_executor_defaults.py` flips the two M11c-1
+"scaffold" assertions to their M11c-2 form
+(`test_recommended_model_populated_by_m11c2`,
+`test_recommended_default_on_still_false_pending_103`); 8/8 tests
+green.
+
+**Default-on bit stays `False`** because part 2 of the two-part
+gate from [`/root/.claude/plans/recursive-petting-planet.md`](.) is
+unresolved. Part 1 (rubric pass: `pass_rate ≥ 0.70` AND
+`avg_quality ≥ 3.5`) clears comfortably at 87.5% / 5.00. Part 2
+(task #103 x-tier proper composition) is the open user-facing
+decision — three paths surveyed in the M11c-1 plan: Option 1 (doc
+deferral, recommend tool_executor for base tiers only), Option 2
+(engine refactor for per-lane `awaiting_tool_results` + post-
+barrier merge router + per-lane round filtering), Option 3 (auto-
+gate at runtime — last resort per
+`feedback_xtier_diversity_priority`). When part 2 resolves, a
+separate engine commit flips `RECOMMENDED_DEFAULT_ON=True` AND
+wires `DEFAULT_ENABLED_BY_ROLE["tool_executor"]=True` atomically
+so the M12 parity test
+(`test_scaffold_default_on_matches_runtime_default`) stays green.
+
+**Bench artifacts** at
+[`benchmarks/consultants/results/2026-05-17/tool_executor/`](benchmarks/consultants/results/2026-05-17/tool_executor/)
+— `metadata.json` (suite hash, harness version, model list, cost
+estimate, judge model, git SHA), `trials.jsonl` (48 rows, one per
+trial, includes `tool_call_log` + `final_text` + judge score +
+rationale), `report.md` (per-model + per-question pass/fail
+matrix). Re-run with
+`claude-consultants skill-eval tool_executor --live --accept-cost`
+to refresh.
+
+**What the failures told us**. 9 of 48 trials failed the oracle —
+discriminating signal, exactly as the suite was designed to
+produce:
+
+- **`medium-02-redundancy-test` fired on 4 of 6 models** (the
+  question's answer is already in the `why:` frontmatter block;
+  passing requires ≥0 filesystem tool calls). Only `glm-5.1:cloud`
+  and `deepseek-v4-pro:cloud` recognised the redundancy and
+  returned the answer without re-reading files. The other 4 issued
+  unnecessary `read_file` / `grep` calls.
+- **`medium-01-multifile-audit` cost qwen3-coder-next 5 reads and
+  gemini-3-flash-preview hit `max_iterations=6`** before
+  converging — the failure mode for "summarise N files" tasks is
+  high-iteration loops on models with weaker plan-then-act
+  behaviour.
+- **`hard` tier passed 100% across all 6 models**. The "hard"
+  label was misnamed for these two questions (ambiguous
+  `survey_project → glob → read` chain + cite-exact-line) —
+  candidate fix for a future `1.0.1` suite bump.
+- **`trivial-02-read-section` × glm-5.1:cloud** produced 0 tool
+  calls — the model answered from the question task text without
+  reading the README. Oracle correctly rejected it.
+
+**Verification**:
+
+- Live bench exit code: 0. Total wall: 339 s for 48 trials + 48
+  judge calls.
+- Both envs full sweep: 3434 tests + 102 sub-tests passing, zero
+  regressions vs the M11c-1 baseline.
+- M12 parity unchanged: 13 tests + 5 sub-tests green.
+- `DEFAULT_ENABLED_BY_ROLE["tool_executor"]` still `False`,
+  `DEFAULT_MODEL_BY_ROLE["tool_executor"]` still
+  `"gemma4:31b-cloud"` — bit-for-bit identical to the M6 / M11c-1
+  state.
+
 ### Added — Tool_executor skill-eval bench harness (M11c-1, task #99 + #103 prelude, 2026-05-17)
 
 The Consultancy Skill-Eval Protocol's **tool_executor**
