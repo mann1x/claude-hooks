@@ -429,23 +429,39 @@ class CoderTrial:
     # source. Cannot tell if the code WORKS, only if it READS WELL.
     quality_score: Optional[float] = None
     quality_rationale: str = ""
-    # v1.0.1: post-test judge. A second judge call fired ONLY when
-    # passes_algorithm=False. The judge sees task + code + the
-    # failing test name + first 200 chars of failure msg, and rates
-    # on a 1-5 EDGE-CASE-AWARENESS rubric (see harness.build_post_test_judge_system).
-    # The divergence between quality_score and quality_post_test
-    # is the "idiomatic-but-broken" signal — a model that scores
-    # 5 on read but 2 here writes clean-looking buggy code.
+    # v1.0.1: **audit judge** — a second judge that fires on EVERY
+    # compiled trial, using one of two prompts depending on the
+    # algorithm-axis outcome:
     #
-    # None when:
-    #  - passes_algorithm=True (no post-test judge needed)
-    #  - the trial errored before pytest ran
-    #  - the post-test judge model wasn't configured at run start
-    #  - the judge response was unparseable
-    quality_post_test: Optional[float] = None
-    quality_post_test_rationale: str = ""
-    quality_post_test_judge_model: str = ""  # which model judged
-    quality_post_test_failing_test: str = "" # which failure was inspected
+    #   mode="post_test"  (passes_algorithm=False)
+    #       Sees the failing test name + first 200 chars of failure
+    #       msg. Rates 1-5 on EDGE-CASE-AWARENESS: should the author
+    #       have anticipated this failure?
+    #
+    #   mode="robustness" (passes_algorithm=True)
+    #       Sees only the task + code. Rates 1-5 on ROBUSTNESS: name
+    #       ONE plausible edge case the visible tests don't cover.
+    #       Captures latent bugs in passing code (e.g. a sort that
+    #       happens to work despite a buggy pivot).
+    #
+    #   mode="skipped"
+    #       No audit judge configured, or the trial errored / didn't
+    #       compile.
+    #
+    # The divergence between ``quality_score`` (read-only / first
+    # judge) and ``quality_audit_score`` (this field, from a
+    # DIFFERENT model) gives cross-judge cross-model robustness on
+    # every trial. A 5 -> 2 drop in post_test mode is the
+    # "camouflaged bug" signal; a 5 -> 2 drop in robustness mode is
+    # the "latent edge case in passing code" signal.
+    quality_audit_score: Optional[float] = None
+    quality_audit_rationale: str = ""
+    quality_audit_judge_model: str = ""    # which model judged
+    quality_audit_target_test: str = ""    # post_test mode: which
+                                           # failure was shown.
+                                           # robustness mode: "".
+    quality_audit_mode: str = "skipped"    # one of: "post_test" /
+                                           # "robustness" / "skipped"
     # Bookkeeping
     sandbox_dir: str = ""
     timestamp: str = ""        # ISO-8601 UTC; set at trial start
@@ -946,6 +962,70 @@ def build_post_test_judge_system(language: str = "Python") -> str:
     )
 
 
+def build_robustness_judge_system(language: str = "Python") -> str:
+    """System prompt for the v1.0.1 audit judge's **robustness mode**.
+
+    Fires on trials with ``passes_algorithm == True``. The judge does
+    NOT see a failure — its job is to identify ONE plausible edge case
+    the visible test suite does not cover. Captures latent bugs in
+    passing code: e.g. a sort that happens to produce correct output
+    despite a buggy pivot, a parser that handles the documented inputs
+    but breaks on a documented-but-untested edge.
+
+    The rubric scales the audit judge's "is this code actually robust?"
+    verdict against the read-only judge's clarity / idiomatic verdict —
+    cross-judge cross-model coverage on every trial.
+    """
+    return (
+        f"You are a senior {language} code reviewer doing a "
+        "ROBUSTNESS AUDIT on code that already passed its visible "
+        "test suite.\n\n"
+        "Real-world code must survive edge cases not in any visible "
+        "test. Identify ONE plausible edge case this code does not "
+        "handle, if any exists.\n\n"
+        "Score on a 1-5 scale:\n\n"
+        "5 — No plausible unhandled edge case. The code is robust.\n"
+        "4 — One narrow edge case the visible tests don't cover; an "
+        "experienced reviewer might catch it on careful read.\n"
+        "3 — One obvious edge case missed; basic review would have "
+        "flagged it.\n"
+        "2 — Multiple edge cases missed; the code's robustness is "
+        "shaky despite passing the visible tests.\n"
+        "1 — The code happens to pass these specific tests but is "
+        "broken at a deeper level (wrong algorithm, dead branches, "
+        "etc.).\n\n"
+        "Output EXACTLY two lines:\n"
+        "Line 1: ``SCORE: <integer 1-5>``\n"
+        "Line 2: One short sentence (max 25 words) naming the edge "
+        "case OR confirming none.\n\n"
+        "Do not add preamble, headings, or markdown."
+    )
+
+
+def build_robustness_judge_messages(
+    task: str,
+    code: str,
+    language: str = "Python",
+    fence: str = "python",
+) -> list[dict]:
+    """Construct the conversation for the v1.0.1 audit judge's
+    robustness mode (passing trials). Mirrors
+    ``build_post_test_judge_messages`` but does NOT include any
+    failure context — the judge's job is to FIND the missing edge
+    case, not to react to one.
+    """
+    user = (
+        f"TASK GIVEN TO THE JUNIOR ENGINEER:\n{task.strip()}\n\n"
+        f"CODE THE JUNIOR PRODUCED (this code passed all visible tests):\n"
+        f"```{fence}\n{code}\n```\n\n"
+        "Score per the rubric. Two lines only."
+    )
+    return [
+        {"role": "system", "content": build_robustness_judge_system(language)},
+        {"role": "user", "content": user},
+    ]
+
+
 def build_post_test_judge_messages(
     task: str,
     code: str,
@@ -1121,6 +1201,8 @@ __all__ = [
     "build_judge_system",
     "build_post_test_judge_messages",
     "build_post_test_judge_system",
+    "build_robustness_judge_messages",
+    "build_robustness_judge_system",
     "count_code_lines",
     "estimate_cost",
     "judge_lang_for_path",

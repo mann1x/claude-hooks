@@ -63,7 +63,8 @@ if str(_REPO_ROOT) not in sys.path:
 from benchmarks.consultants.harness import (  # noqa: E402
     HARNESS_VERSION, BenchQuestion, CoderTrial, SuiteManifest,
     append_trial, build_judge_messages,
-    build_post_test_judge_messages, count_code_lines,
+    build_post_test_judge_messages, build_robustness_judge_messages,
+    count_code_lines,
     estimate_cost, judge_lang_for_path, load_questions,
     load_suite_manifest, make_dry_run_loop_runner, measure_complexity,
     parse_constraint_tests, parse_judge_response,
@@ -225,59 +226,85 @@ def _judge_trial_quality(*, judge_chat_client, judge_model: str,
     return score, rationale
 
 
-def _post_test_judge_trial(*, judge_chat_client, judge_model: str,
-                           task: str, sandbox: Path,
-                           sandbox_path: str,
-                           test_results: dict,
-                           constraint_names: set,
-                           language: str, fence: str,
-                           ) -> tuple[Optional[float], str, str]:
-    """v1.0.1 post-test judge: run a second judge on a failed-algorithm
-    trial, with the failing test name + truncated failure message
-    included in the prompt.
+def _audit_judge_trial(*, judge_chat_client, judge_model: str,
+                       task: str, sandbox: Path,
+                       sandbox_path: str,
+                       passes_algorithm: bool,
+                       test_results: dict,
+                       constraint_names: set,
+                       language: str, fence: str,
+                       ) -> tuple[Optional[float], str, str, str]:
+    """v1.0.1 audit judge: a second judge that fires on every compiled
+    trial, with one of two prompts depending on ``passes_algorithm``.
 
-    Returns ``(score, rationale, failing_test_name)`` — the last
-    element identifies WHICH failure the judge inspected so a
-    post-mortem can correlate the score back to the underlying bug.
-    Returns ``(None, reason, "")`` on any error / unparseable response.
+    Returns ``(score, rationale, target_test, mode)``:
+      score        — float 1-5 from the judge, None on any failure
+      rationale    — the judge's one-line justification or an error msg
+      target_test  — post_test mode: the failing test name shown to
+                     the judge. robustness mode: empty string.
+      mode         — "post_test" / "robustness" / "skipped"
 
-    Selection policy: we pick the FIRST failing non-constraint
-    (algorithmic) test in iteration order. The picking choice is
-    deterministic across runs because ``test_results`` preserves
-    junit's parse order. A future enhancement could rank failing
-    tests (e.g. shortest one — the simplest case the model missed)
-    but the current policy keeps the implementation minimal and
-    keeps the per-trial cost at exactly one extra judge call.
+    Modes:
+      passes_algorithm=False AND a failing non-constraint test exists
+        → "post_test" mode: judge sees failure context, rates
+          edge-case awareness.
+      passes_algorithm=True (or alg=False but no per-test data) and
+      the code file exists
+        → "robustness" mode: judge sees only the code, rates
+          robustness ("name ONE plausible edge case the visible
+          tests don't cover").
+      otherwise
+        → "skipped" mode: no judge call made; score=None.
+
+    Always exactly one judge call (or zero if mode='skipped'), so the
+    per-trial cost is bounded.
+
+    Same retry-once-on-empty-content insurance as the read-only judge
+    in ``_judge_trial_quality``.
     """
     if judge_chat_client is None or not judge_model:
-        return None, "no post-test judge configured", ""
+        return None, "no audit judge configured", "", "skipped"
     code_path = sandbox / sandbox_path
     if not code_path.is_file():
-        return None, "code file not produced", ""
-    # Find the first failing algorithm test.
-    failing_name = ""
-    failing_msg = ""
-    for name, r in test_results.items():
-        if name in constraint_names:
-            continue
-        if r.get("status") not in ("passed", "skipped"):
-            failing_name = name
-            failing_msg = r.get("msg") or ""
-            break
-    if not failing_name:
-        # Hit when passes_algorithm=False was set by the binary
-        # subprocess-exit-code fallback (junit parse failed). No
-        # per-test data to feed the judge.
-        return None, "no failing algorithm test in test_results", ""
+        return None, "code file not produced", "", "skipped"
     try:
         code = code_path.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
-        return None, f"could not read produced file: {e}", failing_name
-    msgs = build_post_test_judge_messages(
-        task=task, code=code,
-        failing_test_name=failing_name, failing_msg=failing_msg,
-        language=language, fence=fence,
-    )
+        return None, f"could not read produced file: {e}", "", "skipped"
+
+    # Mode selection.
+    target_test = ""
+    failing_msg = ""
+    if not passes_algorithm:
+        for name, r in test_results.items():
+            if name in constraint_names:
+                continue
+            if r.get("status") not in ("passed", "skipped"):
+                target_test = name
+                failing_msg = r.get("msg") or ""
+                break
+        if target_test:
+            mode = "post_test"
+        else:
+            # alg=False but junit gave us no per-test data (parse
+            # failure / subprocess-exit-code fallback). Treat as
+            # robustness mode — at least we can ask "is this code
+            # robust?" without specific failure context.
+            mode = "robustness"
+    else:
+        mode = "robustness"
+
+    if mode == "post_test":
+        msgs = build_post_test_judge_messages(
+            task=task, code=code,
+            failing_test_name=target_test, failing_msg=failing_msg,
+            language=language, fence=fence,
+        )
+    else:  # robustness
+        msgs = build_robustness_judge_messages(
+            task=task, code=code,
+            language=language, fence=fence,
+        )
 
     def _call_once() -> str:
         try:
@@ -287,8 +314,8 @@ def _post_test_judge_trial(*, judge_chat_client, judge_model: str,
                 "stream": False,
             })
         except Exception as e:
-            log.exception("post-test judge call raised; treating as no-score")
-            raise RuntimeError(f"post-test judge raised: {e}") from e
+            log.exception("audit judge call raised; treating as no-score")
+            raise RuntimeError(f"audit judge raised: {e}") from e
         if not isinstance(resp, dict):
             return ""
         choices = resp.get("choices") or []
@@ -296,31 +323,27 @@ def _post_test_judge_trial(*, judge_chat_client, judge_model: str,
             return ""
         return (choices[0].get("message") or {}).get("content") or ""
 
-    # First attempt + one retry on empty content. Same insurance
-    # path as ``_judge_trial_quality`` — kimi-judging-kimi went
-    # silent once-in-32 on 2026-05-16; cheap to defend against the
-    # same shape for glm here.
     try:
         text = _call_once()
     except RuntimeError as e:
-        return None, str(e), failing_name
+        return None, str(e), target_test, mode
     if not text.strip():
         try:
             text = _call_once()
         except RuntimeError as e:
-            return None, f"post-test judge empty then raised: {e}", failing_name
+            return None, f"audit judge empty then raised: {e}", target_test, mode
         if not text.strip():
             return None, (
-                f"post-test judge returned empty content twice "
+                f"audit judge returned empty content twice "
                 f"(model={judge_model})"
-            ), failing_name
+            ), target_test, mode
     score, rationale = parse_judge_response(text)
     if score is None and not rationale:
         rationale = (
-            f"post-test judge text unparseable "
+            f"audit judge text unparseable "
             f"(first 200 chars: {text.strip()[:200]!r})"
         )
-    return score, rationale, failing_name
+    return score, rationale, target_test, mode
 
 
 def _run_one_trial(*,
@@ -330,8 +353,8 @@ def _run_one_trial(*,
                    loop_runner,
                    judge_chat_client,
                    judge_model: Optional[str],
-                   post_test_judge_chat_client,
-                   post_test_judge_model: Optional[str],
+                   audit_judge_chat_client,
+                   audit_judge_model: Optional[str],
                    output_dir: Path,
                    pytest_python: str) -> CoderTrial:
     """Execute one (question × model) trial.
@@ -577,34 +600,37 @@ def _run_one_trial(*,
             trial.quality_score = score
             trial.quality_rationale = rationale
 
-        # v1.0.1 post-test judge — fires only when the algorithm
-        # axis failed AND a separate judge model is configured.
-        # The rationale is in the comment block on
-        # ``_post_test_judge_trial``: a model that produces
-        # idiomatic-looking buggy code scores 5 on the read-only
-        # judge but should score 2 here, so the divergence between
-        # ``quality_score`` and ``quality_post_test`` is the
-        # operational "camouflaged bug" signal.
+        # v1.0.1 audit judge — fires on EVERY compiled trial when a
+        # separate judge model is configured. Uses two prompt modes:
+        #   passes_algorithm=False → "post_test" prompt (sees failure)
+        #   passes_algorithm=True  → "robustness" prompt (no failure)
+        # The cross-judge cross-model coverage gives us a second
+        # opinion on every trial — addresses the kimi-as-sole-judge
+        # bias (kimi rating its own coder output would otherwise have
+        # no independent check) and captures latent bugs in passing
+        # code (minimax-style "robust algorithm masking buggy pivot").
+        # See ``_audit_judge_trial`` docstring for the rubric details.
         if (
-            not trial.passes_algorithm
-            and post_test_judge_chat_client is not None
-            and post_test_judge_model
+            audit_judge_chat_client is not None
+            and audit_judge_model
         ):
             language, fence = judge_lang_for_path(question.sandbox_path)
-            pt_score, pt_rationale, pt_failing = _post_test_judge_trial(
-                judge_chat_client=post_test_judge_chat_client,
-                judge_model=post_test_judge_model,
+            a_score, a_rat, a_target, a_mode = _audit_judge_trial(
+                judge_chat_client=audit_judge_chat_client,
+                judge_model=audit_judge_model,
                 task=question.task,
                 sandbox=produced_dir,
                 sandbox_path=question.sandbox_path,
+                passes_algorithm=trial.passes_algorithm,
                 test_results=trial.test_results,
                 constraint_names=constraint_names,
                 language=language, fence=fence,
             )
-            trial.quality_post_test = pt_score
-            trial.quality_post_test_rationale = pt_rationale
-            trial.quality_post_test_judge_model = post_test_judge_model
-            trial.quality_post_test_failing_test = pt_failing
+            trial.quality_audit_score = a_score
+            trial.quality_audit_rationale = a_rat
+            trial.quality_audit_judge_model = audit_judge_model
+            trial.quality_audit_target_test = a_target
+            trial.quality_audit_mode = a_mode
     return trial
 
 
@@ -614,22 +640,21 @@ def _run_one_trial(*,
 
 def _make_live_clients(models: list[str], ollama_base: str,
                        judge_model: Optional[str],
-                       post_test_judge_model: Optional[str] = None,
+                       audit_judge_model: Optional[str] = None,
                        ) -> tuple[dict, Any, Any]:
     """Build per-model ChatClients via
     ``make_agent_chat_client``. Returns
     ``(coder_clients_by_model, judge_client_or_None,
-    post_test_judge_client_or_None)``.
+    audit_judge_client_or_None)``.
 
     Lazy import so dry-run mode works in envs without the full
     claude_hooks stack.
 
-    The post-test judge gets its own ChatClient so retry counters
-    + inference-time accounting stay separate from the read-only
-    judge's. If ``post_test_judge_model`` equals ``judge_model``
-    we still build a fresh client — same model, distinct counters
-    — because the two judges live on different code paths and we
-    want their cost signals attributable separately.
+    The audit judge gets its own ChatClient so retry counters +
+    inference-time accounting stay separate from the read-only
+    judge's. Pick a DIFFERENT model from ``judge_model`` to get
+    cross-judge cross-model robustness — if both judges are the
+    same model, the cross-judge variance signal collapses.
     """
     from claude_hooks.get_advice.chat_client import make_agent_chat_client
     coder_clients: dict[str, Any] = {}
@@ -638,12 +663,12 @@ def _make_live_clients(models: list[str], ollama_base: str,
     judge_client = None
     if judge_model:
         judge_client = make_agent_chat_client(judge_model, ollama_base)
-    post_test_judge_client = None
-    if post_test_judge_model:
-        post_test_judge_client = make_agent_chat_client(
-            post_test_judge_model, ollama_base,
+    audit_judge_client = None
+    if audit_judge_model:
+        audit_judge_client = make_agent_chat_client(
+            audit_judge_model, ollama_base,
         )
-    return coder_clients, judge_client, post_test_judge_client
+    return coder_clients, judge_client, audit_judge_client
 
 
 # ============================================================== #
@@ -803,7 +828,7 @@ def run_bench(*,
               tier_filter: Optional[set[str]],
               id_filter: Optional[set[str]],
               pytest_python: str,
-              post_test_judge_model: Optional[str] = None,
+              audit_judge_model: Optional[str] = None,
               commit_report: bool = False) -> int:
     """Execute the bench. Returns the count of trials run.
 
@@ -827,8 +852,8 @@ def run_bench(*,
         suite=suite, models=models, mode=mode,
         ollama_base=ollama_base, judge_model=judge_model,
     )
-    if post_test_judge_model:
-        metadata["post_test_judge_model"] = post_test_judge_model
+    if audit_judge_model:
+        metadata["audit_judge_model"] = audit_judge_model
     estimate = estimate_cost(questions, models, judge_model=judge_model)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "metadata.json").write_text(
@@ -854,21 +879,21 @@ def run_bench(*,
     # in live mode).
     coder_clients_by_model: dict
     judge_client: Any
-    post_test_judge_client: Any
+    audit_judge_client: Any
     if mode == "dry-run":
         coder_clients_by_model = {
             m: _DryRunChatClient() for m in models
         }
         judge_client = None  # dry-run skips the judge call
-        post_test_judge_client = None
+        audit_judge_client = None
     else:
         if not ollama_base:
             raise SystemExit("--live requires --ollama-base")
         (coder_clients_by_model,
          judge_client,
-         post_test_judge_client) = _make_live_clients(
+         audit_judge_client) = _make_live_clients(
             models, ollama_base, judge_model,
-            post_test_judge_model=post_test_judge_model,
+            audit_judge_model=audit_judge_model,
         )
 
     n_done = 0
@@ -893,8 +918,8 @@ def run_bench(*,
                     loop_runner=loop_runner,
                     judge_chat_client=judge_client,
                     judge_model=judge_model,
-                    post_test_judge_chat_client=post_test_judge_client,
-                    post_test_judge_model=post_test_judge_model,
+                    audit_judge_chat_client=audit_judge_client,
+                    audit_judge_model=audit_judge_model,
                     output_dir=output_dir,
                     pytest_python=pytest_python,
                 )
@@ -1057,17 +1082,18 @@ def build_parser() -> argparse.ArgumentParser:
               f"skip judging. Default: {DEFAULT_JUDGE_MODEL}"),
     )
     p.add_argument(
-        "--post-test-judge-model", default="",
-        help=("v1.0.1: model used as the POST-TEST judge. Fired only "
-              "on trials where ``passes_algorithm=False``. Sees the "
-              "task + code + failing test name + truncated failure "
-              "message; rates 1-5 on edge-case awareness. The "
-              "divergence between ``quality_score`` (read-only) and "
-              "``quality_post_test`` (post-test) is the "
-              "idiomatic-but-broken signal. Set to '' to skip the "
-              "post-test judge (default). Recommended for cross-"
-              "judge robustness: pick a DIFFERENT model from "
-              "--judge-model (e.g. judge=kimi, post-test=glm)."),
+        "--audit-judge-model", default="",
+        help=("v1.0.1: model used as the AUDIT judge — a second judge "
+              "that fires on EVERY compiled trial with one of two "
+              "prompt modes: ``post_test`` (passes_algorithm=False, "
+              "judge sees failing test) or ``robustness`` (passes_"
+              "algorithm=True, judge identifies a latent edge case). "
+              "Gives cross-judge cross-model coverage on every trial "
+              "and addresses the read-only-judge bias when the judge "
+              "is also rating its own coder output. Set to '' to "
+              "skip the audit judge (default). Recommended: pick a "
+              "DIFFERENT model from --judge-model (e.g. judge=kimi, "
+              "audit=glm)."),
     )
     p.add_argument(
         "--questions-dir", type=Path, default=DEFAULT_QUESTIONS_DIR,
@@ -1148,7 +1174,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         mode=mode,
         ollama_base=args.ollama_base if args.live else None,
         judge_model=args.judge_model or None,
-        post_test_judge_model=args.post_test_judge_model or None,
+        audit_judge_model=args.audit_judge_model or None,
         tier_filter=tier_set,
         id_filter=id_set,
         pytest_python=args.pytest_python,
