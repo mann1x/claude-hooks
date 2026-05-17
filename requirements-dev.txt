@@ -2,3 +2,10 @@
 # Install into the conda env:  pip install -r requirements-dev.txt
 pytest>=8.0
 coverage>=7.0
+# pytest-timeout: required by ``benchmarks/consultants/harness.py``'s
+# ``run_pytest_against_sandbox`` (passes ``--timeout=<s>`` +
+# ``--timeout-method=signal`` to the oracle subprocess). The M11b
+# coder bench + the M11c tool_executor bench both exercise this
+# path; without the plugin the oracle subprocess errors out on
+# the unknown flag.
+pytest-timeout>=2.0

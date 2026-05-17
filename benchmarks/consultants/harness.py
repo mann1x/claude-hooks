@@ -81,6 +81,13 @@ class BenchQuestion:
     oracle_path: Path
     notes: str = ""
     body: str = ""            # the markdown body after the frontmatter
+    fixtures_subdir: str = ""  # M11c: tool_executor questions name a
+                               # synthetic fixture cohort under
+                               # ``<suite_dir>/fixtures/<name>/``. The
+                               # tool_executor bench cd's into it before
+                               # driving the lane so ``read_file("foo.py")``
+                               # resolves relative. Empty for suites that
+                               # don't use fixtures (coder, stall).
 
 
 # Lazy frontmatter parser — accepts the common pattern
@@ -285,6 +292,7 @@ def load_questions(
             oracle_path=oracle_path,
             notes=fm.get("notes") or "",
             body=body.strip(),
+            fixtures_subdir=fm.get("fixtures_subdir") or "",
         ))
     return out
 
@@ -585,6 +593,113 @@ class StallTrial:
 
 
 # ============================================================== #
+# ToolExecTrial schema (M11c)
+# ============================================================== #
+
+@dataclass
+class ToolExecTrial:
+    """One ``(question × model × trial_idx)`` trial result for the
+    M11c tool_executor skill-eval bench.
+
+    Unlike :class:`CoderTrial` (which measures **writing** code) and
+    :class:`StallTrial` (which is a **measurement** bench with no
+    pass/fail signal), this trial captures the tool_executor role's
+    distinctive axis: **reading + reasoning over an existing
+    codebase via tool calls**. The schema therefore tracks both
+    correctness signals (an oracle pytest run) AND tool-call
+    mechanics (how many calls fired, how diverse they were, whether
+    the answer cited concrete file:line refs).
+
+    Fields:
+
+    Outcome:
+      ``completed`` — the lane terminated naturally (the tool_executor
+        loop exited with a final assistant message, not an exception).
+        A trial can be ``completed`` and still fail the oracle.
+      ``passes_tests`` — the oracle pytest module reports all tests
+        passing. Decides the cohort pass-rate column.
+      ``test_results`` — per-test detail from the oracle's pytest
+        run; same shape as :class:`CoderTrial.test_results`.
+
+    Cost:
+      ``wall_s`` — total trial wall (incl. retries).
+      ``inference_s`` — cumulative successful-attempt inference time
+        only (parity with ``CoderTrial.inference_s``).
+      ``iterations`` — how many agent-loop iterations fired.
+      ``tokens_prompt`` / ``tokens_completion`` — summed across the
+        whole trial.
+
+    Tool-call mechanics (role-specific):
+      ``tool_calls_count`` — total tool calls in this trial.
+      ``tool_calls_unique`` — distinct ``(tool_name, args_hash)``
+        pairs. A high count vs unique ratio signals redundant
+        re-reads (the medium-02-redundancy-test trap).
+      ``tool_call_log`` — ordered list of
+        ``{"tool": str, "args": str, "result_excerpt": str}``;
+        passed to the oracle via ``TOOL_EXEC_CALLS`` env var and
+        rendered in the per-trial report.
+      ``citation_count`` — number of ``path:line`` style refs the
+        final text contains. A poor signal on its own but a useful
+        sanity check across trials.
+      ``final_text`` — the model's final assistant message text.
+        Trimmed to ``final_text_len`` chars on store if oversized;
+        the field exists so the report renderer can quote answers
+        without re-loading the lane transcript.
+      ``final_text_len`` — length of the un-trimmed final text.
+
+    Quality (LLM judge, soft 1-5):
+      ``quality_score`` — judge score; None when judge skipped or
+        trial didn't complete.
+      ``quality_rationale`` — one-sentence rationale.
+      ``quality_judge_model`` — which model judged.
+
+    Bookkeeping:
+      ``timestamp`` — ISO-8601 UTC at trial start.
+      ``suite_hash`` — populated from the manifest; matches
+        :class:`SuiteManifest.suite_hash`.
+      ``error`` — set when the lane raised; ``None`` otherwise.
+
+    Use :func:`append_trial` to checkpoint each trial — it dispatches
+    on ``to_dict()`` so the same writer handles all three trial
+    shapes.
+    """
+    # Bookkeeping (required positionals — mirrors StallTrial)
+    question_id: str
+    tier: str                                # trivial / easy / medium / hard
+    model: str
+    trial_idx: int = 0
+    timestamp: str = ""
+    suite_hash: str = ""
+    # Outcome
+    completed: bool = False
+    passes_tests: bool = False
+    test_output: str = ""
+    test_results: dict = field(default_factory=dict)
+    # Cost
+    wall_s: float = 0.0
+    inference_s: float = 0.0
+    iterations: int = 0
+    tokens_prompt: int = 0
+    tokens_completion: int = 0
+    # Tool-call mechanics
+    tool_calls_count: int = 0
+    tool_calls_unique: int = 0
+    tool_call_log: list = field(default_factory=list)
+    citation_count: int = 0
+    final_text: str = ""
+    final_text_len: int = 0
+    # Soft-quality (LLM judge)
+    quality_score: Optional[float] = None
+    quality_rationale: str = ""
+    quality_judge_model: str = ""
+    # Bookkeeping
+    error: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+# ============================================================== #
 # Per-model cost coefficients
 # ============================================================== #
 
@@ -764,6 +879,93 @@ def estimate_stall_cost(questions: list[BenchQuestion],
     }
 
 
+def estimate_tool_exec_cost(questions: list[BenchQuestion],
+                            models: list[str],
+                            *,
+                            trials_per_question: int = 1,
+                            judge_model: Optional[str] = None,
+                            ) -> dict[str, Any]:
+    """Token-budget estimate for an M11c tool_executor-bench run.
+
+    The tool_executor bench drives the role's agent loop once per
+    ``(question × model × trial_idx)``. Each trial is a short
+    agent loop — typically 2-4 iterations of read_file / grep /
+    survey_project. The prompt grows with accumulated tool results
+    but each iteration is **smaller** than a coder agent iter
+    (no scaffolding / no diff context), so we use a reduced
+    iteration count and a smaller completion budget than
+    :func:`estimate_cost`.
+
+    Empirical anchors (M11b coder bench, similar agent loop):
+      - average iterations per trial: ~3 (vs ~5 for coder).
+      - per-iteration prompt: same per-model coefficient as coder
+        (the model still sees system + history + tool output).
+      - per-iteration completion: ~1000 tokens (vs ~1500 for coder),
+        since the answer is mostly cited refs + a short summary.
+
+    Returns a dict with ``trials``, ``by_model``, ``total_tokens``,
+    ``judge_tokens``, and ``summary_line`` — same shape as
+    :func:`estimate_cost` so the bench renderer reuses the same
+    banner code.
+    """
+    n_q = len(questions)
+    # Tool_executor loop is shorter than coder loop. Per-iter
+    # completion is smaller (citation + short summary, not code).
+    TOOL_EXEC_AVG_ITERS = 3
+    TOOL_EXEC_COMPLETION_PER_ITER = 1000
+
+    by_model: dict[str, dict[str, int]] = {}
+    total_trials = 0
+    total = 0
+    for m in models:
+        _, pt_per_iter, _ = _coeffs_for(m)
+        iters_per_trial = TOOL_EXEC_AVG_ITERS
+        n_trials = n_q * trials_per_question
+        prompt = iters_per_trial * pt_per_iter * n_trials
+        completion = (iters_per_trial * TOOL_EXEC_COMPLETION_PER_ITER
+                      * n_trials)
+        sub_total = prompt + completion
+        by_model[m] = {
+            "trials": n_trials,
+            "iterations": iters_per_trial * n_trials,
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": sub_total,
+        }
+        total += sub_total
+        total_trials += n_trials
+
+    # Judge: one call per trial that completed (no separate
+    # compile-rate filter — tool_executor trials almost always
+    # produce SOME final text). Assume ~95% completion rate; same
+    # per-call prompt/completion as the coder judge (~1500 + 150).
+    judge_tokens = 0
+    if judge_model:
+        n_completes = int(0.95 * total_trials)
+        judge_tokens = n_completes * (1500 + 150)
+        total += judge_tokens
+
+    summary_line = (
+        f"{len(models)} models × {n_q} questions × "
+        f"{trials_per_question} trial = {total_trials} trials. "
+        f"~{total / 1_000_000:.2f}M tokens estimated"
+        + (
+            f" (+~{judge_tokens / 1_000:.0f}K for the "
+            f"{judge_model} judge)"
+            if judge_model else ""
+        )
+        + "."
+    )
+    return {
+        "trials": total_trials,
+        "by_model": by_model,
+        "judge_model": judge_model,
+        "judge_tokens": judge_tokens,
+        "total_tokens": total,
+        "summary_line": summary_line,
+    }
+
+
 # ============================================================== #
 # Oracle grader (M11b)
 # ============================================================== #
@@ -881,7 +1083,8 @@ def run_pytest_against_sandbox(oracle_path: Path,
                                *,
                                python_executable: str = sys.executable,
                                timeout_s: float = 120.0,
-                               per_test_timeout_s: float = 15.0) -> OracleResult:
+                               per_test_timeout_s: float = 15.0,
+                               extra_env: Optional[dict] = None) -> OracleResult:
     """Run the oracle pytest file with ``CODER_SANDBOX`` env var
     pointing at the produced code's directory. Returns OracleResult.
 
@@ -902,6 +1105,13 @@ def run_pytest_against_sandbox(oracle_path: Path,
         mode (correctly, given missing data) but we lost the
         post_test signal entirely.
 
+    M11c: ``extra_env`` lets a caller inject additional env vars
+    (e.g. ``TOOL_EXEC_OUTPUT`` / ``TOOL_EXEC_CALLS`` /
+    ``TOOL_EXEC_FIXTURE_DIR`` for the tool_executor bench oracle).
+    Keys override values from the inherited environment so a
+    bench-specific signal can mask a stale shell var. ``None``
+    (default) preserves the v1.0.1 behavior.
+
     The oracle file is responsible for importing relative to
     ``$CODER_SANDBOX``.
 
@@ -920,6 +1130,9 @@ def run_pytest_against_sandbox(oracle_path: Path,
     env = dict(os.environ)
     env["CODER_SANDBOX"] = str(sandbox_dir)
     env.pop("PYTHONDONTWRITEBYTECODE", None)
+    if extra_env:
+        for k, v in extra_env.items():
+            env[str(k)] = str(v)
     junit_path = sandbox_dir / "_pytest_junit.xml"
     try:
         junit_path.unlink()
@@ -1591,7 +1804,10 @@ __all__ = [
     "CoderTrial",
     "JUDGE_SYSTEM",
     "OracleResult",
+    "StallTrial",
+    "SuiteManifest",
     "TIERS",
+    "ToolExecTrial",
     "append_trial",
     "build_judge_messages",
     "build_judge_system",
@@ -1603,8 +1819,11 @@ __all__ = [
     "build_robustness_judge_system",
     "count_code_lines",
     "estimate_cost",
+    "estimate_stall_cost",
+    "estimate_tool_exec_cost",
     "judge_lang_for_path",
     "load_questions",
+    "load_suite_manifest",
     "parse_constraint_tests",
     "load_trials",
     "make_dry_run_loop_runner",

@@ -25,7 +25,13 @@ dependencies = [
     "langchain-ollama>=1.0,<2.0",
     "fastapi>=0.115,<0.140",
     "uvicorn[standard]>=0.32,<0.50",
-    "httpx>=0.27,<0.30",
+    # ``[http2]`` pulls in the ``h2`` library. The proxy module's
+    # forwarder + the proxy test suite both assume HTTP/2; plain
+    # ``httpx`` fails at runtime with "Using http2=True, but the
+    # 'h2' package is not installed". The main env gets this via
+    # ``requirements.txt``; the consultants env needs it pinned
+    # here.
+    "httpx[http2]>=0.27,<0.30",
     "pyyaml>=6.0,<7.0",
 ]
 
@@ -40,6 +46,11 @@ postgres = [
 test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    # pytest-timeout: needed by the bench harness's
+    # ``run_pytest_against_sandbox`` (M11b coder + M11c
+    # tool_executor benches subprocess pytest with
+    # ``--timeout=<s>`` + ``--timeout-method=signal``).
+    "pytest-timeout>=2.0",
 ]
 
 [project.scripts]

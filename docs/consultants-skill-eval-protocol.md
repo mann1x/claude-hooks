@@ -30,7 +30,7 @@ issue.
 | **coder**        | [`benchmarks/consultants/questions/coder/`](../benchmarks/consultants/questions/coder/) | `cfg.roles.coder.model` (Python; global)      | v1.0 (2026-05-16) — `glm-5.1:cloud` |
 | **coder_mlang**  | [`benchmarks/consultants/questions/coder_mlang/`](../benchmarks/consultants/questions/coder_mlang/) | `cfg.roles.coder.model` (per-language + global override) | v1.0 (2026-05-16, build-out in progress) |
 | **stall**        | [`benchmarks/consultants/questions/stall/`](../benchmarks/consultants/questions/stall/) | M3 stall thresholds — per-model `(stall_threshold_s, hard_cap_s)` overrides in `consultants/engine/stall_defaults.py` | v1.0 (2026-05-17, harness shipped; live data lands in M11a-2) |
-| **tool_executor**| _(M11c; lands in a later commit)_                         | `cfg.roles.tool_executor.model` + the role's default-on bit | not yet shipped |
+| **tool_executor**| [`benchmarks/consultants/questions/tool_executor/`](../benchmarks/consultants/questions/tool_executor/) | `cfg.roles.tool_executor.model` + the role's default-on bit | v1.0 (2026-05-17, harness shipped; live data lands in M11c-2) |
 
 Each sub-protocol has its own SUITE.md manifest, decision rubric,
 and metric set; they share the harness (`benchmarks/consultants/
@@ -188,6 +188,114 @@ measured data calls for it.
 
 ---
 
+## Tool_executor sub-protocol (v1.0)
+
+**Decision question**: which cloud model is the best default for
+`cfg.roles.tool_executor.model`, and should the role flip from
+disabled-by-default to enabled-by-default?
+
+The M6 `tool_executor` role consumes a `ToolPlanItem` emitted by
+the researcher in PLAN mode, runs a full agent loop with the
+shared tool stack (`survey_project`, `list_files`, `read_file`,
+`glob`, `grep`, `recall_memory`), and returns a `ToolResult` with
+citations the researcher folds into REPORT mode. It ships
+**disabled by default** today (`DEFAULT_ENABLED_BY_ROLE
+["tool_executor"]=False` in `consultants/config.py`) and the
+recommended model is the M6 fallback (`gemma4:31b-cloud`).
+M11c provides the empirical evidence that lets us either keep
+those defaults, swap the model, or flip the default-on bit.
+
+Unlike coder (which **writes** code) and stall (a pure
+measurement bench), this suite measures **reading + reasoning
+over an existing codebase via tool calls**. It uses the same
+oracle pytest + LLM judge pair as coder, but each oracle reads
+the captured assistant text + ordered tool-call log from env
+vars rather than imported sandbox files.
+
+**Manifest**: 8 questions across 4 tiers (trivial / easy /
+medium / hard), curated for the tool-chain behaviours the role
+needs: single-file grep, multi-file audit, ambiguous-intent
+survey, citation precision. See
+[`SUITE.md`](../benchmarks/consultants/questions/tool_executor/SUITE.md)
+for the full manifest and rubric block.
+
+The fixture corpus is **synthetic** — small hand-authored Python
++ Markdown files under
+`benchmarks/consultants/questions/tool_executor/fixtures/<name>/`.
+Each question's frontmatter names its `fixtures_subdir`; the
+bench `cwd`s into that subdir before driving the lane so
+`read_file("auth.py")` resolves relative to the cohort, not the
+bench's working tree. This keeps the suite stable against
+unrelated refactors of the claude-hooks repo itself.
+
+**Per-trial flow** (one question × one model × one trial):
+
+1. The bench builds a `ToolPlanItem` from the question's
+   `task` / `why` / `suggested_tools` frontmatter, with
+   `lane_idx=0` and `parent_round=1`.
+2. The tool stack (`make_executor((fixture_dir,))` +
+   `openai_tool_specs()` + `build_grounding_messages(cwd)`) is
+   built scoped to the fixture cohort.
+3. `tool_executor_node` is driven directly (NOT the full
+   council) with the per-lane state slice, a ChatClient pinned
+   to the model under test, and a custom
+   `_ToolCallCapture` recorder that records iteration count,
+   prompt/completion tokens, and the ordered tool-call log.
+4. After the lane completes, the bench:
+   - Extracts the final assistant text from the lane's
+     `ToolResult.content`.
+   - Counts `path:line`-style citations.
+   - Runs the per-question oracle pytest via
+     `run_pytest_against_sandbox(extra_env={...})` with three
+     env vars set: `TOOL_EXEC_OUTPUT` (the final text),
+     `TOOL_EXEC_CALLS` (the tool-call log as JSON), and
+     `TOOL_EXEC_FIXTURE_DIR` (absolute path to the cohort).
+   - Optionally calls the **judge LLM** with a strict 1-5
+     rubric (`Score: <n>` + a one-sentence rationale).
+5. Trial result is appended to `trials.jsonl` immediately so
+   a Ctrl-C mid-run loses at most the in-progress trial.
+
+**Per-model aggregation** (computed by `render_report`):
+
+- `pass_rate` = #trials where the oracle passed / total trials
+- `avg_quality_score` across trials with a recorded judge score
+- `avg_tool_calls` (per trial) — the cost-per-answer signal
+- `avg_wall_s` (per trial) — operator-facing latency
+
+**Rubric** (pinned in SUITE.md):
+
+> A model **qualifies for the tool_executor role default** iff
+> `pass_rate ≥ 0.70` AND `avg_quality_score ≥ 3.5` — identical
+> thresholds to the coder rubric so an operator who knows one
+> knows both.
+>
+> Among qualifying models, the **recommended default** is the
+> one with the highest `pass_rate`. Ties break on
+> `median_tokens` (cheaper wins). If no model qualifies, the
+> role stays disabled-by-default and
+> `RECOMMENDED_DEFAULT_ON` in `tool_executor_defaults.py`
+> remains `False`.
+
+**Two-part gate for flipping the default-on bit** (the
+**separate decision** of whether `DEFAULT_ENABLED_BY_ROLE
+["tool_executor"]` flips from `False` to `True`):
+
+1. The bench winner passes the rubric above.
+2. Task #103 (x-tier proper composition) is resolved — EITHER
+   the engine refactor lands (Option 2: per-lane
+   `awaiting_tool_results` dict + post-barrier merge router +
+   per-lane round filtering) so the role composes correctly
+   under multi-model researcher fanout, OR the role is
+   explicitly documented as base-tier-only (Option 1: doc
+   deferral) and runtime gates apply.
+
+Until both conditions clear, the role stays opt-in. M11c-2
+populates `RECOMMENDED_TOOL_EXECUTOR_MODEL` from measured data
+and decides condition 1; condition 2 is the user-facing
+decision flow presented after M11c-2 data lands.
+
+---
+
 ## How to run a sub-protocol
 
 Two phases, mandatory order:
@@ -245,6 +353,23 @@ python benchmarks/consultants/coder_bench.py --live --accept-cost \
     --judge-model kimi-k2.6:cloud \
     --commit-report
 ```
+
+For the **tool_executor** sub-protocol the CLI is `skill-eval
+tool_executor`. Dry-run + live commands mirror the coder shape:
+
+```bash
+# Dry-run smoke against the in-repo fixtures
+claude-consultants skill-eval tool_executor --dry-run --smoke
+
+# Full live run (M11c-2 step)
+claude-consultants skill-eval tool_executor --live --accept-cost \
+    --models glm-5.1:cloud,kimi-k2.6:cloud,gemma4:31b-cloud,qwen3-coder-next:cloud,deepseek-v4-pro:cloud,gemini-3-flash-preview:cloud \
+    --judge-model gemma4:31b-cloud
+```
+
+The tool_executor bench has no `--commit-report` flag yet (the
+M11c-2 closeout commits artifacts manually); the rest of the
+surface matches the coder/stall sub-protocols.
 
 ### 3. Render the report
 
@@ -387,13 +512,21 @@ The summary:
 
 | Path | Purpose |
 |---|---|
-| `benchmarks/consultants/harness.py` | Shared question loader, trial schema, oracle grader, judge helper, cost estimator |
+| `benchmarks/consultants/harness.py` | Shared question loader, trial schema (`CoderTrial` / `StallTrial` / `ToolExecTrial`), oracle grader, judge helper, cost estimators |
 | `benchmarks/consultants/coder_bench.py` | M11b runner CLI |
+| `benchmarks/consultants/stall_bench.py` | M11a runner CLI |
+| `benchmarks/consultants/tool_executor_bench.py` | M11c runner CLI |
 | `benchmarks/consultants/analyze.py` | Markdown report renderer + rubric applier |
 | `benchmarks/consultants/questions/coder/SUITE.md` | Coder suite v1.0 manifest + rubric |
-| `benchmarks/consultants/questions/coder/<id>.md` | Per-question task description (model-facing) |
-| `benchmarks/consultants/questions/coder/<id>-oracle.py` | Per-question pytest oracle (harness-facing) |
-| `benchmarks/consultants/results/<date>/coder/{trials.jsonl,metadata.json,report.md}` | Per-run outputs |
+| `benchmarks/consultants/questions/stall/SUITE.md` | Stall suite v1.0 manifest + rubric |
+| `benchmarks/consultants/questions/tool_executor/SUITE.md` | Tool_executor suite v1.0 manifest + rubric |
+| `benchmarks/consultants/questions/tool_executor/fixtures/<name>/` | Synthetic fixture cohort per question (Python + Markdown) |
+| `benchmarks/consultants/questions/<suite>/<id>.md` | Per-question task description (model-facing) |
+| `benchmarks/consultants/questions/<suite>/<id>-oracle.py` | Per-question pytest oracle (harness-facing) |
+| `benchmarks/consultants/results/<date>/<suite>/{trials.jsonl,metadata.json,report.md}` | Per-run outputs |
+| `consultants/engine/coder_defaults.py` | M11b winner + per-language routes |
+| `consultants/engine/stall_defaults.py` | M11a per-model `(stall_threshold_s, hard_cap_s)` table |
+| `consultants/engine/tool_executor_defaults.py` | M11c winner + default-on bit (scaffold in M11c-1; populated by M11c-2) |
 | `docs/consultants-skill-eval-baselines.md` | Running ledger of every model × suite × date |
 | `docs/consultants-skill-eval-protocol.md` | This file |
 

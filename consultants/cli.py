@@ -987,6 +987,58 @@ def cmd_skill_eval_stall(args, base: str) -> int:
     return int(_bench_main(argv))
 
 
+def cmd_skill_eval_tool_executor(args, base: str) -> int:
+    """Run the tool_executor skill-eval suite (M11c). Thin wrapper
+    around ``benchmarks.consultants.tool_executor_bench.main`` —
+    same shape as :func:`cmd_skill_eval_coder` and
+    :func:`cmd_skill_eval_stall` but the suite measures the
+    tool_executor role (reading + reasoning over a codebase via
+    tool calls), not code generation or streaming cadence.
+
+    Exit codes mirror the bench script: 0 on success, 1 on no
+    trials (empty match), 2 when --live is set but --accept-cost
+    isn't.
+    """
+    try:
+        from benchmarks.consultants.tool_executor_bench import (
+            main as _bench_main,
+        )
+    except ImportError as e:
+        raise CLIError(
+            "benchmarks.consultants.tool_executor_bench is not "
+            "importable. Run from the repo root or set PYTHONPATH. "
+            f"Underlying: {e}"
+        )
+    argv: list[str] = []
+    if args.dry_run:
+        argv.append("--dry-run")
+    if args.live:
+        argv.append("--live")
+    if args.accept_cost:
+        argv.append("--accept-cost")
+    if args.models:
+        argv.extend(["--models", args.models])
+    if args.ollama_base:
+        argv.extend(["--ollama-base", args.ollama_base])
+    # ``--judge-model`` distinguishes "user set ''" (disable judge)
+    # from "user didn't pass the flag" (use bench default). The
+    # CLI's default is None ⇒ forward only when explicitly set,
+    # mirroring the coder bench's treatment.
+    if args.judge_model is not None:
+        argv.extend(["--judge-model", args.judge_model])
+    if args.trials is not None:
+        argv.extend(["--trials", str(args.trials)])
+    if args.output_dir:
+        argv.extend(["--output-dir", args.output_dir])
+    for t in (args.tier or []):
+        argv.extend(["--tier", t])
+    for qid in (args.id or []):
+        argv.extend(["--id", qid])
+    if args.smoke:
+        argv.append("--smoke")
+    return int(_bench_main(argv))
+
+
 # ----------------------- argparse wiring ------------------------- #
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1536,6 +1588,73 @@ def build_parser() -> argparse.ArgumentParser:
              "End-to-end validation at minimal spend.",
     )
     se_stall.set_defaults(fn=cmd_skill_eval_stall)
+
+    # ----- skill-eval tool_executor (M11c) ----- #
+    se_te = se_sub.add_parser(
+        "tool_executor",
+        help=("Run the tool_executor suite (M11c). Picks the default "
+              "for cfg.roles.tool_executor.model based on the 8-"
+              "question × 4-tier reading + reasoning corpus."),
+    )
+    se_te_mode = se_te.add_mutually_exclusive_group(required=True)
+    se_te_mode.add_argument(
+        "--dry-run", action="store_true",
+        help="Stub ChatClients; validates the harness without "
+             "cloud spend.",
+    )
+    se_te_mode.add_argument(
+        "--live", action="store_true",
+        help="Real ChatClients against --ollama-base. Requires "
+             "--accept-cost.",
+    )
+    se_te.add_argument(
+        "--accept-cost", action="store_true",
+        help="Required with --live. Acknowledges Ollama-Pro token "
+             "spend (see the summary line).",
+    )
+    se_te.add_argument(
+        "--models", default=None,
+        help="Comma-separated model list. Default: the M11b-mlang "
+             "cohort minus deepseek-v4-flash + "
+             "gemini-3-flash-preview (6 models).",
+    )
+    se_te.add_argument(
+        "--ollama-base", default=None,
+        help="Override the cloud proxy URL. Default: read from "
+             "config or 192.168.178.2:11433.",
+    )
+    se_te.add_argument(
+        "--judge-model", default=None,
+        help="Model used as the answer-quality judge (one call "
+             "per trial). Set to '' to skip. Default: "
+             "gemma4:31b-cloud.",
+    )
+    se_te.add_argument(
+        "--trials", type=int, default=None,
+        help="Trials per (question × model). Default 1 (set by "
+             "the bench).",
+    )
+    se_te.add_argument(
+        "--output-dir", default=None,
+        help=("Per-run output directory. Default: "
+              "benchmarks/consultants/results/<YYYY-MM-DD>/"
+              "tool_executor/"),
+    )
+    se_te.add_argument(
+        "--tier", action="append",
+        choices=("trivial", "easy", "medium", "hard"),
+        help="Filter by tier (repeatable). Default: all tiers.",
+    )
+    se_te.add_argument(
+        "--id", action="append",
+        help="Filter by question id (repeatable). Default: all.",
+    )
+    se_te.add_argument(
+        "--smoke", action="store_true",
+        help="Smoke mode: trivial tier × 1 model × 1 trial. "
+             "End-to-end validation at minimal spend.",
+    )
+    se_te.set_defaults(fn=cmd_skill_eval_tool_executor)
 
     return p
 

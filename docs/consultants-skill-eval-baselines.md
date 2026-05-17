@@ -159,12 +159,18 @@ stall_threshold_s = 500   # wins over stall_defaults.py
 
 ## Tool executor
 
-The tool_executor suite (M11c, not yet shipped) will gate
-`cfg.roles.tool_executor.model` + the role's default-on bit.
+The tool_executor suite (M11c) gates `cfg.roles.tool_executor.model`
++ the role's default-on bit (see
+[`consultants-skill-eval-protocol.md`](consultants-skill-eval-protocol.md#tool_executor-sub-protocol-v10)).
+M11c-1 shipped the harness, the 8-question × 4-tier suite, the
+synthetic fixture corpus, and the
+`consultants/engine/tool_executor_defaults.py` scaffold on
+2026-05-17. The first live run + per-model row(s) below land in
+M11c-2.
 
-| Date | Suite ver. | Configuration                                | Tool-call success | Wasted calls | Median wall | Final-answer score | Suite hash | Notes |
-|------|-----------:|----------------------------------------------|-------------------|--------------|-------------|--------------------|------------|-------|
-| _M11c not yet shipped_ |
+| Date | Suite ver. | Configuration                                | Pass rate | Avg quality | Avg tool calls | Median wall | Suite hash | Notes |
+|------|-----------:|----------------------------------------------|----------:|------------:|---------------:|------------:|------------|-------|
+| _M11c-2 not yet shipped_ |
 
 ---
 

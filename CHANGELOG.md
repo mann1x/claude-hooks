@@ -16,6 +16,139 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — Tool_executor skill-eval bench harness (M11c-1, task #99 + #103 prelude, 2026-05-17)
+
+The Consultancy Skill-Eval Protocol's **tool_executor**
+sub-protocol — the empirical bench that picks the recommended
+model for `cfg.roles.tool_executor.model` and gates whether the
+role flips from disabled-by-default to enabled-by-default.
+**M11c-1 ships the harness + suite + tests + an empty
+`tool_executor_defaults.py` scaffold as a dry-run-only commit;
+the live cloud spend lives in a separate M11c-2 closeout commit
+per the M11b / M11a precedent.**
+
+**Why a third sub-protocol.** The M6 `tool_executor` role
+consumes a `ToolPlanItem` emitted by the researcher in PLAN
+mode, runs a full agent loop with the shared tool stack
+(`survey_project` / `list_files` / `read_file` / `glob` / `grep`
+/ `recall_memory`), and returns a `ToolResult` with citations
+the researcher folds into REPORT mode. Unlike coder (which
+**writes** code) and stall (a pure measurement bench), this
+suite measures **reading + reasoning over an existing codebase
+via tool calls**. Different skill axis, different evidence
+needs, same Consultancy Skill-Eval Protocol shape.
+
+**New files**:
+
+- [`benchmarks/consultants/tool_executor_bench.py`](benchmarks/consultants/tool_executor_bench.py)
+  (~1400 LOC) — orchestration. `cmd_main(argv)` entry point;
+  iterates `(question × model × trial_idx)`; drives
+  `tool_executor_node` directly with a per-trial ChatClient,
+  the production tool stack, and a `_ToolCallCapture` recorder
+  that captures the ordered tool-call log + per-iteration token
+  usage; runs the per-question oracle pytest with three env
+  vars (`TOOL_EXEC_OUTPUT`/`TOOL_EXEC_CALLS`/`TOOL_EXEC_FIXTURE_DIR`)
+  threaded through via `run_pytest_against_sandbox(extra_env=...)`;
+  optionally calls a judge LLM (1-5 + rationale) on each
+  completed answer; writes `metadata.json` + `trials.jsonl` +
+  `report.md`. The dry-run path replays per-question scripted
+  tool calls through the **real** tool callable (so the closure
+  + sandbox + arg parsing all get exercised) and stubs only
+  the model call — same "every dry-run trial passes the oracle"
+  promise as the coder bench.
+- [`benchmarks/consultants/questions/tool_executor/SUITE.md`](benchmarks/consultants/questions/tool_executor/SUITE.md)
+  plus 8 question files × 4 tiers + 8 pytest oracles + a
+  synthetic fixture corpus under
+  [`fixtures/`](benchmarks/consultants/questions/tool_executor/fixtures/)
+  (8 cohorts: `simple_constants`, `readme_basic`, `auth`,
+  `multipkg`, `todos`, `redundant`, `serializers`,
+  `configdrift`). Hand-authored Python + Markdown; each
+  question's frontmatter names its `fixtures_subdir` and the
+  bench scopes the tool sandbox to it so file paths resolve
+  inside the cohort, not the bench cwd. Suite hash `7921555c`.
+  Notable traps: `medium-02-redundancy-test` rewards the model
+  that recognises the answer is already in the question's
+  `why` block (penalises ≥2 filesystem tool calls);
+  `hard-02-cite-correct-line` rewards precision (rejects the
+  comment line + the historical value `100`).
+- [`consultants/engine/tool_executor_defaults.py`](consultants/engine/tool_executor_defaults.py)
+  (~105 LOC) — empty per-model scaffold mirroring
+  `stall_defaults.py` and `coder_defaults.py`. Ships with
+  `RECOMMENDED_TOOL_EXECUTOR_MODEL=""` (sentinel) and
+  `RECOMMENDED_DEFAULT_ON=False` so `DEFAULT_ENABLED_BY_ROLE
+  ["tool_executor"]` stays bit-for-bit unchanged from M6 — the
+  M12 parity test
+  (`test_scaffold_default_on_matches_runtime_default`) holds.
+- [`tests/test_tool_executor_defaults.py`](tests/test_tool_executor_defaults.py)
+  + [`tests/test_tool_executor_bench_harness.py`](tests/test_tool_executor_bench_harness.py)
+  + [`tests/test_consultants_cli_v2_m11c.py`](tests/test_consultants_cli_v2_m11c.py)
+  — 8 + 19 + 21 = 48 new tests covering scaffold shape, M12
+  parity guarantee, `ToolExecTrial` schema + `fixtures_subdir`
+  plumbing + cost estimator + the new
+  `run_pytest_against_sandbox(extra_env=...)` parameter +
+  oracle dispatch end-to-end + CLI sub-subparser dispatch +
+  Namespace → bench-argv translation.
+
+**Harness changes (mostly additive)**:
+
+- [`benchmarks/consultants/harness.py`](benchmarks/consultants/harness.py)
+  gains `ToolExecTrial` (27 fields covering bookkeeping +
+  outcome + cost + tool-call mechanics + soft quality) and
+  `estimate_tool_exec_cost(questions, models, *,
+  trials_per_question=1, judge_model=None)`.
+  `BenchQuestion` grows an optional `fixtures_subdir: str = ""`
+  field, threaded from frontmatter through `load_questions`.
+  `run_pytest_against_sandbox` grows an optional
+  `extra_env: Optional[dict] = None` parameter so the
+  tool_executor bench can pass `TOOL_EXEC_*` env vars without
+  duplicating the timeout / junit / safety-net logic. Empty /
+  None values preserve v1.0.1 behaviour exactly.
+- [`consultants/cli.py`](consultants/cli.py) gains the
+  `skill-eval tool_executor` sub-subparser + the
+  `cmd_skill_eval_tool_executor(args, base)` handler — same
+  shape as the coder/stall handlers (`--dry-run | --live`
+  mutually-exclusive, `--accept-cost`, `--models`,
+  `--ollama-base`, `--judge-model`, `--trials`,
+  `--output-dir`, repeatable `--tier`/`--id`, `--smoke`).
+
+**Rubric** (in SUITE.md frontmatter, mirrors coder):
+
+> A model qualifies for the tool_executor role default iff
+> `pass_rate ≥ 0.70` AND `avg_quality_score ≥ 3.5`. Among
+> qualifying models the recommended default is the one with the
+> highest pass rate; ties break on `median_tokens`.
+
+**Two-part gate for flipping the default-on bit** (separate
+decision from the model pick, see
+[`docs/consultants-skill-eval-protocol.md`](docs/consultants-skill-eval-protocol.md#tool_executor-sub-protocol-v10)):
+the rubric must pass AND task #103 (x-tier proper composition)
+must resolve. Until both clear, the role stays opt-in even if
+M11c-2 picks a winner.
+
+**Verification**:
+
+- Dry-run smoke: 2 trials, both pass through the real tool
+  callable + real oracle pytest + real fixtures.
+- Dry-run full cohort × 2 models: **16/16 PASS** end-to-end.
+- `--live` without `--accept-cost`: exits rc=2 with the cost
+  estimate (~1.38M tokens + 74K judge for 48 trials across the
+  6-model cohort × 8 questions × 1 trial).
+- 87 tests across CLI + bench harness + defaults + stall
+  regression: 0 regressions.
+- M12 parity: 13 tests + 5 subtests, untouched.
+
+**Non-goals (deferred to M11c-2 / #103)**:
+
+- No live cloud calls in M11c-1.
+- No engine wiring of `tool_executor_defaults.py` into the
+  runner. Module ships as importable scaffold; the actual
+  default-on flip is a separate user-confirmed commit gated by
+  both the rubric pass AND #103 resolving.
+- No #103 engine refactor in M11c-1. The user-facing decision
+  flow (Option 1 doc deferral / Option 2 proper composition /
+  Option 3 auto-gate at runtime) happens after M11c-2 data
+  lands.
+
 ### Added — Per-language coder model routing with failover (task #111, 2026-05-17)
 
 The optional `coder` role (M10) now picks its model **per

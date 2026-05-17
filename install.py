@@ -4943,16 +4943,25 @@ def _install_consultants(cfg: dict, cfg_path: Path, *,
                   f"{consultants_py}")
             return False
 
-    # pip install -e consultants/ — heavy, but using the env's pip
-    # ensures all deps land in the right place.
-    print(f"    Installing consultants/ into {consultants_py.parent.name}...")
+    # pip install -e consultants/[test] — heavy, but using the env's
+    # pip ensures all deps land in the right place. The ``[test]``
+    # extra pulls in pytest + pytest-asyncio + pytest-timeout so the
+    # bench harness tests (M11b coder + M11c tool_executor, both call
+    # ``run_pytest_against_sandbox`` which subprocesses pytest with
+    # ``--timeout=<s>``) can run in this env. Without it, the oracle
+    # subprocess errors out on the unknown ``--timeout`` flag and
+    # 4 bench-harness tests fail per the M11c-1 verification.
+    consultants_target = str(HERE / "consultants") + "[test]"
+    print(f"    Installing consultants/[test] into "
+          f"{consultants_py.parent.name}...")
     rc = subprocess.run(
         [str(consultants_py), "-m", "pip", "install", "-e",
-         str(HERE / "consultants")],
+         consultants_target],
         capture_output=True, text=True,
     )
     if rc.returncode != 0:
-        print(f"    pip install -e consultants/ failed:\n{rc.stderr[-500:]}")
+        print(f"    pip install -e consultants/[test] failed:\n"
+              f"{rc.stderr[-500:]}")
         return False
 
     # Wire smart-start flag into config/claude-hooks.json.
