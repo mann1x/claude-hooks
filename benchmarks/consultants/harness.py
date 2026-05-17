@@ -215,6 +215,7 @@ def load_questions(
     *,
     tier_filter: Optional[Iterable[str]] = None,
     id_filter: Optional[Iterable[str]] = None,
+    require_oracle: bool = True,
 ) -> list[BenchQuestion]:
     """Load every ``*.md`` under ``directory`` whose name does NOT
     end with ``-oracle.py`` (oracles are .py files alongside the
@@ -224,6 +225,13 @@ def load_questions(
     the set; None means all tiers.
     ``id_filter`` — keep only questions matching one of the ids;
     None means all ids.
+    ``require_oracle`` — when True (default; the coder bench), a
+    question with no ``oracle`` frontmatter field or whose oracle
+    file is missing is skipped with a warning. When False (the
+    stall bench: it's a measurement bench, not a correctness one),
+    questions without oracles are loaded with ``oracle_path``
+    pointing at the directory as a harmless placeholder; the
+    bench never reads it.
     """
     if not directory.is_dir():
         raise FileNotFoundError(
@@ -252,18 +260,23 @@ def load_questions(
         if id_set is not None and qid not in id_set:
             continue
         oracle_filename = fm.get("oracle")
-        if not oracle_filename:
-            log.warning(
-                "skipping %s: no oracle frontmatter field", md_path,
-            )
-            continue
-        oracle_path = directory / oracle_filename
-        if not oracle_path.is_file():
-            log.warning(
-                "skipping %s: oracle file %s not found",
-                md_path, oracle_path,
-            )
-            continue
+        if require_oracle:
+            if not oracle_filename:
+                log.warning(
+                    "skipping %s: no oracle frontmatter field", md_path,
+                )
+                continue
+            oracle_path = directory / oracle_filename
+            if not oracle_path.is_file():
+                log.warning(
+                    "skipping %s: oracle file %s not found",
+                    md_path, oracle_path,
+                )
+                continue
+        else:
+            # Stall-bench mode: oracle_path is a harmless placeholder.
+            oracle_path = (directory / oracle_filename
+                           if oracle_filename else directory)
         out.append(BenchQuestion(
             id=qid, tier=tier,
             source=fm.get("source") or "",
@@ -505,6 +518,73 @@ class CoderTrial:
 
 
 # ============================================================== #
+# StallTrial schema (M11a)
+# ============================================================== #
+
+@dataclass
+class StallTrial:
+    """One (question × model × trial_idx) trial result for the
+    stall skill-eval bench (M11a).
+
+    Unlike :class:`CoderTrial`, this is a **measurement** bench —
+    there's no pass/fail signal, just per-model streaming-cadence
+    distributions. Each trial records:
+
+    - Aggregate wall-clock (``wall_s``) and inference (``inference_s``).
+    - Per-call counts: ``num_chat_calls`` is 1 for Tier 1 standalone,
+      typically 5-8 for Tier 2 council (planner + researcher rounds
+      + critic + synthesizer).
+    - Streaming percentiles aggregated across all chat_streamed
+      calls in the trial: time-to-first-token p50/p99, inter-token
+      gap p50/p99. The bench computes these via
+      ``benchmarks.consultants.stall_capture.aggregate_calls``.
+    - ``call_timings``: per-call raw timing data (one dict per
+      chat_streamed call). Empty for failed trials or trials that
+      ran on a non-streaming client; populated whenever the
+      bench's ``TimingCaptureChat`` wrapper recorded a call.
+    - Council-mode extras: ``council_effort`` (the effort tier the
+      bench drove, typically "medium" to avoid xmedium's multi-
+      model fanout); ``council_node_set`` (which graph nodes
+      actually fired, for post-hoc analysis of trial coverage).
+
+    The bench appends one row per trial to a JSONL using
+    :func:`append_trial`, identical mechanics to ``CoderTrial``.
+    """
+    # Bookkeeping
+    question_id: str
+    tier: str                                # "standalone" or "council"
+    model: str
+    trial_idx: int                           # 0-based within (question, model, tier)
+    timestamp: str = ""                      # ISO-8601 UTC at trial start
+    suite_hash: str = ""                     # populated from manifest
+    # Outcome
+    error: Optional[str] = None
+    # Aggregate timings
+    wall_s: float = 0.0                      # total trial wall (incl. retries)
+    inference_s: float = 0.0                 # cumulative successful-attempt inference
+    num_chat_calls: int = 0                  # how many chat_streamed calls fired
+    total_tokens: int = 0                    # sum across all calls in this trial
+    # Streaming metrics (across all calls; ms units)
+    time_to_first_token_p50_ms: float = 0.0
+    time_to_first_token_p99_ms: float = 0.0
+    inter_token_p50_ms: float = 0.0
+    inter_token_p99_ms: float = 0.0
+    # Per-call raw data — JSON-friendly list of CallTiming.to_dict()
+    call_timings: list = field(default_factory=list)
+    # Council-mode extras
+    council_effort: str = ""                 # "" for standalone, "medium" etc for council
+    council_node_set: list = field(default_factory=list)
+    council_final_answer_len: int = 0        # synthesizer output length (chars)
+    # Stall watchdog counters (when the engine fired stall events
+    # during the trial)
+    stall_events_count: int = 0
+    stall_cancelled_count: int = 0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+# ============================================================== #
 # Per-model cost coefficients
 # ============================================================== #
 
@@ -600,6 +680,87 @@ def estimate_cost(questions: list[BenchQuestion],
         "judge_tokens": judge_tokens,
         "total_tokens": total,
         "summary_line": summary_line,
+    }
+
+
+def estimate_stall_cost(questions: list[BenchQuestion],
+                        models: list[str],
+                        *,
+                        tier1_trials: int = 3,
+                        tier2_trials: int = 2,
+                        tier1: bool = True,
+                        tier2: bool = True) -> dict[str, Any]:
+    """Token-budget estimate for an M11a stall-bench run.
+
+    The stall bench is cheaper per call than the coder bench:
+
+    - **Tier 1 (standalone)**: a single ``chat_streamed`` call per
+      (question × model × trial_idx). No agent loop, no judge.
+      Prompt ≈ 1500 tokens (analytical), completion ≈ 800 tokens
+      (typical answer length for these prompts).
+
+    - **Tier 2 (council)**: one full ``build_council_graph`` run
+      per (question × model × trial_idx). The council fires
+      ~5-8 chat calls (planner + 2-3 researcher rounds + critic +
+      synthesizer). Per-call prompt grows with context (planner
+      sees the bare prompt, researcher sees plan, synthesizer sees
+      everything). Estimate ~6 calls × per_model coefficients.
+
+    Returns a dict with ``trials``, ``by_model``, ``total_tokens``,
+    and ``summary_line`` — same shape as :func:`estimate_cost` so
+    the bench renderer reuses the same banner code.
+    """
+    n_q = len(questions)
+    # Per-call rough estimates (smaller than coder because no
+    # multi-iteration agent loop).
+    STANDALONE_PROMPT = 1500
+    STANDALONE_COMPLETION = 800
+    COUNCIL_CALLS_PER_RUN = 6
+
+    by_model: dict[str, dict[str, int]] = {}
+    total_trials = 0
+    total = 0
+    for m in models:
+        # Tier 2 uses the same per-iter coefficients as the coder
+        # bench (the council's inner calls have similar prompt sizes
+        # to a coder agent iteration).
+        _, pt_per_iter, ct_per_iter = _coeffs_for(m)
+
+        t1_prompt = (STANDALONE_PROMPT * n_q * tier1_trials) if tier1 else 0
+        t1_completion = (STANDALONE_COMPLETION * n_q * tier1_trials) if tier1 else 0
+        t2_prompt = (COUNCIL_CALLS_PER_RUN * pt_per_iter * n_q * tier2_trials) if tier2 else 0
+        t2_completion = (COUNCIL_CALLS_PER_RUN * ct_per_iter * n_q * tier2_trials) if tier2 else 0
+
+        sub_total = t1_prompt + t1_completion + t2_prompt + t2_completion
+        n_calls = ((n_q * tier1_trials if tier1 else 0)
+                   + (COUNCIL_CALLS_PER_RUN * n_q * tier2_trials if tier2 else 0))
+        by_model[m] = {
+            "trials_tier1": (n_q * tier1_trials) if tier1 else 0,
+            "trials_tier2": (n_q * tier2_trials) if tier2 else 0,
+            "chat_calls": n_calls,
+            "prompt_tokens": t1_prompt + t2_prompt,
+            "completion_tokens": t1_completion + t2_completion,
+            "total_tokens": sub_total,
+        }
+        total += sub_total
+        total_trials += (n_q * tier1_trials if tier1 else 0) + \
+                        (n_q * tier2_trials if tier2 else 0)
+
+    tier_label = "+".join([t for t, on in
+                           [("tier1", tier1), ("tier2", tier2)] if on])
+    summary_line = (
+        f"{len(models)} models × {n_q} questions × "
+        f"({tier1_trials if tier1 else 0}t1+"
+        f"{tier2_trials if tier2 else 0}t2) "
+        f"= {total_trials} trials [{tier_label}]. "
+        f"~{total / 1_000_000:.2f}M tokens estimated."
+    )
+    return {
+        "trials": total_trials,
+        "by_model": by_model,
+        "total_tokens": total,
+        "summary_line": summary_line,
+        "tiers": tier_label,
     }
 
 

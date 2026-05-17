@@ -29,7 +29,7 @@ issue.
 |------------------|-----------------------------------------------------------|-----------------------------------------------|------------------|
 | **coder**        | [`benchmarks/consultants/questions/coder/`](../benchmarks/consultants/questions/coder/) | `cfg.roles.coder.model` (Python; global)      | v1.0 (2026-05-16) — `glm-5.1:cloud` |
 | **coder_mlang**  | [`benchmarks/consultants/questions/coder_mlang/`](../benchmarks/consultants/questions/coder_mlang/) | `cfg.roles.coder.model` (per-language + global override) | v1.0 (2026-05-16, build-out in progress) |
-| **stall**        | _(M11a; lands in a later commit)_                         | M3 stall thresholds; informs every role's caps| not yet shipped   |
+| **stall**        | [`benchmarks/consultants/questions/stall/`](../benchmarks/consultants/questions/stall/) | M3 stall thresholds — per-model `(stall_threshold_s, hard_cap_s)` overrides in `consultants/engine/stall_defaults.py` | v1.0 (2026-05-17, harness shipped; live data lands in M11a-2) |
 | **tool_executor**| _(M11c; lands in a later commit)_                         | `cfg.roles.tool_executor.model` + the role's default-on bit | not yet shipped |
 
 Each sub-protocol has its own SUITE.md manifest, decision rubric,
@@ -103,6 +103,88 @@ the full manifest and the rubric thresholds.
 > at the project-global `DEFAULT_MODEL` and a follow-up run
 > evaluates a different candidate set — never silently flip the
 > default on a sub-threshold model.
+
+---
+
+## Stall sub-protocol (v1.0)
+
+**Decision question**: what `(stall_threshold_s, hard_cap_s)`
+values should the M3 stall detector use per model?
+
+The 2026-05-15 audit-session pathology — gemini-3-flash lanes that
+held the TCP connection open for 27-31 min producing zero useful
+tokens — motivated the M3 stall detector. M3 shipped with
+**global** defaults (`300 s / 3600 s` in
+`consultants/engine/control.py`) that are conservative guesses,
+not measurements. M11a is the bench that turns those guesses into
+per-model evidence.
+
+**Manifest**: 8 questions across 2 tiers (4 standalone + 4
+council), curated from researcher-style analytical prompts +
+GPQA-Diamond-style external anchors. See
+[`SUITE.md`](../benchmarks/consultants/questions/stall/SUITE.md)
+for the full manifest and rubric block.
+
+**Two tiers**:
+
+1. **Tier 1 — standalone** (4 questions). One `chat_streamed` call
+   per (question × model × trial_idx). Cheap; per-model baseline
+   covering the full cohort.
+2. **Tier 2 — fake-consultancy** (4 questions, 2 synthetic
+   audit-style + 2 GPQA-Diamond). One full `build_council_graph`
+   run per trial at `effort="medium"`, every role pinned to the
+   same model under test. Per-lane `chat_streamed` calls captured
+   via a timing-capture shim wrapping every chat client in
+   `GraphDeps`. Per-trial p99 aggregated across all inner calls.
+
+When both tiers measured a given model, the derivation prefers
+**Tier 2** numbers (representative); Tier 1 is the fallback.
+
+**Per-trial flow**:
+
+1. The harness builds a `TimingCaptureChat` wrapping a real
+   `ChatClient` for the model under test. The wrapper intercepts
+   `chat_streamed` and records per-token monotonic timestamps.
+2. For Tier 1: a single `chat_streamed(payload)` with the
+   question body. Records one `CallTiming`; the trial's
+   percentiles come directly from that call's gap distribution.
+3. For Tier 2: the bench sets `runtime_control` on initial state
+   (so the researcher routes chat through
+   `stall_protected_chat_fn_for`), invokes the council, and lets
+   every chat call land in the same wrapper. After the run, the
+   bench reads `capture.calls` (5-8 entries typically) and
+   aggregates inter-token + TTFT percentiles across all of them.
+4. Trial result is appended to `trials.jsonl` immediately so a
+   Ctrl-C mid-run loses at most the in-progress trial.
+
+**Per-model aggregation** (`stall_bench.py:derive_thresholds`):
+
+```
+stall_threshold_s = max(p99_inter_token_ms, p99_ttft_ms) * 2.5,
+                    in seconds, rounded up to the nearest 30 s,
+                    floored at 30 s, ceiled at 600 s.
+hard_cap_s        = p99(wall_s) * 3.0,
+                    rounded up to the nearest 60 s,
+                    floored at 300 s, ceiled at 3600 s.
+```
+
+The margin factors (`2.5×` for stall, `3.0×` for hard cap) plus
+the floor/ceil clamps live in the rubric block of the suite
+manifest, so M11a-2 tunes them without code changes if the
+measured data calls for it.
+
+**Rubric** (pinned in SUITE.md):
+
+> Unlike coder, this is **not** a pass/fail gate — every candidate
+> model gets recommended thresholds derived from its measured
+> percentiles. The bench's `report.md` ranks models by
+> **stall safety margin** =
+> `(stall_threshold_s - p99_inter_token_s) / p99_inter_token_s` —
+> higher is better. The M11a-2 closeout commit pastes the
+> resulting per-model rows into
+> `consultants/engine/stall_defaults.py` so the runtime picks
+> a tuned threshold per model under test, falling back to the
+> global `(300, 3600)` default for any unmeasured model.
 
 ---
 

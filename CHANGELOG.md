@@ -211,6 +211,122 @@ No live cloud calls (M13 owns that story). No new instrumentation
 in production code — the suite uses the existing surface end-to-
 end. No M14 / TTL work.
 
+### Added — Stall skill-eval bench harness (M11a-1, task #99, 2026-05-17)
+
+The Consultancy Skill-Eval Protocol's **stall** sub-protocol —
+the empirical bench that fills the per-model
+`(stall_threshold_s, hard_cap_s)` defaults the M3 stall detector
+currently picks as conservative global guesses. **M11a-1 ships
+the harness + suite + tests as a dry-run-only commit; the live
+cloud spend lives in a separate M11a-2 closeout commit per the
+M11b precedent.**
+
+**Why two tiers.** The 2026-05-15 audit-session pathology
+(gemini-3-flash lanes that held TCP open for 27-31 min without
+producing useful tokens) happened inside a **full council under
+load** — multi-round researcher, parallel lanes, proxy
+back-pressure. A single isolated `chat_streamed` call doesn't
+reproduce that pattern, so the bench measures both:
+
+- **Tier 1 — standalone**: one `chat_streamed` per (question ×
+  model × trial_idx). Cheap, broad per-model baseline.
+- **Tier 2 — fake-consultancy**: a full `build_council_graph`
+  run per (question × model × trial_idx) at `effort="medium"`,
+  every chat client in `GraphDeps` pinned to the same model so
+  we measure that model's cadence under realistic council load.
+  Per-call timings captured via a `TimingCaptureChat` wrapper.
+
+When both tiers measured a given model, the M11a-2 derivation
+prefers Tier 2 numbers (representative); Tier 1 is the fallback
+so models not in the Tier 2 cohort still get a defensible
+default.
+
+**New files**:
+
+- [`benchmarks/consultants/stall_bench.py`](benchmarks/consultants/stall_bench.py)
+  (~620 LOC) — Tier 1 + Tier 2 orchestration, dry-run + live
+  paths, JSONL writer, `metadata.json` writer, `report.md`
+  renderer, `derive_thresholds` rule.
+- [`benchmarks/consultants/stall_capture.py`](benchmarks/consultants/stall_capture.py)
+  (~360 LOC) — `TimingCaptureChat` wrapper around any chat
+  client. Intercepts `chat_streamed`, records per-token monotonic
+  timestamps, computes TTFT + inter-token gaps + total wall on
+  every call. `CallTiming` + `aggregate_calls` helpers.
+- [`benchmarks/consultants/questions/stall/SUITE.md`](benchmarks/consultants/questions/stall/SUITE.md)
+  plus 8 question files: 4 `standalone-*` researcher-style
+  analytical prompts + 2 `council-synth-*` audit-style + 2
+  `council-gpqa-*` GPQA-Diamond-style items (physics + biology)
+  for external difficulty anchor. Suite hash `c8306c62`.
+- [`consultants/engine/stall_defaults.py`](consultants/engine/stall_defaults.py)
+  (~140 LOC) — empty per-model scaffold. Ships with
+  `RECOMMENDED_STALL_THRESHOLDS_BY_MODEL = {}` and
+  `RECOMMENDED_DEFAULT_STALL` set to the existing global
+  `(300, 3600)` so importing the module changes **no** runtime
+  behavior. M11a-2 populates the map; M11a-2 also wires
+  `resolve_stall_thresholds()` into the runtime's
+  `RuntimeControl` defaults once data exists.
+
+**Modified**:
+
+- `benchmarks/consultants/harness.py` — new `StallTrial`
+  dataclass + `estimate_stall_cost()` helper; `load_questions()`
+  gains `require_oracle=False` for measurement benches (the
+  stall suite has no oracles).
+- `consultants/cli.py` — new `skill-eval stall` sub-subparser +
+  `cmd_skill_eval_stall` handler. Mirrors the `coder`
+  subcommand's shape with `--tier1` / `--tier2` / `--both` for
+  tier selection and `--trials-tier1` / `--trials-tier2` for
+  per-tier sample counts.
+- `docs/consultants-skill-eval-protocol.md` — expanded the
+  previously-placeholder "stall" row in the sub-protocols table
+  and added a full "Stall sub-protocol (v1.0)" section covering
+  the decision question, two-tier flow, percentile derivation
+  rule, and rubric.
+
+**Tests** (no cloud spend; all run against fixtures):
+
+- `tests/test_stall_defaults.py` (13 tests + 5 subtests) —
+  M12 parity guarantee: imports change no runtime behavior,
+  resolver falls through to the global default, all provenance
+  constants present.
+- `tests/test_stall_capture.py` (27 tests) —
+  `TimingCaptureChat` against fake streaming clients with
+  controlled per-token timing; verifies TTFT, inter-token p99,
+  `CancelledByOrchestrator` handling, `chat()` non-streamed
+  path, error paths, aggregate-across-calls.
+- `tests/test_stall_bench_harness.py` (13 tests) — schema
+  round-trip, `load_questions(require_oracle=False)` path,
+  suite manifest parse, cost estimator across tier
+  combinations.
+
+**Verification**:
+
+- All three new test files: **53 passed + 5 sub-tests** in both
+  envs.
+- M12 parity (`pytest -m parity`): **22 passed + 12 sub-tests**,
+  unchanged.
+- End-to-end dry-run: `python -m benchmarks.consultants.stall_bench
+  --dry-run --both --smoke` exits 0, writes
+  `metadata.json` + `trials.jsonl` + `report.md`. Tier 2 captures
+  3 chat calls per trial (planner + researcher + synthesizer)
+  with non-zero p99 inter-token gaps — confirming the
+  `runtime_control` plumbing routes the researcher through
+  `chat_streamed`.
+- CLI dispatch: `claude-consultants skill-eval stall --dry-run
+  --both --smoke` exits 0; `--live --both` without
+  `--accept-cost` exits 2 with cost estimate.
+- Cost estimate for full live run (defaults): **7 models × 8
+  questions × (3 t1 + 2 t2) = 280 trials, ~6.86 M tokens**.
+
+**Non-goals (deferred to M11a-2)**:
+
+- No live cloud calls in this commit.
+- No `control.py` defaults change. Until measured data justifies
+  it, the global `(300, 3600)` stays.
+- No engine-side wiring of `stall_defaults.py`. Module ships as
+  importable scaffold only.
+- No M11c (tool_executor bench) — separate sub-milestone of #99.
+
 ### Added — M11b coder skill-eval first live baseline (2026-05-16)
 
 The Consultancy Skill-Eval Protocol's coder sub-protocol now has

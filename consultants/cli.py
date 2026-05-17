@@ -935,6 +935,58 @@ def cmd_skill_eval_coder(args, base: str) -> int:
     return int(_bench_main(argv))
 
 
+def cmd_skill_eval_stall(args, base: str) -> int:
+    """Run the stall skill-eval suite (M11a). Thin wrapper around
+    ``benchmarks.consultants.stall_bench.main`` — same shape as
+    :func:`cmd_skill_eval_coder` but the stall bench has no judge,
+    no per-tier filter (the tier dimension is standalone vs
+    council and is selected via ``--tier1`` / ``--tier2`` / ``--both``),
+    and two trial-count knobs (``--trials-tier1`` / ``--trials-tier2``).
+
+    Exit codes mirror the bench script: 0 on success, 1 on no
+    trials (empty match), 2 when --live is set but --accept-cost
+    isn't.
+    """
+    try:
+        from benchmarks.consultants.stall_bench import main as _bench_main
+    except ImportError as e:
+        raise CLIError(
+            "benchmarks.consultants.stall_bench is not importable. "
+            f"Run from the repo root or set PYTHONPATH. Underlying: {e}"
+        )
+    argv: list[str] = []
+    if args.dry_run:
+        argv.append("--dry-run")
+    if args.live:
+        argv.append("--live")
+    if args.accept_cost:
+        argv.append("--accept-cost")
+    if args.models:
+        argv.extend(["--models", args.models])
+    if args.ollama_base:
+        argv.extend(["--ollama-base", args.ollama_base])
+    if args.output_dir:
+        argv.extend(["--output-dir", args.output_dir])
+    # Tier selection — mutually exclusive in the parser, so at most
+    # one of these is set. The bench's parser is also mutually
+    # exclusive so we forward at most one.
+    if args.tier1:
+        argv.append("--tier1")
+    elif args.tier2:
+        argv.append("--tier2")
+    elif args.both:
+        argv.append("--both")
+    if args.trials_tier1 is not None:
+        argv.extend(["--trials-tier1", str(args.trials_tier1)])
+    if args.trials_tier2 is not None:
+        argv.extend(["--trials-tier2", str(args.trials_tier2)])
+    for qid in (args.id or []):
+        argv.extend(["--id", qid])
+    if args.smoke:
+        argv.append("--smoke")
+    return int(_bench_main(argv))
+
+
 # ----------------------- argparse wiring ------------------------- #
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1410,6 +1462,80 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     se_coder.set_defaults(fn=cmd_skill_eval_coder)
+
+    # ----- skill-eval stall (M11a) ----- #
+    se_stall = se_sub.add_parser(
+        "stall",
+        help=("Run the stall suite (M11a). Measures per-model "
+              "streaming-token cadence + derives recommended "
+              "(stall_threshold_s, hard_cap_s) thresholds."),
+    )
+    se_stall_mode = se_stall.add_mutually_exclusive_group(required=True)
+    se_stall_mode.add_argument(
+        "--dry-run", action="store_true",
+        help="Stub ChatClients; validates the harness without "
+             "cloud spend.",
+    )
+    se_stall_mode.add_argument(
+        "--live", action="store_true",
+        help="Real ChatClients against --ollama-base. Requires "
+             "--accept-cost.",
+    )
+    se_stall.add_argument(
+        "--accept-cost", action="store_true",
+        help="Required with --live. Acknowledges Ollama-Pro token "
+             "spend (see the summary line).",
+    )
+    se_stall.add_argument(
+        "--models", default=None,
+        help="Comma-separated model list. Default: the M11b-mlang "
+             "cohort + gemini-3-flash-preview (7 models).",
+    )
+    se_stall.add_argument(
+        "--ollama-base", default=None,
+        help="Override the cloud proxy URL. Default: read from "
+             "config or 192.168.178.2:11433.",
+    )
+    se_stall.add_argument(
+        "--output-dir", default=None,
+        help=("Per-run output directory. Default: "
+              "benchmarks/consultants/results/<YYYY-MM-DD>/stall/"),
+    )
+    # Tier selection — mutually exclusive on the bench too.
+    se_stall_tier = se_stall.add_mutually_exclusive_group()
+    se_stall_tier.add_argument(
+        "--tier1", action="store_true",
+        help="Run only Tier 1 (standalone chat_streamed calls).",
+    )
+    se_stall_tier.add_argument(
+        "--tier2", action="store_true",
+        help="Run only Tier 2 (full council with single-model "
+             "researcher pinned to the model under test).",
+    )
+    se_stall_tier.add_argument(
+        "--both", action="store_true",
+        help="Run both tiers (default).",
+    )
+    se_stall.add_argument(
+        "--trials-tier1", type=int, default=None,
+        help="Trials per (question × model) for Tier 1. "
+             "Default 3 (set by the bench).",
+    )
+    se_stall.add_argument(
+        "--trials-tier2", type=int, default=None,
+        help="Trials per (question × model) for Tier 2. "
+             "Default 2 (set by the bench).",
+    )
+    se_stall.add_argument(
+        "--id", action="append",
+        help="Filter by question id (repeatable). Default: all.",
+    )
+    se_stall.add_argument(
+        "--smoke", action="store_true",
+        help="Smoke mode: 1 question per tier × 2 models × 1 trial. "
+             "End-to-end validation at minimal spend.",
+    )
+    se_stall.set_defaults(fn=cmd_skill_eval_stall)
 
     return p
 
