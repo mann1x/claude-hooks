@@ -60,6 +60,9 @@ mcp-server = ["mcp[cli]>=1.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "parity: v1 behavior-parity regression suite (M12). Run with `pytest -m parity` to exercise only the default-config gate.",
+]
 
 [tool.coverage.run]
 source = ["claude_hooks"]

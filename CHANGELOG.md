@@ -115,6 +115,102 @@ present.
 
 Full suite: **3418 tests + 101 sub-tests passing**, zero regressions.
 
+### Added — `/consultants` v2 behavior-parity regression suite (M12, task #98, 2026-05-17)
+
+M12 closes the v2 overhaul's most important non-feature promise:
+every milestone landed under M0–M11 + #111 was supposed to be
+**opt-in, default-off**, so a default-config consultation behaves
+bit-for-bit like the v1 council it replaces. The new
+`tests/test_consultants_v2_parity.py` is the regression gate that
+holds that promise — three cohorts of tests, locked to current
+default behavior at this commit, that fail loudly if any v2
+opt-in starts leaking into the default path.
+
+**Why "parity" and not "v1 diff".** There is no v1 in tree to
+compare against. The suite snapshots *current* default behavior
+and treats that as the baseline. Future changes to the default
+path WILL break the suite — which is correct: a change to the
+default path is a behavior change, not a refactor. Each new
+opt-in must come with a new off-by-default test in cohort 2.
+
+**Cohort 1 — Per-effort-tier scenarios** (`TestPerEffortTierParity`,
+9 tests + 7 subtests). Runs a real `build_council_graph` for each
+of `low / medium / high / max / xmedium / xhigh / xmax` with stub
+chat clients that return deterministic content keyed on role
+name. Each tier asserts:
+
+- the `final_answer` equals the synthesizer stub's pinned output,
+- no `CoderFailover`, `RuntimeMutation`, `Interrupt`, `Resumed`,
+  or `DeadlineWarning` event fires on a default-config run,
+- the planner / researcher / synthesizer trio actually invoked
+  their stub clients (each `StableChat` records calls).
+
+The `xauto` tier gets its own test that verifies the escalator
+stays at `xmedium` when no dissent signal arrives.
+
+**Cohort 2 — Opt-ins off by default** (`TestOptInsOffByDefault`,
+11 tests + 5 subtests). Static-state assertions on a fresh
+`ConsultantsConfig()`:
+
+| Gate | Assertion |
+|------|-----------|
+| `cfg.runtime.review_before_synthesis` | `False` |
+| `cfg.runtime.interrupt_on_low_confidence` | `False` |
+| `cfg.roles.tool_executor.enabled` | `False` |
+| `cfg.runtime.effort != "xauto"` | true |
+| `cfg.store.enabled` | `False` AND `make_consultants_store(cfg) is None` |
+| `cfg.roles.coder.enabled` | `False` |
+| Coder routes seeded but inert | `coder_unique_models(cfg)` empty when role disabled |
+| Non-coder roles have empty routing | `routes_by_language == {}`, `default_route is None` |
+| `cfg.checkpointer.backend` | `"sqlite"` (the zero-dep default) |
+| `V2_OPT_IN_EVENT_KINDS` | covers `coder_failover / runtime_mutation / interrupt / resumed / deadline_warning` |
+
+**Cohort 3 — 2h-session stall replay** (`TestStallRecoveryReplay`,
+2 tests). Replays the 2026-05-15 audit-session pathology that
+motivated M3:
+
+- `test_stalled_lane_is_retried_then_tombstoned` — patches
+  `time.monotonic` via a `MockedClock`, feeds a stub that emits 3
+  tokens then hangs forever. Asserts the M3 `StallMonitor` raises
+  `_StallCancelled` within the configured `stall_threshold_s`
+  mocked seconds — well inside a 20-minute mocked-wall budget,
+  vs the 127-minute pathology v1 produced.
+- `test_slow_but_progressing_lane_is_not_killed` — stub that
+  emits 1 token every 60 mocked seconds for 20 mocked minutes
+  (legitimate slow thinking). Asserts no stall fires; lane
+  completes normally. Validates the M3 design goal: the stall
+  detector punishes hangs, not deep work.
+
+**Test infrastructure.** A new `tests/_parity_helpers.py` (1
+file, ~280 LOC) holds the shared kit: `StableChat`,
+`RoundAwareChat`, `HangAfterTokensStream`, `SlowButProgressingStream`,
+`MockedClock`, `_StallCancelled`, `capture_events()`
+context-manager that patches `consultants.engine.events.emit`,
+`assert_no_v2_optin_events()`, `events_by_kind()`,
+`make_default_stubs()`, and `build_default_deps()`. Three
+cohorts share this base; no test mocks past the real engine.
+
+**Pytest marker.** A new `parity` marker is registered in
+`pyproject.toml`'s `[tool.pytest.ini_options].markers`. Run only
+the parity suite with `pytest -m parity` — handy as a pre-push
+gate or for narrowing a CI step.
+
+**Verification.**
+
+- Parity file: 22 tests + 12 sub-tests pass in 2.00 s
+  (consultants env).
+- Main env full suite: 3431 passed, 98 skipped, 106 sub-tests
+  passed, zero regressions.
+- Consultants env full suite: 3474 passed (excluding 33
+  pre-existing proxy failures unrelated to M12).
+- `pytest --collect-only -q tests/test_consultants_v2_parity.py
+  | wc -l` confirms the expected case count per cohort.
+
+**Non-goals (deferred).** No v1 reference run (none in tree).
+No live cloud calls (M13 owns that story). No new instrumentation
+in production code — the suite uses the existing surface end-to-
+end. No M14 / TTL work.
+
 ### Added — M11b coder skill-eval first live baseline (2026-05-16)
 
 The Consultancy Skill-Eval Protocol's coder sub-protocol now has
