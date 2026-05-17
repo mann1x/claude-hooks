@@ -9,6 +9,31 @@ oracle: cpp-very_hard-01-small-vector-oracle.py
 
 # cpp-very_hard-01-small-vector
 
+## ⚠️ CRITICAL CONSTRAINTS — the oracle greps the source
+
+Your solution **must satisfy these literally**:
+
+1. Define `template <typename T, std::size_t N> class
+   SmallVector` with the **exact methods** in the API section
+   below (signatures, names, return types).
+2. **No `std::vector`** anywhere in the source — the oracle
+   greps for `std::vector` and rejects the file if found.
+3. Storage must be **stack-then-heap** with a `bool is_inline()`
+   method returning `true` while `size() <= N`.
+4. The heap path uses raw allocation
+   (`operator new[](capacity_ * sizeof(T))`) + manual
+   placement-new + manual destructor calls.
+5. **Output format** for the `print` op: `<size> <is_inline>`
+   space-separated (where `is_inline` is `1` or `0`), one
+   line per `print`, **no headers, no labels**. Example
+   output for the README I/O contract:
+   `2 1` then newline then `4 1` then newline.
+6. The program must **compile cleanly** under
+   `g++ -O2 -std=c++17 -Wall -Wextra -lpthread`. Common
+   gotchas: alignment for the inline buffer (use
+   `alignas(T)` or `std::aligned_storage`), destructor order
+   on move, exception-safety on growth.
+
 Implement a `SmallVector<T, N>` template with **stack-then-heap
 storage**: the first `N` elements live in an aligned inline
 buffer; beyond that the container heaps onto the free store.

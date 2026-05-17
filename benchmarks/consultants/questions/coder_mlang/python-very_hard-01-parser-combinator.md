@@ -9,6 +9,26 @@ oracle: python-very_hard-01-parser-combinator-oracle.py
 
 # python-very_hard-01-parser-combinator
 
+## ⚠️ CRITICAL CONSTRAINTS — the oracle greps the source
+
+Your solution **must satisfy these literally**:
+
+1. Expose **all six public symbols at the module top**:
+   `Lit`, `Seq`, `Or`, `Many`, `parse`, `ParseError`. The
+   oracle does `hasattr(solution, name)` for each. **Don't
+   nest them inside a class**, don't rename, don't put them
+   in a submodule.
+2. `Seq` and `Many` must **return a `tuple` / `list`** as
+   specified — `Seq` yields a **`tuple`** of children's
+   results (NOT a list); `Many` yields a **`list`**. The
+   test `parse(grammar, "a") == ('a', [])` compares against
+   a tuple literal, so a list will fail equality.
+3. **`parse(grammar, text)` returns just the value**, not
+   `(value, pos)`. The internal parser shape is
+   `(text, pos) -> (value, new_pos)` but the public `parse()`
+   strips the position before returning.
+4. No `re`, no `parsy`, no `pyparsing` imports — stdlib only.
+
 Implement a minimal **parser-combinator** library with three
 combinators (`Lit`, `Seq`, `Or`, `Many`) and a parsing entry
 point that handles the regex-like grammar `a (b|c)*`.

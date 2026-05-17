@@ -9,6 +9,27 @@ oracle: csharp-very_hard-01-di-container-oracle.py
 
 # csharp-very_hard-01-di-container
 
+## ⚠️ CRITICAL CONSTRAINTS — the oracle greps the source
+
+Your solution **must satisfy these literally**:
+
+1. Define a `public class Container` with the **exact public
+   API** in the API section below (`Register<TService,
+   TImpl>()`, `Resolve<T>()`).
+2. Define `public class CircularDependencyException : Exception`
+   verbatim — the oracle greps for the class name.
+3. Use `System.Reflection` (`Type.GetConstructors`,
+   `ConstructorInfo.GetParameters`, `Activator.CreateInstance`
+   or `ConstructorInfo.Invoke`) — not a hand-coded factory map.
+4. The driver in `main` must produce **exact diagnostic
+   output**: `users@console/console` then `same` then `cycle
+   detected`, one per line, no extra labels.
+5. The program must **compile cleanly** under
+   `dotnet publish -c Release`. Common gotchas: generic
+   reflection requires `MakeGenericMethod` for `Resolve<T>`
+   recursion across parameter types; the "currently-resolving"
+   set is keyed by `Type`, not by `T`.
+
 Implement a minimal **dependency-injection container** in C#
 with constructor resolution and cycle detection.
 

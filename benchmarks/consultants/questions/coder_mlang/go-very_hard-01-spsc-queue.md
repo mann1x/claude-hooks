@@ -9,6 +9,28 @@ oracle: go-very_hard-01-spsc-queue-oracle.py
 
 # go-very_hard-01-spsc-queue
 
+## ⚠️ CRITICAL CONSTRAINTS — the oracle greps the source
+
+Your solution **must satisfy these literally**:
+
+1. Define `type SPSCQueue struct { ... }` with the **exact
+   API** in the Required API section below: `NewSPSCQueue`,
+   `Push`, `Pop`.
+2. **No `sync.Mutex`** and no `sync.RWMutex` anywhere — the
+   oracle greps for both and rejects the file if either
+   appears. Use `sync/atomic` (e.g. `atomic.LoadInt64`,
+   `atomic.StoreInt64`, `atomic.AddInt64`).
+3. **Output exactly one line**: `<sum> <count>` — two integers,
+   space-separated, no prefix, no labels. **NO** `OK:`, **NO**
+   `all items conserved`, **NO** verbose summary. Example
+   acceptable line: `500000500000 1000000\n`. Anything else
+   fails `out.strip().split() != [sum, count]`.
+4. The program must **build cleanly** under `go build`.
+   Common gotchas: int vs int64 (use `int64` for atomics),
+   the "done" signal needs a sync.Once or atomic.Bool that
+   the consumer reads atomically, padding to avoid false
+   sharing on head/tail.
+
 Implement a **lock-free single-producer single-consumer (SPSC)
 ring buffer** in Go using **only `sync/atomic`** — no
 `sync.Mutex`, no `sync.RWMutex`, no channels (in the data

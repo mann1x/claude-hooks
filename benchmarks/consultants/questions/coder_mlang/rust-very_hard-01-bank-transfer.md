@@ -9,6 +9,29 @@ oracle: rust-very_hard-01-bank-transfer-oracle.py
 
 # rust-very_hard-01-bank-transfer
 
+## ⚠️ CRITICAL CONSTRAINTS — the oracle greps the source
+
+Your solution **must satisfy these literally**:
+
+1. Define a type **named `Bank`** (oracle greps for `Bank`)
+   with a `transfer(from: u32, to: u32, amount: ...)` method.
+2. The locking strategy **must be deadlock-free** under
+   concurrent `transfer(a, b, ...)` / `transfer(b, a, ...)`
+   from different threads. Canonical fix: lock accounts in
+   id-order (`min(from, to)` first), or use a single
+   coarse-grained Mutex over the whole accounts map.
+3. **Output format**: one balance per line, in account order,
+   **bare integers — NO labels, NO `Account N:` prefix, NO
+   `Total:` / `duration:` lines, NO summary**. Example
+   correct stdout for 3 accounts:
+   `100\n50\n200\n`. The oracle does `int(line)` on each
+   line; any prefix breaks it.
+4. **Stdlib only** — `std::sync::Mutex`, `std::sync::Arc`,
+   `std::thread`. **No external crates** (`parking_lot`,
+   `crossbeam`, etc.).
+5. The program must **compile cleanly** under
+   `rustc -O -o sol solution.rs`.
+
 Implement a thread-safe `Bank` type that supports concurrent
 **transfers between accounts** without deadlock.
 

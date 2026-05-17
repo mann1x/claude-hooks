@@ -9,6 +9,26 @@ oracle: c-very_hard-01-rbtree-insert-oracle.py
 
 # c-very_hard-01-rbtree-insert
 
+## ⚠️ CRITICAL CONSTRAINTS — the oracle greps the source
+
+Your solution **must satisfy these literally**:
+
+1. The color enum **must contain the literal tokens `RED` and
+   `BLACK`** in the source. The oracle greps for both. Don't
+   use 0/1 ints, don't use `kRed`/`kBlack`, don't `#define`.
+2. Define the types **verbatim**: `typedef enum { RED, BLACK }
+   Color;` and a `Node` struct with `int val; Color color;
+   struct Node *left, *right;`.
+3. Implement these function signatures verbatim:
+   `Node *insert(Node *root, int val);`,
+   `void inorder(Node *root, int *out, int *idx);`,
+   `int verify_rb(Node *root);`, `void free_tree(Node *root);`.
+4. Output **exactly two lines** per run:
+   - line 1: space-separated in-order values, **NO `In-order:`
+     prefix, NO trailing space**.
+   - line 2: literal `ok` (RB valid) or `bad` (invariants
+     broken). Nothing else.
+
 Implement a left-leaning red-black tree's **insert** operation
 in C, with full rebalancing.
 

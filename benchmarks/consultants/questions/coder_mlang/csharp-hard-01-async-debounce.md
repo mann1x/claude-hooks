@@ -9,6 +9,27 @@ oracle: csharp-hard-01-async-debounce-oracle.py
 
 # csharp-hard-01-async-debounce
 
+## ⚠️ CRITICAL CONSTRAINTS — the oracle greps the source
+
+Your solution **must satisfy these literally**:
+
+1. Define a `public class Debouncer<T>` with the **exact public
+   surface** in the Required Idiom section below (constructor,
+   `Push`, `FlushAsync`).
+2. The source **must contain the literal token
+   `CancellationTokenSource`**. The oracle greps for it.
+3. Use `async` / `await` — **no `Thread.Sleep` on the main
+   path**. The oracle greps for `Thread.Sleep` and rejects
+   if found in the timer/emit path.
+4. Output: **one emitted value per line**, no labels, no
+   trailing whitespace inside the line.
+5. The program must **compile cleanly** under
+   `dotnet publish -c Release`. Common gotchas: `readonly`
+   fields cannot be reassigned (use a regular field or
+   pattern around `Interlocked.Exchange`), `Task.Delay`
+   needs a `CancellationToken` to cancel cleanly, FlushAsync
+   must await any pending emission.
+
 Implement an **async debounce wrapper** that consumes a stream
 of integers from stdin separated by delays, and emits only the
 "settled" value after a quiet window.

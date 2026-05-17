@@ -9,6 +9,24 @@ oracle: rust-hard-01-iter-window-pairs-oracle.py
 
 # rust-hard-01-iter-window-pairs
 
+## ⚠️ CRITICAL CONSTRAINTS — the oracle greps the source
+
+Your solution **must satisfy these literally**:
+
+1. Define a struct **named `WindowPairs`** (oracle greps the
+   literal string) with a generic parameter
+   `WindowPairs<I: Iterator>`.
+2. Implement `impl<I: Iterator> Iterator for WindowPairs<I>`
+   with `type Item = (I::Item, I::Item);`.
+3. Define an extension trait **named `WindowPairsExt`** (oracle
+   greps for it) adding a `.window_pairs()` method to any
+   `Iterator` whose `Item: Copy`.
+4. **Output format**: each pair on its own line, **space-
+   separated, NO parens, NO commas**. Example correct line:
+   `10 20\n`. **Wrong**: `(10, 20)\n` or `(10,20)\n`.
+5. The program must **compile cleanly** under
+   `rustc -O -o sol solution.rs`.
+
 Write a Rust program that reads a sequence of integers from
 stdin and prints **consecutive pairs** to stdout.
 

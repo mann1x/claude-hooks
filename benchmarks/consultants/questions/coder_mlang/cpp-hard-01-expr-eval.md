@@ -9,6 +9,22 @@ oracle: cpp-hard-01-expr-eval-oracle.py
 
 # cpp-hard-01-expr-eval
 
+## ⚠️ CRITICAL CONSTRAINTS — the oracle greps the source
+
+Your solution **must satisfy these literally**:
+
+1. The grammar must be implemented as **three named functions**:
+   `parseExpr`, `parseTerm`, `parseFactor` (or the
+   underscored variants `parse_expr` / `parse_term` /
+   `parse_factor`). The oracle greps for these names; lambdas,
+   class methods with different names, or a single `parse()`
+   blob fail.
+2. **Integer division** — `10/3` must print `3`, NOT `3.33333`.
+   Use `int` arithmetic, `std::div`, or explicit cast — but
+   the output must be an integer.
+3. Output: **one integer per line**, no trailing decimals, no
+   `.0` suffix.
+
 Implement a **recursive-descent expression evaluator** for the
 grammar:
 

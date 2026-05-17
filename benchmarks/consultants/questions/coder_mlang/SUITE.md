@@ -1,7 +1,7 @@
 ---
 suite: coder_mlang
-suite_version: "1.0"
-released: 2026-05-16
+suite_version: "1.0.1"
+released: 2026-05-17
 manifest:
   - python-medium-01-meeting-rooms
   - rust-medium-01-search-rotated
@@ -27,7 +27,36 @@ rubric:
   tie_breaker: median_tokens
 ---
 
-# Coder Multi-Language Suite v1.0
+# Coder Multi-Language Suite v1.0.1
+
+## v1.0.1 changelog (2026-05-17)
+
+The v1.0 cohort run (2026-05-16, 90 trials, 33% pass) surfaced
+that **every failure** traced to one of three modes — none of
+the oracles were actually broken:
+
+1. Spec-defined name violation (e.g., model named the function
+   `sort` instead of the required `quicksort3`).
+2. Spec-defined output-format violation (e.g., model added a
+   `In-order:` prefix, used tuple notation `(10, 20)` instead
+   of `10 20`, returned `list` where the spec required `tuple`).
+3. Genuine compilation/semantic difficulty.
+
+v1.0.1 tightens the **prompts of the 10 questions** with 0/5
+pass rate, adding a top-of-file "⚠️ CRITICAL CONSTRAINTS"
+block that extracts the spec's verbatim requirements into the
+first thing the model sees. The oracles are unchanged — this
+is a pure prompt-engineering experiment that separates "can do
+the algorithm" from "can read the spec carefully" as cohort
+signals.
+
+Affected questions: c-hard-01-quicksort-3way,
+c-very_hard-01-rbtree-insert, cpp-hard-01-expr-eval,
+cpp-very_hard-01-small-vector, csharp-hard-01-async-debounce,
+csharp-very_hard-01-di-container, go-very_hard-01-spsc-queue,
+python-very_hard-01-parser-combinator,
+rust-hard-01-iter-window-pairs,
+rust-very_hard-01-bank-transfer.
 
 Per-language stress test of the coder role. Question content
 ported from LCB / LeetCode-hard-tier algorithmic problems and

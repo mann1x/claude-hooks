@@ -9,6 +9,21 @@ oracle: c-hard-01-quicksort-3way-oracle.py
 
 # c-hard-01-quicksort-3way
 
+## ⚠️ CRITICAL CONSTRAINTS — the oracle greps the source
+
+Your solution **must satisfy these literally**, before
+algorithmic correctness counts:
+
+1. The sorting function **must be named exactly `quicksort3`**
+   with signature `void quicksort3(int *a, int n)`. The oracle
+   greps the source for the literal string `quicksort3`.
+2. The output for `n` values must be **on a single line,
+   space-separated, with a trailing newline** — NOT one value
+   per line, NOT comma-separated, NOT bracketed. The oracle
+   compares output byte-for-byte against `"1 2 3 4 5"`.
+3. **No `qsort()` shortcut.** The oracle greps for `qsort(` and
+   rejects the source if found.
+
 Implement an in-place **3-way quicksort** (Dutch National Flag
 partition) on an array of `int`s.
 
