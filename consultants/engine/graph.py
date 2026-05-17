@@ -1198,6 +1198,34 @@ def build_council_graph(deps: GraphDeps,
                     models_per_lane[model_idx]
                     if 0 <= model_idx < n_models else primary
                 )
+                # M13 live smoke (2026-05-17) surfaced a Send
+                # state-isolation bug: LangGraph Send delivers
+                # ONLY the dict's keys to the target node;
+                # channels not present in the Send dict are
+                # absent in the receiver's state (even with an
+                # ``operator.add`` reducer at the global level).
+                # The fanback must therefore explicitly hand
+                # this lane's ToolResults to the receiver, or
+                # ``tool_results_for_round`` returns empty and
+                # the researcher falls back to PLAN mode again
+                # — producing the "researcher kept re-planning,
+                # synthesizer got nothing" failure pattern.
+                # Filter to (parent_round == current_round) AND
+                # (parent_lane_idx == this lane OR None) so the
+                # composition guarantee from #103 still holds:
+                # no sibling-lane results leak into this lane's
+                # appendix, and legacy ``None`` rows (mid-rollout
+                # checkpoints) remain readable.
+                lane_results = [
+                    r for r in results
+                    if int(getattr(r, "parent_round", 1) or 1)
+                    == current_round
+                    and (
+                        getattr(r, "parent_lane_idx", None) is None
+                        or getattr(r, "parent_lane_idx", None)
+                        == global_idx
+                    )
+                ]
                 sends.append(Send(
                     "researcher",
                     {
@@ -1221,6 +1249,9 @@ def build_council_graph(deps: GraphDeps,
                         # this is a REPORT-mode re-entry within
                         # the same round, not a new round start.
                         "research_rounds_used": rounds_used,
+                        # M13 fix: pre-filtered per-lane results
+                        # so REPORT-mode finds non-empty input.
+                        "tool_results": lane_results,
                         "turns": [],
                         "total_prompt_tokens": 0,
                         "total_completion_tokens": 0,

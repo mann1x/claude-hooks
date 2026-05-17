@@ -16,6 +16,83 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed — `/consultants` v2 LangGraph Send state-isolation bug surfaced by M13 live smoke (2026-05-17)
+
+The M13 live x-tier smoke (task #102, the milestone whose explicit
+purpose is full-council end-to-end verification) **caught the M11c-3
+regression the stubbed tests couldn't reach**: `_fanout_after_tool_executor`
+omitted `tool_results` from its per-lane Send dict. LangGraph 1.2's
+`Send` dispatch delivers ONLY the dict's keys to the target node —
+channels not in the Send dict are absent from the receiver's state
+even when a global `operator.add` reducer is registered for that
+channel. The first live consultation at `xhigh` against the
+`multipkg` fixture stayed in PLAN mode in **47 of 49** researcher
+calls and synthesized a 180-char "could not perform the audit"
+tombstone instead of a real answer.
+
+**Root cause** (verified by a 4-line LangGraph experiment, now
+locked in the regression suite as
+`test_send_isolation_baseline_when_tool_results_omitted`): each
+fanned-back researcher saw an empty `tool_results` channel in its
+isolated Pregel state, so `tool_results_for_round` returned empty,
+and `researcher_node` fell back to PLAN mode instead of consuming
+the executor's results in REPORT mode.
+
+**The fix**: `_fanout_after_tool_executor` now computes
+`lane_results` per Send — filtered by `parent_round == current_round`
+AND (`parent_lane_idx == this lane` OR `parent_lane_idx is None`
+for legacy rows) — and includes it under the `tool_results` key in
+every emitted Send dict. The #103 composition guarantee is
+preserved at the data layer: no sibling-lane results leak into any
+lane's Send.
+
+**Regression gate** — new test class
+`TestFanbackSendCarriesToolResults` in
+[`tests/test_consultants_v2_tool_executor_xtier_composition.py`](tests/test_consultants_v2_tool_executor_xtier_composition.py):
+
+- `test_each_fanback_send_delivers_its_own_lane_results` — builds
+  a minimal real `StateGraph` with stub nodes, drives a real Send
+  fanout, asserts each receiver saw its own filtered
+  `tool_results` (no cross-pollution AND no PLAN-mode fallback).
+- `test_send_isolation_baseline_when_tool_results_omitted` — locks
+  the underlying LangGraph contract: omitting `tool_results` from
+  a Send dict yields empty receiver state. If this test ever
+  starts failing, LangGraph changed semantics and the
+  explicit-pass workaround can be dropped.
+- `test_engine_fanback_dict_includes_tool_results` — white-box
+  check on the production closure: every emitted Send dict must
+  contain `tool_results`, filtered to that lane.
+
+The 3 new tests are the regression gate the M11c-3 stubbed tests
+lacked — they invoke the routing function with a synthetic dict
+and inspect its return Sends, but never drive Pregel.
+
+**Rerun** (`csl-2026-05-17-2336-5124`, post-fix): 218.30 s,
+29 of 38 researcher calls in REPORT mode (9 PLAN + 29 REPORT —
+one PLAN per lane, multi-round REPORT cycles), 77 tool calls,
+single critic pass with no reroute, 756-char structured answer
+with file:line citations. All 9 lanes pass the headline #103
+no-cross-pollution contract via the post-hoc inspector at
+[`benchmarks/consultants/results/2026-05-17/m13-smoke/m13_inspect.py`](benchmarks/consultants/results/2026-05-17/m13-smoke/m13_inspect.py).
+
+**Verification**:
+
+- Both envs full sweep: 3550 + 3632 passing (+3 isolation tests
+  in the consultants env vs the M11c-3 baseline of 3629).
+- M12 parity holds — the change is additive to the Send dict
+  contents, no schema changes, no externally observable API
+  shifts.
+- Live x-tier smoke: ✅ PASS.
+
+The full M13 writeup including run-1 vs run-2 numbers, the final
+answer, and the cross-pollution analysis is at
+[`benchmarks/consultants/results/2026-05-17/m13-smoke/report.md`](benchmarks/consultants/results/2026-05-17/m13-smoke/report.md).
+
+Task #102 (M13) closes with the fix-up; task #103 (proper
+composition) and M11c-5 (default-on flip) stay in place — the
+engine refactor was correct in shape, it just needed the explicit
+Send-channel passthrough that LangGraph 1.2 semantics require.
+
 ### Changed — `/consultants` v2 tool_executor flipped to enabled-by-default (M11c-5, 2026-05-17)
 
 The atomic flip of the two defaults that the M11c-1/2/3 sequence
