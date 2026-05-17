@@ -86,16 +86,18 @@ class TestOptInsOffByDefault(unittest.TestCase):
 
     # ----- M6 (tool_executor role) ------------------------------ #
 
-    def test_tool_executor_role_disabled_by_default(self):
-        # M6: the gemma4-31b-cloud tool-call specialist. Off by
-        # default because it fundamentally changes the council's
-        # tool-call topology (researcher offloads tool-calls to a
-        # dedicated lane). M11c-3 (#103 proper composition) made
-        # the role safe for x-tier multi-model researcher fanout
-        # but kept the default-on bit at False — flipping that
-        # bit is reserved for M11c-5 after a live x-tier
-        # validation run (M11c-4).
-        self.assertFalse(self.cfg.roles["tool_executor"].enabled)
+    def test_tool_executor_role_enabled_by_default(self):
+        # M11c-5 (2026-05-17) flipped tool_executor to enabled-by-
+        # default after the two-part gate cleared: the M11c-2
+        # bench winner (gemma4:31b-cloud at 87.5% / 5.00) AND
+        # task #103 (x-tier proper composition) resolved via the
+        # M11c-3 engine refactor (per-lane parent_lane_idx +
+        # _fanout_after_tool_executor conditional edge replacing
+        # the unconditional M6 edge). A default-config
+        # consultation now wires the tool_executor lane and
+        # routes researcher PLAN-mode tool intents through a
+        # dedicated specialist instead of an inline subloop.
+        self.assertTrue(self.cfg.roles["tool_executor"].enabled)
 
     def test_awaiting_tool_results_field_dropped_from_state(self):
         # #103 (M11c-3): the scalar ``awaiting_tool_results`` flag

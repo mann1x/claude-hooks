@@ -1,31 +1,23 @@
-"""Defaults for the optional tool_executor role (M6), grounded
-in the M11c skill-eval bench.
+"""Defaults for the now-enabled-by-default tool_executor role
+(M6), grounded in the M11c skill-eval bench.
 
-**M11c-1 ships this module as an empty scaffold.** The
-``RECOMMENDED_TOOL_EXECUTOR_MODEL`` is a sentinel string (empty);
-``RECOMMENDED_DEFAULT_ON`` is ``False``, matching the current
-``DEFAULT_ENABLED_BY_ROLE["tool_executor"]=False`` in
-``consultants/config.py`` exactly. This preserves the M12 parity
-guarantee: importing this module changes **no** runtime behavior.
+**M11c-5 (2026-05-17) flipped this role's default-on bit to
+``True``.** The two-part gate from the M11c plan cleared:
 
-The M11c-2 commit (the live skill-eval run + closeout) populates
-``RECOMMENDED_TOOL_EXECUTOR_MODEL`` from measured data and bumps
-the provenance stamps below. Whether ``RECOMMENDED_DEFAULT_ON``
-flips from ``False`` to ``True`` is gated by **both**:
-
-1. The bench winner passing the rubric (``pass_rate >= 70%``
-   AND ``avg_quality >= 3.5``).
-2. The x-tier composition decision (task #103) being resolved —
-   EITHER the engine refactor (Option 2: per-lane
-   ``awaiting_tool_results``) lands AND the role is safe at
-   x-tier, OR the role is explicitly documented as base-tier-only
-   (Option 1: doc deferral).
-
-When that two-part gate fires, ``RECOMMENDED_DEFAULT_ON`` flips
-True and a separate engine commit wires it into
-``DEFAULT_ENABLED_BY_ROLE`` so a default-config consultation
-gets the tool_executor role active. Until then this module is
-inert and the role remains opt-in.
+1. ✅ The M11c-2 bench winner cleared the rubric:
+   ``gemma4:31b-cloud`` at ``pass_rate=87.5%`` AND
+   ``avg_quality=5.00`` (won every tiebreaker among 4 tied
+   models). Baselines table in
+   ``docs/consultants-skill-eval-baselines.md``.
+2. ✅ Task #103 (x-tier proper composition) resolved via the
+   M11c-3 engine refactor (commit ``e62fd85``): per-lane
+   ``parent_lane_idx`` threading + the new
+   ``_fanout_after_tool_executor`` conditional edge replacing
+   the M6 unconditional ``tool_executor → researcher`` edge.
+   The headline no-cross-pollution test
+   (``test_two_researcher_lanes_three_items_each_no_pollution``)
+   is green; ``tests/test_consultants_v2_tool_executor_xtier_composition.py``
+   pins the contract for future regressions.
 
 Mirror pattern: this module is the tool_executor-side sibling of
 ``consultants/engine/coder_defaults.py`` and
@@ -33,11 +25,12 @@ Mirror pattern: this module is the tool_executor-side sibling of
 same "live config wins" rule (a TOML override in
 ``[role.tool_executor]`` always supersedes these constants).
 
-**Fallback for unknown configurations**: when
-``RECOMMENDED_DEFAULT_ON=False`` (M11c-1 state), no engine wiring
-fires from this module. The config layer reads
-``DEFAULT_ENABLED_BY_ROLE`` and ``DEFAULT_MODEL_BY_ROLE``
-unchanged from M6.
+**Override-out semantics**: setting ``[role.tool_executor]
+enabled = false`` in a config still disables the role (operators
+needing the M6-era researcher-with-inline-tool-subloop topology
+get that with one TOML line). The default change here only
+affects fresh configs without an explicit
+``[role.tool_executor].enabled`` declaration.
 """
 
 from __future__ import annotations
@@ -96,28 +89,30 @@ RECOMMENDED_TOOL_EXECUTOR_MODEL: str = "gemma4:31b-cloud"
 
 # Whether the role should be enabled by default.
 #
-# **M11c-2 decision**: stays ``False``. The bench winner cleared
-# part 1 of the gate (rubric pass: 87.5% / 5.00 — well above the
-# 70% / 3.5 floors). Part 2 (task #103 — x-tier proper
-# composition) is NOT yet resolved, so per the M11c plan
-# (``/root/.claude/plans/recursive-petting-planet.md``) the
-# default-on bit stays disabled until #103 lands:
+# **M11c-5 decision (2026-05-17): flipped to ``True``.** Both
+# parts of the M11c plan's two-part gate cleared:
 #
 # 1. ✅ Bench winner clears the rubric (``pass_rate=87.5%`` AND
-#    ``avg_quality=5.00``).
-# 2. ❌ Task #103 (x-tier proper composition) — NOT resolved.
-#    EITHER the engine refactor lands (Option 2) so the role
-#    composes correctly under multi-model researcher fanout, OR
-#    the role is explicitly documented as base-tier-only
-#    (Option 1 doc deferral) and runtime gates apply.
+#    ``avg_quality=5.00`` from M11c-2, commit ``235fe6c``).
+# 2. ✅ Task #103 (x-tier proper composition) resolved via the
+#    M11c-3 engine refactor (commit ``e62fd85``). The role
+#    composes cleanly under Phase 9 multi-model researcher
+#    fanout — each researcher lane's REPORT-mode prompt sees
+#    only its own ToolResults (verified by
+#    ``tests/test_consultants_v2_tool_executor_xtier_composition.py``).
 #
-# When part 2 resolves, a separate engine commit reads this
-# constant and wires it into the runtime's
-# ``DEFAULT_ENABLED_BY_ROLE`` lookup. Until then this stays
-# False — preserving the [[feedback_xtier_diversity_priority]]
-# constraint that Phase 9 multi-model researcher fanout is the
-# council's defining advantage and must NOT be auto-gated off.
-RECOMMENDED_DEFAULT_ON: bool = False
+# ``consultants/config.py:DEFAULT_ENABLED_BY_ROLE["tool_executor"]``
+# now reads ``True`` (atomic with this flip — the M12 parity test
+# ``test_scaffold_default_on_matches_runtime_default`` enforces
+# bit-for-bit alignment).
+#
+# Why the gate's part 2 mattered:
+# [[feedback_xtier_diversity_priority]] forbids auto-gating Phase
+# 9 multi-model researcher fanout because it's the council's
+# defining advantage. The M11c-3 refactor made tool_executor SAFE
+# at x-tier (no cross-pollution under N×M lanes), which is what
+# the gate required before flipping the default.
+RECOMMENDED_DEFAULT_ON: bool = True
 
 
 __all__ = [

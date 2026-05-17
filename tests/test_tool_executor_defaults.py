@@ -56,38 +56,43 @@ class TestToolExecutorDefaultsScaffoldShape(unittest.TestCase):
             "regressed",
         )
 
-    def test_recommended_default_on_still_false_pending_103(self) -> None:
-        """M11c-2 outcome: rubric clears (87.5% / 5.00), but task
-        #103 (x-tier proper composition) is NOT yet resolved, so
-        the default-on bit stays False per the two-part gate in
-        the M11c plan. When #103 closes (Option 1 doc deferral OR
-        Option 2 proper composition engine refactor), a separate
-        commit flips this to True and wires
-        ``DEFAULT_ENABLED_BY_ROLE["tool_executor"]`` accordingly.
-        """
-        self.assertEqual(ted.RECOMMENDED_DEFAULT_ON, False)
+    def test_recommended_default_on_true_after_103_resolved(self) -> None:
+        """M11c-5 outcome (2026-05-17): both parts of the gate
+        cleared — rubric pass at 87.5% / 5.00 (M11c-2), AND task
+        #103 (x-tier proper composition) resolved by the M11c-3
+        engine refactor (commit ``e62fd85``: per-lane
+        ``parent_lane_idx`` threading + the
+        ``_fanout_after_tool_executor`` conditional edge). The
+        default-on bit flipped to True; this test guards against
+        a regression back to False without re-evaluating the
+        two-part gate."""
+        self.assertEqual(ted.RECOMMENDED_DEFAULT_ON, True)
 
 
-class TestM12ParityGuarantee(unittest.TestCase):
-    """The critical guarantee: importing
-    ``tool_executor_defaults`` does NOT change the existing role
-    defaults the runtime reads. The engine wiring happens in a
-    separate M11c-2-or-later commit.
+class TestM11c5RuntimeDefault(unittest.TestCase):
+    """M11c-5 (2026-05-17) atomic flip of the runtime default.
+
+    The M12 parity guarantee from M11c-1 ("importing
+    ``tool_executor_defaults`` doesn't change runtime behavior")
+    no longer applies — M11c-5 deliberately changes the runtime
+    default. These tests pin the new state so a future commit
+    that quietly reverts the flip fails CI loudly.
     """
 
-    def test_default_enabled_by_role_unchanged(self) -> None:
-        """``DEFAULT_ENABLED_BY_ROLE["tool_executor"]`` must still
-        be ``False`` after importing this module — exactly what
-        M6 / current config layer shipped."""
+    def test_default_enabled_by_role_is_true(self) -> None:
+        """``DEFAULT_ENABLED_BY_ROLE["tool_executor"]`` is now
+        ``True`` — M11c-5 atomic flip. A fresh ConsultantsConfig
+        gets the tool_executor lane wired by default."""
         from consultants.config import DEFAULT_ENABLED_BY_ROLE
 
         self.assertEqual(
-            DEFAULT_ENABLED_BY_ROLE["tool_executor"], False,
+            DEFAULT_ENABLED_BY_ROLE["tool_executor"], True,
         )
 
     def test_default_model_by_role_unchanged(self) -> None:
-        """``DEFAULT_MODEL_BY_ROLE["tool_executor"]`` must still be
-        ``"gemma4:31b-cloud"`` (the M6 pick)."""
+        """``DEFAULT_MODEL_BY_ROLE["tool_executor"]`` stays
+        ``"gemma4:31b-cloud"`` — the M11c-2 bench confirmed the
+        M6 fallback was the right pick; no change here."""
         from consultants.config import DEFAULT_MODEL_BY_ROLE
 
         self.assertEqual(
@@ -95,15 +100,14 @@ class TestM12ParityGuarantee(unittest.TestCase):
         )
 
     def test_scaffold_default_on_matches_runtime_default(self) -> None:
-        """``RECOMMENDED_DEFAULT_ON`` should match the runtime's
-        ``DEFAULT_ENABLED_BY_ROLE["tool_executor"]`` bit-for-bit
-        for as long as the engine wiring hasn't fired. M11c-1
-        shipped the scaffold with both ``False``; M11c-2 kept
-        ``RECOMMENDED_DEFAULT_ON=False`` because task #103 isn't
-        resolved yet. When #103 closes and a separate commit
-        flips the bit, the engine wiring commit MUST update
-        ``DEFAULT_ENABLED_BY_ROLE`` in the same atomic change so
-        this test stays green."""
+        """``RECOMMENDED_DEFAULT_ON`` and
+        ``DEFAULT_ENABLED_BY_ROLE["tool_executor"]`` must agree
+        bit-for-bit. M11c-1 shipped both at False; M11c-2 left
+        them both at False (gate part 2 unresolved); M11c-5
+        flipped them both to True atomically. A future commit
+        that nudges one without the other (e.g. to disable the
+        role again) MUST touch both fields — this test guards
+        against drift."""
         from consultants.config import DEFAULT_ENABLED_BY_ROLE
 
         self.assertEqual(

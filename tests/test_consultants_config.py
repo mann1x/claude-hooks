@@ -40,12 +40,15 @@ class TestDefaults:
         cfg = cc.ConsultantsConfig()
         assert cc.validate_pipeline(cfg) is None
 
-    def test_opt_in_roles_disabled_by_default(self):
-        # M6 + M10: tool_executor and coder ship disabled. The rest
-        # stay enabled-by-default to preserve v1 behavior across the
-        # schema bump.
+    def test_opt_in_roles_default_state(self):
+        # M11c-5 (2026-05-17): tool_executor flipped to enabled-
+        # by-default after the M11c-2 bench cleared the rubric +
+        # M11c-3 resolved task #103 (x-tier proper composition).
+        # M10 coder stays disabled-by-default (different decision,
+        # gated by the operator opting into sandboxed file writes).
+        # Every other role stays enabled-by-default.
         cfg = cc.ConsultantsConfig()
-        assert cfg.roles["tool_executor"].enabled is False
+        assert cfg.roles["tool_executor"].enabled is True
         assert cfg.roles["coder"].enabled is False
         for r in cc.ROLES:
             if r in ("tool_executor", "coder"):
@@ -85,13 +88,16 @@ class TestDefaults:
         assert cfg.effort == cc.DEFAULT_EFFORT
         assert cfg.service.mode == cc.DEFAULT_SERVICE_MODE
         for r in cc.ROLES:
-            # tool_executor and coder both ship disabled-by-default
-            # AND carry role-specific model picks grounded in the
-            # skill-eval bench (M11c pending for tool_executor;
-            # M11b 2026-05-16 baseline for coder). Every other role
-            # tracks the global DEFAULT_MODEL.
+            # M11c-5 (2026-05-17): tool_executor enabled-by-
+            # default after the M11c-2 bench (gemma4:31b-cloud at
+            # 87.5% / 5.00) + M11c-3 #103 resolution. coder stays
+            # disabled-by-default (M10, gated separately by the
+            # operator opting into sandboxed file writes). Both
+            # carry role-specific model picks grounded in the
+            # skill-eval bench. Every other role tracks the global
+            # DEFAULT_MODEL.
             if r == "tool_executor":
-                assert cfg.roles[r].enabled is False
+                assert cfg.roles[r].enabled is True
                 assert cfg.roles[r].model == "gemma4:31b-cloud"
             elif r == "coder":
                 assert cfg.roles[r].enabled is False
@@ -275,8 +281,12 @@ class TestValidatePipeline:
         assert "planner / researcher" in err
 
     def test_enabled_roles_in_pipeline_order(self):
+        # M11c-5: tool_executor is now in the default enabled set.
+        # Disable it explicitly to keep this test focused on the
+        # critic-disable invariant (the pipeline-order contract).
         cfg = cc.ConsultantsConfig()
         cfg.roles["critic"].enabled = False
+        cfg.roles["tool_executor"].enabled = False
         order = cc.enabled_roles(cfg)
         assert order == ["planner", "researcher", "synthesizer"]
 

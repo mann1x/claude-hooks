@@ -221,18 +221,23 @@ DEFAULT_MODEL_BY_ROLE: dict[str, str] = {
 }
 
 
-# M6 + M10: tool_executor and coder ship disabled-by-default. Every
-# other role's RoleConfig starts ``enabled=True``; the runner strips
-# disabled roles from the compiled graph topology. Opting in is one
-# TOML line per role:
-#   [role.tool_executor]  enabled = true
+# M11c-5 (2026-05-17): tool_executor flipped to enabled-by-default
+# after the M11c-2 bench cleared the rubric (gemma4:31b-cloud at
+# 87.5% / 5.00) AND task #103 (x-tier proper composition) resolved
+# via the M11c-3 engine refactor. See
+# ``consultants/engine/tool_executor_defaults.py`` for the bench-
+# grounded provenance + the rationale recorded under
+# ``project_consultants_v2_103_proper_composition``.
+#
+# Coder remains disabled-by-default — different decision, gated by
+# the operator opting into sandboxed file writes. Opting in is one
+# TOML line:
 #   [role.coder]          enabled = true
-# Both default off because they fundamentally change council
-# behavior (delegated tool-call mechanics / sandboxed code writes);
-# the M11b/M11c benchmarks will produce the evidence for whether to
-# flip a future default.
+# Disabling tool_executor (if an operator needs the legacy
+# researcher-with-inline-tool-subloop topology) is also one line:
+#   [role.tool_executor]  enabled = false
 DEFAULT_ENABLED_BY_ROLE: dict[str, bool] = {
-    "tool_executor": False,
+    "tool_executor": True,
     "coder": False,
 }
 

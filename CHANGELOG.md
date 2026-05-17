@@ -16,6 +16,90 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Changed — `/consultants` v2 tool_executor flipped to enabled-by-default (M11c-5, 2026-05-17)
+
+The atomic flip of the two defaults that the M11c-1/2/3 sequence
+was building toward. **Both parts of the two-part gate from the
+M11c plan have now cleared**:
+
+1. ✅ **Rubric pass** (M11c-2, commit `235fe6c`):
+   `gemma4:31b-cloud` at `pass_rate=87.5%` AND
+   `avg_quality_score=5.00` — won every tiebreaker among 4
+   models tied on pass rate. Baselines row in
+   [`docs/consultants-skill-eval-baselines.md`](docs/consultants-skill-eval-baselines.md).
+2. ✅ **Task #103 (x-tier proper composition) resolved**
+   (M11c-3, commit `e62fd85`): per-lane `parent_lane_idx`
+   threading + the new `_fanout_after_tool_executor`
+   conditional edge replacing the M6 unconditional
+   `tool_executor → researcher` edge. The no-cross-pollution
+   contract is pinned by
+   [`tests/test_consultants_v2_tool_executor_xtier_composition.py`](tests/test_consultants_v2_tool_executor_xtier_composition.py).
+
+**The atomic flip**:
+
+- [`consultants/engine/tool_executor_defaults.py`](consultants/engine/tool_executor_defaults.py):
+  `RECOMMENDED_DEFAULT_ON: bool = True` (was `False`).
+- [`consultants/config.py`](consultants/config.py):
+  `DEFAULT_ENABLED_BY_ROLE["tool_executor"] = True` (was
+  `False`). The M11c-3 parity test
+  `test_scaffold_default_on_matches_runtime_default` enforces
+  bit-for-bit alignment between these two constants so a future
+  commit can't quietly desync them.
+
+**What this changes for users**:
+
+- A fresh `claude-consultants ask` run now compiles the graph
+  with the `tool_executor` lane wired. PLAN-mode researcher
+  delegates tool intents (`survey_project` / `list_files` /
+  `read_file` / `glob` / `grep` / `recall_memory`) to a
+  dedicated specialist running `gemma4:31b-cloud`, then folds
+  the cited evidence into REPORT mode.
+- The "researcher with inline tool subloop" topology of M6
+  remains accessible — set `[role.tool_executor].enabled =
+  false` in `~/.claude/consultants.toml` (one line) to revert
+  to the legacy shape.
+- x-tier (`xmedium` / `xhigh` / `xmax` / `xauto`) consultations
+  benefit from the M11c-3 proper-composition wiring: each
+  researcher lane in REPORT mode sees only its own
+  ToolResults, no cross-pollination from sibling lanes.
+
+**Test updates**:
+
+- `tests/test_tool_executor_defaults.py`:
+  `test_recommended_default_on_still_false_pending_103` →
+  `test_recommended_default_on_true_after_103_resolved`. Class
+  `TestM12ParityGuarantee` →
+  `TestM11c5RuntimeDefault` (the parity-guarantee framing
+  changed; the new class pins the new runtime state).
+- `tests/test_consultants_v2_parity.py`:
+  `test_tool_executor_role_disabled_by_default` →
+  `test_tool_executor_role_enabled_by_default`.
+- `tests/test_consultants_config.py`:
+  `test_opt_in_roles_disabled_by_default` →
+  `test_opt_in_roles_default_state`; the `coder`-only
+  disabled-by-default check stays. One pipeline-order test
+  gains an explicit `tool_executor.enabled = False` to keep
+  its focus on the critic-disable invariant.
+
+**Verification**:
+
+- Both envs full sweep: 3550 + 3629 passing, **zero
+  regressions** vs the M11c-3 baseline. Every test that pinned
+  the old `False` default was updated coherently — no silent
+  failures left behind.
+- M12 parity: 13 + 5 sub-tests / 22 + 12 sub-tests green with
+  the renamed assertion.
+- The M11c-3 stubbed x-tier composition suite (19 tests) stays
+  green — the engine wiring is unchanged from M11c-3, only the
+  default-on bit moved.
+
+**Live x-tier validation** belongs to M13 (task #102, still
+pending — the live-smoke milestone whose explicit purpose is
+full-council end-to-end verification including ops runbook +
+CHANGELOG cut). The skill-eval protocol explicitly carves out
+that the per-role bench does NOT exercise the full council; M13
+is the canonical home for that work.
+
 ### Changed — `/consultants` v2 tool_executor + x-tier proper composition (M11c-3, task #103, 2026-05-17)
 
 The engine refactor that makes the optional `tool_executor`
