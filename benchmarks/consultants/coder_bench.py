@@ -62,13 +62,13 @@ if str(_REPO_ROOT) not in sys.path:
 
 from benchmarks.consultants.harness import (  # noqa: E402
     HARNESS_VERSION, BenchQuestion, CoderTrial, SuiteManifest,
-    append_trial, build_judge_messages,
+    append_trial, build_judge_messages, build_meta_judge_messages,
     build_post_test_judge_messages, build_robustness_judge_messages,
     count_code_lines,
     estimate_cost, judge_lang_for_path, load_questions,
     load_suite_manifest, make_dry_run_loop_runner, measure_complexity,
     parse_constraint_tests, parse_judge_response,
-    run_pytest_against_sandbox,
+    parse_meta_judge_response, run_pytest_against_sandbox,
 )
 
 log = logging.getLogger("benchmarks.consultants.coder_bench")
@@ -346,6 +346,107 @@ def _audit_judge_trial(*, judge_chat_client, judge_model: str,
     return score, rationale, target_test, mode
 
 
+def _meta_judge_trial(*, judge_chat_client, judge_model: str,
+                      task: str, sandbox: Path, sandbox_path: str,
+                      judge_a_score: Optional[float],
+                      judge_a_rationale: str,
+                      judge_b_score: Optional[float],
+                      judge_b_rationale: str,
+                      judge_b_mode: str,
+                      test_results: dict,
+                      constraint_names: set,
+                      language: str, fence: str,
+                      ) -> tuple[Optional[float], str, str, str, str, str]:
+    """v1.0.1 meta judge: an out-of-cohort third judge that scores
+    the code AND evaluates the two prior judges' verdicts.
+
+    Returns ``(score, assessment, issue, rationale, meta_rationale, mode)``:
+      score             — float 1-5, None on parse failure
+      assessment        — categorical label (one of
+                          _META_JUDGE_ASSESSMENTS), "" on parse fail
+      issue             — short defect name, "none" if score=5
+      rationale         — one sentence justifying own score
+      meta_rationale    — one sentence on prior judges' calls
+      mode              — "meta_judge" / "skipped"
+
+    The meta judge sees ALL failing non-constraint tests (was: just
+    the first one in the initial design — user requested the full
+    failure picture so the meta judge isn't shown a narrow slice).
+    """
+    if judge_chat_client is None or not judge_model:
+        return None, "", "", "no meta judge configured", "", "skipped"
+    code_path = sandbox / sandbox_path
+    if not code_path.is_file():
+        return None, "", "", "code file not produced", "", "skipped"
+    try:
+        code = code_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return None, "", "", f"could not read produced file: {e}", "", "skipped"
+
+    # Collect ALL failing non-constraint (algorithm) tests with their
+    # truncated messages. ``build_meta_judge_messages`` caps the list
+    # at ``max_failing_tests`` so a runaway-recursion trial that
+    # tombstones every test doesn't blow up the prompt.
+    failing_tests: list[tuple[str, str]] = []
+    for name, r in test_results.items():
+        if name in constraint_names:
+            continue
+        if r.get("status") not in ("passed", "skipped"):
+            failing_tests.append((name, r.get("msg") or ""))
+
+    msgs = build_meta_judge_messages(
+        task=task, code=code,
+        judge_a_score=judge_a_score,
+        judge_a_rationale=judge_a_rationale,
+        judge_b_score=judge_b_score,
+        judge_b_rationale=judge_b_rationale,
+        judge_b_mode=judge_b_mode,
+        failing_tests=failing_tests,
+        language=language, fence=fence,
+    )
+
+    def _call_once() -> str:
+        try:
+            resp = judge_chat_client.chat({
+                "model": judge_model,
+                "messages": msgs,
+                "stream": False,
+            })
+        except Exception as e:
+            log.exception("meta judge call raised; treating as no-score")
+            raise RuntimeError(f"meta judge raised: {e}") from e
+        if not isinstance(resp, dict):
+            return ""
+        choices = resp.get("choices") or []
+        if not choices or not isinstance(choices[0], dict):
+            return ""
+        return (choices[0].get("message") or {}).get("content") or ""
+
+    try:
+        text = _call_once()
+    except RuntimeError as e:
+        return None, "", "", str(e), "", "meta_judge"
+    if not text.strip():
+        try:
+            text = _call_once()
+        except RuntimeError as e:
+            return None, "", "", f"meta judge empty then raised: {e}", "", "meta_judge"
+        if not text.strip():
+            return None, "", "", (
+                f"meta judge returned empty content twice "
+                f"(model={judge_model})"
+            ), "", "meta_judge"
+    score, assessment, issue, rationale, meta_rationale = (
+        parse_meta_judge_response(text)
+    )
+    if score is None and not rationale:
+        rationale = (
+            f"meta judge text unparseable "
+            f"(first 200 chars: {text.strip()[:200]!r})"
+        )
+    return score, assessment, issue, rationale, meta_rationale, "meta_judge"
+
+
 def _run_one_trial(*,
                    question: BenchQuestion, model: str,
                    idx: int,
@@ -355,6 +456,8 @@ def _run_one_trial(*,
                    judge_model: Optional[str],
                    audit_judge_chat_client,
                    audit_judge_model: Optional[str],
+                   meta_judge_chat_client,
+                   meta_judge_model: Optional[str],
                    output_dir: Path,
                    pytest_python: str) -> CoderTrial:
     """Execute one (question × model) trial.
@@ -631,6 +734,41 @@ def _run_one_trial(*,
             trial.quality_audit_judge_model = audit_judge_model
             trial.quality_audit_target_test = a_target
             trial.quality_audit_mode = a_mode
+
+        # v1.0.1 meta judge — an out-of-cohort third judge that
+        # scores the code AND evaluates the two prior judges. Fires
+        # after both prior judges have run, so the meta judge sees
+        # the full context: code + failure + judge A + judge B.
+        # Default model gemma4:31b-cloud (fast, not in the 5-model
+        # cohort under test) — true impartiality on every trial.
+        if (
+            meta_judge_chat_client is not None
+            and meta_judge_model
+        ):
+            language, fence = judge_lang_for_path(question.sandbox_path)
+            (m_score, m_asmt, m_issue,
+             m_rat, m_meta_rat, m_mode) = _meta_judge_trial(
+                judge_chat_client=meta_judge_chat_client,
+                judge_model=meta_judge_model,
+                task=question.task,
+                sandbox=produced_dir,
+                sandbox_path=question.sandbox_path,
+                judge_a_score=trial.quality_score,
+                judge_a_rationale=trial.quality_rationale,
+                judge_b_score=trial.quality_audit_score,
+                judge_b_rationale=trial.quality_audit_rationale,
+                judge_b_mode=trial.quality_audit_mode,
+                test_results=trial.test_results,
+                constraint_names=constraint_names,
+                language=language, fence=fence,
+            )
+            trial.quality_meta_score = m_score
+            trial.quality_meta_assessment = m_asmt
+            trial.quality_meta_issue = m_issue
+            trial.quality_meta_rationale = m_rat
+            trial.quality_meta_meta_rationale = m_meta_rat
+            trial.quality_meta_judge_model = meta_judge_model
+            trial.quality_meta_mode = m_mode
     return trial
 
 
@@ -641,20 +779,24 @@ def _run_one_trial(*,
 def _make_live_clients(models: list[str], ollama_base: str,
                        judge_model: Optional[str],
                        audit_judge_model: Optional[str] = None,
-                       ) -> tuple[dict, Any, Any]:
+                       meta_judge_model: Optional[str] = None,
+                       ) -> tuple[dict, Any, Any, Any]:
     """Build per-model ChatClients via
     ``make_agent_chat_client``. Returns
     ``(coder_clients_by_model, judge_client_or_None,
-    audit_judge_client_or_None)``.
+    audit_judge_client_or_None, meta_judge_client_or_None)``.
 
     Lazy import so dry-run mode works in envs without the full
     claude_hooks stack.
 
-    The audit judge gets its own ChatClient so retry counters +
-    inference-time accounting stay separate from the read-only
-    judge's. Pick a DIFFERENT model from ``judge_model`` to get
-    cross-judge cross-model robustness — if both judges are the
-    same model, the cross-judge variance signal collapses.
+    Each judge gets its own ChatClient so retry counters +
+    inference-time accounting stay attributable per role.
+
+    Pick the meta judge to be OUT-OF-COHORT (not in the ``models``
+    list) for true impartiality. Default v1.0.1 setup:
+      judge        = kimi-k2.6:cloud      (in cohort)
+      audit_judge  = glm-5.1:cloud        (in cohort)
+      meta_judge   = gemma4:31b-cloud     (OUT of cohort)
     """
     from claude_hooks.get_advice.chat_client import make_agent_chat_client
     coder_clients: dict[str, Any] = {}
@@ -668,7 +810,12 @@ def _make_live_clients(models: list[str], ollama_base: str,
         audit_judge_client = make_agent_chat_client(
             audit_judge_model, ollama_base,
         )
-    return coder_clients, judge_client, audit_judge_client
+    meta_judge_client = None
+    if meta_judge_model:
+        meta_judge_client = make_agent_chat_client(
+            meta_judge_model, ollama_base,
+        )
+    return coder_clients, judge_client, audit_judge_client, meta_judge_client
 
 
 # ============================================================== #
@@ -829,6 +976,7 @@ def run_bench(*,
               id_filter: Optional[set[str]],
               pytest_python: str,
               audit_judge_model: Optional[str] = None,
+              meta_judge_model: Optional[str] = None,
               commit_report: bool = False) -> int:
     """Execute the bench. Returns the count of trials run.
 
@@ -854,6 +1002,8 @@ def run_bench(*,
     )
     if audit_judge_model:
         metadata["audit_judge_model"] = audit_judge_model
+    if meta_judge_model:
+        metadata["meta_judge_model"] = meta_judge_model
     estimate = estimate_cost(questions, models, judge_model=judge_model)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "metadata.json").write_text(
@@ -880,20 +1030,24 @@ def run_bench(*,
     coder_clients_by_model: dict
     judge_client: Any
     audit_judge_client: Any
+    meta_judge_client: Any
     if mode == "dry-run":
         coder_clients_by_model = {
             m: _DryRunChatClient() for m in models
         }
         judge_client = None  # dry-run skips the judge call
         audit_judge_client = None
+        meta_judge_client = None
     else:
         if not ollama_base:
             raise SystemExit("--live requires --ollama-base")
         (coder_clients_by_model,
          judge_client,
-         audit_judge_client) = _make_live_clients(
+         audit_judge_client,
+         meta_judge_client) = _make_live_clients(
             models, ollama_base, judge_model,
             audit_judge_model=audit_judge_model,
+            meta_judge_model=meta_judge_model,
         )
 
     n_done = 0
@@ -920,6 +1074,8 @@ def run_bench(*,
                     judge_model=judge_model,
                     audit_judge_chat_client=audit_judge_client,
                     audit_judge_model=audit_judge_model,
+                    meta_judge_chat_client=meta_judge_client,
+                    meta_judge_model=meta_judge_model,
                     output_dir=output_dir,
                     pytest_python=pytest_python,
                 )
@@ -1096,6 +1252,20 @@ def build_parser() -> argparse.ArgumentParser:
               "audit=glm)."),
     )
     p.add_argument(
+        "--meta-judge-model", default="",
+        help=("v1.0.1: model used as the META judge — a THIRD, "
+              "out-of-cohort judge that scores the code AND "
+              "evaluates the two prior judges' verdicts. Sees task "
+              "+ code + failure (if any) + judge A and judge B's "
+              "scores and rationales; outputs SCORE + ASSESSMENT "
+              "(one of AGREE_WITH_A / AGREE_WITH_B / BOTH_RIGHT / "
+              "BOTH_WRONG / NEW_ISSUE) + own rationale + verdict on "
+              "the prior judges. Pick a model OUT OF the cohort "
+              "under test for true impartiality (default in v1.0.1: "
+              "gemma4:31b-cloud — fast, not in the 5-model cohort). "
+              "Set to '' to skip the meta judge (default)."),
+    )
+    p.add_argument(
         "--questions-dir", type=Path, default=DEFAULT_QUESTIONS_DIR,
         help=f"Directory of bench questions. Default: {DEFAULT_QUESTIONS_DIR}",
     )
@@ -1175,6 +1345,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         ollama_base=args.ollama_base if args.live else None,
         judge_model=args.judge_model or None,
         audit_judge_model=args.audit_judge_model or None,
+        meta_judge_model=args.meta_judge_model or None,
         tier_filter=tier_set,
         id_filter=id_set,
         pytest_python=args.pytest_python,

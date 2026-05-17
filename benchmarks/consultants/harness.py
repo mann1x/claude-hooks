@@ -462,6 +462,37 @@ class CoderTrial:
                                            # robustness mode: "".
     quality_audit_mode: str = "skipped"    # one of: "post_test" /
                                            # "robustness" / "skipped"
+    # v1.0.1: **meta judge** — a third judge that is intentionally
+    # OUT-OF-COHORT (default gemma4:31b-cloud, which is not in the
+    # 5-model cohort under test). Acts as an impartial arbiter:
+    # sees task + code + failing test (if any) + BOTH prior judges'
+    # scores and rationales, then produces:
+    #
+    #   quality_meta_score        — its own independent 1-5 score
+    #                               (same rubric as the audit judge)
+    #   quality_meta_assessment   — one of AGREE_WITH_A / AGREE_WITH_B /
+    #                               BOTH_RIGHT / BOTH_WRONG / NEW_ISSUE
+    #                               (A = read-only judge; B = audit)
+    #   quality_meta_rationale    — one sentence justifying own score
+    #   quality_meta_meta_rationale — one sentence on prior judges'
+    #                               calls (why agree/disagree)
+    #
+    # Use cases:
+    # - When judges A and B disagree, this column says who got it right.
+    # - When ASSESSMENT == BOTH_WRONG, the trial is a candidate for
+    #   human review — gemma saw something the in-cohort judges missed.
+    # - When ASSESSMENT == NEW_ISSUE, gemma identified a separate
+    #   problem neither judge caught.
+    quality_meta_score: Optional[float] = None
+    quality_meta_assessment: str = ""      # categorical (8 values; see
+                                           # _META_JUDGE_ASSESSMENTS)
+    quality_meta_issue: str = ""           # short defect name, or "none"
+                                           # if score=5
+    quality_meta_rationale: str = ""       # one-sentence: why this score
+    quality_meta_meta_rationale: str = ""  # one-sentence: verdict on the
+                                           # prior two judges
+    quality_meta_judge_model: str = ""     # which model judged
+    quality_meta_mode: str = "skipped"     # "meta_judge" / "skipped"
     # Bookkeeping
     sandbox_dir: str = ""
     timestamp: str = ""        # ISO-8601 UTC; set at trial start
@@ -1044,6 +1075,192 @@ def build_robustness_judge_messages(
     ]
 
 
+_META_JUDGE_ASSESSMENTS = (
+    "AGREE_WITH_A",   # A captures the real issue; B missed it
+    "AGREE_WITH_B",   # B captures the real issue; A missed it
+    "BOTH_RIGHT",     # both converged fully on the right call
+    "BOTH_WRONG",     # neither captured the real issue
+    "PARTIAL_A",      # A captured part; missed something important
+    "PARTIAL_B",      # B captured part; missed something important
+    "MIXED",          # each captured different facets; combined they cover it
+    "NEW_ISSUE",      # gemma sees something neither mentioned
+)
+
+
+def build_meta_judge_system(language: str = "Python") -> str:
+    """System prompt for the v1.0.1 **meta judge** — a third,
+    out-of-cohort judge that scores the code AND evaluates the
+    other two judges' verdicts.
+
+    Default model is gemma4:31b-cloud: fast, impartial (not in the
+    5-model cohort under test), competent at reading code even
+    when its own code-generation is weaker.
+
+    The output is structured to five lines so a small model can
+    produce it reliably — no nested JSON, no markdown. Five lines
+    (was four in the initial design) because the user requested an
+    explicit ISSUE: line on top of the rationale, so post-mortem
+    reports can extract a bug-name list across trials without
+    NLP-ing the rationale prose.
+    """
+    return (
+        f"You are a senior {language} code reviewer asked to provide "
+        "an IMPARTIAL ASSESSMENT of code produced by a junior "
+        "engineer. You are also given two PRIOR REVIEWS by other "
+        "reviewers (Judge A and Judge B). You have THREE jobs:\n\n"
+        "1. Score the code yourself on a 1-5 scale. Same rubric:\n"
+        "   1 — Broken at a fundamental level.\n"
+        "   2 — Obviously missed edge cases; basic review would catch.\n"
+        "   3 — Correct main case but missed an obvious edge case.\n"
+        "   4 — Mostly handles edge cases; narrow gap remains.\n"
+        "   5 — Robust. If a test failed it is an oracle/spec issue, "
+        "       not the code's fault.\n\n"
+        "2. Pick EXACTLY ONE assessment label that captures how the "
+        "two prior reviewers compare to your verdict:\n"
+        "   AGREE_WITH_A — A's verdict captures the real issue; "
+        "B missed it.\n"
+        "   AGREE_WITH_B — B's verdict captures the real issue; "
+        "A missed it.\n"
+        "   BOTH_RIGHT   — Both judges fully converged on the right call.\n"
+        "   BOTH_WRONG   — Neither captured the real issue.\n"
+        "   PARTIAL_A    — A captured part of the real issue but "
+        "missed something important.\n"
+        "   PARTIAL_B    — B captured part of the real issue but "
+        "missed something important.\n"
+        "   MIXED        — A and B each captured DIFFERENT facets of "
+        "the issue; alone each is partial, combined they cover it.\n"
+        "   NEW_ISSUE    — You see a specific issue NEITHER judge "
+        "mentioned.\n\n"
+        "3. Name the specific defect (or write 'none' when score=5).\n\n"
+        "Output EXACTLY five lines, in this order:\n"
+        "Line 1: ``SCORE: <integer 1-5>``\n"
+        "Line 2: ``ASSESSMENT: <label>``\n"
+        "Line 3: ``ISSUE: <short defect name, or 'none' if score=5>``\n"
+        "Line 4: One short sentence (max 25 words) justifying your score.\n"
+        "Line 5: One short sentence (max 25 words) on the prior reviewers.\n\n"
+        "Do not add preamble, headings, or markdown. Five lines, period."
+    )
+
+
+def build_meta_judge_messages(
+    task: str,
+    code: str,
+    judge_a_score: Optional[float],
+    judge_a_rationale: str,
+    judge_b_score: Optional[float],
+    judge_b_rationale: str,
+    judge_b_mode: str,
+    failing_tests: Optional[list[tuple[str, str]]] = None,
+    language: str = "Python",
+    fence: str = "python",
+    msg_chars: int = 200,
+    max_failing_tests: int = 6,
+) -> list[dict]:
+    """Construct the meta-judge conversation. Includes:
+      - task + code
+      - ALL failing non-constraint tests with truncated messages
+        (was: single test in the initial design — user requested
+        full failure context to avoid the meta judge being fed a
+        narrow slice of the failure picture)
+      - judge A (read-only) score + rationale
+      - judge B (audit) score + rationale + mode tag
+
+    ``failing_tests`` is a list of ``(test_name, failure_msg)``
+    tuples. Each msg is truncated to ``msg_chars`` chars. If more
+    than ``max_failing_tests`` are passed, only the first
+    ``max_failing_tests`` are rendered (prevents the prompt from
+    blowing up on a runaway-recursion trial that fails every
+    algorithm test — and the marginal signal from test #7 is small).
+
+    Empty / None scores render as ``(no score)`` so the prompt
+    still parses cleanly when one of the prior judges errored.
+    """
+    def _fmt_score(s):
+        if s is None:
+            return "(no score)"
+        return f"{int(s)}" if float(s).is_integer() else f"{s:.1f}"
+
+    failure_block = ""
+    if failing_tests:
+        fts = list(failing_tests)[:max_failing_tests]
+        elided = len(failing_tests) - len(fts)
+        lines = ["\nTESTS THAT FAILED (algorithm-only, constraint failures "
+                 "excluded):"]
+        for i, (name, msg) in enumerate(fts, 1):
+            msg_trunc = (msg or "").strip()[:msg_chars].replace("\n", " ")
+            lines.append(f"  {i}. {name}: {msg_trunc}")
+        if elided > 0:
+            lines.append(f"  ... [{elided} more failing tests elided]")
+        failure_block = "\n".join(lines) + "\n"
+
+    user = (
+        f"TASK GIVEN TO THE JUNIOR ENGINEER:\n{task.strip()}\n\n"
+        f"CODE THE JUNIOR PRODUCED:\n```{fence}\n{code}\n```\n"
+        f"{failure_block}\n"
+        f"JUDGE A's REVIEW (read-only — saw only the code):\n"
+        f"  SCORE: {_fmt_score(judge_a_score)}\n"
+        f"  RATIONALE: {(judge_a_rationale or '').strip() or '(empty)'}\n\n"
+        f"JUDGE B's REVIEW (audit, mode={judge_b_mode!r} — "
+        f"saw code + any failure context):\n"
+        f"  SCORE: {_fmt_score(judge_b_score)}\n"
+        f"  RATIONALE: {(judge_b_rationale or '').strip() or '(empty)'}\n\n"
+        "Score per the rubric, judge the prior reviewers, and name "
+        "the specific defect. Five lines only."
+    )
+    return [
+        {"role": "system", "content": build_meta_judge_system(language)},
+        {"role": "user", "content": user},
+    ]
+
+
+_META_ASSESSMENT_RE = re.compile(
+    r"^\s*ASSESSMENT\s*:\s*([A-Z_]+)", re.MULTILINE,
+)
+_META_ISSUE_RE = re.compile(
+    r"^\s*ISSUE\s*:\s*(.+?)\s*$", re.MULTILINE,
+)
+
+
+def parse_meta_judge_response(text: str) -> tuple[
+    Optional[float], str, str, str, str
+]:
+    """Parse the meta judge's 5-line output. Returns
+    ``(score, assessment, issue, rationale, meta_rationale)``.
+
+    Line 1: ``SCORE: <int>``         → ``score`` (float)
+    Line 2: ``ASSESSMENT: <label>``  → ``assessment`` (string, one
+                                       of _META_JUDGE_ASSESSMENTS or
+                                       whatever the model emitted)
+    Line 3: ``ISSUE: <defect>``      → ``issue`` (string, "none" if
+                                       the score was 5; arbitrary
+                                       short text otherwise)
+    Line 4: rationale                → ``rationale`` (string, why
+                                       I scored what I scored)
+    Line 5: prior-reviewers verdict  → ``meta_rationale`` (string,
+                                       verdict on the prior judges)
+
+    Tolerant of:
+    - Extra blank lines between fields
+    - SCORE / ASSESSMENT / ISSUE emitted in different order
+    - Models that drop a line (then that field is empty)
+    """
+    if not text or not isinstance(text, str):
+        return None, "", "", "", ""
+    score, _ = parse_judge_response(text)
+    m_asmt = _META_ASSESSMENT_RE.search(text)
+    assessment = m_asmt.group(1) if m_asmt else ""
+    m_issue = _META_ISSUE_RE.search(text)
+    issue = m_issue.group(1).strip()[:220] if m_issue else ""
+    # Strip the structured lines; remainder is rationale + meta_rationale.
+    body = re.sub(_JUDGE_SCORE_RE, "", text, count=1)
+    body = re.sub(_META_ASSESSMENT_RE, "", body, count=1)
+    body = re.sub(_META_ISSUE_RE, "", body, count=1)
+    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+    rationale = lines[0][:220] if lines else ""
+    meta_rationale = lines[1][:220] if len(lines) >= 2 else ""
+    return score, assessment, issue, rationale, meta_rationale
+
+
 def build_post_test_judge_messages(
     task: str,
     code: str,
@@ -1219,6 +1436,8 @@ __all__ = [
     "build_judge_system",
     "build_post_test_judge_messages",
     "build_post_test_judge_system",
+    "build_meta_judge_messages",
+    "build_meta_judge_system",
     "build_robustness_judge_messages",
     "build_robustness_judge_system",
     "count_code_lines",
@@ -1230,5 +1449,6 @@ __all__ = [
     "make_dry_run_loop_runner",
     "measure_complexity",
     "parse_judge_response",
+    "parse_meta_judge_response",
     "run_pytest_against_sandbox",
 ]
