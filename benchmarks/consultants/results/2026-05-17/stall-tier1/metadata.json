@@ -1,0 +1,108 @@
+{
+  "harness_version": "1.0",
+  "suite": "stall",
+  "suite_version": "1.0",
+  "suite_hash": "c8306c6204bc013a50a516dc388601072336aee152ccdc5629092b3208f6742d",
+  "suite_released": "2026-05-17",
+  "rubric": {
+    "stall_margin_factor": 2.5,
+    "hardcap_margin_factor": 3.0,
+    "stall_min_s": 30.0,
+    "stall_max_s": 600.0,
+    "stall_round_s": 30.0,
+    "hardcap_min_s": 300.0,
+    "hardcap_max_s": 3600.0,
+    "hardcap_round_s": 60.0
+  },
+  "models": [
+    "glm-5.1:cloud",
+    "kimi-k2.6:cloud",
+    "gemma4:31b-cloud",
+    "qwen3-coder-next:cloud",
+    "deepseek-v4-pro:cloud",
+    "deepseek-v4-flash:cloud",
+    "gemini-3-flash-preview:cloud"
+  ],
+  "mode": "live",
+  "ollama_base": "http://192.168.178.2:11433",
+  "tier1_enabled": true,
+  "tier2_enabled": false,
+  "tier1_trials": 3,
+  "tier2_trials": 2,
+  "git_commit": "bcb18850747f1bc1df50c3a975bfbb1302bee814",
+  "started_at": "2026-05-17T15:18:06Z",
+  "questions": [
+    "council-gpqa-01-physics",
+    "council-gpqa-02-biology",
+    "council-synth-01-proxy-log-rca",
+    "council-synth-02-two-stack-tradeoff",
+    "standalone-01-research-synth",
+    "standalone-02-compare-architectures",
+    "standalone-03-summarize-paper",
+    "standalone-04-explain-tradeoff"
+  ],
+  "estimate": {
+    "trials": 168,
+    "by_model": {
+      "glm-5.1:cloud": {
+        "trials_tier1": 24,
+        "trials_tier2": 0,
+        "chat_calls": 24,
+        "prompt_tokens": 36000,
+        "completion_tokens": 19200,
+        "total_tokens": 55200
+      },
+      "kimi-k2.6:cloud": {
+        "trials_tier1": 24,
+        "trials_tier2": 0,
+        "chat_calls": 24,
+        "prompt_tokens": 36000,
+        "completion_tokens": 19200,
+        "total_tokens": 55200
+      },
+      "gemma4:31b-cloud": {
+        "trials_tier1": 24,
+        "trials_tier2": 0,
+        "chat_calls": 24,
+        "prompt_tokens": 36000,
+        "completion_tokens": 19200,
+        "total_tokens": 55200
+      },
+      "qwen3-coder-next:cloud": {
+        "trials_tier1": 24,
+        "trials_tier2": 0,
+        "chat_calls": 24,
+        "prompt_tokens": 36000,
+        "completion_tokens": 19200,
+        "total_tokens": 55200
+      },
+      "deepseek-v4-pro:cloud": {
+        "trials_tier1": 24,
+        "trials_tier2": 0,
+        "chat_calls": 24,
+        "prompt_tokens": 36000,
+        "completion_tokens": 19200,
+        "total_tokens": 55200
+      },
+      "deepseek-v4-flash:cloud": {
+        "trials_tier1": 24,
+        "trials_tier2": 0,
+        "chat_calls": 24,
+        "prompt_tokens": 36000,
+        "completion_tokens": 19200,
+        "total_tokens": 55200
+      },
+      "gemini-3-flash-preview:cloud": {
+        "trials_tier1": 24,
+        "trials_tier2": 0,
+        "chat_calls": 24,
+        "prompt_tokens": 36000,
+        "completion_tokens": 19200,
+        "total_tokens": 55200
+      }
+    },
+    "total_tokens": 386400,
+    "summary_line": "7 models \u00d7 8 questions \u00d7 (3t1+0t2) = 168 trials [tier1]. ~0.39M tokens estimated.",
+    "tiers": "tier1"
+  }
+}

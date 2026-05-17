@@ -62,13 +62,56 @@ class TestStallDefaultsScaffoldShape(unittest.TestCase):
         self.assertEqual(sd.RECOMMENDED_DEFAULT_STALL.stall_threshold_s, 300.0)
         self.assertEqual(sd.RECOMMENDED_DEFAULT_STALL.hard_cap_s, 3600.0)
 
-    def test_per_model_map_empty_in_scaffold(self) -> None:
-        """M11a-1: every model falls through to the global default.
-        M11a-2 will add entries; updating this test to assert that
-        the entries match the baselines.md row is part of the
-        M11a-2 deliverable.
+    def test_per_model_map_populated_from_m11a2_tier1(self) -> None:
+        """M11a-2 (Tier 1 live run, 2026-05-17) populated the
+        per-model map with seven entries — the M11b-mlang cohort
+        plus gemini-3-flash-preview, matching the table in
+        ``docs/consultants-skill-eval-baselines.md``.
         """
-        self.assertEqual(sd.RECOMMENDED_STALL_THRESHOLDS_BY_MODEL, {})
+        expected_models = {
+            "glm-5.1:cloud",
+            "kimi-k2.6:cloud",
+            "gemma4:31b-cloud",
+            "qwen3-coder-next:cloud",
+            "deepseek-v4-pro:cloud",
+            "deepseek-v4-flash:cloud",
+            "gemini-3-flash-preview:cloud",
+        }
+        self.assertEqual(
+            set(sd.RECOMMENDED_STALL_THRESHOLDS_BY_MODEL.keys()),
+            expected_models,
+        )
+
+    def test_kimi_threshold_higher_than_global_default(self) -> None:
+        """The headline finding of the M11a-2 Tier-1 live run: kimi
+        needs ``stall_threshold_s > 300`` (the global default).
+        This test locks that empirical fact — if a future run
+        gives kimi a different default, the regression flag should
+        fire so the operator confirms intentional drift."""
+        kimi = sd.RECOMMENDED_STALL_THRESHOLDS_BY_MODEL["kimi-k2.6:cloud"]
+        self.assertGreater(
+            kimi.stall_threshold_s,
+            sd.RECOMMENDED_DEFAULT_STALL.stall_threshold_s,
+        )
+        # Locked exact value from the M11a-2 closeout.
+        self.assertEqual(kimi.stall_threshold_s, 390.0)
+        self.assertEqual(kimi.hard_cap_s, 540.0)
+
+    def test_deepseek_flash_hard_cap_above_300(self) -> None:
+        """Second headline finding: deepseek-v4-flash's p99 wall
+        (256 s) pushed its hard_cap_s above the 300 s floor."""
+        ds = sd.RECOMMENDED_STALL_THRESHOLDS_BY_MODEL[
+            "deepseek-v4-flash:cloud"
+        ]
+        self.assertEqual(ds.stall_threshold_s, 210.0)
+        self.assertEqual(ds.hard_cap_s, 780.0)
+
+    def test_provenance_stamps_populated(self) -> None:
+        """M11a-2 fills the suite-hash prefix the scaffold left
+        empty + bumps the AS_OF stamp to the live-run date."""
+        self.assertEqual(sd.RECOMMENDED_SUITE_HASH_PREFIX, "c8306c62")
+        self.assertEqual(sd.RECOMMENDED_AS_OF, "2026-05-17")
+        self.assertEqual(sd.RECOMMENDED_TIER_MIX, "tier1-only")
 
 
 class TestStallDefaultsResolver(unittest.TestCase):
@@ -89,18 +132,34 @@ class TestStallDefaultsResolver(unittest.TestCase):
         )
 
     def test_unknown_model_returns_default(self) -> None:
+        """Any model NOT in
+        ``RECOMMENDED_STALL_THRESHOLDS_BY_MODEL`` falls through
+        to the global default. M11a-2 populated the in-cohort
+        models; everything else still falls through.
+        """
         for model in (
-            "glm-5.1:cloud",
-            "kimi-k2.6:cloud",
-            "gemma4:31b-cloud",
-            "gemini-3-flash-preview:cloud",
             "made-up-model:v0",
+            "claude-3-opus:cloud",
+            "gpt-5:cloud",
+            "out-of-cohort:v1",
         ):
             with self.subTest(model=model):
                 self.assertEqual(
                     sd.resolve_stall_thresholds(model),
                     sd.RECOMMENDED_DEFAULT_STALL,
                 )
+
+    def test_known_model_returns_per_model_override(self) -> None:
+        """Inverse of the unknown-model test: in-cohort models
+        get their per-model entry from the map, NOT the global
+        default."""
+        kimi = sd.resolve_stall_thresholds("kimi-k2.6:cloud")
+        self.assertIsNot(kimi, sd.RECOMMENDED_DEFAULT_STALL)
+        self.assertEqual(kimi.stall_threshold_s, 390.0)
+
+        glm = sd.resolve_stall_thresholds("glm-5.1:cloud")
+        self.assertIsNot(glm, sd.RECOMMENDED_DEFAULT_STALL)
+        self.assertEqual(glm.stall_threshold_s, 90.0)
 
     def test_resolver_returns_same_object_when_no_override(self) -> None:
         """Identity is intentional — the resolver returns the
@@ -109,7 +168,7 @@ class TestStallDefaultsResolver(unittest.TestCase):
         callers can't mutate it.
         """
         self.assertIs(
-            sd.resolve_stall_thresholds("anything"),
+            sd.resolve_stall_thresholds("never-seen-this-model:v0"),
             sd.RECOMMENDED_DEFAULT_STALL,
         )
 
@@ -147,6 +206,7 @@ class TestStallDefaultsPublicSurface(unittest.TestCase):
             "RECOMMENDED_AS_OF",
             "RECOMMENDED_SUITE_VERSION",
             "RECOMMENDED_SUITE_HASH_PREFIX",
+            "RECOMMENDED_TIER_MIX",
             "RECOMMENDED_DEFAULT_STALL",
             "RECOMMENDED_STALL_THRESHOLDS_BY_MODEL",
             "resolve_stall_thresholds",

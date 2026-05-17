@@ -211,6 +211,84 @@ No live cloud calls (M13 owns that story). No new instrumentation
 in production code — the suite uses the existing surface end-to-
 end. No M14 / TTL work.
 
+### Added — Stall skill-eval Tier-1 live baseline + populated stall_defaults.py (M11a-2, task #99, 2026-05-17)
+
+The Tier-1 closeout of the M11a-1 bench harness: 84 trials (7
+cohort models × 4 standalone questions × 3 trials each) against
+the live `192.168.178.2:11433` Ollama-Pro proxy, 61 min total
+wall, **zero errors**. The 7 cohort models match the M11b-mlang
+baseline plus `gemini-3-flash-preview:cloud` (the model that
+triggered the 2026-05-15 audit-session pathology).
+
+**Headline finding**: `kimi-k2.6:cloud` measured p99 TTFT
+**150 s**, which derives a recommended `stall_threshold_s=390`
+— **higher than the existing global default of 300 s**. This
+is empirical proof that the M3 detector's current global default
+would have falsely tripped `STARTUP_STALL` on kimi calls
+periodically. The bench's premise validated.
+
+**Second finding**: `deepseek-v4-flash:cloud` produced a p99
+inter-token gap of **4534 ms** and a p99 wall of **256 s** —
+both indicate the model has cadence pathology even when not
+fully stalled. Derived `hard_cap_s=780` (above the 300 s floor).
+
+**Populated per-model thresholds** in
+[`consultants/engine/stall_defaults.py`](consultants/engine/stall_defaults.py):
+
+| Model | `stall_threshold_s` | `hard_cap_s` |
+|------|---:|---:|
+| `glm-5.1:cloud`              |  90 | 300 |
+| `kimi-k2.6:cloud`            | **390** | **540** |
+| `gemma4:31b-cloud`           |  30 | 300 |
+| `qwen3-coder-next:cloud`     |  30 | 300 |
+| `deepseek-v4-pro:cloud`      | 150 | 300 |
+| `deepseek-v4-flash:cloud`    | 210 | **780** |
+| `gemini-3-flash-preview:cloud` |  30 | 300 |
+
+Out-of-cohort models fall through to `RECOMMENDED_DEFAULT_STALL`
+= `(300, 3600)` (matching the existing `control.py` globals) so
+the M12 parity guarantee holds bit-for-bit for any model not yet
+measured.
+
+**Tier 2 deferred**. Tier 1 already produces clearly
+differentiated per-model recommendations; we hold Tier 2 (full
+council under load) for if real-world usage flags problems with
+these Tier-1-derived defaults. Re-run is a single CLI invocation:
+`claude-consultants skill-eval stall --live --tier2
+--accept-cost`.
+
+**Provenance** baked into `stall_defaults.py`:
+- `RECOMMENDED_AS_OF = "2026-05-17"`
+- `RECOMMENDED_SUITE_VERSION = "1.0"`
+- `RECOMMENDED_SUITE_HASH_PREFIX = "c8306c62"`
+- `RECOMMENDED_TIER_MIX = "tier1-only"`
+
+**No engine-side wiring change in this commit**. The runner /
+researcher still reads `runtime_control.stall_threshold_s` /
+`per_lane_hard_s` from RuntimeControl as before; wiring
+`resolve_stall_thresholds(model)` into the RuntimeControl
+defaults is a separate plumbing decision (the constants are
+imported and available; the wiring belongs in a follow-up
+commit that owns the cross-module ripple).
+
+**Tests**. Updated `tests/test_stall_defaults.py` to assert the
+populated map shape:
+- All 7 cohort models present.
+- `kimi-k2.6:cloud.stall_threshold_s > global default` (the
+  headline finding as a regression flag).
+- `deepseek-v4-flash:cloud` carries the elevated hard_cap.
+- Resolver returns the per-model override for in-cohort models,
+  the global default for out-of-cohort.
+- Provenance constants stamped correctly.
+
+**Artifacts**:
+- Results dir:
+  [`benchmarks/consultants/results/2026-05-17/stall-tier1/`](benchmarks/consultants/results/2026-05-17/stall-tier1/)
+  (`metadata.json` + `trials.jsonl` + `report.md` + `run.log`).
+- Baselines table row in
+  [`docs/consultants-skill-eval-baselines.md`](docs/consultants-skill-eval-baselines.md)
+  (Stall thresholds section).
+
 ### Added — Stall skill-eval bench harness (M11a-1, task #99, 2026-05-17)
 
 The Consultancy Skill-Eval Protocol's **stall** sub-protocol —

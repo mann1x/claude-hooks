@@ -91,13 +91,69 @@ Override surface (task #111):
 
 ## Stall thresholds
 
-The stall suite (M11a, not yet shipped) will gate per-model
-`stall_threshold_s` and `hard_cap_s` defaults in
-`consultants/engine/stall_defaults.py`.
+The stall suite (M11a) gates per-model `stall_threshold_s` and
+`hard_cap_s` defaults in
+[`consultants/engine/stall_defaults.py`](../consultants/engine/stall_defaults.py).
 
-| Date | Suite ver. | Model | inter-token p99 | recommended stall_s | recommended hard_cap_s | Suite hash | Notes |
-|------|-----------:|-------|-----------------|---------------------|------------------------|------------|-------|
-| _M11a not yet shipped_ |
+| Date       | Suite ver. | Model                          | p99 TTFT (ms) | p99 inter (ms) | p99 wall (s) | recommended stall_s | recommended hard_cap_s | Suite hash | Notes |
+|------------|-----------:|--------------------------------|--------------:|---------------:|-------------:|--------------------:|-----------------------:|------------|-------|
+| 2026-05-17 |        1.0 | `glm-5.1:cloud`                |       29 891 |          1 269 |         41.6 |                  90 |                    300 | `c8306c62` | Tier-1 only; balanced startup + cadence |
+| 2026-05-17 |        1.0 | `kimi-k2.6:cloud`              |    **150 376** |            815 |        166.7 |             **390** |                    540 | `c8306c62` | **stall_s > global 300 — current default would falsely STARTUP_STALL on kimi cold calls.** Headline M11a finding. |
+| 2026-05-17 |        1.0 | `gemma4:31b-cloud`             |         5 192 |       **3 895** |         82.6 |                  30 |                    300 | `c8306c62` | Fast startup but heavy inter-token spikes — clamped at 30 s stall floor |
+| 2026-05-17 |        1.0 | `qwen3-coder-next:cloud`       |           390 |            699 |         22.2 |                  30 |                    300 | `c8306c62` | Fastest in cohort; clamps at floor on both axes |
+| 2026-05-17 |        1.0 | `deepseek-v4-pro:cloud`        |        54 504 |            240 |         79.5 |                 150 |                    300 | `c8306c62` | Cleanest cadence in cohort (p99 inter just 240 ms) |
+| 2026-05-17 |        1.0 | `deepseek-v4-flash:cloud`      |        79 662 |       **4 534** |    **255.5** |                 210 |                **780** | `c8306c62` | Big inter-token spike + slowest p99 wall; raised hard_cap above floor |
+| 2026-05-17 |        1.0 | `gemini-3-flash-preview:cloud` |         6 828 |            266 |         14.9 |                  30 |                    300 | `c8306c62` | Snappiest among the "slow startup" cohort — surprising; cold-start TTFT only ~5 s |
+
+### Methodology
+
+Suite v1.0 (8 questions: 4 standalone + 2 council-synth + 2
+council-gpqa). **This baseline is Tier-1 only** (84 trials =
+7 models × 4 standalone questions × 3 trials). Tier 2
+(fake-consultancy) is deferred — Tier 1 already produced clearly
+differentiated per-model recommendations. If a model's real-world
+usage flags problems, re-run with `--tier2` or `--both` to refine
+under realistic council load.
+
+Derivation rule:
+```
+stall_threshold_s = max(p99_inter_token_ms, p99_ttft_ms) * 2.5,
+                    rounded up to the nearest 30 s,
+                    floored at 30 s, ceiled at 600 s.
+hard_cap_s        = p99(wall_s) * 3.0,
+                    rounded up to the nearest 60 s,
+                    floored at 300 s, ceiled at 3600 s.
+```
+
+Multipliers + clamps live in
+[`benchmarks/consultants/questions/stall/SUITE.md`](../benchmarks/consultants/questions/stall/SUITE.md)
+under `rubric:`.
+
+### Out-of-cohort models
+
+Models NOT in the table above fall through to
+`RECOMMENDED_DEFAULT_STALL = (300, 3600)` — the existing global
+defaults from `consultants/engine/control.py`. To bake a new
+model's threshold in, add it to the cohort and re-run:
+
+```bash
+claude-consultants skill-eval stall --live --tier1 \
+    --models <existing-cohort>,<new-model:v0> \
+    --accept-cost
+```
+
+Or override at runtime with a TOML config:
+
+```toml
+[runtime]
+stall_threshold_s = 500   # wins over stall_defaults.py
+```
+
+### Bench artifacts
+
+- Results dir: [`benchmarks/consultants/results/2026-05-17/stall-tier1/`](../benchmarks/consultants/results/2026-05-17/stall-tier1/)
+- Bench commit: `bcb1885` (M11a-1 harness landing).
+- Live-run commit: see the M11a-2 commit that appended this section.
 
 ---
 
