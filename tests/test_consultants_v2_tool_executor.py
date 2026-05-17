@@ -54,6 +54,10 @@ class TestToolPlanItem(unittest.TestCase):
         self.assertEqual(item.intent, "find function X")
         self.assertEqual(item.why, "")
         self.assertIsNone(item.lane_idx)
+        # #103: parent_lane_idx defaults to None — the single-
+        # researcher / pre-refactor path. The fanback router
+        # treats None lanes as "no per-researcher filter needed".
+        self.assertIsNone(item.parent_lane_idx)
         self.assertEqual(item.parent_round, 1)
         self.assertEqual(item.suggested_tools, [])
 
@@ -62,10 +66,15 @@ class TestToolPlanItem(unittest.TestCase):
             intent="audit auth",
             why="user asked about session security",
             lane_idx=3,
+            parent_lane_idx=5,
             parent_round=2,
             suggested_tools=["grep", "read_file"],
         )
         self.assertEqual(item.lane_idx, 3)
+        # #103: parent_lane_idx records WHICH researcher lane
+        # emitted this plan item — the globally-unique lane_idx
+        # from Phase 9 multi-model researcher fanout.
+        self.assertEqual(item.parent_lane_idx, 5)
         self.assertEqual(item.parent_round, 2)
         self.assertEqual(item.suggested_tools, ["grep", "read_file"])
 
@@ -82,16 +91,23 @@ class TestToolResult(unittest.TestCase):
         self.assertEqual(r.intent, "x")
         self.assertEqual(r.content, "")
         self.assertEqual(r.tools_called, [])
+        # #103: parent_lane_idx defaults to None on legacy /
+        # single-researcher results.
+        self.assertIsNone(r.parent_lane_idx)
         self.assertIsNone(r.error)
 
     def test_tombstone_shape(self):
         r = ToolResult(
             intent="audit", content="",
             error="RuntimeError: boom",
-            lane_idx=2, parent_round=1,
+            lane_idx=2, parent_lane_idx=5, parent_round=1,
         )
         self.assertEqual(r.error, "RuntimeError: boom")
         self.assertEqual(r.content, "")
+        # #103: parent_lane_idx round-trips even on tombstones
+        # so the post-mortem can attribute failures to a specific
+        # researcher lane.
+        self.assertEqual(r.parent_lane_idx, 5)
 
 
 # ============================================================== #
@@ -117,6 +133,95 @@ class TestToolResultsForRound(unittest.TestCase):
         self.assertEqual(tool_results_for_round({}, 1), [])
         self.assertEqual(
             tool_results_for_round({"tool_results": []}, 1), [],
+        )
+
+    # ---- #103: parent_lane_idx filter overload ---------------------
+
+    def test_parent_lane_filter_matches_own_lane(self):
+        """Passing ``parent_lane_idx=N`` filters to results whose
+        parent_lane_idx equals N — the #103 cross-pollution fix
+        in action."""
+        state = {"tool_results": [
+            ToolResult(intent="a", parent_round=1, parent_lane_idx=5),
+            ToolResult(intent="b", parent_round=1, parent_lane_idx=7),
+            ToolResult(intent="c", parent_round=2, parent_lane_idx=5),
+        ]}
+        lane5_r1 = tool_results_for_round(state, 1, parent_lane_idx=5)
+        self.assertEqual([r.intent for r in lane5_r1], ["a"])
+        lane7_r1 = tool_results_for_round(state, 1, parent_lane_idx=7)
+        self.assertEqual([r.intent for r in lane7_r1], ["b"])
+        lane5_r2 = tool_results_for_round(state, 2, parent_lane_idx=5)
+        self.assertEqual([r.intent for r in lane5_r2], ["c"])
+
+    def test_parent_lane_none_returns_every_match_for_round(self):
+        """Passing ``parent_lane_idx=None`` (the default) is the
+        pre-#103 contract: return every result for the round
+        regardless of which lane emitted it. Used by the single-
+        researcher non-fanout path."""
+        state = {"tool_results": [
+            ToolResult(intent="a", parent_round=1, parent_lane_idx=5),
+            ToolResult(intent="b", parent_round=1, parent_lane_idx=7),
+            ToolResult(intent="c", parent_round=2, parent_lane_idx=5),
+        ]}
+        all_r1 = tool_results_for_round(state, 1)
+        self.assertEqual([r.intent for r in all_r1], ["a", "b"])
+        all_r1_explicit = tool_results_for_round(
+            state, 1, parent_lane_idx=None,
+        )
+        self.assertEqual(
+            [r.intent for r in all_r1_explicit], ["a", "b"],
+        )
+
+    def test_legacy_none_parent_lane_returns_to_every_filter(self):
+        """A ToolResult with ``parent_lane_idx is None`` is the
+        legacy / pre-#103 shape — it must surface to every lane
+        filter rather than getting masked. Critical for the
+        rollout: in-flight checkpoints with None values keep
+        producing correct REPORT-mode prompts under the new
+        engine wiring."""
+        state = {"tool_results": [
+            ToolResult(intent="own", parent_round=1, parent_lane_idx=5),
+            ToolResult(
+                intent="legacy", parent_round=1, parent_lane_idx=None,
+            ),
+            ToolResult(
+                intent="sibling", parent_round=1, parent_lane_idx=7,
+            ),
+        ]}
+        lane5 = tool_results_for_round(state, 1, parent_lane_idx=5)
+        self.assertEqual([r.intent for r in lane5], ["own", "legacy"])
+        # The sibling's stamped non-None value must be filtered out.
+        self.assertNotIn(
+            "sibling", [r.intent for r in lane5],
+        )
+
+    def test_parent_lane_filter_no_match_returns_empty(self):
+        """A parent_lane_idx that doesn't match any result and
+        no legacy-None rows present returns the empty list (not
+        an exception)."""
+        state = {"tool_results": [
+            ToolResult(intent="x", parent_round=1, parent_lane_idx=5),
+        ]}
+        self.assertEqual(
+            tool_results_for_round(state, 1, parent_lane_idx=99), [],
+        )
+        # Round mismatch with lane filter is also empty.
+        self.assertEqual(
+            tool_results_for_round(state, 2, parent_lane_idx=5), [],
+        )
+
+    def test_parent_lane_filter_preserves_emission_order(self):
+        """Round-filter is order-preserving so REPORT-mode prompts
+        render ToolResults in the order tool_executor returned
+        them. Verifies the parent_lane_idx filter doesn't shuffle."""
+        state = {"tool_results": [
+            ToolResult(intent="first", parent_round=1, parent_lane_idx=5),
+            ToolResult(intent="second", parent_round=1, parent_lane_idx=5),
+            ToolResult(intent="third", parent_round=1, parent_lane_idx=5),
+        ]}
+        out = tool_results_for_round(state, 1, parent_lane_idx=5)
+        self.assertEqual(
+            [r.intent for r in out], ["first", "second", "third"],
         )
 
 

@@ -1165,25 +1165,35 @@ def researcher_node(state: dict, *,
     # alternates between two single-shot LLM calls:
     #
     #   PLAN MODE  — first entry of this research cycle.
-    #     Append the PLAN_MODE_BLOCK to the user message,
-    #     call chat once (no agent_loop, no tools_available),
-    #     parse the JSON ``tool_plan`` from the response, return
-    #     {"tool_plan": [items], "awaiting_tool_results": True}.
-    #     The graph fans out one tool_executor Send per item.
+    #     Append the PLAN_MODE_BLOCK to the user message, call
+    #     chat once (no agent_loop, no tools_available), parse
+    #     the JSON ``tool_plan`` from the response, return
+    #     ``{"tool_plan": [items]}`` with each item stamped with
+    #     this lane's ``parent_lane_idx`` (#103). The graph fans
+    #     out one tool_executor Send per item.
     #
     #   REPORT MODE — re-entry after lanes complete.
     #     Append the PRIOR TOOL RESULTS block (rendered from
-    #     ``tool_results_for_round(state, this_round)``) to the
-    #     user message, call chat once, return the v1 shape
-    #     {"research": [text], "awaiting_tool_results": False,
-    #      "research_rounds_used": 1}.
+    #     ``tool_results_for_round(state, this_round,
+    #     parent_lane_idx=lane_idx)``) to the user message, call
+    #     chat once, return the v1 shape ``{"research": [text],
+    #     "research_rounds_used": 1}``.
     #
     # The mode is decided by whether tool_results exist for
-    # ``this_round``: if any do, the lanes already ran for this
-    # round and we're consuming their output (REPORT); otherwise
-    # we're emitting the plan (PLAN). The graph re-enters the
-    # researcher after the Send-fanout completes; LangGraph's
-    # state-merge ensures the new tool_results are visible here.
+    # ``(this_round, parent_lane_idx=lane_idx)``: if any do, the
+    # lanes already ran for this round and this researcher lane
+    # and we're consuming their output (REPORT); otherwise we're
+    # emitting the plan (PLAN). The graph re-enters each lane in
+    # REPORT mode via the post-tool_executor fanback conditional
+    # edge (#103); LangGraph's state-merge ensures the new
+    # tool_results are visible here.
+    #
+    # #103 dropped the M6-era ``awaiting_tool_results: bool``
+    # scalar flag from the state schema — under x-tier multi-
+    # model researcher fanout, last-writer-wins on a scalar
+    # produced ambiguous routing. The router now derives the
+    # dispatch decision from ``tool_plan`` vs ``tool_results``
+    # directly (see ``_route_after_researcher`` in ``graph.py``).
     if tool_executor_enabled:
         from consultants.engine.state_v2 import (
             tool_results_for_round,
@@ -1194,7 +1204,15 @@ def researcher_node(state: dict, *,
             parse_tool_plan,
         )
 
-        prior_for_round = tool_results_for_round(state, this_round)
+        # #103 proper composition: pass this lane's identity as
+        # ``parent_lane_idx`` so REPORT mode reads only the
+        # ToolResults the dispatcher emitted for our own plan.
+        # ``lane_idx=None`` (single-researcher non-fanout path)
+        # is forwarded as-is — the helper's None branch returns
+        # all matching-round results, preserving the M6 contract.
+        prior_for_round = tool_results_for_round(
+            state, this_round, parent_lane_idx=lane_idx,
+        )
         report_mode = bool(prior_for_round)
         # Append the mode-specific appendix to the user message.
         # Both append to msgs[-1] (the v1 user message) so the
@@ -1225,11 +1243,14 @@ def researcher_node(state: dict, *,
                 error=f"{type(e).__name__}: {e}",
             )
             tomb_text = f"(researcher lane failed: {e})"
+            # #103: the legacy ``awaiting_tool_results=False`` key
+            # is dropped — the router now derives the dispatch
+            # decision from tool_plan vs tool_results directly,
+            # making the scalar flag redundant.
             return {
                 "error": f"researcher failed: {e}",
                 "_role_failed": "researcher",
                 "research": [tomb_text] if not report_mode else [],
-                "awaiting_tool_results": False,
                 "turns": [RoleTurn(
                     role="researcher", round=this_round,
                     content=tomb_text,
@@ -1262,7 +1283,6 @@ def researcher_node(state: dict, *,
             return {
                 "research": [text],
                 "research_rounds_used": 1,
-                "awaiting_tool_results": False,
                 "turns": [turn],
                 "total_prompt_tokens": pt,
                 "total_completion_tokens": ct,
@@ -1271,7 +1291,14 @@ def researcher_node(state: dict, *,
         # is a soft failure: the dispatcher's conditional edge
         # falls through to the standard continuation rather than
         # looping forever on an empty Send list.
-        items = parse_tool_plan(text, parent_round=this_round)
+        # #103: stamp each emitted item with this researcher
+        # lane's identity so tool_executor → researcher fanback
+        # can route ToolResults back to the originating lane.
+        items = parse_tool_plan(
+            text,
+            parent_round=this_round,
+            parent_lane_idx=lane_idx,
+        )
         turn = RoleTurn(
             role="researcher", round=this_round, content=text,
             prompt_tokens=pt, completion_tokens=ct,
@@ -1294,8 +1321,11 @@ def researcher_node(state: dict, *,
             # Empty plan — degrade to the v1 inline-report shape:
             # treat the raw researcher text as the research report
             # so the council still produces an answer. The graph's
-            # awaiting_tool_results=False flag ensures the next
-            # edge skips the tool_executor fanout.
+            # router falls through automatically because no plan
+            # items survive the "current-round + unconsumed" filter
+            # (#103 drops the scalar awaiting_tool_results flag in
+            # favour of deriving the dispatch decision from
+            # tool_plan vs tool_results directly).
             log.warning(
                 "researcher M6 PLAN-mode returned empty/unparseable "
                 "tool_plan; falling back to inline research from raw text"
@@ -1304,14 +1334,16 @@ def researcher_node(state: dict, *,
             return {
                 "research": [text],
                 "research_rounds_used": 1,
-                "awaiting_tool_results": False,
                 "turns": [turn],
                 "total_prompt_tokens": pt,
                 "total_completion_tokens": ct,
             }
+        # #103: ``awaiting_tool_results`` is no longer written —
+        # the router infers PLAN-mode-just-completed from the
+        # presence of current-round tool_plan items that lack
+        # matching tool_results.
         return {
             "tool_plan": items,
-            "awaiting_tool_results": True,
             "turns": [turn],
             "total_prompt_tokens": pt,
             "total_completion_tokens": ct,

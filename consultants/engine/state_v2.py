@@ -82,14 +82,28 @@ class ToolPlanItem:
 
     ``why`` is the researcher's reason for the plan item, surfaced
     to the tool_executor's prompt so the specialist model has the
-    *intent* not just the literal request. ``lane_idx`` is set by
-    the dispatcher; ``parent_round`` records which researcher round
-    emitted this plan (so a critic-reroute round-2 plan's results
-    don't merge into the round-1 result set).
+    *intent* not just the literal request. ``lane_idx`` is the
+    plan-item index within a single researcher's PLAN-mode output
+    (set by :func:`parse_tool_plan` as the enumerate position).
+    ``parent_lane_idx`` identifies WHICH researcher lane emitted
+    this plan item — the globally-unique ``lane_idx`` from the
+    Phase 9 multi-model researcher fanout, or ``None`` on the
+    single-researcher path (base tiers + the xtier short-circuit
+    when planner emits < FANOUT_MIN_ITEMS). ``parent_round``
+    records which researcher round emitted this plan (so a
+    critic-reroute round-2 plan's results don't merge into the
+    round-1 result set).
+
+    The ``parent_lane_idx`` field is the #103 proper-composition
+    bridge: the graph's post-tool_executor fanback uses it to
+    re-fire each researcher lane in REPORT mode against only its
+    own results, eliminating the cross-pollution that the M6
+    scope note (``graph.py:1025-1030``) documents.
     """
     intent: str
     why: str = ""
     lane_idx: Optional[int] = None
+    parent_lane_idx: Optional[int] = None
     parent_round: int = 1
     suggested_tools: list[str] = field(default_factory=list)
 
@@ -108,12 +122,20 @@ class ToolResult:
     tool-loop runaway); the researcher should treat that intent as
     unaddressed and re-plan around it. ``duration_ms`` lets the
     M11c bench correlate per-lane wall time with answer quality.
+
+    ``parent_lane_idx`` mirrors the field on :class:`ToolPlanItem`
+    — the tool_executor lane stamps the value it received via its
+    per-lane Send slice, so the researcher's REPORT-mode prompt
+    builder can filter ``tool_results`` to only the results from
+    its own original plan items. ``None`` on the single-researcher
+    path.
     """
     intent: str
     content: str = ""
     transcript_summary: str = ""
     tools_called: list[str] = field(default_factory=list)
     lane_idx: Optional[int] = None
+    parent_lane_idx: Optional[int] = None
     parent_round: int = 1
     duration_ms: int = 0
     error: Optional[str] = None
@@ -382,16 +404,21 @@ class CouncilStateV2(TypedDict, total=False):
     tool_plan: Annotated[list[ToolPlanItem], operator.add]
     # ``tool_results`` is the corresponding additive merge of every
     # tool_executor lane's output. The researcher's next-round
-    # prompt renders unconsumed results (filtered by parent_round)
-    # so it can reason over the evidence without re-running tools.
+    # prompt renders unconsumed results (filtered by parent_round
+    # AND parent_lane_idx — see :func:`tool_results_for_round`)
+    # so it can reason over the evidence without re-running tools
+    # AND without seeing sibling lanes' results under x-tier
+    # multi-model researcher fanout (the #103 fix).
     tool_results: Annotated[list[ToolResult], operator.add]
-    # ``awaiting_tool_results`` flips True after the researcher
-    # emits a plan in PLAN MODE; the graph's route_after_researcher
-    # reads it to decide between tool_executor fanout vs the
-    # critic/synthesizer continuation. Cleared back to False by
-    # the researcher's REPORT MODE return so subsequent rounds
-    # don't loop forever. Non-additive (last-writer-wins).
-    awaiting_tool_results: Optional[bool]
+    # NOTE: the M6 ``awaiting_tool_results: Optional[bool]`` flag
+    # was dropped by the #103 proper-composition refactor. The
+    # router (``_route_after_researcher`` in ``graph.py``) now
+    # derives the dispatch decision directly from ``tool_plan`` vs
+    # ``tool_results`` at the current round — strictly more robust
+    # than a last-writer-wins scalar under N×M parallel researcher
+    # lanes. Existing checkpoints that still carry the key are
+    # ignored on read (LangGraph's TypedDict state tolerates
+    # unknown keys); we simply stopped writing it.
 
     # ---- M10: coder channels ----
     # When the planner declares the question needs code generation
@@ -445,7 +472,12 @@ def unconsumed_context_for(state: dict, role: str) -> list[Doc]:
     return out
 
 
-def tool_results_for_round(state: dict, round: int) -> list["ToolResult"]:
+def tool_results_for_round(
+    state: dict,
+    round: int,
+    *,
+    parent_lane_idx: Optional[int] = None,
+) -> list["ToolResult"]:
     """Return tool_executor results matching ``round`` so the
     researcher's prompt at round N+1 only sees the round-N evidence.
 
@@ -454,11 +486,35 @@ def tool_results_for_round(state: dict, round: int) -> list["ToolResult"]:
     contract: caller asks for "round 1" and gets round-1 results
     only. Robust against a row where ``parent_round`` is missing —
     treats it as 1.
+
+    ``parent_lane_idx`` is the #103 per-researcher-lane filter:
+    when set, only results whose ``parent_lane_idx`` matches OR
+    whose ``parent_lane_idx is None`` (legacy / single-researcher
+    path) are returned. The None-tolerance matters during the
+    rollout: a checkpoint persisted before the #103 refactor
+    landed has ``parent_lane_idx=None`` on every ToolResult, and
+    the post-refactor researcher should still see those rather
+    than getting an empty filter result. When the caller passes
+    ``parent_lane_idx=None`` (the pre-#103 contract, still used by
+    the single-researcher non-fanout path), every matching-round
+    result is returned regardless of which lane emitted it.
+
+    Order-preserving so the REPORT-mode prompt sees results in the
+    order tool_executor returned them.
     """
+    target_lane = parent_lane_idx
     out: list[ToolResult] = []
     for r in state.get("tool_results") or []:
-        if int(getattr(r, "parent_round", 1) or 1) == int(round):
-            out.append(r)
+        if int(getattr(r, "parent_round", 1) or 1) != int(round):
+            continue
+        if target_lane is not None:
+            r_lane = getattr(r, "parent_lane_idx", None)
+            # Legacy tolerance: a None on the ToolResult is the
+            # pre-#103 / single-researcher shape — surface it to
+            # every lane filter rather than masking it.
+            if r_lane is not None and r_lane != target_lane:
+                continue
+        out.append(r)
     return out
 
 

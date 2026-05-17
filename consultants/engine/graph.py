@@ -1022,49 +1022,57 @@ def build_council_graph(deps: GraphDeps,
     # researcher's PRIOR TOOL RESULTS block sees all merged lanes in
     # one prompt.
     #
-    # Scope note: this initial wiring assumes the non-fanout
-    # researcher path. Combination with x-tier Phase 9 fanout
-    # (multiple parallel researcher lanes) is a follow-up; the
-    # config-layer guidance gates this by leaving tool_executor
-    # disabled-by-default and recommending it for non-x effort tiers
-    # in the docs.
+    # #103 proper composition: the M6-era scope note that gated
+    # tool_executor at non-x effort tiers only is now obsolete.
+    # ``_route_after_researcher`` derives the dispatch decision
+    # from ``tool_plan`` vs ``tool_results`` (no scalar flag —
+    # see ``state_v2.py`` for the dropped field), and the
+    # post-tool_executor edge fans back out to each researcher
+    # lane in REPORT mode against ONLY its own ToolResults
+    # (filtered by ``parent_lane_idx``). x-tier multi-model
+    # researcher fanout now composes cleanly: 2 researcher
+    # lanes × 3 plan items each produces 6 ToolResults, each
+    # researcher's REPORT mode prompt sees only its 3.
     if tool_executor_enabled and "researcher" in enabled:
         def _route_after_researcher(state: dict) -> Any:
-            awaiting = bool(state.get("awaiting_tool_results"))
-            if not awaiting:
-                # REPORT mode or fallback: fall through to the
-                # natural next role from plan_topology. ``None``
-                # means END (researcher was the last pipeline
-                # stage before synthesizer); router contract
-                # accepts the destination string OR a list of
-                # Sends, so we return the string here.
-                return researcher_downstream_natural or synthesizer_target
-            # PLAN mode just completed: emit one Send per
-            # unconsumed tool_plan item. We filter by:
-            # - parent_round == current researcher round (so a
-            #   critic-reroute cycle's leftover items don't re-fire),
-            # - no matching tool_results yet (so a partial-failure
-            #   re-entry doesn't double-execute completed lanes).
+            """Decide where to route after a researcher invocation.
+
+            Derives the dispatch decision purely from
+            ``tool_plan`` vs ``tool_results`` at the current
+            round: are there unconsumed plan items? If yes,
+            emit one Send per item to tool_executor. If no,
+            fall through to the next role (REPORT-mode
+            completion, empty-plan fallback, or M6 error path
+            — all surface the same way).
+
+            The ``completed`` set uses the full per-lane identity
+            tuple ``(parent_round, lane_idx, parent_lane_idx)``
+            so x-tier sibling researcher lanes don't mask each
+            other's unconsumed items.
+            """
             plan = list(state.get("tool_plan") or [])
             results = list(state.get("tool_results") or [])
-            # Compute "completed" lane indexes for the current round
-            # via parent_round + lane_idx matching.
             rounds_used = int(state.get("research_rounds_used") or 0)
             current_round = rounds_used + 1
-            completed: set[tuple[int, Optional[int]]] = set()
+            completed: set[
+                tuple[int, Optional[int], Optional[int]]
+            ] = set()
             for r in results:
                 rr = int(getattr(r, "parent_round", 1) or 1)
                 if rr == current_round:
-                    completed.add(
-                        (rr, getattr(r, "lane_idx", None))
-                    )
+                    completed.add((
+                        rr,
+                        getattr(r, "lane_idx", None),
+                        getattr(r, "parent_lane_idx", None),
+                    ))
             sends: list[Send] = []
             for item in plan:
                 pr = int(getattr(item, "parent_round", 1) or 1)
                 if pr != current_round:
                     continue
                 lane = getattr(item, "lane_idx", None)
-                if (pr, lane) in completed:
+                parent_lane = getattr(item, "parent_lane_idx", None)
+                if (pr, lane, parent_lane) in completed:
                     continue
                 sends.append(Send(
                     "tool_executor",
@@ -1078,7 +1086,15 @@ def build_council_graph(deps: GraphDeps,
                         # consume; carries intent + parent_round so
                         # the lane stamps its ToolResult correctly.
                         "tool_plan_item": item,
+                        # ``lane_idx`` is the plan-item index
+                        # within the researcher's PLAN-mode output;
+                        # ``parent_lane_idx`` is the researcher
+                        # lane that emitted it (#103). Both round-
+                        # trip onto the resulting ToolResult so
+                        # the post-tool_executor fanback can route
+                        # back correctly.
                         "lane_idx": lane,
+                        "parent_lane_idx": parent_lane,
                         # Empty deltas so additive reducers don't
                         # double-count anything from the outer
                         # researcher state.
@@ -1088,11 +1104,134 @@ def build_council_graph(deps: GraphDeps,
                     },
                 ))
             if not sends:
-                # Defensive: PLAN mode fired but no items survived
-                # the filter. Fall through to the next role so the
-                # graph doesn't stall on an empty fanout.
+                # No unconsumed items: REPORT-mode return /
+                # empty-plan fallback / M6 error — all converge
+                # here. Fall through to the next role.
                 return researcher_downstream_natural or synthesizer_target
             return sends
+
+        def _fanout_after_tool_executor(state: dict) -> Any:
+            """Fan back out to researcher lanes in REPORT mode
+            after the Send-multiplexed tool_executor barrier
+            completes.
+
+            #103 proper composition: when N×M researcher lanes
+            (Phase 9 multi-model fanout) emitted plan items,
+            each lane must re-enter REPORT mode against ONLY
+            its own ToolResults. The legacy unconditional
+            ``tool_executor → researcher`` edge barriered all
+            lanes and fired researcher once with merged state —
+            that produced cross-pollination.
+
+            Decision tree:
+              - No tool_results at the current round with a non-
+                None ``parent_lane_idx`` → single-researcher
+                path (base tiers + xtier <FANOUT_MIN short-
+                circuit). Return the string ``"researcher"`` —
+                identical behavior to the old unconditional
+                edge (one re-entry with merged state).
+              - Otherwise, re-derive each lane's
+                ``(plan_item, model_override)`` deterministically
+                from ``state.plan_items`` using the same
+                ``group_items_into_lanes`` + ``[primary] +
+                extras`` shape ``_fanout_after_planner`` uses.
+                Emit one Send per distinct ``parent_lane_idx``.
+                ``research_rounds_used`` is carried through from
+                state (mirroring ``_fanout_to_critics``) so
+                each per-lane researcher sees the same round
+                number it ran under in PLAN mode.
+            """
+            results = list(state.get("tool_results") or [])
+            rounds_used = int(state.get("research_rounds_used") or 0)
+            current_round = rounds_used + 1
+            distinct: list[int] = []
+            seen: set[int] = set()
+            for r in results:
+                rr = int(getattr(r, "parent_round", 1) or 1)
+                if rr != current_round:
+                    continue
+                pli = getattr(r, "parent_lane_idx", None)
+                if pli is None or pli in seen:
+                    continue
+                seen.add(pli)
+                distinct.append(pli)
+            if not distinct:
+                # Single-researcher path — same as the old
+                # unconditional edge.
+                return "researcher"
+            # Multi-researcher path: re-derive the per-lane
+            # (plan_item, model_override) tuple deterministically.
+            items_for_partition = state.get("plan_items") or []
+            try:
+                lanes_partition = council.group_items_into_lanes(
+                    items_for_partition, council.FANOUT_MAX_LANES,
+                )
+            except Exception:  # pragma: no cover — defensive
+                log.exception(
+                    "fanback re-partition failed; degrading to "
+                    "single re-entry"
+                )
+                return "researcher"
+            primary = deps.models.get("researcher", "")
+            extras = list(
+                deps.extra_models_by_role.get("researcher") or []
+            )
+            models_per_lane: list[str] = [primary] + extras
+            n_models = max(len(models_per_lane), 1)
+            sends: list[Send] = []
+            # Sorted order so the post-mortem transcript is
+            # deterministic (matches _fanout_after_planner's
+            # global_idx enumeration).
+            for global_idx in sorted(distinct):
+                item_idx = global_idx // n_models
+                model_idx = global_idx % n_models
+                if not (0 <= item_idx < len(lanes_partition)):
+                    # parent_lane_idx outside the current
+                    # partition — e.g. a stale checkpoint or a
+                    # critic-reroute changed plan_items mid-cycle.
+                    # Skip the malformed lane rather than crash.
+                    continue
+                joined = council.join_lane_items(
+                    lanes_partition[item_idx],
+                )
+                model_tag = (
+                    models_per_lane[model_idx]
+                    if 0 <= model_idx < n_models else primary
+                )
+                sends.append(Send(
+                    "researcher",
+                    {
+                        "question": state.get("question"),
+                        "plan": state.get("plan", ""),
+                        "cwd": state.get("cwd"),
+                        "effort": state.get("effort"),
+                        "models": state.get("models", {}),
+                        "topology": state.get("topology"),
+                        "plan_item": joined,
+                        # Globally-unique lane_idx matching the
+                        # value the PLAN-mode researcher ran
+                        # under, so the round-filter inside the
+                        # node finds its own ToolResults via
+                        # ``tool_results_for_round(state,
+                        # this_round, parent_lane_idx=lane_idx)``.
+                        "lane_idx": global_idx,
+                        "model_override": model_tag,
+                        "research": [],
+                        # Carry research_rounds_used through —
+                        # this is a REPORT-mode re-entry within
+                        # the same round, not a new round start.
+                        "research_rounds_used": rounds_used,
+                        "turns": [],
+                        "total_prompt_tokens": 0,
+                        "total_completion_tokens": 0,
+                    },
+                ))
+            if not sends:
+                # Defensive: every parent_lane_idx fell outside
+                # the partition. Degrade to single re-entry.
+                return "researcher"
+            return sends
+
         # The conditional's target list must enumerate every node
         # the router can route to. Include the natural downstream +
         # tool_executor; LangGraph uses these to build the static
@@ -1105,12 +1244,19 @@ def build_council_graph(deps: GraphDeps,
         sg.add_conditional_edges(
             "researcher", _route_after_researcher, targets,
         )
-        # Unconditional edge back to researcher: after all
-        # tool_executor Sends complete (LangGraph barriers on
-        # Send-multiplexed sources before unconditional successors
-        # fire), researcher re-enters in REPORT mode and the
-        # tool_results reducer's merged list is visible.
-        sg.add_edge("tool_executor", "researcher")
+        # #103: replace the M6 unconditional ``tool_executor →
+        # researcher`` edge with a conditional fanback that
+        # respects per-researcher-lane composition. The single-
+        # researcher path returns the string ``"researcher"`` so
+        # behavior is identical to the old unconditional edge at
+        # base tiers; the multi-researcher path emits one Send
+        # per parent_lane_idx so each lane re-enters REPORT
+        # mode against only its own ToolResults.
+        sg.add_conditional_edges(
+            "tool_executor",
+            _fanout_after_tool_executor,
+            ["researcher"],
+        )
 
     # M7: xauto escalator wiring.
     #

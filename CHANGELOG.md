@@ -16,6 +16,152 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Changed — `/consultants` v2 tool_executor + x-tier proper composition (M11c-3, task #103, 2026-05-17)
+
+The engine refactor that makes the optional `tool_executor`
+role compose cleanly under Phase 9 multi-model researcher
+fanout at x-prefixed effort tiers (xmedium / xhigh / xmax /
+xauto). The M6 wiring assumed a single researcher lane; under
+x-tier the scalar `awaiting_tool_results` flag's last-writer-
+wins reducer made dispatch ambiguous and the unconditional
+`tool_executor → researcher` edge barriered all parallel
+researcher lanes into a single REPORT-mode invocation that saw
+the union of every lane's `tool_results` — cross-pollination.
+**M11c-3 fixes all three failure modes documented in the
+`graph.py:1025-1030` scope note.**
+
+The post-M11c-2 user-confirmed work, following the path the
+[[feedback_xtier_diversity_priority]] memory mandates: invest in
+proper composition rather than auto-gate the role off at x-tier
+(Option 3, rejected). The M11c-2 bench cleared part 1 of the
+two-part default-on gate (87.5% / 5.00 well above the 70% / 3.5
+rubric floors); this commit clears part 2 (engine wiring) but
+**does not flip the default-on bit** — that's reserved for
+M11c-4 (live x-tier validation) and M11c-5 (the atomic flip).
+
+**What changed**:
+
+- [`consultants/engine/state_v2.py`](consultants/engine/state_v2.py)
+  - `ToolPlanItem` and `ToolResult` gain a
+    `parent_lane_idx: Optional[int] = None` field — records
+    WHICH researcher lane emitted the plan item (the globally-
+    unique lane index from `_fanout_after_planner`), not the
+    plan-item position within a single researcher's output
+    (that's the existing `lane_idx`, unchanged).
+  - **Dropped**: the scalar `awaiting_tool_results: Optional[bool]`
+    field from `CouncilStateV2`. The post-researcher router
+    now derives the dispatch decision from `tool_plan` vs
+    `tool_results` directly — strictly more robust than a
+    last-writer-wins scalar under N×M parallel writes. Legacy
+    checkpoints that still carry the key are tolerated (the
+    TypedDict ignores unknown keys); the engine simply stops
+    writing it.
+  - `tool_results_for_round(state, round, *, parent_lane_idx=None)`
+    grows the optional per-lane filter. `None` returns every
+    matching-round result (the pre-#103 single-researcher
+    contract); a set value returns only results from that
+    researcher lane (plus legacy `parent_lane_idx=None` rows for
+    in-flight checkpoint tolerance).
+
+- [`consultants/engine/tool_executor.py`](consultants/engine/tool_executor.py)
+  - `parse_tool_plan(text, *, parent_round, parent_lane_idx=None)`
+    — the researcher_node passes its own `state["lane_idx"]`
+    so every emitted item records its originating researcher.
+  - `tool_executor_node` reads `state["parent_lane_idx"]` from
+    the Send slice and stamps it on every emitted `ToolResult`
+    (all four construction sites: happy path, missing-item
+    tombstone, loop-import failure tombstone, loop-exception
+    tombstone).
+
+- [`consultants/engine/council.py`](consultants/engine/council.py)
+  - M6 researcher_node branch threads its own `lane_idx` as
+    `parent_lane_idx` into both `parse_tool_plan` (PLAN mode
+    stamps items) and `tool_results_for_round` (REPORT mode
+    filters to own-lane results).
+  - **Drops** the four `awaiting_tool_results=True/False` writes
+    in the return dicts (PLAN normal, empty-plan fallback,
+    REPORT normal, M6 error path). The router no longer reads
+    the field.
+
+- [`consultants/engine/graph.py`](consultants/engine/graph.py)
+  - `_route_after_researcher` drops the scalar flag read. The
+    `completed` set keys on the full per-lane identity tuple
+    `(parent_round, lane_idx, parent_lane_idx)` so x-tier
+    sibling lanes don't mask each other's unconsumed items.
+    Each emitted Send carries `parent_lane_idx` so
+    tool_executor can stamp it on the result.
+  - **New** `_fanout_after_tool_executor` conditional edge —
+    replaces the M6 unconditional `tool_executor → researcher`
+    edge. Reads current-round `tool_results`; extracts distinct
+    non-None `parent_lane_idx` values; if empty (single-
+    researcher path), returns the string `"researcher"` —
+    identical to the old unconditional edge. Otherwise re-
+    derives each lane's `(plan_item, model_override)`
+    deterministically via the same
+    `group_items_into_lanes(plan_items, FANOUT_MAX_LANES)` +
+    `[primary] + extras` shape `_fanout_after_planner` uses, and
+    emits one Send per distinct `parent_lane_idx`. Defensive
+    paths: malformed partition / out-of-range index / no
+    current-round results all degrade gracefully to the single-
+    researcher fanback rather than crashing.
+  - Replaces the obsolete scope note at the old `graph.py:1025-1030`
+    block with the post-refactor description.
+
+**M12 parity preserved**:
+
+- `DEFAULT_ENABLED_BY_ROLE["tool_executor"]` stays `False` —
+  default-config consultations don't register the tool_executor
+  node at all, so the new edges don't even exist on the
+  default-config graph.
+- `tests/test_consultants_v2_parity.py` adds one new assertion
+  in `TestOptInsOffByDefault`:
+  `test_awaiting_tool_results_field_dropped_from_state` — locks
+  the schema change.
+
+**New test surface** (~430 LOC):
+
+- [`tests/test_consultants_v2_tool_executor_xtier_composition.py`](tests/test_consultants_v2_tool_executor_xtier_composition.py)
+  — 19 tests across 6 classes covering the data round-trip
+  (`parse_tool_plan` stamps, `tool_executor_node` stamps), the
+  no-cross-pollution headline contract (2 researcher lanes × 3
+  plan items each — each lane sees only its own 3 results),
+  the routing topology (compiled graph branches contain the
+  new `_fanout_after_tool_executor` conditional), the fanback
+  closure behavior (single-researcher → `"researcher"` string;
+  x-tier → one Send per `parent_lane_idx` with correct
+  lane_idx + model_override; pathological states degrade
+  gracefully), and the `_route_after_researcher` decision rule
+  (unconsumed items dispatch with `parent_lane_idx` propagated;
+  x-tier sibling lanes with shared `lane_idx` don't mask each
+  other thanks to the full identity tuple key).
+- `tests/test_consultants_v2_tool_executor.py` gains 5 new
+  round-filter overload tests on the widened helper signature.
+
+**Verification**:
+
+- Both envs full sweep: 3550 + 3629 passing, zero regressions
+  vs the M11c-2 baseline of 3536 + 3604.
+- New x-tier composition suite: 19 tests pass in consultants
+  env (langgraph available); 8 pass + 11 properly skipped in
+  main env (the langgraph-gated routing tests).
+- M12 parity unchanged at the behavioral layer; +1 new
+  static-shape assertion locking the dropped scalar field.
+
+**Non-goals (deferred to M11c-4 / M11c-5)**:
+
+- **No default-on flip**. `RECOMMENDED_DEFAULT_ON` stays
+  `False`, `DEFAULT_ENABLED_BY_ROLE["tool_executor"]` stays
+  `False`. The user-confirmed live x-tier validation (M11c-4)
+  must land green first; the atomic flip is M11c-5.
+- **No live cloud calls in this commit**. All new tests are
+  stubbed.
+- **No round-counter refactor**. The pre-existing
+  `research_rounds_used` additive-reducer pathology at x-tier
+  (sums across N×M REPORT-mode returns instead of counting
+  rounds) is orthogonal and not surfaced by any current test
+  — leaving it for a future commit if M11c-4 surfaces a real
+  failure mode rooted in it.
+
 ### Added — Tool_executor skill-eval bench M11c-2 closeout (live cohort, 2026-05-17)
 
 The live cohort that turns the M11c-1 dry-run-only scaffold into a

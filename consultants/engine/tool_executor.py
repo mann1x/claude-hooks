@@ -178,6 +178,13 @@ def tool_executor_node(state: dict,
     """
     item: Optional[ToolPlanItem] = state.get("tool_plan_item")
     lane_idx = state.get("lane_idx")
+    # #103 proper composition: per-lane Send carries the researcher
+    # lane that emitted the plan item. Stamped on every emitted
+    # ToolResult so the round-filter can match results back to the
+    # parent researcher lane at REPORT-mode re-entry. ``None`` on
+    # the single-researcher path (base tiers + xtier <FANOUT_MIN
+    # short-circuit).
+    parent_lane_idx = state.get("parent_lane_idx")
     parent_round = (
         int(item.parent_round) if item is not None else 1
     )
@@ -201,6 +208,7 @@ def tool_executor_node(state: dict,
                 error="tool_executor lane invoked without a "
                        "tool_plan_item on per-lane state",
                 lane_idx=lane_idx,
+                parent_lane_idx=parent_lane_idx,
                 parent_round=parent_round,
                 duration_ms=int((time.monotonic() - t0) * 1000),
             )],
@@ -237,7 +245,9 @@ def tool_executor_node(state: dict,
                 "tool_results": [ToolResult(
                     intent=item.intent, content="",
                     error="agent_loop.runner.run_loop not available",
-                    lane_idx=lane_idx, parent_round=parent_round,
+                    lane_idx=lane_idx,
+                    parent_lane_idx=parent_lane_idx,
+                    parent_round=parent_round,
                     duration_ms=dt_ms,
                 )],
             }
@@ -345,7 +355,9 @@ def tool_executor_node(state: dict,
                 intent=item.intent, content="",
                 tools_called=list(tools_called),
                 error=f"{type(e).__name__}: {e}",
-                lane_idx=lane_idx, parent_round=parent_round,
+                lane_idx=lane_idx,
+                parent_lane_idx=parent_lane_idx,
+                parent_round=parent_round,
                 duration_ms=dt_ms,
             )],
         }
@@ -371,7 +383,9 @@ def tool_executor_node(state: dict,
             content=final_text,
             transcript_summary=_summarize_tools(tools_called),
             tools_called=list(tools_called),
-            lane_idx=lane_idx, parent_round=parent_round,
+            lane_idx=lane_idx,
+            parent_lane_idx=parent_lane_idx,
+            parent_round=parent_round,
             duration_ms=dt_ms,
         )],
     }
@@ -476,7 +490,9 @@ def _import_re():
 
 
 def parse_tool_plan(text: str, *,
-                    parent_round: int = 1) -> list[ToolPlanItem]:
+                    parent_round: int = 1,
+                    parent_lane_idx: Optional[int] = None,
+                    ) -> list[ToolPlanItem]:
     """Extract ``ToolPlanItem`` entries from the researcher's
     PLAN-mode response.
 
@@ -506,6 +522,14 @@ def parse_tool_plan(text: str, *,
     ``parent_round`` stamps every emitted item; the graph wires this
     from the researcher's ``this_round`` so the M6 round-filter
     works downstream.
+
+    ``parent_lane_idx`` is the #103 proper-composition stamp: the
+    researcher_node passes its own ``state["lane_idx"]`` so each
+    emitted item records WHICH researcher lane produced it. The
+    downstream round-filter ``tool_results_for_round(state, round,
+    parent_lane_idx=...)`` reads this field to keep x-tier sibling
+    lanes from cross-pollinating each other's REPORT-mode prompts.
+    ``None`` on the single-researcher path (base tiers).
     """
     import json
 
@@ -556,6 +580,7 @@ def parse_tool_plan(text: str, *,
             out.append(ToolPlanItem(
                 intent=intent, why=why,
                 lane_idx=idx,
+                parent_lane_idx=parent_lane_idx,
                 parent_round=int(parent_round),
                 suggested_tools=suggested,
             ))

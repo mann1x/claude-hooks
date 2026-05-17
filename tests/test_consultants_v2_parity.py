@@ -90,8 +90,25 @@ class TestOptInsOffByDefault(unittest.TestCase):
         # M6: the gemma4-31b-cloud tool-call specialist. Off by
         # default because it fundamentally changes the council's
         # tool-call topology (researcher offloads tool-calls to a
-        # dedicated lane).
+        # dedicated lane). M11c-3 (#103 proper composition) made
+        # the role safe for x-tier multi-model researcher fanout
+        # but kept the default-on bit at False — flipping that
+        # bit is reserved for M11c-5 after a live x-tier
+        # validation run (M11c-4).
         self.assertFalse(self.cfg.roles["tool_executor"].enabled)
+
+    def test_awaiting_tool_results_field_dropped_from_state(self):
+        # #103 (M11c-3): the scalar ``awaiting_tool_results`` flag
+        # was removed from CouncilStateV2. The post-researcher
+        # router now derives the dispatch decision from
+        # ``tool_plan`` vs ``tool_results`` at the current round.
+        # If a future commit re-adds the field, that's a
+        # parity-breaking shape change worth catching here.
+        from consultants.engine.state_v2 import CouncilStateV2
+        self.assertNotIn(
+            "awaiting_tool_results",
+            CouncilStateV2.__annotations__,
+        )
 
     # ----- M7 (xauto effort tier) ------------------------------- #
 
