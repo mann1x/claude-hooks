@@ -16,6 +16,105 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — Per-language coder model routing with failover (task #111, 2026-05-17)
+
+The optional `coder` role (M10) now picks its model **per
+language** instead of using a single global model for every code-
+generation task. Each entry — and the global default — carries a
+`primary` and a `fallback`, giving the lane an opt-out-able two-
+step failover chain. The defaults are seeded from the v1.0.1-mlang
+bench (`docs/consultants-skill-eval-baselines.md`).
+
+**Data model.**
+[`consultants/engine/state_v2.py`](consultants/engine/state_v2.py)
+gains a frozen `CoderLanguageRoute(primary, fallback="")`. Both
+the per-language map and the global default share that shape.
+
+**Defaults.**
+[`consultants/engine/coder_defaults.py`](consultants/engine/coder_defaults.py)
+gains `LANGUAGE_BY_EXTENSION` (extension → language id),
+`language_from_path()`, `RECOMMENDED_CODER_ROUTES_BY_LANGUAGE`
+(six in-cohort languages × `(primary, fallback)`),
+`RECOMMENDED_CODER_DEFAULT_ROUTE` (used when a language has no
+per-language entry), and `resolve_coder_route()` — a single-source
+pure-function resolver used by both the graph and the tests.
+`RECOMMENDED_AS_OF` bumps to `2026-05-17`, the suite version
+becomes `1.0.1-mlang`, and the hash prefix is `ddef8095`. The
+legacy `RECOMMENDED_CODER_MODEL` constant stays as the v1
+back-compat fallback.
+
+**Config.**
+`RoleConfig` (`consultants/config.py`) gains
+`routes_by_language: dict[str, CoderLanguageRoute]` and
+`default_route: Optional[CoderLanguageRoute]`. Both are seeded for
+the coder role only; other roles keep them empty / None. The TOML
+emitter writes `[role.coder.default_route]` and `[role.coder.routes.<lang>]`
+sub-tables; the merger round-trips through `_coerce_route()`. New
+helpers `coder_resolve_route(cfg, lang)` and `coder_unique_models(cfg)`
+back the graph wiring + the runner's per-model ChatClient
+materialisation.
+
+**Failover semantics** (in `consultants/engine/coder.py`). The
+`coder_node` signature gains an optional `model_chain_resolver`
+parameter; when set, the lane walks the resolved
+`[(client, model_name), ...]` chain in order. Triggers:
+exception, no artifacts written, OR empty final assistant message
+— strictest wins for the recorded reason. Each attempt rebuilds
+the sandbox so a partial write from a failed attempt doesn't leak
+into the next; the recorder + event log tag every attempt with
+the actual model used. A new typed event
+`CoderFailover(from_model, to_model, reason, attempt_idx,
+next_attempt_idx, error_preview)` lands between attempts AND once
+more with `reason="chain_exhausted"` on full failure. Back-compat:
+when `model_chain_resolver` is `None`, the node behaves exactly as
+before (single-attempt call using `chat_client` + `model`
+kwargs). On chain exhaustion the tombstone names BOTH models:
+`primary <m1> and fallback <m2> both failed: <last error>`.
+
+**Graph + runner wiring.** `GraphDeps`
+(`consultants/engine/graph.py`) grows three fields:
+`coder_chat_clients_by_model`, `coder_routes_by_language`,
+`coder_default_route`. `_wrap_coder` builds a resolver closure
+over them — empty config falls through to the v1 single-attempt
+shape (M12 parity-safe). `consultants/server/runner.py`
+materialises one TracedChat per unique model named across the
+per-language map + default route + legacy fallback. Follow-ups
+inherit the warm per-model dict via a new
+`SessionState._coder_chat_clients_by_model` field so a follow-up's
+fallback lane reuses the parent's warmed-up ChatClient.
+
+**CLI.** `claude-consultants config` grows a sub-namespace:
+
+```
+claude-consultants config coder list
+claude-consultants config coder set <lang> --primary <m> [--fallback <m>]
+claude-consultants config coder unset <lang>
+claude-consultants config coder set-default --primary <m> [--fallback <m>]
+```
+
+All accept the existing `--cwd` / `--project` scope flags. Empty-
+string `--fallback ""` is the explicit-clear sentinel; `None` (no
+flag) is "keep current".
+
+**Skill dialog.** `.claude/skills/consultants/SKILL.md` grows a
+new top-level menu option (**"4. Coder routing"**) and **Subflow
+E** that walks the user through editing the global default, per-
+language entries, adding a new language, or removing an entry. The
+`config show` block also renders the routing table for coder when
+present.
+
+**Tests.** Three new files (~50 tests):
+- `tests/test_coder_defaults_language_map.py` — extension → lang
+  → route resolution, default-table shape, provenance stamps.
+- `tests/test_config_coder_routes.py` — RoleConfig seeding, TOML
+  round-trip, partial-override merge, the three mutators.
+- `tests/test_cli_config_coder.py` — argparse round-trip + handler
+  dispatch + validation errors.
+- Plus 8 extension cases in `tests/test_consultants_v2_coder.py`
+  for the resolver dispatch + every failover trigger.
+
+Full suite: **3418 tests + 101 sub-tests passing**, zero regressions.
+
 ### Added — M11b coder skill-eval first live baseline (2026-05-16)
 
 The Consultancy Skill-Eval Protocol's coder sub-protocol now has

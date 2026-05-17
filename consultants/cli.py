@@ -577,6 +577,103 @@ def cmd_config_list_models(args, base: str) -> int:
     return 0
 
 
+# ----------------------- Task #111: config coder ---------------- #
+# Sub-subparser under ``config coder`` for managing the per-language
+# coder model routes + global default route. The single-source
+# resolver lives in ``consultants.config.coder_resolve_route``; the
+# CLI is a thin adapter onto the three mutators (set_coder_route /
+# unset_coder_route / set_coder_default_route) plus a JSON pretty-
+# printer for the ``list`` verb. Same --cwd/--project scope handling
+# as ``set-role``.
+
+
+def _route_to_dict(route) -> Optional[dict]:
+    """Coerce a CoderLanguageRoute (or None) to a JSON-friendly dict."""
+    if route is None:
+        return None
+    return {
+        "primary": getattr(route, "primary", ""),
+        "fallback": getattr(route, "fallback", ""),
+    }
+
+
+def _coder_route_block(cfg) -> dict:
+    """Build the {default_route, routes_by_language} dict used by
+    ``config coder list``'s JSON output. Pure-function — no I/O."""
+    rc = cfg.roles["coder"]
+    return {
+        "model": rc.model,
+        "default_route": _route_to_dict(rc.default_route),
+        "routes_by_language": {
+            lang: _route_to_dict(route)
+            for lang, route in sorted(rc.routes_by_language.items())
+        },
+    }
+
+
+def cmd_config_coder_list(args, base: str) -> int:
+    cwd = Path(args.cwd).resolve() if args.cwd else None
+    cfg = cc.load_config(cwd)
+    print(json.dumps({"ok": True, "coder": _coder_route_block(cfg)},
+                     indent=2))
+    return 0
+
+
+def _scope_kwargs(args) -> dict:
+    """Translate ``args.project`` + ``args.cwd`` into the kwargs the
+    config-mutator functions expect. Mirrors ``cmd_config_set_role``."""
+    return {
+        "scope": "project" if getattr(args, "project", False) else "user",
+        "cwd": (
+            Path(args.cwd or os.getcwd()).resolve()
+            if getattr(args, "project", False) else None
+        ),
+    }
+
+
+def cmd_config_coder_set(args, base: str) -> int:
+    # ``primary``/``fallback`` are optional on update, required on
+    # create — cc.set_coder_route enforces this. The CLI defers
+    # entirely to the mutator's validation so the rules live in one
+    # place.
+    try:
+        cfg = cc.set_coder_route(
+            args.language,
+            primary=args.primary,
+            fallback=args.fallback,
+            **_scope_kwargs(args),
+        )
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    print(json.dumps({"ok": True, "coder": _coder_route_block(cfg)},
+                     indent=2))
+    return 0
+
+
+def cmd_config_coder_unset(args, base: str) -> int:
+    try:
+        cfg = cc.unset_coder_route(args.language, **_scope_kwargs(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    print(json.dumps({"ok": True, "coder": _coder_route_block(cfg)},
+                     indent=2))
+    return 0
+
+
+def cmd_config_coder_set_default(args, base: str) -> int:
+    try:
+        cfg = cc.set_coder_default_route(
+            primary=args.primary,
+            fallback=args.fallback,
+            **_scope_kwargs(args),
+        )
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    print(json.dumps({"ok": True, "coder": _coder_route_block(cfg)},
+                     indent=2))
+    return 0
+
+
 # ----------------------- M9 control verbs ----------------------- #
 # These mirror the seven HTTP control endpoints exposed by
 # consultants.server.control_routes. Each handler is a thin
@@ -1168,6 +1265,78 @@ def build_parser() -> argparse.ArgumentParser:
     clm = cfg_sub.add_parser("list-models",
                              help="Available Ollama tags.")
     clm.set_defaults(fn=cmd_config_list_models)
+
+    # ----- Task #111: config coder ---------------------------------
+    # Sub-namespace under ``config`` for the coder role's per-language
+    # routing. Verbs: list / set / unset / set-default. All share the
+    # standard --cwd/--project scope flags.
+    coder_parser = cfg_sub.add_parser(
+        "coder",
+        help=("Manage the coder role's per-language model routing "
+              "(primary + fallback per language, plus a global "
+              "default). The map is seeded from the v1.0.1-mlang "
+              "bench winners; overrides land here."),
+    )
+    coder_sub = coder_parser.add_subparsers(
+        dest="coder_cmd", required=True,
+    )
+
+    cl = coder_sub.add_parser(
+        "list",
+        help="Print the resolved coder routing table.",
+    )
+    cl.add_argument("--cwd",
+                    help="Project root (loads project overrides too).")
+    cl.set_defaults(fn=cmd_config_coder_list)
+
+    cset = coder_sub.add_parser(
+        "set",
+        help=("Upsert a per-language coder route. --primary is "
+              "required on create; either flag alone works on "
+              "update. Pass --fallback '' to clear failover."),
+    )
+    cset.add_argument("language",
+                      help="Language id (e.g. python, csharp, cpp).")
+    cset.add_argument("--primary",
+                      help="Primary model tag (e.g. glm-5.1:cloud).")
+    cset.add_argument("--fallback", default=None,
+                      help="Fallback model tag. Empty string clears "
+                           "the failover model on an existing entry.")
+    cset.add_argument("--project", action="store_true",
+                      help="Save under per-project scope "
+                           "(.claude-hooks/) instead of user-global.")
+    cset.add_argument("--cwd",
+                      help="Project root (only used with --project).")
+    cset.set_defaults(fn=cmd_config_coder_set)
+
+    cunset = coder_sub.add_parser(
+        "unset",
+        help=("Remove a per-language coder route. The language then "
+              "falls through to the global default route. Idempotent."),
+    )
+    cunset.add_argument("language",
+                        help="Language id to remove.")
+    cunset.add_argument("--project", action="store_true",
+                        help="Save under per-project scope.")
+    cunset.add_argument("--cwd",
+                        help="Project root (only used with --project).")
+    cunset.set_defaults(fn=cmd_config_coder_unset)
+
+    csd = coder_sub.add_parser(
+        "set-default",
+        help=("Set or update the GLOBAL default coder route — used "
+              "when a language has no per-language entry."),
+    )
+    csd.add_argument("--primary",
+                     help="Primary model tag for the default route.")
+    csd.add_argument("--fallback", default=None,
+                     help="Fallback model tag. Empty string clears "
+                          "the failover model on an existing default.")
+    csd.add_argument("--project", action="store_true",
+                     help="Save under per-project scope.")
+    csd.add_argument("--cwd",
+                     help="Project root (only used with --project).")
+    csd.set_defaults(fn=cmd_config_coder_set_default)
 
     # ----- skill-eval (M11) — wraps benchmarks/consultants/*.py ----
     se = sub.add_parser(

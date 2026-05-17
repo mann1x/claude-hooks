@@ -122,6 +122,24 @@ class ToolResult:
 # ---------- M10: coder channels ------------------------------------ #
 
 @dataclass(frozen=True)
+class CoderLanguageRoute:
+    """Task #111 — model routing entry for one language (or the global
+    default). ``primary`` is tried first; on **any error** OR when the
+    tool-loop tombstones with no artifacts written, the lane falls
+    through to ``fallback``. Empty ``fallback`` means "no failover —
+    tombstone on first failure".
+
+    Used both as a per-language entry (keyed by language id, e.g.
+    ``"csharp"``) and as the global default route (used when the
+    detected language has no per-language entry). The chain is always
+    primary → fallback → tombstone; the global default is *not* a
+    third tier inside an in-language chain.
+    """
+    primary: str
+    fallback: str = ""
+
+
+@dataclass(frozen=True)
 class CoderTaskItem:
     """One entry in the planner's ``coder_tasks`` block — a code-
     generation intent ("Write parse_iso8601(s: str) -> datetime in

@@ -37,7 +37,12 @@ except ImportError:  # pragma: no cover — only on 3.10
 # Imported here at module top to avoid the mid-file import smell.
 # ``coder_defaults`` is a sibling-package leaf with no back-edges
 # (it imports nothing from this module), so the cycle risk is nil.
-from .engine.coder_defaults import RECOMMENDED_CODER_MODEL
+from .engine.coder_defaults import (
+    RECOMMENDED_CODER_DEFAULT_ROUTE,
+    RECOMMENDED_CODER_MODEL,
+    RECOMMENDED_CODER_ROUTES_BY_LANGUAGE,
+)
+from .engine.state_v2 import CoderLanguageRoute
 
 
 # ----------------------- defaults ----------------------------------- #
@@ -158,6 +163,16 @@ class RoleConfig:
     # Tools-capability validation against /api/tags is the runner's
     # job (we don't want a config load to require network).
     extra_models: list[str] = field(default_factory=list)
+    # Task #111: per-language coder routing (only consulted for the
+    # ``coder`` role; other roles ignore both fields). Keyed by
+    # language id from ``coder_defaults.LANGUAGE_BY_EXTENSION``.
+    # Empty dict means "no per-language routing — fall through to
+    # ``default_route`` (or ``model`` if that's also unset)".
+    routes_by_language: dict[str, CoderLanguageRoute] = \
+        field(default_factory=dict)
+    # ``None`` means "no global default route — fall through to
+    # legacy ``model`` field with no failover (v1 back-compat)".
+    default_route: Optional[CoderLanguageRoute] = None
 
 
 # Per-role think defaults. Tuned from the 2026-05-07 trace
@@ -229,11 +244,28 @@ def _default_role_config(role: str) -> "RoleConfig":
     primary model + disabled-by-default) so the dataclass factory
     on ``ConsultantsConfig.roles`` stays a one-liner and every
     role-iteration site sees consistent defaults.
+
+    Task #111: the ``coder`` role additionally seeds
+    ``routes_by_language`` + ``default_route`` from the v1.0.1-mlang
+    bench winners. Other roles leave both fields empty / None so
+    the runtime stays a pure-``model`` lookup for them.
     """
-    return RoleConfig(
+    rc = RoleConfig(
         enabled=DEFAULT_ENABLED_BY_ROLE.get(role, True),
         model=DEFAULT_MODEL_BY_ROLE.get(role, DEFAULT_MODEL),
     )
+    if role == "coder":
+        # Deep-copy the recommended routes — without this every
+        # config instance shares the same dict and mutations leak.
+        rc.routes_by_language = {
+            k: CoderLanguageRoute(primary=v.primary, fallback=v.fallback)
+            for k, v in RECOMMENDED_CODER_ROUTES_BY_LANGUAGE.items()
+        }
+        rc.default_route = CoderLanguageRoute(
+            primary=RECOMMENDED_CODER_DEFAULT_ROUTE.primary,
+            fallback=RECOMMENDED_CODER_DEFAULT_ROUTE.fallback,
+        )
+    return rc
 
 
 def role_think(cfg: "ConsultantsConfig", role: str) -> Any:
@@ -421,6 +453,28 @@ def _read_toml(path: Path) -> dict:
         return {}
 
 
+def _coerce_route(raw: Any) -> Optional[CoderLanguageRoute]:
+    """Parse one ``CoderLanguageRoute`` from a TOML sub-table dict.
+
+    Accepts ``{primary, fallback?}``. Returns ``None`` when the
+    primary is missing / empty (a route without a primary is
+    meaningless; the caller decides whether to fall through to the
+    legacy ``model`` field).
+    """
+    if not isinstance(raw, dict):
+        return None
+    primary = raw.get("primary")
+    if not isinstance(primary, str) or not primary.strip():
+        return None
+    fallback = raw.get("fallback") or ""
+    if not isinstance(fallback, str):
+        fallback = ""
+    return CoderLanguageRoute(
+        primary=primary.strip(),
+        fallback=fallback.strip(),
+    )
+
+
 def _merge_role(base: RoleConfig, override: dict) -> RoleConfig:
     out = RoleConfig(
         enabled=base.enabled,
@@ -429,6 +483,8 @@ def _merge_role(base: RoleConfig, override: dict) -> RoleConfig:
         ctx_max_explicit=base.ctx_max_explicit,
         think=base.think,
         extra_models=list(base.extra_models),
+        routes_by_language=dict(base.routes_by_language),
+        default_route=base.default_route,
     )
     if "enabled" in override:
         out.enabled = bool(override["enabled"])
@@ -458,6 +514,27 @@ def _merge_role(base: RoleConfig, override: dict) -> RoleConfig:
         raw_extras = override["extra_models"]
         if isinstance(raw_extras, list):
             out.extra_models = _sanitize_extras(raw_extras, primary=out.model)
+    # Task #111: per-language coder routing. Only the ``coder`` role
+    # ever populates these fields, but the merge logic is uniform —
+    # other roles simply never have TOML sections for them.
+    if "default_route" in override:
+        # Empty dict / None / malformed → clear (operator chose
+        # "no global default"). Valid sub-table → parse + replace.
+        out.default_route = _coerce_route(override["default_route"])
+    if "routes" in override and isinstance(override["routes"], dict):
+        # Empty dict: explicit clear. Non-empty dict: REPLACE — TOML
+        # users who want to *add* one entry while keeping the rest
+        # should re-emit all entries (the CLI handles that). The
+        # alternative (merge-in) would surprise an operator who set
+        # ``routes = {}`` expecting to start fresh.
+        new_routes: dict[str, CoderLanguageRoute] = {}
+        for lang, route_raw in override["routes"].items():
+            if not isinstance(lang, str) or not lang.strip():
+                continue
+            parsed = _coerce_route(route_raw)
+            if parsed is not None:
+                new_routes[lang.strip()] = parsed
+        out.routes_by_language = new_routes
     return out
 
 
@@ -689,7 +766,94 @@ def _render(cfg: ConsultantsConfig) -> str:
             # know it exists; cheaper than docs-spelunking.
             L.append("extra_models = []")
         L.append("")
+        # Task #111: emit coder per-language routing as nested
+        # sub-tables AFTER the plain role block — TOML grammar
+        # requires sub-tables to follow their parent. Other roles
+        # leave both fields empty / None so this block is a no-op
+        # for them.
+        if rc.default_route is not None:
+            L.append(f"[role.{role}.default_route]")
+            L.append(f"primary = {_toml_str(rc.default_route.primary)}")
+            if rc.default_route.fallback:
+                L.append(
+                    f"fallback = {_toml_str(rc.default_route.fallback)}"
+                )
+            else:
+                L.append('# fallback = ""  # empty / unset: '
+                         "no failover on this route")
+            L.append("")
+        if rc.routes_by_language:
+            for lang in sorted(rc.routes_by_language):
+                route = rc.routes_by_language[lang]
+                L.append(f"[role.{role}.routes.{lang}]")
+                L.append(f"primary = {_toml_str(route.primary)}")
+                if route.fallback:
+                    L.append(f"fallback = {_toml_str(route.fallback)}")
+                else:
+                    L.append('# fallback = ""  # empty / unset: '
+                             "no failover on this route")
+                L.append("")
     return "\n".join(L)
+
+
+# Task #111: single-source resolver for "given a language id, which
+# (primary, fallback) pair should the coder lane use?" Re-exported
+# for the graph + tests. Pure function — no side effects, no I/O.
+def coder_resolve_route(cfg: ConsultantsConfig,
+                        language: Optional[str]) -> CoderLanguageRoute:
+    """Walk ``cfg.roles['coder']`` to find the route for ``language``.
+
+    Resolution order:
+    1. ``language`` ∈ ``routes_by_language`` → that entry.
+    2. ``default_route`` set → that entry.
+    3. legacy: synthesize a route from ``cfg.roles['coder'].model``
+       with no fallback (v1 back-compat for callers that haven't
+       touched the new fields).
+
+    Always returns a ``CoderLanguageRoute``; the lane code decides
+    whether to fail fast on an empty fallback.
+    """
+    rc = cfg.roles.get("coder")
+    if rc is None:
+        return CoderLanguageRoute(primary=DEFAULT_MODEL)
+    if language and language in rc.routes_by_language:
+        return rc.routes_by_language[language]
+    if rc.default_route is not None:
+        return rc.default_route
+    return CoderLanguageRoute(primary=rc.model or DEFAULT_MODEL)
+
+
+def coder_unique_models(cfg: ConsultantsConfig) -> list[str]:
+    """De-duped list of every model name the coder role might ever
+    invoke (primary + fallback across every per-language entry plus
+    the global default plus the legacy ``model`` field). Used by the
+    runner to materialise one chat client per distinct model up
+    front. Order is stable: legacy model first, then default-route
+    primary/fallback, then per-language entries sorted by language
+    id (primary, fallback). Empty fallbacks are skipped.
+    """
+    rc = cfg.roles.get("coder")
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def _add(m: str) -> None:
+        s = (m or "").strip()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+
+    if rc is None:
+        _add(DEFAULT_MODEL)
+        return out
+    _add(rc.model)
+    if rc.default_route is not None:
+        _add(rc.default_route.primary)
+        _add(rc.default_route.fallback)
+    for lang in sorted(rc.routes_by_language):
+        route = rc.routes_by_language[lang]
+        _add(route.primary)
+        _add(route.fallback)
+    return out
 
 
 def save_config(cfg: ConsultantsConfig, *, scope: str = "user",
@@ -789,6 +953,124 @@ def set_role(role: str, *, model: Optional[str] = None,
     if remove_extra_model is not None:
         tag = remove_extra_model.strip()
         rc.extra_models = [m for m in rc.extra_models if m != tag]
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+# ---------- Task #111: coder per-language route mutators ----------- #
+
+def _validate_lang_id(lang: str) -> str:
+    """Normalise + sanity-check a language id.
+
+    The CLI's ``config coder set <lang>`` lets the operator pass any
+    lower-case identifier (so future languages don't require a code
+    change); we just enforce the id is a non-empty lower-case slug
+    matching ``[a-z][a-z0-9_-]*``. Validation against
+    ``LANGUAGE_BY_EXTENSION.values()`` happens at the CLI layer with
+    an opt-out flag for future-proofing.
+    """
+    s = (lang or "").strip().lower()
+    if not s:
+        raise ValueError("language id must be non-empty")
+    import re
+    if not re.match(r"^[a-z][a-z0-9_+-]*$", s):
+        raise ValueError(
+            f"language id {lang!r} must be a lower-case slug "
+            "([a-z][a-z0-9_+-]*)"
+        )
+    return s
+
+
+def set_coder_route(language: str, *, primary: Optional[str] = None,
+                    fallback: Optional[str] = None,
+                    scope: str = "user",
+                    cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Upsert one per-language coder route entry.
+
+    On a NEW entry (``language`` not yet in ``routes_by_language``)
+    ``primary`` is required. On an UPDATE either flag alone works
+    — the unset side keeps its current value. Pass ``fallback=""``
+    explicitly to clear the failover model on an existing entry.
+
+    Persists to user-global by default; ``scope`` + ``cwd`` switch
+    to per-project (matches ``set_role``).
+    """
+    lang = _validate_lang_id(language)
+    cfg = load_config(cwd if scope != "user" else None)
+    rc = cfg.roles["coder"]
+    existing = rc.routes_by_language.get(lang)
+    if existing is None:
+        if not primary or not primary.strip():
+            raise ValueError(
+                f"language {lang!r} has no existing route; "
+                "--primary is required to create one"
+            )
+        new_primary = primary.strip()
+        new_fallback = (fallback or "").strip()
+    else:
+        new_primary = (
+            primary.strip() if primary and primary.strip()
+            else existing.primary
+        )
+        # fallback semantics: None ⇒ keep current; "" ⇒ explicit clear;
+        # non-empty ⇒ replace.
+        if fallback is None:
+            new_fallback = existing.fallback
+        else:
+            new_fallback = fallback.strip()
+    rc.routes_by_language[lang] = CoderLanguageRoute(
+        primary=new_primary, fallback=new_fallback,
+    )
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def unset_coder_route(language: str, *, scope: str = "user",
+                      cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Remove one per-language coder route entry. Idempotent — a
+    missing entry is a silent no-op (no error). After removal the
+    language falls through to the global default route at routing
+    time.
+    """
+    lang = _validate_lang_id(language)
+    cfg = load_config(cwd if scope != "user" else None)
+    rc = cfg.roles["coder"]
+    rc.routes_by_language.pop(lang, None)
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_coder_default_route(*, primary: Optional[str] = None,
+                            fallback: Optional[str] = None,
+                            scope: str = "user",
+                            cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set or update the global default coder route.
+
+    When no default exists yet, ``primary`` is required. Updates
+    follow the same semantics as ``set_coder_route``: ``None`` for
+    a field keeps the current value; ``""`` for ``fallback``
+    explicitly clears it.
+    """
+    cfg = load_config(cwd if scope != "user" else None)
+    rc = cfg.roles["coder"]
+    existing = rc.default_route
+    if existing is None:
+        if not primary or not primary.strip():
+            raise ValueError(
+                "no default_route exists; --primary is required to "
+                "create one"
+            )
+        new_primary = primary.strip()
+        new_fallback = (fallback or "").strip()
+    else:
+        new_primary = (
+            primary.strip() if primary and primary.strip()
+            else existing.primary
+        )
+        if fallback is None:
+            new_fallback = existing.fallback
+        else:
+            new_fallback = fallback.strip()
+    rc.default_route = CoderLanguageRoute(
+        primary=new_primary, fallback=new_fallback,
+    )
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 

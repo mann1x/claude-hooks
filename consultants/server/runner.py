@@ -106,6 +106,34 @@ def make_runner(*, ollama_base_url: str):
         }
         models = {r: cfg.roles[r].model for r in enabled}
 
+        # Task #111: per-model ChatClient dict for the coder role's
+        # failover chain. Only materialised when ``coder`` is in
+        # ``enabled`` AND the cfg has per-language routing OR a
+        # global default route configured. Each model gets its own
+        # TracedChat so per-attempt usage rolls up under the right
+        # tag in the recorder.
+        coder_clients_by_model: dict[str, Any] = {}
+        coder_routes_by_language: dict[str, Any] = {}
+        coder_default_route = None
+        if "coder" in enabled:
+            coder_routes_by_language = dict(
+                cfg.roles["coder"].routes_by_language or {}
+            )
+            coder_default_route = cfg.roles["coder"].default_route
+            if coder_routes_by_language or coder_default_route is not None:
+                for m in cc.coder_unique_models(cfg):
+                    if m == cfg.roles["coder"].model and "coder" in chat_clients:
+                        # Re-use the legacy per-role client for the
+                        # primary model so the ChatClient's warm
+                        # /api/show probe + retry-budget state
+                        # carries across.
+                        coder_clients_by_model[m] = chat_clients["coder"]
+                        continue
+                    coder_clients_by_model[m] = TracedChat(
+                        make_agent_chat_client(m, ollama_base_url),
+                        role="coder", tracer=tracer,
+                    )
+
         grounding_msgs = build_grounding_messages(
             cwd, tools_available=True,
         ) if "researcher" in enabled else []
@@ -227,6 +255,12 @@ def make_runner(*, ollama_base_url: str):
             coder_max_file_bytes=cfg.coder_limits.max_file_bytes,
             coder_max_total_bytes=cfg.coder_limits.max_total_bytes,
             coder_max_files=cfg.coder_limits.max_files,
+            # Task #111: per-language coder routing. Empty dicts /
+            # None when not configured ⇒ _wrap_coder returns the
+            # v1 single-attempt callable (full back-compat).
+            coder_chat_clients_by_model=coder_clients_by_model,
+            coder_routes_by_language=coder_routes_by_language,
+            coder_default_route=coder_default_route,
         )
         # M5: static review-before-synthesis interrupt. When the
         # user opted in via cfg.runtime.review_before_synthesis,
@@ -373,6 +407,13 @@ def make_runner(*, ollama_base_url: str):
         state._chat_clients = {
             r: getattr(c, "_client", c) for r, c in chat_clients.items()
         }
+        # Task #111: also stash the per-model raw clients so a
+        # follow-up's coder lanes can reuse warmed-up failover
+        # candidates without re-probing /api/show.
+        state._coder_chat_clients_by_model = {
+            m: getattr(c, "_client", c)
+            for m, c in coder_clients_by_model.items()
+        }
         state.bump_activity()
 
         state.status = terminal_status
@@ -482,6 +523,39 @@ def make_follow_up_runner(*, ollama_base_url: str):
                 )
             chat_clients[role] = TracedChat(raw, role=role, tracer=tracer)
 
+        # Task #111: per-model coder clients (mirrors the primary
+        # runner's logic). Re-use warm parent clients when present;
+        # otherwise cold-build. Follow-ups inherit the same routing
+        # configuration the parent ran with (via cfg).
+        coder_clients_by_model_fu: dict[str, Any] = {}
+        coder_routes_by_language_fu: dict[str, Any] = {}
+        coder_default_route_fu = None
+        warm_coder_clients = (
+            parent_state._coder_chat_clients_by_model
+            if parent_state is not None
+            and parent_state._coder_chat_clients_by_model is not None
+            else {}
+        )
+        if "coder" in enabled_t:
+            coder_routes_by_language_fu = dict(
+                cfg.roles["coder"].routes_by_language or {}
+            )
+            coder_default_route_fu = cfg.roles["coder"].default_route
+            if coder_routes_by_language_fu \
+                    or coder_default_route_fu is not None:
+                for m in cc.coder_unique_models(cfg):
+                    if m == cfg.roles["coder"].model \
+                            and "coder" in chat_clients:
+                        coder_clients_by_model_fu[m] = \
+                            chat_clients["coder"]
+                        continue
+                    raw = warm_coder_clients.get(m)
+                    if raw is None:
+                        raw = make_agent_chat_client(m, ollama_base_url)
+                    coder_clients_by_model_fu[m] = TracedChat(
+                        raw, role="coder", tracer=tracer,
+                    )
+
         # Models: prefer parent's recorded models so the follow-up
         # talks to the same models the parent used. Falls back to
         # current cfg.roles[role].model when parent didn't record.
@@ -577,6 +651,10 @@ def make_follow_up_runner(*, ollama_base_url: str):
             coder_max_file_bytes=cfg.coder_limits.max_file_bytes,
             coder_max_total_bytes=cfg.coder_limits.max_total_bytes,
             coder_max_files=cfg.coder_limits.max_files,
+            # Task #111: per-language coder routing (warm-aware).
+            coder_chat_clients_by_model=coder_clients_by_model_fu,
+            coder_routes_by_language=coder_routes_by_language_fu,
+            coder_default_route=coder_default_route_fu,
         )
         compiled = build_follow_up_graph(deps, tracer=tracer)
         # M9: follow-ups expose their own compiled graph + thread
@@ -707,6 +785,12 @@ def make_follow_up_runner(*, ollama_base_url: str):
         state.models = dict(models)
         state._chat_clients = {
             r: getattr(c, "_client", c) for r, c in chat_clients.items()
+        }
+        # Task #111: stash per-model coder clients for the next
+        # follow-up in the chain.
+        state._coder_chat_clients_by_model = {
+            m: getattr(c, "_client", c)
+            for m, c in coder_clients_by_model_fu.items()
         }
         state.bump_activity()
         # Also bump the parent so an active iteration chain keeps

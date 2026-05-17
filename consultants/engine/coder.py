@@ -45,8 +45,9 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
+from consultants.engine.coder_defaults import language_from_path
 from consultants.engine.state_v2 import CoderArtifact, CoderTaskItem
 
 log = logging.getLogger("consultants.engine.coder")
@@ -445,15 +446,36 @@ def _emit_tool_call(role: str, *, round: int, lane_idx: Optional[int],
         log.exception("emit ToolCall raised; ignored")
 
 
+def _emit_coder_failover(*, round: int, lane_idx: Optional[int],
+                         from_model: str, to_model: Optional[str],
+                         reason: str, attempt_idx: int,
+                         next_attempt_idx: Optional[int],
+                         error_preview: str = "") -> None:
+    """Task #111 — coder-specific failover marker emitted between
+    chain attempts AND once more on chain-exhaustion (with
+    ``to_model=None``, ``reason='chain_exhausted'``)."""
+    try:
+        from consultants.engine.events import CoderFailover, emit
+        emit(CoderFailover(
+            round=round, lane_idx=lane_idx,
+            from_model=from_model, to_model=to_model,
+            reason=reason, attempt_idx=attempt_idx,
+            next_attempt_idx=next_attempt_idx,
+            error_preview=error_preview[:200],
+        ))
+    except Exception:  # pragma: no cover
+        log.exception("emit CoderFailover raised; ignored")
+
+
 # ============================================================== #
 # Node
 # ============================================================== #
 
 def coder_node(state: dict,
                *,
-               chat_client,
+               chat_client=None,
                grounding_msgs: list[dict],
-               model: str,
+               model: str = "",
                cwd: str,
                sid: str,
                think: Any = "high",
@@ -461,7 +483,10 @@ def coder_node(state: dict,
                recorder=None,
                max_file_bytes: int = 50 * 1024,
                max_total_bytes: int = 1024 * 1024,
-               max_files: int = 16) -> dict:
+               max_files: int = 16,
+               model_chain_resolver: Optional[Callable[
+                   [Optional[str]], list[tuple[Any, str]]]] = None,
+               ) -> dict:
     """Execute one ``CoderTaskItem`` from the per-lane state slice.
 
     Returns a state delta merging into ``coder_artifacts``. Never
@@ -472,28 +497,86 @@ def coder_node(state: dict,
     the same deps (chat_client per role, grounding_msgs, recorder,
     cwd) without divergent plumbing. ``sid`` is the session id used
     to root the sandbox under ``<cwd>/.claude-hooks/consultants/<sid>
-    /coder-out/`` — required (the runner injects from
-    ``state.sid``).
+    /coder-out/`` — required (the runner injects from ``state.sid``).
 
     ``loop_runner`` defaults to
     ``claude_hooks.agent_loop.runner.run_loop`` lazy-imported so the
     module loads in envs where claude_hooks isn't on the path.
+
+    Task #111: when ``model_chain_resolver`` is provided, the lane
+    walks the resolved ``[(client, model_name), ...]`` chain in
+    order, falling through to the next entry on **any error**, on
+    **no artifacts written**, or when the **final assistant message
+    is empty**. Each attempt rebuilds the sandbox so a partial-
+    write from a failed attempt doesn't leak into the next. When
+    the resolver is ``None`` the lane behaves as a single-attempt
+    call using the ``chat_client`` + ``model`` kwargs (full v1
+    back-compat).
     """
     item: Optional[CoderTaskItem] = state.get("coder_task_item")
     lane_idx = state.get("lane_idx")
     parent_round = (
         int(item.parent_round) if item is not None else 1
     )
-    t0 = time.monotonic()
+    t0_lane = time.monotonic()
+
+    # Resolve the failover chain BEFORE the defensive task check so
+    # the emit-on-missing-task path still reports a useful model.
+    if model_chain_resolver is not None:
+        language = language_from_path(
+            item.path if item is not None else ""
+        )
+        try:
+            raw_chain = model_chain_resolver(language) or []
+        except Exception:
+            log.exception(
+                "model_chain_resolver raised — falling back to "
+                "(chat_client, model)"
+            )
+            raw_chain = []
+        chain: list[tuple[Any, str]] = [
+            (c, m) for c, m in raw_chain
+            if c is not None and isinstance(m, str) and m.strip()
+        ]
+        if not chain and chat_client is not None and model:
+            chain = [(chat_client, model)]
+    else:
+        chain = (
+            [(chat_client, model)]
+            if chat_client is not None and model else []
+        )
+
+    # If we still have no chain, this is a graph-wiring bug — surface
+    # it as a tombstone instead of crashing.
+    if not chain:
+        dt_ms = int((time.monotonic() - t0_lane) * 1000)
+        _emit_started("coder", round=parent_round,
+                       lane_idx=lane_idx, model="")
+        _emit_finished(
+            "coder", round=parent_round, lane_idx=lane_idx,
+            duration_ms=dt_ms, ok=False,
+            error="no chat_client / model resolved",
+        )
+        return {
+            "coder_artifacts": [CoderArtifact(
+                task=item.task if item is not None else "(missing)",
+                summary="",
+                error="coder lane had no resolvable model — "
+                       "fix model_chain_resolver or chat_client wiring",
+                lane_idx=lane_idx, parent_round=parent_round,
+                duration_ms=dt_ms,
+            )],
+        }
 
     # Defensive: a Send without a task is a graph-wiring bug.
     if item is None or not isinstance(item, CoderTaskItem) \
             or not (item.task or "").strip():
+        first_model = chain[0][1]
         _emit_started("coder", round=parent_round,
-                       lane_idx=lane_idx, model=model)
+                       lane_idx=lane_idx, model=first_model)
         _emit_finished(
             "coder", round=parent_round, lane_idx=lane_idx,
-            duration_ms=int((time.monotonic() - t0) * 1000),
+            duration_ms=int((time.monotonic() - t0_lane) * 1000),
             ok=False, error="missing coder_task_item",
         )
         return {
@@ -504,31 +587,9 @@ def coder_node(state: dict,
                        "coder_task_item on per-lane state",
                 lane_idx=lane_idx,
                 parent_round=parent_round,
-                duration_ms=int((time.monotonic() - t0) * 1000),
+                duration_ms=int((time.monotonic() - t0_lane) * 1000),
             )],
         }
-
-    _emit_started("coder", round=parent_round,
-                   lane_idx=lane_idx, model=model)
-    if recorder is not None:
-        try:
-            recorder.record_node(
-                role="coder", kind="node_enter",
-                round=parent_round, lane_idx=lane_idx,
-            )
-        except Exception:  # pragma: no cover
-            log.exception("recorder.record_node raised; ignored")
-
-    # Build per-lane sandbox + tool executor. The sandbox is short-
-    # lived (one node invocation) but the audit log lives long enough
-    # to seed the CoderArtifact return.
-    sandbox = make_coder_sandbox(
-        cwd=cwd, sid=sid,
-        max_file_bytes=max_file_bytes,
-        max_total_bytes=max_total_bytes,
-        max_files=max_files,
-    )
-    tool_executor = make_sandbox_tool_executor(sandbox)
 
     # Lazy run_loop import — same pattern as tool_executor_node.
     if loop_runner is None:
@@ -537,7 +598,9 @@ def coder_node(state: dict,
             loop_runner = run_loop
         except Exception:  # pragma: no cover
             log.exception("could not import run_loop; aborting lane")
-            dt_ms = int((time.monotonic() - t0) * 1000)
+            dt_ms = int((time.monotonic() - t0_lane) * 1000)
+            _emit_started("coder", round=parent_round,
+                           lane_idx=lane_idx, model=chain[0][1])
             _emit_finished(
                 "coder", round=parent_round, lane_idx=lane_idx,
                 duration_ms=dt_ms, ok=False,
@@ -566,15 +629,13 @@ def coder_node(state: dict,
         max_total_bytes=max_total_bytes,
         max_files=max_files,
     )
-    payload = {"model": model, "messages": msgs, "stream": False}
 
-    cfg = None
+    loop_cfg = None
     if LoopConfig is not None:
-        cfg = LoopConfig(
+        loop_cfg = LoopConfig(
             # Coder is more iterative than tool_executor (write,
             # potentially revise after reading an error), but not as
-            # exploratory as researcher. Tuned conservatively pending
-            # M11b data.
+            # exploratory as researcher.
             max_iterations=8,
             force_answer_after=6,
             tools_available=True,
@@ -582,112 +643,223 @@ def coder_node(state: dict,
             force_first_tool_call=False,
         )
 
-    # Recorder callbacks — coder role tag so post-mortem audits can
-    # SQL by role and find every coder lane regardless of session.
-    on_iter_cb = None
-    on_tool_cb = None
-    tools_called: list[str] = []
-    if recorder is not None:
-        def _on_iter(_idx: int, req: dict, resp: dict, dt_ms: int) -> None:
-            pt, ct = _usage_from(resp)
-            recorder.record_llm(
-                role="coder", round=parent_round,
-                lane_idx=lane_idx, model=model,
-                request=req, response=resp,
-                prompt_tokens=pt, completion_tokens=ct,
-                duration_ms=dt_ms,
-            )
-
-        def _on_tool(name: str, args: str, output: str,
-                     dt_ms: int, err: Optional[str]) -> None:
-            recorder.record_tool(
-                role="coder", round=parent_round,
-                lane_idx=lane_idx, tool=name, args=args,
-                output=output, duration_ms=dt_ms, error=err,
-            )
-            tools_called.append(name)
-            _emit_tool_call(
-                "coder", round=parent_round,
-                lane_idx=lane_idx, tool=name,
-                args_preview=args, output_preview=output,
-                duration_ms=dt_ms, error=err,
-            )
-        on_iter_cb = _on_iter
-        on_tool_cb = _on_tool
-    else:
-        def _on_tool_norec(name: str, args: str, output: str,
-                           dt_ms: int, err: Optional[str]) -> None:
-            tools_called.append(name)
-            _emit_tool_call(
-                "coder", round=parent_round,
-                lane_idx=lane_idx, tool=name,
-                args_preview=args, output_preview=output,
-                duration_ms=dt_ms, error=err,
-            )
-        on_tool_cb = _on_tool_norec
-
-    def _chat_fn(_payload: dict) -> dict:
-        return chat_client.chat(_payload)
-
-    try:
-        result = loop_runner(
-            payload,
-            cwd,
-            config=cfg,
-            tool_specs=[CODER_WRITE_FILE_TOOL_SPEC],
-            chat_fn=_chat_fn,
-            tool_executor=tool_executor,
-            on_iter=on_iter_cb,
-            on_tool=on_tool_cb,
-        )
-    except Exception as e:
-        log.exception("coder lane %s failed: %s", lane_idx, e)
-        dt_ms = int((time.monotonic() - t0) * 1000)
-        _emit_finished(
+    # Walk the failover chain. Each iteration is a fully-isolated
+    # attempt — fresh sandbox, fresh callbacks closing over the
+    # attempt's model name, fresh writes.
+    last_error: Optional[str] = None
+    last_failure_reason: str = ""
+    attempted_models: list[str] = []
+    for attempt_idx, (client, model_name) in enumerate(chain, start=1):
+        attempted_models.append(model_name)
+        t0_attempt = time.monotonic()
+        _emit_started(
             "coder", round=parent_round, lane_idx=lane_idx,
-            duration_ms=dt_ms, ok=False,
-            error=f"{type(e).__name__}: {e}",
+            model=model_name,
         )
-        return {
-            "coder_artifacts": [CoderArtifact(
-                task=item.task,
-                summary="",
-                files=list(sandbox.writes),
-                error=f"{type(e).__name__}: {e}",
-                lane_idx=lane_idx, parent_round=parent_round,
-                duration_ms=dt_ms,
-            )],
+        if recorder is not None:
+            try:
+                recorder.record_node(
+                    role="coder", kind="node_enter",
+                    round=parent_round, lane_idx=lane_idx,
+                )
+            except Exception:  # pragma: no cover
+                log.exception("recorder.record_node raised; ignored")
+
+        # Fresh sandbox per attempt — a partial write from a failed
+        # primary must not leak into the fallback's view of the world.
+        sandbox = make_coder_sandbox(
+            cwd=cwd, sid=sid,
+            max_file_bytes=max_file_bytes,
+            max_total_bytes=max_total_bytes,
+            max_files=max_files,
+        )
+        tool_executor = make_sandbox_tool_executor(sandbox)
+
+        payload = {
+            "model": model_name, "messages": list(msgs), "stream": False,
         }
 
-    final_text = _extract_final_content(result)
-    dt_ms = int((time.monotonic() - t0) * 1000)
-    if recorder is not None:
+        # Recorder + event closures bind the CURRENT attempt's model
+        # so a post-mortem SQL by model finds the right rows on the
+        # right attempt — the failover attempts must not all log as
+        # the primary.
+        tools_called: list[str] = []
+        on_iter_cb = None
+        on_tool_cb = None
+        if recorder is not None:
+            def _on_iter(_idx: int, req: dict, resp: dict, dt_ms: int,
+                         _m: str = model_name) -> None:
+                pt, ct = _usage_from(resp)
+                recorder.record_llm(
+                    role="coder", round=parent_round,
+                    lane_idx=lane_idx, model=_m,
+                    request=req, response=resp,
+                    prompt_tokens=pt, completion_tokens=ct,
+                    duration_ms=dt_ms,
+                )
+
+            def _on_tool(name: str, args: str, output: str,
+                         dt_ms: int, err: Optional[str]) -> None:
+                recorder.record_tool(
+                    role="coder", round=parent_round,
+                    lane_idx=lane_idx, tool=name, args=args,
+                    output=output, duration_ms=dt_ms, error=err,
+                )
+                tools_called.append(name)
+                _emit_tool_call(
+                    "coder", round=parent_round,
+                    lane_idx=lane_idx, tool=name,
+                    args_preview=args, output_preview=output,
+                    duration_ms=dt_ms, error=err,
+                )
+            on_iter_cb = _on_iter
+            on_tool_cb = _on_tool
+        else:
+            def _on_tool_norec(name: str, args: str, output: str,
+                               dt_ms: int, err: Optional[str]) -> None:
+                tools_called.append(name)
+                _emit_tool_call(
+                    "coder", round=parent_round,
+                    lane_idx=lane_idx, tool=name,
+                    args_preview=args, output_preview=output,
+                    duration_ms=dt_ms, error=err,
+                )
+            on_tool_cb = _on_tool_norec
+
+        def _chat_fn(_payload: dict, _client=client) -> dict:
+            return _client.chat(_payload)
+
+        # ---- Attempt body ----
+        attempt_failed = False
+        failure_reason = ""
+        failure_error: Optional[str] = None
+        result: Any = None
         try:
-            recorder.record_node(
-                role="coder", kind="node_exit",
-                round=parent_round, lane_idx=lane_idx,
-                duration_ms=dt_ms,
+            result = loop_runner(
+                payload,
+                cwd,
+                config=loop_cfg,
+                tool_specs=[CODER_WRITE_FILE_TOOL_SPEC],
+                chat_fn=_chat_fn,
+                tool_executor=tool_executor,
+                on_iter=on_iter_cb,
+                on_tool=on_tool_cb,
             )
-        except Exception:  # pragma: no cover
-            log.exception("recorder.record_node raised; ignored")
-    # If the lane wrote zero files AND rejections occurred, surface
-    # the rejection reason as an error so the synthesizer flags the
-    # gap. Empty-files-with-no-rejections is treated as "model
-    # decided no code was needed" — surfaced as the summary text
-    # with no error.
-    err: Optional[str] = None
-    if not sandbox.writes and sandbox.rejections:
-        err = "; ".join(sandbox.rejections[-3:])
-    _emit_finished("coder", round=parent_round, lane_idx=lane_idx,
-                    duration_ms=dt_ms, ok=err is None, error=err)
+        except Exception as e:
+            log.exception(
+                "coder lane %s attempt %d (%s) raised: %s",
+                lane_idx, attempt_idx, model_name, e,
+            )
+            attempt_failed = True
+            failure_reason = "raised"
+            failure_error = f"{type(e).__name__}: {e}"
+
+        final_text = "" if attempt_failed else _extract_final_content(result)
+
+        # Failover triggers — only check when the call didn't already
+        # raise. Strictest of the three triggers wins (order matters
+        # for the reason tag).
+        if not attempt_failed:
+            if not sandbox.writes:
+                attempt_failed = True
+                failure_reason = "no_artifacts"
+                rej = "; ".join(sandbox.rejections[-3:]) \
+                    if sandbox.rejections else "no write_file calls"
+                failure_error = (
+                    f"primary {model_name} wrote no files: {rej}"
+                )
+            elif not (final_text or "").strip():
+                attempt_failed = True
+                failure_reason = "empty_message"
+                failure_error = (
+                    f"primary {model_name} returned empty final message"
+                )
+
+        dt_attempt_ms = int((time.monotonic() - t0_attempt) * 1000)
+        if recorder is not None:
+            try:
+                recorder.record_node(
+                    role="coder", kind="node_exit",
+                    round=parent_round, lane_idx=lane_idx,
+                    duration_ms=dt_attempt_ms,
+                )
+            except Exception:  # pragma: no cover
+                log.exception("recorder.record_node raised; ignored")
+
+        if not attempt_failed:
+            # Success path. Final emit + return artifact tagged
+            # with the model that won (the primary unless we
+            # failed-over).
+            dt_lane_ms = int((time.monotonic() - t0_lane) * 1000)
+            _emit_finished(
+                "coder", round=parent_round, lane_idx=lane_idx,
+                duration_ms=dt_attempt_ms, ok=True,
+            )
+            return {
+                "coder_artifacts": [CoderArtifact(
+                    task=item.task,
+                    summary=final_text,
+                    files=list(sandbox.writes),
+                    lane_idx=lane_idx, parent_round=parent_round,
+                    duration_ms=dt_lane_ms,
+                    error=None,
+                )],
+            }
+
+        # Failure: emit a NodeFinished(ok=False) for the failed
+        # attempt before deciding whether to retry.
+        last_error = failure_error
+        last_failure_reason = failure_reason
+        _emit_finished(
+            "coder", round=parent_round, lane_idx=lane_idx,
+            duration_ms=dt_attempt_ms, ok=False,
+            error=f"{failure_reason}: {failure_error or ''}",
+        )
+
+        # Decide: more attempts left, or chain exhausted?
+        next_idx = attempt_idx + 1
+        if next_idx <= len(chain):
+            next_model = chain[next_idx - 1][1]
+            _emit_coder_failover(
+                round=parent_round, lane_idx=lane_idx,
+                from_model=model_name, to_model=next_model,
+                reason=failure_reason, attempt_idx=attempt_idx,
+                next_attempt_idx=next_idx,
+                error_preview=(failure_error or "")[:200],
+            )
+            continue
+        # Chain exhausted — emit a final failover marker so the
+        # post-mortem shows the chain ended here without recovery.
+        _emit_coder_failover(
+            round=parent_round, lane_idx=lane_idx,
+            from_model=model_name, to_model=None,
+            reason="chain_exhausted", attempt_idx=attempt_idx,
+            next_attempt_idx=None,
+            error_preview=(failure_error or "")[:200],
+        )
+
+    # Loop fell through with no success — tombstone with the full
+    # chain context.
+    dt_lane_ms = int((time.monotonic() - t0_lane) * 1000)
+    if len(attempted_models) == 1:
+        chain_desc = f"model {attempted_models[0]} failed"
+    else:
+        chain_desc = (
+            f"primary {attempted_models[0]} and fallback "
+            f"{attempted_models[-1]} both failed"
+        )
+    err_msg = (
+        f"{chain_desc} ({last_failure_reason or 'unknown'}): "
+        f"{last_error or 'no error captured'}"
+    )
     return {
         "coder_artifacts": [CoderArtifact(
             task=item.task,
-            summary=final_text,
-            files=list(sandbox.writes),
+            summary="",
+            files=[],
+            error=err_msg,
             lane_idx=lane_idx, parent_round=parent_round,
-            duration_ms=dt_ms,
-            error=err,
+            duration_ms=dt_lane_ms,
         )],
     }
 

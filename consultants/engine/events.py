@@ -206,6 +206,37 @@ class Resumed(CouncilEvent):
     kind: str = "resumed"
 
 
+@dataclass(frozen=True, kw_only=True)
+class CoderFailover(CouncilEvent):
+    """Task #111 — emitted between attempts when a coder lane's
+    primary model fails and the lane falls through to its fallback.
+
+    Failover triggers (set in ``reason``):
+    - ``"raised"``         primary raised any exception (transport,
+                           stall-detector kill, agent-loop crash)
+    - ``"no_artifacts"``   primary completed but wrote zero files
+    - ``"empty_message"``  primary's final assistant message was
+                           empty or whitespace-only
+    - ``"chain_exhausted"`` final attempt also failed; the artifact
+                           tombstones with both model names in
+                           ``CoderArtifact.error``.
+
+    ``attempt_idx`` is the 1-based index of the FAILED attempt;
+    ``next_attempt_idx`` is the index the lane is about to try
+    (``None`` when ``reason == "chain_exhausted"``).
+    """
+    role: str = "coder"
+    round: int = 1
+    lane_idx: Optional[int] = None
+    from_model: str = ""
+    to_model: Optional[str] = None
+    reason: str = ""
+    attempt_idx: int = 1
+    next_attempt_idx: Optional[int] = None
+    error_preview: str = ""
+    kind: str = "coder_failover"
+
+
 # ============================================================== #
 # Stream-writer bridge
 # ============================================================== #

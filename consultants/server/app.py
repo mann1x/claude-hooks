@@ -92,6 +92,17 @@ class SessionState:
     # The follow-up runner reuses these to skip the /api/show probe
     # and the upstream warmup.
     _chat_clients: Optional[dict] = field(default=None, repr=False)
+    # Task #111: per-model raw ChatClients for the coder role's
+    # failover chain. Same warm-reuse pattern as ``_chat_clients``
+    # but keyed by Ollama model tag (not role). ``None`` on parents
+    # that didn't enable per-language routing AND on v1.x sessions
+    # reopened from disk (the follow-up runner cold-builds them
+    # then). Empty dict means "enabled but only the default route
+    # in use" — pre-built clients are stashed so the next follow-up
+    # in the chain inherits them too.
+    _coder_chat_clients_by_model: Optional[dict] = field(
+        default=None, repr=False,
+    )
     # v1.1 message-history fields. Populated from transcript.db on
     # reopen-from-disk and from the live recorder on warm-session
     # completion, so the disk-loaded path is indistinguishable from
@@ -978,6 +989,7 @@ def _close_session(app, sid: str, *, reason: str) -> None:
     # but no open sockets (urllib opens per-call), so this is just
     # a memory release.
     state._chat_clients = None
+    state._coder_chat_clients_by_model = None
     log.info("closed session %s (reason=%s)", sid, reason)
 
 

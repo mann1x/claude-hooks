@@ -42,6 +42,51 @@ Live-run commit: see the M11b live-run commit that appended this
 row. Results dir:
 [`benchmarks/consultants/results/2026-05-16/coder/`](../benchmarks/consultants/results/2026-05-16/coder/).
 
+### v1.0.1-mlang baseline (2026-05-17) — per-language winners
+
+The mlang v1.0.1 delta fixed the `pytest -x` algorithm-axis bug
+(see commit `bench(coder_mlang): v1.0.1 two-axis oracle scoring`)
+and re-ran the same 5-model cohort across **6 languages × 13
+questions**. The results revealed that no single model is best
+across all languages — the per-language map below replaces the
+v1.0 "one model wins all" baseline as task #111's default. Suite
+hash `ddef8095`.
+
+| Language | Primary             | Fallback                 | alg% | avgQ | Source                                |
+|----------|---------------------|--------------------------|-----:|-----:|---------------------------------------|
+| c        | `glm-5.1:cloud`     | `deepseek-v4-pro:cloud`  |  50% | 2.83 | user "pick fastest" (table ambiguous) |
+| cpp      | `deepseek-v4-flash:cloud` | `kimi-k2.6:cloud`  |  33% | 4.33 | table alg + quality winner            |
+| csharp   | `deepseek-v4-pro:cloud`   | `kimi-k2.6:cloud`  |  33% | 3.67 | user override (top avgQ)              |
+| go       | `kimi-k2.6:cloud`         | `deepseek-v4-pro:cloud` | 0% | 4.33 | table avgQ winner                     |
+| python   | `glm-5.1:cloud`           | `kimi-k2.6:cloud`  |  0%  | 4.67 | user override (top avgQ tied)         |
+| rust     | `deepseek-v4-flash:cloud` | `deepseek-v4-pro:cloud` | 0% | 2.83 | table avgQ winner                     |
+
+**Global default route** (used when a language has no per-language
+entry, including all out-of-cohort languages like `typescript`,
+`java`, `ruby`, `swift`, `shell`):
+`glm-5.1:cloud` → `kimi-k2.6:cloud`.
+
+Constants live in
+[`consultants/engine/coder_defaults.py`](../consultants/engine/coder_defaults.py)
+as `RECOMMENDED_CODER_ROUTES_BY_LANGUAGE` +
+`RECOMMENDED_CODER_DEFAULT_ROUTE`. Results dir:
+[`benchmarks/consultants/results/2026-05-17/coder_mlang-v1.0.1/`](../benchmarks/consultants/results/2026-05-17/coder_mlang-v1.0.1/)
+(merged with `rerun-20260517-114651/` for the 1 timeout-tagged
+trial that re-fired clean).
+
+The `fallback` column is the cohort-wide #2-by-avgQ when not
+already the primary — so a primary failure lands on a model that
+was still strong-for-that-language rather than a random survivor.
+Failover triggers (in `coder.py`) are: any exception, zero files
+written, OR empty final assistant message — strictest of the
+three wins for the recorded reason.
+
+Override surface (task #111):
+- TOML: `[role.coder.routes.<lang>]` + `[role.coder.default_route]`
+  (see `consultants/config.py:_render`).
+- CLI: `claude-consultants config coder {list,set,unset,set-default}`.
+- Skill: `/consultants config` → "Coder routing" subflow.
+
 ---
 
 ## Stall thresholds

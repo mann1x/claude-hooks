@@ -947,6 +947,223 @@ class TestSynthesizerCoderIntegration(unittest.TestCase):
 
 
 # ============================================================== #
+# Task #111: per-language model dispatch via model_chain_resolver
+# ============================================================== #
+
+class TestCoderNodeResolverDispatch(unittest.TestCase):
+    """When the runner wires a ``model_chain_resolver``, the lane
+    walks the chain instead of using the legacy ``chat_client`` +
+    ``model`` kwargs. The resolver is called with the language id
+    derived from ``CoderTaskItem.path``.
+    """
+
+    def test_resolver_called_with_python_for_py_path(self):
+        import tempfile
+        seen: list = []
+
+        def resolver(lang):
+            seen.append(lang)
+            return [(_FakeChat(), "glm-5.1:cloud")]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            item = CoderTaskItem(task="x", path="solution.py")
+            state = {"coder_task_item": item, "lane_idx": 0}
+            out = coder_node(
+                state, grounding_msgs=[], cwd=tmp, sid="sid-1",
+                model_chain_resolver=resolver,
+                loop_runner=_stub_loop_runner_writes(),
+            )
+        self.assertEqual(seen, ["python"])
+        self.assertIsNone(out["coder_artifacts"][0].error)
+
+    def test_resolver_called_with_csharp_for_cs_path(self):
+        import tempfile
+        seen: list = []
+
+        def resolver(lang):
+            seen.append(lang)
+            return [(_FakeChat(), "deepseek-v4-pro:cloud")]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            item = CoderTaskItem(task="x", path="Service.cs")
+            state = {"coder_task_item": item, "lane_idx": 0}
+            coder_node(
+                state, grounding_msgs=[], cwd=tmp, sid="sid-1",
+                model_chain_resolver=resolver,
+                loop_runner=_stub_loop_runner_writes(
+                    "Service.cs", "class S {}\n",
+                ),
+            )
+        self.assertEqual(seen, ["csharp"])
+
+    def test_resolver_called_with_none_for_empty_path(self):
+        # When the planner emits no path, the language id is None
+        # → the resolver routes to its global default route.
+        import tempfile
+        seen: list = []
+
+        def resolver(lang):
+            seen.append(lang)
+            return [(_FakeChat(), "glm-5.1:cloud")]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            item = CoderTaskItem(task="x", path="")
+            state = {"coder_task_item": item, "lane_idx": 0}
+            coder_node(
+                state, grounding_msgs=[], cwd=tmp, sid="sid-1",
+                model_chain_resolver=resolver,
+                loop_runner=_stub_loop_runner_writes(),
+            )
+        self.assertEqual(seen, [None])
+
+    def test_chain_failover_on_exception(self):
+        """Primary raises → fallback wins. Recorder + tools see
+        BOTH attempts; the artifact reflects the fallback's output."""
+        import tempfile
+        attempt_models: list = []
+
+        # Primary stub raises; fallback stub writes successfully.
+        def variant_runner(payload, cwd, *, config, tool_specs, chat_fn,
+                            tool_executor, on_iter=None, on_tool=None,
+                            preseed_builder=None):
+            attempt_models.append(payload["model"])
+            if payload["model"] == "primary:cloud":
+                raise RuntimeError("simulated primary failure")
+            # Fallback: write + emit non-empty final
+            import json as _json
+            args = _json.dumps({"path": "out.py", "content": "ok\n"})
+            out = tool_executor("write_file", args)
+            if on_tool: on_tool("write_file", args, out, 5, None)
+            return {"final": {"choices": [{"message": {
+                "role": "assistant", "content": "fallback wrote out.py",
+            }}]}}
+
+        def resolver(lang):
+            return [
+                (_FakeChat(), "primary:cloud"),
+                (_FakeChat(), "fallback:cloud"),
+            ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            item = CoderTaskItem(task="x", path="solution.py")
+            state = {"coder_task_item": item, "lane_idx": 0}
+            out = coder_node(
+                state, grounding_msgs=[], cwd=tmp, sid="sid-1",
+                model_chain_resolver=resolver,
+                loop_runner=variant_runner,
+            )
+        self.assertEqual(attempt_models, ["primary:cloud", "fallback:cloud"])
+        art = out["coder_artifacts"][0]
+        self.assertIsNone(art.error)
+        self.assertIn("fallback wrote out.py", art.summary)
+
+    def test_chain_exhausted_tombstones_with_both_models_named(self):
+        import tempfile
+
+        def no_artifacts_runner(payload, cwd, *, config, tool_specs,
+                                 chat_fn, tool_executor,
+                                 on_iter=None, on_tool=None,
+                                 preseed_builder=None):
+            # Don't write anything → no_artifacts failover trigger
+            return {"final": {"choices": [{"message": {
+                "role": "assistant", "content": "I refuse",
+            }}]}}
+
+        def resolver(lang):
+            return [
+                (_FakeChat(), "p:cloud"), (_FakeChat(), "f:cloud"),
+            ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            item = CoderTaskItem(task="x", path="solution.py")
+            state = {"coder_task_item": item, "lane_idx": 0}
+            out = coder_node(
+                state, grounding_msgs=[], cwd=tmp, sid="sid-1",
+                model_chain_resolver=resolver,
+                loop_runner=no_artifacts_runner,
+            )
+        art = out["coder_artifacts"][0]
+        self.assertIsNotNone(art.error)
+        self.assertIn("primary p:cloud and fallback f:cloud both failed",
+                      art.error)
+
+    def test_empty_message_triggers_failover(self):
+        """Stricter than no_artifacts — if the model wrote a file
+        but returned an empty final message, the lane treats it as
+        a failure (catches the kimi empty-content failure mode)."""
+        import tempfile
+        attempts: list = []
+
+        def runner_variant(payload, cwd, *, config, tool_specs, chat_fn,
+                            tool_executor, on_iter=None, on_tool=None,
+                            preseed_builder=None):
+            attempts.append(payload["model"])
+            import json as _json
+            args = _json.dumps({"path": "out.py", "content": "x\n"})
+            out = tool_executor("write_file", args)
+            if on_tool: on_tool("write_file", args, out, 5, None)
+            # Primary writes a file but returns empty final text →
+            # empty_message trigger. Fallback writes + responds.
+            if payload["model"] == "p:cloud":
+                content = "   "
+            else:
+                content = "fallback summary"
+            return {"final": {"choices": [{"message": {
+                "role": "assistant", "content": content,
+            }}]}}
+
+        def resolver(lang):
+            return [(_FakeChat(), "p:cloud"), (_FakeChat(), "f:cloud")]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            item = CoderTaskItem(task="x", path="solution.py")
+            state = {"coder_task_item": item, "lane_idx": 0}
+            out = coder_node(
+                state, grounding_msgs=[], cwd=tmp, sid="sid-1",
+                model_chain_resolver=resolver,
+                loop_runner=runner_variant,
+            )
+        self.assertEqual(attempts, ["p:cloud", "f:cloud"])
+        art = out["coder_artifacts"][0]
+        self.assertIsNone(art.error)
+        self.assertIn("fallback summary", art.summary)
+
+    def test_resolver_returning_empty_chain_tombstones_cleanly(self):
+        """A graph-wiring bug shouldn't crash the lane — return a
+        tombstone with a descriptive error instead."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            item = CoderTaskItem(task="x", path="solution.py")
+            state = {"coder_task_item": item, "lane_idx": 0}
+            out = coder_node(
+                state, grounding_msgs=[], cwd=tmp, sid="sid-1",
+                model_chain_resolver=lambda lang: [],
+                loop_runner=_stub_loop_runner_writes(),
+            )
+        art = out["coder_artifacts"][0]
+        self.assertIsNotNone(art.error)
+        self.assertIn("no resolvable model", art.error)
+
+    def test_backcompat_no_resolver_uses_chat_client_kwarg(self):
+        """When ``model_chain_resolver`` is None (v1 callers), the
+        lane behaves exactly as it did before #111."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            item = CoderTaskItem(task="x", path="solution.py")
+            state = {"coder_task_item": item, "lane_idx": 0}
+            out = coder_node(
+                state, chat_client=_FakeChat(),
+                grounding_msgs=[], model="legacy:cloud",
+                cwd=tmp, sid="sid-1",
+                loop_runner=_stub_loop_runner_writes(),
+                # NO resolver
+            )
+        art = out["coder_artifacts"][0]
+        self.assertIsNone(art.error)
+        self.assertEqual(len(art.files), 1)
+
+
+# ============================================================== #
 # CODER_WRITE_FILE_TOOL_SPEC sanity
 # ============================================================== #
 

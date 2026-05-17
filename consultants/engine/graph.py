@@ -246,6 +246,27 @@ class GraphDeps:
     coder_max_file_bytes: int = 50 * 1024
     coder_max_total_bytes: int = 1024 * 1024
     coder_max_files: int = 16
+    # Task #111: per-model ChatClient dict for the coder role's
+    # failover chain. Keys are model names (Ollama tags); values
+    # are ChatClient-like objects. The runner materialises one
+    # client per UNIQUE model named across the per-language map +
+    # default route + legacy fallback model. Empty dict ⇒ no
+    # per-language routing (the coder uses ``chat_clients["coder"]``
+    # alone, full v1 back-compat).
+    coder_chat_clients_by_model: dict[str, Any] = field(
+        default_factory=dict,
+    )
+    # Task #111: per-language route map for the coder role. Same
+    # shape as ``RoleConfig.routes_by_language``; the
+    # ``_wrap_coder`` resolver closure walks this. Empty dict ⇒
+    # no per-language routing.
+    coder_routes_by_language: dict[str, Any] = field(
+        default_factory=dict,
+    )
+    # Task #111: global default route for the coder role. ``None``
+    # ⇒ fall through to the legacy ``chat_clients["coder"]`` +
+    # ``models["coder"]``.
+    coder_default_route: Optional[Any] = None
 
 
 # ----------------------- node wrappers --------------------------- #
@@ -419,16 +440,27 @@ def _wrap_coder(deps: GraphDeps, *, max_file_bytes: int,
     sandbox-root path; if ``deps.sid`` is None the coder tombstones
     with a "missing sid" error (preserves audit-trail correctness
     over silent fallback to a shared dir).
+
+    Task #111: when ``deps.coder_chat_clients_by_model`` is non-
+    empty AND (``coder_routes_by_language`` is non-empty OR
+    ``coder_default_route`` is set), build a resolver closure
+    that returns the (primary, fallback) chain per detected
+    language. Otherwise pass ``model_chain_resolver=None`` and the
+    node behaves as the single-attempt v1 callable.
     """
     from consultants.engine.coder import coder_node
     role = "coder"
 
+    # Build the per-call resolver once at wrap time so the closure
+    # body is a fast dict lookup, not a config-walk.
+    resolver = _build_coder_chain_resolver(deps)
+
     def _node(state: dict) -> dict:
         return coder_node(
             state,
-            chat_client=deps.chat_clients[role],
+            chat_client=deps.chat_clients.get(role),
             grounding_msgs=deps.grounding_msgs,
-            model=deps.models[role],
+            model=deps.models.get(role, ""),
             cwd=deps.cwd,
             sid=deps.sid or "_unknown_",
             think=_think_for(deps, role),
@@ -436,8 +468,67 @@ def _wrap_coder(deps: GraphDeps, *, max_file_bytes: int,
             max_file_bytes=max_file_bytes,
             max_total_bytes=max_total_bytes,
             max_files=max_files,
+            model_chain_resolver=resolver,
         )
     return _node
+
+
+def _build_coder_chain_resolver(deps: GraphDeps):
+    """Task #111 — return a closure mapping language id (or None) to
+    the failover chain ``[(client, model_name), ...]``.
+
+    The resolver is ``None`` when no per-language routing is
+    configured AND no global default is set — that's the v1
+    back-compat case where ``coder_node`` should use its single
+    ``chat_client`` + ``model`` kwargs.
+    """
+    routes = deps.coder_routes_by_language or {}
+    default_route = deps.coder_default_route
+    clients_by_model = deps.coder_chat_clients_by_model or {}
+    legacy_client = deps.chat_clients.get("coder")
+    legacy_model = deps.models.get("coder", "")
+
+    if not routes and default_route is None:
+        return None  # back-compat fast path
+
+    def _resolver(language: Optional[str]):
+        # 1. per-language entry
+        route = None
+        if language and language in routes:
+            route = routes[language]
+        elif default_route is not None:
+            route = default_route
+        if route is None:
+            # Shouldn't happen given the guard above, but be safe.
+            if legacy_client is not None and legacy_model:
+                return [(legacy_client, legacy_model)]
+            return []
+        chain: list[tuple[Any, str]] = []
+        primary_name = (getattr(route, "primary", "") or "").strip()
+        if primary_name:
+            client = clients_by_model.get(primary_name)
+            if client is None:
+                # Fall back to the legacy client only if the model
+                # name happens to match — otherwise the runner
+                # forgot to materialise this client (graph-wiring
+                # bug; surface it by skipping rather than crashing).
+                if legacy_client is not None \
+                        and legacy_model == primary_name:
+                    client = legacy_client
+            if client is not None:
+                chain.append((client, primary_name))
+        fallback_name = (getattr(route, "fallback", "") or "").strip()
+        if fallback_name and fallback_name != primary_name:
+            client = clients_by_model.get(fallback_name)
+            if client is None \
+                    and legacy_client is not None \
+                    and legacy_model == fallback_name:
+                client = legacy_client
+            if client is not None:
+                chain.append((client, fallback_name))
+        return chain
+
+    return _resolver
 
 
 def _wrap_synthesizer(deps: GraphDeps):

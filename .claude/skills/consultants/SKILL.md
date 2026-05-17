@@ -324,7 +324,22 @@ Roles:
                   extra_models: (none — only used at xmax)
   synthesizer   ENABLED   model=kimi-k2.6:cloud         ctx=auto
                 (synthesizer cannot be disabled)
+  coder         DISABLED  model=glm-5.1:cloud           ctx=auto
+                  default → glm-5.1:cloud → kimi-k2.6:cloud
+                  routes:
+                    c       → glm-5.1:cloud         → deepseek-v4-pro:cloud
+                    cpp     → deepseek-v4-flash:cloud → kimi-k2.6:cloud
+                    csharp  → deepseek-v4-pro:cloud → kimi-k2.6:cloud
+                    go      → kimi-k2.6:cloud       → deepseek-v4-pro:cloud
+                    python  → glm-5.1:cloud         → kimi-k2.6:cloud
+                    rust    → deepseek-v4-flash:cloud → deepseek-v4-pro:cloud
 ```
+
+When rendering the "coder" sub-block, surface the
+`coder.default_route` (as `default → primary → fallback`) and each
+per-language entry the same way. The routes only matter when
+`coder` is `ENABLED`; render the block in dim/grey when disabled
+(but still show it so the user knows the routing config exists).
 
 ### 2. Top-level menu (loop until Done)
 
@@ -334,9 +349,12 @@ AskUserQuestion (single-select, max 4):
 2. **Change service mode** — always-on or smart-start
 3. **Change effort tier** — low/medium/high/max, or x-prefixed
    variants for multi-model fan-out
-4. **Done**
+4. **Coder routing** — per-language model selection (primary +
+   fallback) for the optional coder role
 
-Loop back to step 1 after each successful change.
+(Loop until the user picks **Done** — offer that as a 4th option
+in a follow-up question after each round if the menu hits the 4-
+option cap.) Loop back to step 1 after each successful change.
 
 ### Subflow A — Edit a role
 
@@ -389,6 +407,77 @@ researcher `extra_models`, surface:
 > corresponding base tier until you add extras via Subflow A.
 
 Don't block the change.
+
+### Subflow E — Coder per-language routing (task #111)
+
+When the user picks **"4. Coder routing"** from the top-level menu:
+
+1. **Show current state.** Run
+   ```
+   claude-consultants config coder list --cwd "$(pwd)"
+   ```
+   Render a compact view of `coder.default_route` + each
+   `routes_by_language` entry. Mention if `coder` is disabled (the
+   routing is configured but the role itself won't fire until
+   enabled via Subflow A → `set-role coder --enabled true`).
+
+2. **Top-level routing question.** AskUserQuestion:
+   - **Edit global default route** — change the model used when a
+     language has no per-language entry.
+   - **Edit a per-language entry** — pick one of the existing
+     entries to change its primary/fallback.
+   - **Add a new language entry** — for a language not currently
+     in the map (e.g. `typescript`, `java`).
+   - **Remove a per-language entry** — language falls back to the
+     global default after removal.
+
+3. **For "Edit global default" / "Edit a per-language entry":**
+   - Sub-question: "Change primary, fallback, or both?"
+   - For each chosen field: AskUserQuestion with the candidate
+     model list. Source the list via
+     `claude-consultants config list-models` and rank by:
+     (a) the user's existing per-role models, (b) the bench
+     winners for this language (when known), (c) recent models
+     by `modified_at`. Cap at 3 + `Other (custom)`.
+   - Forward to:
+     ```
+     claude-consultants config coder set-default --primary <m> [--fallback <m>]
+     claude-consultants config coder set <lang> --primary <m> [--fallback <m>]
+     ```
+     Pass `--fallback ""` (empty string) when the user wants to
+     clear the failover on an existing entry — the CLI treats
+     `None` as "keep current" and `""` as "explicit clear".
+
+4. **For "Add a new language entry":**
+   - AskUserQuestion: which language? Offer the keys from
+     `LANGUAGE_BY_EXTENSION.values()` minus existing entries:
+     `c`, `cpp`, `csharp`, `go`, `python`, `rust`, `typescript`,
+     `javascript`, `java`, `kotlin`, `swift`, `ruby`, `php`,
+     `shell`. Cap at 3 + `Other (custom slug)`.
+   - Then primary/fallback as in step 3.
+   - Forward to `claude-consultants config coder set <lang>
+     --primary <m> --fallback <m>`.
+
+5. **For "Remove a per-language entry":**
+   - AskUserQuestion: which entry? List existing keys + `Back`.
+   - Confirm with the user before sending (this is a destructive
+     change to the routing) — show what the language will fall
+     back to (the global default's primary+fallback). The
+     operation is idempotent (no error on repeat), but the
+     confirmation is for the human, not the API.
+   - Forward to `claude-consultants config coder unset <lang>`.
+
+6. **Loop back to step 1** after each successful change.
+
+**Failover semantics primer (mention once, on the first change):**
+
+> The coder's failover chain is `primary → fallback → tombstone`.
+> On **any** primary failure (raised exception, zero files written,
+> empty final message) the lane retries the same task with the
+> fallback model. After both fail the lane tombstones with both
+> model names recorded. The global default is **not** a third
+> retry — it only fills in when a language has no per-language
+> entry.
 
 ### After every change
 
