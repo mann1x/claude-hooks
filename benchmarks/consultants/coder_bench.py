@@ -780,6 +780,8 @@ def _make_live_clients(models: list[str], ollama_base: str,
                        judge_model: Optional[str],
                        audit_judge_model: Optional[str] = None,
                        meta_judge_model: Optional[str] = None,
+                       judge_timeout_s: float = 60.0,
+                       judge_max_retries: int = 3,
                        ) -> tuple[dict, Any, Any, Any]:
     """Build per-model ChatClients via
     ``make_agent_chat_client``. Returns
@@ -792,6 +794,17 @@ def _make_live_clients(models: list[str], ollama_base: str,
     Each judge gets its own ChatClient so retry counters +
     inference-time accounting stay attributable per role.
 
+    **Retry budgets** differ by role:
+      - Coder clients keep the agent-loop defaults (timeout 600s,
+        retries 15). Coders do real work and need the headroom.
+      - Judge clients use ``judge_timeout_s`` / ``judge_max_retries``
+        — defaults 60s timeout × 3 retries = ~3 min worst-case per
+        judge call. The 2026-05-17 v1.0.1 partial caught a kimi
+        empty-content trial that ate ~900s of cloud time on default
+        budgets; tighter judge limits bound the cost without
+        denying judges legitimate think time (judge prompts are
+        small, ~3K tokens, and cleanly succeed in <10s normally).
+
     Pick the meta judge to be OUT-OF-COHORT (not in the ``models``
     list) for true impartiality. Default v1.0.1 setup:
       judge        = kimi-k2.6:cloud      (in cohort)
@@ -801,19 +814,25 @@ def _make_live_clients(models: list[str], ollama_base: str,
     from claude_hooks.get_advice.chat_client import make_agent_chat_client
     coder_clients: dict[str, Any] = {}
     for m in models:
+        # Coders keep default budgets — agent loops can be long.
         coder_clients[m] = make_agent_chat_client(m, ollama_base)
+    judge_kwargs = dict(
+        timeout_s=judge_timeout_s, max_retries=judge_max_retries,
+    )
     judge_client = None
     if judge_model:
-        judge_client = make_agent_chat_client(judge_model, ollama_base)
+        judge_client = make_agent_chat_client(
+            judge_model, ollama_base, **judge_kwargs,
+        )
     audit_judge_client = None
     if audit_judge_model:
         audit_judge_client = make_agent_chat_client(
-            audit_judge_model, ollama_base,
+            audit_judge_model, ollama_base, **judge_kwargs,
         )
     meta_judge_client = None
     if meta_judge_model:
         meta_judge_client = make_agent_chat_client(
-            meta_judge_model, ollama_base,
+            meta_judge_model, ollama_base, **judge_kwargs,
         )
     return coder_clients, judge_client, audit_judge_client, meta_judge_client
 
@@ -977,6 +996,8 @@ def run_bench(*,
               pytest_python: str,
               audit_judge_model: Optional[str] = None,
               meta_judge_model: Optional[str] = None,
+              judge_timeout_s: float = 60.0,
+              judge_max_retries: int = 3,
               commit_report: bool = False) -> int:
     """Execute the bench. Returns the count of trials run.
 
@@ -1048,6 +1069,8 @@ def run_bench(*,
             models, ollama_base, judge_model,
             audit_judge_model=audit_judge_model,
             meta_judge_model=meta_judge_model,
+            judge_timeout_s=judge_timeout_s,
+            judge_max_retries=judge_max_retries,
         )
 
     n_done = 0
@@ -1266,6 +1289,23 @@ def build_parser() -> argparse.ArgumentParser:
               "Set to '' to skip the meta judge (default)."),
     )
     p.add_argument(
+        "--judge-timeout-s", type=float, default=60.0,
+        help=("Per-attempt timeout (seconds) for ALL judge calls "
+              "(read-only + audit + meta). Default 60. Judges are "
+              "small prompts (~3K tokens) that normally complete in "
+              "<10s; the tight budget bounds the cost of a kimi "
+              "empty-content / network-stall pathology. Set higher "
+              "for thoughtful judge models on hard questions."),
+    )
+    p.add_argument(
+        "--judge-max-retries", type=int, default=3,
+        help=("Retry budget for judge ChatClient calls. Default 3. "
+              "Worst-case judge wall = judge_timeout_s × "
+              "(judge_max_retries + 1) ≈ 4 minutes at defaults. "
+              "Coder clients keep the 15-retry agent-loop default "
+              "regardless of this flag."),
+    )
+    p.add_argument(
         "--questions-dir", type=Path, default=DEFAULT_QUESTIONS_DIR,
         help=f"Directory of bench questions. Default: {DEFAULT_QUESTIONS_DIR}",
     )
@@ -1346,6 +1386,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         judge_model=args.judge_model or None,
         audit_judge_model=args.audit_judge_model or None,
         meta_judge_model=args.meta_judge_model or None,
+        judge_timeout_s=args.judge_timeout_s,
+        judge_max_retries=args.judge_max_retries,
         tier_filter=tier_set,
         id_filter=id_set,
         pytest_python=args.pytest_python,
