@@ -294,6 +294,17 @@ def _run_one_trial(*,
         "plan": "",          # no plan in bench — the task IS the plan
         "research": [],      # no researcher findings
     }
+    # v1.0.1: reset per-trial so trial.inference_s captures only the
+    # successful-attempt inference time on this trial's calls. wall_s
+    # still measures the full wall (including any ChatClient retry
+    # backoffs) for the operator-facing "elapsed" number.
+    try:
+        coder_chat_client.reset_inference_timer()
+    except AttributeError:
+        # Old ChatClient without the timer — bench still runs, just
+        # leaves trial.inference_s at 0.0. Should never hit on the
+        # current claude-hooks build.
+        pass
     t0 = time.monotonic()
     try:
         result = coder_node(
@@ -310,12 +321,18 @@ def _run_one_trial(*,
     except Exception as e:
         log.exception("trial %s × %s raised", question.id, model)
         trial.wall_s = time.monotonic() - t0
+        trial.inference_s = float(
+            getattr(coder_chat_client, "total_inference_s", 0.0) or 0.0
+        )
         trial.iterations = iterations
         trial.tokens_prompt = tokens_prompt
         trial.tokens_completion = tokens_completion
         trial.error = f"{type(e).__name__}: {e}"
         return trial
     trial.wall_s = time.monotonic() - t0
+    trial.inference_s = float(
+        getattr(coder_chat_client, "total_inference_s", 0.0) or 0.0
+    )
     trial.iterations = iterations
     trial.tokens_prompt = tokens_prompt
     trial.tokens_completion = tokens_completion

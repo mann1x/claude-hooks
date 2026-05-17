@@ -414,7 +414,12 @@ class CoderTrial:
     test_results: dict = field(default_factory=dict)  # v1.0.1: per-test detail
     constraint_violations: list = field(default_factory=list)  # v1.0.1
     # Cost signals
-    wall_s: float = 0.0
+    wall_s: float = 0.0                       # total trial wall (incl. retries)
+    inference_s: float = 0.0                  # v1.0.1: cumulative SUCCESSFUL-attempt inference
+                                              # time only (excludes failed-attempt timeouts +
+                                              # exponential-backoff sleeps). Use this for
+                                              # cost-comparison rankings; wall_s stays for
+                                              # the operator-facing "wall clock" number.
     iterations: int = 0
     tokens_prompt: int = 0
     tokens_completion: int = 0

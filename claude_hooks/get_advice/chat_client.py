@@ -125,6 +125,19 @@ class ChatClient:
             "prompt_eval_count": 0,
             "eval_count": 0,
         }
+        # Inference-time accounting (separates real LLM work from
+        # retry sleeps + failed-attempt timeouts). Only the SUCCESSFUL
+        # attempt's duration is added to ``total_inference_s``; the
+        # 10-minute timeouts that fired before the successful retry
+        # are explicitly excluded. ``last_inference_s`` is the
+        # duration of the most recent successful chat() / stream call.
+        #
+        # Callers (notably the coder benchmark) reset these per-trial
+        # via ``reset_inference_timer()`` and read
+        # ``total_inference_s`` at trial end to get a
+        # retry-decontaminated cost signal.
+        self.last_inference_s: float = 0.0
+        self.total_inference_s: float = 0.0
         # Per-instance memo of model tags that 400'd on the ``think``
         # field. We strip ``think`` / ``reasoning_effort`` from
         # subsequent calls to that model so non-reasoning models
@@ -137,6 +150,18 @@ class ChatClient:
         # second call. ``None`` value = probe is unknown / failed and
         # we should fall back to the reactive (400-based) path.
         self._probed_think: dict[str, Optional[bool]] = {}
+
+    def reset_inference_timer(self) -> None:
+        """Reset the per-trial inference-time accumulators.
+
+        Call before a benchmark trial / consultant session so the
+        ``total_inference_s`` accumulator reflects only the work
+        done within that scope. ``last_inference_s`` is also
+        reset so a downstream reader that picks up the field
+        between calls won't see a stale value from a prior run.
+        """
+        self.last_inference_s = 0.0
+        self.total_inference_s = 0.0
 
     def _probe_supports_think(self, model: str) -> Optional[bool]:
         """Ask ``/api/show`` whether ``model`` advertises the
@@ -224,13 +249,24 @@ class ChatClient:
                 method="POST",
                 headers={"Content-Type": "application/json"},
             )
+            attempt_start = time.monotonic()
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
                     data = json.loads(resp.read())
+                # Inference-time accounting: ONLY the successful
+                # attempt's duration counts. Prior failed attempts
+                # (timeouts, retryable 5xx, network resets) and the
+                # exponential-backoff sleeps between them are excluded
+                # from total_inference_s. The bench reads this field
+                # at trial end to produce a retry-decontaminated cost
+                # signal.
+                self.last_inference_s = time.monotonic() - attempt_start
+                self.total_inference_s += self.last_inference_s
                 if attempt > 0:
                     log.info(
-                        "ollama chat: succeeded on retry %d/%d",
-                        attempt, self.max_retries,
+                        "ollama chat: succeeded on retry %d/%d "
+                        "(inference %.1fs)",
+                        attempt, self.max_retries, self.last_inference_s,
                     )
                 return self._from_ollama(data)
             except urllib.error.HTTPError as e:
@@ -371,16 +407,22 @@ class ChatClient:
                 headers={"Content-Type": "application/json",
                          "Accept": "application/x-ndjson"},
             )
+            attempt_start = time.monotonic()
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
                     final = self._consume_ndjson(
                         resp, on_token=on_token,
                         cancel_check=cancel_check,
                     )
+                # Inference-time accounting — same semantic as chat():
+                # only the successful attempt's duration is recorded.
+                self.last_inference_s = time.monotonic() - attempt_start
+                self.total_inference_s += self.last_inference_s
                 if attempt > 0:
                     log.info(
-                        "ollama chat_streamed: succeeded on retry %d/%d",
-                        attempt, self.max_retries,
+                        "ollama chat_streamed: succeeded on retry %d/%d "
+                        "(inference %.1fs)",
+                        attempt, self.max_retries, self.last_inference_s,
                     )
                 return self._from_ollama(final)
             except CancelledByOrchestrator:
