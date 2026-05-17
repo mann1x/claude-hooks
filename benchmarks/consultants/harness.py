@@ -688,39 +688,47 @@ def run_pytest_against_sandbox(oracle_path: Path,
                                sandbox_dir: Path,
                                *,
                                python_executable: str = sys.executable,
-                               timeout_s: float = 60.0) -> OracleResult:
+                               timeout_s: float = 120.0,
+                               per_test_timeout_s: float = 15.0) -> OracleResult:
     """Run the oracle pytest file with ``CODER_SANDBOX`` env var
     pointing at the produced code's directory. Returns OracleResult.
 
     v1.0.1 changes vs v1.0:
       - ``-x`` (exit on first failure) dropped — every test now
-        runs to completion. The v1.0 run had ``-x`` set, which
-        meant a single source-grep miss (e.g.
-        ``test_function_named_correctly``) aborted before any
-        algorithmic test got to execute, denying us the real
-        cohort signal on the 10 zero-pass questions.
-      - ``--junitxml=`` writes per-test results to a sandbox-
-        local XML file; ``_parse_junit_xml`` reads them back into
-        ``OracleResult.test_results``.
+        runs to completion.
+      - ``--junitxml=`` writes per-test results.
+      - ``--timeout=<per_test_timeout_s>`` via ``pytest-timeout``
+        plugin (with ``--timeout-method=signal``): individual hung
+        tests are killed without aborting the whole pytest session,
+        and the junit XML records the failure with the surviving
+        per-test data. Prior subprocess-only timeout SIGKILLed the
+        whole pytest process before junit XML write, leaving the
+        bench with zero per-test data for any runaway-recursion
+        trial. The 2026-05-17 quicksort × flash trial exposed this:
+        flash had an infinite recursion, the subprocess hit the
+        60s wall, and the audit judge fell back to ``robustness``
+        mode (correctly, given missing data) but we lost the
+        post_test signal entirely.
 
     The oracle file is responsible for importing relative to
-    ``$CODER_SANDBOX`` (the test files we ship under questions/
-    do exactly that).
+    ``$CODER_SANDBOX``.
 
-    Timeout default 60s — large enough for any reasonable test
-    suite, small enough that a runaway-import-loop in the model's
-    code doesn't hang the bench indefinitely.
+    Two timeouts:
+      ``per_test_timeout_s`` (default 15s) — each test gets this
+        long. Honest tests finish in <1s; this catches runaway
+        recursion / busy-loop bugs while letting legitimate edge-
+        case tests (large random arrays, etc.) complete.
+      ``timeout_s`` (default 120s) — total session safety net.
+        Should never fire under normal pytest-timeout operation
+        but kept as a defense against pytest-timeout plugin
+        edge cases (segfault, fork bomb, etc.).
     """
     import os
     t0 = time.monotonic()
     env = dict(os.environ)
     env["CODER_SANDBOX"] = str(sandbox_dir)
-    # Strip PYTHONDONTWRITEBYTECODE if set — pytest is fine writing
-    # cache files, but inheriting an env that bans them sometimes
-    # confuses old pytest versions.
     env.pop("PYTHONDONTWRITEBYTECODE", None)
     junit_path = sandbox_dir / "_pytest_junit.xml"
-    # Wipe any stale junit from a prior run in the same sandbox.
     try:
         junit_path.unlink()
     except FileNotFoundError:
@@ -730,19 +738,29 @@ def run_pytest_against_sandbox(oracle_path: Path,
             [python_executable, "-m", "pytest", str(oracle_path),
              "-q", "--no-header",
              "-p", "no:cacheprovider",
-             f"--junitxml={junit_path}"],
+             f"--junitxml={junit_path}",
+             # Per-test timeout. ``signal`` method uses SIGALRM
+             # which pytest's pytest-timeout plugin catches and
+             # records as a test failure in the junit XML — the
+             # rest of the test session keeps running. POSIX-only
+             # but the bench is POSIX-only anyway.
+             f"--timeout={per_test_timeout_s}",
+             "--timeout-method=signal"],
             capture_output=True,
             text=True,
             env=env,
             timeout=timeout_s,
         )
     except subprocess.TimeoutExpired as e:
+        # Outer safety net fired — pytest-timeout's per-test logic
+        # didn't fire fast enough. Still parse whatever junit got
+        # written before the SIGKILL.
         return OracleResult(
             passed=False, returncode=-1,
             stdout=(e.stdout or b"").decode("utf-8", errors="replace")
                    if isinstance(e.stdout, (bytes, bytearray))
                    else (e.stdout or ""),
-            stderr=f"(pytest timed out after {timeout_s}s)",
+            stderr=f"(pytest session timed out after {timeout_s}s)",
             duration_s=time.monotonic() - t0,
             test_results=_parse_junit_xml(junit_path),
         )
