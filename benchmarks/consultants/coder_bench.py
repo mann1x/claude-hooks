@@ -62,7 +62,8 @@ if str(_REPO_ROOT) not in sys.path:
 
 from benchmarks.consultants.harness import (  # noqa: E402
     HARNESS_VERSION, BenchQuestion, CoderTrial, SuiteManifest,
-    append_trial, build_judge_messages, count_code_lines,
+    append_trial, build_judge_messages,
+    build_post_test_judge_messages, count_code_lines,
     estimate_cost, judge_lang_for_path, load_questions,
     load_suite_manifest, make_dry_run_loop_runner, measure_complexity,
     parse_constraint_tests, parse_judge_response,
@@ -224,6 +225,104 @@ def _judge_trial_quality(*, judge_chat_client, judge_model: str,
     return score, rationale
 
 
+def _post_test_judge_trial(*, judge_chat_client, judge_model: str,
+                           task: str, sandbox: Path,
+                           sandbox_path: str,
+                           test_results: dict,
+                           constraint_names: set,
+                           language: str, fence: str,
+                           ) -> tuple[Optional[float], str, str]:
+    """v1.0.1 post-test judge: run a second judge on a failed-algorithm
+    trial, with the failing test name + truncated failure message
+    included in the prompt.
+
+    Returns ``(score, rationale, failing_test_name)`` — the last
+    element identifies WHICH failure the judge inspected so a
+    post-mortem can correlate the score back to the underlying bug.
+    Returns ``(None, reason, "")`` on any error / unparseable response.
+
+    Selection policy: we pick the FIRST failing non-constraint
+    (algorithmic) test in iteration order. The picking choice is
+    deterministic across runs because ``test_results`` preserves
+    junit's parse order. A future enhancement could rank failing
+    tests (e.g. shortest one — the simplest case the model missed)
+    but the current policy keeps the implementation minimal and
+    keeps the per-trial cost at exactly one extra judge call.
+    """
+    if judge_chat_client is None or not judge_model:
+        return None, "no post-test judge configured", ""
+    code_path = sandbox / sandbox_path
+    if not code_path.is_file():
+        return None, "code file not produced", ""
+    # Find the first failing algorithm test.
+    failing_name = ""
+    failing_msg = ""
+    for name, r in test_results.items():
+        if name in constraint_names:
+            continue
+        if r.get("status") not in ("passed", "skipped"):
+            failing_name = name
+            failing_msg = r.get("msg") or ""
+            break
+    if not failing_name:
+        # Hit when passes_algorithm=False was set by the binary
+        # subprocess-exit-code fallback (junit parse failed). No
+        # per-test data to feed the judge.
+        return None, "no failing algorithm test in test_results", ""
+    try:
+        code = code_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return None, f"could not read produced file: {e}", failing_name
+    msgs = build_post_test_judge_messages(
+        task=task, code=code,
+        failing_test_name=failing_name, failing_msg=failing_msg,
+        language=language, fence=fence,
+    )
+
+    def _call_once() -> str:
+        try:
+            resp = judge_chat_client.chat({
+                "model": judge_model,
+                "messages": msgs,
+                "stream": False,
+            })
+        except Exception as e:
+            log.exception("post-test judge call raised; treating as no-score")
+            raise RuntimeError(f"post-test judge raised: {e}") from e
+        if not isinstance(resp, dict):
+            return ""
+        choices = resp.get("choices") or []
+        if not choices or not isinstance(choices[0], dict):
+            return ""
+        return (choices[0].get("message") or {}).get("content") or ""
+
+    # First attempt + one retry on empty content. Same insurance
+    # path as ``_judge_trial_quality`` — kimi-judging-kimi went
+    # silent once-in-32 on 2026-05-16; cheap to defend against the
+    # same shape for glm here.
+    try:
+        text = _call_once()
+    except RuntimeError as e:
+        return None, str(e), failing_name
+    if not text.strip():
+        try:
+            text = _call_once()
+        except RuntimeError as e:
+            return None, f"post-test judge empty then raised: {e}", failing_name
+        if not text.strip():
+            return None, (
+                f"post-test judge returned empty content twice "
+                f"(model={judge_model})"
+            ), failing_name
+    score, rationale = parse_judge_response(text)
+    if score is None and not rationale:
+        rationale = (
+            f"post-test judge text unparseable "
+            f"(first 200 chars: {text.strip()[:200]!r})"
+        )
+    return score, rationale, failing_name
+
+
 def _run_one_trial(*,
                    question: BenchQuestion, model: str,
                    idx: int,
@@ -231,6 +330,8 @@ def _run_one_trial(*,
                    loop_runner,
                    judge_chat_client,
                    judge_model: Optional[str],
+                   post_test_judge_chat_client,
+                   post_test_judge_model: Optional[str],
                    output_dir: Path,
                    pytest_python: str) -> CoderTrial:
     """Execute one (question × model) trial.
@@ -475,6 +576,35 @@ def _run_one_trial(*,
             )
             trial.quality_score = score
             trial.quality_rationale = rationale
+
+        # v1.0.1 post-test judge — fires only when the algorithm
+        # axis failed AND a separate judge model is configured.
+        # The rationale is in the comment block on
+        # ``_post_test_judge_trial``: a model that produces
+        # idiomatic-looking buggy code scores 5 on the read-only
+        # judge but should score 2 here, so the divergence between
+        # ``quality_score`` and ``quality_post_test`` is the
+        # operational "camouflaged bug" signal.
+        if (
+            not trial.passes_algorithm
+            and post_test_judge_chat_client is not None
+            and post_test_judge_model
+        ):
+            language, fence = judge_lang_for_path(question.sandbox_path)
+            pt_score, pt_rationale, pt_failing = _post_test_judge_trial(
+                judge_chat_client=post_test_judge_chat_client,
+                judge_model=post_test_judge_model,
+                task=question.task,
+                sandbox=produced_dir,
+                sandbox_path=question.sandbox_path,
+                test_results=trial.test_results,
+                constraint_names=constraint_names,
+                language=language, fence=fence,
+            )
+            trial.quality_post_test = pt_score
+            trial.quality_post_test_rationale = pt_rationale
+            trial.quality_post_test_judge_model = post_test_judge_model
+            trial.quality_post_test_failing_test = pt_failing
     return trial
 
 
@@ -483,12 +613,23 @@ def _run_one_trial(*,
 # ============================================================== #
 
 def _make_live_clients(models: list[str], ollama_base: str,
-                       judge_model: Optional[str]) -> tuple[dict, Any]:
+                       judge_model: Optional[str],
+                       post_test_judge_model: Optional[str] = None,
+                       ) -> tuple[dict, Any, Any]:
     """Build per-model ChatClients via
     ``make_agent_chat_client``. Returns
-    ``(coder_clients_by_model, judge_client_or_None)``. Lazy import
-    so dry-run mode works in envs without the full claude_hooks
-    stack.
+    ``(coder_clients_by_model, judge_client_or_None,
+    post_test_judge_client_or_None)``.
+
+    Lazy import so dry-run mode works in envs without the full
+    claude_hooks stack.
+
+    The post-test judge gets its own ChatClient so retry counters
+    + inference-time accounting stay separate from the read-only
+    judge's. If ``post_test_judge_model`` equals ``judge_model``
+    we still build a fresh client — same model, distinct counters
+    — because the two judges live on different code paths and we
+    want their cost signals attributable separately.
     """
     from claude_hooks.get_advice.chat_client import make_agent_chat_client
     coder_clients: dict[str, Any] = {}
@@ -497,7 +638,12 @@ def _make_live_clients(models: list[str], ollama_base: str,
     judge_client = None
     if judge_model:
         judge_client = make_agent_chat_client(judge_model, ollama_base)
-    return coder_clients, judge_client
+    post_test_judge_client = None
+    if post_test_judge_model:
+        post_test_judge_client = make_agent_chat_client(
+            post_test_judge_model, ollama_base,
+        )
+    return coder_clients, judge_client, post_test_judge_client
 
 
 # ============================================================== #
@@ -657,6 +803,7 @@ def run_bench(*,
               tier_filter: Optional[set[str]],
               id_filter: Optional[set[str]],
               pytest_python: str,
+              post_test_judge_model: Optional[str] = None,
               commit_report: bool = False) -> int:
     """Execute the bench. Returns the count of trials run.
 
@@ -680,6 +827,8 @@ def run_bench(*,
         suite=suite, models=models, mode=mode,
         ollama_base=ollama_base, judge_model=judge_model,
     )
+    if post_test_judge_model:
+        metadata["post_test_judge_model"] = post_test_judge_model
     estimate = estimate_cost(questions, models, judge_model=judge_model)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "metadata.json").write_text(
@@ -705,16 +854,21 @@ def run_bench(*,
     # in live mode).
     coder_clients_by_model: dict
     judge_client: Any
+    post_test_judge_client: Any
     if mode == "dry-run":
         coder_clients_by_model = {
             m: _DryRunChatClient() for m in models
         }
         judge_client = None  # dry-run skips the judge call
+        post_test_judge_client = None
     else:
         if not ollama_base:
             raise SystemExit("--live requires --ollama-base")
-        coder_clients_by_model, judge_client = _make_live_clients(
+        (coder_clients_by_model,
+         judge_client,
+         post_test_judge_client) = _make_live_clients(
             models, ollama_base, judge_model,
+            post_test_judge_model=post_test_judge_model,
         )
 
     n_done = 0
@@ -739,6 +893,8 @@ def run_bench(*,
                     loop_runner=loop_runner,
                     judge_chat_client=judge_client,
                     judge_model=judge_model,
+                    post_test_judge_chat_client=post_test_judge_client,
+                    post_test_judge_model=post_test_judge_model,
                     output_dir=output_dir,
                     pytest_python=pytest_python,
                 )
@@ -901,6 +1057,19 @@ def build_parser() -> argparse.ArgumentParser:
               f"skip judging. Default: {DEFAULT_JUDGE_MODEL}"),
     )
     p.add_argument(
+        "--post-test-judge-model", default="",
+        help=("v1.0.1: model used as the POST-TEST judge. Fired only "
+              "on trials where ``passes_algorithm=False``. Sees the "
+              "task + code + failing test name + truncated failure "
+              "message; rates 1-5 on edge-case awareness. The "
+              "divergence between ``quality_score`` (read-only) and "
+              "``quality_post_test`` (post-test) is the "
+              "idiomatic-but-broken signal. Set to '' to skip the "
+              "post-test judge (default). Recommended for cross-"
+              "judge robustness: pick a DIFFERENT model from "
+              "--judge-model (e.g. judge=kimi, post-test=glm)."),
+    )
+    p.add_argument(
         "--questions-dir", type=Path, default=DEFAULT_QUESTIONS_DIR,
         help=f"Directory of bench questions. Default: {DEFAULT_QUESTIONS_DIR}",
     )
@@ -979,6 +1148,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         mode=mode,
         ollama_base=args.ollama_base if args.live else None,
         judge_model=args.judge_model or None,
+        post_test_judge_model=args.post_test_judge_model or None,
         tier_filter=tier_set,
         id_filter=id_set,
         pytest_python=args.pytest_python,

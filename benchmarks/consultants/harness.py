@@ -425,9 +425,27 @@ class CoderTrial:
     tokens_completion: int = 0
     code_lines: int = 0
     complexity: Optional[int] = None
-    # Soft-quality signal (LLM judge)
+    # Soft-quality signal (LLM judge) — pure static read of the
+    # source. Cannot tell if the code WORKS, only if it READS WELL.
     quality_score: Optional[float] = None
     quality_rationale: str = ""
+    # v1.0.1: post-test judge. A second judge call fired ONLY when
+    # passes_algorithm=False. The judge sees task + code + the
+    # failing test name + first 200 chars of failure msg, and rates
+    # on a 1-5 EDGE-CASE-AWARENESS rubric (see harness.build_post_test_judge_system).
+    # The divergence between quality_score and quality_post_test
+    # is the "idiomatic-but-broken" signal — a model that scores
+    # 5 on read but 2 here writes clean-looking buggy code.
+    #
+    # None when:
+    #  - passes_algorithm=True (no post-test judge needed)
+    #  - the trial errored before pytest ran
+    #  - the post-test judge model wasn't configured at run start
+    #  - the judge response was unparseable
+    quality_post_test: Optional[float] = None
+    quality_post_test_rationale: str = ""
+    quality_post_test_judge_model: str = ""  # which model judged
+    quality_post_test_failing_test: str = "" # which failure was inspected
     # Bookkeeping
     sandbox_dir: str = ""
     timestamp: str = ""        # ISO-8601 UTC; set at trial start
@@ -885,6 +903,79 @@ def build_judge_messages(
     ]
 
 
+def build_post_test_judge_system(language: str = "Python") -> str:
+    """System prompt for the v1.0.1 **post-test judge**.
+
+    Fired only when ``passes_algorithm == False``. The judge gets:
+      - the task
+      - the produced code
+      - the name of a test that failed and the (truncated) failure msg
+
+    and rates 1-5 on EDGE-CASE / ROBUSTNESS quality specifically.
+
+    The rubric is intentionally different from the read-only judge.
+    The read-only judge can score a buggy-but-clean piece of code at
+    5 because the bug is invisible at a glance. The post-test judge
+    sees evidence the code failed and is asked: *should the author
+    have anticipated this?* Diverging scores from the two judges is
+    the operational signal that a model writes camouflaged bugs.
+    """
+    return (
+        f"You are a senior {language} code reviewer doing a POST-MORTEM "
+        "review of code that failed a test. You see:\n"
+        "- The task the engineer was given\n"
+        "- The code they produced\n"
+        "- The name of a test that failed and the failure message\n\n"
+        "Score the code on a 1-5 scale specifically on EDGE-CASE / "
+        "ROBUSTNESS quality:\n\n"
+        "1 — Code is broken at a fundamental level; this failure is "
+        "one of many bugs.\n"
+        "2 — The code obviously missed this case; basic review would "
+        "have caught it.\n"
+        "3 — The code is correct for the main case but didn't "
+        "anticipate this edge.\n"
+        "4 — The code mostly handles edge cases; the gap that failed "
+        "is narrow / requires deep thinking to anticipate.\n"
+        "5 — The code IS robust against this case. This suggests an "
+        "oracle / spec issue, not the code's fault.\n\n"
+        "Output EXACTLY two lines:\n"
+        "Line 1: ``SCORE: <integer 1-5>``\n"
+        "Line 2: One short sentence (max 25 words) explaining whether "
+        "the code should have anticipated this failure.\n\n"
+        "Do not add preamble, headings, or markdown."
+    )
+
+
+def build_post_test_judge_messages(
+    task: str,
+    code: str,
+    failing_test_name: str,
+    failing_msg: str,
+    language: str = "Python",
+    fence: str = "python",
+    msg_chars: int = 200,
+) -> list[dict]:
+    """Construct the conversation for the v1.0.1 post-test judge.
+
+    Mirrors ``build_judge_messages`` but adds the failure context.
+    ``failing_msg`` is truncated to ``msg_chars`` characters so the
+    judge prompt stays bounded — the goal is for the judge to know
+    WHAT failed, not to debug the C compiler's diagnostic verbatim.
+    """
+    msg_trunc = (failing_msg or "").strip()[:msg_chars]
+    user = (
+        f"TASK GIVEN TO THE JUNIOR ENGINEER:\n{task.strip()}\n\n"
+        f"CODE THE JUNIOR PRODUCED:\n```{fence}\n{code}\n```\n\n"
+        f"TEST THAT FAILED: {failing_test_name}\n"
+        f"FAILURE MESSAGE (first {msg_chars} chars):\n{msg_trunc}\n\n"
+        "Score per the rubric. Two lines only."
+    )
+    return [
+        {"role": "system", "content": build_post_test_judge_system(language)},
+        {"role": "user", "content": user},
+    ]
+
+
 def parse_judge_response(text: str) -> tuple[Optional[float], str]:
     """Extract ``(score, rationale)`` from the judge's reply.
     ``score`` is a float (1.0–5.0) when parseable, else None.
@@ -1028,6 +1119,8 @@ __all__ = [
     "append_trial",
     "build_judge_messages",
     "build_judge_system",
+    "build_post_test_judge_messages",
+    "build_post_test_judge_system",
     "count_code_lines",
     "estimate_cost",
     "judge_lang_for_path",
