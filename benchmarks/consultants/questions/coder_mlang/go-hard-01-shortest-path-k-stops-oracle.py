@@ -5,6 +5,7 @@ import os
 import random
 import sys
 from pathlib import Path
+import pytest
 
 _HARNESS_ROOT = Path(__file__).resolve().parents[4]
 if str(_HARNESS_ROOT) not in sys.path:
@@ -62,6 +63,7 @@ def _reference(n, edges, src, dst, K):
     return -1
 
 
+@pytest.mark.constraint
 def test_source_present():
     assert SOURCE.is_file()
 

@@ -4,6 +4,7 @@ import os
 import re
 import sys
 from pathlib import Path
+import pytest
 
 _HARNESS_ROOT = Path(__file__).resolve().parents[4]
 if str(_HARNESS_ROOT) not in sys.path:
@@ -34,10 +35,12 @@ def _query(values, cycle_to):
     return out.strip()
 
 
+@pytest.mark.constraint
 def test_source_present():
     assert SOURCE.is_file()
 
 
+@pytest.mark.constraint
 def test_uses_two_pointer_walk_not_set():
     src = SOURCE.read_text()
     # Must NOT use unordered_set / set for cycle detection.

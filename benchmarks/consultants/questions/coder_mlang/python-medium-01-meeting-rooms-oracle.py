@@ -4,6 +4,7 @@ import os
 import random
 import sys
 from pathlib import Path
+import pytest
 
 SANDBOX = Path(os.environ["CODER_SANDBOX"])
 sys.path.insert(0, str(SANDBOX))
@@ -11,6 +12,7 @@ sys.path.insert(0, str(SANDBOX))
 import solution  # noqa: E402
 
 
+@pytest.mark.constraint
 def test_callable():
     assert callable(getattr(solution, "min_meeting_rooms", None))
 

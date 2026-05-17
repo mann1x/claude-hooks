@@ -4,6 +4,7 @@ import os
 import re
 import sys
 from pathlib import Path
+import pytest
 
 _HARNESS_ROOT = Path(__file__).resolve().parents[4]
 if str(_HARNESS_ROOT) not in sys.path:
@@ -36,10 +37,12 @@ def _query(capacity, n_items):
     return int(parts[0]), int(parts[1])
 
 
+@pytest.mark.constraint
 def test_source_present():
     assert SOURCE.is_file()
 
 
+@pytest.mark.constraint
 def test_no_mutex_shortcut():
     src = SOURCE.read_text()
     forbidden = re.search(
@@ -52,6 +55,7 @@ def test_no_mutex_shortcut():
     )
 
 
+@pytest.mark.constraint
 def test_uses_atomic_package():
     src = SOURCE.read_text()
     has_atomic = "atomic." in src or "/atomic\"" in src

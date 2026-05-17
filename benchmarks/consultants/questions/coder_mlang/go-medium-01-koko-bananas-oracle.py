@@ -5,6 +5,7 @@ import os
 import sys
 import time
 from pathlib import Path
+import pytest
 
 _HARNESS_ROOT = Path(__file__).resolve().parents[4]
 if str(_HARNESS_ROOT) not in sys.path:
@@ -35,6 +36,7 @@ def _query(piles, H):
     return int(out.strip())
 
 
+@pytest.mark.constraint
 def test_source_present():
     assert SOURCE.is_file()
 

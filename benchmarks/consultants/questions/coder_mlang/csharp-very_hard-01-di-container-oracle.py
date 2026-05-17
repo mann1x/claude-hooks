@@ -3,6 +3,7 @@
 import os
 import sys
 from pathlib import Path
+import pytest
 
 _HARNESS_ROOT = Path(__file__).resolve().parents[4]
 if str(_HARNESS_ROOT) not in sys.path:
@@ -26,10 +27,12 @@ def _run(stdin_input: str = "") -> tuple[int, str, str]:
         raise AssertionError(f"dotnet rejected solution.cs:\n{e.stderr}") from None
 
 
+@pytest.mark.constraint
 def test_source_present():
     assert SOURCE.is_file()
 
 
+@pytest.mark.constraint
 def test_has_container_class():
     src = SOURCE.read_text()
     assert "class Container" in src, "Container class missing"
@@ -38,6 +41,7 @@ def test_has_container_class():
     )
 
 
+@pytest.mark.constraint
 def test_uses_reflection():
     src = SOURCE.read_text()
     assert (

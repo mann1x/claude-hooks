@@ -10,6 +10,7 @@ sys.path.insert(0, str(SANDBOX))
 import solution  # noqa: E402
 
 
+@pytest.mark.constraint
 def test_class_present():
     assert hasattr(solution, "LRUCache"), "solution.LRUCache missing"
 

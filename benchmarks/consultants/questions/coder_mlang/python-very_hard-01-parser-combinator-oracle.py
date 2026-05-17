@@ -10,6 +10,7 @@ sys.path.insert(0, str(SANDBOX))
 import solution  # noqa: E402
 
 
+@pytest.mark.constraint
 def test_public_symbols_present():
     for name in ("Lit", "Seq", "Or", "Many", "parse", "ParseError"):
         assert hasattr(solution, name), f"solution.{name} missing"

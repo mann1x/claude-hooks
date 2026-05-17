@@ -4,6 +4,7 @@ import os
 import random
 import sys
 from pathlib import Path
+import pytest
 
 _HARNESS_ROOT = Path(__file__).resolve().parents[4]
 if str(_HARNESS_ROOT) not in sys.path:
@@ -27,10 +28,12 @@ def _run(stdin_input: str) -> tuple[int, str, str]:
         raise AssertionError(f"gcc rejected solution.c:\n{e.stderr}") from None
 
 
+@pytest.mark.constraint
 def test_source_present():
     assert SOURCE.is_file()
 
 
+@pytest.mark.constraint
 def test_has_red_black_logic():
     src = SOURCE.read_text()
     has_color = "RED" in src and "BLACK" in src

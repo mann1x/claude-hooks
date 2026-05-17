@@ -3,6 +3,7 @@
 import os
 import sys
 from pathlib import Path
+import pytest
 
 _HARNESS_ROOT = Path(__file__).resolve().parents[4]
 if str(_HARNESS_ROOT) not in sys.path:
@@ -26,6 +27,7 @@ def _run(stdin_input: str) -> tuple[int, str, str]:
         raise AssertionError(f"rustc rejected solution.rs:\n{e.stderr}") from None
 
 
+@pytest.mark.constraint
 def test_source_present():
     assert SOURCE.is_file(), (
         f"missing solution.rs; sandbox: "
@@ -33,6 +35,7 @@ def test_source_present():
     )
 
 
+@pytest.mark.constraint
 def test_uses_custom_iterator_adapter():
     src = SOURCE.read_text()
     assert "WindowPairs" in src, (
@@ -75,6 +78,7 @@ def test_negative_values():
     assert out.strip() == "-1 -2\n-2 -3"
 
 
+@pytest.mark.constraint
 def test_implements_iterator_trait():
     src = SOURCE.read_text()
     assert "impl" in src and "Iterator for WindowPairs" in src, (

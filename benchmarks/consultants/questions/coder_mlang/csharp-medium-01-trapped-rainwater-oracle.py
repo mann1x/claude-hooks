@@ -5,6 +5,7 @@ import random
 import sys
 import time
 from pathlib import Path
+import pytest
 
 _HARNESS_ROOT = Path(__file__).resolve().parents[4]
 if str(_HARNESS_ROOT) not in sys.path:
@@ -50,6 +51,7 @@ def _reference(h):
     return sum(min(lmax[i], rmax[i]) - h[i] for i in range(n))
 
 
+@pytest.mark.constraint
 def test_source_present():
     assert SOURCE.is_file()
 

@@ -371,10 +371,30 @@ def load_suite_manifest(directory: Path) -> SuiteManifest:
 
 @dataclass
 class CoderTrial:
-    """One (question × model) trial result. ``compiles`` /
-    ``passes_tests`` / ``test_output`` are the hard-correctness
-    signals; ``quality_score`` is the LLM-judge soft signal (1-5,
-    None when judge skipped or trial didn't compile);
+    """One (question × model) trial result.
+
+    Two-axis correctness signals (v1.0.1+):
+      ``passes_algorithm`` — all algorithmic tests pass. Decides
+        the cohort pass-rate column in the report. This is the
+        primary "does the code work?" signal.
+      ``passes_constraints`` — all constraint-tagged tests pass.
+        Measures instruction-following (did the model use the
+        required function names, output formats, banned-import
+        rules?). Independent of algorithmic correctness.
+      ``passes_tests`` — back-compat alias = ``passes_algorithm``
+        in v1.0.1+. In v1.0 this meant "all tests passed under
+        ``pytest -x``", which conflated the two axes.
+      ``test_results`` — per-test detail from the pytest junit
+        XML: ``{test_name: {"status": "passed"|"failed"|"error"
+        |"skipped", "msg": str}}``. Empty when the trial didn't
+        compile (pytest never ran).
+      ``constraint_violations`` — convenience: the test names
+        marked ``@pytest.mark.constraint`` that did NOT pass.
+        First-class field so the report renderer can surface
+        them without re-parsing test_results.
+
+    ``quality_score`` is the LLM-judge soft signal (1-5, None
+    when judge skipped or trial didn't compile);
     ``code_lines`` / ``complexity`` / ``tokens_*`` / ``wall_s`` /
     ``iterations`` measure cost.
 
@@ -387,8 +407,12 @@ class CoderTrial:
     model: str
     # Hard-correctness signals
     compiles: bool = False
-    passes_tests: bool = False
+    passes_tests: bool = False               # alias for passes_algorithm (v1.0.1+)
+    passes_algorithm: bool = False           # v1.0.1: algorithmic tests
+    passes_constraints: bool = False         # v1.0.1: constraint tests
     test_output: str = ""
+    test_results: dict = field(default_factory=dict)  # v1.0.1: per-test detail
+    constraint_violations: list = field(default_factory=list)  # v1.0.1
     # Cost signals
     wall_s: float = 0.0
     iterations: int = 0
@@ -516,14 +540,109 @@ def estimate_cost(questions: list[BenchQuestion],
 @dataclass
 class OracleResult:
     """Outcome of running the oracle pytest file against the
-    produced sandbox. ``passed`` is the hard signal; ``stdout`` /
-    ``stderr`` capture the pytest output for post-hoc inspection.
+    produced sandbox.
+
+    v1.0.1: ``passed`` keeps the back-compat semantic ("all tests
+    pass"), but per-test data lives in ``test_results`` so the
+    bench can split algorithm vs constraint at trial-finalize
+    time. The pytest command line dropped ``-x`` so EVERY test
+    runs to completion regardless of earlier failures — this is
+    what makes the algorithm/constraint split possible.
     """
     passed: bool
     returncode: int
     stdout: str
     stderr: str
     duration_s: float
+    test_results: dict = field(default_factory=dict)
+
+
+def _parse_junit_xml(junit_path: Path) -> dict:
+    """Parse a pytest ``--junitxml`` file into a
+    ``{test_name: {"status": ..., "msg": ...}}`` dict.
+
+    Status values: ``"passed"``, ``"failed"``, ``"error"``,
+    ``"skipped"``. Missing/unparseable file yields an empty dict
+    — the bench then treats the trial as "pytest never ran",
+    which matches how a no-compile or timeout looks anyway.
+
+    Messages are truncated to a defensive ceiling (2 KB each) so
+    a single chatty assertion can't bloat the trials.jsonl row.
+    """
+    if not junit_path.is_file():
+        return {}
+    try:
+        import xml.etree.ElementTree as ET
+        tree = ET.parse(str(junit_path))
+    except Exception:  # pragma: no cover — corrupt junit XML
+        return {}
+    root = tree.getroot()
+    out: dict = {}
+    # ``root`` may be ``testsuites`` (multiple) or a single
+    # ``testsuite``; iter both shapes.
+    for tc in root.iter("testcase"):
+        name = tc.get("name") or "(unnamed)"
+        fail = tc.find("failure")
+        err = tc.find("error")
+        skip = tc.find("skipped")
+        if fail is not None:
+            msg = ((fail.get("message") or "") + "\n"
+                   + (fail.text or ""))[:2000]
+            out[name] = {"status": "failed", "msg": msg.strip()}
+        elif err is not None:
+            msg = ((err.get("message") or "") + "\n"
+                   + (err.text or ""))[:2000]
+            out[name] = {"status": "error", "msg": msg.strip()}
+        elif skip is not None:
+            msg = (skip.get("message") or skip.text or "")[:2000]
+            out[name] = {"status": "skipped", "msg": msg.strip()}
+        else:
+            out[name] = {"status": "passed", "msg": ""}
+    return out
+
+
+def parse_constraint_tests(oracle_path: Path) -> set:
+    """Return the set of ``test_<name>`` function names in the
+    given oracle file that carry the ``@pytest.mark.constraint``
+    decorator immediately above them.
+
+    Tolerant of:
+      - Multiple decorators stacked (the constraint mark only
+        needs to be one of them).
+      - Blank lines between decorator and ``def``.
+      - Method-style oracles (rare; we still match the def line).
+    The check is **lexical** — no import needed, no pytest
+    collection. Faster than re-running pytest with
+    ``--collect-only`` and lets the bench inspect the oracle
+    even when subprocess pytest isn't running.
+    """
+    if not oracle_path.is_file():
+        return set()
+    text = oracle_path.read_text(encoding="utf-8", errors="replace")
+    out: set = set()
+    pending = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line == "@pytest.mark.constraint":
+            pending = True
+            continue
+        if line.startswith("@"):
+            # Other decorators don't reset; they stack.
+            continue
+        if line.startswith("def test_"):
+            if pending:
+                # Extract the function name.
+                name = line[4:].split("(", 1)[0].strip()
+                if name:
+                    out.add(name)
+            pending = False
+            continue
+        if line == "" or line.startswith("#"):
+            # Blank line / comment between decorator and def is fine.
+            continue
+        # Any other code line breaks the pending association.
+        pending = False
+    return out
 
 
 def run_pytest_against_sandbox(oracle_path: Path,
@@ -533,6 +652,17 @@ def run_pytest_against_sandbox(oracle_path: Path,
                                timeout_s: float = 60.0) -> OracleResult:
     """Run the oracle pytest file with ``CODER_SANDBOX`` env var
     pointing at the produced code's directory. Returns OracleResult.
+
+    v1.0.1 changes vs v1.0:
+      - ``-x`` (exit on first failure) dropped — every test now
+        runs to completion. The v1.0 run had ``-x`` set, which
+        meant a single source-grep miss (e.g.
+        ``test_function_named_correctly``) aborted before any
+        algorithmic test got to execute, denying us the real
+        cohort signal on the 10 zero-pass questions.
+      - ``--junitxml=`` writes per-test results to a sandbox-
+        local XML file; ``_parse_junit_xml`` reads them back into
+        ``OracleResult.test_results``.
 
     The oracle file is responsible for importing relative to
     ``$CODER_SANDBOX`` (the test files we ship under questions/
@@ -550,10 +680,18 @@ def run_pytest_against_sandbox(oracle_path: Path,
     # cache files, but inheriting an env that bans them sometimes
     # confuses old pytest versions.
     env.pop("PYTHONDONTWRITEBYTECODE", None)
+    junit_path = sandbox_dir / "_pytest_junit.xml"
+    # Wipe any stale junit from a prior run in the same sandbox.
+    try:
+        junit_path.unlink()
+    except FileNotFoundError:
+        pass
     try:
         proc = subprocess.run(
             [python_executable, "-m", "pytest", str(oracle_path),
-             "-x", "-q", "--no-header"],
+             "-q", "--no-header",
+             "-p", "no:cacheprovider",
+             f"--junitxml={junit_path}"],
             capture_output=True,
             text=True,
             env=env,
@@ -567,6 +705,7 @@ def run_pytest_against_sandbox(oracle_path: Path,
                    else (e.stdout or ""),
             stderr=f"(pytest timed out after {timeout_s}s)",
             duration_s=time.monotonic() - t0,
+            test_results=_parse_junit_xml(junit_path),
         )
     return OracleResult(
         passed=proc.returncode == 0,
@@ -574,6 +713,7 @@ def run_pytest_against_sandbox(oracle_path: Path,
         stdout=proc.stdout,
         stderr=proc.stderr,
         duration_s=time.monotonic() - t0,
+        test_results=_parse_junit_xml(junit_path),
     )
 
 
@@ -887,6 +1027,7 @@ __all__ = [
     "estimate_cost",
     "judge_lang_for_path",
     "load_questions",
+    "parse_constraint_tests",
     "load_trials",
     "make_dry_run_loop_runner",
     "measure_complexity",

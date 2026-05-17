@@ -65,7 +65,8 @@ from benchmarks.consultants.harness import (  # noqa: E402
     append_trial, build_judge_messages, count_code_lines,
     estimate_cost, judge_lang_for_path, load_questions,
     load_suite_manifest, make_dry_run_loop_runner, measure_complexity,
-    parse_judge_response, run_pytest_against_sandbox,
+    parse_constraint_tests, parse_judge_response,
+    run_pytest_against_sandbox,
 )
 
 log = logging.getLogger("benchmarks.consultants.coder_bench")
@@ -374,7 +375,56 @@ def _run_one_trial(*,
             python_executable=pytest_python,
             timeout_s=60.0,
         )
-        trial.passes_tests = oracle_result.passed
+        # v1.0.1 two-axis split: parse the oracle file to identify
+        # which tests are constraint-marked, then compute algorithm
+        # vs constraint pass-rates from the per-test junit data.
+        constraint_names = parse_constraint_tests(question.oracle_path)
+        trial.test_results = oracle_result.test_results
+        # Split per-test results by category.
+        alg_results = {
+            n: r for n, r in oracle_result.test_results.items()
+            if n not in constraint_names
+        }
+        con_results = {
+            n: r for n, r in oracle_result.test_results.items()
+            if n in constraint_names
+        }
+        # passes_algorithm = every non-constraint test passed.
+        # An empty alg_results dict (e.g. trial didn't compile,
+        # though we're inside the compiles branch) yields True via
+        # all([]) — but compiles=True here so we'd get test data
+        # OR a junit-parse failure. The latter sets passes_tests
+        # to oracle_result.passed (back-compat) to avoid a false
+        # positive.
+        if alg_results:
+            trial.passes_algorithm = all(
+                r["status"] == "passed" for r in alg_results.values()
+            )
+        else:
+            # No per-test data parsed (junit parse failure or
+            # subprocess timeout before any test ran) — fall back
+            # to the binary subprocess exit code.
+            trial.passes_algorithm = oracle_result.passed
+        if con_results:
+            trial.passes_constraints = all(
+                r["status"] == "passed" for r in con_results.values()
+            )
+            trial.constraint_violations = sorted(
+                n for n, r in con_results.items()
+                if r["status"] != "passed"
+            )
+        else:
+            # No constraint tests in this oracle (the medium tier
+            # mostly relies on existence checks for Python and
+            # nothing for C/Go). Vacuously "passed".
+            trial.passes_constraints = True
+            trial.constraint_violations = []
+        # passes_tests is the back-compat alias = passes_algorithm
+        # (the practical "does the code work?" signal). v1.0
+        # callers reading this field continue to get a useful
+        # answer; the report renderer is opt-in for the two-axis
+        # surface.
+        trial.passes_tests = trial.passes_algorithm
         # Keep stdout truncated so the JSON stays bounded — but wide
         # enough to fit the full pytest failure preamble for hard
         # questions. The 2026-05-16 coder_mlang v1 run kept this at
