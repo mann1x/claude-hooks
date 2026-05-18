@@ -665,8 +665,12 @@ class TestBuildToolPlanUserAppendix(unittest.TestCase):
         r = ToolResult(intent="x", content=big)
         out = build_tool_plan_user_appendix([r])
         self.assertIn("truncated", out)
-        # Content body is capped — total length is bounded.
-        self.assertLess(len(out), 3000)
+        # Content body is capped at 2000 chars + the REPORT-NOW
+        # instructions and source-listing-fabrication block — total
+        # length bounded to ~4 KB. The 2026-05-18 (#207) source-
+        # listing-anti-fabrication block bumped the appendix tail
+        # from ~500 to ~1000 chars; cap raised accordingly.
+        self.assertLess(len(out), 4000)
 
     def test_multiple_results_numbered(self):
         a = ToolResult(intent="a", content="found A")

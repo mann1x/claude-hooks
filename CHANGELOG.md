@@ -16,6 +16,55 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — consultants: prompt-level guard against source-listing fabrications (#207, 2026-05-18)
+
+Cross-trace of the 2026-05-18 ``csl-2026-05-18-1428-589c`` run
+(with #204 + #205 wired) showed the 9 surviving fabrications in
+the final answer were all fake method / table / scheduler names
+(``_find_candidates``, ``_distillation_confirmed``,
+``_remove_originals``, ``_mark_ledger_completed``,
+``_write_to_project``, ``_SimpleScheduler``,
+``research_originals``, ``distillation_ledger``, ``distill``) —
+**every one of them originated in ``glm-5.1:cloud`` researcher
+lanes**. Same pattern as ``csl-2026-05-18-1031-9e3b`` (lane 5,
+17 fabs incl. fake ``store_sql.py`` / ``distiller.py`` /
+``transcript_db.py`` modules). Two consults, two glm-5.1 lanes
+emitting plausible-looking 60-line source listings that survive
+through to the user-visible answer.
+
+The CitationLinter catches these after the fact, but the user
+preferred a prompt-side fix before any roster change. Two prompt
+sites tightened:
+
+1. ``consultants/engine/council.py:RESEARCHER_SYSTEM`` — the
+   CITATION INTEGRITY block adds a third explicit failure mode:
+   *"writing a fake numbered SOURCE LISTING (lines of code with
+   line numbers prepended) for a file you did not actually
+   read"*. Names the specific class with worked-example shape so
+   the model can pattern-match.
+2. ``consultants/engine/tool_executor.py:build_tool_plan_user_appendix``
+   — the REPORT-NOW closing instruction (the tightest
+   load-bearing prompt at the moment of REPORT emission) gains a
+   ``DO NOT FABRICATE SOURCE LISTINGS`` block: the EVIDENCE
+   blocks above are the ONLY file content the researcher may
+   quote / paraphrase / cite. Numbered code blocks (``21
+   import foo``...) must be verbatim from EVIDENCE. Invented
+   dataclass fields / function names / table names are
+   explicitly forbidden, even if they sound plausible.
+
+This is a behavioral nudge — the linter remains the
+verification layer. If the next M14-style consult still
+produces glm-5.1 source-listing fabrications under the tightened
+prompt, the next step is roster-side (demote glm-5.1 from the
+researcher extras list to tool_executor-only).
+
+Test impact: ``tests/test_consultants_v2_tool_executor.py::
+TestBuildToolPlanUserAppendix::test_truncates_long_content``
+cap raised from 3000 to 4000 chars (the new instruction tail
+adds ~530 chars). All other tests pass unchanged.
+
+Both envs full sweep: 3815 + 3717 passing.
+
 ### Fixed — consultants: CitationLinter symbol-match — text-at-cited-line instead of enclosing-function (#205, 2026-05-18)
 
 The 2026-05-18 ``csl-2026-05-18-1428-589c`` re-run (M14 first-real-
