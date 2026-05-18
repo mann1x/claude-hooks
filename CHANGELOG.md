@@ -16,6 +16,52 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed — consultants: CitationLinter now runs at researcher boundary, not just synthesizer (#204, 2026-05-18)
+
+The CitationLinter shipped in commit ``159d353`` runs at the
+synthesizer node — caught fabricated path:line cites in the
+final answer, but only at the very last step. A 2026-05-18
+forensic on ``csl-2026-05-18-1031-9e3b`` proved the worst-class
+fabrication (the fake module ``consultants/engine/store_sql.py``,
+plus invented ``distiller.py`` and ``transcript_db.py``)
+originated in a single researcher lane (``glm-5.1:cloud``,
+lane 5) with **ZERO tool calls** — pure hallucination. The bad
+cites then flowed unchallenged through peer_findings → critic →
+synthesizer.
+
+Retroactive lint of the originating researcher REPORT
+(event_id=341) caught **17 distinct fabrications** including
+three entirely fake filenames. Had the linter been wired at the
+researcher boundary, every downstream role would have seen the
+annotated form (``store_sql.py:41-61 [unverified — file not
+found]``) instead of the bare claim.
+
+Fix: ``researcher_node`` in ``consultants/engine/council.py``
+gains a ``_lint_research_text`` closure called at all three
+successful-REPORT exit sites (M6 REPORT mode, PLAN-mode empty
+fallback, v1 inline-loop). The annotated form flows into the
+``research`` field of the return dict, into peer_findings, into
+the store, and into the synthesizer's input. The ``turn`` record
+keeps the RAW model output so the transcript stays a faithful
+"what the model said" forensic for future investigations.
+
+Companion forensic write-up at
+``benchmarks/consultants/results/2026-05-18/m14-first-real-ask/forensic-202-204.md``
+documents the full chain for both fabrication classes (gemma's
+real-but-wrong grep-line interpretation, glm's pure
+hallucination) and the cross-trace that proved the synthesizer
+was relaying, not inventing, the gemma-emitted wrong lines.
+
+New tests in ``tests/test_consultants_council.py::TestResearcherCitationLint``:
+
+- Fabricated cite annotated in downstream-visible ``research``
+  field; raw text preserved in turn record.
+- Empty cwd → linter no-ops (defensive — no false-flagging when
+  there's nothing to verify against).
+- Real path:line cite passes through unchanged.
+
+Both envs full sweep: 3811 + 3713 passing.
+
 ### Added — code_graph: ``end_line`` on def/class/method nodes + ``enclosing_symbol_at`` query API (#200, 2026-05-18)
 
 The 2026-05-18 CitationLinter parsed every cited file on demand

@@ -561,6 +561,113 @@ class TestResearcherNode:
         assert update["research_rounds_used"] == 1
 
 
+class TestResearcherCitationLint:
+    """#204 (2026-05-18): researcher REPORT output runs through the
+    CitationLinter before the text flows into peer_findings, the
+    store, and the synthesizer's input.
+
+    Behavior contract:
+    * Fabricated path:line cites in the researcher's response are
+      annotated in the ``research`` field of the return dict.
+    * The ``turn`` record keeps the RAW model output so the
+      transcript stays a faithful "what the model said" forensic.
+    * No allowed_roots → linter no-ops; un-annotated text passes
+      through cleanly (defensive default).
+    * Real path:line cites pass through unchanged.
+    """
+
+    def _run_with_text(self, fake_text, *, cwd, extra_roots=()):
+        """Helper: run researcher_node returning ``fake_text`` and
+        get back (research_text, turn_content, update_dict)."""
+        def fake_loop(payload, cwd_arg, **kw):
+            return _completion(
+                fake_text, prompt_tokens=10, completion_tokens=20,
+            )
+        state = council.initial_state(
+            question="q", cwd=cwd,
+            models={"researcher": "m"},
+            topology="council", effort="medium",
+        )
+        state["plan"] = "p"
+        if extra_roots:
+            state["extra_roots"] = list(extra_roots)
+        update = council.researcher_node(
+            state, chat_client=FakeChatClient([]),
+            tool_executor=lambda *a, **k: "",
+            tool_specs=[], grounding_msgs=[], model="m",
+            cwd=cwd, loop_runner=fake_loop,
+        )
+        return (
+            update["research"][0],
+            update["turns"][0].content,
+            update,
+        )
+
+    def test_fabricated_cite_annotated_in_research_field(
+        self, tmp_path,
+    ):
+        import textwrap
+        # Lay down a real file so the linter has a populated allowed
+        # root, but cite a path that does NOT exist.
+        real = tmp_path / "src" / "real.py"
+        real.parent.mkdir(parents=True)
+        real.write_text(textwrap.dedent('''\
+            def thing():
+                return 1
+        '''))
+        fake_text = (
+            "Researcher finding: there is a `StoreSQL` class at "
+            "`consultants/engine/store_sql.py:41-61` and a real "
+            "thing at `src/real.py:1`."
+        )
+        research, turn_content, _ = self._run_with_text(
+            fake_text, cwd=str(tmp_path),
+        )
+        # Fabrication annotated in the downstream-visible field.
+        assert "[unverified" in research
+        assert "store_sql.py:41-61 [unverified" in research
+        # Real cite untouched.
+        assert "src/real.py:1" in research
+        assert "src/real.py:1 [unverified" not in research
+        # Turn record keeps the RAW model output — forensic faith.
+        assert turn_content == fake_text
+        assert "[unverified" not in turn_content
+
+    def test_no_cwd_no_lint_passthrough(self, tmp_path):
+        # When the lint helper has no roots to check against, it
+        # returns the text unchanged (defensive — don't false-flag
+        # everything as unverified).
+        fake_text = "Cite: `consultants/engine/store_sql.py:41-61`."
+        # cwd is set in initial_state but the closure also reads
+        # state["extra_roots"] — both default to empty here. The
+        # closure uses cwd anyway; pass an empty string to disable.
+        update = self._run_with_text(fake_text, cwd="")
+        # Empty cwd → linter has no roots → no annotation.
+        assert update[0] == fake_text
+
+    def test_clean_real_cite_passes_through(self, tmp_path):
+        import textwrap
+        real = tmp_path / "pkg" / "code.py"
+        real.parent.mkdir(parents=True)
+        real.write_text(textwrap.dedent('''\
+            """Module."""
+
+            def my_func():
+                return 42
+        '''))
+        fake_text = (
+            "The function `my_func` lives at `pkg/code.py:3`."
+        )
+        research, turn_content, _ = self._run_with_text(
+            fake_text, cwd=str(tmp_path),
+        )
+        # No annotation should be added — cite is valid.
+        assert "[unverified" not in research
+        assert "[in " not in research
+        assert research == fake_text
+        assert turn_content == fake_text
+
+
 # ----------------------- critic_node ------------------------------ #
 
 class TestCriticNode:

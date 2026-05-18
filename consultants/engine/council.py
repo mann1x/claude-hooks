@@ -1091,6 +1091,57 @@ def researcher_node(state: dict, *,
                 "%s; lane continues",
                 lane_idx,
             )
+
+    # 2026-05-18 (#204): citation lint on researcher REPORT output.
+    # The 2026-05-18 csl-2026-05-18-1031-9e3b forensic proved the
+    # worst-case fabrication (an entirely fake filename
+    # ``consultants/engine/store_sql.py``) originated in a researcher
+    # lane (glm-5.1:cloud, lane 5) with ZERO tool calls — pure
+    # hallucination. The bad cite then flowed unchallenged through
+    # peer_findings into the critic and synthesizer. The synthesizer-
+    # side linter (shipped in commit ``159d353``) caught it at the
+    # end, but the cite still contaminated every intermediate step.
+    #
+    # Wiring the linter at the researcher boundary fixes that: the
+    # annotated form (``store_sql.py [unverified — file not found]``)
+    # is what flows into peer_findings, the critic, and the
+    # synthesizer's input — so every downstream role sees the verdict
+    # alongside the claim instead of being silently misinformed. The
+    # synthesizer-side lint stays as belt-and-suspenders for cites
+    # the synthesizer itself introduces or transforms.
+    def _lint_research_text(text_in: str) -> str:
+        if not isinstance(text_in, str) or not text_in.strip():
+            return text_in
+        try:
+            from consultants.engine.citation_linter import lint_answer
+            roots: list[str] = []
+            if isinstance(cwd, str) and cwd:
+                roots.append(cwd)
+            for r in (state.get("extra_roots") or ()):
+                if isinstance(r, str) and r:
+                    roots.append(r)
+            if not roots:
+                return text_in
+            linted_text, issues = lint_answer(
+                text_in, allowed_roots=roots,
+            )
+            if issues:
+                log.info(
+                    "researcher citation lint sid=%s lane=%s round=%s: "
+                    "%d fabrication(s) annotated; %s",
+                    sid, lane_idx, this_round, len(issues),
+                    "; ".join(
+                        f"{i.original_match} ({i.reason})"
+                        for i in issues
+                    ),
+                )
+            return linted_text
+        except Exception:  # pragma: no cover — defensive
+            log.exception(
+                "citation_linter raised in researcher lane %s; "
+                "using unlinted text", lane_idx,
+            )
+            return text_in
     # Phase 9: per-lane multi-model fan-out. The dispatcher sets
     # ``state["model_override"]`` on each Send so different lanes
     # talk to different Ollama models. Falls back to the role's
@@ -1343,6 +1394,11 @@ def researcher_node(state: dict, *,
         dt = time.monotonic() - t0
         if report_mode:
             # Tools already ran — write the report as the v1 shape.
+            # The turn record keeps the RAW model output so the
+            # transcript stays a faithful "what the model said"
+            # forensic — citation annotation flows only into the
+            # downstream-visible ``research`` field below (see #204
+            # docstring above).
             turn = RoleTurn(
                 role="researcher", round=this_round, content=text,
                 prompt_tokens=pt, completion_tokens=ct,
@@ -1361,9 +1417,12 @@ def researcher_node(state: dict, *,
                 "researcher", round=this_round, lane_idx=lane_idx,
                 duration_ms=int(dt * 1000), ok=True,
             )
-            _record_finding_to_store(text)
+            # #204: annotate fabricated cites before they flow to
+            # peer_findings + the store + the synthesizer's input.
+            linted_text = _lint_research_text(text)
+            _record_finding_to_store(linted_text)
             return {
-                "research": [text],
+                "research": [linted_text],
                 "research_rounds_used": 1,
                 "turns": [turn],
                 "total_prompt_tokens": pt,
@@ -1412,9 +1471,11 @@ def researcher_node(state: dict, *,
                 "researcher M6 PLAN-mode returned empty/unparseable "
                 "tool_plan; falling back to inline research from raw text"
             )
-            _record_finding_to_store(text)
+            # #204: same downstream-annotation pattern as REPORT mode.
+            linted_text = _lint_research_text(text)
+            _record_finding_to_store(linted_text)
             return {
-                "research": [text],
+                "research": [linted_text],
                 "research_rounds_used": 1,
                 "turns": [turn],
                 "total_prompt_tokens": pt,
@@ -1687,9 +1748,12 @@ def researcher_node(state: dict, *,
             log.exception("recorder.record_node raised; ignored")
     _emit_finished("researcher", round=this_round, lane_idx=lane_idx,
                     duration_ms=int(dt * 1000), ok=True)
-    _record_finding_to_store(text)
+    # #204: v1 inline-loop researcher exit — same lint pattern as the
+    # M6 REPORT and PLAN-empty branches.
+    linted_text = _lint_research_text(text)
+    _record_finding_to_store(linted_text)
     return {
-        "research": [text],
+        "research": [linted_text],
         "research_rounds_used": 1,
         "turns": [turn],
         "total_prompt_tokens": pt,
