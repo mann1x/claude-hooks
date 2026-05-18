@@ -62,11 +62,18 @@ class _FakeProvider:
     """Duck-typed ``StoreProvider`` — keeps every store() call in
     a list so tests can assert on what was persisted, and serves
     them back from recall_hybrid in insertion order (no real
-    semantic ranking; the marker filter is what we're testing)."""
+    semantic ranking; the marker filter is what we're testing).
+
+    #216: also models per-content-hash deletion. The ProviderBackedStore
+    uses ``delete_by_hashes`` on overwrite to keep one provider row
+    per ``(namespace, key)`` pair; this fake mirrors that surface so
+    the tests see the real post-overwrite row count.
+    """
 
     def __init__(self):
         self.stored: list[tuple[str, dict]] = []
         self.recall_calls: list[tuple[str, int]] = []
+        self.delete_calls: list[list[bytes]] = []
         self.fail_store = False
         self.fail_recall = False
 
@@ -85,6 +92,23 @@ class _FakeProvider:
         for text, meta in self.stored[:k]:
             out.append(_FakeMemory(text=text, metadata=dict(meta)))
         return out
+
+    def delete_by_hashes(self, hashes: list[bytes]) -> int:
+        """#216: remove rows whose content hashes to one of the
+        given bytes. Mirrors the provider contract used by
+        :class:`ProviderBackedStore._do_put` on overwrite."""
+        from claude_hooks.providers._content_hash import content_hash
+        self.delete_calls.append(list(hashes))
+        wanted = set(hashes)
+        kept: list[tuple[str, dict]] = []
+        removed = 0
+        for text, meta in self.stored:
+            if content_hash(text) in wanted:
+                removed += 1
+                continue
+            kept.append((text, meta))
+        self.stored = kept
+        return removed
 
 
 # ============================================================== #
@@ -498,6 +522,119 @@ class TestProviderBackedStoreOps(unittest.TestCase):
         )
         # Same content + same lane -> same key (idempotent overwrite).
         self.assertEqual(k1, k2)
+
+    def test_record_research_key_is_stable_per_lane(self):
+        """#216: same lane = same key regardless of content. Each
+        successive round of the SAME researcher lane overwrites the
+        prior round's in-process entry instead of fanning out."""
+        k1 = record_research(
+            self.store, "csl-X",
+            lane_idx=0, plan_item="p", finding="round 1 finding",
+        )
+        k2 = record_research(
+            self.store, "csl-X",
+            lane_idx=0, plan_item="p", finding="round 2 finding",
+        )
+        # Same lane → same key, regardless of changed content.
+        self.assertEqual(k1, k2)
+        # Key follows the documented L{lane_idx} shape.
+        self.assertEqual(k1, "L0")
+
+    def test_record_research_keys_differ_across_lanes(self):
+        """#216: different lanes get different keys so cross-lane
+        findings don't clobber each other in the in-process index."""
+        k0 = record_research(
+            self.store, "csl-X",
+            lane_idx=0, plan_item="p", finding="lane 0",
+        )
+        k1 = record_research(
+            self.store, "csl-X",
+            lane_idx=1, plan_item="p", finding="lane 1",
+        )
+        self.assertNotEqual(k0, k1)
+        self.assertEqual(k0, "L0")
+        self.assertEqual(k1, "L1")
+
+    def test_record_research_missing_lane_idx_uses_question_mark(self):
+        """#216: ``lane_idx=None`` falls back to ``L?`` (single-
+        researcher non-fanout path). All single-researcher rounds
+        of the same session land on the same key."""
+        k = record_research(
+            self.store, "csl-X",
+            lane_idx=None, plan_item="p", finding="text",
+        )
+        self.assertEqual(k, "L?")
+
+    def test_per_lane_overwrite_deletes_prior_provider_row(self):
+        """#216: writing the SAME (namespace, key) pair with different
+        content deletes the prior provider row before inserting the
+        new one. After 3 rounds for one lane, the provider has exactly
+        1 row — not 3."""
+        ns = Namespaces.research("csl-X")
+        # Round 1.
+        self.store.put(ns, "L0", {"text": "round 1"}, index=["text"])
+        self.assertEqual(len(self.provider.stored), 1)
+        self.assertEqual(self.provider.stored[0][0], "round 1")
+        # Round 2 — different content, same key.
+        self.store.put(ns, "L0", {"text": "round 2"}, index=["text"])
+        self.assertEqual(len(self.provider.stored), 1)
+        self.assertEqual(self.provider.stored[0][0], "round 2")
+        # Round 3 — and again.
+        self.store.put(ns, "L0", {"text": "round 3"}, index=["text"])
+        self.assertEqual(len(self.provider.stored), 1)
+        self.assertEqual(self.provider.stored[0][0], "round 3")
+        # Two delete calls fired (round 2 deleted round 1, round 3
+        # deleted round 2) — that's the embedder load we're saving.
+        self.assertEqual(len(self.provider.delete_calls), 2)
+
+    def test_per_lane_overwrite_skips_delete_when_content_unchanged(self):
+        """#216: re-storing the SAME content under the same key is
+        a true no-op — no delete call (the prior row's content_hash
+        equals the new one, so the provider's existing
+        ``ON CONFLICT(content_hash) DO NOTHING`` upsert handles it)."""
+        ns = Namespaces.research("csl-X")
+        self.store.put(ns, "L0", {"text": "same"}, index=["text"])
+        self.store.put(ns, "L0", {"text": "same"}, index=["text"])
+        # Provider got two store() calls but its dedup leaves 1 row;
+        # importantly NO delete fired because content didn't change.
+        self.assertEqual(len(self.provider.delete_calls), 0)
+
+    def test_per_lane_overwrite_with_record_research_smoke(self):
+        """#216 end-to-end via record_research: a lane that writes 4
+        round findings ends with 1 row in the provider, simulating
+        the tool_executor PLAN→REPORT round loop."""
+        for round_idx, txt in enumerate(
+            ["r1", "r2", "r3", "r4"], start=1,
+        ):
+            record_research(
+                self.store, "csl-X",
+                lane_idx=2, plan_item="audit",
+                finding=f"lane=2 round={round_idx}: {txt}",
+            )
+        # One row — the latest content.
+        self.assertEqual(len(self.provider.stored), 1)
+        latest_text, _ = self.provider.stored[0]
+        self.assertIn("round=4", latest_text)
+
+    def test_multi_lane_writes_keep_one_row_per_lane(self):
+        """#216 cohort: 3 lanes × 4 rounds each end with 3 provider
+        rows (one per lane), not 12. Cross-lane writes don't clobber
+        each other."""
+        for lane in range(3):
+            for round_idx in range(1, 5):
+                record_research(
+                    self.store, "csl-X",
+                    lane_idx=lane, plan_item="audit",
+                    finding=f"L{lane} round {round_idx}",
+                )
+        # 3 rows, one per lane, each holding its lane's latest text.
+        self.assertEqual(len(self.provider.stored), 3)
+        latest_by_lane = {
+            meta.get("key"): text
+            for text, meta in self.provider.stored
+        }
+        for lane in range(3):
+            self.assertIn(f"L{lane} round 4", latest_by_lane[f"L{lane}"])
 
     def test_provider_store_failure_propagates_to_caller(self):
         # Contract (post-#212): durable-write failures propagate so

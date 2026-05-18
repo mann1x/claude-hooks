@@ -16,6 +16,85 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed — consultants: stop tool_executor's per-round store writes from fanning out per lane (#216, 2026-05-18)
+
+The same csl-2026-05-18-1724-0f9f deadlock investigation that drove
+#215 also surfaced a write-amplification issue on the store side:
+sessions with ``tool_executor`` enabled produced ~4× more provider
+rows per lane than sessions without it. A direct census comparison
+showed csl-1527 (tool_executor=ON, 9 researcher lanes) carrying **36
+research rows** vs. csl-1801 (tool_executor=OFF, 9 lanes) carrying
+**6 rows**. Each extra row is an extra embedder call at write time
+and an extra distillation candidate 30 days later.
+
+Root cause: ``record_research`` used a content-derived key
+(``L{lane_idx}-{sha1(text)[:12]}``), so a researcher lane that
+loops PLAN→tool→REPORT N times (high effort allows 3 rounds, plus
+critic reroutes) writes N **different texts** under N **different
+keys**. The in-process index legitimately holds N entries (one per
+round); the provider has no key-based upsert and dedupes only on
+``content_hash``, so it gets N new rows too. The embedder fires
+once per round per lane, the reaper distillation budget rises in
+proportion, and the resulting per-tick load was the trigger for the
+embedder saturation that #215 paces but doesn't actually shrink.
+
+Fix: **one provider row per (namespace, key) pair**, replacing the
+pre-#216 "one row per (namespace, key, content)" semantics.
+
+| Layer | Change |
+|---|---|
+| ``record_research`` | Key shape collapsed from ``L{lane_idx}-{sha1[:12]}`` to ``L{lane_idx}`` — stable per lane regardless of content. ``lane_idx=None`` (single-researcher, non-fanout) still maps to the ``L?`` sentinel so the legacy path keeps working. |
+| ``ProviderBackedStore._do_put`` | On overwrite (in-process index already holds ``op.key``), recompute the **prior** content's hash and call ``provider.delete_by_hashes`` to remove the stale row **before** inserting the new one. The new row is the only durable record. |
+| Same-content re-puts | ``ON CONFLICT(content_hash) DO NOTHING`` (existing provider semantics) handles these; the new path skips the delete when prior text equals new text — no spurious provider churn. |
+| Delete failure | Best-effort. If ``delete_by_hashes`` raises, log and proceed with the insert. Worst case is the pre-#216 accumulation, which the M14 reaper eventually GCs via TTL. Never blocks the durable write. |
+
+This composes with M14 TTL semantics: the new row carries a fresh
+``expires_at`` (jittered per #215); the deleted row was always
+going to expire under the same TTL window, just N round-times
+earlier on the calendar. Refresh-on-read still applies — repeated
+reads of the same lane finding bump the timestamp on the SINGLE
+surviving row.
+
+Why this is safe for the M8 peer-findings recall semantics: each
+later round's text is strictly the **most refined** version of the
+lane's finding (the model has seen the prior round's tool results
+when it writes round N+1). Discarding earlier rounds doesn't lose
+signal — it discards drafts.
+
+Test surface (``tests/test_consultants_v2_store.py``):
+
+- ``test_record_research_key_is_stable_per_lane`` — same lane =
+  same key regardless of content.
+- ``test_record_research_keys_differ_across_lanes`` — cross-lane
+  isolation.
+- ``test_record_research_missing_lane_idx_uses_question_mark`` —
+  ``L?`` sentinel for the single-researcher path.
+- ``test_per_lane_overwrite_deletes_prior_provider_row`` — three
+  consecutive puts under one key leave exactly one provider row.
+- ``test_per_lane_overwrite_skips_delete_when_content_unchanged``
+  — identity re-puts are zero-cost.
+- ``test_per_lane_overwrite_with_record_research_smoke`` — same,
+  end-to-end via ``record_research`` (4 rounds → 1 row).
+- ``test_multi_lane_writes_keep_one_row_per_lane`` — 3 lanes ×
+  4 rounds → 3 rows, one per lane, each holding the latest text.
+
+The fake provider grew ``delete_by_hashes`` mirroring the real
+pgvector / sqlite_vec contract.
+
+Affected files:
+
+- ``consultants/engine/store.py`` — stable per-lane key in
+  ``record_research``; ``_do_put`` adds prior-row delete on
+  overwrite; drops the ``hashlib`` import (no longer used).
+- ``tests/test_consultants_v2_store.py`` — +7 tests;
+  ``_FakeProvider.delete_by_hashes`` mirrors the provider contract.
+
+Both envs full sweep: ``claude-hooks-consultants`` 3849 + 30
+skipped + 117 subtests; ``claude-hooks`` 3743 + 136 skipped + 110
+subtests. M12 parity green (the store stays gated on
+``effort=medium`` by default — the new key shape only matters
+when the store is enabled and the lane actually loops).
+
 ### Fixed — consultants: M14 reaper pacing + TTL jitter to prevent embedder saturation (#215, 2026-05-18)
 
 Two compounding issues surfaced during the deadlock investigation of

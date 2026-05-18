@@ -53,7 +53,6 @@ must never break the council.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from collections import defaultdict
@@ -262,6 +261,47 @@ if HAVE_LANGGRAPH_STORE:
             text = self._extract_indexable_text(op.value, op.index)
             if not text:
                 return
+            # #216: when this put OVERWRITES an in-process entry whose
+            # prior content was different, delete the prior provider
+            # row before inserting the new one. Without this the
+            # provider accumulates one row per distinct content for
+            # the SAME (namespace, key) pair, and a researcher lane
+            # that loops PLAN→tool→REPORT 3× (high effort) leaves 3
+            # rows for one logical "lane finding" — plus 3 embedder
+            # calls, plus 3 distillation candidates 30 days later.
+            #
+            # Stable per-lane keys (record_research's L{lane_idx}
+            # post-#216) + this delete-on-overwrite step give "one
+            # provider row per (namespace, key) pair" semantics that
+            # match the in-process index. Refresh-on-read still
+            # exists; the row's content_hash and rowid stay stable
+            # across rounds as long as the text doesn't change.
+            #
+            # The delete is best-effort: a delete failure logs and
+            # proceeds with the new insert, so the worst case is the
+            # pre-#216 accumulation (which the M14 reaper eventually
+            # cleans up via TTL). Better an extra row than a missed
+            # write.
+            if existing is not None:
+                prior_text = self._extract_indexable_text(
+                    existing.value, op.index,
+                )
+                if prior_text and prior_text != text:
+                    try:
+                        prior_hash = content_hash(prior_text)
+                        deleter = getattr(
+                            self._provider, "delete_by_hashes", None,
+                        )
+                        if deleter is not None and prior_hash:
+                            deleter([prior_hash])
+                    except Exception:  # pragma: no cover — defensive
+                        log.exception(
+                            "ProviderBackedStore: prior-row delete "
+                            "failed for ns=%s key=%s; proceeding with "
+                            "insert (will leak a stale row, reaper "
+                            "will GC it via TTL)",
+                            ns, op.key,
+                        )
             meta = {
                 self._marker: True,
                 "namespace": list(ns),
@@ -785,14 +825,24 @@ def record_research(
 
     Returns the ``key`` written (deterministic) so the caller can
     log it, or ``None`` when the store is disabled / the finding
-    is empty. Idempotent: re-recording the same finding from the
-    same lane is a content-hash collision and overwrites in place.
+    is empty.
+
+    Key shape: **stable per-lane**, ``L{lane_idx}`` (#216,
+    2026-05-18). Each subsequent round of the same lane OVERWRITES
+    the in-process index entry, and :meth:`ProviderBackedStore._do_put`
+    deletes the prior provider row before inserting the new one —
+    so a research lane that loops PLAN→tool→REPORT N times leaves
+    exactly ONE row in the provider, not N. The pre-#216 key shape
+    was ``L{lane_idx}-{sha1(text)[:12]}`` which gave per-round
+    fan-out (different text per round → different content_hash →
+    new in-process AND provider row), generating the 4× write
+    amplification the M14 reaper deadlock investigation surfaced.
     """
     if store is None or not finding or not str(finding).strip():
         return None
-    h = hashlib.sha1(finding.encode("utf-8")).hexdigest()[:12]
+    # #216: stable per-lane key — see docstring.
     lane_part = "L?" if lane_idx is None else f"L{int(lane_idx)}"
-    key = f"{lane_part}-{h}"
+    key = lane_part
     value: dict = {
         "text": finding,
         "plan_item": plan_item or "",
