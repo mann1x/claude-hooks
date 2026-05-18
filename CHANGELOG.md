@@ -16,6 +16,98 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed — M14 follow-up: researcher REPORT-mode regression + pgvector concurrency race (2026-05-18)
+
+Diagnosed and fixed three issues caught by the first live
+`claude-consultants consult` after the M14 default-on flip
+(SID `csl-2026-05-18-0937-4f4f`, 737 s, refusal answer).
+
+**1. Researcher REPORT-mode prompt regression
+(`consultants/engine/`).** The xhigh consultation stayed in
+PLAN mode for every researcher round — every turn emitted
+`{"tool_plan": [...]}` JSON instead of a research report, so
+the synthesizer correctly concluded "no findings available"
+and refused the answer.
+
+Root cause: the M6 REPORT-mode appendix
+(`build_tool_plan_user_appendix` in
+`consultants/engine/tool_executor.py`) dumped tool results but
+contained no explicit "write a report now" instruction. In M13
+this was load-bearing — the model defaulted to free-text
+reports — but two M14-era changes combined to break it:
+
+- **Peer findings leaking into REPORT mode.** With the M14
+  default-on store, sibling lanes' findings get recalled into
+  the researcher's prompt as a "## Peer findings (recalled from
+  earlier lanes)" block built by `format_findings_block`. In
+  PLAN mode this is helpful (lets the lane dedup against what
+  other lanes already tackled), but in REPORT mode it competes
+  with the PRIOR TOOL RESULTS appendix and steers
+  `gemini-3-flash-preview` toward re-planning to "verify what
+  the peers found." The store row `L2-56807ca7491b` captured
+  the smoking gun: `"The prior tool results gave a good
+  overview but I need to verify the actual line numbers and
+  code paths myself, since line numbers may be stale."`
+- **No explicit "report now" instruction.** Once the model
+  was nudged toward re-planning, nothing in the prompt told it
+  not to.
+
+Fix:
+
+- `consultants/engine/council.py`: in the M6 researcher branch,
+  rebuild `msgs` with `peer_findings=None` when
+  `report_mode=True` so REPORT-mode prompts no longer carry
+  the peer-findings block.
+- `consultants/engine/tool_executor.py`: append an explicit
+  "REPORT NOW. Do NOT emit another `tool_plan` block. Write a
+  plain-prose research finding citing the evidence you have…"
+  closing instruction to `build_tool_plan_user_appendix` so
+  the dispatch decision is unambiguous regardless of prompt
+  context.
+
+**2. pgvector concurrency race
+(`claude_hooks/providers/pgvector.py`).** The same session
+emitted 5 `current transaction is aborted, commands ignored
+until end of transaction block` warnings during researcher
+fanout. The smoking gun: 4 of the 5 fires landed in a 6-second
+window during simultaneous tool_executor lanes hitting the
+same shared `PgvectorProvider` instance. psycopg's connection
+is **not** thread-safe — concurrent `cursor()` calls on the
+same connection race each other's transaction state, producing
+the abort cascade.
+
+The 2026-05-18 rollback fix caught each abort post-facto but
+did not prevent the race. M14 makes this hot because (a) the
+consultants engine fans out 3+ concurrent researcher lanes at
+xhigh and (b) every recall AND every store call now traverses
+the same provider instance.
+
+Fix: `PgvectorProvider.__init__` grows
+`self._lock = threading.RLock()`. Every public method that
+touches `self._conn` (`recall`, `store`, `count`,
+`expire_before`, `refresh_expires_at`, `delete_by_hashes`,
+`batch_recall`, `batch_store`, `recall_hybrid`,
+`kg_create_entities`, `kg_add_observations`,
+`kg_create_relations`, `kg_search_nodes`) now wraps its full
+SQL sequence in `with self._lock:`. RLock (not Lock) because
+`kg_search_nodes` re-enters via `recall_hybrid`. The lock is
+held for the embedding call too — that costs latency under
+fanout but keeps the patch minimal and is correctness-safe.
+Each except clause that catches a SQL exception now also
+attempts `self._conn.rollback()` so a half-aborted txn doesn't
+leak into the next lock-acquirer.
+
+**3. Cleanup.** 10 rows from session
+`csl-2026-05-18-0937-4f4f` deleted from `consultants_store` so
+the 30-day TTL doesn't fire a distillation LLM call on garbage.
+One-liner used (operator reference only):
+`DELETE FROM consultants_store WHERE
+(metadata->'namespace')::jsonb ? 'csl-2026-05-18-0937-4f4f'`.
+
+**Verification.** 3696 + 3598 = 7294 passing tests across both
+conda envs (no regressions). Live re-run with the original
+question pending (next entry in this log when complete).
+
 ### Added — M14 follow-up: store embedder config + install.py wiring + TTL backfill script (2026-05-18)
 
 Three pieces that close the M14 "production-ready" gap surfaced

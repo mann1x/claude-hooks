@@ -623,6 +623,15 @@ def build_tool_plan_user_appendix(prior_results: list[ToolResult]) -> str:
     truncated content. Tombstones (error set) are rendered in a
     compact "(intent: '...' FAILED: error)" form so the model
     knows the gap exists and re-plans around it.
+
+    M14 follow-up (2026-05-18): closes with an explicit "write a
+    research report NOW, do NOT emit another tool_plan" instruction
+    so the model doesn't re-enter PLAN mode when peer findings or
+    other prompt context could make re-planning seem like the
+    right move. Originally the appendix dumped the tool results
+    and stopped — the absence of an instruction was load-bearing
+    in M13 (the model defaulted to free-text reports) but broke
+    when the M14 default-on store surfaced peer findings.
     """
     if not prior_results:
         return ""
@@ -643,6 +652,17 @@ def build_tool_plan_user_appendix(prior_results: list[ToolResult]) -> str:
             f"   TOOLS: {r.transcript_summary or '(none)'}\n"
             f"   EVIDENCE:\n{snippet}"
         )
+    lines.append(
+        "\n\nREPORT NOW. The tool_executor lanes have already run "
+        "the tool calls you planned — your job in this round is to "
+        "synthesize the evidence above into a concrete research "
+        "report. Do NOT emit another ``{\"tool_plan\": [...]}`` "
+        "block. Do NOT request more tool calls. Write a plain-prose "
+        "research finding citing the evidence you have (file:line "
+        "where applicable). If the evidence is insufficient, say "
+        "so explicitly in the report — the critic will decide "
+        "whether more research rounds are warranted."
+    )
     return "\n".join(lines)
 
 

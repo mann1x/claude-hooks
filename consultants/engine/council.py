@@ -1214,6 +1214,48 @@ def researcher_node(state: dict, *,
             state, this_round, parent_lane_idx=lane_idx,
         )
         report_mode = bool(prior_for_round)
+        # M14 follow-up (2026-05-18): rebuild ``msgs`` without
+        # ``peer_findings`` in REPORT mode. When the M8 store is
+        # default-on (M14), sibling lanes' findings get recalled
+        # into ``peer_findings_block`` and surfaced as a "## Peer
+        # findings (recalled from earlier lanes)" block in the
+        # researcher's user message. In PLAN mode this is helpful
+        # (lets the lane dedup against what other lanes already
+        # tackled). But in REPORT mode it competes with the PRIOR
+        # TOOL RESULTS appendix below — the appendix carries no
+        # explicit "write a report now" instruction (see
+        # ``build_tool_plan_user_appendix``), so the model is left
+        # inferring. With peer findings present, gemini-3-flash-
+        # preview re-emits another ``tool_plan`` JSON ("let me
+        # verify what the peers found") instead of synthesizing
+        # the tool results into a report. The M13 smoke worked
+        # because the store was disabled and peer_findings was
+        # always None. The 2026-05-18 first real M14 consult
+        # (csl-2026-05-18-0937-4f4f, 737 s, refusal answer)
+        # caught this regression.
+        if report_mode:
+            extra_ctx_res_local = _additional_context_for(
+                state, "researcher",
+            )
+            if plan_item:
+                focused_plan_local = (
+                    f"Sub-research lane "
+                    f"{state.get('lane_idx', 0) + 1}: "
+                    f"{plan_item}"
+                )
+                msgs = build_researcher_messages(
+                    state["question"], focused_plan_local, [],
+                    grounding_msgs,
+                    additional_context=extra_ctx_res_local,
+                    peer_findings=None,
+                )
+            else:
+                msgs = build_researcher_messages(
+                    state["question"], state["plan"], prior_rounds,
+                    grounding_msgs,
+                    additional_context=extra_ctx_res_local,
+                    peer_findings=None,
+                )
         # Append the mode-specific appendix to the user message.
         # Both append to msgs[-1] (the v1 user message) so the
         # researcher's existing context (plan, prior rounds,
