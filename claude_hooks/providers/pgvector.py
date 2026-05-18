@@ -226,6 +226,8 @@ class PgvectorProvider(Provider):
             meta["_distance"] = distance
             meta["_table"] = src
             result.append(Memory(text=content, metadata=meta))
+        # #218: close read-only transaction before returning.
+        self._read_only_finish()
         return result
 
     def store(self, content: str, metadata: Optional[dict] = None) -> None:
@@ -274,6 +276,40 @@ class PgvectorProvider(Provider):
     # M14 — TTL surface (per-row ``expires_at``)
     # ------------------------------------------------------------------ #
 
+    def _read_only_finish(self) -> None:
+        """#218 (2026-05-18): close any open read-only transaction
+        on this connection. psycopg3's default mode auto-starts a
+        transaction on the first ``execute()`` and keeps it open
+        until ``commit()``/``rollback()``. Read-only methods that
+        return on the happy path without committing leave the
+        connection ``idle in transaction`` — holding ``AccessShareLock``
+        on every table they touched.
+
+        That lock blocks any concurrent ``ALTER TABLE`` from another
+        connection. The 2026-05-18 cell-2 deadlock of the #214
+        regression matrix surfaced this: the store-reaper called
+        ``expire_before`` (read-only, no commit), went back to sleep
+        with the transaction still open, and the next researcher
+        session's ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS
+        expires_at`` from M14's lazy migration in ``_create_table``
+        sat blocked for 14 minutes until manually terminated.
+
+        Every read-only method must call this before returning. Uses
+        rollback (not commit) because read-only commit and rollback
+        are semantically identical at the PG level — and rollback
+        is cheaper. Tolerates an already-closed/aborted connection
+        defensively; if the rollback itself raises, log and
+        proceed (the caller is in a finally-style cleanup path).
+        """
+        try:
+            if self._conn is not None:
+                self._conn.rollback()  # type: ignore[union-attr]
+        except Exception:  # pragma: no cover — defensive
+            log.exception(
+                "pgvector: _read_only_finish rollback raised "
+                "(connection may have been reset); ignoring"
+            )
+
     def expire_before(
         self, *, before_iso: str, limit: int = 1000,
     ) -> list:
@@ -310,6 +346,13 @@ class PgvectorProvider(Provider):
                         (before_iso, int(limit)),
                     )
                     rows = cur.fetchall()
+                # #218: close the read-only transaction before returning.
+                # Without this, the connection sits "idle in transaction"
+                # holding AccessShareLock on the table — blocking any
+                # concurrent DDL (M14's lazy ALTER TABLE) from another
+                # connection until the next call lands. See
+                # _read_only_finish for the full forensic.
+                self._read_only_finish()
             except Exception as e:
                 log.warning("pgvector expire_before failed: %s", e)
                 try:
@@ -416,7 +459,10 @@ class PgvectorProvider(Provider):
             try:
                 with self._conn.cursor() as cur:  # type: ignore[union-attr]
                     cur.execute(f"SELECT COUNT(*) FROM {table}")
-                    return cur.fetchone()[0]
+                    n = cur.fetchone()[0]
+                # #218: close read-only transaction before returning.
+                self._read_only_finish()
+                return n
             except Exception:
                 try:
                     self._conn.rollback()  # type: ignore[union-attr]
@@ -777,6 +823,13 @@ def _recall_hybrid_unlocked(
         meta["_vec_rank"] = e["vec_rank"]
         meta["_kw_rank"] = e["kw_rank"]
         out.append(Memory(text=e["content"], metadata=meta))
+    # #218: close the read-only transaction before returning. Both
+    # the vector ranking SELECT and the BM25 SELECT above leave the
+    # connection ``idle in transaction``; without this, every
+    # ``recall_hybrid`` (the hot path for researcher_node peer-
+    # findings recall) silently holds AccessShareLock on every
+    # touched table until the next call from the same connection.
+    self._read_only_finish()
     return out
 
 
@@ -1042,6 +1095,12 @@ def _kg_search_nodes(self: PgvectorProvider, query: str, k: int = 5) -> list[dic
         # Drop internal id from public payload (keep _score/_match for ranking transparency).
         for n in ranked:
             n.pop("id", None)
+        # #218: close the read-only transaction. Three SELECTs landed on
+        # this connection (entity-name pass, observation-resolve pass,
+        # observation-fill pass) and the inner recall_hybrid call also
+        # closed its own — but the outer KG SELECTs left their own
+        # implicit transaction open. Close it here.
+        self._read_only_finish()
         return ranked
 
 

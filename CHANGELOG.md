@@ -16,6 +16,92 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed — pgvector: read-only methods leak transactions, blocking concurrent DDL (#218, 2026-05-18)
+
+The #214 regression matrix's cell 2 (Q1 × high) deadlocked for **14
+minutes** at the planner→researcher transition. Three lanes were
+stuck in ``recall_research → _ensure_ready → _create_table``
+waiting on an ``ALTER TABLE consultants_store ADD COLUMN IF NOT
+EXISTS expires_at`` that PG was refusing to grant because the
+store-reaper's connection held an unrelated lock.
+
+Forensic via ``pg_stat_activity``:
+
+- pid 458296 (store-reaper): state ``idle in transaction``,
+  wait ``Client/ClientRead``, last query =
+  ``SELECT ... FROM consultants_store WHERE expires_at IS NOT NULL``
+  (the reaper's ``expire_before`` sweep). Held ``AccessShareLock``
+  on ``consultants_store`` for **20 minutes** since 18:00:40.
+- pid 460699 (researcher session): state ``active``, wait
+  ``Lock/relation``, query = ``ALTER TABLE ... ADD COLUMN``.
+  Needed ``AccessExclusiveLock``; blocked by 458296.
+
+Root cause: every read-only method in ``pgvector.py`` (``expire_before``,
+``count``, ``_search_tables``, ``_recall_hybrid_unlocked``,
+``_kg_search_nodes``) calls ``cur.execute(SELECT ...)`` inside a
+``with self._conn.cursor()`` block and returns the rows
+**without calling commit() or rollback()**. psycopg3's default
+mode (autocommit=False) auto-starts a transaction on the first
+execute and keeps it open until the caller closes it explicitly.
+Closing the cursor context manager does NOT close the transaction.
+
+Result: every read-only call leaves the connection sitting ``idle
+in transaction`` holding ``AccessShareLock`` on every table it
+touched. With one connection per provider, a same-connection
+caller sees no issue (the lock is shared with itself). But the
+M14 reaper has its own provider with its own connection — and
+every researcher session that opens its provider for M14's lazy
+``ALTER TABLE`` migration walks into the reaper's lingering lock.
+
+Fix: introduce ``_read_only_finish()`` (rollback-based, since
+read-only commit and rollback are semantically identical at the
+PG level but rollback is cheaper), and call it from every
+read-only happy-path exit:
+
+| Method | Happy path | Old | New |
+|---|---|---|---|
+| ``expire_before`` | after ``fetchall()`` | (none) | ``_read_only_finish()`` |
+| ``count`` | after ``fetchone()`` | (none) | ``_read_only_finish()`` |
+| ``_search_tables`` | after merge | (none) | ``_read_only_finish()`` |
+| ``_recall_hybrid_unlocked`` | after RRF merge | (none) | ``_read_only_finish()`` |
+| ``_kg_search_nodes`` | after rank+trim | (none) | ``_read_only_finish()`` |
+
+The error paths already call ``self._conn.rollback()``; this fix
+only changes the success paths. Write methods (``store``,
+``delete_by_hashes``, ``refresh_expires_at``, ``batch_store``,
+``_create_table``, the ``_kg_*`` writers) already commit
+explicitly and are untouched.
+
+The helper tolerates a missing/aborted connection defensively —
+if the rollback itself raises, log and proceed. The caller's
+``self._lock`` (RLock from the 2026-05-18 thread-safety fix) is
+still held around the close call so the close races safely with
+the next read on the same provider.
+
+Test surface:
+
+- ``tests/test_pgvector_expires_at.py:test_expire_before_closes_readonly_transaction``
+  — drives the fake connection through a happy-path
+  ``expire_before`` and asserts the rollback counter incremented.
+- Existing 17 pgvector tests continue to pass — the cleanup is
+  additive on the happy path.
+
+Affected files:
+
+- ``claude_hooks/providers/pgvector.py`` — new
+  ``_read_only_finish()`` helper; +5 call sites at read-only
+  happy-path exits.
+- ``tests/test_pgvector_expires_at.py`` — +1 regression test.
+
+Operational note: a previously-stuck transaction can only be
+released by ``pg_terminate_backend(pid)`` against the offending
+backend (``pg_cancel_backend`` only interrupts active queries,
+not idle-in-transaction ones). After deploying this fix, restart
+``claude-hooks-daemon`` and the consultants daemon so the new
+code loads. Existing leaked transactions from pre-#218 daemons
+need a one-shot terminate on the matching ``pg_stat_activity``
+row.
+
 ### Fixed — consultants: stop tool_executor's per-round store writes from fanning out per lane (#216, 2026-05-18)
 
 The same csl-2026-05-18-1724-0f9f deadlock investigation that drove

@@ -288,6 +288,35 @@ class TestExpireBefore(unittest.TestCase):
         # Datetime → ISO string.
         self.assertEqual(out[0].expires_at, "2026-01-01T00:00:00+00:00")
 
+    def test_expire_before_closes_readonly_transaction(self):
+        """#218 (2026-05-18): a successful read-only SELECT must close
+        the connection's transaction before returning. Without this,
+        psycopg3 leaves the connection ``idle in transaction``
+        holding AccessShareLock on the table, blocking any concurrent
+        ALTER TABLE from another connection. The #214 cell-2 14-minute
+        deadlock surfaced this — the M14 reaper sweep's expire_before
+        held the lock while a researcher session's M14 lazy migration
+        (ADD COLUMN IF NOT EXISTS expires_at) sat waiting.
+
+        Verified via the fake conn's rollback counter (our fake
+        decrements ``committed`` on every rollback). After a happy-
+        path expire_before, ``committed`` must be lower than zero.
+        """
+        p, conn = _make_provider()
+        # No queued rows — empty happy path.
+        out = p.expire_before(
+            before_iso="2026-06-01T00:00:00+00:00", limit=10,
+        )
+        self.assertEqual(out, [])
+        # The fake's rollback decrements ``committed``; one rollback
+        # call after the SELECT means committed == -1 (no prior commits
+        # in this test).
+        self.assertEqual(
+            conn.committed, -1,
+            "expire_before must rollback the read-only transaction "
+            "to release AccessShareLock — see #218 forensic.",
+        )
+
 
 class TestRefreshExpiresAt(unittest.TestCase):
     """``refresh_expires_at`` is the refresh-on-read primitive."""
