@@ -108,7 +108,8 @@ wiring, monitoring, uninstall — see [`docs/deployment.md`](docs/deployment.md)
 
 - Current version: **v1.7.0** — see [CHANGELOG.md](CHANGELOG.md) for the full history,
   or [`docs/whats-new.md`](docs/whats-new.md) for the human-readable
-  v1.4 highlights (older releases:
+  v1.7 highlights (older releases archived alongside:
+  [v1.4](docs/whats-new-v1.4.md),
   [v1.1](docs/whats-new-v1.1.md)). Significant unreleased work
   on `dev` since v1.7.0: `/consultants` v2 (M8 store, M11c-3
   proper composition, M14 TTL+distillation, CitationLinter).

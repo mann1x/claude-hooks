@@ -310,6 +310,23 @@ class TestPromptBuilders:
         body = msgs[-1]["content"]
         assert "CRITIC'S VERDICT" not in body
 
+    def test_synthesizer_system_demands_exhaustive_enumeration(self):
+        # Regression for #213. A live audit run stopped mid-bullet
+        # on edge case 5 of 6 with finish_reason="stop" — the model
+        # decided the list was "complete enough" after 4.5 of the
+        # researchers' reported items. The fix is prompt-level, not
+        # a budget knob: the synthesizer prompt must require walking
+        # through every researcher item before stopping on
+        # list-shaped answers.
+        assert "EXHAUSTIVE ENUMERATION" in council.SYNTHESIZER_SYSTEM
+        assert "all N" in council.SYNTHESIZER_SYSTEM
+        assert "item by item" in council.SYNTHESIZER_SYSTEM
+        # Self-critic variant carries the same load-bearing rule
+        # (compacter wording: 'every item' instead of 'all N').
+        assert "EXHAUSTIVE ENUMERATION" in council.SYNTHESIZER_SELF_CRITIC_SYSTEM
+        assert "every item" in council.SYNTHESIZER_SELF_CRITIC_SYSTEM
+        assert "item by item" in council.SYNTHESIZER_SELF_CRITIC_SYSTEM
+
     def test_council_preamble_prepended_to_every_role(self):
         # Regression: every role's system message must carry the
         # COUNCIL_PREAMBLE so the LLM-to-LLM / concise / dense /

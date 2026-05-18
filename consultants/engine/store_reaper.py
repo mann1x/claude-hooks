@@ -266,6 +266,7 @@ class StoreReaperThread:
                 "expired": 0, "distilled": 0, "deleted": 0,
                 "groups_skipped_below_threshold": 0,
                 "groups_distill_failed": 0,
+                "rows_unknown_skipped": 0,
             }
         if not expiring:
             self._stamp(now)
@@ -273,6 +274,7 @@ class StoreReaperThread:
                 "expired": 0, "distilled": 0, "deleted": 0,
                 "groups_skipped_below_threshold": 0,
                 "groups_distill_failed": 0,
+                "rows_unknown_skipped": 0,
             })
 
         groups = _group_by_sid_and_kind(expiring)
@@ -280,6 +282,7 @@ class StoreReaperThread:
         deleted = 0
         skipped_below = 0
         distill_failed = 0
+        unknown_skipped = 0
         min_entries = self._min_entries_per_distillation()
         distill_enabled = self._distillation_enabled()
 
@@ -318,8 +321,34 @@ class StoreReaperThread:
                     )
                     continue
                 distilled += 1
+            elif kind == KIND_UNKNOWN:
+                # Post-#213: UNKNOWN means we couldn't classify the
+                # namespace — either the metadata got corrupted on
+                # disk OR a future schema added a new namespace kind
+                # that this daemon version doesn't know about. The
+                # rows DID expire, but "we don't know what kind it
+                # is" is too thin a basis to delete: if the content
+                # is recoverable, deleting loses it forever. So
+                # leak-then-log: skip the delete, the TTL filter on
+                # _do_search / _do_get already hides them from
+                # consumers (they're already expired), and a human
+                # can audit later via direct provider query.
+                #
+                # Cost is bounded: UNKNOWN only happens on corrupted
+                # metadata or schema-version skew, both rare. The
+                # alternative is silent data loss.
+                log.warning(
+                    "store-reaper: %d rows for sid=%s have "
+                    "unrecognised namespace (KIND_UNKNOWN); "
+                    "skipping delete to avoid data loss. "
+                    "Inspect via the provider directly if this "
+                    "persists.",
+                    len(rows), sid,
+                )
+                unknown_skipped += len(rows)
             else:
-                # tool_results / unknown — delete without distillation.
+                # tool_results — delete without distillation per
+                # M14 spec (cheap to drop, nothing worth distilling).
                 try:
                     deleted += self._delete_rows(rows)
                 except Exception:
@@ -331,6 +360,7 @@ class StoreReaperThread:
             "deleted": deleted,
             "groups_skipped_below_threshold": skipped_below,
             "groups_distill_failed": distill_failed,
+            "rows_unknown_skipped": unknown_skipped,
         })
 
     # ---- helpers ---- #

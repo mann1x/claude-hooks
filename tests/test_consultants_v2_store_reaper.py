@@ -202,8 +202,14 @@ class TestGroupBySidAndKind(unittest.TestCase):
         )
 
     def test_unknown_namespace_buckets_unknown(self) -> None:
-        """Bad / missing metadata still gets a bucket so the row
-        gets deleted by the sweep."""
+        """Bad / missing metadata still gets a bucket so the sweep
+        can decide what to do with the row.
+
+        Post-#213 the sweep leak-then-logs UNKNOWN rows rather than
+        deleting them — see TestSweepFailureIsolation.
+        test_unknown_kind_rows_skipped_not_deleted — but the
+        bucketing logic here is unchanged: we still classify them
+        as ``KIND_UNKNOWN`` so the sweep can branch on the kind."""
         bad = _FakeRow(content="x", metadata={}, content_hash=b"x")
         weird = _FakeRow(
             content="y", metadata={"namespace": ["onlyone"]}, content_hash=b"y",
@@ -523,6 +529,86 @@ class TestSweepFailureIsolation(unittest.TestCase):
         self.assertEqual(prov.delete_calls, [])
         # Distiller was invoked once (the failure is store-side).
         self.assertEqual(len(distiller.calls), 1)
+
+    def test_unknown_kind_rows_skipped_not_deleted(self) -> None:
+        """Regression for #213 — surfaced by csl-2026-05-18-1554-c8dc.
+
+        Pre-#213 ``sweep_once`` deleted ``KIND_UNKNOWN`` rows
+        unconditionally via the same ``else`` branch as
+        ``KIND_TOOL_RESULTS``. The csl-1554 consultation correctly
+        flagged this as a silent-data-loss risk: ``KIND_UNKNOWN``
+        means the metadata is corrupted OR a future schema added a
+        namespace kind this daemon version doesn't know about — in
+        either case, the row's content may still be recoverable,
+        and "we don't know what kind it is" is too thin a basis to
+        delete.
+
+        Post-#213 the sweep leaks-then-logs: UNKNOWN rows stay on
+        disk, ``rows_unknown_skipped`` increments, and a WARNING
+        log line is emitted so ops can audit via direct provider
+        query. Cost is bounded — UNKNOWN only happens on corrupted
+        metadata or schema-version skew, both rare. The TTL filter
+        already hides them from consumers (they're expired)."""
+        # Row with empty metadata (no "namespace" key).
+        bad_md = _FakeRow(
+            content="content-A", metadata={"cwd": "/p"},
+            content_hash=b"hashA",
+        )
+        # Row with a namespace shape the classifier doesn't recognise.
+        weird_ns = _FakeRow(
+            content="content-B",
+            metadata={"namespace": ["future_kind", "tail"]},
+            content_hash=b"hashB",
+        )
+        prov = _FakeProvider([[bad_md, weird_ns]])
+        r = StoreReaperThread(
+            store_cfg=_store_cfg(min_entries=3),
+            provider=prov, distiller=None, store=None,
+        )
+
+        result = r.sweep_once()
+
+        self.assertEqual(result["expired"], 2)
+        # CRITICAL: rows stayed.
+        self.assertEqual(result["deleted"], 0)
+        self.assertEqual(prov.delete_calls, [])
+        # New observability key — number of rows skipped on UNKNOWN.
+        self.assertEqual(result["rows_unknown_skipped"], 2)
+        # And no distillation either (UNKNOWN rows are not research).
+        self.assertEqual(result["distilled"], 0)
+        self.assertEqual(result["groups_distill_failed"], 0)
+
+    def test_unknown_kind_does_not_block_other_groups(self) -> None:
+        """One UNKNOWN group + one research group: the UNKNOWN stays
+        in place, the research group still distills + deletes
+        normally. Single-tick isolation between kinds."""
+        research_rows = [
+            _row(f"r{i}", ns=("csl-OK", "research"), cwd="/p", lane_idx=i)
+            for i in range(3)
+        ]
+        unknown = _FakeRow(
+            content="weird", metadata={"namespace": ["mystery"]},
+            content_hash=b"u1",
+        )
+        prov = _FakeProvider([research_rows + [unknown]])
+        distiller = _FakeDistiller()
+        store = _FakeStore()
+        r = StoreReaperThread(
+            store_cfg=_store_cfg(min_entries=3),
+            provider=prov, distiller=distiller, store=store,
+        )
+
+        result = r.sweep_once()
+
+        self.assertEqual(result["expired"], 4)
+        # Research group fully cycled.
+        self.assertEqual(result["distilled"], 1)
+        self.assertEqual(result["deleted"], 3)
+        # UNKNOWN group preserved.
+        self.assertEqual(result["rows_unknown_skipped"], 1)
+        # Only the research group's hashes were deleted.
+        deleted_hashes = {h for batch in prov.delete_calls for h in batch}
+        self.assertEqual(deleted_hashes, {b"r0", b"r1", b"r2"})
 
     def test_expire_before_provider_failure_returns_zero_stats(self) -> None:
         """Provider blow-up → sweep is a no-op tick, not a thread

@@ -16,6 +16,89 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed — consultants: triple-fix (#213, 2026-05-18) — UNKNOWN preservation + exhaustive synthesizer + prompt compaction
+
+Three follow-ups from the csl-2026-05-18-1554-c8dc forensic + the
+README audit.
+
+**1. `KIND_UNKNOWN` rows now preserved, not deleted** —
+``store_reaper.py:sweep_once`` previously fell through into the
+``KIND_TOOL_RESULTS`` branch for rows whose namespace metadata
+the daemon couldn't classify, deleting them unconditionally. The
+consultation flagged this as silent data loss: ``KIND_UNKNOWN``
+means the metadata is corrupted OR a future schema added a
+namespace kind the running daemon doesn't recognise — in either
+case, the row's content may still be recoverable, and "we don't
+know what kind it is" is too thin a basis to delete. Post-#213
+the sweep leak-then-logs: UNKNOWN rows stay on disk, a new
+``rows_unknown_skipped`` stat increments, and a WARNING log line
+is emitted so ops can audit via direct provider query. Cost is
+bounded (UNKNOWN only happens on corrupted metadata or
+schema-version skew, both rare); the TTL filter on
+``_do_search`` / ``_do_get`` already hides them from consumers
+since they're expired.
+
+Two new tests in ``tests/test_consultants_v2_store_reaper.py``:
+``test_unknown_kind_rows_skipped_not_deleted`` (end-to-end
+preservation invariant) and
+``test_unknown_kind_does_not_block_other_groups`` (mixed-group
+isolation — UNKNOWN preserved while research distills + deletes
+normally). The existing
+``test_unknown_namespace_buckets_unknown`` docstring updated
+(grouping unchanged; sweep branch changed).
+
+**2. Synthesizer prompt requires exhaustive list enumeration** —
+``csl-2026-05-18-1554-c8dc`` ended with ``finish_reason="stop"``
+mid-bullet 5 of 6 (~2.6 k chars output). Investigation via
+``transcript.db`` confirmed it was NOT a token-budget cap: the
+synthesizer (gemma4:31b-cloud) decided the list was "complete
+enough" after 4.5 of the researchers' 5 reported edge cases.
+Fix is prompt-level, not a ``num_predict`` knob. Both
+``SYNTHESIZER_SYSTEM`` and ``SYNTHESIZER_SELF_CRITIC_SYSTEM``
+gained an ``EXHAUSTIVE ENUMERATION`` block requiring the model
+to walk every researcher item before stopping on list-shaped
+answers (edge cases, failure modes, gotchas, alternatives).
+
+One new prompt-content test:
+``tests/test_consultants_council.py:TestPromptBuilders.test_synthesizer_system_demands_exhaustive_enumeration``.
+
+**3. Prompt compaction (token + bias hygiene)** — The two
+prompt blocks added in #213 originally carried verbose project
+history ("the csl-2026-05-18-1554 audit stopped mid-bullet 5 of
+6 because…"). User correctly flagged that as bias risk +
+prompt-token waste: the model wonders "what is csl-2026-05-18-
+1554?" and the load-bearing rule is the same with or without
+the example. Same pass applied to the existing #207 additions:
+
+- ``RESEARCHER_SYSTEM`` ``CITATION INTEGRITY`` block: dropped
+  the worked-example bits (``store_sql.py``, "line 128 vs 360",
+  the 60-line plausible-looking imports paragraph). Three
+  failure modes still named explicitly. ~150 chars saved.
+- ``SYNTHESIZER_SYSTEM`` ``CITATION INTEGRITY`` block: dropped
+  the ``store_sql.py`` reference. Rule unchanged.
+- ``tool_executor.build_tool_plan_user_appendix`` REPORT-NOW
+  closing instruction: dropped the "2026-05-18 M14 first-real-
+  ask repeatedly caught" paragraph. Same forbid-fabrication
+  rule, in fewer tokens.
+- ``SYNTHESIZER_SYSTEM`` + ``SYNTHESIZER_SELF_CRITIC_SYSTEM``
+  ``EXHAUSTIVE ENUMERATION`` block: shipped in compact form
+  from the start.
+
+Net prompt-token reduction across the four blocks: ~600 chars
+(~150 tokens) per researcher / synthesizer round. Bias surface
+reduced: no project-specific filenames, csl IDs, or dated
+incident narration in any prompt the council sees.
+
+**4. README `whats-new.md` link description** —
+``docs/whats-new.md`` actually contains v1.7 highlights, but
+the README described it as "v1.4 highlights" (pre-existing
+stale text from before the v1.5/1.6/1.7 cuts landed). Fixed +
+added the archive link to ``whats-new-v1.4.md`` alongside the
+existing ``whats-new-v1.1.md``.
+
+Full sweep: 3818 → 3821 passed (+3 new tests). Targeted suites
+green.
+
 ### Fixed — consultants: M14 silent-durable-write hole at store.py:281-288 (#212, 2026-05-18)
 
 Discovered during the
