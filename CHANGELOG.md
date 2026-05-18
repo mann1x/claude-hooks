@@ -16,6 +16,57 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — consultants store: CLI surface + installer prompts + doc (#220, 2026-05-18)
+
+The M14 `[store]` / `[store.ttl]` / `[store.distillation]` blocks
+were TOML-only — operators had to hand-edit
+``~/.claude/consultants-config.toml`` to tune anything beyond what
+``install.py`` auto-detected. #220 closes that gap on all three
+fronts:
+
+- **`consultants/config.py`** — three new mutators
+  (``set_store`` / ``set_store_ttl`` / ``set_store_distillation``)
+  matching the existing ``set_role`` / ``set_effort`` pattern.
+  ``None`` = leave unchanged; invalid values raise ``ValueError``;
+  the dataclass ``enable_at_efforts`` tuple coerces to list for
+  in-place edits and round-trips through the TOML renderer.
+- **`consultants/cli.py`** — three new subparsers under
+  ``claude-consultants config``:
+  ``set-store``, ``set-store-ttl``, ``set-store-distillation``.
+  ``--enabled`` / ``--refresh-on-read`` accept the canonical
+  ``true|yes|1|on`` / ``false|no|0|off`` bool ladder; typos raise
+  a clean ``CLIError(exit_code=2)`` instead of silently flipping a
+  knob. ``_config_dump`` now emits the full ``[store]`` block so
+  ``config show`` and the JSON returned by every ``set-*`` call
+  reveal the state.
+- **`install.py`** — ``_setup_consultants_store`` gains an optional
+  ``_customize_consultants_store_knobs`` interactive phase. The
+  default flow (auto-detect embedder, keep M14 defaults) is
+  unchanged; answer **yes** to the *"Customize TTL + distillation
+  knobs now?"* prompt to walk through every knob with the current
+  default as the fallback. Non-interactive installs skip the
+  prompt entirely.
+- **`docs/consultants.md`** — Configuration table extended with
+  18 new store rows; CLI section now lists every new verb with
+  example invocations; new **Cross-session memory (M8 store +
+  M14 distillation)** major section after Configuration covers
+  the four namespaces, the episodic → semantic consolidation
+  flow, the #215 pacing knobs, and backend selection. Three new
+  troubleshooting entries: ``EmbedderError`` recovery,
+  distillation backlog drain, and the #218 transaction-abort
+  symptom.
+- **Tests** — 38 new unit tests across
+  ``tests/test_consultants_config.py`` (``TestSetStore`` /
+  ``TestSetStoreTtl`` / ``TestSetStoreDistillation``) and
+  ``tests/test_consultants_cli.py`` (``TestConfigSetStore`` /
+  ``TestConfigSetStoreTtl`` / ``TestConfigSetStoreDistillation``).
+  Full sweep stays green at 3909 passed / 30 skipped.
+
+No behavior change for existing callers: defaults are unchanged,
+the new mutators are additive, and the interactive installer
+prompt is a single ``[y/N]`` gate with `N` keeping pre-#220
+behavior.
+
 ### Improved — stop_guard: 5 new commitment-stall patterns from live observation (#219, 2026-05-18)
 
 The pre-v1.7.x release-cut soak surfaced 5 distinct stall-after-

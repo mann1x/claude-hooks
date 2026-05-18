@@ -377,6 +377,7 @@ def _cmd_show_raw(args, sdir: Path) -> int:
 # ----------------------- config --------------------------------- #
 
 def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
+    s = cfg.store
     return {
         "topology": cfg.topology,
         "effort": cfg.effort,
@@ -407,10 +408,46 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
             }
             for r in cc.ROLES
         },
+        # M8 + M14 (#220): expose the cross-session store block so
+        # `config show` reveals the same knobs that `set-store{,-ttl,
+        # -distillation}` mutate. The skill renders this; the test
+        # suite asserts on the round-trip.
+        "store": {
+            "enabled": s.enabled,
+            "backend": s.backend,
+            "enable_at_efforts": list(s.enable_at_efforts),
+            "recall_limit": s.recall_limit,
+            "pgvector_dsn": s.pgvector_dsn,
+            "pgvector_table": s.pgvector_table,
+            "sqlite_vec_path": s.sqlite_vec_path,
+            "embedder": s.embedder,
+            "ttl": {
+                "enabled": s.ttl.enabled,
+                "research_days": s.ttl.research_days,
+                "tool_results_hours": s.ttl.tool_results_hours,
+                "project_days": s.ttl.project_days,
+                "user_days": s.ttl.user_days,
+                "refresh_on_read": s.ttl.refresh_on_read,
+                "jitter_pct": s.ttl.jitter_pct,
+            },
+            "distillation": {
+                "enabled": s.distillation.enabled,
+                "model": s.distillation.model,
+                "fallback_models": list(s.distillation.fallback_models),
+                "sweep_interval_seconds": s.distillation.sweep_interval_seconds,
+                "min_entries_per_distillation":
+                    s.distillation.min_entries_per_distillation,
+                "max_session_entries": s.distillation.max_session_entries,
+                "max_groups_per_sweep": s.distillation.max_groups_per_sweep,
+                "pace_seconds_between_distillations":
+                    s.distillation.pace_seconds_between_distillations,
+            },
+        },
         "extras_active": cc.extras_active(cfg.effort),
         "mandatory_roles": sorted(cc.MANDATORY_ROLES),
         "valid_efforts": sorted(cc.EFFORT_BUDGETS),
         "valid_service_modes": sorted(cc.VALID_SERVICE_MODES),
+        "valid_store_backends": list(cc.VALID_STORE_BACKENDS),
     }
 
 
@@ -539,6 +576,111 @@ def cmd_config_set_idle_timeout(args, base: str) -> int:
         "idle_timeout_seconds": args.seconds,
         "follow_up": "Restart claude-hooks-daemon for the change to take effect.",
     }, indent=2))
+    return 0
+
+
+def _parse_cli_bool(raw: Optional[str], *, flag: str) -> Optional[bool]:
+    """Parse the canonical CLI bool ladder used by set-role.
+
+    Returns ``None`` when ``raw`` is None (= "leave unchanged"). Raises
+    :class:`CLIError` on anything other than the documented synonyms
+    so a typo stays loud instead of silently flipping a wrong knob.
+    """
+    if raw is None:
+        return None
+    s = raw.strip().lower()
+    if s in ("true", "yes", "1", "on"):
+        return True
+    if s in ("false", "no", "0", "off"):
+        return False
+    raise CLIError(
+        f"{flag} must be true/false (got {raw!r})",
+        exit_code=2,
+    )
+
+
+def cmd_config_set_store(args, base: str) -> int:
+    """``config set-store`` — top-level [store] block knobs."""
+    try:
+        enabled = _parse_cli_bool(args.enabled, flag="--enabled")
+        cfg = cc.set_store(
+            enabled=enabled,
+            backend=args.backend,
+            recall_limit=args.recall_limit,
+            sqlite_vec_path=args.sqlite_vec_path,
+            pgvector_dsn=args.pgvector_dsn,
+            pgvector_table=args.pgvector_table,
+            embedder=args.embedder,
+            add_enable_at_effort=args.add_effort,
+            remove_enable_at_effort=args.remove_effort,
+            clear_enable_at_efforts=bool(args.clear_efforts),
+            scope="project" if args.project else "user",
+            cwd=Path(args.cwd or os.getcwd()).resolve()
+            if args.project else None,
+        )
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    block = _read_claude_hooks_consultants_block()
+    smart = block.get("smart_start") or {}
+    print(json.dumps({"ok": True, **_config_dump(cfg, smart_block=smart)},
+                     indent=2))
+    return 0
+
+
+def cmd_config_set_store_ttl(args, base: str) -> int:
+    """``config set-store-ttl`` — per-namespace TTL + #215 jitter."""
+    try:
+        enabled = _parse_cli_bool(args.enabled, flag="--enabled")
+        refresh = _parse_cli_bool(args.refresh_on_read,
+                                  flag="--refresh-on-read")
+        cfg = cc.set_store_ttl(
+            enabled=enabled,
+            research_days=args.research_days,
+            tool_results_hours=args.tool_results_hours,
+            project_days=args.project_days,
+            user_days=args.user_days,
+            refresh_on_read=refresh,
+            jitter_pct=args.jitter_pct,
+            scope="project" if args.project else "user",
+            cwd=Path(args.cwd or os.getcwd()).resolve()
+            if args.project else None,
+        )
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    block = _read_claude_hooks_consultants_block()
+    smart = block.get("smart_start") or {}
+    print(json.dumps({"ok": True, **_config_dump(cfg, smart_block=smart)},
+                     indent=2))
+    return 0
+
+
+def cmd_config_set_store_distillation(args, base: str) -> int:
+    """``config set-store-distillation`` — M14 sweep + #215 pacing."""
+    try:
+        enabled = _parse_cli_bool(args.enabled, flag="--enabled")
+        cfg = cc.set_store_distillation(
+            enabled=enabled,
+            model=args.model,
+            add_fallback_model=args.add_fallback_model,
+            remove_fallback_model=args.remove_fallback_model,
+            clear_fallback_models=bool(args.clear_fallback_models),
+            sweep_interval_seconds=args.sweep_interval_seconds,
+            min_entries_per_distillation=args.min_entries_per_distillation,
+            max_session_entries=args.max_session_entries,
+            max_groups_per_sweep=args.max_groups_per_sweep,
+            pace_seconds_between_distillations=(
+                args.pace_seconds_between_distillations
+            ),
+            scope="project" if args.project else "user",
+            cwd=Path(args.cwd or os.getcwd()).resolve()
+            if args.project else None,
+        )
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    block = _read_claude_hooks_consultants_block()
+    smart = block.get("smart_start") or {}
+    print(json.dumps({"ok": True, **_config_dump(cfg, smart_block=smart)},
+                     indent=2))
     return 0
 
 
@@ -1365,6 +1507,131 @@ def build_parser() -> argparse.ArgumentParser:
                              help="Smart-start idle timeout (seconds).")
     cit.add_argument("seconds", type=int)
     cit.set_defaults(fn=cmd_config_set_idle_timeout)
+
+    # ----- #220: [store] / [store.ttl] / [store.distillation] -----
+    # Pre-#220 these blocks were TOML-only. The three subparsers below
+    # mirror the set-role pattern: every knob is optional, None means
+    # "leave unchanged", and validation lives in consultants.config.
+    css = cfg_sub.add_parser(
+        "set-store",
+        help=("Configure the [store] block (cross-session memory). "
+              "Pre-#220 this required hand-editing the TOML."),
+    )
+    css.add_argument("--enabled",
+                     help="true|false — toggle the store on/off.")
+    css.add_argument("--backend",
+                     choices=cc.VALID_STORE_BACKENDS,
+                     help="memory | pgvector | sqlite_vec.")
+    css.add_argument("--recall-limit", dest="recall_limit", type=int,
+                     help="Top-K results returned by peer_findings recall "
+                          "(default 5).")
+    css.add_argument("--sqlite-vec-path", dest="sqlite_vec_path",
+                     help="Override path for sqlite_vec backend "
+                          "(default ~/.claude/consultants-store.db).")
+    css.add_argument("--pgvector-dsn", dest="pgvector_dsn",
+                     help="postgres://user:pass@host:5432/db for pgvector.")
+    css.add_argument("--pgvector-table", dest="pgvector_table",
+                     help="Table name on the pgvector backend (default "
+                          "consultants_store).")
+    css.add_argument("--embedder",
+                     help="Embedder identifier (e.g. llamafile / ollama).")
+    css.add_argument("--add-effort", dest="add_effort",
+                     help="Enable the store at this effort tier "
+                          "(low|medium|high|max|xmedium|xhigh|xmax). "
+                          "Default set = high/max/xhigh/xmax. Idempotent.")
+    css.add_argument("--remove-effort", dest="remove_effort",
+                     help="Drop a tier from enable_at_efforts.")
+    css.add_argument("--clear-efforts", dest="clear_efforts",
+                     action="store_true",
+                     help="Empty enable_at_efforts (store becomes "
+                          "inert at every tier).")
+    css.add_argument("--project", action="store_true",
+                     help="Save under per-project scope "
+                          "(.claude-hooks/consultants.toml).")
+    css.add_argument("--cwd",
+                     help="Project root (only used with --project).")
+    css.set_defaults(fn=cmd_config_set_store)
+
+    cst = cfg_sub.add_parser(
+        "set-store-ttl",
+        help=("Configure the [store.ttl] block: per-namespace TTL, "
+              "refresh-on-read, #215 jitter."),
+    )
+    cst.add_argument("--enabled",
+                     help="true|false — master TTL switch.")
+    cst.add_argument("--research-days", dest="research_days", type=float,
+                     help="Days before research entries expire "
+                          "(default 30). 0 or negative = never.")
+    cst.add_argument("--tool-results-hours", dest="tool_results_hours",
+                     type=float,
+                     help="Hours before tool_results entries expire "
+                          "(default 24). 0 or negative = never.")
+    cst.add_argument("--project-days", dest="project_days", type=float,
+                     help="Days before ('project', pid) entries expire "
+                          "(default never). 0 or negative = never.")
+    cst.add_argument("--user-days", dest="user_days", type=float,
+                     help="Days before ('user', uid) entries expire "
+                          "(default never). 0 or negative = never.")
+    cst.add_argument("--refresh-on-read", dest="refresh_on_read",
+                     help="true|false — bump expires_at forward on every "
+                          "successful recall hit (default true).")
+    cst.add_argument("--jitter-pct", dest="jitter_pct", type=float,
+                     help="#215 cohort jitter — 0.0..1.0. Spreads aligned "
+                          "writes across ±jitter of the nominal TTL so "
+                          "the reaper doesn't see N sessions expire on "
+                          "one tick. Default 0.1 (=±10%%).")
+    cst.add_argument("--project", action="store_true",
+                     help="Save under per-project scope.")
+    cst.add_argument("--cwd", help="Project root.")
+    cst.set_defaults(fn=cmd_config_set_store_ttl)
+
+    csd = cfg_sub.add_parser(
+        "set-store-distillation",
+        help=("Configure the [store.distillation] block: M14 sweep + "
+              "#215 cap + pace."),
+    )
+    csd.add_argument("--enabled",
+                     help="true|false — master distillation switch. "
+                          "OFF = research originals just delete at TTL.")
+    csd.add_argument("--model",
+                     help="Primary distillation LLM "
+                          "(default gemma4:31b-cloud).")
+    csd.add_argument("--add-fallback-model", dest="add_fallback_model",
+                     help="Append a model to the fallback chain "
+                          "(idempotent; dedup'd against the primary).")
+    csd.add_argument("--remove-fallback-model",
+                     dest="remove_fallback_model",
+                     help="Drop a model from the fallback chain.")
+    csd.add_argument("--clear-fallback-models",
+                     dest="clear_fallback_models",
+                     action="store_true",
+                     help="Empty the fallback chain (primary-only).")
+    csd.add_argument("--sweep-interval-seconds",
+                     dest="sweep_interval_seconds", type=float,
+                     help="Reaper sweep cadence (default 3600 = 1 h, "
+                          "minimum 30).")
+    csd.add_argument("--min-entries-per-distillation",
+                     dest="min_entries_per_distillation", type=int,
+                     help="Cost gate — research groups below this "
+                          "count delete without LLM call (default 3).")
+    csd.add_argument("--max-session-entries",
+                     dest="max_session_entries", type=int,
+                     help="Truncation cap before prompt assembly "
+                          "(default 50; bounds per-call token cost).")
+    csd.add_argument("--max-groups-per-sweep",
+                     dest="max_groups_per_sweep", type=int,
+                     help="#215 — cap successful distillations per "
+                          "sweep tick. Cost-gated skips and tool_results "
+                          "deletes don't count. Default 5; 0 = uncapped.")
+    csd.add_argument("--pace-seconds-between-distillations",
+                     dest="pace_seconds_between_distillations", type=float,
+                     help="#215 — sleep N seconds between consecutive "
+                          "distillations within one sweep. Default 5.0; "
+                          "0.0 disables. Sliced 0.5 s for shutdown.")
+    csd.add_argument("--project", action="store_true",
+                     help="Save under per-project scope.")
+    csd.add_argument("--cwd", help="Project root.")
+    csd.set_defaults(fn=cmd_config_set_store_distillation)
 
     clm = cfg_sub.add_parser("list-models",
                              help="Available Ollama tags.")

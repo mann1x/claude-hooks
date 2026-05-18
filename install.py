@@ -5116,6 +5116,149 @@ def _write_consultants_task_xml(*, description: str, command: str,
     return Path(path)
 
 
+def _ask_optional_float(prompt: str, *, default: Optional[float],
+                          none_synonyms: tuple[str, ...] = ("never", "off")
+                          ) -> tuple[bool, Optional[float]]:
+    """Prompt for an optional float. Returns ``(changed, value)``.
+
+    Blank input → ``(False, None)`` so callers know to leave the
+    field unchanged. ``never`` / ``off`` → ``(True, None)`` (explicit
+    "never expire" answer). Otherwise parses to float.
+    """
+    default_label = "never" if default is None else f"{default}"
+    raw = input(f"  {prompt} [{default_label}]: ").strip()
+    if not raw:
+        return False, None
+    if raw.lower() in none_synonyms:
+        return True, None
+    try:
+        return True, float(raw)
+    except ValueError:
+        print(f"    [warn] not a number: {raw!r} — keeping default")
+        return False, None
+
+
+def _ask_optional_int(prompt: str, *, default: int
+                       ) -> tuple[bool, Optional[int]]:
+    raw = input(f"  {prompt} [{default}]: ").strip()
+    if not raw:
+        return False, None
+    try:
+        return True, int(raw)
+    except ValueError:
+        print(f"    [warn] not an integer: {raw!r} — keeping default")
+        return False, None
+
+
+def _ask_optional_bool(prompt: str, *, default: bool
+                        ) -> tuple[bool, Optional[bool]]:
+    label = "Y/n" if default else "y/N"
+    raw = input(f"  {prompt} [{label}]: ").strip().lower()
+    if not raw:
+        return False, None
+    if raw in ("y", "yes", "true", "1", "on"):
+        return True, True
+    if raw in ("n", "no", "false", "0", "off"):
+        return True, False
+    print(f"    [warn] not a yes/no: {raw!r} — keeping default")
+    return False, None
+
+
+def _customize_consultants_store_knobs(*, non_interactive: bool
+                                        ) -> tuple[dict, dict]:
+    """Optional interactive customization of [store.ttl] +
+    [store.distillation] knobs at install time (#220).
+
+    Returns ``(ttl_overrides, distill_overrides)`` — two dicts of
+    field-name → value that the helper script applies. Empty dicts
+    mean "no overrides, keep M14 defaults".
+
+    Non-interactive runs always return empty dicts (defaults are
+    correct; the operator can always tune via
+    ``claude-consultants config set-store-{ttl,distillation}``).
+    """
+    if non_interactive:
+        return {}, {}
+    ans = input(
+        "    Customize TTL + distillation knobs now? "
+        "(M14 defaults are sensible; say n to skip) [y/N]: "
+    ).strip().lower()
+    if ans not in ("y", "yes"):
+        return {}, {}
+
+    ttl_over: dict = {}
+    distill_over: dict = {}
+
+    print("    [store.ttl] — episodic-memory expiry windows")
+    changed, val = _ask_optional_bool(
+        "TTL enabled?", default=True)
+    if changed:
+        ttl_over["enabled"] = bool(val)
+    changed, val = _ask_optional_float(
+        "Research namespace TTL (days)", default=30.0)
+    if changed:
+        ttl_over["research_days"] = val
+    changed, val = _ask_optional_float(
+        "Tool-results namespace TTL (hours)", default=24.0)
+    if changed:
+        ttl_over["tool_results_hours"] = val
+    changed, val = _ask_optional_float(
+        "Project namespace TTL (days)", default=None)
+    if changed:
+        ttl_over["project_days"] = val
+    changed, val = _ask_optional_float(
+        "User namespace TTL (days)", default=None)
+    if changed:
+        ttl_over["user_days"] = val
+    changed, val = _ask_optional_bool(
+        "Refresh expires_at on every successful recall hit?",
+        default=True)
+    if changed:
+        ttl_over["refresh_on_read"] = bool(val)
+    changed, val = _ask_optional_float(
+        "Cohort jitter — fraction (#215, 0..1)", default=0.1)
+    if changed and val is not None:
+        if 0.0 <= val <= 1.0:
+            ttl_over["jitter_pct"] = val
+        else:
+            print(f"    [warn] jitter_pct out of range — kept default")
+
+    print("    [store.distillation] — semantic-memory consolidation")
+    changed, val = _ask_optional_bool(
+        "Distillation enabled?", default=True)
+    if changed:
+        distill_over["enabled"] = bool(val)
+    raw = input(
+        "  Distillation model [gemma4:31b-cloud]: ").strip()
+    if raw:
+        distill_over["model"] = raw
+    changed, val = _ask_optional_float(
+        "Sweep cadence (seconds, >=30)", default=3600.0)
+    if changed and val is not None and val >= 30.0:
+        distill_over["sweep_interval_seconds"] = float(val)
+    elif changed:
+        print(f"    [warn] sweep_interval_seconds < 30 — kept default")
+    changed, val = _ask_optional_int(
+        "Minimum entries to trigger distillation", default=3)
+    if changed and val is not None and val >= 1:
+        distill_over["min_entries_per_distillation"] = int(val)
+    changed, val = _ask_optional_int(
+        "Max session entries per prompt (cost cap)", default=50)
+    if changed and val is not None and val >= 1:
+        distill_over["max_session_entries"] = int(val)
+    changed, val = _ask_optional_int(
+        "Max distillations per sweep (#215; 0=uncapped)", default=5)
+    if changed and val is not None and val >= 0:
+        distill_over["max_groups_per_sweep"] = int(val)
+    changed, val = _ask_optional_float(
+        "Seconds between distillations within a sweep (#215)",
+        default=5.0)
+    if changed and val is not None and val >= 0.0:
+        distill_over["pace_seconds_between_distillations"] = float(val)
+
+    return ttl_over, distill_over
+
+
 def _setup_consultants_store(cfg: dict, *, consultants_py: Path,
                              non_interactive: bool,
                              dry_run: bool) -> None:
@@ -5200,6 +5343,17 @@ def _setup_consultants_store(cfg: dict, *, consultants_py: Path,
               f"{chosen_backend!r} with embedder = {embedder_name!r}")
         return
 
+    # #220 (2026-05-18): optional interactive customization of the
+    # M14 TTL + distillation knobs. Defaults stay correct without
+    # prompts; the interactive prompts let an operator opt into a
+    # different research window, a different distillation cadence,
+    # or a different distiller model at install time instead of
+    # forcing them to discover `claude-consultants config set-store*`
+    # after the fact.
+    ttl_overrides, distill_overrides = _customize_consultants_store_knobs(
+        non_interactive=non_interactive,
+    )
+
     # Load existing TOML via the consultants-env python so we use the
     # canonical dataclass + render path (subprocess isolates the
     # heavy LangGraph imports from the main installer process).
@@ -5210,6 +5364,8 @@ def _setup_consultants_store(cfg: dict, *, consultants_py: Path,
         "pgvector_dsn": pgvector_dsn,
         "pgvector_table": pgvector_table,
         "sqlite_vec_path": sqlite_vec_path,
+        "ttl": ttl_overrides,
+        "distillation": distill_overrides,
     }
     helper = (
         "import json, sys\n"
@@ -5228,6 +5384,15 @@ def _setup_consultants_store(cfg: dict, *, consultants_py: Path,
         "    cfg.store.pgvector_table = payload['pgvector_table']\n"
         "if payload.get('sqlite_vec_path'):\n"
         "    cfg.store.sqlite_vec_path = payload['sqlite_vec_path']\n"
+        "ttl = payload.get('ttl') or {}\n"
+        "for k, v in ttl.items():\n"
+        "    setattr(cfg.store.ttl, k, v)\n"
+        "dist = payload.get('distillation') or {}\n"
+        "for k, v in dist.items():\n"
+        "    if k == 'fallback_models':\n"
+        "        cfg.store.distillation.fallback_models = tuple(v)\n"
+        "    else:\n"
+        "        setattr(cfg.store.distillation, k, v)\n"
         "path = cc.save_config(cfg, scope='user')\n"
         "print(str(path))\n"
     )

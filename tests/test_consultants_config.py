@@ -254,6 +254,202 @@ class TestSetServiceMode:
             cc.set_service_mode("on-demand")
 
 
+# ----------------------- set-store (#220) ------------------------- #
+
+class TestSetStore:
+    def test_toggle_enabled_and_persist(self, isolated_home):
+        cc.set_store(enabled=False)
+        cfg = cc.load_config()
+        assert cfg.store.enabled is False
+        cc.set_store(enabled=True)
+        cfg = cc.load_config()
+        assert cfg.store.enabled is True
+
+    def test_backend_validated(self, isolated_home):
+        cc.set_store(backend="pgvector")
+        cfg = cc.load_config()
+        assert cfg.store.backend == "pgvector"
+        with pytest.raises(ValueError) as ei:
+            cc.set_store(backend="qdrant")
+        assert "backend must be one of" in str(ei.value)
+
+    def test_recall_limit_must_be_positive(self, isolated_home):
+        cc.set_store(recall_limit=7)
+        cfg = cc.load_config()
+        assert cfg.store.recall_limit == 7
+        with pytest.raises(ValueError):
+            cc.set_store(recall_limit=0)
+
+    def test_paths_and_dsn_set_and_clear(self, isolated_home):
+        cc.set_store(
+            sqlite_vec_path="/tmp/x.db",
+            pgvector_dsn="postgres://u:p@h/db",
+            pgvector_table="ctab",
+            embedder="ollama",
+        )
+        cfg = cc.load_config()
+        assert cfg.store.sqlite_vec_path == "/tmp/x.db"
+        assert cfg.store.pgvector_dsn == "postgres://u:p@h/db"
+        assert cfg.store.pgvector_table == "ctab"
+        assert cfg.store.embedder == "ollama"
+        # Empty string clears overrides. pgvector_dsn / pgvector_table /
+        # embedder default to None, so clearing → None. sqlite_vec_path
+        # has a non-None default (~/.claude/consultants-store.db); the
+        # mutator writes None, but load_config restores the default so
+        # the field reverts to its baked-in path rather than going None.
+        cc.set_store(sqlite_vec_path="", pgvector_dsn="",
+                     pgvector_table="", embedder="")
+        cfg = cc.load_config()
+        assert cfg.store.pgvector_dsn is None
+        assert cfg.store.pgvector_table is None
+        assert cfg.store.embedder is None
+        # sqlite_vec_path reverts to default rather than None.
+        assert cfg.store.sqlite_vec_path == "~/.claude/consultants-store.db"
+
+    def test_enable_at_effort_add_remove_idempotent(self, isolated_home):
+        # The field is a tuple by dataclass type; mutator uses a list
+        # for in-place edits, load_config rehydrates as a tuple.
+        cc.set_store(clear_enable_at_efforts=True)
+        cfg = cc.load_config()
+        assert tuple(cfg.store.enable_at_efforts) == ()
+        cc.set_store(add_enable_at_effort="high")
+        cc.set_store(add_enable_at_effort="high")  # idempotent
+        cfg = cc.load_config()
+        assert tuple(cfg.store.enable_at_efforts) == ("high",)
+        cc.set_store(remove_enable_at_effort="high")
+        cc.set_store(remove_enable_at_effort="high")  # idempotent
+        cfg = cc.load_config()
+        assert tuple(cfg.store.enable_at_efforts) == ()
+
+    def test_enable_at_effort_validated(self, isolated_home):
+        with pytest.raises(ValueError):
+            cc.set_store(add_enable_at_effort="infinite")
+
+    def test_none_leaves_unchanged(self, isolated_home):
+        cc.set_store(enabled=True, recall_limit=11)
+        cc.set_store()  # all defaults None → no-op
+        cfg = cc.load_config()
+        assert cfg.store.enabled is True
+        assert cfg.store.recall_limit == 11
+
+
+# ----------------------- set-store-ttl (#220) --------------------- #
+
+class TestSetStoreTtl:
+    def test_toggle_enabled(self, isolated_home):
+        cc.set_store_ttl(enabled=False)
+        cfg = cc.load_config()
+        assert cfg.store.ttl.enabled is False
+
+    def test_zero_or_negative_means_never(self, isolated_home):
+        cc.set_store_ttl(research_days=0)
+        cfg = cc.load_config()
+        assert cfg.store.ttl.research_days is None
+        cc.set_store_ttl(research_days=-5)
+        cfg = cc.load_config()
+        assert cfg.store.ttl.research_days is None
+        cc.set_store_ttl(research_days=30.0)
+        cfg = cc.load_config()
+        assert cfg.store.ttl.research_days == 30.0
+
+    def test_all_namespace_knobs(self, isolated_home):
+        cc.set_store_ttl(
+            research_days=14.0,
+            tool_results_hours=6.0,
+            project_days=180.0,
+            user_days=365.0,
+        )
+        cfg = cc.load_config()
+        assert cfg.store.ttl.research_days == 14.0
+        assert cfg.store.ttl.tool_results_hours == 6.0
+        assert cfg.store.ttl.project_days == 180.0
+        assert cfg.store.ttl.user_days == 365.0
+
+    def test_refresh_on_read_toggle(self, isolated_home):
+        cc.set_store_ttl(refresh_on_read=False)
+        cfg = cc.load_config()
+        assert cfg.store.ttl.refresh_on_read is False
+
+    def test_jitter_pct_range_validated(self, isolated_home):
+        cc.set_store_ttl(jitter_pct=0.0)
+        cc.set_store_ttl(jitter_pct=1.0)
+        cc.set_store_ttl(jitter_pct=0.25)
+        cfg = cc.load_config()
+        assert cfg.store.ttl.jitter_pct == 0.25
+        with pytest.raises(ValueError):
+            cc.set_store_ttl(jitter_pct=-0.1)
+        with pytest.raises(ValueError):
+            cc.set_store_ttl(jitter_pct=1.5)
+
+
+# ----------------------- set-store-distillation (#220) ------------ #
+
+class TestSetStoreDistillation:
+    def test_toggle_enabled(self, isolated_home):
+        cc.set_store_distillation(enabled=False)
+        cfg = cc.load_config()
+        assert cfg.store.distillation.enabled is False
+
+    def test_model_must_be_nonempty(self, isolated_home):
+        cc.set_store_distillation(model="kimi-k2.6:cloud")
+        cfg = cc.load_config()
+        assert cfg.store.distillation.model == "kimi-k2.6:cloud"
+        with pytest.raises(ValueError):
+            cc.set_store_distillation(model="")
+        with pytest.raises(ValueError):
+            cc.set_store_distillation(model="   ")
+
+    def test_fallback_chain_add_remove_clear(self, isolated_home):
+        cc.set_store_distillation(clear_fallback_models=True)
+        cfg = cc.load_config()
+        assert cfg.store.distillation.fallback_models == ()
+        cc.set_store_distillation(add_fallback_model="glm-5.1:cloud")
+        cc.set_store_distillation(add_fallback_model="glm-5.1:cloud")  # idempotent
+        cc.set_store_distillation(add_fallback_model="kimi-k2.6:cloud")
+        cfg = cc.load_config()
+        assert cfg.store.distillation.fallback_models == (
+            "glm-5.1:cloud", "kimi-k2.6:cloud",
+        )
+        cc.set_store_distillation(remove_fallback_model="glm-5.1:cloud")
+        cfg = cc.load_config()
+        assert cfg.store.distillation.fallback_models == ("kimi-k2.6:cloud",)
+
+    def test_fallback_dedup_against_primary(self, isolated_home):
+        cc.set_store_distillation(
+            clear_fallback_models=True,
+            model="kimi-k2.6:cloud",
+        )
+        cc.set_store_distillation(add_fallback_model="kimi-k2.6:cloud")
+        cfg = cc.load_config()
+        # Adding the primary as a fallback is a no-op.
+        assert cfg.store.distillation.fallback_models == ()
+
+    def test_numeric_caps_validated(self, isolated_home):
+        with pytest.raises(ValueError):
+            cc.set_store_distillation(sweep_interval_seconds=10)  # < 30 minimum
+        with pytest.raises(ValueError):
+            cc.set_store_distillation(min_entries_per_distillation=0)
+        with pytest.raises(ValueError):
+            cc.set_store_distillation(max_session_entries=0)
+        with pytest.raises(ValueError):
+            cc.set_store_distillation(max_groups_per_sweep=-1)
+        with pytest.raises(ValueError):
+            cc.set_store_distillation(pace_seconds_between_distillations=-1.0)
+
+    def test_215_pacing_knobs(self, isolated_home):
+        cc.set_store_distillation(
+            max_groups_per_sweep=3,
+            pace_seconds_between_distillations=10.0,
+        )
+        cfg = cc.load_config()
+        assert cfg.store.distillation.max_groups_per_sweep == 3
+        assert cfg.store.distillation.pace_seconds_between_distillations == 10.0
+        # 0 = uncapped is legal.
+        cc.set_store_distillation(max_groups_per_sweep=0)
+        cfg = cc.load_config()
+        assert cfg.store.distillation.max_groups_per_sweep == 0
+
+
 # ----------------------- validate_pipeline ------------------------- #
 
 class TestValidatePipeline:

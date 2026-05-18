@@ -1563,6 +1563,220 @@ def set_topology(topology: str, *, scope: str = "user",
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 
+# --------------------------------------------------------------------- #
+# Store / TTL / distillation mutators (#220)
+# --------------------------------------------------------------------- #
+# Until #220, the [store] / [store.ttl] / [store.distillation] knobs
+# were TOML-only — users had to hand-edit ~/.claude/consultants-config.toml
+# (or the per-project override) to flip them. These mutators surface
+# every knob with the same "pass-None-to-leave-unchanged" contract that
+# ``set_role`` uses, so the CLI (``config set-store``,
+# ``config set-store-ttl``, ``config set-store-distillation``) and the
+# installer can drive them programmatically.
+
+VALID_STORE_BACKENDS: tuple[str, ...] = ("memory", "pgvector", "sqlite_vec")
+
+
+def _normalize_ttl_days(val: Optional[float]) -> Optional[float]:
+    """0 or negative -> None (never expire); positive -> float."""
+    if val is None:
+        return None  # sentinel for "leave unchanged" handled upstream
+    if val <= 0:
+        return None
+    return float(val)
+
+
+def set_store(
+    *,
+    enabled: Optional[bool] = None,
+    backend: Optional[str] = None,
+    recall_limit: Optional[int] = None,
+    sqlite_vec_path: Optional[str] = None,
+    pgvector_dsn: Optional[str] = None,
+    pgvector_table: Optional[str] = None,
+    embedder: Optional[str] = None,
+    add_enable_at_effort: Optional[str] = None,
+    remove_enable_at_effort: Optional[str] = None,
+    clear_enable_at_efforts: bool = False,
+    scope: str = "user",
+    cwd: Optional[Path] = None,
+) -> ConsultantsConfig:
+    """Mutate the top-level ``[store]`` block and persist.
+
+    Each kwarg is "None = leave unchanged". Empty strings on path /
+    DSN / table / embedder mean "clear the override". Effort tier
+    add/remove are idempotent (no-op when the tier is already
+    present / absent). The full list of toggleable tiers is the
+    same as :data:`EFFORT_BUDGETS`.
+    """
+    cfg = load_config(cwd if scope != "user" else None)
+    s = cfg.store
+    if enabled is not None:
+        s.enabled = bool(enabled)
+    if backend is not None:
+        b = backend.strip().lower()
+        if b not in VALID_STORE_BACKENDS:
+            raise ValueError(
+                "backend must be one of: "
+                + ", ".join(VALID_STORE_BACKENDS)
+            )
+        s.backend = b
+    if recall_limit is not None:
+        if recall_limit < 1:
+            raise ValueError("recall_limit must be >= 1")
+        s.recall_limit = int(recall_limit)
+    if sqlite_vec_path is not None:
+        v = sqlite_vec_path.strip()
+        s.sqlite_vec_path = v or None
+    if pgvector_dsn is not None:
+        v = pgvector_dsn.strip()
+        s.pgvector_dsn = v or None
+    if pgvector_table is not None:
+        v = pgvector_table.strip()
+        s.pgvector_table = v or None
+    if embedder is not None:
+        v = embedder.strip()
+        s.embedder = v or None
+    # ``enable_at_efforts`` round-trips as a tuple (dataclass type) so
+    # any in-place mutation must coerce to a list first; we keep it a
+    # list on the live config since the renderer accepts either and
+    # other set_store calls in the same process can append cheaply.
+    if clear_enable_at_efforts:
+        s.enable_at_efforts = []
+    if add_enable_at_effort is not None:
+        tier = add_enable_at_effort.strip()
+        if tier not in EFFORT_BUDGETS:
+            raise ValueError(
+                "effort tier must be one of: "
+                + ", ".join(sorted(EFFORT_BUDGETS))
+            )
+        existing = list(s.enable_at_efforts)
+        if tier not in existing:
+            existing.append(tier)
+        s.enable_at_efforts = existing
+    if remove_enable_at_effort is not None:
+        tier = remove_enable_at_effort.strip()
+        s.enable_at_efforts = [
+            t for t in s.enable_at_efforts if t != tier
+        ]
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_store_ttl(
+    *,
+    enabled: Optional[bool] = None,
+    research_days: Optional[float] = None,
+    tool_results_hours: Optional[float] = None,
+    project_days: Optional[float] = None,
+    user_days: Optional[float] = None,
+    refresh_on_read: Optional[bool] = None,
+    jitter_pct: Optional[float] = None,
+    scope: str = "user",
+    cwd: Optional[Path] = None,
+) -> ConsultantsConfig:
+    """Mutate the ``[store.ttl]`` block.
+
+    Negative or zero day/hour values map to ``None`` (never expire).
+    ``jitter_pct`` is clamped to ``[0.0, 1.0]`` — 0.0 disables the
+    cohort-spread mechanic from #215.
+    """
+    cfg = load_config(cwd if scope != "user" else None)
+    t = cfg.store.ttl
+    if enabled is not None:
+        t.enabled = bool(enabled)
+    if research_days is not None:
+        t.research_days = _normalize_ttl_days(research_days)
+    if tool_results_hours is not None:
+        t.tool_results_hours = _normalize_ttl_days(tool_results_hours)
+    if project_days is not None:
+        t.project_days = _normalize_ttl_days(project_days)
+    if user_days is not None:
+        t.user_days = _normalize_ttl_days(user_days)
+    if refresh_on_read is not None:
+        t.refresh_on_read = bool(refresh_on_read)
+    if jitter_pct is not None:
+        if jitter_pct < 0.0 or jitter_pct > 1.0:
+            raise ValueError("jitter_pct must be in [0.0, 1.0]")
+        t.jitter_pct = float(jitter_pct)
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_store_distillation(
+    *,
+    enabled: Optional[bool] = None,
+    model: Optional[str] = None,
+    add_fallback_model: Optional[str] = None,
+    remove_fallback_model: Optional[str] = None,
+    clear_fallback_models: bool = False,
+    sweep_interval_seconds: Optional[float] = None,
+    min_entries_per_distillation: Optional[int] = None,
+    max_session_entries: Optional[int] = None,
+    max_groups_per_sweep: Optional[int] = None,
+    pace_seconds_between_distillations: Optional[float] = None,
+    scope: str = "user",
+    cwd: Optional[Path] = None,
+) -> ConsultantsConfig:
+    """Mutate the ``[store.distillation]`` block.
+
+    The fallback chain is a tuple internally; ``add_fallback_model``
+    appends idempotently (no-op when already present or equal to
+    the primary), ``remove_fallback_model`` drops by tag,
+    ``clear_fallback_models`` empties the chain. Numeric caps are
+    range-checked.
+    """
+    cfg = load_config(cwd if scope != "user" else None)
+    d = cfg.store.distillation
+    if enabled is not None:
+        d.enabled = bool(enabled)
+    if model is not None:
+        m = model.strip()
+        if not m:
+            raise ValueError("model must be non-empty")
+        d.model = m
+    if clear_fallback_models:
+        d.fallback_models = tuple()
+    if add_fallback_model is not None:
+        tag = add_fallback_model.strip()
+        if not tag:
+            raise ValueError("add_fallback_model must be non-empty")
+        existing = list(d.fallback_models)
+        if tag not in existing and tag != d.model:
+            existing.append(tag)
+        d.fallback_models = tuple(existing)
+    if remove_fallback_model is not None:
+        tag = remove_fallback_model.strip()
+        d.fallback_models = tuple(
+            m for m in d.fallback_models if m != tag
+        )
+    if sweep_interval_seconds is not None:
+        if sweep_interval_seconds < 30.0:
+            raise ValueError("sweep_interval_seconds must be >= 30")
+        d.sweep_interval_seconds = float(sweep_interval_seconds)
+    if min_entries_per_distillation is not None:
+        if min_entries_per_distillation < 1:
+            raise ValueError("min_entries_per_distillation must be >= 1")
+        d.min_entries_per_distillation = int(min_entries_per_distillation)
+    if max_session_entries is not None:
+        if max_session_entries < 1:
+            raise ValueError("max_session_entries must be >= 1")
+        d.max_session_entries = int(max_session_entries)
+    if max_groups_per_sweep is not None:
+        if max_groups_per_sweep < 0:
+            raise ValueError(
+                "max_groups_per_sweep must be >= 0 (0 = uncapped)"
+            )
+        d.max_groups_per_sweep = int(max_groups_per_sweep)
+    if pace_seconds_between_distillations is not None:
+        if pace_seconds_between_distillations < 0.0:
+            raise ValueError(
+                "pace_seconds_between_distillations must be >= 0"
+            )
+        d.pace_seconds_between_distillations = float(
+            pace_seconds_between_distillations
+        )
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
 # ----------------------- helpers ------------------------------------ #
 
 def enabled_roles(cfg: ConsultantsConfig) -> list[str]:

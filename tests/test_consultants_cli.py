@@ -369,6 +369,181 @@ class TestConfigSetIdleTimeout:
         assert rc == 2
 
 
+# ----------------------- config set-store (#220) -------------- #
+
+class TestConfigSetStore:
+    def test_toggle_enabled(self, isolated_home, patched_http):
+        rc, payload, _ = _run(["config", "set-store", "--enabled", "false"])
+        assert rc == 0
+        assert payload["store"]["enabled"] is False
+        rc, payload, _ = _run(["config", "set-store", "--enabled", "true"])
+        assert rc == 0
+        assert payload["store"]["enabled"] is True
+
+    def test_backend_switch(self, isolated_home, patched_http):
+        rc, payload, _ = _run(
+            ["config", "set-store", "--backend", "pgvector"])
+        assert rc == 0
+        assert payload["store"]["backend"] == "pgvector"
+
+    def test_recall_limit(self, isolated_home, patched_http):
+        rc, payload, _ = _run(
+            ["config", "set-store", "--recall-limit", "11"])
+        assert rc == 0
+        assert payload["store"]["recall_limit"] == 11
+
+    def test_paths_dsn_table_embedder(self, isolated_home, patched_http):
+        rc, payload, _ = _run([
+            "config", "set-store",
+            "--sqlite-vec-path", "/tmp/y.db",
+            "--pgvector-dsn", "postgres://u:p@h/db",
+            "--pgvector-table", "ctab",
+            "--embedder", "ollama",
+        ])
+        assert rc == 0
+        s = payload["store"]
+        assert s["sqlite_vec_path"] == "/tmp/y.db"
+        assert s["pgvector_dsn"] == "postgres://u:p@h/db"
+        assert s["pgvector_table"] == "ctab"
+        assert s["embedder"] == "ollama"
+
+    def test_efforts_add_remove_clear(self, isolated_home, patched_http):
+        rc, _, _ = _run(["config", "set-store", "--clear-efforts"])
+        assert rc == 0
+        rc, payload, _ = _run(
+            ["config", "set-store", "--add-effort", "max"])
+        assert rc == 0
+        assert "max" in payload["store"]["enable_at_efforts"]
+        rc, payload, _ = _run(
+            ["config", "set-store", "--remove-effort", "max"])
+        assert rc == 0
+        assert "max" not in payload["store"]["enable_at_efforts"]
+
+    def test_invalid_backend_rejected(self, isolated_home, patched_http):
+        # argparse's `choices=` catches this at parse time → SystemExit(2)
+        # before our handler runs; that's intentional (more helpful
+        # error message). Make sure the contract is "reject, don't
+        # accept silently" without locking us into a specific path.
+        with pytest.raises(SystemExit) as ei:
+            _run(["config", "set-store", "--backend", "redis"])
+        assert ei.value.code == 2
+
+    def test_invalid_bool_rejected(self, isolated_home, patched_http):
+        rc, _, err = _run(["config", "set-store", "--enabled", "maybe"])
+        assert rc == 2
+        assert "--enabled" in err or "maybe" in err
+
+    def test_recall_limit_must_be_positive(self, isolated_home, patched_http):
+        rc, _, err = _run(["config", "set-store", "--recall-limit", "0"])
+        assert rc == 2
+
+
+# ----------------------- config set-store-ttl (#220) ---------- #
+
+class TestConfigSetStoreTtl:
+    def test_toggle_enabled(self, isolated_home, patched_http):
+        rc, payload, _ = _run(
+            ["config", "set-store-ttl", "--enabled", "false"])
+        assert rc == 0
+        assert payload["store"]["ttl"]["enabled"] is False
+
+    def test_research_days_zero_means_never(self, isolated_home,
+                                             patched_http):
+        rc, payload, _ = _run(
+            ["config", "set-store-ttl", "--research-days", "0"])
+        assert rc == 0
+        assert payload["store"]["ttl"]["research_days"] is None
+
+    def test_research_days_positive(self, isolated_home, patched_http):
+        rc, payload, _ = _run(
+            ["config", "set-store-ttl", "--research-days", "14"])
+        assert rc == 0
+        assert payload["store"]["ttl"]["research_days"] == 14.0
+
+    def test_refresh_on_read_bool(self, isolated_home, patched_http):
+        rc, payload, _ = _run(
+            ["config", "set-store-ttl", "--refresh-on-read", "false"])
+        assert rc == 0
+        assert payload["store"]["ttl"]["refresh_on_read"] is False
+
+    def test_jitter_pct(self, isolated_home, patched_http):
+        rc, payload, _ = _run(
+            ["config", "set-store-ttl", "--jitter-pct", "0.25"])
+        assert rc == 0
+        assert payload["store"]["ttl"]["jitter_pct"] == 0.25
+
+    def test_jitter_pct_out_of_range_rejected(self, isolated_home,
+                                                patched_http):
+        rc, _, _ = _run(
+            ["config", "set-store-ttl", "--jitter-pct", "1.5"])
+        assert rc == 2
+
+
+# ----------------------- config set-store-distillation (#220) --- #
+
+class TestConfigSetStoreDistillation:
+    def test_toggle_enabled(self, isolated_home, patched_http):
+        rc, payload, _ = _run(
+            ["config", "set-store-distillation", "--enabled", "false"])
+        assert rc == 0
+        assert payload["store"]["distillation"]["enabled"] is False
+
+    def test_model_change(self, isolated_home, patched_http):
+        rc, payload, _ = _run([
+            "config", "set-store-distillation",
+            "--model", "kimi-k2.6:cloud",
+        ])
+        assert rc == 0
+        assert payload["store"]["distillation"]["model"] == "kimi-k2.6:cloud"
+
+    def test_fallback_chain_add_remove_clear(self, isolated_home,
+                                               patched_http):
+        rc, _, _ = _run([
+            "config", "set-store-distillation",
+            "--clear-fallback-models",
+        ])
+        assert rc == 0
+        rc, payload, _ = _run([
+            "config", "set-store-distillation",
+            "--add-fallback-model", "glm-5.1:cloud",
+        ])
+        assert rc == 0
+        assert "glm-5.1:cloud" in payload["store"]["distillation"][
+            "fallback_models"]
+        rc, payload, _ = _run([
+            "config", "set-store-distillation",
+            "--remove-fallback-model", "glm-5.1:cloud",
+        ])
+        assert rc == 0
+        assert "glm-5.1:cloud" not in payload["store"]["distillation"][
+            "fallback_models"]
+
+    def test_pacing_knobs_215(self, isolated_home, patched_http):
+        rc, payload, _ = _run([
+            "config", "set-store-distillation",
+            "--max-groups-per-sweep", "3",
+            "--pace-seconds-between-distillations", "12",
+        ])
+        assert rc == 0
+        d = payload["store"]["distillation"]
+        assert d["max_groups_per_sweep"] == 3
+        assert d["pace_seconds_between_distillations"] == 12.0
+
+    def test_sweep_too_short_rejected(self, isolated_home, patched_http):
+        rc, _, _ = _run([
+            "config", "set-store-distillation",
+            "--sweep-interval-seconds", "10",
+        ])
+        assert rc == 2
+
+    def test_min_entries_zero_rejected(self, isolated_home, patched_http):
+        rc, _, _ = _run([
+            "config", "set-store-distillation",
+            "--min-entries-per-distillation", "0",
+        ])
+        assert rc == 2
+
+
 # ----------------------- top-level errors ---------------------- #
 
 class TestTopLevelErrors:

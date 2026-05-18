@@ -196,6 +196,59 @@ council fabricated. The linter runs at researcher-boundary
 (annotations propagate via `peer_findings`) rather than only at
 synthesizer-output, so downstream lanes see only verified cites.
 
+**4. May-18 hardening pass (#212 / #215 / #216 / #218).**
+
+A live regression run uncovered four issues in the M14 store
+path; all four are fixed and the fixes ship as additive
+defaults. None of these change role behavior — they fix the
+machinery beneath the store.
+
+- **#212 — silent durable-write hole.** `ProviderBackedStore._do_put`
+  used to swallow provider failures from `provider.store(...)`.
+  The M14 reaper's critical invariant ("research originals
+  only deleted after a successful distillation write to the
+  project namespace") was therefore conditional on the
+  fallible provider call surfacing. Fix: failures re-raise to
+  the caller; reaper catches `DistillationFailed` and skips
+  the delete step, originals stay for the next sweep tick.
+- **#215 — M14 reaper pacing.** Three configurable knobs so a
+  backlog can't fan out into one big synchronous batch that
+  saturates the embedder:
+  - `store.ttl.jitter_pct = 0.1` — at write time,
+    `expires_at = now + ttl * (1 + uniform(-jitter, +jitter))`.
+    Spreads cohorts across ±10 % of the nominal TTL so the
+    reaper doesn't see N sessions expire on one tick. Critical
+    after the default-on flip stamped every existing session
+    with the same 30 d expiry within one minute.
+  - `store.distillation.max_groups_per_sweep = 5` — caps
+    **successful** distillations per tick. Cost-gate skips
+    (< `min_entries_per_distillation`) and tool_results
+    deletes don't burn the budget; only LLM-driven
+    distillations do. Remaining groups roll over to the next
+    sweep, originals stay in place.
+  - `store.distillation.pace_seconds_between_distillations = 5.0`
+    — sleeps between consecutive distillations within one
+    tick. Sliced 0.5 s so reaper shutdown stays responsive.
+- **#216 — `tool_executor` write amplification.** With
+  `tool_executor` enabled, a researcher lane that loops
+  PLAN → tool → REPORT N times wrote N different rows to the
+  store (one per round, different content_hash). The fix:
+  `record_research` now uses a stable per-lane key (`L{lane_idx}`,
+  no content hash), and `ProviderBackedStore._do_put` deletes
+  the prior provider row on overwrite. One row per
+  `(namespace, key)` pair regardless of how many rounds run.
+- **#218 — pgvector read-only transaction leak.**
+  `expire_before` / `count` / `_search_tables` /
+  `_recall_hybrid_unlocked` / `_kg_search_nodes` used to
+  return rows without closing the psycopg3 implicit
+  transaction. The connection sat ``idle in transaction``
+  holding `AccessShareLock`, blocking any concurrent
+  `ALTER TABLE` from another connection — which is exactly
+  what M14's lazy `ADD COLUMN IF NOT EXISTS expires_at`
+  migration is on every researcher session's first store
+  call. Fix: `_read_only_finish()` helper called at every
+  read-only happy-path exit.
+
 ---
 
 ## Prerequisites
@@ -500,14 +553,34 @@ hand-editable if you prefer.
 
 | Knob | Tier | What it does |
 |---|---|---|
-| Per-role `enabled` | role | Toggle planner / researcher / critic on or off (synthesizer is mandatory). Disabling planner skips decomposition; disabling researcher gives the synthesizer only the bare question (rarely useful); disabling critic skips the verdict step. |
+| Per-role `enabled` | role | Toggle planner / researcher / critic / tool_executor / coder on or off (synthesizer is mandatory). Disabling planner skips decomposition; disabling researcher gives the synthesizer only the bare question (rarely useful); disabling critic skips the verdict step; tool_executor + coder are opt-in (default OFF as of 2026-05-18). |
 | Per-role `model` | role | Primary Ollama model for that role. Roles can run different models. |
 | Per-role `ctx_max` | role | Pin context length explicitly, or `auto` to probe via `/api/show` on first use. |
-| Per-role `extra_models` | role | At x-tier effort: fan-out lanes (researcher, critic). At any tier on synthesizer: failure-fallback chain. |
+| Per-role `extra_models` | role | At x-tier effort: fan-out lanes (researcher, critic, tool_executor). At any tier on synthesizer: failure-fallback chain. |
+| Coder language routes | role | Per-language primary + fallback model for the `coder` role. Default map covers c / cpp / csharp / go / python / rust. |
 | `effort` | global | Default effort tier — `low`/`medium`/`high`/`max`/`xmedium`/`xhigh`/`xmax`. |
 | `service.mode` | global | `always-on` or `smart-start`. |
 | `smart_start.idle_timeout_seconds` | global | Idle timeout before reaping the engine in smart-start mode. |
 | `topology` | global | Currently only `council`. Future: roundtable, freeform. |
+| `store.enabled` | store | Master switch for the cross-session memory adapter. M14 default = `true`. |
+| `store.backend` | store | `memory` (no durability) / `sqlite_vec` (default; file at `~/.claude/consultants-store.db`) / `pgvector` (shared Postgres). |
+| `store.enable_at_efforts` | store | Effort tiers at which the store wires into the graph. Default `["high", "max", "xmedium", "xhigh", "xmax", "xauto"]` — lower tiers stay zero-cost. |
+| `store.recall_limit` | store | Top-K results for the peer-findings recall block. Default 5. |
+| `store.sqlite_vec_path` / `pgvector_dsn` / `pgvector_table` | store | Backend-specific endpoints. The pgvector table defaults to `consultants_store` so the M14 reaper never scans the recall pipeline's `memories_<model>` rows. |
+| `store.embedder` + `embedder_options` | store | Embedder identifier (e.g. `llamafile`, `ollama`) and its connection options. `install.py` auto-copies these from the matching `providers.<name>` block in `claude-hooks.json`. |
+| `store.ttl.enabled` | store | Master TTL switch. M14 default = `true`. |
+| `store.ttl.research_days` / `tool_results_hours` / `project_days` / `user_days` | store | Per-namespace TTL. `0` or negative = never expire. Defaults: 30 d / 24 h / never / never. |
+| `store.ttl.refresh_on_read` | store | Bump `expires_at` forward on every successful recall hit ("if it's still useful, keep it"). Default `true`. |
+| `store.ttl.jitter_pct` | store | #215 cohort spread — at write time `expires_at += ttl * uniform(-jitter, +jitter)`. Stops N sessions from expiring on the same reaper tick. Default 0.1 (±10 %). |
+| `store.distillation.enabled` | store | Master switch for Caliber-style summarization at expiry. M14 default = `true`. |
+| `store.distillation.model` | store | Primary distiller LLM. Default `gemma4:31b-cloud` (M11c-2 tool_executor winner). |
+| `store.distillation.fallback_models` | store | Tried in order on primary failure. Default `["glm-5.1:cloud"]`. |
+| `store.distillation.sweep_interval_seconds` | store | Reaper cadence. Minimum 30 s; default 3600 (1 h). |
+| `store.distillation.min_entries_per_distillation` | store | Cost gate — research groups below this delete without an LLM call. Default 3. |
+| `store.distillation.max_session_entries` | store | Per-prompt truncation cap. Default 50 (~30 k tokens at `gemma4:31b-cloud`'s 32 k ctx). |
+| `store.distillation.max_groups_per_sweep` | store | #215 cap on **successful** distillations per tick. Cost-gate skips + tool_results deletes don't burn the budget. Default 5; `0` = uncapped. |
+| `store.distillation.pace_seconds_between_distillations` | store | #215 inter-call sleep (0.5 s sliced for shutdown). Default 5 s. |
+| `coder_limits.max_file_bytes` / `max_total_bytes` / `max_files` | role | Sandbox caps for the opt-in `coder` role. Defaults 50 KB / 1 MB / 16. |
 
 ### CLI
 
@@ -532,13 +605,179 @@ claude-consultants config set-effort xhigh
 claude-consultants config set-service-mode always-on
 claude-consultants config set-idle-timeout 1800
 
+# Cross-session memory store (M8 + M14)
+claude-consultants config set-store --enabled true --backend sqlite_vec
+claude-consultants config set-store --recall-limit 7
+claude-consultants config set-store --add-effort medium     # enable at the medium tier too
+claude-consultants config set-store --pgvector-dsn 'postgresql://u:p@host:5432/db' \
+    --pgvector-table consultants_store
+
+# TTL knobs (per namespace; 0 / negative = never expire)
+claude-consultants config set-store-ttl --enabled true
+claude-consultants config set-store-ttl --research-days 14 --tool-results-hours 6
+claude-consultants config set-store-ttl --project-days 0     # explicit "never"
+claude-consultants config set-store-ttl --refresh-on-read false --jitter-pct 0.0
+
+# Distillation knobs (M14 sweep + #215 pacing)
+claude-consultants config set-store-distillation --enabled true \
+    --model gemma4:31b-cloud --add-fallback-model glm-5.1:cloud
+claude-consultants config set-store-distillation --sweep-interval-seconds 1800 \
+    --min-entries-per-distillation 5
+claude-consultants config set-store-distillation --max-groups-per-sweep 3 \
+    --pace-seconds-between-distillations 10
+
+# Coder language routes (opt-in coder role; M11b skill-eval)
+claude-consultants config coder set-route python --primary glm-5.1:cloud \
+    --fallback kimi-k2.6:cloud
+claude-consultants config coder set-default --primary glm-5.1:cloud
+
 # Discover what's available
 claude-consultants config list-models
 ```
 
+Every `set-*` accepts `--project` + `--cwd` to write a per-project
+override file (`.claude-hooks/consultants.toml`) instead of the
+user-global `~/.claude/consultants-config.toml`. Both files are
+hand-editable if you prefer; the CLI is a typed wrapper around the
+same dataclass + TOML round-trip.
+
 `config list-models` calls Ollama's `/api/tags` and filters to
 tools-capable models — what the council can actually use as a role
 model.
+
+### Interactive installer
+
+`install.py` calls `_setup_consultants_store()` after the engine is
+wired. The default flow auto-detects an embedder from the main
+recall pipeline's `providers.pgvector` or `providers.sqlite_vec`
+block in `claude-hooks.json` and copies it into the consultants
+config — no questions asked, M14 defaults stand. If you want to
+tune TTL / distillation knobs at install time instead of discovering
+the CLI afterwards, answer **yes** to the
+"Customize TTL + distillation knobs now?" prompt and it walks
+through every knob with the current default as the fallback.
+
+---
+
+## Cross-session memory (M8 store + M14 distillation)
+
+The optional `[store]` block wires a LangGraph
+[`BaseStore`](https://langchain-ai.github.io/langgraph/concepts/persistence/#stores)
+into every researcher + synthesizer turn. Two questions it answers
+across sessions: *"did anyone in the same project already research
+this?"* (peer-findings recall before researcher draft) and *"what
+durable knowledge can we keep when the per-session transcript
+expires?"* (distillation on TTL).
+
+### The four namespaces
+
+| Namespace                  | Lifetime         | Default TTL | Written by                              | Read by                                                                       |
+|----------------------------|------------------|-------------|-----------------------------------------|-------------------------------------------------------------------------------|
+| `(sid, "research")`        | per-session lane | 30 days     | researcher REPORT (verified citations)  | sibling researcher lanes via `peer_findings`; reaper as the distillation source |
+| `(sid, "tool_results")`    | per-session tool | 24 hours    | tool_executor (when role enabled)       | researcher REPORT prompt (#216 stable per-lane key)                            |
+| `("project", project_id)`  | per-project     | never       | M14 reaper at distillation              | future sessions in the same project (`project_id` = `sha256(cwd)[:12]`)        |
+| `("user", user_id)`        | user-global      | never       | (no writer yet — reserved for future)   | (no reader yet — reserved for future)                                          |
+
+The store is **effort-gated** via `enable_at_efforts`. The default
+`["high", "max", "xmedium", "xhigh", "xmax", "xauto"]` keeps the
+lower tiers (`low`, `medium`) on the zero-cost no-store path. M12
+parity stays green because `medium` (the default effort) is not in
+the gate.
+
+### Episodic → semantic via M14 distillation
+
+Per-session research is **episodic** memory — high-detail, tied to
+the session, expires fast. Cross-project knowledge is **semantic**
+memory — distilled, durable, useful across sessions. M14 wires the
+consolidation between them:
+
+```
+                            ┌─ daemon thread sleeps in 0.5 s slices ─┐
+                            │     (interval default = 3600 s)        │
+sweep tick ─────────────────┴────────────────────────────────────────┘
+   │
+   ▼
+provider.expire_before(before_iso=now - 5 min, limit=1000)
+   │
+   ├─ Group rows by (sid, kind):
+   │
+   ├─ For "research" group with N ≥ min_entries_per_distillation:
+   │    1. Build distillation prompt from rows (≤ max_session_entries)
+   │    2. Call distiller LLM: primary → fallback chain
+   │    3. project_id = sha256(cwd_from_meta)[:12]
+   │    4. Write summary → ("project", project_id) with provenance
+   │    5. provider.delete_by_hashes(originals)
+   │
+   └─ For "tool_results" group: delete unconditionally (no distillation)
+```
+
+**Critical invariant**: research originals are deleted **only after
+a successful distillation write to the project namespace**. Failed
+distillation (every model in the chain raised) keeps the originals
+in place — the next sweep tick retries. This survives transient
+cloud flaps, OOM kills, and signal-interrupted writes (#212).
+
+`tool_results` is dropped at TTL without distillation — cheap to
+recompute and nothing worth keeping beyond the session window.
+
+The distillation prompt is in `consultants/engine/distillation.py`;
+borrows the rubric shape from
+[`claude_hooks/reflect.py`](../claude_hooks/reflect.py) (retain
+citations + decisions, drop process narration / dead ends).
+
+### Recall — what the researcher sees
+
+When the store is wired in, every researcher draft sees a
+`## peer_findings` block in its prompt — top-K (default 5) results
+from a hybrid recall across the project's research namespace. The
+block lands **above** the question so the model treats it as
+context, not as a finding to re-derive. Recall results passing the
+TTL filter trigger a `refresh_expires_at` UPDATE when
+`refresh_on_read = true` — "if it's still useful, keep it".
+
+### #215 reaper pacing
+
+The default-on flip stamped every existing session with the same
+30 d expiry within one minute. Without pacing knobs, the reaper
+would have fanned a hundred sessions into a single sweep tick and
+saturated the embedder. Three knobs space the work out:
+
+- **`store.ttl.jitter_pct`** — spreads cohorts at write time.
+  `expires_at = now + ttl * (1 + uniform(-jitter, +jitter))`.
+  Default 0.1 (±10 %); set to 0.0 for deterministic expiry
+  windows.
+- **`store.distillation.max_groups_per_sweep`** — caps
+  *successful* distillations per tick. Cost-gated skips and
+  tool_results deletes don't count. Default 5; rolls overflow to
+  the next sweep with originals intact.
+- **`store.distillation.pace_seconds_between_distillations`** —
+  inter-call sleep within one tick, sliced 0.5 s for shutdown
+  responsiveness. Default 5 s.
+
+### Backend choice
+
+- **`sqlite_vec` (default)** — single file at
+  `~/.claude/consultants-store.db`, no daemon dependency, FTS5 +
+  vec extension for hybrid recall. Lowest-friction.
+- **`pgvector`** — shares the Postgres your main recall pipeline
+  already uses. Dedicated table (default `consultants_store`)
+  keeps consultants writes separate from `memories_<model>`.
+  Higher throughput, KG relations available.
+- **`memory`** — LangGraph's bundled in-process store. No
+  durability, no cross-session memory. M14 reaper short-circuits
+  on this backend (nothing to sweep). Use it for debugging.
+
+### Operational knobs at a glance
+
+| Verb                      | Question it answers                                                        |
+|---------------------------|----------------------------------------------------------------------------|
+| `set-store`               | Should the store run? What backend? At which effort tiers? Which embedder? |
+| `set-store-ttl`           | How long does each namespace's data live? Refresh on hit? Cohort spread?  |
+| `set-store-distillation`  | When is the reaper sweep? Which model distills? How much load per tick?    |
+
+All three are also exposed via the `/consultants config` skill
+walkthrough — `claude-consultants config show` dumps the current
+state so the skill knows what to default each prompt to.
 
 ---
 
@@ -723,6 +962,59 @@ explicitly:
 
 The `/consultants followup` skill picks the most recent session
 of any status by default, which usually does the right thing.
+
+### Store calls failing with `EmbedderError` / `NullEmbedder`
+
+The store needs an embedder to vectorize content at write + recall
+time. The M14 defaults turn the store on without forcing one to be
+configured — if the install detected one, it was copied over from
+`providers.pgvector` / `providers.sqlite_vec`. If you see
+`EmbedderError: NullEmbedder cannot embed` in the engine log:
+
+```bash
+# Confirm what's wired
+claude-consultants config show | jq '.store'
+
+# Wire one explicitly
+claude-consultants config set-store --embedder ollama
+# then hand-edit ~/.claude/consultants-config.toml's
+# [store.embedder_options] block (url / model / timeout)
+```
+
+Or re-run `install.py` and let it auto-detect again from
+`config/claude-hooks.json`. The store stays effort-gated, so
+disabling it via `set-store --enabled false` is also a valid
+escape hatch.
+
+### Distillation backlog never drains
+
+Symptoms: `expire_before` returns the same rows tick after tick,
+`max_groups_per_sweep` is doing its job (5 / tick), but a 200-
+group backlog will still take 40 ticks (≈ 40 hours) at the
+default cadence. To accelerate:
+
+```bash
+# Drain faster (shorter cadence, more groups per tick)
+claude-consultants config set-store-distillation \
+    --sweep-interval-seconds 600 \
+    --max-groups-per-sweep 20 \
+    --pace-seconds-between-distillations 2
+```
+
+Restore the defaults once the backlog clears. If the originals
+are *not* worth distilling (e.g. a forgotten benchmark dump from
+months ago), set `distillation.enabled = false` for a single
+sweep cycle and the reaper deletes them straight away.
+
+### Engine log shows `current transaction is aborted` after store hit
+
+This is the **#218 read-only transaction leak** symptom. Pre-#218,
+`PgvectorProvider.expire_before` / `count` / search would leave
+the psycopg3 implicit transaction open, blocking concurrent
+`ALTER TABLE` from another connection. Upgrade to a build that
+includes #218 (commit `40eef61` and later); every read-only
+happy-path exit now calls `_read_only_finish()`. Manual recovery:
+restart `claude-hooks-consultants.service`.
 
 ---
 
