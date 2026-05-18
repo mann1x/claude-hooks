@@ -94,6 +94,227 @@ class CollectorTests(unittest.TestCase):
             ["docs/PLAN-lsp-engine.md", "docs/PLAN-stats-sqlite.md"],
         )
 
+    def test_collect_ask_user_questions_empty_transcript(self):
+        """#217: no transcript → empty list (not None, not a crash)."""
+        self.assertEqual(ws.collect_ask_user_questions([]), [])
+
+    def test_collect_ask_user_questions_single_pair(self):
+        """#217: one Q + one matching A produces one tuple."""
+        transcript = [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_abc",
+                        "name": "AskUserQuestion",
+                        "input": {"questions": [
+                            {"question": "Which env?",
+                             "header": "Env",
+                             "options": [{"label": "prod", "description": "x"},
+                                         {"label": "staging", "description": "y"}],
+                             "multiSelect": False},
+                        ]},
+                    }],
+                },
+            },
+            {
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_abc",
+                        "content": ('User has answered your questions: '
+                                    '"Which env?"="prod". You can now '
+                                    'continue with the user\'s answers in '
+                                    'mind.'),
+                    }],
+                },
+            },
+        ]
+        pairs = ws.collect_ask_user_questions(transcript)
+        self.assertEqual(pairs, [("Which env?", "prod")])
+
+    def test_collect_ask_user_questions_multi_pair(self):
+        """#217: one tool_use with N questions → N pairs in order."""
+        transcript = [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_xyz",
+                        "name": "AskUserQuestion",
+                        "input": {"questions": [
+                            {"question": "Env?",
+                             "header": "E", "options": [], "multiSelect": False},
+                            {"question": "Region?",
+                             "header": "R", "options": [], "multiSelect": False},
+                        ]},
+                    }],
+                },
+            },
+            {
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_xyz",
+                        "content": ('User has answered your questions: '
+                                    '"Env?"="prod", "Region?"="us-east-1". '
+                                    'You can now continue.'),
+                    }],
+                },
+            },
+        ]
+        pairs = ws.collect_ask_user_questions(transcript)
+        self.assertEqual(
+            pairs,
+            [("Env?", "prod"), ("Region?", "us-east-1")],
+        )
+
+    def test_collect_ask_user_questions_ignores_other_tool_uses(self):
+        """#217: non-AskUserQuestion tool_uses don't show up; one
+        AskUserQuestion in a sea of other tools is still extracted."""
+        transcript = [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "name": "Bash",
+                         "id": "t1", "input": {"command": "ls"}},
+                        {"type": "tool_use", "name": "AskUserQuestion",
+                         "id": "t2", "input": {"questions": [
+                            {"question": "Proceed?",
+                             "header": "P", "options": [], "multiSelect": False},
+                         ]}},
+                        {"type": "tool_use", "name": "Read",
+                         "id": "t3", "input": {"file_path": "/a"}},
+                    ],
+                },
+            },
+            {
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "t2",
+                        "content": ('User has answered your questions: '
+                                    '"Proceed?"="yes". You can now continue.'),
+                    }],
+                },
+            },
+        ]
+        self.assertEqual(
+            ws.collect_ask_user_questions(transcript),
+            [("Proceed?", "yes")],
+        )
+
+    def test_collect_ask_user_questions_skips_unanswered(self):
+        """#217: an AskUserQuestion whose tool_result is missing
+        from the transcript is silently dropped (better empty than
+        wrong). This handles the in-flight case where compaction
+        catches the question mid-air."""
+        transcript = [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_orphan",
+                        "name": "AskUserQuestion",
+                        "input": {"questions": [
+                            {"question": "Q?",
+                             "header": "H", "options": [], "multiSelect": False},
+                        ]},
+                    }],
+                },
+            },
+            # No matching tool_result message.
+        ]
+        self.assertEqual(ws.collect_ask_user_questions(transcript), [])
+
+    def test_collect_ask_user_questions_tool_result_list_content(self):
+        """#217: tool_result.content may be a list of {type:text,text:...}
+        blocks (newer API shape); the extractor flattens it."""
+        transcript = [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_list",
+                        "name": "AskUserQuestion",
+                        "input": {"questions": [
+                            {"question": "Format?",
+                             "header": "F", "options": [], "multiSelect": False},
+                        ]},
+                    }],
+                },
+            },
+            {
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_list",
+                        "content": [
+                            {"type": "text", "text":
+                                ('User has answered your questions: '
+                                 '"Format?"="json". You can now continue.')},
+                        ],
+                    }],
+                },
+            },
+        ]
+        self.assertEqual(
+            ws.collect_ask_user_questions(transcript),
+            [("Format?", "json")],
+        )
+
+    def test_collect_ask_user_questions_preserves_chronological_order(self):
+        """#217: pairs are returned in chronological order, even when
+        the second tool_use appears before the first tool_use's
+        result (interleaved exchange)."""
+        # The harness records tool_uses in chronological order; the
+        # extractor's two-pass design preserves that order regardless
+        # of when the matching result arrives.
+        def aq(uid, qtext):
+            return {
+                "message": {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use", "id": uid,
+                        "name": "AskUserQuestion",
+                        "input": {"questions": [
+                            {"question": qtext, "header": "h",
+                             "options": [], "multiSelect": False},
+                        ]},
+                    }],
+                },
+            }
+
+        def res(uid, qtext, atext):
+            return {
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result", "tool_use_id": uid,
+                        "content": (f'User has answered your questions: '
+                                    f'"{qtext}"="{atext}". You can now '
+                                    f'continue.'),
+                    }],
+                },
+            }
+        transcript = [aq("u1", "Q1?"), res("u1", "Q1?", "A1"),
+                      aq("u2", "Q2?"), res("u2", "Q2?", "A2"),
+                      aq("u3", "Q3?"), res("u3", "Q3?", "A3")]
+        pairs = ws.collect_ask_user_questions(transcript)
+        self.assertEqual(
+            pairs,
+            [("Q1?", "A1"), ("Q2?", "A2"), ("Q3?", "A3")],
+        )
+
     def test_collect_background_tasks(self):
         transcript = [
             _assistant_with_tool("Monitor", {"description": "watch deploy.log"}),
@@ -170,6 +391,58 @@ class SynthesizeMarkdownTests(unittest.TestCase):
         self.assertIn("/repo/app.py", md)
         self.assertIn("PLAN-lsp-engine", md)
         self.assertIn("pandorum", md)
+
+    def test_ask_user_questions_section_emitted_when_pairs_present(self):
+        """#217: when the transcript carries AskUserQuestion exchanges,
+        the markdown gets the dedicated unnumbered section."""
+        transcript = [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_ttt",
+                        "name": "AskUserQuestion",
+                        "input": {"questions": [
+                            {"question": "Approach?",
+                             "header": "A", "options": [],
+                             "multiSelect": False},
+                        ]},
+                    }],
+                },
+            },
+            {
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_ttt",
+                        "content": ('User has answered your questions: '
+                                    '"Approach?"="surgical fix". You can '
+                                    'now continue.'),
+                    }],
+                },
+            },
+        ]
+        md = ws.synthesize_markdown(transcript, cwd="", session_id="s")
+        self.assertIn("User decisions captured this session", md)
+        self.assertIn("**Q:** Approach?", md)
+        self.assertIn("**A:** surgical fix", md)
+
+    def test_ask_user_questions_section_omitted_when_no_pairs(self):
+        """#217: empty Q&A → no section header (don't print a hollow
+        block that the reader has to skip)."""
+        md = ws.synthesize_markdown([], cwd="", session_id="s")
+        self.assertNotIn("User decisions captured this session", md)
+
+    def test_canonical_section_numbering_preserved(self):
+        """#217: the new unnumbered section must not disturb the 1-8
+        canonical numbering — the /wrapup skill renders that schema
+        and shifting numbers would break downstream readers."""
+        md = ws.synthesize_markdown([], cwd="", session_id="s")
+        for header in ("## 1.", "## 2.", "## 3.", "## 4.",
+                       "## 5.", "## 6.", "## 7.", "## 8."):
+            self.assertIn(header, md)
 
 
 # --------------------------------------------------------------------------- #

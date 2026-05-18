@@ -16,6 +16,89 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — PreCompact wrap-up: preserve AskUserQuestion Q&A across the compaction boundary (#217, 2026-05-18)
+
+The 2026-05-18 #214 regression matrix lost two question shapes (Q2
+and Q3 wordings) across a context-compaction boundary. The
+mechanical extractor in ``wrapup_synth`` was preserving files,
+commits, bash commands, plan refs, and remote endpoints — but
+**not the user's explicit decisions made via AskUserQuestion**.
+The summarizer model can't reconstruct those from prose because
+the prose only carries the AssistantAgent's downstream actions,
+not the original options menu nor the chosen label.
+
+Result: post-compact sessions resumed work without knowing what
+the user had already decided. The summary's "(AskUserQuestion
+answer) 'all the three' + 'both modes'" line stripped both the
+question text AND the option labels — leaving the resumed
+session unable to tell whether Q2 was a citation-lint stress
+question or a synthesizer-enumeration question.
+
+Fix: a third class of mechanical extraction added to
+``claude_hooks/wrapup_synth.py``:
+
+| Helper | What it does |
+|---|---|
+| ``collect_ask_user_questions(transcript)`` | Two-pass walk over the transcript: pass 1 indexes every ``AskUserQuestion`` ``tool_use`` by id; pass 2 pairs each with its ``tool_result`` (matched on ``tool_use_id``) and parses the canonical "User has answered your questions: …" answer string. Returns ``[(question, answer), …]`` in chronological order. |
+| ``_parse_aq_answers(question_texts, result_str)`` | Anchors on the known question texts (from the tool_use's ``questions`` list) so the parser doesn't have to traverse the trailing prose. Tolerates the three known terminator shapes (``", "`` next-pair, ``" selected preview`` for preview options, ``". You can now…`` canonical close). |
+
+The wrap-up markdown grows an **unnumbered** section between
+``## 1. Session snapshot`` and ``## 2. Session achievements``:
+
+```markdown
+## User decisions captured this session
+
+_Verbatim AskUserQuestion exchanges from this session, in order.
+Preserved here because the May-2026 #214 regression matrix lost
+Q2/Q3 across a compaction boundary — these decisions are
+load-bearing for resumed work and the summarizer can't
+reconstruct them from prose alone._
+
+- **Q:** Run shape for these 4 models?
+  **A:** Screening (1 run × 3 queries × 4 models = 12 consultations) (Recommended)
+- **Q:** Embedder bottleneck: which direction to take?
+  **A:** I would go with: Bump embedder timeout from 60s → 300s and retry. llamafile…
+...
+```
+
+Position rationale: the section sits at the top of the file (post-
+Snapshot, pre-Achievements) where post-compact attention lands
+first. Unnumbered to preserve the canonical 1-8 ``/wrapup``
+skill numbering — renumbering would have broken the skill's
+schema-pinned readers.
+
+Cost: one extra pass over the transcript at PreCompact time.
+Zero LLM calls, zero network. Cap of 30 pairs per session keeps
+the wrap-up readable on very long sessions; the full series
+remains in the transcript.
+
+Validated against the live transcript that drove this fix
+(``0ac25a2d-bb65-4d0a-9b53-9001606a9811.jsonl``, 45 185
+messages): 88 ``(Q, A)`` pairs extracted cleanly, including the
+exact "What's Q2 for the regression matrix?" exchange that
+triggered the discovery.
+
+Test surface (``tests/test_pre_compact.py``):
+
+- 7 new ``CollectorTests`` cases: empty transcript, single pair,
+  multi-pair single exchange, isolation from other tool_uses,
+  unanswered (orphaned) exchange handling, list-shaped
+  tool_result content, chronological ordering.
+- 3 new ``SynthesizeMarkdownTests`` cases: section emitted when
+  pairs present, section omitted when empty, canonical 1-8
+  numbering preserved.
+- Existing 17 tests unchanged.
+
+Affected files:
+
+- ``claude_hooks/wrapup_synth.py`` — ``collect_ask_user_questions``,
+  ``_parse_aq_answers``, new section in ``synthesize_markdown``.
+- ``tests/test_pre_compact.py`` — +10 tests.
+
+Both envs full sweep: ``claude-hooks-consultants`` 3860 + 30
+skipped + 117 subtests; ``claude-hooks`` 3754 + 136 skipped + 110
+subtests.
+
 ### Fixed — pgvector: read-only methods leak transactions, blocking concurrent DDL (#218, 2026-05-18)
 
 The #214 regression matrix's cell 2 (Q1 × high) deadlocked for **14

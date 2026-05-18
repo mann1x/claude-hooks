@@ -131,6 +131,151 @@ def _iter_text_blocks(transcript: list[dict]):
 
 
 # --------------------------------------------------------------------------- #
+# AskUserQuestion preservation (#217)
+# --------------------------------------------------------------------------- #
+# The 2026-05-18 #214 regression matrix lost two question shapes (Q2 and
+# Q3) across a context-compaction boundary because the AskUserQuestion
+# Q&A pairs weren't recorded anywhere in the pre-compact summary.
+# Mechanically-extractable artefacts (files, commits, bash) survived;
+# the user's explicit decisions did not.
+#
+# This block adds a third class of mechanical extraction: walk the
+# transcript pairing AskUserQuestion ``tool_use`` blocks with their
+# ``tool_result`` responses (matched by ``tool_use_id``), parse the
+# canonical "User has answered your questions: ..." answer string, and
+# surface every (question, chosen-answer) pair in a dedicated wrap-up
+# section. Cheap — one extra pass over the transcript, no model calls,
+# no network. Safe — if the parse fails for any pair, the pair is
+# silently dropped (better empty than wrong).
+
+
+def _parse_aq_answers(
+    question_texts: list[str], result_str: str,
+) -> dict[str, str]:
+    """Extract ``{question: answer}`` from one AskUserQuestion
+    tool_result string.
+
+    The canonical answer-string shape is::
+
+        User has answered your questions: "Q1?"="A1", "Q2?"="A2", ...
+
+    Sometimes the closing prose differs — the harness appends a "You
+    can now continue ..." sentence, or a "selected preview:" block when
+    the user picked a preview option. Anchoring on the **known question
+    text** (passed in from the matching tool_use) avoids parsing the
+    trailing prose at all: we look for the literal ``"Q"="`` marker
+    and then take whatever's between that and the next plausible
+    terminator.
+
+    Returns a dict mapping every question we found an answer for. Pairs
+    we couldn't parse are silently omitted (better empty than wrong —
+    the wrap-up reader sees the dropped question explicitly only if we
+    chose to mark it).
+    """
+    out: dict[str, str] = {}
+    for q in question_texts:
+        if not q:
+            continue
+        marker = '"' + q + '"="'
+        i = result_str.find(marker)
+        if i < 0:
+            continue
+        start = i + len(marker)
+        # Find the closest plausible end-of-answer. Order matters —
+        # the longest match wins ties.
+        terminators = (
+            '", "',                # next pair marker
+            '" selected preview',  # preview-option suffix
+            '". You can now',      # canonical trailing prose
+            '" You can now',       # space-style variant
+            '\\". You can now',    # double-escaped variant
+        )
+        end = -1
+        for term in terminators:
+            j = result_str.find(term, start)
+            if j >= 0 and (end < 0 or j < end):
+                end = j
+        if end < 0:
+            # Last resort: take to the next bare close-quote.
+            end = result_str.find('"', start)
+            if end < 0:
+                end = len(result_str)
+        out[q] = result_str[start:end].strip()
+    return out
+
+
+def collect_ask_user_questions(transcript: list[dict]) -> list[tuple[str, str]]:
+    """Return every AskUserQuestion ``(question, answer)`` pair from the
+    transcript in chronological order.
+
+    Walks the transcript twice: first pass indexes every
+    ``AskUserQuestion`` tool_use by id so the second pass can match
+    tool_results back to the questions they answered. Defensive against
+    schema drift (missing ids, list-shaped tool_result content) — any
+    malformed pair is silently dropped rather than emitted as garbage.
+    """
+    use_by_id: dict[str, list[str]] = {}
+    seen_ids: set[str] = set()
+    order: list[str] = []
+    for msg in transcript:
+        if not isinstance(msg, dict):
+            continue
+        for block in _msg_content(msg):
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "tool_use":
+                continue
+            if block.get("name") != "AskUserQuestion":
+                continue
+            tuid = block.get("id") or ""
+            inp = block.get("input") or {}
+            qs = inp.get("questions") or []
+            qtexts = [
+                str(q.get("question") or "").strip()
+                for q in qs if isinstance(q, dict)
+            ]
+            qtexts = [q for q in qtexts if q]
+            if tuid and qtexts and tuid not in seen_ids:
+                seen_ids.add(tuid)
+                use_by_id[tuid] = qtexts
+                order.append(tuid)
+
+    out: list[tuple[str, str]] = []
+    answered: set[str] = set()
+    for msg in transcript:
+        if not isinstance(msg, dict):
+            continue
+        for block in _msg_content(msg):
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "tool_result":
+                continue
+            tuid = block.get("tool_use_id") or ""
+            if tuid not in use_by_id or tuid in answered:
+                continue
+            content = block.get("content") or ""
+            if isinstance(content, list):
+                # Modern API also serves tool_result content as a list
+                # of {type: text, text: ...} blocks — flatten.
+                parts: list[str] = []
+                for c in content:
+                    if isinstance(c, dict):
+                        parts.append(c.get("text") or "")
+                    else:
+                        parts.append(str(c))
+                content = "".join(parts)
+            if not isinstance(content, str) or not content:
+                continue
+            answers = _parse_aq_answers(use_by_id[tuid], content)
+            for q in use_by_id[tuid]:
+                a = answers.get(q, "").strip()
+                if a:
+                    out.append((q, a))
+            answered.add(tuid)
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Mechanical extraction
 # --------------------------------------------------------------------------- #
 def collect_modified_files(transcript: list[dict]) -> list[str]:
@@ -352,6 +497,10 @@ def synthesize_markdown(
     plans = collect_plan_references(transcript)
     bg = collect_background_tasks(transcript)
     endpoints = collect_endpoints(transcript, bash)
+    # #217 (2026-05-18): preserve user-decided AskUserQuestion answers
+    # across the compaction boundary. The May-18 #214 matrix lost Q2/Q3
+    # shapes this way; mechanically-extractable now.
+    aq_pairs = collect_ask_user_questions(transcript)
 
     out: list[str] = []
     out.append(f"# Pre-compact wrap-up ({ts_human})")
@@ -379,6 +528,35 @@ def synthesize_markdown(
         )
     out.append("- Narrative: _needs model — invoke `/wrapup` to fill in_")
     out.append("")
+
+    # User decisions captured this session (#217). Unnumbered so the
+    # canonical /wrapup numbering (1-8) stays intact, but positioned
+    # at the top where post-compact attention lands first. Each pair
+    # is the literal question shown to the user + the option label
+    # they chose. Cap at 30 to keep the wrap-up readable; sessions
+    # this active have other context-loss problems too.
+    if aq_pairs:
+        out.append("## User decisions captured this session")
+        out.append("")
+        out.append(
+            "_Verbatim AskUserQuestion exchanges from this session, in "
+            "order. Preserved here because the May-2026 #214 regression "
+            "matrix lost Q2/Q3 across a compaction boundary — these "
+            "decisions are load-bearing for resumed work and the "
+            "summarizer can't reconstruct them from prose alone._"
+        )
+        out.append("")
+        for q, a in aq_pairs[:30]:
+            # Compact one-line form. Truncate long answers to keep the
+            # block scannable; the full text lives in the transcript.
+            q_short = q if len(q) <= 160 else q[:157] + "..."
+            a_short = a if len(a) <= 200 else a[:197] + "..."
+            out.append(f"- **Q:** {q_short}")
+            out.append(f"  **A:** {a_short}")
+        if len(aq_pairs) > 30:
+            out.append(f"- _… and {len(aq_pairs) - 30} earlier pair(s) "
+                       "omitted — see transcript for the full series._")
+        out.append("")
 
     # 2 — Achievements (mechanical)
     out.append("## 2. Session achievements")
