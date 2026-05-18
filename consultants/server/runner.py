@@ -323,6 +323,13 @@ def make_runner(*, ollama_base_url: str):
             question=question, cwd=cwd, models=models,
             topology=cfg.topology, effort=cfg.effort,
         )
+        # 2026-05-18: thread extra_roots into LangGraph state so the
+        # synthesizer's post-output citation linter can resolve cites
+        # under all session-allowed directories, not just cwd. Empty
+        # tuple is the safe default — the linter falls back to cwd
+        # alone when this key is absent.
+        if extra_roots:
+            initial["extra_roots"] = list(extra_roots)
         if enabled:
             state.progress[enabled[0]] = "in_progress"
 
@@ -735,6 +742,11 @@ def make_follow_up_runner(*, ollama_base_url: str):
             question=question, cwd=cwd, models=models,
             topology=cfg.topology, effort=cfg.effort,
         )
+        # 2026-05-18: same extra_roots threading as the primary
+        # runner — the follow-up's synthesizer linter needs the
+        # merged parent+followup allowed-roots set.
+        if extra_roots:
+            initial["extra_roots"] = list(extra_roots)
         initial["plan"] = (
             parent_state.plan
             if parent_state is not None and parent_state.plan

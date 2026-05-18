@@ -16,6 +16,98 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — consultants: CitationLinter + tightened prompts for path:line fabrications (2026-05-18)
+
+The 2026-05-18 M14 first-real-ask re-run produced a coherent
+4-step answer but with mixed-fidelity citations — two distinct
+fabrication modes that this commit neutralizes.
+
+**Diagnosis** (full forensic in
+`benchmarks/consultants/results/2026-05-18/m14-first-real-ask/rerun-report.md`):
+
+- **glm-5.1:cloud in researcher role lane 5** invented the file
+  `consultants/engine/store_sql.py` outright (no such file
+  exists). Tool_executor evidence was honest; the researcher
+  generated this filename in its REPORT.
+- **gemma4:31b in synthesizer role** relayed the fake filename
+  forward AND added its own wrong line numbers within real
+  files (claimed `_distill_group` at line 128 when it's
+  actually at line 360, `_write_summary` at 148 vs the real
+  371, `_delete_rows` at 157 vs the real 402 — all four
+  citations landed in unrelated regions of `store_reaper.py`).
+- **Tool_executor itself was honest** — every cite emitted by
+  the tool_executor role traced back to real grep/read_file
+  output.
+
+**Fix — two layers, ship together:**
+
+1. **Prompt tightening
+   (`consultants/engine/council.py`)** — `RESEARCHER_SYSTEM`,
+   `SYNTHESIZER_SYSTEM`, and `SYNTHESIZER_SELF_CRITIC_SYSTEM`
+   gain explicit "CITATION INTEGRITY (load-bearing)" blocks.
+   Researchers must only cite path:line they verified in
+   their own tool_results; synthesizers must only relay
+   cites the researchers actually emitted, never introduce
+   new ones. The synthesizer prompt names the M14 first-ask
+   `store_sql.py` failure mode by name so the model has a
+   concrete anti-pattern to avoid.
+
+2. **CitationLinter
+   (`consultants/engine/citation_linter.py`)** — new module,
+   wired into `synthesizer_node` as a post-output pass. Three
+   verification layers per `path:line` cite:
+
+   - **Filesystem**: path must resolve under any of the
+     session's allowed_roots. Miss → annotate
+     `path:line [unverified — file not found]`.
+   - **Bounds**: line ≤ file_length. Beyond EOF → annotate
+     `path:line [unverified — file has N lines]`.
+   - **AST symbol match** (Python files only — stdlib
+     `ast`): when a backticked symbol name appears within
+     80 chars before the cite, the cited line's enclosing
+     function/class (via `ast.walk`) must match the claimed
+     symbol's leaf name. Mismatch → annotate
+     `path:line [in <actual>, not <claimed>]`. Filters
+     Python literals/keywords/builtins + exception-class
+     suffixes from claimed-symbol candidates so legitimate
+     prose like "DistillationFailed exception caught at
+     `…:129`" doesn't trigger false positives.
+
+   The linter is **non-blocking**: it annotates inline, never
+   rejects the answer. A clean answer survives byte-identical
+   (idempotent on re-runs via the substring marker check). The
+   `state.extra_roots` plumbing now reaches LangGraph state via
+   `runner.py` so the linter sees the full session-allowed
+   directory set, not just cwd.
+
+   Validation against the prior failed-fabrication answer
+   (`scripts/lint_consult_answer.py csl-2026-05-18-1031-9e3b`):
+   **5 fabrications caught** in the on-disk answer — both
+   `store_sql.py:41-61` + `store_sql.py:61` flagged as
+   file-not-found; `_distill_group:128`, `_write_summary:148`,
+   `_delete_rows:157` flagged as wrong-symbol-at-line. The
+   annotated answer is checked in at
+   `benchmarks/consultants/results/2026-05-18/m14-first-real-ask/answer-linted.md`.
+
+**New files**:
+
+- `consultants/engine/citation_linter.py` — module (~360 lines)
+- `tests/test_citation_linter.py` — 26 tests covering regex
+  extraction, single-cite verification, AST symbol matching,
+  full pipeline, and the csl-2026-05-18-1031-9e3b regression
+  fixture
+- `scripts/lint_consult_answer.py` — operator-facing CLI for
+  retroactive answer lint; auto-falls-back to on-disk
+  `metadata.json` when the HTTP service doesn't hold the
+  session in memory
+- `benchmarks/.../answer-linted.md` — annotated prior answer
+
+**Verification.** 3730 + 3632 = 7362 passing tests across both
+conda envs (up from 7310; +26 linter tests × 2 envs). M12
+parity holds (no default behavior change — linter is wired
+unconditionally into the synthesizer but is a pure annotation
+pass when the answer has no fabrications).
+
 ### Changed — consultants: log readability — symlink-aware allowed_roots + transcript.db path (2026-05-18)
 
 Two operator-quality-of-life fixes surfaced during the

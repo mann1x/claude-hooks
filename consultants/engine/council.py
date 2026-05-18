@@ -220,7 +220,22 @@ RESEARCHER_SYSTEM = _role_prompt(
     "finding, each with a `path:line` reference. Do NOT speculate "
     "beyond evidence. Do NOT answer the user's question — that's "
     "the synthesizer's job. The critic reads this; verbosity costs "
-    "another full council round."
+    "another full council round.\n\n"
+    "CITATION INTEGRITY (load-bearing). Every `path:line` you emit "
+    "MUST come from a real read_file / grep / glob result you saw "
+    "in this turn's tool results, NOT from inference, NOT from a "
+    "filename that sounds plausible. Two failure modes the council "
+    "has caught in the wild (and that the post-synthesis linter "
+    "will now mark and re-route): (1) inventing a sibling filename "
+    "you never read — e.g. citing `consultants/engine/store_sql.py` "
+    "when you only read `store_reaper.py`; (2) citing a line number "
+    "inside a real file but in the wrong region — e.g. naming "
+    "line 128 for a function that grep would have shown lives at "
+    "line 360. If you only KNOW the function name but not its "
+    "verified line, cite `path` (no colon-line) or "
+    "`path: <function_name>` and let the synthesizer leave the "
+    "line-precision gap visible. NEVER fabricate path or line to "
+    "make the report look more concrete."
 )
 
 CRITIC_SYSTEM = _role_prompt(
@@ -317,7 +332,23 @@ SYNTHESIZER_SYSTEM = _role_prompt(
     "(\"could not verify <X> because <lane> failed: <error>\"), or, "
     "when the surviving evidence is too thin to answer at all, "
     "state that plainly and stop. The tombstone is the system's "
-    "signal that a lane crashed; never treat it as evidence."
+    "signal that a lane crashed; never treat it as evidence.\n\n"
+    "CITATION INTEGRITY (load-bearing). Every `path:line` you put "
+    "in the final answer MUST appear verbatim in at least one "
+    "researcher report or tool result you were given. Do NOT "
+    "introduce new path:line citations that no researcher emitted "
+    "— a downstream linter scans the answer against the actual "
+    "filesystem and will mark every fabrication inline as "
+    "`path:line [unverified — …]`, visible to the user. "
+    "Specifically: do NOT change a researcher's `path` to a "
+    "sibling file that 'sounds related' (the M14 first-real-ask "
+    "smoke caught a synthesizer relaying `store_sql.py` when no "
+    "such file exists); do NOT replace a researcher's line number "
+    "with one that 'looks more precise' — relay exactly the cite "
+    "the researcher gave or omit the line. If the researchers "
+    "disagree on a line, name both with `path:lineA / lineB "
+    "(researchers disagree)` rather than picking one or "
+    "averaging."
 )
 
 # Self-critic variant — used at effort=low/medium when the critic
@@ -350,7 +381,16 @@ SYNTHESIZER_SELF_CRITIC_SYSTEM = _role_prompt(
     "(\"could not verify <X> because <lane> failed: <error>\"), or, "
     "when the surviving evidence is too thin to answer at all, "
     "state that plainly and stop. The tombstone is the system's "
-    "signal that a lane crashed; never treat it as evidence."
+    "signal that a lane crashed; never treat it as evidence.\n\n"
+    "CITATION INTEGRITY (load-bearing). Every `path:line` you put "
+    "in the final answer MUST appear verbatim in at least one "
+    "researcher report or tool result you were given. Do NOT "
+    "introduce new path:line citations no researcher emitted — a "
+    "downstream linter scans the answer against the actual "
+    "filesystem and will mark every fabrication inline. Do NOT "
+    "swap a researcher's `path` for a sibling 'sounds-related' "
+    "filename. Do NOT replace a researcher's line number with one "
+    "that 'looks more precise'. Relay exactly, or omit the line."
 )
 
 
@@ -2020,6 +2060,42 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
             )],
         }
     dt = time.monotonic() - t0
+    # 2026-05-18: post-synthesis citation lint. The 2026-05-18 first
+    # M14 consult caught two fabrication classes in the synthesizer's
+    # output — an entirely fake filename relayed forward from a
+    # researcher hallucination, plus several wrong-line cites within
+    # real files. The linter scans path:line patterns against the
+    # session's allowed_roots, annotates fabrications inline as
+    # ``path:line [unverified — …]``. Symbol-semantic verification
+    # (right function at right line) is out of scope — needs an AST
+    # pass; that's a follow-up if the inline annotation isn't enough.
+    # The linter is non-blocking: a clean answer survives unchanged.
+    try:
+        from consultants.engine.citation_linter import lint_answer
+        roots: list[str] = []
+        cwd = state.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            roots.append(cwd)
+        for r in (state.get("extra_roots") or ()):
+            if isinstance(r, str) and r:
+                roots.append(r)
+        if roots:
+            linted_text, issues = lint_answer(text, allowed_roots=roots)
+            if issues:
+                log.info(
+                    "synthesizer citation lint: %d fabrication(s) "
+                    "annotated; %s",
+                    len(issues),
+                    "; ".join(
+                        f"{i.original_match} ({i.reason})"
+                        for i in issues
+                    ),
+                )
+                text = linted_text
+    except Exception:  # pragma: no cover - defensive
+        log.exception(
+            "citation_linter raised; using unlinted synthesizer output"
+        )
     turn = RoleTurn(
         role="synthesizer", round=1, content=text,
         prompt_tokens=pt, completion_tokens=ct, duration_seconds=dt,
