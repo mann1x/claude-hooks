@@ -499,14 +499,26 @@ class TestProviderBackedStoreOps(unittest.TestCase):
         # Same content + same lane -> same key (idempotent overwrite).
         self.assertEqual(k1, k2)
 
-    def test_provider_store_failure_does_not_break_put(self):
-        # Provider raising must not propagate — the in-process
-        # index still gets the item so recall in the SAME process
-        # works (cross-process recall just misses it).
+    def test_provider_store_failure_propagates_to_caller(self):
+        # Contract (post-#212): durable-write failures propagate so
+        # callers that depend on persistence (M14 reaper →
+        # write_distilled_summary) can react and skip the follow-up
+        # delete step. The in-process index update still lands —
+        # only the durable provider missed it — so the same-process
+        # get() call below still finds the item. Callers that want
+        # silent best-effort (researcher per-turn puts via
+        # record_research) wrap store.put themselves; see
+        # record_research at the bottom of store.py for the pattern.
+        #
+        # Pre-#212 this test asserted the *opposite* (silent swallow);
+        # the consultation csl-2026-05-18-1554-c8dc surfaced this
+        # contract gap against the M14 critical invariant.
         self.provider.fail_store = True
         ns = Namespaces.research("csl-1")
-        # No exception expected.
-        self.store.put(ns, "k1", {"text": "x"})
+        with self.assertRaises(RuntimeError):
+            self.store.put(ns, "k1", {"text": "x"})
+        # In-process index still has it (we deliberately don't roll
+        # back the in-memory update on durable-write failure).
         self.assertIsNotNone(self.store.get(ns, "k1"))
 
 

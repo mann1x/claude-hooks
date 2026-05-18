@@ -419,5 +419,20 @@ def write_distilled_summary(
     ns = Namespaces.project(project_id)
     # Index on "text" so the summary is recall-searchable; metadata
     # carries the rest as side data.
-    store.put(ns, key, value, index=["text"])
+    #
+    # Post-#212: ProviderBackedStore._do_put propagates durable-
+    # write failures. Convert them to DistillationFailed so the
+    # reaper's existing `except DistillationFailed` block at
+    # sweep_once treats this as "originals stay; retry next tick"
+    # rather than "summary landed; safe to delete." This is the
+    # M14 critical invariant — research originals only delete
+    # after a *successful* project-namespace write.
+    try:
+        store.put(ns, key, value, index=["text"])
+    except DistillationFailed:
+        raise
+    except Exception as e:
+        raise DistillationFailed(
+            f"durable write to project namespace failed: {e!r}",
+        ) from e
     return key

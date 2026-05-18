@@ -16,6 +16,78 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed — consultants: M14 silent-durable-write hole at store.py:281-288 (#212, 2026-05-18)
+
+Discovered during the
+[A/B WITHOUT-tool_executor consultation](.claude-hooks/consultants/csl-2026-05-18-1554-c8dc/summary.md)
+that was reviewing the M14 critical invariant
+("research originals only get deleted after a successful
+distillation write to the project namespace"). The council
+correctly identified that ``ProviderBackedStore._do_put``
+wrapped ``self._provider.store(...)`` in a bare
+``except Exception: log.exception(...)`` with no re-raise, so
+``store.put`` returned success even when the underlying
+pgvector / sqlite_vec write failed. The
+``StoreReaperThread.sweep_once`` chain then saw
+``_write_summary`` succeed and proceeded to
+``delete_by_hashes(originals)`` — distilled originals gone,
+summary missing, data loss.
+
+Root cause was older than M14: an existing test
+(``tests/test_consultants_v2_store.py:test_provider_store_failure_does_not_break_put``)
+**pinned the silent-swallow contract** with the rationale "the
+in-process index still gets the item so recall in the SAME
+process works." That stance is fine for best-effort callers
+(researcher per-turn puts via ``record_research``, which wraps
+its own ``try/except`` at ``store.py:776`` and was always
+covered), but it broke M14 the moment the reaper started
+relying on durable persistence for the invariant.
+
+Fix is two-file, two-line:
+
+1. ``consultants/engine/store.py:281-301`` — ``_do_put`` now
+   re-raises after logging. The in-process index update on lines
+   246-255 is deliberately NOT rolled back; callers that want
+   transactional semantics wrap themselves. Updated inline
+   contract comment to spell out the post-#212 contract +
+   reference ``record_research`` for the best-effort pattern.
+2. ``consultants/engine/distillation.py:422-433`` —
+   ``write_distilled_summary`` wraps ``store.put`` in
+   ``try/except`` and re-raises any non-``DistillationFailed``
+   exception as ``DistillationFailed(f"durable write to project
+   namespace failed: {e!r}") from e``. The reaper's existing
+   ``except DistillationFailed`` block at ``sweep_once:303``
+   catches it and treats the group as "originals stay; retry
+   next tick" — matching the M14 plan's stated invariant
+   exactly.
+
+Test surface (claude-hooks-consultants env):
+
+- ``tests/test_consultants_v2_store.py`` — renamed
+  ``test_provider_store_failure_does_not_break_put`` →
+  ``test_provider_store_failure_propagates_to_caller``;
+  ``assertRaises(RuntimeError)`` instead of "no exception
+  expected"; in-process index assertion preserved (the
+  deliberate non-rollback of the in-memory update).
+- ``tests/test_consultants_v2_distillation.py`` — two new
+  ``TestWriteDistilledSummary`` cases:
+  ``test_write_summary_wraps_store_put_failure_as_distillation_failed``
+  (RuntimeError → DistillationFailed with chained ``__cause__``)
+  and
+  ``test_write_summary_passes_through_distillation_failed_from_store``
+  (no double-wrap if the store itself raises DistillationFailed).
+- ``tests/test_consultants_v2_store_reaper.py`` — new
+  ``test_durable_write_failure_keeps_originals`` exercises the
+  end-to-end failure path (distiller healthy, store-side put
+  fails) and asserts the M14 invariant: distilled=0,
+  groups_distill_failed=1, deleted=0, no ``delete_by_hashes``
+  calls. ``_FakeStore`` grew a ``fail_put`` knob so future
+  durable-failure regressions can reuse the helper.
+
+Full sweep: 3815 → 3818 passed (+3 new tests). Targeted M14
+surface (store + distillation + reaper + ttl + e2e): 116
+passed.
+
 ### Changed — consultants: tool_executor flipped back to disabled-by-default (#211, 2026-05-18)
 
 The M14 first-real-ask A/B run on 2026-05-18 measured the

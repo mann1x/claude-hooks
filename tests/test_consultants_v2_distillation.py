@@ -478,6 +478,53 @@ class TestWriteDistilledSummary(unittest.TestCase):
         self.assertEqual(value["distill_model"], "gemma4:31b-cloud")
         self.assertEqual(value["cwd"], "/proj/x")
 
+    def test_write_summary_wraps_store_put_failure_as_distillation_failed(self) -> None:
+        """Regression for the M14 critical invariant — surfaced by
+        csl-2026-05-18-1554-c8dc.
+
+        When the underlying ``store.put`` raises (because the
+        durable provider write failed), ``write_distilled_summary``
+        MUST translate it into ``DistillationFailed`` so the
+        reaper's existing ``except DistillationFailed`` block at
+        ``sweep_once`` keeps the originals in place instead of
+        proceeding to delete them.
+
+        Pre-#212 ``_do_put`` swallowed the durable-write failure
+        and ``store.put`` returned silently, so the reaper saw
+        success and deleted the originals even though the
+        project-namespace summary never landed."""
+        class _BoomStore:
+            def put(self, *a: Any, **kw: Any) -> None:
+                raise RuntimeError("durable provider down")
+
+        with self.assertRaises(DistillationFailed) as ctx:
+            write_distilled_summary(
+                _BoomStore(), summary="body", sid="s",
+                project_id="p", original_count=3,
+            )
+        # The wrapped cause is preserved in the chain so logs +
+        # the reaper's warning render the actual provider message.
+        self.assertIn("durable write", str(ctx.exception).lower())
+        self.assertIsInstance(ctx.exception.__cause__, RuntimeError)
+
+    def test_write_summary_passes_through_distillation_failed_from_store(self) -> None:
+        """If the store layer ever raises ``DistillationFailed``
+        itself (e.g. a future store-side validation), the wrapper
+        must NOT re-wrap it — that would lose the original type
+        and obscure the message."""
+        class _DistilledFailedStore:
+            def put(self, *a: Any, **kw: Any) -> None:
+                raise DistillationFailed("store said no")
+
+        with self.assertRaises(DistillationFailed) as ctx:
+            write_distilled_summary(
+                _DistilledFailedStore(), summary="body", sid="s",
+                project_id="p", original_count=3,
+            )
+        self.assertEqual(str(ctx.exception), "store said no")
+        # Not wrapped — __cause__ stays None for a pass-through.
+        self.assertIsNone(ctx.exception.__cause__)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

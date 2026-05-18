@@ -280,12 +280,28 @@ if HAVE_LANGGRAPH_STORE:
                 meta["expires_at"] = exp_iso
             try:
                 self._provider.store(text, metadata=meta)
-            except Exception:  # pragma: no cover — provider-side
+            except Exception:
+                # Contract (post-#212): propagate the failure so
+                # callers that depend on durable persistence (M14
+                # reaper → write_distilled_summary, namely) can
+                # react and skip the follow-up delete step.
+                #
+                # The in-process index update on lines 246-255
+                # above already landed; we deliberately do NOT roll
+                # it back. Same-process recall via _do_get /
+                # _do_search will still find this item; only
+                # vector-backed recall via the durable provider
+                # will miss it. Callers that want "best effort"
+                # semantics (researcher per-turn puts via
+                # record_research) wrap store.put in their own
+                # try/except — see record_research at the bottom
+                # of this file for the pattern.
                 log.exception(
                     "ProviderBackedStore: provider.store raised; "
-                    "in-process index updated but vector recall will "
-                    "miss this item",
+                    "in-process index updated but durable write "
+                    "failed; propagating",
                 )
+                raise
 
         # ---- M14 TTL helpers ---- #
 

@@ -128,12 +128,21 @@ class _FakeDistiller:
 
 class _FakeStore:
     """Records ``put`` calls — the write target of
-    :func:`write_distilled_summary`."""
+    :func:`write_distilled_summary`. Optional ``fail_put`` lets
+    tests simulate the M14 silent-durable-write failure mode that
+    csl-2026-05-18-1554-c8dc surfaced (#212)."""
 
     def __init__(self) -> None:
         self.puts: list[tuple[tuple[str, ...], str, dict, dict]] = []
+        # When set to an exception instance/factory, every put()
+        # raises it. Mirrors the post-#212 contract where
+        # ProviderBackedStore._do_put propagates durable-write
+        # failures to its caller.
+        self.fail_put: Optional[BaseException] = None
 
     def put(self, ns: tuple[str, ...], key: str, value: dict, **kwargs: Any) -> None:
+        if self.fail_put is not None:
+            raise self.fail_put
         self.puts.append((ns, key, value, kwargs))
 
 
@@ -458,6 +467,62 @@ class TestSweepFailureIsolation(unittest.TestCase):
         # second; order is irrelevant).
         sids = {c["sid"] for c in distiller.calls}
         self.assertEqual(sids, {"csl-BAD", "csl-OK"})
+
+    def test_durable_write_failure_keeps_originals(self) -> None:
+        """Regression for the M14 critical invariant — surfaced by
+        csl-2026-05-18-1554-c8dc (#212).
+
+        Pre-#212 ``ProviderBackedStore._do_put`` swallowed
+        durable-write failures and returned silently. The reaper
+        then saw ``_write_summary`` succeed and proceeded to delete
+        the originals, even though the project-namespace summary
+        never landed. Result: distilled originals gone, summary
+        missing, data loss.
+
+        Post-#212 ``_do_put`` propagates the failure and
+        ``write_distilled_summary`` wraps it as
+        :class:`DistillationFailed`, which the reaper's existing
+        ``except DistillationFailed`` block at ``sweep_once``
+        catches. Originals stay, next tick retries.
+
+        This test exercises the end-to-end path: distillation
+        succeeds, the store-side put fails (durable write down),
+        the reaper must NOT call ``delete_by_hashes`` for the
+        group."""
+        rows = [
+            _row(f"r{i}", ns=("csl-WRITE-DOWN", "research"),
+                 cwd="/p", lane_idx=i)
+            for i in range(3)
+        ]
+        prov = _FakeProvider([rows])
+        # Distillation itself returns fine — the LLM is healthy.
+        distiller = _FakeDistiller()
+        # Store-side put is what's broken. Simulates the post-#212
+        # contract: durable provider write fails and the exception
+        # propagates out of ProviderBackedStore.put.
+        store = _FakeStore()
+        store.fail_put = RuntimeError("durable provider down")
+        r = StoreReaperThread(
+            store_cfg=_store_cfg(min_entries=3),
+            provider=prov, distiller=distiller, store=store,
+        )
+
+        result = r.sweep_once()
+
+        self.assertEqual(result["expired"], 3)
+        # Distillation ran, but the write failed — so distilled
+        # counter does NOT advance.
+        self.assertEqual(result["distilled"], 0)
+        # The reaper accounted this as a distill failure (its
+        # ``except DistillationFailed`` block at sweep_once is what
+        # catches the wrapped store error).
+        self.assertEqual(result["groups_distill_failed"], 1)
+        # CRITICAL: originals stayed. The next sweep tick will
+        # retry.
+        self.assertEqual(result["deleted"], 0)
+        self.assertEqual(prov.delete_calls, [])
+        # Distiller was invoked once (the failure is store-side).
+        self.assertEqual(len(distiller.calls), 1)
 
     def test_expire_before_provider_failure_returns_zero_stats(self) -> None:
         """Provider blow-up → sweep is a no-op tick, not a thread
