@@ -380,6 +380,62 @@ COMMITMENT_PATTERNS: list[str] = [
     r"\bi'?ll\s+(?:start|begin|kick (?:off|that)|proceed|implement|write|build|fire)\s+(?:now|right now|immediately|it|the\b)",
     r"\bon it\.?\s*$",  # bare "On it." at end of message
     r"\b(?:executing|running)(?:\s+it)?\s+now\b",
+    # ---- 2026-05-18: five additional patterns from live observation ----
+    # The five corresponding stall events were collected from real
+    # solidPC sessions just before the v1.7.x release cut. Each
+    # pattern is gated by the same end_turn + zero tool_use + last-
+    # paragraph stack as the originals, so they stay tight even when
+    # the verb list is broad.
+    #
+    # 1) "Going to update X, log Y, then start Z" — multi-verb plans
+    #    where at least one verb implies tool use. Caught the M26/M27
+    #    "Going to update STYLE_SHIFT_ISSUE.md … then start M27." stall.
+    r"\bgoing to\s+(?:update|log|run|write|implement|build|create|fix|"
+    r"kick|fire|wire|start|begin|continue|finish|launch|trigger|invoke|"
+    r"patch|apply|commit|push|add|insert|edit|modify|append|prepend|"
+    r"execute|draft|compose|register|define|overwrite|reset|enable|"
+    r"disable|connect|spawn|kill|restart)\b",
+    # 2) "Now drafting X" / "Now writing Y" / "Now adding Z" — present-
+    #    progressive at the START of the last paragraph. Broader verb
+    #    set than the existing "writing the {script|code|...}" pattern
+    #    which required strict adjacency between verb and a fixed noun.
+    #    Caught the T17.3 mapping-script stall and the
+    #    "_maybe_start_store_reaper helper" mid-edit pause.
+    r"\bnow\s+(?:drafting|writing|adding|inserting|appending|preparing|"
+    r"composing|sketching|building|implementing|creating|wiring|"
+    r"patching|applying|committing|pushing|editing|updating|modifying|"
+    r"finishing|launching|running|executing|firing|fixing|registering|"
+    r"defining|spawning|invoking|triggering|overwriting|resetting|"
+    r"enabling|disabling|connecting)\b",
+    # 3) "Writing X now:" / "Implementing Y right now." — verb at the
+    #    start of a phrase, ANY object, a "now"-style closer at the
+    #    END of the last paragraph. The end-anchor ($) keeps planning
+    #    narration earlier in the SAME paragraph from false-positiving.
+    #    Caught the "Writing the three Step 1 scripts now:" stall
+    #    where the existing pattern's strict-adjacency requirement
+    #    (verb + the + noun) wouldn't fire on the "the three Step 1
+    #    scripts" multi-word object.
+    r"\b(?:writing|drafting|adding|implementing|building|creating|"
+    r"wiring|registering|inserting|appending|prepending|defining|"
+    r"composing|sketching|fixing|patching|applying|committing|pushing|"
+    r"launching|running|executing|firing|invoking|triggering|editing|"
+    r"updating|modifying|spawning|overwriting)\b.{0,120}\b"
+    r"(?:now|right now|immediately)[:.]?\s*$",
+    # 4) "Let me insert X" / "Let me patch Y" / "Let me wire Z" — extends
+    #    the existing let-me pattern (start|begin|kick off|fire off) to
+    #    cover edit / apply / register / continue verbs. Caught the
+    #    "Let me insert it near _start_idle_reaper:" mid-edit pause.
+    r"\blet me\s+(?:insert|add|patch|apply|update|edit|modify|fix|"
+    r"write|push|commit|append|prepend|run|execute|invoke|trigger|"
+    r"launch|wire|register|define|draft|compose|finish|resume|continue|"
+    r"reset|enable|disable|connect|overwrite|spawn|restart)\b",
+    # 5) "Starting with Phase 1:" / "Starting with Step 2:" / "Starting
+    #    with the implementation:" — a colon-terminated commitment to
+    #    a specific named subtask that should immediately precede tool
+    #    calls. Caught the "Starting with Phase 1: two parallel Explore
+    #    agents" stall where the model committed to an agent fan-out
+    #    but ended the turn instead.
+    r"\bstarting with\s+(?:phase\s+\d+|step\s+\d+|the\s+\w+)\b.*:",
 ]
 
 _COMMITMENT_REGEX_CACHE: Optional[re.Pattern] = None

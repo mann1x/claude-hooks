@@ -16,6 +16,72 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Improved — stop_guard: 5 new commitment-stall patterns from live observation (#219, 2026-05-18)
+
+The pre-v1.7.x release-cut soak surfaced 5 distinct stall-after-
+commitment shapes that the current ``COMMITMENT_PATTERNS`` list
+didn't catch. Each event was a real solidPC session where the model
+wrote a clean commitment paragraph and then ended the turn without
+firing the tool calls it described — the failure mode the stop_guard
+exists to detect. Patterns added (gated by the same end_turn +
+zero-tool_use + last-paragraph stack as the originals):
+
+| # | Live event tail | New pattern shape |
+|---|---|---|
+| 1 | "Going to update STYLE_SHIFT_ISSUE.md … log RESULTS.md, then start M27." | ``\bgoing to\s+(?:update\|log\|run\|write\|…)\b`` |
+| 2 | "Now drafting T17.3 mapping script in the meantime —" | ``\bnow\s+(?:drafting\|writing\|adding\|…)\b`` |
+| 3a | "Writing the three Step 1 scripts now:" | ``\b(?:writing\|implementing\|…)\b.{0,120}\bnow[:.]?\s*$`` |
+| 3b | "Now writing the orchestrator wrapper that applies Step 1 + re-smokes a variant…" | same as #2 |
+| 4 | "Starting with Phase 1: two parallel Explore agents to map the current wiring before I draft the refactor." | ``\bstarting with\s+(?:phase\s+\d+\|step\s+\d+\|the\s+\w+)\b.*:`` |
+| 5 | "Now add the ``_maybe_start_store_reaper`` helper. Let me insert it near ``_start_idle_reaper``:" | ``\bnow\s+add\b`` + ``\blet me\s+(?:insert\|patch\|apply\|…)\b`` |
+
+Design notes:
+
+- **Verb curation matters.** Each verb list is restricted to action
+  verbs that imply tool use (write, edit, run, apply, commit, …).
+  Read verbs (examine, look, check, search, investigate) are
+  deliberately excluded — narration like "Now examining the
+  structure" is the model thinking aloud, not committing to action.
+- **End-anchored tail pattern (#3a).** The pre-existing
+  ``\b(?:writing|implementing|…)\s+(?:the|that|…)?\s*(?:script|code|…)\b``
+  required strict verb→noun adjacency, missing multi-word objects
+  like "the three Step 1 scripts". The new pattern accepts up to
+  120 chars between the verb and a ``\bnow[:.]?\s*$`` close, end-
+  anchored so it only fires on a paragraph that genuinely ends on
+  a "…now" commitment.
+- **Colon-anchored phase pattern (#4).** ``Starting with Phase 1:``
+  requires the colon to fire — bare ``starting with Phase 1`` in
+  conditional planning ("starting with Phase 1 would be too
+  risky") stays silent.
+- **Past tense stays silent.** "I wrote / I added / I implemented"
+  doesn't match any of the new patterns. Reporting is not
+  committing.
+
+Test surface (``tests/test_stop_guard.py``):
+
+- 6 new positive cases — one per live event (3a and 3b separate
+  because they exercise different patterns).
+- 5 new negative cases — read verbs, bare "Continuing", past
+  tense, no-colon "starting with Phase", "Going to think" with
+  a non-action verb.
+- All 38 existing tests unchanged.
+
+A standalone manual verification of the 11 cases (6 fire + 5
+silent) is in the commit's bash output as a smoke against
+``_commitment_regex().search``.
+
+Affected files:
+
+- ``claude_hooks/stop_guard.py`` — +5 patterns appended to
+  ``COMMITMENT_PATTERNS`` with inline forensic comments tying
+  each pattern to the event that surfaced it.
+- ``tests/test_stop_guard.py`` — +11 tests
+  (``StallAfterCommitmentLiveEventsTests`` class).
+
+Both envs full sweep: ``claude-hooks-consultants`` 3871 + 30
+skipped + 117 subtests; ``claude-hooks`` 3765 + 136 skipped + 110
+subtests.
+
 ### Added — PreCompact wrap-up: preserve AskUserQuestion Q&A across the compaction boundary (#217, 2026-05-18)
 
 The 2026-05-18 #214 regression matrix lost two question shapes (Q2
