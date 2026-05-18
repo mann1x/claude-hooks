@@ -79,6 +79,11 @@ class _FakeConn:
     def commit(self) -> None:
         self.committed += 1
 
+    def rollback(self) -> None:
+        # Bumped on any failed transactional unit so tests can verify
+        # the provider doesn't leave the connection aborted.
+        self.committed -= 1
+
     def close(self) -> None:
         pass
 
@@ -355,6 +360,89 @@ class TestDeleteByHashes(unittest.TestCase):
             [s for s in _stmts(conn) if "DELETE" in s],
             [],
         )
+
+
+class TestCreateTableMigratesExistingTables(unittest.TestCase):
+    """Regression gate for the M14 bug surfaced by the live
+    distillation smoke (2026-05-18): when the table already exists
+    (pre-M14 deployment), ``_create_table`` early-returned BEFORE
+    the ALTER TABLE / CREATE INDEX, so the user's live
+    ``memories_qwen3`` would never grow the ``expires_at`` column
+    and ``expire_before`` would fail with ``column does not exist``.
+
+    The fix splits the create branch from the migration branch:
+    create is skipped when the table exists, but the additive M14
+    migration (ALTER + CREATE INDEX, both IF NOT EXISTS) runs on
+    every connection.
+    """
+
+    def test_existing_table_still_gets_alter_and_index(self):
+        from claude_hooks.providers.pgvector import PgvectorProvider
+        p, conn = _make_provider()
+        # Simulate "table already exists" — the
+        # ``SELECT 1 FROM information_schema.tables`` fetchone returns
+        # a row.
+        conn.queued_rows = [(1,)]
+        p._table_created = False  # type: ignore[attr-defined]
+        p._create_table()
+        # CREATE TABLE must NOT be emitted on the existing-table path.
+        self.assertIsNone(
+            _stmt_matching(conn, "CREATE TABLE IF NOT EXISTS test_mem"),
+            f"CREATE TABLE wrongly emitted on existing table; "
+            f"statements: {_stmts(conn)}",
+        )
+        # ALTER TABLE + partial index MUST still be emitted so live
+        # pre-M14 tables migrate in place.
+        self.assertIsNotNone(
+            _stmt_matching(
+                conn, "ALTER TABLE", "ADD COLUMN IF NOT EXISTS",
+                "expires_at",
+            ),
+            f"ALTER TABLE not emitted on existing-table path "
+            f"(M14 regression); statements: {_stmts(conn)}",
+        )
+        self.assertIsNotNone(
+            _stmt_matching(
+                conn, "CREATE INDEX",
+                "test_mem_expires_at_idx",
+                "expires_at IS NOT NULL",
+            ),
+            f"CREATE INDEX not emitted on existing-table path; "
+            f"statements: {_stmts(conn)}",
+        )
+        # The migration block commits — required so the next query on
+        # this connection doesn't see "current transaction is
+        # aborted".
+        self.assertGreaterEqual(conn.committed, 1)
+
+    def test_migration_rolls_back_on_failure(self):
+        """If the ALTER TABLE blows up (e.g. permissions, race), the
+        connection must be rolled back before the exception
+        propagates — otherwise subsequent queries fail with
+        ``current transaction is aborted, commands ignored``."""
+        from claude_hooks.providers.pgvector import PgvectorProvider
+
+        class _RaisingCursor(_FakeCursor):
+            def execute(self, sql, params=None):
+                if "ADD COLUMN IF NOT EXISTS expires_at" in sql:
+                    raise RuntimeError("simulated DDL failure")
+                super().execute(sql, params)
+
+        class _RaisingConn(_FakeConn):
+            def cursor(self):
+                return _RaisingCursor(self)
+
+        p, _ = _make_provider()
+        bad = _RaisingConn()
+        bad.queued_rows = [(1,)]  # table already exists
+        p._conn = bad  # type: ignore[attr-defined]
+        p._table_created = False  # type: ignore[attr-defined]
+        with self.assertRaises(RuntimeError):
+            p._create_table()
+        # rollback() in our fake decrements ``committed`` — confirm
+        # it ran so a real psycopg connection would clear the
+        # aborted-transaction state.
+        self.assertLess(bad.committed, 0)
 
 
 if __name__ == "__main__":

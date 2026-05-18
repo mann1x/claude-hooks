@@ -196,6 +196,13 @@ class PgvectorProvider(Provider):
                     rows.extend(cur.fetchall())
             except Exception as e:
                 log.warning("pgvector query on %s failed: %s", t, e)
+                # Roll back so the next table's query (or any
+                # subsequent caller on this connection) doesn't
+                # see "current transaction is aborted".
+                try:
+                    self._conn.rollback()  # type: ignore[union-attr]
+                except Exception:
+                    pass
                 continue
         rows.sort(key=lambda r: r[2])
         result: list[Memory] = []
@@ -468,7 +475,18 @@ class PgvectorProvider(Provider):
             self._create_table()
 
     def _create_table(self) -> None:
-        """Create the memory table + HNSW index if they don't exist."""
+        """Create the memory table + HNSW index if they don't exist,
+        then run the additive M14 migration (``expires_at`` column +
+        partial index) on every connection.
+
+        The migration steps are split from the create step on purpose
+        — pre-M14 tables exist without ``expires_at``, so an early
+        return when the table exists would leave the user's
+        ``memories_qwen3`` (and any other live tables) stuck on the
+        v1.7 schema forever. Both ALTER TABLE and CREATE INDEX use
+        IF NOT EXISTS, so re-running them on a v2 table is a
+        committed no-op (PG 9.6+).
+        """
         table = _safe_table(self.options.get("table") or "claude_hooks_memory")
         dim = self._embedder.dim if self._embedder and self._embedder.dim else 0  # type: ignore[union-attr]
 
@@ -478,60 +496,72 @@ class PgvectorProvider(Provider):
                 "SELECT 1 FROM information_schema.tables WHERE table_name = %s",
                 (table,),
             )
-            if cur.fetchone():
-                self._table_created = True
-                return
+            table_exists = bool(cur.fetchone())
 
-        # Need the embedding dimension. Probe if unknown.
-        if dim == 0:
-            try:
-                probe = self._embedder.embed("dimension probe")  # type: ignore[union-attr]
-                dim = len(probe)
-            except EmbedderError as e:
-                raise RuntimeError(
-                    f"cannot create table: need embedding dimension but embedder failed: {e}"
+        if not table_exists:
+            # Need the embedding dimension. Probe if unknown.
+            if dim == 0:
+                try:
+                    probe = self._embedder.embed("dimension probe")  # type: ignore[union-attr]
+                    dim = len(probe)
+                except EmbedderError as e:
+                    raise RuntimeError(
+                        f"cannot create table: need embedding dimension but embedder failed: {e}"
+                    )
+            with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                # Schema mirrors scripts/migrate_to_pgvector.py:schema_sql_for_model
+                # so production stores from the live hook collide on the same
+                # content_hash key as migration-loaded rows.
+                cur.execute(
+                    f"""CREATE TABLE IF NOT EXISTS {table} (
+                        id              BIGSERIAL PRIMARY KEY,
+                        content         TEXT NOT NULL,
+                        content_hash    BYTEA NOT NULL,
+                        metadata        JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                        embedding       vector({dim}) NOT NULL,
+                        created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        CONSTRAINT {table}_content_hash_unique UNIQUE (content_hash)
+                    )"""
                 )
+                cur.execute(
+                    f"""CREATE INDEX IF NOT EXISTS {table}_embedding_hnsw
+                        ON {table} USING hnsw (embedding vector_cosine_ops)
+                        WITH (m = 16, ef_construction = 64)"""
+                )
+            self._conn.commit()  # type: ignore[union-attr]
+            log.info("created pgvector table: %s (dim=%d)", table, dim)
 
-        with self._conn.cursor() as cur:  # type: ignore[union-attr]
-            # Schema mirrors scripts/migrate_to_pgvector.py:schema_sql_for_model
-            # so production stores from the live hook collide on the same
-            # content_hash key as migration-loaded rows.
-            cur.execute(
-                f"""CREATE TABLE IF NOT EXISTS {table} (
-                    id              BIGSERIAL PRIMARY KEY,
-                    content         TEXT NOT NULL,
-                    content_hash    BYTEA NOT NULL,
-                    metadata        JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-                    embedding       vector({dim}) NOT NULL,
-                    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    CONSTRAINT {table}_content_hash_unique UNIQUE (content_hash)
-                )"""
-            )
-            cur.execute(
-                f"""CREATE INDEX IF NOT EXISTS {table}_embedding_hnsw
-                    ON {table} USING hnsw (embedding vector_cosine_ops)
-                    WITH (m = 16, ef_construction = 64)"""
-            )
-            # M14: per-row TTL via ``expires_at TIMESTAMPTZ``. The
-            # column + partial index land in-place on every
-            # ``_ensure_ready`` so existing v1.7 tables upgrade on
-            # first reconnect — no separate migration step needed
-            # for one nullable column. Postgres 9.6+ supports
-            # ``ADD COLUMN IF NOT EXISTS``; the partial index keeps
-            # NULL rows (legacy / never-expire) out of the cleanup
-            # index so an x-tier-only TTL flip doesn't slow recall.
-            cur.execute(
-                f"ALTER TABLE {table} "
-                f"ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ"
-            )
-            cur.execute(
-                f"CREATE INDEX IF NOT EXISTS {table}_expires_at_idx "
-                f"ON {table} (expires_at) "
-                f"WHERE expires_at IS NOT NULL"
-            )
-        self._conn.commit()  # type: ignore[union-attr]
+        # M14 lazy migration — runs on BOTH the just-created path and
+        # the table-already-existed path. Idempotent: ADD COLUMN IF
+        # NOT EXISTS + CREATE INDEX IF NOT EXISTS. Split off so a
+        # smoke that catches one half (column added, index missing)
+        # or vice-versa doesn't permanently break — the next open
+        # converges. Partial index keeps NULL rows (legacy /
+        # never-expire) out of the cleanup-scan path.
+        try:
+            with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                cur.execute(
+                    f"ALTER TABLE {table} "
+                    f"ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ"
+                )
+                cur.execute(
+                    f"CREATE INDEX IF NOT EXISTS {table}_expires_at_idx "
+                    f"ON {table} (expires_at) "
+                    f"WHERE expires_at IS NOT NULL"
+                )
+            self._conn.commit()  # type: ignore[union-attr]
+        except Exception:
+            # If the migration step blew up (e.g. permissions, race
+            # against another writer), roll back the failing
+            # transaction so subsequent queries on this connection
+            # don't see "current transaction is aborted". The next
+            # _ensure_ready will retry.
+            try:
+                self._conn.rollback()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            raise
         self._table_created = True
-        log.info("created pgvector table: %s (dim=%d)", table, dim)
 
 
 def _safe_table(name: str) -> str:
@@ -616,6 +646,13 @@ def _recall_hybrid(self: PgvectorProvider, query: str, k: int = 5,
         except Exception as e:
             log.warning("pgvector hybrid vector query on %s failed: %s", t, e)
             vec_rows = []
+            # Roll back so the next query on this connection doesn't
+            # see "current transaction is aborted, commands ignored".
+            # Surfaced by the M14 distillation smoke 2026-05-18.
+            try:
+                self._conn.rollback()  # type: ignore[union-attr]
+            except Exception:
+                pass
         for rank, (content, meta, distance, ch) in enumerate(vec_rows, start=1):
             key = (t, ch.hex() if isinstance(ch, (bytes, bytearray)) else str(ch))
             entry = fused.setdefault(key, {
@@ -643,9 +680,16 @@ def _recall_hybrid(self: PgvectorProvider, query: str, k: int = 5,
                 kw_rows = cur.fetchall()
         except Exception as e:
             # content_tsv missing or query error — silently degrade to
-            # vector-only signal for this table.
+            # vector-only signal for this table. Roll back so the
+            # connection isn't left aborted for the next query
+            # (the smoke's test table doesn't have content_tsv —
+            # surfaced 2026-05-18).
             log.debug("pgvector hybrid keyword query on %s skipped: %s", t, e)
             kw_rows = []
+            try:
+                self._conn.rollback()  # type: ignore[union-attr]
+            except Exception:
+                pass
         for rank, (content, meta, _score, ch) in enumerate(kw_rows, start=1):
             key = (t, ch.hex() if isinstance(ch, (bytes, bytearray)) else str(ch))
             entry = fused.setdefault(key, {

@@ -16,6 +16,85 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed — pgvector M14 migration + transaction-abort regressions surfaced by live distillation smoke (2026-05-18)
+
+Two real defects landed by the M14 commit `aac87e7`, both caught
+by the live distillation smoke against the user's solidPC
+pgvector (run write-up at
+[`benchmarks/consultants/results/2026-05-18/m14-distillation-smoke/report.md`](benchmarks/consultants/results/2026-05-18/m14-distillation-smoke/report.md)).
+
+**1. Pre-existing tables never received the `expires_at` column.**
+
+`PgvectorProvider._create_table` early-returned at the table-
+exists check, BEFORE the M14 `ALTER TABLE … ADD COLUMN
+IF NOT EXISTS expires_at` and the partial index. Net effect:
+the user's live `memories_qwen3` (and every pre-M14 table on every
+host) would never grow `expires_at`, and any subsequent
+`expire_before` query would fail with
+`column "expires_at" does not exist`. This was the worst kind of
+M14 bug — silent for fresh tables (which worked), catastrophic
+for upgrades.
+
+**Fix**: split the create branch from the migration branch in
+[`claude_hooks/providers/pgvector.py:470`](claude_hooks/providers/pgvector.py).
+`CREATE TABLE` is skipped when the table exists; the additive M14
+migration (ALTER + CREATE INDEX, both `IF NOT EXISTS`) runs on
+every connection. The migration block also catches failures and
+calls `self._conn.rollback()` before re-raising, so a permissions
+issue or DDL race doesn't leave the connection aborted for the
+next caller.
+
+**2. Recall paths left the connection aborted on soft failure.**
+
+`recall_hybrid`'s BM25 leg and `_search_tables`'s vector leg both
+caught query exceptions as "soft" failures (BM25: tables without
+`content_tsv` should degrade to vector-only; vector: per-table
+errors should just skip that table). Both logged + continued
+WITHOUT calling `self._conn.rollback()`. PostgreSQL leaves the
+connection in an aborted state until a rollback fires, so the
+very next query on the same connection — in the smoke's case,
+`provider.expire_before` 35 s later — saw
+`current transaction is aborted, commands ignored until end of
+transaction block`.
+
+This was a pre-existing pgvector defect, not introduced by M14 —
+M14 just surfaced it because the M14 smoke uses an ad-hoc test
+table that doesn't have `content_tsv` (canonical migration-script
+tables do). Any caller that hit a malformed table on a non-canonical
+DSN would have tripped it.
+
+**Fix**: every soft-failure `except` in `recall_hybrid` (vector +
+BM25 legs) and `_search_tables` now calls
+`self._conn.rollback()` in a guarded inner try before the
+`continue`. The rollback restores the connection so the next
+caller can use it.
+
+**Regression gate** — new test class
+`TestCreateTableMigratesExistingTables` in
+[`tests/test_pgvector_expires_at.py`](tests/test_pgvector_expires_at.py):
+
+- `test_existing_table_still_gets_alter_and_index` — locks the
+  bug-1 fix at the SQL-statement level.
+- `test_migration_rolls_back_on_failure` — locks the
+  rollback-before-raise contract so a future refactor can't
+  silently regress the aborted-transaction behaviour.
+
+**Verification** (both envs full sweep):
+
+- **claude-hooks-consultants**: 3737 pass / 30 skip (+2 new
+  pgvector regression tests vs the 3735 post-flip baseline).
+- **claude-hooks**: 3639 pass / 128 skip (+2 same).
+- **Live smoke**: ✅ End-to-end PASS. 4 research findings seeded,
+  expired after 30 s, distilled by `gemma4:31b-cloud` in 25.71 s
+  into a 2073-char summary; written to
+  `("project", "6ba3d13e1e58")`; originals deleted; project
+  namespace verified to hold 1 distilled entry.
+
+The smoke is permanent at
+[`benchmarks/consultants/results/2026-05-18/m14-distillation-smoke/`](benchmarks/consultants/results/2026-05-18/m14-distillation-smoke/)
+and can be re-run on any host that has psycopg + a reachable
+pgvector + the daemon-managed llamafile embedder.
+
 ### Changed — `/consultants` v2 M14 default-on flip (2026-05-18)
 
 The companion to commit `aac87e7` (M14 land). With the TTL +
