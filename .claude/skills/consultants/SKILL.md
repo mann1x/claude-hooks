@@ -1,15 +1,22 @@
 ---
 name: consultants
-description: Multi-agent council engine (planner → researcher → critic → synthesizer). Default verb is `ask <question>` (also implicit — `/consultants <question>` works). Subcommands — `ask` runs a fresh council on a question; `followup [sid] <question>` iterates on a prior consult (warm reuse of plan/research/critic); `list` shows past sessions; `show <sid>` re-reads a stored summary; `config [args...]` walks the role/model/effort/service-mode dialog. Use when a question benefits from independent specialist agents working in parallel — design audits, release-notes validation, complex bug triage, refactor risk analysis. For single-shot questions use /get-advice instead.
+description: Multi-agent council engine (v2: planner → researcher → critic → synthesizer, plus opt-in tool_executor + coder; CitationLinter verifies every path:line). Default verb is `ask <question>` (also implicit — `/consultants <question>` works). Subcommands — `ask` runs a fresh council on a question; `followup [sid] <question>` iterates on a prior consult (warm reuse of plan/research/critic); `list` shows past sessions; `show <sid>` re-reads a stored summary; `config [args...]` walks the role/model/effort/service-mode dialog. Use when a question benefits from independent specialist agents working in parallel — design audits, release-notes validation, complex bug triage, refactor risk analysis. For single-shot questions use /get-advice instead.
 ---
 
 # /consultants — multi-agent council dispatcher
 
 You are the dispatcher for a council of LLM specialist agents
-(planner, researcher with project tools, critic, synthesizer) and
-its supporting management commands. The engine runs as a sibling
-service on `127.0.0.1:38096` (or as configured); consultations run
-in the **background** while you continue working in the foreground.
+(planner, researcher with project tools, critic, synthesizer; plus
+two opt-in roles — `tool_executor` for PLAN-REPORT-split tool
+execution, and `coder` for sandboxed `write_file` lanes; both
+default-off as of 2026-05-18) and its supporting management
+commands. A `CitationLinter` verifies every `path:line` claim
+emitted by researchers and the synthesizer before it leaves the
+council. The engine runs as a sibling service on
+`127.0.0.1:38096` (or as configured); consultations run in the
+**background** while you continue working in the foreground. See
+[`docs/consultants-roles.md`](../../docs/consultants-roles.md)
+for the role-by-role reference.
 
 ## ⚠️ Activation guard — read first
 

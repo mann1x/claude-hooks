@@ -1,10 +1,23 @@
 # `/consultants` — multi-agent council consultation
 
-> **Status:** v1.1.0 · opt-in install via `python install.py` ·
-> dedicated `claude-hooks-consultants` conda env (Py 3.11) with
-> LangGraph + LangServe · per-OS service unit (or smart-start
-> spawn-on-demand) · permanent on-disk session artifacts under
+> **Status:** engine **v2** (post-v1.7.0, on `dev`) · opt-in
+> install via `python install.py` · dedicated
+> `claude-hooks-consultants` conda env (Py 3.11) with LangGraph +
+> LangServe · per-OS service unit (or smart-start spawn-on-demand)
+> · permanent on-disk session artifacts under
 > `.claude-hooks/consultants/<sid>/`
+>
+> **v2 over v1.1 in one paragraph:** six roles instead of four
+> (opt-in `tool_executor` + `coder` join the four base roles),
+> proper composition under tool_executor + x-tier multi-model
+> fan-out (M11c-3 `parent_lane_idx`-routed `Send` dispatch), an
+> opt-in BaseStore-backed cross-session memory (M8) with
+> per-namespace TTL + Caliber-style distillation-on-expiry (M14),
+> and a `CitationLinter` that verifies every `path:line` claim
+> before the answer leaves the council (#204 / #205 / #207).
+> The role-by-role reference lives at
+> [`docs/consultants-roles.md`](consultants-roles.md) — read it
+> before flipping opt-ins on.
 
 `/consultants` runs a **council** of LLM specialist agents on a
 single deep question:
@@ -13,20 +26,44 @@ single deep question:
 question
    │
    ▼
-[planner]   ── decomposes the question, picks files / paths to ground in
-   │
+[planner]       ── decomposes the question, picks files / paths to
+   │                ground in; optional JSON blocks request
+   │                tool_executor or coder lanes
    ▼
-[researcher×N]  ── tool-call loop over read_file / grep / glob /
-   │                list_files / recall_memory; produces grounded
-   │                evidence reports with path:line citations
+[researcher×N]  ── one of two modes (planner picks):
+   │                  Mode A (inline): tool-call loop directly over
+   │                    read_file / grep / glob / list_files /
+   │                    recall_memory; produces grounded report
+   │                  Mode B (PLAN-REPORT split, opt-in):
+   │                    researcher emits a tool_plan (PLAN),
+   │                    tool_executor lanes run the tools,
+   │                    researcher fans back in REPORT mode
+   │                    against routed tool_results (M11c-3
+   │                    parent_lane_idx)
+   ▼  ── CitationLinter verifies every path:line before peer_findings
+[tool_executor×K]   ── (opt-in role, default OFF as of 2026-05-18)
+   │                    structured tool-call dispatcher feeding
+   │                    routed evidence back to its parent
+   │                    researcher lane. See the role doc for
+   │                    when to enable.
    ▼
 [critic×C]      ── reads researcher reports + the question; returns
    │                DECISION: ready | needs_more_research with gaps
+   │                (xmax: meta-critic combines C critic verdicts)
    ▼
-[synthesizer]   ── composes the final answer from research + critic verdict
-   │
+[synthesizer]   ── composes the final answer from research + critic
+   │                verdict; CitationLinter runs again on output
+   │  ── (if planner emitted coder_tasks) ────────────┐
+   │                                                  ▼
+   │                                              [coder]
+   │                                              sandbox-bounded
+   │                                              write_file role
+   │                                              (50 KB/file,
+   │                                              1 MB/lane,
+   │                                              16 files/lane)
    ▼
-synthesizer's final answer (lives on disk + returned to the user)
+final answer (lives on disk + returned to the user, store-distilled
+into the project namespace at TTL expiry if the M8 store is enabled)
 ```
 
 The council runs **in the background** while you keep working in
@@ -74,6 +111,90 @@ OS reboots, and Claude Code updates — and live under
 `/consultants` is the heavier path. Use [`/get-advice`](get-advice.md)
 for one-shot questions; reach for the council when the question
 deserves a planner pass and grounded evidence-gathering.
+
+---
+
+## v2 engine — what changed since v1.1
+
+The v1.1 council had four roles wired in a fixed
+planner → researcher → critic → synthesizer topology. The v2
+engine (post-v1.7.0, all on `dev`) keeps that as the default path
+and adds three orthogonal pieces:
+
+**1. Two opt-in roles (default OFF as of 2026-05-18).**
+
+- **`tool_executor`** — splits researcher into PLAN-REPORT mode:
+  researcher emits a structured `tool_plan` block, the
+  tool_executor lane runs the calls, the researcher fans back in
+  REPORT mode against routed `tool_results`. Default OFF because
+  the M14 first-real-ask A/B benchmark showed 3× wall time, +43%
+  tokens, and **fewer** edge cases caught on grep-shaped questions
+  vs the synthesizer-direct path. Keep enabled only for
+  slow-tool-budget questions where the synthesizer would otherwise
+  re-issue the same five grep calls across nine x-tier lanes — the
+  role's actual win condition. Record:
+  [`benchmarks/consultants/results/2026-05-18/tool-executor-ab/report.md`](../benchmarks/consultants/results/2026-05-18/tool-executor-ab/report.md).
+- **`coder`** — sandbox-bounded `write_file` role for "change
+  these files, here's what they should look like after"
+  questions. Planner emits a `coder_tasks` JSON block when
+  `requires_code_generation=true`. Caps: 50 KB/file, 1 MB/lane,
+  16 files/lane. Model picks matter — see the M11b skill-eval
+  rubric at
+  [`docs/consultants-skill-eval-protocol.md`](consultants-skill-eval-protocol.md).
+
+Full per-role detail (responsibilities, prompts, planner JSON
+contracts, model evidence, shortcomings, when to enable):
+[`docs/consultants-roles.md`](consultants-roles.md).
+
+**2. Optional BaseStore-backed cross-session memory (M8 + M14).**
+
+When `[store].enabled = true`, the engine threads a LangGraph
+BaseStore (pgvector or sqlite_vec backend) through every
+researcher and synthesizer turn. Four canonical namespaces:
+
+| Namespace                | Lifetime         | Default TTL |
+|--------------------------|------------------|-------------|
+| `(sid, "research")`      | per-session lane | 30 days     |
+| `(sid, "tool_results")`  | per-session tool | 24 hours    |
+| `("project", project_id)`| per-project     | never       |
+| `("user", user_id)`      | user-global      | never       |
+
+M14 ships a hourly daemon sweep that, for expiring research
+entries, runs a **Caliber-style distillation pass** (primary
+`gemma4:31b-cloud` → fallback `glm-5.1:cloud`) that summarizes
+the session's findings into the durable
+`("project", project_id)` namespace **before** deleting the
+originals. Episodic short-term → semantic long-term. The
+research originals are only deleted after a successful
+project-namespace write — failed distillation keeps the
+originals in place for the next sweep tick.
+
+Defaults flipped on 2026-05-18 (commit `48f1c4e`):
+`store.enabled=True`, `backend=sqlite_vec`, TTL+distillation on.
+M12 parity holds because `medium` (the default effort) is not in
+the M8 `enable_at_efforts` set — the store stays inactive until
+you ask for `high` / `max` / x-tier.
+
+**3. `CitationLinter` at the researcher boundary (#204 / #205 / #207).**
+
+Every researcher REPORT (and synthesizer output) passes through
+a three-layer verifier before flowing downstream:
+
+1. **Path resolution** — the file must exist under one of the
+   discovered allowed roots.
+2. **Line bounds** — the cited line range must be within the file.
+3. **Symbol match** — if the cite names a function / class /
+   method, the symbol text must actually appear at the cited
+   line (±1 slack). Backed by the in-process `code_graph`
+   `enclosing_symbol_at` query for fast lookup; ast-parse
+   fallback for files outside the graph.
+
+Failures are annotated inline as
+`[no <claimed> at this line; line is in <actual>]` so the
+synthesizer (and the user) can see exactly which cites the
+council fabricated. The linter runs at researcher-boundary
+(annotations propagate via `peer_findings`) rather than only at
+synthesizer-output, so downstream lanes see only verified cites.
 
 ---
 
@@ -614,7 +735,24 @@ If you want to read the code:
   per-role logic (planner, researcher, critic, meta-critic,
   synthesizer)
 - Engine: `consultants/engine/graph.py` — LangGraph state machine
-  wiring (Send fan-out, conditional edges, barrier nodes)
+  wiring (Send fan-out, conditional edges, barrier nodes,
+  M11c-3 `parent_lane_idx`-routed `_fanout_after_tool_executor`)
+- Engine: `consultants/engine/tool_executor.py` — opt-in
+  PLAN-REPORT role (default OFF since 2026-05-18; see
+  [`docs/consultants-roles.md`](consultants-roles.md))
+- Engine: `consultants/engine/tool_executor_defaults.py` —
+  `RECOMMENDED_DEFAULT_ON` + flip-history comment block
+- Engine: `consultants/engine/coder.py` — opt-in sandboxed
+  `write_file` role
+- Engine: `consultants/engine/citation_linter.py` — three-layer
+  `path:line` verifier (#204 / #205 / #207) with `code_graph`
+  fast path
+- Engine: `consultants/engine/store.py` — M8 BaseStore adapter
+  (researcher peer_findings recall + record)
+- Engine: `consultants/engine/distillation.py` — M14 Caliber-style
+  distillation; primary + fallback chain
+- Engine: `consultants/engine/store_reaper.py` — M14 daemon-side
+  hourly sweep (TTL expiry → distill → delete)
 - Engine: `consultants/engine/recorder.py` — `transcript.db`
   writer and `load_role_messages` reader
 - Engine: `consultants/engine/storage.py` — `summary.md` /
@@ -624,12 +762,20 @@ If you want to read the code:
 - Server: `consultants/server/app.py` — FastAPI HTTP surface
 - CLI: `consultants/cli.py`
 - Config: `consultants/config.py`
-- Tests: `tests/test_consultants_*.py` (369 passing as of v1.1.0)
+- Code-graph query: `claude_hooks/code_graph/enclosing.py` —
+  process-global mtime-cached `enclosing_symbol_at` used by the
+  CitationLinter
+- Tests: `tests/test_consultants_*.py` + `tests/test_citation_linter.py`
+  + `tests/test_code_graph_enclosing.py` + `tests/test_tool_executor_defaults.py`
+  (~1200 collected; full sweep target stays green)
 
 ---
 
 ## See also
 
+- [`docs/consultants-roles.md`](consultants-roles.md) — **the
+  role-by-role reference** (read first when considering enabling
+  `tool_executor` or `coder`)
 - [`docs/get-advice.md`](get-advice.md) — when one model is plenty
 - [`docs/benchmarks/EVALUATION.md`](benchmarks/EVALUATION.md) —
   evaluation protocol (run + grade + compare)
@@ -637,6 +783,14 @@ If you want to read the code:
   benchmark sweeps
 - [`docs/consultants-benchmarks.md`](consultants-benchmarks.md) —
   canonical query set
+- [`docs/consultants-skill-eval-protocol.md`](consultants-skill-eval-protocol.md)
+  — Consultancy Skill-Eval Protocol v1.0 (coder + stall +
+  tool_executor sub-protocols)
+- [`docs/consultants-skill-eval-baselines.md`](consultants-skill-eval-baselines.md)
+  — model-pick evidence ledger (M11b coder, M11c tool_executor)
+- [`benchmarks/consultants/results/2026-05-18/tool-executor-ab/report.md`](../benchmarks/consultants/results/2026-05-18/tool-executor-ab/report.md)
+  — the A/B record behind the 2026-05-18 `tool_executor`
+  default-flip back to OFF
 - [`docs/consultants-transcript-db-schema.md`](consultants-transcript-db-schema.md)
   — `transcript.db` schema + privacy posture
 - [`docs/PLAN-consultants-v1.1-message-history.md`](PLAN-consultants-v1.1-message-history.md)
