@@ -30,7 +30,9 @@ def make_runner(*, ollama_base_url: str):
     """
     # Lazy imports — none of these are present in the main test env.
     from claude_hooks.allowed_roots import (
-        discover_allowed_roots, render_for_log,
+        discover_allowed_roots,
+        discover_allowed_roots_with_display,
+        render_for_log,
     )
     from claude_hooks.get_advice.chat_client import ChatClient, make_agent_chat_client
     from claude_hooks.caliber_proxy.tools import (
@@ -210,9 +212,25 @@ def make_runner(*, ollama_base_url: str):
         )
 
         if extra_roots:
+            # 2026-05-18: render the display form (user-facing pre-realpath
+            # paths) when available so /shared/dev/<x> shows in the log
+            # instead of /srv/dev-disk-by-label-opt/dev/<x>. Falls back to
+            # realpath rendering when the upstream didn't pass display info
+            # (legacy / disk-reopened sessions).
+            cwd_display = runner_input.get("cwd_display") or cwd
+            extra_roots_display = tuple(
+                runner_input.get("extra_roots_display")
+                or extra_roots
+            )
+            if len(extra_roots_display) != len(extra_roots):
+                extra_roots_display = extra_roots
             log.info(
                 "consultants sid=%s allowed roots:\n%s",
-                state.sid, render_for_log([cwd, *extra_roots]),
+                state.sid,
+                render_for_log(
+                    [cwd, *extra_roots],
+                    display_roots=[cwd_display, *extra_roots_display],
+                ),
             )
         # M8: build the long-term-memory store if cfg.store.enabled is
         # true and the current effort tier is in the enable list.
@@ -448,7 +466,9 @@ def make_follow_up_runner(*, ollama_base_url: str):
     parent was reaped between completion and follow-up).
     """
     from claude_hooks.allowed_roots import (
-        discover_allowed_roots, render_for_log,
+        discover_allowed_roots,
+        discover_allowed_roots_with_display,
+        render_for_log,
     )
     from claude_hooks.get_advice.chat_client import ChatClient, make_agent_chat_client
     from claude_hooks.caliber_proxy.tools import (
@@ -605,9 +625,40 @@ def make_follow_up_runner(*, ollama_base_url: str):
         )
 
         if extra_roots:
+            # 2026-05-18: render display form like run_council does.
+            cwd_display_fu = runner_input.get("cwd_display") or cwd
+            # ``extra_roots`` here is the parent ∪ follow-up merged
+            # realpath list. Build the parallel display form from the
+            # follow-up's body-extras-display and the parent's stored
+            # display info; fall back to realpath where neither is
+            # available.
+            parent_state_fu = runner_input.get("parent_state")
+            parent_real_to_display: dict[str, str] = {}
+            if parent_state_fu is not None:
+                p_real = list(getattr(parent_state_fu, "extra_roots", []) or [])
+                p_disp = list(
+                    getattr(parent_state_fu, "extra_roots_display", []) or []
+                )
+                if p_disp and len(p_disp) == len(p_real):
+                    parent_real_to_display = dict(zip(p_real, p_disp))
+            body_real_to_display: dict[str, str] = {}
+            body_disp = runner_input.get("extra_roots_display") or []
+            for raw in body_disp:
+                from claude_hooks.allowed_roots import _canonical
+                real = _canonical(raw)
+                if real:
+                    body_real_to_display.setdefault(real, raw)
+            extra_roots_display_fu = tuple(
+                parent_real_to_display.get(r) or body_real_to_display.get(r) or r
+                for r in extra_roots
+            )
             log.info(
                 "consultants follow-up sid=%s allowed roots:\n%s",
-                state.sid, render_for_log([cwd, *extra_roots]),
+                state.sid,
+                render_for_log(
+                    [cwd, *extra_roots],
+                    display_roots=[cwd_display_fu, *extra_roots_display_fu],
+                ),
             )
         # M8: follow-ups share the store config with their parent.
         # The store is keyed by the follow-up's own sid (each
@@ -841,10 +892,18 @@ def _build_recorder(*, sid: str, cwd: str, question: str,
             models=dict(models),
             parent_sid=parent_sid,
         )
-        return MessageRecorder(
+        recorder = MessageRecorder(
             sdir / _storage.TRANSCRIPT_DB_FILENAME,
             meta=meta,
         )
+        # 2026-05-18: surface the transcript path in the session log so
+        # operators can locate it without having to grep the runner
+        # source for the convention.
+        log.info(
+            "consultants sid=%s transcript.db: %s",
+            sid, sdir / _storage.TRANSCRIPT_DB_FILENAME,
+        )
+        return recorder
     except Exception as exc:
         log.warning(
             "MessageRecorder construction failed (sid=%s): %s; "

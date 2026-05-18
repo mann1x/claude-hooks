@@ -172,18 +172,92 @@ def discover_allowed_roots(
     return out
 
 
-def render_for_log(roots: list[str], *, primary_label: str = "primary") -> str:
+def render_for_log(
+    roots: list[str], *,
+    primary_label: str = "primary",
+    display_roots: Optional[list[str]] = None,
+) -> str:
     """Render the allow-list as a multi-line block for log output.
 
     Mirrors the shape used in the plan: ``primary:`` first, then
     ``extra:`` for the rest. Falls back to a single ``primary:`` line
     when there are no extras.
+
+    2026-05-18: ``display_roots`` is an optional parallel list of the
+    user-facing (pre-realpath) paths. When supplied, the log shows
+    those instead of the realpath canonical forms — so a user who
+    typed ``/shared/dev/laserRMT`` sees that in the log rather than
+    ``/srv/dev-disk-by-label-opt/dev/laserRMT`` (the symlink-resolved
+    form). When a display entry differs from the realpath, the
+    realpath is shown in parentheses for forensic clarity. List must
+    have the same length as ``roots``; mismatched lengths are
+    ignored (defensive — fall back to roots as the display form).
     """
     if not roots:
         return f"{primary_label}: (none)"
-    lines = [f"{primary_label}: {roots[0]}"]
+    if display_roots is None or len(display_roots) != len(roots):
+        display_roots = list(roots)
+
+    def _format(display: str, real: str) -> str:
+        return display if display == real else f"{display}  ({real})"
+
+    lines = [f"{primary_label}: {_format(display_roots[0], roots[0])}"]
     if len(roots) > 1:
         lines.append("extra:")
-        for r in roots[1:]:
-            lines.append(f"  {r}")
+        for d, r in zip(display_roots[1:], roots[1:]):
+            lines.append(f"  {_format(d, r)}")
     return "\n".join(lines)
+
+
+def discover_allowed_roots_with_display(
+    cwd: str,
+    *,
+    add_dirs: Sequence[str] = (),
+    settings_files: Optional[Sequence[str]] = None,
+) -> tuple[list[str], list[str]]:
+    """Same as :func:`discover_allowed_roots` but additionally returns
+    the user-facing display form for each entry.
+
+    Returns ``(real_paths, display_paths)`` parallel lists. The
+    ``real_paths`` list is identical to what
+    :func:`discover_allowed_roots` returns (used for de-dup +
+    filesystem checks). The ``display_paths`` list holds the
+    pre-realpath form (``~`` expanded, but symlinks NOT resolved)
+    suitable for human-readable logging. They have the same
+    length and the same order.
+
+    Added 2026-05-18 for the consultants `allowed roots:` log so
+    operators see ``/shared/dev/<x>`` (the path they typed in
+    settings) rather than ``/srv/dev-disk-by-label-opt/dev/<x>``
+    (the realpath after the ``/shared`` symlink resolves).
+    """
+    files = (
+        list(settings_files) if settings_files is not None
+        else _candidate_settings_files(cwd)
+    )
+    raw_entries: list[str] = []
+    for f in files:
+        raw_entries.extend(_read_additional_directories(f))
+    raw_entries.extend(str(p) for p in add_dirs if p)
+
+    cwd_display = os.path.expanduser(cwd)
+    cwd_real = os.path.realpath(cwd_display)
+    seen = {cwd_real}
+    reals: list[str] = [cwd_real]
+    displays: list[str] = [cwd_display]
+    for entry in raw_entries:
+        expanded = os.path.expanduser(entry)
+        try:
+            real = os.path.realpath(expanded)
+        except (OSError, ValueError) as e:
+            log.debug("cannot canonicalise %r: %s", entry, e)
+            continue
+        if not os.path.isdir(real):
+            log.debug("allowed-root path is not a directory, skipping: %s", real)
+            continue
+        if real in seen:
+            continue
+        seen.add(real)
+        reals.append(real)
+        displays.append(expanded)
+    return reals, displays

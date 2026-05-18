@@ -16,6 +16,58 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Changed — consultants: log readability — symlink-aware allowed_roots + transcript.db path (2026-05-18)
+
+Two operator-quality-of-life fixes surfaced during the
+2026-05-18 M14 first-real-ask re-run.
+
+**1. Allowed-roots log shows the user-facing path, not the
+realpath.** When the operator's `~/.claude/settings.json`
+`additionalDirectories` points at `/shared/dev/<x>` (a
+symlink), the consultants engine's `allowed roots:` log line
+used to render the realpath canonical form
+(`/srv/dev-disk-by-label-opt/dev/<x>`) because
+`discover_allowed_roots` realpath-canonicalizes for security
++ de-dup. Confusing — operators don't recognize the path
+they typed.
+
+Fix:
+
+- `claude_hooks/allowed_roots.py` grows
+  `discover_allowed_roots_with_display(...)` which returns
+  parallel `(realpath_list, display_list)` lists — same
+  length, same order. Realpaths are still used for the
+  tool-sandbox security check; display is the pre-realpath
+  user-facing form (`~` expanded but symlinks NOT resolved).
+- `render_for_log` gets an optional `display_roots=` kwarg.
+  When supplied, the log line shows the display path; when
+  the display differs from realpath, the realpath appears
+  in parentheses for forensic clarity:
+  `extra:\n  /shared/dev/laserRMT  (/srv/dev-disk-by-label-opt/dev/laserRMT)`.
+- `SessionState` (`consultants/server/app.py`) grows parallel
+  `extra_roots_display: list[str]` and `cwd_display:
+  Optional[str]` fields; the runner's two `render_for_log`
+  call sites (consult + follow-up) thread the display info
+  through. Follow-up merge reuses the parent's display map.
+
+**2. transcript.db path logged at session start.**
+`MessageRecorder` opens the per-session SQLite sidecar at
+`<cwd>/.claude-hooks/consultants/<sid>/transcript.db`, but
+the convention was only documented in the runner source.
+Now `_build_recorder` (`consultants/server/runner.py`)
+emits an INFO log line `consultants sid=<sid> transcript.db:
+<abs_path>` so operators can locate the sidecar from
+`/root/.claude/claude-hooks-consultants.log` without
+grepping the source.
+
+**Tests.** `tests/test_allowed_roots.py` grows 9 new tests
+covering `render_for_log` with display kwarg (parens vs not,
+length mismatch) + `discover_allowed_roots_with_display`
+(cwd-only, symlink keeps display, dedup by realpath,
+add_dirs, consistency vs the realpath-only helper). Both
+conda envs now at 3704 + 3606 = 7310 passing (no
+regressions).
+
 ### Fixed — M14 follow-up: researcher REPORT-mode regression + pgvector concurrency race (2026-05-18)
 
 Diagnosed and fixed three issues caught by the first live

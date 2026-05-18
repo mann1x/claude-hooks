@@ -17,6 +17,7 @@ from pathlib import Path
 
 from claude_hooks.allowed_roots import (
     discover_allowed_roots,
+    discover_allowed_roots_with_display,
     render_for_log,
 )
 
@@ -252,6 +253,118 @@ class TestRenderForLog(unittest.TestCase):
 
     def test_empty(self):
         self.assertEqual(render_for_log([]), "primary: (none)")
+
+    def test_display_roots_same_as_real(self):
+        # When display matches real, render just the path (no parens).
+        out = render_for_log(
+            ["/foo", "/bar"], display_roots=["/foo", "/bar"],
+        )
+        self.assertIn("primary: /foo", out)
+        self.assertIn("  /bar", out)
+        self.assertNotIn("(", out)
+
+    def test_display_roots_differ_show_realpath_paren(self):
+        # When display differs from real (symlink resolution), show both:
+        # the user-facing form on the left, realpath in parens.
+        out = render_for_log(
+            ["/srv/foo", "/srv/bar"],
+            display_roots=["/shared/foo", "/shared/bar"],
+        )
+        self.assertIn("primary: /shared/foo  (/srv/foo)", out)
+        self.assertIn("  /shared/bar  (/srv/bar)", out)
+
+    def test_display_roots_length_mismatch_ignored(self):
+        # Defensive: parallel-list length must match. Mismatched =
+        # fall back to realpath display (no crash).
+        out = render_for_log(
+            ["/foo", "/bar"], display_roots=["/shared/foo"],
+        )
+        self.assertIn("primary: /foo", out)
+        self.assertIn("  /bar", out)
+
+
+class TestDiscoverWithDisplay(unittest.TestCase):
+    """``discover_allowed_roots_with_display`` keeps the user-facing
+    path next to the realpath. Same shape (length / order) as
+    ``discover_allowed_roots``, with one extra string per entry.
+    """
+
+    def test_cwd_only(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            reals, displays = discover_allowed_roots_with_display(
+                cwd, settings_files=[],
+            )
+            self.assertEqual(len(reals), 1)
+            self.assertEqual(len(displays), 1)
+            self.assertEqual(displays[0], cwd)  # cwd is its own display
+            self.assertEqual(reals[0], os.path.realpath(cwd))
+
+    def test_symlink_keeps_display(self):
+        # Build a symlink chain: <real_dir>/sub  ←  <link_dir>/sub
+        with tempfile.TemporaryDirectory() as real_root, \
+             tempfile.TemporaryDirectory() as link_root:
+            real_sub = os.path.join(real_root, "sub")
+            os.makedirs(real_sub)
+            link_sub = os.path.join(link_root, "sub")
+            os.symlink(real_sub, link_sub)
+            with tempfile.TemporaryDirectory() as cwd:
+                settings = os.path.join(cwd, ".claude", "settings.json")
+                _write_settings(settings, [link_sub])
+                reals, displays = discover_allowed_roots_with_display(
+                    cwd, settings_files=[settings],
+                )
+                # 2 entries: cwd + the symlinked dir.
+                self.assertEqual(len(reals), 2)
+                self.assertEqual(len(displays), 2)
+                # display stays as the symlink path; realpath resolves.
+                self.assertEqual(displays[1], link_sub)
+                self.assertEqual(reals[1], os.path.realpath(real_sub))
+                self.assertNotEqual(displays[1], reals[1])
+
+    def test_dedup_by_realpath_still_dedups(self):
+        # Two entries pointing at the same realpath via different
+        # symlinks: only the first survives in both lists.
+        with tempfile.TemporaryDirectory() as real_root, \
+             tempfile.TemporaryDirectory() as link_a, \
+             tempfile.TemporaryDirectory() as link_b:
+            real_sub = os.path.join(real_root, "sub")
+            os.makedirs(real_sub)
+            la = os.path.join(link_a, "sub")
+            lb = os.path.join(link_b, "sub")
+            os.symlink(real_sub, la)
+            os.symlink(real_sub, lb)
+            with tempfile.TemporaryDirectory() as cwd:
+                settings = os.path.join(cwd, ".claude", "settings.json")
+                _write_settings(settings, [la, lb])
+                reals, displays = discover_allowed_roots_with_display(
+                    cwd, settings_files=[settings],
+                )
+                # cwd + one entry (the second symlink dedups out).
+                self.assertEqual(len(reals), 2)
+                self.assertEqual(len(displays), 2)
+                self.assertEqual(displays[1], la)
+
+    def test_add_dirs_carried_with_display(self):
+        with tempfile.TemporaryDirectory() as cwd, \
+             tempfile.TemporaryDirectory() as extra:
+            reals, displays = discover_allowed_roots_with_display(
+                cwd, add_dirs=[extra], settings_files=[],
+            )
+            self.assertEqual(len(reals), 2)
+            self.assertEqual(displays[1], extra)
+            self.assertEqual(reals[1], os.path.realpath(extra))
+
+    def test_consistent_with_discover_allowed_roots(self):
+        # The reals list must equal what discover_allowed_roots returns.
+        with tempfile.TemporaryDirectory() as cwd, \
+             tempfile.TemporaryDirectory() as extra:
+            reals_only = discover_allowed_roots(
+                cwd, add_dirs=[extra], settings_files=[],
+            )
+            reals, _ = discover_allowed_roots_with_display(
+                cwd, add_dirs=[extra], settings_files=[],
+            )
+            self.assertEqual(reals, reals_only)
 
 
 if __name__ == "__main__":

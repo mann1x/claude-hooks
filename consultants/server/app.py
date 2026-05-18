@@ -78,6 +78,19 @@ class SessionState:
     # Follow-ups inherit this list and may extend it; ``run_follow_up``
     # in the runner merges the parent's roots with the follow-up's.
     extra_roots: list[str] = field(default_factory=list)
+    # 2026-05-18: parallel display form of ``extra_roots``, holding the
+    # user-facing pre-realpath path (``/shared/dev/<x>`` instead of
+    # ``/srv/dev-disk-by-label-opt/dev/<x>`` when the user's settings
+    # use the ``/shared`` symlink). ``extra_roots`` itself stays the
+    # realpath form for tool-sandbox checks. Same length + same order
+    # as ``extra_roots``. Empty list when display info wasn't
+    # captured at session-creation time (legacy sessions on disk).
+    extra_roots_display: list[str] = field(default_factory=list)
+    # Display form of the primary cwd (pre-realpath) — used only for
+    # log rendering, never for filesystem access. ``cwd`` itself
+    # remains the original path the runner received (so subsequent
+    # tool ops don't suddenly differ).
+    cwd_display: Optional[str] = None
     # Lifecycle. ``closed`` flips on explicit close OR idle reap;
     # downstream follow-up requests against a closed sid 410.
     # ``last_activity_at`` is bumped on every poll, follow-up start,
@@ -357,7 +370,9 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         # like caliber-grounding-proxy), so body-supplied roots are
         # operator-trusted here. Settings-file values come from disk
         # files the operator wrote.
-        from claude_hooks.allowed_roots import discover_allowed_roots
+        from claude_hooks.allowed_roots import (
+            discover_allowed_roots_with_display,
+        )
         body_extras = body.get("extra_roots") or []
         if not isinstance(body_extras, list) or not all(
             isinstance(x, str) for x in body_extras
@@ -366,22 +381,28 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
                 status_code=400,
                 detail="extra_roots must be a list of strings",
             )
-        discovered = discover_allowed_roots(
+        discovered, discovered_display = discover_allowed_roots_with_display(
             str(cwd_path), add_dirs=body_extras,
         )
         # discover_allowed_roots prepends the primary cwd; the runner
-        # wants extras only.
+        # wants extras only. Both lists share order so the parallel
+        # ``[1:]`` slices stay aligned.
         session_extra_roots: list[str] = list(discovered[1:])
+        session_extra_roots_display: list[str] = list(
+            discovered_display[1:]
+        )
 
         sid = _new_sid()
         state = SessionState(
             sid=sid,
             cwd=str(cwd_path),
+            cwd_display=discovered_display[0],
             question=question,
             effort=cfg.effort,
             topology=cfg.topology,
             progress={r: "pending" for r in cc.enabled_roles(cfg)},
             extra_roots=session_extra_roots,
+            extra_roots_display=session_extra_roots_display,
         )
         with app.state.sessions_lock:
             app.state.sessions[sid] = state
@@ -416,9 +437,11 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         runner_input = {
             "config": cfg,
             "cwd": str(cwd_path),
+            "cwd_display": discovered_display[0],
             "question": question,
             "trace": trace_flag,
             "extra_roots": session_extra_roots,
+            "extra_roots_display": session_extra_roots_display,
         }
 
         # Hand off to the executor. The runner mutates ``state`` and
@@ -521,9 +544,40 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
                 status_code=400,
                 detail="extra_roots must be a list of strings",
             )
+        # 2026-05-18: parallel display-form merge so follow-up logs
+        # also show the user-facing paths (the parent already carries
+        # ``extra_roots_display`` for itself; we extend it with the
+        # follow-up body's extras, treating them as their own display
+        # form). Body entries that resolve to a parent entry's
+        # realpath get dropped via ``_merge_extra_roots``; the display
+        # list mirrors the same dedupe in step.
+        merged_extra = _merge_extra_roots(
+            parent.extra_roots, followup_body_extras,
+        )
+        if parent.extra_roots_display and len(parent.extra_roots_display) == len(parent.extra_roots):
+            base_display = list(parent.extra_roots_display)
+        else:
+            base_display = list(parent.extra_roots)
+        # Reconstruct display by stepping through ``merged_extra`` and
+        # mapping each realpath back to (parent's display) if it came
+        # from the parent, or to the user-supplied body extra otherwise.
+        from claude_hooks.allowed_roots import _canonical  # internal
+        body_real_to_display: dict[str, str] = {}
+        for raw in followup_body_extras:
+            real = _canonical(raw)
+            if real:
+                body_real_to_display.setdefault(real, raw)
+        parent_real_to_display = dict(
+            zip(parent.extra_roots, base_display)
+        )
+        merged_display = [
+            parent_real_to_display.get(r) or body_real_to_display.get(r) or r
+            for r in merged_extra
+        ]
         child = SessionState(
             sid=child_sid,
             cwd=parent.cwd,
+            cwd_display=parent.cwd_display or parent.cwd,
             question=message,
             effort=cfg.effort,
             topology=parent.topology,
@@ -533,9 +587,8 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             # in order with dedup. The runner does the same merge for
             # the in-flight executor; we persist it so disk-reopen of
             # the child surfaces the full set.
-            extra_roots=_merge_extra_roots(
-                parent.extra_roots, followup_body_extras,
-            ),
+            extra_roots=merged_extra,
+            extra_roots_display=merged_display,
         )
         with app.state.sessions_lock:
             app.state.sessions[child_sid] = child
@@ -561,6 +614,7 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         runner_input = {
             "config": cfg,
             "cwd": parent.cwd,
+            "cwd_display": parent.cwd_display or parent.cwd,
             "question": message,
             "trace": trace_flag,
             "parent_state": parent,   # warm ChatClients + prior data
@@ -568,6 +622,8 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             # parent_state.extra_roots so a follow-up always sees the
             # parent's reach plus whatever this turn added.
             "extra_roots": followup_body_extras,
+            # Parallel pre-realpath display form of the body extras.
+            "extra_roots_display": list(followup_body_extras),
         }
         future = app.state.executor.submit(
             _run_with_state, app.state.run_follow_up, child, runner_input,
