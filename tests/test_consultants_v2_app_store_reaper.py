@@ -13,8 +13,11 @@ circuits to no-op):
 - Either ``cfg.store.ttl.enabled`` or
   ``cfg.store.distillation.enabled`` is True.
 
-Default config keeps ``store.enabled = False`` — the most common
-deploy path is "reaper does not start", which we cover explicitly.
+M14 default-on flip (2026-05-18) made ``store.enabled = True``
+the shipped default, with TTL + distillation also on. The
+reaper-skip paths (``store.enabled = False``, memory backend,
+provider load failure, …) remain reachable for hosts that opt
+out of persistence — those are the tests below.
 """
 from __future__ import annotations
 

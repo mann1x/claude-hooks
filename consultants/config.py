@@ -358,8 +358,11 @@ class StoreTTLConfig:
     ``refresh_on_read`` (default ``True``) bumps ``expires_at``
     forward on hit so recalled-and-cited findings stay alive — the
     "if it's still useful, keep it" heuristic.
+
+    M14 (2026-05-18) flipped ``enabled`` from False to True as
+    part of the default-on flip for the consultants store.
     """
-    enabled: bool = False
+    enabled: bool = True
     research_days: Optional[float] = 30.0
     tool_results_hours: Optional[float] = 24.0
     project_days: Optional[float] = None  # never
@@ -438,8 +441,11 @@ StoreReaperThread` finds expiring research rows, it groups them by
     - ``max_session_entries = 50`` — truncate before prompt
       assembly. ~600 chars/entry × 50 ≈ 30 k tokens (gemma's
       32 k ctx ceiling); larger groups overflow to the fallback.
+
+    M14 (2026-05-18) flipped ``enabled`` from False to True as
+    part of the default-on flip for the consultants store.
     """
-    enabled: bool = False
+    enabled: bool = True
     model: str = "gemma4:31b-cloud"
     fallback_models: tuple[str, ...] = ("glm-5.1:cloud",)
     sweep_interval_seconds: float = 3600.0
@@ -454,27 +460,40 @@ class StoreConfig:
     A LangGraph :class:`BaseStore` lets researcher lanes recall what
     other lanes already discovered (within a session) and lets the
     follow-up runner semantically replay the parent's research
-    (across sessions). The store is **opt-in** and **effort-gated**:
+    (across sessions). The store is **effort-gated**:
 
-    - ``enabled = false`` (default) — no store is wired; recall + record
-      helpers in :mod:`consultants.engine.store` are no-ops. Zero cost.
-    - ``backend = "memory"`` — LangGraph's bundled InMemoryStore (per-
-      process, no durability). Useful for users who want intra-session
-      recall without a database.
-    - ``backend = "pgvector"`` — wraps :class:`PgvectorProvider`. Shares
-      the Postgres instance the recall hook pipeline already uses.
-      Cross-session persistence + KG-style relations.
-    - ``backend = "sqlite_vec"`` — file-backed alternative for hosts
-      that don't run Postgres.
+    - ``enabled = true`` (M14 default) — store is wired into the
+      graph at the configured effort tiers.
+      ``backend = "sqlite_vec"`` (default) is the lowest-friction
+      persistence option: a single file at
+      ``~/.claude/consultants-store.db`` with no daemon dependency.
+      Cross-session persistence + the M14 TTL / distillation chain
+      fires (see ``[store.ttl]`` and ``[store.distillation]``).
+    - ``backend = "pgvector"`` — shares the Postgres instance the
+      recall hook pipeline already uses. Higher throughput, KG-
+      style relations available. Configure on hosts that already
+      run claude-hooks against pgvector.
+    - ``backend = "memory"`` — LangGraph's bundled InMemoryStore
+      (per-process, no durability). The M14 reaper short-circuits
+      on this backend because there's nothing to sweep
+      cross-session.
+    - ``enabled = false`` — explicit opt-out; recall + record
+      helpers in :mod:`consultants.engine.store` become no-ops.
+      Zero cost.
 
     The ``enable_at_efforts`` gate keeps the zero-cost path for the
     light tiers and turns the store on for the deep ones, where the
     multi-lane x-tier diversity benefits the most from cross-lane
     recall. Pass ``effort=None`` to the factory to bypass the gate
     entirely (used by the follow-up runner).
+
+    M14 (2026-05-18) flipped ``enabled`` from False to True and
+    ``backend`` from "memory" to "sqlite_vec" so the TTL +
+    distillation chain is wired by default. Hosts that don't want
+    any persistent state set ``enabled = false``.
     """
-    enabled: bool = False
-    backend: str = "memory"  # "memory" | "pgvector" | "sqlite_vec"
+    enabled: bool = True
+    backend: str = "sqlite_vec"  # "memory" | "pgvector" | "sqlite_vec"
     # Effort tiers at which the store is wired into the graph. Lower
     # tiers stay zero-cost. ``xauto`` is explicitly included because
     # it inherits the xmedium baseline and can escalate; we want the
@@ -490,10 +509,19 @@ class StoreConfig:
     # Backend-specific endpoints (only the relevant one is consulted).
     pgvector_dsn: Optional[str] = None
     pgvector_table: Optional[str] = None
-    sqlite_vec_path: Optional[str] = None
-    # M14: per-namespace TTL + distillation-on-expiry. Both default
-    # to ``enabled = False`` — the M14 wiring is fully opt-in so
-    # existing M8 deployments stay zero-cost.
+    # M14 default: a dedicated file under the user's claude config
+    # dir so the consultants store stays decoupled from the main
+    # recall pipeline's ``claude-hooks-memory.db``. The path is
+    # tilde-expanded by ``claude_hooks.utils.expand_user_path``
+    # downstream — leaving the literal ``~`` here keeps configs
+    # portable across hosts.
+    sqlite_vec_path: Optional[str] = "~/.claude/consultants-store.db"
+    # M14 default-on (2026-05-18): TTL + distillation default to
+    # ``enabled = True`` (in the sub-config dataclasses) so the
+    # consultants store self-curates. Hosts that don't want this
+    # set ``[store.ttl].enabled = false`` and
+    # ``[store.distillation].enabled = false``, or
+    # ``[store].enabled = false`` to disable the store outright.
     ttl: StoreTTLConfig = field(default_factory=StoreTTLConfig)
     distillation: StoreDistillationConfig = field(
         default_factory=StoreDistillationConfig,
@@ -917,7 +945,9 @@ def _render(cfg: ConsultantsConfig) -> str:
     L.append("")
     L.append("[store]")
     L.append("# Long-term memory BaseStore for cross-lane / cross-session recall.")
-    L.append("# enabled = false  -> no store wired (zero cost, default).")
+    L.append("# M14 default: enabled = true, backend = sqlite_vec ->")
+    L.append("#   ~/.claude/consultants-store.db with TTL + distillation on.")
+    L.append("# Set enabled = false for zero-cost (no store wired).")
     L.append("# backend choices: memory | pgvector | sqlite_vec")
     L.append(f"enabled = {'true' if cfg.store.enabled else 'false'}")
     L.append(f"backend = {_toml_str(cfg.store.backend)}")
@@ -940,9 +970,10 @@ def _render(cfg: ConsultantsConfig) -> str:
     L.append("")
     # M14: nested [store.ttl] block — per-namespace TTL.
     L.append("[store.ttl]")
-    L.append("# Per-namespace TTL on store entries. enabled = false "
-             "(default) keeps the M8 'live forever' behavior; flip on "
-             "to age out stale findings before they dilute recall.")
+    L.append("# Per-namespace TTL on store entries. M14 default = true "
+             "so research findings age out at research_days (30d) and "
+             "tool_results at tool_results_hours (24h); project / user "
+             "namespaces stay forever (null = never).")
     L.append(f"enabled = {'true' if cfg.store.ttl.enabled else 'false'}")
     if cfg.store.ttl.research_days is None:
         L.append("# research_days: null = never expire")

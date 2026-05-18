@@ -1052,7 +1052,10 @@ def _maybe_start_store_reaper(app, cfg, ollama_base_url: str) -> None:
     """
     store_cfg = getattr(cfg, "store", None)
     if store_cfg is None or not getattr(store_cfg, "enabled", False):
-        log.info("store reaper: cfg.store.enabled is False; not starting")
+        log.info(
+            "store reaper: cfg.store.enabled is False "
+            "(M14 default is True; admin set it false); not starting",
+        )
         return
     ttl_enabled = bool(getattr(getattr(store_cfg, "ttl", None), "enabled", False))
     dist_enabled = bool(getattr(

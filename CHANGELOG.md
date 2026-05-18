@@ -16,6 +16,66 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Changed — `/consultants` v2 M14 default-on flip (2026-05-18)
+
+The companion to commit `aac87e7` (M14 land). With the TTL +
+distillation chain shipped and verified, the shipped defaults
+now flip to "store on, self-curating":
+
+| Field                              | Before flip | After flip                              |
+|------------------------------------|-------------|-----------------------------------------|
+| `store.enabled`                    | `false`     | `true`                                  |
+| `store.backend`                    | `"memory"`  | `"sqlite_vec"`                          |
+| `store.sqlite_vec_path`            | `null`      | `"~/.claude/consultants-store.db"`      |
+| `store.ttl.enabled`                | `false`     | `true`                                  |
+| `store.distillation.enabled`       | `false`     | `true`                                  |
+
+**Why sqlite_vec (not pgvector) as the shipped default**: lowest-
+friction persistence (a single file under `~/.claude/`, no daemon
+dependency) that still triggers the TTL + distillation chain.
+Hosts that run claude-hooks against pgvector (e.g. solidPC)
+configure `backend = "pgvector"` explicitly. Hosts that want zero
+new state set `backend = "memory"` or `store.enabled = false`.
+
+**Effort-gate safety net preserves M12 parity**: `enable_at_efforts
+= ("high", "max", "xmedium", "xhigh", "xmax", "xauto")` excludes
+the default `effort = "medium"`. So a plain `claude-consultants
+ask` run at default effort still pays zero store cost — the
+factory short-circuits to `None` because of the gate, not because
+of `enabled = false`. The flip becomes observable only at high+
+tiers, where x-tier diversity benefits most from cross-lane
+recall.
+
+**Parity tests updated** (`tests/test_consultants_v2_parity.py`):
+- `test_store_disabled_by_default` → `test_store_enabled_by_default`
+  (assertion inverted).
+- New: `test_store_backend_is_sqlite_vec_by_default`,
+  `test_store_ttl_enabled_by_default`,
+  `test_store_distillation_enabled_by_default`.
+- `test_make_consultants_store_returns_none_on_default` →
+  `test_make_consultants_store_returns_none_at_default_effort`
+  (verifies the effort-gate safety net explicitly — same outcome,
+  the comment now documents *why*).
+
+**Pre-M14 configs continue to work unchanged**: explicit
+`[store] enabled = false` (or any explicit backend) is preserved
+by the TOML merge layer. Only configs with NO `[store]` block see
+the new defaults take over.
+
+**Verification** (both envs full sweep):
+
+- **claude-hooks-consultants**: 3735 pass / 30 skip (+3 new
+  parity tests vs the M14-land baseline of 3732).
+- **claude-hooks**: 3637 pass / 128 skip (+3 same parity tests
+  vs the M14-land baseline of 3634).
+- **M12 parity** — `pytest -m parity` — green in both envs.
+
+This is the post-M14 manual flip the user committed to in writing
+during the M14 plan ("flip store.enabled = True immediately after
+M14 ships so accumulation pressure starts the moment we land").
+Same shape as the M11c-5 atomic flip after the M11c-2 +
+M11c-3 land + verify sequence.
+
 ### Added — `/consultants` v2 per-namespace TTL + distillation-on-expiry for the M8 store (M14, task #104, 2026-05-18)
 
 The M8 LangGraph BaseStore adapter ships with TTL semantics and a

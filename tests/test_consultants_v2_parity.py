@@ -120,19 +120,49 @@ class TestOptInsOffByDefault(unittest.TestCase):
         # consultations don't pay the escalator's overhead.
         self.assertNotEqual(self.cfg.effort, "xauto")
 
-    # ----- M8 (BaseStore) --------------------------------------- #
+    # ----- M8 (BaseStore) + M14 (TTL + distillation) ------------ #
 
-    def test_store_disabled_by_default(self):
-        # M8: long-term memory BaseStore. Off so a fresh install
-        # doesn't quietly start writing research summaries to
-        # pgvector / sqlite_vec.
-        self.assertFalse(self.cfg.store.enabled)
+    def test_store_enabled_by_default(self):
+        # M14 (2026-05-18) flipped this default from False to True.
+        # The store itself wires in — but the ``enable_at_efforts``
+        # gate (excludes "medium") keeps it OFF for default-effort
+        # users (see test_make_consultants_store_returns_none_at_default_effort
+        # below). The flip becomes observable only at high+ tiers.
+        self.assertTrue(self.cfg.store.enabled)
 
-    def test_make_consultants_store_returns_none_on_default(self):
-        # The factory short-circuits to None when cfg.store.enabled
-        # is False — recall + record helpers downstream tolerate
-        # None and behave as no-ops.
+    def test_store_backend_is_sqlite_vec_by_default(self):
+        # M14: default backend flipped from "memory" to "sqlite_vec"
+        # so the TTL + distillation chain has a real persistence
+        # surface. Hosts that prefer pgvector configure explicitly;
+        # hosts that want zero deps stick with backend = "memory" or
+        # ``store.enabled = false``.
+        self.assertEqual(self.cfg.store.backend, "sqlite_vec")
+
+    def test_store_ttl_enabled_by_default(self):
+        # M14: per-namespace TTL on by default (research=30d,
+        # tool_results=24h, project/user=never). Hosts that want
+        # M8's live-forever behavior set ttl.enabled = false.
+        self.assertTrue(self.cfg.store.ttl.enabled)
+
+    def test_store_distillation_enabled_by_default(self):
+        # M14: Caliber-style distillation on by default — expiring
+        # research findings get summarized into the durable
+        # ("project", pid) namespace before deletion. The cost
+        # gate (min_entries_per_distillation = 3) keeps single-
+        # finding sessions from triggering an LLM call.
+        self.assertTrue(self.cfg.store.distillation.enabled)
+
+    def test_make_consultants_store_returns_none_at_default_effort(self):
+        # M14 default-on safety net: even with ``store.enabled =
+        # True``, the ``enable_at_efforts`` gate (excludes "medium",
+        # the default effort) means ``make_consultants_store`` still
+        # short-circuits to None at the default config. This
+        # preserves the original M12 parity guarantee for plain
+        # ``claude-consultants ask`` runs — they pay zero store
+        # cost unless the operator explicitly bumps effort.
         from consultants.engine.store import make_consultants_store
+        self.assertEqual(self.cfg.effort, "medium")
+        self.assertNotIn("medium", self.cfg.store.enable_at_efforts)
         store = make_consultants_store(
             self.cfg, sid="csl-parity-test", effort=self.cfg.effort,
         )
