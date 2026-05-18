@@ -41,14 +41,21 @@ class TestDefaults:
         assert cc.validate_pipeline(cfg) is None
 
     def test_opt_in_roles_default_state(self):
-        # M11c-5 (2026-05-17): tool_executor flipped to enabled-
-        # by-default after the M11c-2 bench cleared the rubric +
-        # M11c-3 resolved task #103 (x-tier proper composition).
-        # M10 coder stays disabled-by-default (different decision,
-        # gated by the operator opting into sandboxed file writes).
-        # Every other role stays enabled-by-default.
+        # tool_executor flip history:
+        #   M11c-1 scaffold False → M11c-5 (2026-05-17) True
+        #   after the M11c-2 bench + #103 gate cleared →
+        #   2026-05-18 back to False after the M14 first-real-ask
+        #   tool_executor on/off A/B
+        #   (benchmarks/consultants/results/2026-05-18/tool-executor-ab/)
+        #   showed the role +12 min wall / +43% tokens AND fewer
+        #   edge cases identified on a grep-shaped question. The
+        #   M11c-2 bench still validates the role on tool-heavy
+        #   reasoning; the default-off recognizes most operator
+        #   questions don't look like that bench corpus.
+        # coder remains disabled-by-default (operator opts in to
+        # sandboxed file writes). Every other role stays enabled.
         cfg = cc.ConsultantsConfig()
-        assert cfg.roles["tool_executor"].enabled is True
+        assert cfg.roles["tool_executor"].enabled is False
         assert cfg.roles["coder"].enabled is False
         for r in cc.ROLES:
             if r in ("tool_executor", "coder"):
@@ -88,16 +95,16 @@ class TestDefaults:
         assert cfg.effort == cc.DEFAULT_EFFORT
         assert cfg.service.mode == cc.DEFAULT_SERVICE_MODE
         for r in cc.ROLES:
-            # M11c-5 (2026-05-17): tool_executor enabled-by-
-            # default after the M11c-2 bench (gemma4:31b-cloud at
-            # 87.5% / 5.00) + M11c-3 #103 resolution. coder stays
-            # disabled-by-default (M10, gated separately by the
-            # operator opting into sandboxed file writes). Both
-            # carry role-specific model picks grounded in the
-            # skill-eval bench. Every other role tracks the global
-            # DEFAULT_MODEL.
+            # 2026-05-18: tool_executor flipped back to disabled-
+            # by-default after the M14 first-real-ask A/B
+            # (benchmarks/consultants/results/2026-05-18/tool-executor-ab/).
+            # The role's MODEL pick stays gemma4:31b-cloud (M11c-2
+            # bench winner) for operators who opt in. coder stays
+            # disabled (operator opts in to sandboxed file writes)
+            # with the M11b coder rubric winner as model. Every
+            # other role tracks the global DEFAULT_MODEL.
             if r == "tool_executor":
-                assert cfg.roles[r].enabled is True
+                assert cfg.roles[r].enabled is False
                 assert cfg.roles[r].model == "gemma4:31b-cloud"
             elif r == "coder":
                 assert cfg.roles[r].enabled is False

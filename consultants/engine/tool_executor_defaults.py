@@ -92,27 +92,35 @@ RECOMMENDED_TOOL_EXECUTOR_MODEL: str = "gemma4:31b-cloud"
 # **M11c-5 decision (2026-05-17): flipped to ``True``.** Both
 # parts of the M11c plan's two-part gate cleared:
 #
-# 1. ✅ Bench winner clears the rubric (``pass_rate=87.5%`` AND
-#    ``avg_quality=5.00`` from M11c-2, commit ``235fe6c``).
-# 2. ✅ Task #103 (x-tier proper composition) resolved via the
-#    M11c-3 engine refactor (commit ``e62fd85``). The role
-#    composes cleanly under Phase 9 multi-model researcher
-#    fanout — each researcher lane's REPORT-mode prompt sees
-#    only its own ToolResults (verified by
-#    ``tests/test_consultants_v2_tool_executor_xtier_composition.py``).
+# Flip history:
+# - M11c-1 (2026-05-17): scaffold False.
+# - M11c-5 (2026-05-17): flipped True after the two-part gate
+#   cleared — M11c-2 bench rubric pass (87.5% / 5.00) +
+#   task #103 (x-tier proper composition) via M11c-3 engine
+#   refactor (commit ``e62fd85``).
+# - 2026-05-18: flipped back to False. The M14 first-real-ask
+#   tool_executor on/off A/B
+#   (``benchmarks/consultants/results/2026-05-18/tool-executor-ab/``)
+#   showed the role costing +12 minutes wall time and +43% tokens
+#   on a grep-shaped question AND identifying fewer edge cases
+#   than the inline-tool-loop variant. The M11c-2 bench result
+#   still stands for the tool-heavy question shape that bench
+#   targeted; the default flip-back recognizes most operator
+#   questions don't look like the bench corpus.
 #
-# ``consultants/config.py:DEFAULT_ENABLED_BY_ROLE["tool_executor"]``
-# now reads ``True`` (atomic with this flip — the M12 parity test
+# This module remains the bench-grounded provenance record for
+# the role. Setting ``RECOMMENDED_DEFAULT_ON = False`` here does
+# NOT delete the M11c-2 win — it records the operator-side
+# trade-off that informs the default. The
+# ``RECOMMENDED_TOOL_EXECUTOR_MODEL`` constant still surfaces the
+# bench-validated pick (``gemma4:31b-cloud``) for operators who
+# opt in via TOML.
+#
+# Atomic with ``consultants/config.py:DEFAULT_ENABLED_BY_ROLE``
+# — the M12 parity test
 # ``test_scaffold_default_on_matches_runtime_default`` enforces
-# bit-for-bit alignment).
-#
-# Why the gate's part 2 mattered:
-# [[feedback_xtier_diversity_priority]] forbids auto-gating Phase
-# 9 multi-model researcher fanout because it's the council's
-# defining advantage. The M11c-3 refactor made tool_executor SAFE
-# at x-tier (no cross-pollution under N×M lanes), which is what
-# the gate required before flipping the default.
-RECOMMENDED_DEFAULT_ON: bool = True
+# bit-for-bit alignment.
+RECOMMENDED_DEFAULT_ON: bool = False
 
 
 __all__ = [

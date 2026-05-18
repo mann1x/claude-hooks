@@ -16,6 +16,91 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Changed — consultants: tool_executor flipped back to disabled-by-default (#211, 2026-05-18)
+
+The M14 first-real-ask A/B run on 2026-05-18 measured the
+``tool_executor`` role at full x-tier (3 models × 3 lanes) under
+its M11c-5 default-on configuration:
+
+| Variant            | Wall   | Tokens | Edge cases caught |
+|--------------------|-------:|-------:|------------------:|
+| WITH tool_executor | 1121 s | ~840 k | 8                 |
+| WITHOUT (synth)    |  403 s | ~480 k | 9                 |
+
+Net result: 3× slower wall time, +43% tokens, ``-1`` edge case
+under the role's intended best-case shape (a grep-heavy
+research question on this repo). Full A/B record in
+[``benchmarks/consultants/results/2026-05-18/tool-executor-ab/report.md``](benchmarks/consultants/results/2026-05-18/tool-executor-ab/report.md).
+
+The architectural read: the tool_executor → researcher fanback
+forces each researcher lane to read tool results through the
+M11c-3 ``parent_lane_idx``-routed ``Send`` aggregation barrier,
+which (a) serializes a fan-in step that the synthesizer-direct
+path skips entirely, and (b) makes researcher-side fabrications
+more visible because tool_results give the lane plausible
+"sources" to cite from without grounding.
+
+The role remains supported, fully tested, and ready to enable
+per-role for **slow-tool-budget questions** where the synthesizer
+would otherwise re-issue the same five grep calls across nine
+lanes (the role's actual win condition). Flipped in two places
+that mirror each other intentionally:
+
+- ``consultants/config.py:DEFAULT_ENABLED_BY_ROLE["tool_executor"]: False``
+- ``consultants/engine/tool_executor_defaults.py:RECOMMENDED_DEFAULT_ON = False``
+
+The flip history comment block in both files records the full
+M11c-1 → M11c-5 → 2026-05-18 path so the next time someone
+considers flipping this they have to read the A/B record first.
+
+Test surface follows the flip:
+
+- ``tests/test_tool_executor_defaults.py`` — renamed
+  ``test_recommended_default_on_true_after_103_resolved`` →
+  ``test_recommended_default_on_is_false_after_m14_ab``;
+  ``TestM11c5RuntimeDefault`` → ``TestRuntimeDefault``;
+  ``test_default_enabled_by_role_is_true`` →
+  ``test_default_enabled_by_role_is_false``.
+- ``tests/test_consultants_v2_parity.py:test_tool_executor_role_disabled_by_default`` —
+  renamed from ``_enabled_by_default``; ``assertFalse`` with the
+  flip-history comment block.
+- ``tests/test_consultants_config.py:TestDefaults.test_opt_in_roles_default_state``
+  and ``test_load_with_no_files_returns_defaults`` — updated to
+  assert ``cfg.roles["tool_executor"].enabled is False`` with the
+  same flip-history comment.
+
+M12 parity is preserved by construction: the parity baseline
+locks "today-default == tomorrow-default", and we have a new
+default — the parity tests assert the new default and the
+fixtures that exercise the on path explicitly opt in via
+``cfg.roles["tool_executor"].enabled = True``.
+
+### Added — consultants: role-by-role reference doc (#208, 2026-05-18)
+
+[``docs/consultants-roles.md``](docs/consultants-roles.md) is a
+~250-line role-by-role reference covering all 6 active roles:
+``planner``, ``researcher`` (Mode A inline / Mode B PLAN-REPORT
+split), ``critic``, ``synthesizer``, ``tool_executor``,
+``coder``. The doc opens with a quick map table
+(default state, model, tier coverage, doc anchor) and each
+section gives the role's responsibility, the prompts that drive
+it, the planner-emitted JSON contracts where applicable, and the
+M11c / M11b bench evidence backing the model picks.
+
+Particular focus on the two opt-in roles per the user's request:
+
+- ``coder`` — sandbox limits, why model picks matter, the M11b
+  skill-eval rubric, the failure modes (sandbox cap rejection,
+  no transactional rollback, planner-emitted ``coder_tasks``
+  contract).
+- ``tool_executor`` — opens with a "default disabled" status
+  banner, links the M14 A/B record, lists 4 specific
+  shortcomings to know about when enabled (wall time, token
+  cost, aggregation lossiness, researcher contamination
+  amplification), and a "when to enable anyway" section
+  explaining the role's actual win condition (cross-lane tool
+  call deduplication under slow-tool budgets).
+
 ### Added — consultants: prompt-level guard against source-listing fabrications (#207, 2026-05-18)
 
 Cross-trace of the 2026-05-18 ``csl-2026-05-18-1428-589c`` run

@@ -86,18 +86,24 @@ class TestOptInsOffByDefault(unittest.TestCase):
 
     # ----- M6 (tool_executor role) ------------------------------ #
 
-    def test_tool_executor_role_enabled_by_default(self):
-        # M11c-5 (2026-05-17) flipped tool_executor to enabled-by-
-        # default after the two-part gate cleared: the M11c-2
-        # bench winner (gemma4:31b-cloud at 87.5% / 5.00) AND
-        # task #103 (x-tier proper composition) resolved via the
-        # M11c-3 engine refactor (per-lane parent_lane_idx +
-        # _fanout_after_tool_executor conditional edge replacing
-        # the unconditional M6 edge). A default-config
-        # consultation now wires the tool_executor lane and
-        # routes researcher PLAN-mode tool intents through a
-        # dedicated specialist instead of an inline subloop.
-        self.assertTrue(self.cfg.roles["tool_executor"].enabled)
+    def test_tool_executor_role_disabled_by_default(self):
+        # Flip history:
+        # - M11c-1 (2026-05-17): scaffold False.
+        # - M11c-5 (2026-05-17): True after the two-part gate
+        #   cleared (M11c-2 bench rubric pass + #103 x-tier
+        #   composition via M11c-3 engine refactor).
+        # - 2026-05-18: back to False. The M14 first-real-ask
+        #   tool_executor on/off A/B
+        #   (benchmarks/consultants/results/2026-05-18/tool-executor-ab/)
+        #   showed the role +12 min wall / +43% tokens AND
+        #   fewer edge cases identified on a grep-shaped
+        #   question. The M11c-2 bench still validates the role
+        #   on tool-heavy reasoning; the default flip-back
+        #   recognizes that bench's question shape is not what
+        #   most operator questions look like. Operators who
+        #   want the specialist opt in via:
+        #     [role.tool_executor]  enabled = true
+        self.assertFalse(self.cfg.roles["tool_executor"].enabled)
 
     def test_awaiting_tool_results_field_dropped_from_state(self):
         # #103 (M11c-3): the scalar ``awaiting_tool_results`` flag

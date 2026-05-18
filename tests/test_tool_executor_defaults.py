@@ -1,18 +1,18 @@
-"""Scaffold-shape tests for
+"""Tests for
 ``consultants/engine/tool_executor_defaults.py``.
 
-M11c-1 ships the module as an empty scaffold. These tests pin the
-shape so M11c-2 (the live-run + closeout commit) can't accidentally
-land while leaving the scaffold half-populated or with mismatched
-defaults.
+Pins the module's shape + the current runtime-default contract.
+Flips of ``RECOMMENDED_DEFAULT_ON`` (and the paired
+``DEFAULT_ENABLED_BY_ROLE["tool_executor"]`` in
+``consultants/config.py``) are deliberate, recorded in a
+benchmark file under ``benchmarks/consultants/results/...``,
+and require BOTH constants to move atomically — the drift test
+below catches accidents.
 
-Crucially: assertions hold the **M12 parity guarantee** — importing
-this module does NOT change the existing
-``DEFAULT_ENABLED_BY_ROLE["tool_executor"]=False`` from
-``consultants/config.py``. The engine wiring (if M11c-2 flips
-``RECOMMENDED_DEFAULT_ON=True``) happens in a separate commit
-that reads this module's constants and updates config defaults
-explicitly.
+Current state (2026-05-18): both default to ``False`` after the
+M14 first-real-ask tool_executor on/off A/B showed the role
+net-negative on grep-shaped questions. The M11c-2 bench result
+remains the recommendation when operators opt in.
 """
 
 from __future__ import annotations
@@ -56,43 +56,56 @@ class TestToolExecutorDefaultsScaffoldShape(unittest.TestCase):
             "regressed",
         )
 
-    def test_recommended_default_on_true_after_103_resolved(self) -> None:
-        """M11c-5 outcome (2026-05-17): both parts of the gate
-        cleared — rubric pass at 87.5% / 5.00 (M11c-2), AND task
-        #103 (x-tier proper composition) resolved by the M11c-3
-        engine refactor (commit ``e62fd85``: per-lane
-        ``parent_lane_idx`` threading + the
-        ``_fanout_after_tool_executor`` conditional edge). The
-        default-on bit flipped to True; this test guards against
-        a regression back to False without re-evaluating the
-        two-part gate."""
-        self.assertEqual(ted.RECOMMENDED_DEFAULT_ON, True)
+    def test_recommended_default_on_is_false_after_m14_ab(self) -> None:
+        """Flip history:
+
+        * M11c-1 (2026-05-17): scaffold False.
+        * M11c-5 (2026-05-17): True after the two-part gate
+          cleared — M11c-2 bench rubric pass + task #103
+          (x-tier proper composition) via M11c-3 refactor.
+        * 2026-05-18: back to False. The M14 first-real-ask
+          tool_executor on/off A/B
+          (``benchmarks/consultants/results/2026-05-18/tool-executor-ab/``)
+          showed the role costing +12 minutes wall + 43% tokens
+          AND identifying fewer edge cases on a grep-shaped
+          question. The M11c-2 bench result still validates the
+          role for tool-heavy reasoning corpora; the flip-back
+          says the bench corpus is not what most operator
+          questions look like.
+
+        This test guards against an accidental re-flip without
+        a fresh A/B providing the inverse evidence.
+        """
+        self.assertEqual(ted.RECOMMENDED_DEFAULT_ON, False)
 
 
-class TestM11c5RuntimeDefault(unittest.TestCase):
-    """M11c-5 (2026-05-17) atomic flip of the runtime default.
-
-    The M12 parity guarantee from M11c-1 ("importing
-    ``tool_executor_defaults`` doesn't change runtime behavior")
-    no longer applies — M11c-5 deliberately changes the runtime
-    default. These tests pin the new state so a future commit
-    that quietly reverts the flip fails CI loudly.
+class TestRuntimeDefault(unittest.TestCase):
+    """Pin the current runtime default. Flips happen deliberately
+    (with paired updates to ``RECOMMENDED_DEFAULT_ON`` AND a
+    benchmark record under
+    ``benchmarks/consultants/results/...``); this test fails
+    CI when one half of the flip is missed.
     """
 
-    def test_default_enabled_by_role_is_true(self) -> None:
+    def test_default_enabled_by_role_is_false(self) -> None:
         """``DEFAULT_ENABLED_BY_ROLE["tool_executor"]`` is now
-        ``True`` — M11c-5 atomic flip. A fresh ConsultantsConfig
-        gets the tool_executor lane wired by default."""
+        ``False`` (2026-05-18 flip-back). A fresh
+        ConsultantsConfig leaves tool_executor disabled; the
+        researcher runs its own inline tool-loop. Operators who
+        want the specialist role opt in via TOML:
+        ``[role.tool_executor]  enabled = true``."""
         from consultants.config import DEFAULT_ENABLED_BY_ROLE
 
         self.assertEqual(
-            DEFAULT_ENABLED_BY_ROLE["tool_executor"], True,
+            DEFAULT_ENABLED_BY_ROLE["tool_executor"], False,
         )
 
     def test_default_model_by_role_unchanged(self) -> None:
         """``DEFAULT_MODEL_BY_ROLE["tool_executor"]`` stays
-        ``"gemma4:31b-cloud"`` — the M11c-2 bench confirmed the
-        M6 fallback was the right pick; no change here."""
+        ``"gemma4:31b-cloud"`` — the M11c-2 bench result is
+        still the recommended model when operators opt in. The
+        default-off flip didn't invalidate the bench, only the
+        baseline-on conclusion."""
         from consultants.config import DEFAULT_MODEL_BY_ROLE
 
         self.assertEqual(
@@ -102,12 +115,8 @@ class TestM11c5RuntimeDefault(unittest.TestCase):
     def test_scaffold_default_on_matches_runtime_default(self) -> None:
         """``RECOMMENDED_DEFAULT_ON`` and
         ``DEFAULT_ENABLED_BY_ROLE["tool_executor"]`` must agree
-        bit-for-bit. M11c-1 shipped both at False; M11c-2 left
-        them both at False (gate part 2 unresolved); M11c-5
-        flipped them both to True atomically. A future commit
-        that nudges one without the other (e.g. to disable the
-        role again) MUST touch both fields — this test guards
-        against drift."""
+        bit-for-bit. Any flip MUST touch both fields atomically —
+        this test fails when one is nudged without the other."""
         from consultants.config import DEFAULT_ENABLED_BY_ROLE
 
         self.assertEqual(

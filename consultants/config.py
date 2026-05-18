@@ -222,23 +222,44 @@ DEFAULT_MODEL_BY_ROLE: dict[str, str] = {
 }
 
 
-# M11c-5 (2026-05-17): tool_executor flipped to enabled-by-default
-# after the M11c-2 bench cleared the rubric (gemma4:31b-cloud at
-# 87.5% / 5.00) AND task #103 (x-tier proper composition) resolved
-# via the M11c-3 engine refactor. See
-# ``consultants/engine/tool_executor_defaults.py`` for the bench-
-# grounded provenance + the rationale recorded under
-# ``project_consultants_v2_103_proper_composition``.
+# History of tool_executor's default-on bit:
 #
-# Coder remains disabled-by-default — different decision, gated by
-# the operator opting into sandboxed file writes. Opting in is one
-# TOML line:
+# - M11c-1 (2026-05-17, scaffold): False.
+# - M11c-5 (2026-05-17, flip-on after bench): True. The M11c-2
+#   bench cleared its rubric (gemma4:31b-cloud at 87.5% / 5.00)
+#   AND task #103 (x-tier proper composition) resolved via the
+#   M11c-3 engine refactor.
+# - 2026-05-18 (flip-back-off): False. The M14 first-real-ask
+#   tool_executor on/off A/B
+#   (``benchmarks/consultants/results/2026-05-18/tool-executor-ab/``)
+#   showed the role costing +12 minutes wall time and +43% tokens
+#   AND identifying FEWER edge cases on a grep-shaped question.
+#   M11c-2 still validates the role for the tool-heavy reasoning
+#   questions that bench targeted; this flip-back recognizes that
+#   the bench's question shape is NOT what most operator questions
+#   look like. Default-off is the right baseline; operators who
+#   want the role's specialization can opt in.
+#
+# When tool_executor is net-positive (turn it on):
+#   * Heavy cross-file tool work (5+ files, deep call chains).
+#   * Questions where each researcher lane would otherwise
+#     saturate context just running grep / read_file.
+#   * Sub-question shapes that match the M11c-2 corpus profile
+#     (see ``benchmarks/consultants/questions/tool_executor/``).
+#
+# When tool_executor is net-negative (leave it off):
+#   * Grep-and-interpret questions like the M14 walk-me-through
+#     prompt. Inline researcher tool-loop is faster + sharper
+#     because the model that calls grep is the one that
+#     interprets it (no fanback aggregation lossiness).
+#   * Sessions where wall time is the binding constraint.
+#
+# Coder remains disabled-by-default — operator must opt into
+# sandboxed file writes. Both opt-in/opt-out is one TOML line:
 #   [role.coder]          enabled = true
-# Disabling tool_executor (if an operator needs the legacy
-# researcher-with-inline-tool-subloop topology) is also one line:
-#   [role.tool_executor]  enabled = false
+#   [role.tool_executor]  enabled = true     # opt-in to specialist
 DEFAULT_ENABLED_BY_ROLE: dict[str, bool] = {
-    "tool_executor": True,
+    "tool_executor": False,
     "coder": False,
 }
 
