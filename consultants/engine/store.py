@@ -630,6 +630,28 @@ def make_consultants_store(
     return ProviderBackedStore(provider, ttl_config=ttl_config)
 
 
+def _merge_embedder_options(store_cfg) -> dict:
+    """Build the embedder block of a provider's options from store_cfg.
+
+    Returns a dict shaped like the recall hook pipeline's
+    ``providers.<name>`` JSON entry — ``embedder`` (name) +
+    ``embedder_options`` (kwargs). When ``store_cfg.embedder`` is
+    unset, returns an empty dict so the provider falls back to
+    its own default (``"null"`` for pgvector, ``"null"`` for
+    sqlite_vec — both raise on first embed, which is correct: a
+    misconfigured store must fail loud, not silently no-op).
+    """
+    out: dict = {}
+    embedder = getattr(store_cfg, "embedder", None)
+    if isinstance(embedder, str) and embedder.strip():
+        out["embedder"] = embedder.strip()
+    opts = getattr(store_cfg, "embedder_options", None)
+    if isinstance(opts, dict) and opts:
+        # Shallow copy so the caller can't mutate the config.
+        out["embedder_options"] = dict(opts)
+    return out
+
+
 def _load_pgvector(store_cfg):  # pragma: no cover — runtime-only
     try:
         from claude_hooks.providers.pgvector import PgvectorProvider
@@ -644,9 +666,19 @@ def _load_pgvector(store_cfg):  # pragma: no cover — runtime-only
     options: dict = {}
     if dsn:
         options["dsn"] = dsn
-    table = getattr(store_cfg, "table", None)
+    # ``StoreConfig.pgvector_table`` is the canonical M14 field;
+    # the legacy ``store_cfg.table`` lookup stays for compatibility
+    # with any test seam that built a store_cfg-shaped dict.
+    table = (
+        getattr(store_cfg, "pgvector_table", None)
+        or getattr(store_cfg, "table", None)
+    )
     if table:
         options["table"] = table
+    # M14 follow-up: thread embedder config so the provider can
+    # actually embed. Without this, every call goes through
+    # NullEmbedder and raises ``EmbedderError``.
+    options.update(_merge_embedder_options(store_cfg))
     cand = ServerCandidate(server_key="consultants-pgvector", url="")
     try:
         return PgvectorProvider(cand, options=options)
@@ -669,6 +701,8 @@ def _load_sqlite_vec(store_cfg):  # pragma: no cover — runtime-only
     options: dict = {}
     if path:
         options["db_path"] = path
+    # Same embedder-threading rationale as _load_pgvector.
+    options.update(_merge_embedder_options(store_cfg))
     cand = ServerCandidate(server_key="consultants-sqlite-vec", url="")
     try:
         return SqliteVecProvider(cand, options=options)

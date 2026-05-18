@@ -24,6 +24,7 @@ env.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -516,6 +517,18 @@ class StoreConfig:
     # downstream — leaving the literal ``~`` here keeps configs
     # portable across hosts.
     sqlite_vec_path: Optional[str] = "~/.claude/consultants-store.db"
+    # M14 follow-up (2026-05-18): the provider needs an embedder to
+    # turn ``content`` into vectors at ``store`` / ``recall_hybrid``
+    # time. Without explicit config it defaults to ``NullEmbedder``,
+    # which always raises — so every store call would fail.
+    # ``embedder`` and ``embedder_options`` mirror the shape used by
+    # the recall hook pipeline's ``providers.pgvector`` /
+    # ``providers.sqlite_vec`` blocks in ``claude-hooks.json``, so
+    # operators can copy/paste their existing embedder config
+    # straight across into ``[store]`` without re-learning the
+    # field names.
+    embedder: Optional[str] = None  # "ollama" | "llamafile" | ...
+    embedder_options: dict = field(default_factory=dict)
     # M14 default-on (2026-05-18): TTL + distillation default to
     # ``enabled = True`` (in the sub-config dataclasses) so the
     # consultants store self-curates. Hosts that don't want this
@@ -784,6 +797,16 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
             base.store.pgvector_table = st["pgvector_table"].strip() or None
         if "sqlite_vec_path" in st and isinstance(st["sqlite_vec_path"], str):
             base.store.sqlite_vec_path = st["sqlite_vec_path"].strip() or None
+        # M14 follow-up: embedder + embedder_options. Required when
+        # backend = "pgvector" or "sqlite_vec" — without these the
+        # provider falls back to NullEmbedder and store calls fail.
+        if "embedder" in st and isinstance(st["embedder"], str):
+            base.store.embedder = st["embedder"].strip() or None
+        if "embedder_options" in st and isinstance(
+                st["embedder_options"], dict):
+            # Shallow copy + str-key normalisation; TOML keys are
+            # already strings so this is a defensive no-op.
+            base.store.embedder_options = dict(st["embedder_options"])
 
         # M14: nested [store.ttl] block — opt-in per-namespace TTL.
         ttl_raw = st.get("ttl") or {}
@@ -967,6 +990,38 @@ def _render(cfg: ConsultantsConfig) -> str:
         L.append(f"sqlite_vec_path = {_toml_str(cfg.store.sqlite_vec_path)}")
     else:
         L.append('# sqlite_vec_path = "~/.claude/consultants-store.db"')
+    # M14 follow-up: embedder config. Without these the pgvector /
+    # sqlite_vec backend falls back to NullEmbedder and every store
+    # call raises. ``install.py`` borrows the values from the main
+    # recall pipeline's providers block; operators can hand-edit
+    # here to override.
+    if cfg.store.embedder:
+        L.append(f"embedder = {_toml_str(cfg.store.embedder)}")
+    else:
+        L.append('# embedder = "llamafile"   # or "ollama" — borrow '
+                 'from providers.<name>.embedder')
+    if cfg.store.embedder_options:
+        L.append("[store.embedder_options]")
+        for k in sorted(cfg.store.embedder_options.keys()):
+            v = cfg.store.embedder_options[k]
+            if isinstance(v, bool):
+                L.append(f"{k} = {'true' if v else 'false'}")
+            elif isinstance(v, (int, float)):
+                L.append(f"{k} = {v}")
+            elif isinstance(v, str):
+                L.append(f"{k} = {_toml_str(v)}")
+            else:
+                # Lists/dicts: emit as JSON-ish literal and trust
+                # the TOML parser to accept it. Rare in practice.
+                L.append(f"{k} = {json.dumps(v)}")
+        L.append("")
+    else:
+        L.append("# [store.embedder_options]")
+        L.append('# url = "http://127.0.0.1:38092/embedding"')
+        L.append('# model = "qwen3-embedding:0.6b"')
+        L.append("# timeout = 30.0")
+        L.append("# num_ctx = 16384")
+        L.append("# daemon_ensure = true")
     L.append("")
     # M14: nested [store.ttl] block — per-namespace TTL.
     L.append("[store.ttl]")

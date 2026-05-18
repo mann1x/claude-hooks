@@ -16,6 +16,121 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — M14 follow-up: store embedder config + install.py wiring + TTL backfill script (2026-05-18)
+
+Three pieces that close the M14 "production-ready" gap surfaced
+during deployment to solidPC:
+
+**1. Store embedder config plumbing.** The M14 ProviderBackedStore
+needs an embedder to turn `content` into vectors at write /
+recall time. Pre-this-commit, `_load_pgvector` and
+`_load_sqlite_vec` didn't read `embedder` / `embedder_options`
+off `StoreConfig` — the provider fell back to `NullEmbedder` and
+every store call would have raised `EmbedderError`. Smoke
+worked because it built the provider directly with embedder
+options; the daemon path would have spun.
+
+Fix:
+
+- `StoreConfig` grew `embedder: Optional[str]` and
+  `embedder_options: dict` fields, mirroring the shape used by
+  the main recall pipeline's `providers.<name>` block in
+  `claude-hooks.json`.
+- TOML merge layer (`_merge_layer`) reads `embedder` /
+  `embedder_options` from `[store]` and from a nested
+  `[store.embedder_options]` table.
+- TOML render emits both fields so `save_config` →
+  re-`load_config` round-trips cleanly. When no embedder is
+  configured, the renderer emits a commented-out template so
+  hand-editing operators see the right shape.
+- `_load_pgvector` / `_load_sqlite_vec` thread the fields into
+  the provider's `options` dict via the new
+  `_merge_embedder_options` helper.
+
+**2. `install.py` consultants-store wiring** —
+`_setup_consultants_store(cfg, ...)` is a new helper called
+from `_install_consultants` after the conda env install. It
+inspects the main recall pipeline's
+`providers.pgvector` / `providers.sqlite_vec` blocks and:
+
+- If pgvector is enabled with an embedder → consultants
+  `backend = "pgvector"`, DSN copied across, dedicated
+  `pgvector_table = "consultants_store"` to keep recall +
+  consultants writes separate, embedder block borrowed.
+- Else if sqlite_vec is enabled with an embedder → consultants
+  `backend = "sqlite_vec"`, dedicated db path
+  `~/.claude/consultants-store.db`, embedder block borrowed.
+- Else → leaves M14 defaults but prints a warning that the
+  store will fail at runtime without manual embedder config.
+
+The helper writes via `consultants.config.save_config(scope=
+"user")` so the canonical TOML render path is used — hand-
+edited and CLI-mutator round-trips stay intact.
+
+**3. `scripts/backfill_expires_at.py` — retroactive TTL.**
+Pre-M14 rows have `expires_at = NULL` and live forever by
+design (correct default-preserving behaviour on upgrade — see
+the [`feedback_pgvector_rollback_hygiene`](../../../root/.claude/projects/-srv-dev-disk-by-label-opt-dev-claude-hooks/memory/feedback_pgvector_rollback_hygiene.md)
+memory and the M14 plan's "Non-goals" section). But operators
+sometimes WANT to age out historical data ("anything older than
+6 months"). The new script does exactly that, opt-in, with
+safety rails:
+
+```bash
+# Dry-run first — reports counts + SQL, no writes:
+python scripts/backfill_expires_at.py \
+    --dsn "postgresql://user:pass@host/db" \
+    --table memories_qwen3 \
+    --days 180 \
+    --dry-run
+
+# Apply:
+python scripts/backfill_expires_at.py \
+    --sqlite-vec-path ~/.claude/consultants-store.db \
+    --table memory \
+    --days 30
+```
+
+Safety rails:
+
+- Only touches rows where `expires_at IS NULL` — M14-stamped
+  rows are untouched.
+- `--days <= 0` refused (would expire everything immediately).
+- `--max-rows N` cap (default 1_000_000) prevents accidental
+  multi-hour migrations on giant tables.
+- `--dry-run` mode reports counts + the actual SQL.
+- Unsafe table names refused via the same regex pgvector
+  provider uses (`_safe_table`).
+- Refuses with a clear error when the table lacks `expires_at`
+  (M14 migration hasn't run yet).
+- Per-tx commit so a Ctrl-C mid-run leaves a partial backfill
+  that re-running with the same `--days` picks up cleanly.
+- Stdlib-only beyond psycopg / sqlite3 — psycopg only imported
+  when `--dsn` is supplied.
+
+Exit codes: 0 (applied), 1 (nothing to update / usage), 2
+(backend error), 3 (SIGINT).
+
+**Tests** (+20 since the flip baseline of 3735 / 3637):
+
+- `tests/test_consultants_v2_store_embedder.py` — 11 tests
+  covering field defaults, TOML merge, TOML render round-trip,
+  `_load_pgvector` / `_load_sqlite_vec` thread the embedder
+  into provider options.
+- `tests/test_backfill_expires_at.py` — 9 tests via
+  subprocess invocation against a real sqlite db: dry-run
+  reports counts without writes, apply updates only NULL rows
+  + preserves M14-stamped rows, missing column errors, no-NULL
+  rows returns rc=1, --max-rows cap refuses oversized backfill,
+  --days safety rails, unsafe table name refused, --dsn /
+  --sqlite-vec-path mutually exclusive.
+
+**Verification** (both envs full sweep):
+
+- **claude-hooks-consultants**: 3757 / 30 (+20).
+- **claude-hooks**: 3659 / 128 (+20).
+- M12 parity green in both envs.
+
 ### Fixed — pgvector M14 migration + transaction-abort regressions surfaced by live distillation smoke (2026-05-18)
 
 Two real defects landed by the M14 commit `aac87e7`, both caught

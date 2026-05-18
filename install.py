@@ -4983,6 +4983,26 @@ def _install_consultants(cfg: dict, cfg_path: Path, *,
                            or "http://127.0.0.1:38096"))
                          .rsplit(":", 1)[-1].rstrip("/"))
 
+    # M14 follow-up (2026-05-18): wire the consultants long-term-
+    # memory store. Defaults to the new sqlite_vec backend + an
+    # embedder borrowed from the main recall pipeline's pgvector or
+    # sqlite_vec block so the engine doesn't try to embed via the
+    # NullEmbedder on first store call. Non-fatal: a write failure
+    # here just leaves the M14 defaults in place — the user can
+    # always re-run install.py or hand-edit
+    # ~/.claude/consultants-config.toml.
+    try:
+        _setup_consultants_store(
+            cfg, consultants_py=consultants_py,
+            non_interactive=non_interactive, dry_run=dry_run,
+        )
+    except Exception as e:
+        print(f"    [warn] consultants store config setup failed: {e}")
+        print(f"           consultants daemon will fall back to "
+              f"sqlite_vec at ~/.claude/consultants-store.db "
+              f"without an embedder — store calls will fail until "
+              f"you hand-edit ~/.claude/consultants-config.toml.")
+
     # Platform autostart.
     if platform.system() == "Linux":
         if service_mode == "always-on":
@@ -5094,6 +5114,146 @@ def _write_consultants_task_xml(*, description: str, command: str,
     os.close(fd)
     Path(path).write_bytes(xml.encode("utf-16"))
     return Path(path)
+
+
+def _setup_consultants_store(cfg: dict, *, consultants_py: Path,
+                             non_interactive: bool,
+                             dry_run: bool) -> None:
+    """M14 follow-up — wire the consultants long-term-memory store.
+
+    The M14 defaults (2026-05-18) ship with ``store.enabled = True``,
+    ``backend = "sqlite_vec"`` at ``~/.claude/consultants-store.db``,
+    TTL on, distillation on. But the consultants store needs an
+    **embedder** to turn ``content`` into vectors at store /
+    recall_hybrid time. Without one configured, every call falls
+    back to ``NullEmbedder`` and raises ``EmbedderError``.
+
+    This helper borrows the embedder config from the main recall
+    pipeline's ``providers.pgvector`` or ``providers.sqlite_vec``
+    block in ``claude-hooks.json`` — that way a host whose recall
+    is already wired to llamafile/ollama gets a matching consultants
+    store without re-typing the embedder block.
+
+    Selection rule:
+      1. If ``providers.pgvector.enabled = true`` AND it has an
+         embedder configured → consultants backend = "pgvector",
+         DSN + table + embedder copied over. A dedicated table
+         (default ``consultants_store``) is used so the recall
+         pipeline's ``memories_<model>`` isn't co-mingled.
+      2. Else if ``providers.sqlite_vec.enabled = true`` AND it has
+         an embedder → consultants backend = "sqlite_vec",
+         dedicated db path under ``~/.claude/consultants-store.db``,
+         embedder copied.
+      3. Else → leave M14 defaults but print a warning that the
+         store will fail at runtime unless the operator wires an
+         embedder by hand.
+
+    The consultants store is persisted to
+    ``~/.claude/consultants-config.toml`` via the canonical
+    :func:`consultants.config.save_config` so the TOML round-trips
+    cleanly with the CLI's other mutators.
+    """
+    providers = cfg.get("providers") or {}
+    pg = providers.get("pgvector") or {}
+    sv = providers.get("sqlite_vec") or {}
+
+    def _has_embedder(block: dict) -> bool:
+        emb = block.get("embedder")
+        return isinstance(emb, str) and bool(emb.strip())
+
+    chosen_backend: Optional[str] = None
+    embedder_name: Optional[str] = None
+    embedder_options: dict = {}
+    pgvector_dsn: Optional[str] = None
+    pgvector_table: Optional[str] = None
+    sqlite_vec_path: Optional[str] = None
+
+    if pg.get("enabled") and _has_embedder(pg):
+        chosen_backend = "pgvector"
+        embedder_name = str(pg.get("embedder") or "").strip() or None
+        embedder_options = dict(pg.get("embedder_options") or {})
+        pgvector_dsn = str(pg.get("dsn") or "").strip() or None
+        # Dedicated table keeps consultants writes separate from the
+        # recall pipeline's ``memories_<model>`` so the M14 reaper
+        # never touches user-curated recall data.
+        pgvector_table = "consultants_store"
+    elif sv.get("enabled") and _has_embedder(sv):
+        chosen_backend = "sqlite_vec"
+        embedder_name = str(sv.get("embedder") or "").strip() or None
+        embedder_options = dict(sv.get("embedder_options") or {})
+        # Always a dedicated file — never share the recall db_path so
+        # the reaper can't scan recall-pipeline rows.
+        sqlite_vec_path = "~/.claude/consultants-store.db"
+    else:
+        print("    [warn] No enabled pgvector/sqlite_vec provider "
+              "with an embedder found in main config.")
+        print("           Consultants store will use M14 defaults "
+              "(sqlite_vec @ ~/.claude/consultants-store.db) but "
+              "WITHOUT an embedder — store calls will raise.")
+        print("           Hand-edit ~/.claude/consultants-config.toml "
+              "and add an [store] block with embedder + "
+              "embedder_options to enable the store.")
+        return
+
+    if dry_run:
+        print(f"    [dry-run] Would set consultants store backend = "
+              f"{chosen_backend!r} with embedder = {embedder_name!r}")
+        return
+
+    # Load existing TOML via the consultants-env python so we use the
+    # canonical dataclass + render path (subprocess isolates the
+    # heavy LangGraph imports from the main installer process).
+    payload = {
+        "backend": chosen_backend,
+        "embedder": embedder_name,
+        "embedder_options": embedder_options,
+        "pgvector_dsn": pgvector_dsn,
+        "pgvector_table": pgvector_table,
+        "sqlite_vec_path": sqlite_vec_path,
+    }
+    helper = (
+        "import json, sys\n"
+        "payload = json.loads(sys.stdin.read())\n"
+        "from consultants import config as cc\n"
+        "cfg = cc.load_config()\n"
+        "cfg.store.enabled = True\n"
+        "cfg.store.backend = payload['backend']\n"
+        "if payload.get('embedder'):\n"
+        "    cfg.store.embedder = payload['embedder']\n"
+        "if payload.get('embedder_options'):\n"
+        "    cfg.store.embedder_options = dict(payload['embedder_options'])\n"
+        "if payload.get('pgvector_dsn'):\n"
+        "    cfg.store.pgvector_dsn = payload['pgvector_dsn']\n"
+        "if payload.get('pgvector_table'):\n"
+        "    cfg.store.pgvector_table = payload['pgvector_table']\n"
+        "if payload.get('sqlite_vec_path'):\n"
+        "    cfg.store.sqlite_vec_path = payload['sqlite_vec_path']\n"
+        "path = cc.save_config(cfg, scope='user')\n"
+        "print(str(path))\n"
+    )
+    proc = subprocess.run(
+        [str(consultants_py), "-c", helper],
+        input=json.dumps(payload), capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        print("    [warn] consultants config write failed:")
+        print(f"           {proc.stderr.strip()[-300:]}")
+        return
+    path = proc.stdout.strip() or "~/.claude/consultants-config.toml"
+    print(f"    Consultants store wired:")
+    print(f"      backend  = {chosen_backend}")
+    print(f"      embedder = {embedder_name}")
+    if chosen_backend == "pgvector":
+        # DSN may contain a password — print only host:port/db to
+        # avoid leaking credentials into install logs.
+        safe_dsn = pgvector_dsn or ""
+        if "@" in safe_dsn:
+            safe_dsn = "***@" + safe_dsn.rsplit("@", 1)[-1]
+        print(f"      dsn      = {safe_dsn}")
+        print(f"      table    = {pgvector_table}")
+    else:
+        print(f"      db_path  = {sqlite_vec_path}")
+    print(f"      written  -> {path}")
 
 
 def _wait_for_consultants_health(port: int, *,
