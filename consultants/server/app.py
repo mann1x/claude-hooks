@@ -216,11 +216,21 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
                idle_timeout_s: float = DEFAULT_IDLE_TIMEOUT_S,
                reaper_interval_s: float = DEFAULT_REAPER_INTERVAL_S,
                run_follow_up: Optional[Callable[..., None]] = None,
-               start_reaper: bool = True) -> "FastAPI":
+               start_reaper: bool = True,
+               cfg: Optional["cc.ConsultantsConfig"] = None,
+               ollama_base_url: Optional[str] = None) -> "FastAPI":
     """Build a FastAPI app. ``run_council`` is the in-process
     council executor; if None, the app comes up but ``/v1/consult``
     returns 503 (useful for tests that only exercise the read-side
-    routes)."""
+    routes).
+
+    ``cfg`` + ``ollama_base_url`` enable the M14 store reaper. When
+    ``cfg.store.enabled`` is True and either ``cfg.store.ttl.enabled``
+    or ``cfg.store.distillation.enabled`` is set, a daemon
+    :class:`~consultants.engine.store_reaper.StoreReaperThread` is
+    spawned at startup and joined on shutdown. Tests / older callers
+    that don't pass cfg just skip the reaper — opt-in by design.
+    """
     try:
         from fastapi import FastAPI, HTTPException
     except ImportError as e:  # pragma: no cover
@@ -244,6 +254,38 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
     app.state.reaper_stop = threading.Event()
     if start_reaper:
         _start_idle_reaper(app)
+
+    # M14: optionally spawn the store reaper (TTL sweep +
+    # distillation-on-expiry). Off unless cfg + ollama_base_url are
+    # both supplied AND cfg.store enables either TTL or
+    # distillation. Failure to start is logged + non-fatal — the
+    # app still comes up.
+    app.state.store_reaper = None
+    if cfg is not None and ollama_base_url:
+        try:
+            _maybe_start_store_reaper(app, cfg, ollama_base_url)
+        except Exception:  # pragma: no cover — defensive
+            log.exception(
+                "_maybe_start_store_reaper failed; "
+                "M14 reaper unavailable",
+            )
+
+    # Shutdown hook — joins the store reaper if one was started.
+    # Idle-reaper shutdown is already handled via reaper_stop.
+    @app.on_event("shutdown")
+    async def _shutdown_store_reaper() -> None:  # pragma: no cover
+        reaper = getattr(app.state, "store_reaper", None)
+        if reaper is not None:
+            try:
+                reaper.stop(timeout=5.0)
+            except Exception:
+                log.exception("store_reaper.stop failed")
+        # Also signal the idle reaper to exit (uvicorn already does
+        # this for the daemon thread, but we're explicit).
+        try:
+            app.state.reaper_stop.set()
+        except Exception:
+            pass
 
     # M9: register the control-surface routes (GET /state, POST
     # /inject / /control / /interrupt / /resume / /cancel, GET
@@ -991,6 +1033,117 @@ def _close_session(app, sid: str, *, reason: str) -> None:
     state._chat_clients = None
     state._coder_chat_clients_by_model = None
     log.info("closed session %s (reason=%s)", sid, reason)
+
+
+def _maybe_start_store_reaper(app, cfg, ollama_base_url: str) -> None:
+    """Spawn the M14 :class:`StoreReaperThread` when config opts in.
+
+    Gates (any False short-circuits to no-op):
+
+    - ``cfg.store`` exists.
+    - ``cfg.store.enabled`` is True.
+    - Either ``cfg.store.ttl.enabled`` or
+      ``cfg.store.distillation.enabled`` is True.
+    - A provider can be loaded for ``cfg.store.backend``.
+
+    On success the reaper is stashed at ``app.state.store_reaper`` so
+    the shutdown hook can join it. Failures are logged + non-fatal
+    — the app still comes up without a reaper.
+    """
+    store_cfg = getattr(cfg, "store", None)
+    if store_cfg is None or not getattr(store_cfg, "enabled", False):
+        log.info("store reaper: cfg.store.enabled is False; not starting")
+        return
+    ttl_enabled = bool(getattr(getattr(store_cfg, "ttl", None), "enabled", False))
+    dist_enabled = bool(getattr(
+        getattr(store_cfg, "distillation", None), "enabled", False,
+    ))
+    if not ttl_enabled and not dist_enabled:
+        log.info(
+            "store reaper: neither store.ttl nor store.distillation "
+            "is enabled; not starting",
+        )
+        return
+
+    # Reuse the same backend loaders the consultants store uses so
+    # the daemon and the per-session stores write through the same
+    # connection class. The reaper-side provider is independent of
+    # any specific session — the reaper sweeps across sids.
+    backend = (getattr(store_cfg, "backend", "memory") or "memory").lower()
+    if backend == "memory":
+        log.info(
+            "store reaper: backend=memory is per-process; "
+            "no cross-session sweep needed — not starting",
+        )
+        return
+    try:
+        from consultants.engine.store import (
+            _load_pgvector, _load_sqlite_vec, make_consultants_store,
+        )
+    except Exception:
+        log.exception("store reaper: store module import failed")
+        return
+    if backend == "pgvector":
+        provider = _load_pgvector(store_cfg)
+    elif backend == "sqlite_vec":
+        provider = _load_sqlite_vec(store_cfg)
+    else:
+        log.warning(
+            "store reaper: unknown backend %r; not starting", backend,
+        )
+        return
+    if provider is None:
+        log.warning(
+            "store reaper: provider load failed for backend=%r; "
+            "not starting", backend,
+        )
+        return
+
+    # Build a long-lived store for the project-namespace writes
+    # ``write_distilled_summary`` performs. Bypass the effort gate
+    # (the reaper is daemon-side, not session-side) by passing
+    # ``effort=None``.
+    try:
+        store = make_consultants_store(
+            cfg, sid="<reaper>", effort=None,
+        )
+    except Exception:
+        log.exception("store reaper: make_consultants_store raised")
+        return
+    if store is None:
+        log.warning(
+            "store reaper: make_consultants_store returned None; "
+            "not starting",
+        )
+        return
+
+    distiller = None
+    if dist_enabled:
+        try:
+            from consultants.engine.distillation import Distiller
+            distiller = Distiller(
+                store_cfg.distillation, ollama_base_url,
+            )
+        except Exception:
+            log.exception(
+                "store reaper: Distiller init failed; sweep will "
+                "delete-only, no distillation",
+            )
+
+    from consultants.engine.store_reaper import StoreReaperThread
+    reaper = StoreReaperThread(
+        store_cfg=store_cfg,
+        provider=provider,
+        distiller=distiller,
+        store=store,
+    )
+    reaper.start()
+    app.state.store_reaper = reaper
+    log.info(
+        "store reaper: started (backend=%s, ttl=%s, distill=%s, "
+        "interval=%.0fs)",
+        backend, ttl_enabled, dist_enabled, reaper.interval_seconds,
+    )
 
 
 def _start_idle_reaper(app) -> None:

@@ -81,7 +81,9 @@ class TestFreshDB(unittest.TestCase):
         )
         v = migrate_schema(self.conn, embedding_dim=4, table="memory")
         self.assertEqual(v, LATEST_VERSION)
-        self.assertEqual(v, 1)
+        # M14: LATEST_VERSION bumped from 1 to 2. The migration must
+        # land at the current latest, whatever that is.
+        self.assertEqual(v, LATEST_VERSION)
 
     def test_fresh_creates_all_required_tables(self):
         from claude_hooks.providers.sqlite_vec_schema import migrate_schema
@@ -220,22 +222,38 @@ class TestIdempotency(unittest.TestCase):
         self.conn.close()
 
     def test_rerun_returns_same_version(self):
-        from claude_hooks.providers.sqlite_vec_schema import migrate_schema
+        from claude_hooks.providers.sqlite_vec_schema import (
+            migrate_schema, LATEST_VERSION,
+        )
         v1 = migrate_schema(self.conn, embedding_dim=4, table="memory")
         v2 = migrate_schema(self.conn, embedding_dim=4, table="memory")
         v3 = migrate_schema(self.conn, embedding_dim=4, table="memory")
         self.assertEqual(v1, v2)
         self.assertEqual(v2, v3)
-        self.assertEqual(v1, 1)
+        # M14: track LATEST_VERSION (2) rather than hard-coding 1.
+        self.assertEqual(v1, LATEST_VERSION)
 
     def test_rerun_does_not_duplicate_version_row(self):
-        from claude_hooks.providers.sqlite_vec_schema import migrate_schema
+        from claude_hooks.providers.sqlite_vec_schema import (
+            migrate_schema, LATEST_VERSION,
+        )
         migrate_schema(self.conn, embedding_dim=4, table="memory")
-        migrate_schema(self.conn, embedding_dim=4, table="memory")
-        count = self.conn.execute(
+        # Snapshot row count after initial migration; M14 writes one
+        # row per migration step, so a fresh DB landing at v2 holds
+        # two rows (one for v1, one for v2). The invariant under
+        # test is "re-running migrate_schema doesn't add new rows" —
+        # i.e. row count is stable across no-op runs, not that it
+        # equals 1.
+        before = self.conn.execute(
             "SELECT COUNT(*) FROM claude_hooks_schema"
         ).fetchone()[0]
-        self.assertEqual(count, 1)
+        self.assertGreaterEqual(before, 1)
+        self.assertLessEqual(before, LATEST_VERSION)
+        migrate_schema(self.conn, embedding_dim=4, table="memory")
+        after = self.conn.execute(
+            "SELECT COUNT(*) FROM claude_hooks_schema"
+        ).fetchone()[0]
+        self.assertEqual(before, after)
 
     def test_rerun_with_existing_data_doesnt_double_fts(self):
         from claude_hooks.providers.sqlite_vec_schema import migrate_schema
@@ -249,7 +267,8 @@ class TestIdempotency(unittest.TestCase):
         fts_after_first = self.conn.execute(
             "SELECT COUNT(*) FROM memory_fts"
         ).fetchone()[0]
-        # Second migration is a no-op — version is already 1
+        # Second migration is a no-op — version is already at the
+        # current LATEST_VERSION (2 since M14; was 1 in v1.7).
         migrate_schema(self.conn, embedding_dim=4, table="memory")
         fts_after_second = self.conn.execute(
             "SELECT COUNT(*) FROM memory_fts"
@@ -389,21 +408,25 @@ class TestRoundTripOnDisk(unittest.TestCase):
         self.tmpdir.cleanup()
 
     def test_reopen_sees_v1(self):
+        # Name kept for blame stability; the assertion now pins
+        # ``LATEST_VERSION`` (2 since M14, was 1 in v1.7) so the
+        # test tracks the schema's current latest rather than a
+        # hard-coded number.
         from claude_hooks.providers.sqlite_vec_schema import (
-            migrate_schema, _read_version,
+            migrate_schema, _read_version, LATEST_VERSION,
         )
         conn = _conn(str(self.db_path))
         try:
             migrate_schema(conn, embedding_dim=4, table="memory")
         finally:
             conn.close()
-        # Reopen and re-run migrate; should be a no-op at v1.
+        # Reopen and re-run migrate; should be a no-op at LATEST_VERSION.
         conn = _conn(str(self.db_path))
         try:
             v = _read_version(conn)
-            self.assertEqual(v, 1)
+            self.assertEqual(v, LATEST_VERSION)
             migrate_schema(conn, embedding_dim=4, table="memory")
-            self.assertEqual(_read_version(conn), 1)
+            self.assertEqual(_read_version(conn), LATEST_VERSION)
         finally:
             conn.close()
 
@@ -426,14 +449,17 @@ class TestSafeTable(unittest.TestCase):
                 migrate_schema(self.conn, embedding_dim=4, table=bad)
 
     def test_valid_table_name_accepted(self):
-        from claude_hooks.providers.sqlite_vec_schema import migrate_schema
+        from claude_hooks.providers.sqlite_vec_schema import (
+            migrate_schema, LATEST_VERSION,
+        )
         for good in ("memory", "test_mem", "MyTable", "t1_2_3", "_under"):
             # Each runs against its own connection (else the second
             # call short-circuits on the version check).
             c = _conn()
             try:
                 v = migrate_schema(c, embedding_dim=4, table=good)
-                self.assertEqual(v, 1)
+                # M14: pin to LATEST_VERSION, not a hard-coded 1.
+                self.assertEqual(v, LATEST_VERSION)
             finally:
                 c.close()
 

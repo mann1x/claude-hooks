@@ -60,6 +60,11 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Optional, Protocol
 
+from claude_hooks.providers._content_hash import (
+    compute_expires_at,
+    content_hash,
+)
+
 
 # Optional langgraph import — the BaseStore subclass only exists
 # when langgraph is installed. The convenience helpers
@@ -166,6 +171,13 @@ if HAVE_LANGGRAPH_STORE:
         (``abatch``) defers to ``batch``. The consultants runner
         already wraps node work via ``asyncio.to_thread`` so calling
         sync here is fine.
+
+        **M14 — per-namespace TTL**: when a ``ttl_config`` is wired,
+        ``_do_put`` stamps ``expires_at`` on the provider metadata,
+        ``_do_get`` and ``_do_search`` filter expired items, and
+        recall hits roll their expiry forward when
+        ``refresh_on_read = True``. Without a ``ttl_config`` the
+        store behaves exactly as in M8 — every row lives forever.
         """
 
         def __init__(
@@ -173,9 +185,16 @@ if HAVE_LANGGRAPH_STORE:
             provider: StoreProvider,
             *,
             marker: str = _STORE_MARKER,
+            ttl_config: Optional[Any] = None,
         ):
             self._provider = provider
             self._marker = marker
+            # M14: optional per-namespace TTL. None / disabled →
+            # the M8 contract is preserved bit-for-bit.
+            self._ttl = ttl_config if (
+                ttl_config is not None
+                and getattr(ttl_config, "enabled", False)
+            ) else None
             # ns -> key -> Item; only as durable as this object
             self._index: dict[tuple[str, ...], dict[str, Item]] = (
                 defaultdict(dict)
@@ -206,7 +225,16 @@ if HAVE_LANGGRAPH_STORE:
 
         def _do_get(self, op):
             ns = tuple(op.namespace)
-            return self._index.get(ns, {}).get(op.key)
+            item = self._index.get(ns, {}).get(op.key)
+            if item is None:
+                return None
+            # M14: drop expired items silently — callers asking for a
+            # specific key on an expired entry want "not found", not a
+            # stale value. ``ttl_for_namespace(ns) is None`` means the
+            # namespace never expires; preserve M8 semantics there.
+            if self._is_expired(ns, item):
+                return None
+            return item
 
         def _do_put(self, op):
             ns = tuple(op.namespace)
@@ -242,6 +270,14 @@ if HAVE_LANGGRAPH_STORE:
                 "created_at": item.created_at.isoformat(),
                 "updated_at": item.updated_at.isoformat(),
             }
+            # M14: stamp expires_at when the namespace has a TTL. The
+            # provider reads this from metadata and writes the new
+            # ``expires_at`` column (pgvector) or ``expires_at TEXT``
+            # column (sqlite_vec). ``None`` → row never expires (M8
+            # contract preserved).
+            exp_iso = self._compute_expires_iso(ns, now)
+            if exp_iso is not None:
+                meta["expires_at"] = exp_iso
             try:
                 self._provider.store(text, metadata=meta)
             except Exception:  # pragma: no cover — provider-side
@@ -249,6 +285,106 @@ if HAVE_LANGGRAPH_STORE:
                     "ProviderBackedStore: provider.store raised; "
                     "in-process index updated but vector recall will "
                     "miss this item",
+                )
+
+        # ---- M14 TTL helpers ---- #
+
+        def _ttl_seconds_for(
+            self, ns: tuple[str, ...],
+        ) -> Optional[float]:
+            """TTL in seconds for this namespace, or ``None``."""
+            if self._ttl is None:
+                return None
+            try:
+                return self._ttl.ttl_for_namespace(ns)
+            except Exception:  # pragma: no cover — defensive
+                return None
+
+        def _compute_expires_iso(
+            self, ns: tuple[str, ...], now: datetime,
+        ) -> Optional[str]:
+            """ISO-8601 expiry stamp for a row in this namespace,
+            or ``None`` when the namespace has no TTL configured."""
+            ttl_s = self._ttl_seconds_for(ns)
+            return compute_expires_at(now, ttl_s)
+
+        def _is_expired(
+            self, ns: tuple[str, ...], item: Item,
+        ) -> bool:
+            """In-process expiry check using ``updated_at + TTL``.
+
+            The in-process index doesn't carry ``expires_at`` as a
+            distinct field — we derive it from ``updated_at`` plus
+            the namespace's TTL. This stays consistent with the
+            provider's ``expires_at`` column as long as refresh-on-
+            read bumps both sides in lockstep (see ``_refresh_hit``).
+            """
+            ttl_s = self._ttl_seconds_for(ns)
+            if ttl_s is None:
+                return False  # namespace has no TTL
+            now = datetime.now(timezone.utc)
+            updated = item.updated_at
+            if updated is None:
+                return False  # legacy item without an anchor
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=timezone.utc)
+            return (now - updated).total_seconds() > ttl_s
+
+        def _refresh_hit(
+            self, ns: tuple[str, ...], h: Any,
+        ) -> None:
+            """Bump a successful recall hit's expiry forward.
+
+            Touches BOTH sides so subsequent ``_do_get`` and
+            ``_do_search`` agree on aliveness:
+
+            1. Provider column — uses ``content_hash(h.text)`` as
+               the lookup key (mirrors how the row was stored;
+               whitespace-normalised SHA-256 is the shared idempotency
+               key — see :mod:`claude_hooks.providers._content_hash`).
+            2. In-process Item.updated_at — overwritten with ``now``
+               so the in-process expiry math (``updated_at + TTL``)
+               agrees with the provider column.
+
+            Silent no-op when refresh isn't configured or the hit
+            text is empty.
+            """
+            if self._ttl is None or not self._ttl.refresh_on_read:
+                return
+            ttl_s = self._ttl_seconds_for(ns)
+            if ttl_s is None:
+                return  # never-expire namespace; no refresh needed
+            text = getattr(h, "text", "") or ""
+            if not text:
+                return
+            now = datetime.now(timezone.utc)
+            new_iso = compute_expires_at(now, ttl_s)
+            if new_iso is None:
+                return
+            try:
+                self._provider.refresh_expires_at(
+                    content_hash(text), new_iso,
+                )
+            except Exception:  # pragma: no cover — provider-side
+                log.exception(
+                    "ProviderBackedStore: refresh_expires_at raised; "
+                    "hit still served but expires_at not bumped",
+                )
+            # Mirror the bump into the in-process index so the next
+            # ``_do_get`` for the same key on this object instance
+            # doesn't think the item is older than it is.
+            meta = getattr(h, "metadata", None) or {}
+            key = meta.get("key") or ""
+            existing = self._index.get(ns, {}).get(key)
+            if existing is not None:
+                # Item is a frozen dataclass; rebuild with new
+                # updated_at.
+                self._index[ns][key] = Item(
+                    value=existing.value,
+                    key=existing.key,
+                    namespace=existing.namespace,
+                    created_at=existing.created_at,
+                    updated_at=now,
                 )
 
         def _do_search(self, op):
@@ -291,6 +427,7 @@ if HAVE_LANGGRAPH_STORE:
 
             seen: set[tuple] = set()
             out: list[SearchItem] = []
+            now = datetime.now(timezone.utc)
             for h in hits:
                 meta = getattr(h, "metadata", None) or {}
                 if not meta.get(self._marker):
@@ -304,6 +441,23 @@ if HAVE_LANGGRAPH_STORE:
                 if (ns, key) in seen:
                     continue
                 seen.add((ns, key))
+                # M14: server-side filter on expires_at. The provider
+                # already drops expired rows from search-by-text via
+                # the daemon's sweep, but a hit can still surface
+                # between sweeps if its expiry crossed mid-window.
+                # Filter here so callers never see an expired item.
+                exp_iso = meta.get("expires_at")
+                if exp_iso:
+                    try:
+                        exp_dt = datetime.fromisoformat(exp_iso)
+                        if exp_dt.tzinfo is None:
+                            exp_dt = exp_dt.replace(
+                                tzinfo=timezone.utc,
+                            )
+                        if exp_dt <= now:
+                            continue  # expired; skip silently
+                    except (TypeError, ValueError):
+                        pass  # tolerate malformed timestamps
                 value = meta.get("value")
                 if not isinstance(value, dict):
                     # Older entries or non-dict payloads — surface
@@ -323,6 +477,11 @@ if HAVE_LANGGRAPH_STORE:
                     updated_at=updated,
                     score=score,
                 ))
+                # M14: refresh-on-read — bump expires_at forward
+                # because this row is still useful (it just got
+                # cited by a recall). Bumping the provider AND the
+                # in-process index keeps both views consistent.
+                self._refresh_hit(ns, h)
                 if len(out) >= op.limit + op.offset:
                     break
             return out[op.offset: op.offset + op.limit]
@@ -463,7 +622,12 @@ def make_consultants_store(
 
     if provider is None:
         return None
-    return ProviderBackedStore(provider)
+    # M14: thread the optional ``StoreTTLConfig`` into the adapter so
+    # per-namespace TTL + refresh-on-read apply at write/read time.
+    # ``getattr`` with a None fallback keeps pre-M14 configs (which
+    # lack the ``ttl`` field) working unchanged.
+    ttl_config = getattr(store_cfg, "ttl", None)
+    return ProviderBackedStore(provider, ttl_config=ttl_config)
 
 
 def _load_pgvector(store_cfg):  # pragma: no cover — runtime-only

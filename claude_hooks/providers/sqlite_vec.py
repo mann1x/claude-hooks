@@ -173,6 +173,16 @@ class SqliteVecProvider(Provider):
         table = _safe_table(self.options.get("table") or "memory")
         vec_blob = _pack_vec(vec)
         ch = content_hash(content)
+        # M14: pull expires_at out of metadata if the caller provided
+        # one (the ProviderBackedStore adapter computes it from
+        # ``StoreTTLConfig.ttl_for_namespace``). NULL means "never
+        # expire", which is the legacy v1.7.0 behavior and stays the
+        # default when the metadata key is absent.
+        expires_at = None
+        if isinstance(metadata, dict):
+            ea = metadata.get("expires_at")
+            if isinstance(ea, str) and ea.strip():
+                expires_at = ea
         try:
             with self._conn:  # type: ignore[union-attr]
                 # v1.7.0: idempotent on content_hash. Re-storing the
@@ -188,13 +198,17 @@ class SqliteVecProvider(Provider):
                     # conflict target so SQLite recognises the
                     # constraint. See ``CREATE UNIQUE INDEX`` in
                     # sqlite_vec_schema.py.
-                    f"INSERT INTO {table}(content, content_hash, metadata) "
-                    f"VALUES (?, ?, ?) "
+                    f"INSERT INTO {table}"
+                    f"(content, content_hash, metadata, expires_at) "
+                    f"VALUES (?, ?, ?, ?) "
                     f"ON CONFLICT(content_hash) "
                     f"  WHERE content_hash IS NOT NULL "
                     f"  DO NOTHING "
                     f"RETURNING rowid",
-                    (content, ch, json.dumps(metadata or {})),
+                    (
+                        content, ch, json.dumps(metadata or {}),
+                        expires_at,
+                    ),
                 )
                 row = cur.fetchone()
                 if row is None:
@@ -209,6 +223,127 @@ class SqliteVecProvider(Provider):
                 )
         except sqlite3.Error as e:
             log.warning("sqlite_vec insert failed: %s", e)
+            raise
+
+    # ------------------------------------------------------------------ #
+    # M14 — TTL surface (per-row ``expires_at``)
+    # ------------------------------------------------------------------ #
+
+    def expire_before(
+        self, *, before_iso: str, limit: int = 1000,
+    ) -> list:
+        """Return rows whose ``expires_at`` is non-NULL and lexically
+        less than ``before_iso``.
+
+        The lexical comparison is correct because the column stores
+        ISO-8601 strings (sortable as text). The partial index on
+        ``expires_at`` lets this query skip the non-TTL rows
+        entirely; on a million-row store with N TTL'd rows it scans
+        O(N), not O(million).
+
+        Args:
+            before_iso: any row with ``expires_at < before_iso`` is
+                included. The daemon passes ``(now - grace).isoformat()``.
+            limit: cap per call. The reaper drives this in a loop
+                until it gets less than ``limit`` back (the standard
+                "small page until empty" cleanup pattern).
+
+        Returns:
+            List of :class:`ExpiringRow` ordered by ``expires_at``
+            ascending (oldest first). Empty when nothing matches.
+        """
+        from claude_hooks.providers._content_hash import ExpiringRow
+        if not before_iso:
+            return []
+        self._ensure_ready()
+        table = _safe_table(self.options.get("table") or "memory")
+        try:
+            rows = self._conn.execute(  # type: ignore[union-attr]
+                f"SELECT content_hash, content, metadata, expires_at "
+                f"FROM {table} "
+                f"WHERE expires_at IS NOT NULL "
+                f"AND expires_at < ? "
+                f"ORDER BY expires_at ASC "
+                f"LIMIT ?",
+                (before_iso, int(limit)),
+            ).fetchall()
+        except sqlite3.Error as e:
+            log.warning("sqlite_vec expire_before failed: %s", e)
+            return []
+        out: list = []
+        for ch, content, meta_json, exp in rows:
+            try:
+                meta = json.loads(meta_json) if meta_json else {}
+            except json.JSONDecodeError:
+                meta = {}
+            out.append(ExpiringRow(
+                content_hash=bytes(ch) if ch is not None else b"",
+                content=content or "",
+                metadata=meta,
+                expires_at=exp or "",
+            ))
+        return out
+
+    def refresh_expires_at(
+        self, content_hash_bytes: bytes, new_expires_iso: str,
+    ) -> None:
+        """Bump one row's ``expires_at`` forward.
+
+        Driven by the ProviderBackedStore adapter's refresh-on-read
+        closure: when a hit is returned to the caller, the adapter
+        rolls the expiry forward by ``ttl_for_namespace`` so still-
+        useful findings stay alive.
+
+        Silent no-op when the row doesn't exist (hash was already
+        deleted, or never existed). Errors log + raise so a buggy
+        caller surfaces early in tests.
+        """
+        if not content_hash_bytes or not new_expires_iso:
+            return
+        self._ensure_ready()
+        table = _safe_table(self.options.get("table") or "memory")
+        try:
+            with self._conn:  # type: ignore[union-attr]
+                self._conn.execute(  # type: ignore[union-attr]
+                    f"UPDATE {table} SET expires_at = ? "
+                    f"WHERE content_hash = ?",
+                    (new_expires_iso, content_hash_bytes),
+                )
+        except sqlite3.Error as e:
+            log.warning("sqlite_vec refresh_expires_at failed: %s", e)
+            raise
+
+    def delete_by_hashes(self, hashes: list) -> int:
+        """Hard-delete rows by ``content_hash``. Returns count deleted.
+
+        Cascades to the ``_vec`` virtual table because both share
+        the same ``rowid`` and SQLite's INSERT/DELETE triggers on
+        ``<table>_fts`` keep the FTS5 mirror in sync. Empty input
+        is a no-op.
+
+        Caller must batch — SQLite parameter limit is 999 by default.
+        The reaper batches in pages of 500.
+        """
+        if not hashes:
+            return 0
+        self._ensure_ready()
+        table = _safe_table(self.options.get("table") or "memory")
+        # Filter to non-empty bytes; SQLite IN-list with NULLs would
+        # quietly drop matches.
+        hashes = [bytes(h) for h in hashes if h]
+        if not hashes:
+            return 0
+        placeholders = ",".join("?" for _ in hashes)
+        try:
+            with self._conn:  # type: ignore[union-attr]
+                cur = self._conn.execute(  # type: ignore[union-attr]
+                    f"DELETE FROM {table} "
+                    f"WHERE content_hash IN ({placeholders})",
+                    hashes,
+                )
+                return int(cur.rowcount or 0)
+        except sqlite3.Error as e:
+            log.warning("sqlite_vec delete_by_hashes failed: %s", e)
             raise
 
     def recall_hybrid(self, query: str, k: int = 5,

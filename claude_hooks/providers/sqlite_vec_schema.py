@@ -56,7 +56,7 @@ from claude_hooks.providers._content_hash import content_hash
 
 log = logging.getLogger("claude_hooks.providers.sqlite_vec_schema")
 
-LATEST_VERSION = 1
+LATEST_VERSION = 2
 
 # Identifier validation for the configurable memory table name. Same
 # pattern sqlite_vec.py uses; duplicated here so the schema module
@@ -125,6 +125,17 @@ def migrate_schema(conn: sqlite3.Connection, *, embedding_dim: int,
         conn.commit()
         log.info("sqlite_vec schema migrated to v1 (table=%s, dim=%d)",
                  table, embedding_dim)
+
+    # M14 v2 — add per-row TTL via an ``expires_at`` column on the
+    # memory table. Carries the same partial-index pattern as
+    # ``content_hash`` (only non-NULL rows in the index) because most
+    # rows in v1 deployments have NULL expiry (they pre-date the
+    # column) and ought to stay out of the cleanup index.
+    if current < 2:
+        _migrate_v1_to_v2(conn, table=table)
+        _write_version(conn, 2, _build_v2_metadata(conn))
+        conn.commit()
+        log.info("sqlite_vec schema migrated to v2 (table=%s)", table)
     return LATEST_VERSION
 
 
@@ -323,6 +334,55 @@ def _migrate_v0_to_v1(conn: sqlite3.Connection, *, embedding_dim: int,
         END
         """
     )
+
+
+# ---------------------------------------------------------------- #
+# v1 → v2 (M14: per-row TTL via ``expires_at``)
+# ---------------------------------------------------------------- #
+
+
+def _migrate_v1_to_v2(conn: sqlite3.Connection, *, table: str) -> None:
+    """Add ``expires_at TEXT`` column + partial index to ``<table>``.
+
+    Two-step, idempotent migration:
+
+    1. ``ALTER TABLE … ADD COLUMN expires_at TEXT`` (SQLite has no
+       ``ADD COLUMN IF NOT EXISTS`` — we guard with ``PRAGMA
+       table_info`` to avoid the ``duplicate column`` error on
+       re-run).
+    2. Partial ``CREATE INDEX IF NOT EXISTS`` on ``expires_at``,
+       skipping NULL rows. Most pre-M14 rows have NULL (legacy
+       "never expire" semantics), so the index stays narrow.
+
+    Values are stored as ISO-8601 strings (``datetime.isoformat()``)
+    so they sort lexicographically by time — string comparison
+    against ``before_iso`` is correct on the SQLite text affinity.
+    """
+    cols = {row[1] for row in conn.execute(
+        f"PRAGMA table_info({table})"
+    )}
+    if "expires_at" not in cols:
+        conn.execute(
+            f"ALTER TABLE {table} ADD COLUMN expires_at TEXT"
+        )
+    conn.execute(
+        f"CREATE INDEX IF NOT EXISTS {table}_expires_at_idx "
+        f"ON {table}(expires_at) WHERE expires_at IS NOT NULL"
+    )
+
+
+def _build_v2_metadata(conn: sqlite3.Connection) -> dict:
+    """Cache feature probes the v2 schema cares about.
+
+    Currently just inherits the v1 trigram-tokenizer probe — the
+    column-level change in v2 doesn't introduce any new optional
+    features. Kept as a stable hook so future versions can extend
+    it without changing the migration signature.
+    """
+    return {
+        "name_fts_tokenizer": _probe_trigram_tokenizer(conn),
+        "has_expires_at": True,
+    }
 
 
 # ---------------------------------------------------------------- #

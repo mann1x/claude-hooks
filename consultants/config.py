@@ -338,6 +338,116 @@ class RuntimeConfig:
 
 
 @dataclass
+class StoreTTLConfig:
+    """M14: per-namespace TTL for store entries.
+
+    Defaults match the user-locked decisions from
+    ``project_consultants_v2_m14_ttl_distillation``:
+
+    - ``research`` (per-session findings) — 30 days. Long enough to
+      survive a multi-week project; short enough to keep the index
+      from drowning in stale leads.
+    - ``tool_results`` (per-session tool outputs) — 24 hours. The
+      content is verbatim file contents / grep output; cheap to
+      re-fetch, expensive to preserve.
+    - ``project`` (per-project distilled memory) — null = never.
+      This is the durable bucket distillation writes into.
+    - ``user`` (cross-project user-global memory) — null = never.
+      Preferences and patterns the user wants kept forever.
+
+    ``refresh_on_read`` (default ``True``) bumps ``expires_at``
+    forward on hit so recalled-and-cited findings stay alive — the
+    "if it's still useful, keep it" heuristic.
+    """
+    enabled: bool = False
+    research_days: Optional[float] = 30.0
+    tool_results_hours: Optional[float] = 24.0
+    project_days: Optional[float] = None  # never
+    user_days: Optional[float] = None  # never
+    refresh_on_read: bool = True
+
+    def ttl_for_namespace(
+        self, ns: tuple[str, ...],
+    ) -> Optional[float]:
+        """Return TTL in seconds for a namespace tuple, or ``None``
+        when entries in this namespace should never expire.
+
+        Namespace shape: ``(head, kind)`` where ``head`` is either
+        a literal ``"project"`` / ``"user"`` or an opaque ``sid``,
+        and ``kind`` is ``"research"`` / ``"tool_results"``.
+        """
+        if len(ns) != 2:
+            return None
+        head, kind = ns
+        if head == "project":
+            return (
+                self.project_days * 86400.0
+                if self.project_days else None
+            )
+        if head == "user":
+            return (
+                self.user_days * 86400.0
+                if self.user_days else None
+            )
+        # Otherwise ``head`` is a sid; kind drives the TTL.
+        if kind == "research":
+            return (
+                self.research_days * 86400.0
+                if self.research_days else None
+            )
+        if kind == "tool_results":
+            return (
+                self.tool_results_hours * 3600.0
+                if self.tool_results_hours else None
+            )
+        return None
+
+
+@dataclass
+class StoreDistillationConfig:
+    """M14: Caliber-style distillation of expiring research entries.
+
+    When the daemon's :class:`~consultants.engine.store_reaper.\
+StoreReaperThread` finds expiring research rows, it groups them by
+    ``sid`` and calls a distiller LLM to write ONE summary entry
+    into the durable ``("project", project_id)`` namespace before
+    deleting the originals. Episodic short-term → semantic long-
+    term, mirroring human memory consolidation.
+
+    The LLM is invoked with the rubric in
+    :mod:`consultants.engine.distillation`: retain file:line
+    citations, decisions, gotchas, and open questions; drop process
+    narration, retries, and prose padding.
+
+    **Critical invariant**: the daemon only deletes originals after
+    a successful summary write. If every model in
+    ``[model] + fallback_models`` fails, the originals stay in
+    place and the next sweep tick retries.
+
+    Defaults (user-locked 2026-05-17):
+
+    - ``model = "gemma4:31b-cloud"`` — the M11c-2 tool_executor
+      winner; already trusted in the council pipeline.
+    - ``fallback_models = ["glm-5.1:cloud"]`` — caliber-init
+      fallback model; ~64k context window comfortable for prompt
+      overflow.
+    - ``sweep_interval_seconds = 3600`` — hourly. Cheap on a
+      24-hour TTL boundary; safe on a 30-day TTL.
+    - ``min_entries_per_distillation = 3`` — cost gate.
+      Single-finding sessions just get deleted; no LLM call fires.
+    - ``max_session_entries = 50`` — truncate before prompt
+      assembly. ~600 chars/entry × 50 ≈ 30 k tokens (gemma's
+      32 k ctx ceiling); larger groups overflow to the fallback.
+    """
+    enabled: bool = False
+    model: str = "gemma4:31b-cloud"
+    fallback_models: tuple[str, ...] = ("glm-5.1:cloud",)
+    sweep_interval_seconds: float = 3600.0
+    min_entries_per_distillation: int = 3
+    max_session_entries: int = 50
+
+
+@dataclass
 class StoreConfig:
     """M8: long-term memory BaseStore settings.
 
@@ -381,6 +491,13 @@ class StoreConfig:
     pgvector_dsn: Optional[str] = None
     pgvector_table: Optional[str] = None
     sqlite_vec_path: Optional[str] = None
+    # M14: per-namespace TTL + distillation-on-expiry. Both default
+    # to ``enabled = False`` — the M14 wiring is fully opt-in so
+    # existing M8 deployments stay zero-cost.
+    ttl: StoreTTLConfig = field(default_factory=StoreTTLConfig)
+    distillation: StoreDistillationConfig = field(
+        default_factory=StoreDistillationConfig,
+    )
 
 
 @dataclass
@@ -640,6 +757,80 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
         if "sqlite_vec_path" in st and isinstance(st["sqlite_vec_path"], str):
             base.store.sqlite_vec_path = st["sqlite_vec_path"].strip() or None
 
+        # M14: nested [store.ttl] block — opt-in per-namespace TTL.
+        ttl_raw = st.get("ttl") or {}
+        if isinstance(ttl_raw, dict):
+            if "enabled" in ttl_raw:
+                base.store.ttl.enabled = bool(ttl_raw["enabled"])
+            for fld, key in (
+                ("research_days", "research_days"),
+                ("tool_results_hours", "tool_results_hours"),
+                ("project_days", "project_days"),
+                ("user_days", "user_days"),
+            ):
+                if key in ttl_raw:
+                    v = ttl_raw[key]
+                    if v is None:
+                        setattr(base.store.ttl, fld, None)
+                    else:
+                        try:
+                            num = float(v)
+                        except (TypeError, ValueError):
+                            continue
+                        setattr(
+                            base.store.ttl, fld,
+                            num if num > 0 else None,
+                        )
+            if "refresh_on_read" in ttl_raw:
+                base.store.ttl.refresh_on_read = bool(
+                    ttl_raw["refresh_on_read"]
+                )
+
+        # M14: nested [store.distillation] block.
+        dist_raw = st.get("distillation") or {}
+        if isinstance(dist_raw, dict):
+            if "enabled" in dist_raw:
+                base.store.distillation.enabled = bool(
+                    dist_raw["enabled"]
+                )
+            if "model" in dist_raw and isinstance(
+                    dist_raw["model"], str):
+                m = dist_raw["model"].strip()
+                if m:
+                    base.store.distillation.model = m
+            if "fallback_models" in dist_raw and isinstance(
+                    dist_raw["fallback_models"], (list, tuple)):
+                base.store.distillation.fallback_models = tuple(
+                    str(x).strip()
+                    for x in dist_raw["fallback_models"]
+                    if str(x).strip()
+                )
+            if "sweep_interval_seconds" in dist_raw:
+                try:
+                    secs = float(
+                        dist_raw["sweep_interval_seconds"]
+                    )
+                    if secs > 0:
+                        base.store.distillation.sweep_interval_seconds = secs
+                except (TypeError, ValueError):
+                    pass
+            if "min_entries_per_distillation" in dist_raw:
+                try:
+                    n = int(
+                        dist_raw["min_entries_per_distillation"]
+                    )
+                    if n >= 1:
+                        base.store.distillation.min_entries_per_distillation = n
+                except (TypeError, ValueError):
+                    pass
+            if "max_session_entries" in dist_raw:
+                try:
+                    m = int(dist_raw["max_session_entries"])
+                    if m >= 1:
+                        base.store.distillation.max_session_entries = m
+                except (TypeError, ValueError):
+                    pass
+
     # coder_limits (M10)
     cl = raw.get("coder_limits") or {}
     if isinstance(cl, dict):
@@ -746,6 +937,73 @@ def _render(cfg: ConsultantsConfig) -> str:
         L.append(f"sqlite_vec_path = {_toml_str(cfg.store.sqlite_vec_path)}")
     else:
         L.append('# sqlite_vec_path = "~/.claude/consultants-store.db"')
+    L.append("")
+    # M14: nested [store.ttl] block — per-namespace TTL.
+    L.append("[store.ttl]")
+    L.append("# Per-namespace TTL on store entries. enabled = false "
+             "(default) keeps the M8 'live forever' behavior; flip on "
+             "to age out stale findings before they dilute recall.")
+    L.append(f"enabled = {'true' if cfg.store.ttl.enabled else 'false'}")
+    if cfg.store.ttl.research_days is None:
+        L.append("# research_days: null = never expire")
+        L.append("research_days = 0  # treat 0 / negative as 'never'")
+    else:
+        L.append(f"research_days = {cfg.store.ttl.research_days}")
+    if cfg.store.ttl.tool_results_hours is None:
+        L.append("tool_results_hours = 0  # treat 0 / negative as 'never'")
+    else:
+        L.append(f"tool_results_hours = {cfg.store.ttl.tool_results_hours}")
+    if cfg.store.ttl.project_days is None:
+        L.append('# project_days = 365   # never by default '
+                 '(cross-session memory)')
+        L.append("project_days = 0  # 0 / negative = never")
+    else:
+        L.append(f"project_days = {cfg.store.ttl.project_days}")
+    if cfg.store.ttl.user_days is None:
+        L.append('# user_days = 365      # never by default '
+                 '(cross-project memory)')
+        L.append("user_days = 0  # 0 / negative = never")
+    else:
+        L.append(f"user_days = {cfg.store.ttl.user_days}")
+    L.append("# refresh_on_read: bump expires_at forward on every "
+             "successful recall hit (the 'if it's still useful, "
+             "keep it' heuristic).")
+    L.append(
+        f"refresh_on_read = "
+        f"{'true' if cfg.store.ttl.refresh_on_read else 'false'}"
+    )
+    L.append("")
+    # M14: nested [store.distillation] block.
+    L.append("[store.distillation]")
+    L.append("# Caliber-style summary written into the durable "
+             "('project', pid) namespace before expiring research "
+             "entries get deleted. Episodic short-term → semantic "
+             "long-term.")
+    L.append(
+        f"enabled = "
+        f"{'true' if cfg.store.distillation.enabled else 'false'}"
+    )
+    L.append(f"model = {_toml_str(cfg.store.distillation.model)}")
+    if cfg.store.distillation.fallback_models:
+        inner = ", ".join(
+            _toml_str(m)
+            for m in cfg.store.distillation.fallback_models
+        )
+        L.append(f"fallback_models = [{inner}]")
+    else:
+        L.append("fallback_models = []")
+    L.append(
+        f"sweep_interval_seconds = "
+        f"{cfg.store.distillation.sweep_interval_seconds}"
+    )
+    L.append(
+        f"min_entries_per_distillation = "
+        f"{cfg.store.distillation.min_entries_per_distillation}"
+    )
+    L.append(
+        f"max_session_entries = "
+        f"{cfg.store.distillation.max_session_entries}"
+    )
     L.append("")
     L.append("[coder_limits]")
     L.append("# Sandbox caps for the coder role (M10). Only consulted "

@@ -215,6 +215,14 @@ class PgvectorProvider(Provider):
         except (ImportError, EmbedderError) as e:
             raise RuntimeError(f"pgvector store failed: {e}")
         table = _safe_table(self.options.get("table") or "claude_hooks_memory")
+        # M14: pull expires_at out of metadata. ISO-8601 strings are
+        # implicitly cast to TIMESTAMPTZ by Postgres on INSERT. NULL
+        # (or absent key) is "never expire", the v1.7 default.
+        expires_at = None
+        if isinstance(metadata, dict):
+            ea = metadata.get("expires_at")
+            if isinstance(ea, str) and ea.strip():
+                expires_at = ea
         try:
             with self._conn.cursor() as cur:  # type: ignore[union-attr]
                 # ``content_hash`` matches the migration-script schema —
@@ -223,14 +231,139 @@ class PgvectorProvider(Provider):
                 # makes repeat stores of identical content a silent no-op
                 # rather than a unique-constraint error.
                 cur.execute(
-                    f"INSERT INTO {table} (content, content_hash, metadata, embedding) "
-                    f"VALUES (%s, %s, %s, %s) "
+                    f"INSERT INTO {table} "
+                    f"(content, content_hash, metadata, embedding, "
+                    f"expires_at) "
+                    f"VALUES (%s, %s, %s, %s, %s) "
                     f"ON CONFLICT (content_hash) DO NOTHING",
-                    (content, _content_hash(content), json.dumps(metadata or {}), str(vec)),
+                    (
+                        content, _content_hash(content),
+                        json.dumps(metadata or {}), str(vec),
+                        expires_at,
+                    ),
                 )
                 self._conn.commit()  # type: ignore[union-attr]
         except Exception as e:
             log.warning("pgvector insert failed: %s", e)
+            raise
+
+    # ------------------------------------------------------------------ #
+    # M14 — TTL surface (per-row ``expires_at``)
+    # ------------------------------------------------------------------ #
+
+    def expire_before(
+        self, *, before_iso: str, limit: int = 1000,
+    ) -> list:
+        """Return rows whose ``expires_at`` is non-NULL and older
+        than ``before_iso``.
+
+        Uses the partial index ``<table>_expires_at_idx`` (created
+        at ``_create_table`` time), so the scan is O(N) over TTL'd
+        rows rather than O(rows). The string-to-TIMESTAMPTZ implicit
+        cast is safe on ISO-8601 input — anything else surfaces as
+        a DataError, which logs and returns ``[]``.
+
+        Returns a list of :class:`ExpiringRow` ordered ascending by
+        ``expires_at`` (oldest first), matching the sqlite_vec
+        contract so the daemon can treat both backends identically.
+        """
+        from claude_hooks.providers._content_hash import ExpiringRow
+        if not before_iso:
+            return []
+        self._ensure_ready()
+        table = _safe_table(
+            self.options.get("table") or "claude_hooks_memory"
+        )
+        try:
+            with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                cur.execute(
+                    f"SELECT content_hash, content, metadata, expires_at "
+                    f"FROM {table} "
+                    f"WHERE expires_at IS NOT NULL "
+                    f"AND expires_at < %s::timestamptz "
+                    f"ORDER BY expires_at ASC "
+                    f"LIMIT %s",
+                    (before_iso, int(limit)),
+                )
+                rows = cur.fetchall()
+        except Exception as e:
+            log.warning("pgvector expire_before failed: %s", e)
+            return []
+        out: list = []
+        for ch, content, meta, exp in rows:
+            # psycopg returns BYTEA as memoryview; coerce to bytes.
+            ch_bytes = bytes(ch) if ch is not None else b""
+            # JSONB comes back as dict already; passthrough.
+            md = dict(meta) if meta else {}
+            # TIMESTAMPTZ comes back as ``datetime`` with tzinfo;
+            # the daemon wants ISO strings end-to-end so the sweep's
+            # forensic logs and the sqlite_vec ExpiringRow have the
+            # same shape.
+            exp_iso = exp.isoformat() if exp is not None else ""
+            out.append(ExpiringRow(
+                content_hash=ch_bytes,
+                content=content or "",
+                metadata=md,
+                expires_at=exp_iso,
+            ))
+        return out
+
+    def refresh_expires_at(
+        self, content_hash_bytes: bytes, new_expires_iso: str,
+    ) -> None:
+        """Bump one row's ``expires_at`` forward by content_hash.
+
+        Driven by ProviderBackedStore's refresh-on-read closure.
+        Silent no-op when the row doesn't exist; errors log + raise
+        so a buggy caller surfaces in tests.
+        """
+        if not content_hash_bytes or not new_expires_iso:
+            return
+        self._ensure_ready()
+        table = _safe_table(
+            self.options.get("table") or "claude_hooks_memory"
+        )
+        try:
+            with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                cur.execute(
+                    f"UPDATE {table} "
+                    f"SET expires_at = %s::timestamptz "
+                    f"WHERE content_hash = %s",
+                    (new_expires_iso, content_hash_bytes),
+                )
+                self._conn.commit()  # type: ignore[union-attr]
+        except Exception as e:
+            log.warning("pgvector refresh_expires_at failed: %s", e)
+            raise
+
+    def delete_by_hashes(self, hashes: list) -> int:
+        """Hard-delete rows by ``content_hash``. Returns count
+        deleted.
+
+        Empty input is a no-op. Postgres doesn't have a 999-param
+        limit like SQLite, but the daemon batches in pages of 500
+        anyway for predictable transaction sizes.
+        """
+        if not hashes:
+            return 0
+        self._ensure_ready()
+        table = _safe_table(
+            self.options.get("table") or "claude_hooks_memory"
+        )
+        hashes = [bytes(h) for h in hashes if h]
+        if not hashes:
+            return 0
+        try:
+            with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                cur.execute(
+                    f"DELETE FROM {table} WHERE content_hash = ANY(%s)",
+                    (hashes,),
+                )
+                deleted = int(cur.rowcount or 0)
+                self._conn.commit()  # type: ignore[union-attr]
+                return deleted
+        except Exception as e:
+            log.warning("pgvector delete_by_hashes failed: %s", e)
             raise
 
     def count(self) -> int:
@@ -378,6 +511,23 @@ class PgvectorProvider(Provider):
                 f"""CREATE INDEX IF NOT EXISTS {table}_embedding_hnsw
                     ON {table} USING hnsw (embedding vector_cosine_ops)
                     WITH (m = 16, ef_construction = 64)"""
+            )
+            # M14: per-row TTL via ``expires_at TIMESTAMPTZ``. The
+            # column + partial index land in-place on every
+            # ``_ensure_ready`` so existing v1.7 tables upgrade on
+            # first reconnect — no separate migration step needed
+            # for one nullable column. Postgres 9.6+ supports
+            # ``ADD COLUMN IF NOT EXISTS``; the partial index keeps
+            # NULL rows (legacy / never-expire) out of the cleanup
+            # index so an x-tier-only TTL flip doesn't slow recall.
+            cur.execute(
+                f"ALTER TABLE {table} "
+                f"ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ"
+            )
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS {table}_expires_at_idx "
+                f"ON {table} (expires_at) "
+                f"WHERE expires_at IS NOT NULL"
             )
         self._conn.commit()  # type: ignore[union-attr]
         self._table_created = True

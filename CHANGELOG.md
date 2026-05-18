@@ -16,6 +16,156 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — `/consultants` v2 per-namespace TTL + distillation-on-expiry for the M8 store (M14, task #104, 2026-05-18)
+
+The M8 LangGraph BaseStore adapter ships with TTL semantics and a
+Caliber-style distillation pass that consolidates expiring
+research findings into a durable project-level summary *before*
+the originals are deleted. **Episodic short-term → semantic long-
+term**, mirroring how humans consolidate working memory into
+autobiographical memory. The user committed in writing to flip
+`store.enabled = True` immediately after this lands so the
+accumulation pressure starts the moment it's available.
+
+**The three pieces ship together as one commit on `dev`** — any
+one alone is wrong (TTL alone deletes signal; cleanup alone is
+just TTL with extra steps; distillation without TTL never
+fires):
+
+1. **TTL** — both providers grow a first-class `expires_at`
+   column.
+   - **pgvector**: `ALTER TABLE … ADD COLUMN IF NOT EXISTS
+     expires_at TIMESTAMPTZ` + partial index `WHERE expires_at IS
+     NOT NULL`, emitted at `_create_table` time. PG 9.6+
+     supports the IF NOT EXISTS form — idempotent on every boot.
+   - **sqlite_vec**: bumped `LATEST_VERSION = 2`. New
+     `_migrate_v1_to_v2` step adds `expires_at TEXT NULL` +
+     partial index. Mirrors the v0→v1 pattern: bookkeeping table
+     drives one-shot lazy migration on first open.
+   - **Shared helper**: `claude_hooks/providers/_content_hash.py`
+     grew `compute_expires_at(now, ttl_seconds)` and the
+     provider-agnostic `ExpiringRow` dataclass.
+   - **ProviderBackedStore** (`consultants/engine/store.py`):
+     `_do_put` stamps `expires_at` on metadata when the namespace
+     has a TTL; `_do_search` / `_do_get` filter expired items;
+     `_do_search` hits trigger `provider.refresh_expires_at` when
+     `refresh_on_read = True`.
+   - **Provider API**: both providers grew three new methods —
+     `expire_before(*, before_iso, limit=1000) -> list[ExpiringRow]`,
+     `refresh_expires_at(content_hash, new_expires_iso)`,
+     `delete_by_hashes(hashes) -> int`. Provider-agnostic in
+     shape so the daemon has no per-store SQL knowledge.
+
+2. **Cleanup** — `consultants/engine/store_reaper.py` is a new
+   daemon thread that runs in the consultants-daemon. Mirrors
+   `embedding_manager._reaper_loop`'s 0.5 s-slice pattern for
+   responsive shutdown. Each sweep tick calls
+   `provider.expire_before` with a 5-minute grace window, groups
+   rows by `(sid, kind)`, and dispatches:
+   - **research** above `min_entries_per_distillation` → distill
+     then delete.
+   - **research** below the threshold → delete without
+     distillation (cost gate).
+   - **tool_results** / unknown → delete unconditionally.
+   - **Critical invariant**: the reaper **only deletes research
+     originals after a successful distillation write to the
+     project namespace**. If every model in the configured
+     fallback chain fails, `DistillationFailed` propagates and
+     the originals stay in place — the next sweep tick retries.
+     This is the single line of defense against the "TTL deleted
+     my findings before distillation could capture them" failure
+     mode.
+
+3. **Distillation** — `consultants/engine/distillation.py` is the
+   Caliber-style summarizer. Reads expiring rows from one
+   session's research namespace, builds a prompt with the rubric
+   (retain file:line citations + decisions + gotchas + open
+   questions; drop process narration + retries + padding), calls
+   the distillation LLM with a fallback chain, writes the
+   resulting summary into the durable
+   `("project", project_id)` namespace via the new
+   `write_distilled_summary` helper. `project_id` is
+   `sha256(Path(cwd).resolve())[:12]` — deterministic,
+   collision-resistant, no extra registry table needed.
+
+**User-locked defaults (2026-05-17 + 2026-05-18 plan)**:
+
+| Knob                            | Default               |
+|---------------------------------|-----------------------|
+| `store.ttl.research_days`       | 30 days               |
+| `store.ttl.tool_results_hours`  | 24 hours              |
+| `store.ttl.project_days`        | `null` (never)        |
+| `store.ttl.user_days`           | `null` (never)        |
+| `store.ttl.refresh_on_read`     | `true`                |
+| `store.distillation.model`      | `gemma4:31b-cloud`    |
+| `store.distillation.fallback_models` | `["glm-5.1:cloud"]` |
+| `store.distillation.sweep_interval_seconds` | `3600` (1 h) |
+| `store.distillation.min_entries_per_distillation` | `3` |
+| `store.distillation.max_session_entries` | `50` (~30 k tokens) |
+| `store.enabled`                 | **`false` still**     |
+
+The default-on flip on `store.enabled` is a separate manual step
+the user will take after this lands — same shape as the
+M11c-5 atomic flip.
+
+**App wiring** — `consultants/server/app.py`'s `create_app` now
+accepts `cfg` and `ollama_base_url` kwargs; when both are passed
+AND `cfg.store.enabled` is True AND either TTL or distillation
+is enabled, `_maybe_start_store_reaper` spawns the daemon
+thread and stashes it at `app.state.store_reaper`. The FastAPI
+`shutdown` hook stops it with a 5 s timeout. Pre-M14 callers
+that don't pass `cfg` keep working unchanged.
+
+**Backfill**: none. Pre-M14 rows have `expires_at = NULL` and
+live forever, which is the correct default-preserving behavior.
+A user who wants retroactive TTL has to write it themselves — a
+future helper can land if anyone asks.
+
+**Verification** (both envs full sweep):
+
+- **claude-hooks-consultants**: 3732 pass, 30 skip (was 3632
+  post-M13; +100 new M14 tests).
+- **claude-hooks**: 3634 pass, 128 skip (was 3550 post-M13; +84
+  net, M14 tests that import LangGraph-free pieces also run
+  here).
+- **M12 parity** — `pytest -m parity` — 23 + 12 sub-tests green
+  in consultants env, 14 + 5 sub-tests green in main env.
+  TTL/distillation default `enabled = False` keeps behavior
+  identical to M12 baseline.
+
+**New modules** (`~700` LOC engine + `~840` LOC tests):
+
+- `consultants/engine/distillation.py` (~420 LOC) — prompt,
+  rubric, fallback chain, project_id derivation, summary write
+  helper.
+- `consultants/engine/store_reaper.py` (~340 LOC) — daemon
+  thread, sweep loop, group-by-sid-and-kind helper.
+- `tests/test_consultants_v2_store_ttl.py` (24 tests) — TTL
+  filter, refresh-on-read, factory plumbing.
+- `tests/test_consultants_v2_distillation.py` (26 tests) —
+  prompt shape, fallback chain, project_id, write helper.
+- `tests/test_consultants_v2_store_reaper.py` (18 tests) —
+  grouping, lifecycle, happy paths, failure isolation.
+- `tests/test_consultants_v2_app_store_reaper.py` (7 tests) —
+  app-factory wiring gates.
+- `tests/test_pgvector_expires_at.py` (15 tests) — DDL shape +
+  expire/refresh/delete query shape (no live PG).
+- `tests/test_sqlite_vec_schema_v2.py` (10 tests) — v1→v2
+  migration idempotency, fresh-DB v2 migration, multi-step
+  v0→v1→v2 path, write+read column.
+
+**Non-goals (this commit)**:
+
+- Live distillation smoke is deferred to a separate
+  user-confirmed run after the commit lands (mirrors M11c-4
+  absorbed-by-M13 pattern).
+- TTL UI in `claude-consultants config show` — render the new
+  blocks, but no interactive editing skill until anyone asks.
+- Tool-results distillation — explicitly out of scope per the
+  user-locked decisions table; the daemon just deletes them.
+- Default-on flip — `store.enabled` stays `False`. Manual flip
+  by the user after M14 lands.
+
 ### Fixed — `/consultants` v2 LangGraph Send state-isolation bug surfaced by M13 live smoke (2026-05-17)
 
 The M13 live x-tier smoke (task #102, the milestone whose explicit
