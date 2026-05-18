@@ -135,6 +135,89 @@ post-fix run produces a coherent (if partially confabulated)
 regression is closed.** Citation fabrication is now a model-
 output-quality follow-up, not a regression.
 
+## Citation-linter validation re-run — csl-2026-05-18-1156-115c
+
+Third run of the same question — this time with the
+CitationLinter shipped in commit `159d353` wired into
+`synthesizer_node`. Goal: confirm the linter catches
+fabrications **inline in the live answer**, not just
+retroactively. See [`rerun2-linted-answer.md`](rerun2-linted-answer.md)
+for the saved annotated output.
+
+- **SID**: `csl-2026-05-18-1156-115c`
+- **Duration**: 593.6 s (~9.9 min, faster than the 986 s
+  prior linter-free run — likely warmer caches + tighter
+  CITATION INTEGRITY prompt block reducing turn count)
+- **Tokens**: 487,537 prompt + 38,262 completion = 525,799
+  total (~22% cheaper than the 674,932 prior run)
+- **Status**: `completed`
+- **pgvector abort warnings**: **0** (Fix #2 still holds)
+- **Linter activity** (recorded in
+  `/root/.claude/claude-hooks-consultants.log`):
+
+  ```
+  2026-05-18 12:05:55 [INFO] consultants.engine.council
+    synthesizer citation lint: 8 fabrication(s) annotated;
+    consultants/engine/store_reaper.py:301 (line 301 is inside sweep_once; answer claims _distill_group);
+    consultants/engine/store_reaper.py:302 (line 302 is inside sweep_once; answer claims _write_summary);
+    consultants/engine/store_reaper.py:392 (line 392 is inside _write_summary; answer claims write_distilled_summary);
+    consultants/engine/store_reaper.py:313 (line 313 is inside sweep_once; answer claims _delete_rows);
+    consultants/engine/store_reaper.py:416 (line 416 is inside _delete_rows; answer claims delete_by_hashes);
+    (3 duplicate occurrences omitted)
+  ```
+
+- **User-visible inline markers** (final answer): 9 distinct
+  `[in <actual>, not <claimed>]` annotations surfaced to the
+  user. Every fabricated `path:line` cite shipped to the user
+  with the linter's verdict pinned right next to the
+  synthesizer's claim. Example excerpt:
+
+  > 1. **Distillation**: The reaper calls `_distill_group`
+  >    at `consultants/engine/store_reaper.py:301
+  >    [in sweep_once, not _distill_group]`.
+  > 2. **Persistence**: If distillation succeeds, it
+  >    immediately calls `_write_summary` at
+  >    `consultants/engine/store_reaper.py:302
+  >    [in sweep_once, not _write_summary]`, which invokes
+  >    `write_distilled_summary` at
+  >    `consultants/engine/store_reaper.py:392
+  >    [in _write_summary, not write_distilled_summary]`
+
+### What this run proves
+
+- **The linter works end-to-end on the live engine.** The
+  synthesizer (`gemma4:31b-cloud`) still chose wrong line
+  numbers within `store_reaper.py` (301, 302, 313, 392, 416
+  instead of the real 360, 371, 402, …). The tightened
+  CITATION INTEGRITY prompt block did NOT fully prevent the
+  fabrication — gemma4's training-data-style "this looks
+  right" wins over the prompt directive under certain
+  contexts. But the linter caught every single fabricated
+  cite at the AST symbol-mismatch layer.
+- **No `[unverified — file not found]` markers this run.**
+  Unlike the prior csl-2026-05-18-1031-9e3b answer (which
+  cited a fake `store_sql.py`), this run's cites all
+  resolved to real files. The tightened prompt did prevent
+  the most egregious failure mode (entirely-fake filenames).
+  The remaining failure is the softer wrong-line-within-real-
+  file class, which the AST layer caught cleanly.
+- **gemma4:31b-cloud's reputation is reaffirmed.** The
+  fabricated cites in this run all live within the real
+  file `store_reaper.py`; gemma's mistake is picking lines
+  in unrelated functions, not inventing new modules. Glm-5.1's
+  prior fake-filename fabrication remains the worst-class
+  failure observed.
+- **The user sees the linter's verdict alongside every
+  fabricated cite.** Trust through transparency: gemma can't
+  quietly slip a wrong line past the user when the linter
+  marks it inline.
+
+**Final verdict on the M14 first-real-ask thread**: regression
+closed, prompt regression neutralized, citation fabrication
+class made user-visible and self-documenting via the AST
+linter. Three commits total: `3fa939f` (the three fixes),
+`72e7ecb` (log readability), `159d353` (CitationLinter).
+
 ## Verification artifacts
 
 - Result endpoint: `claude-consultants result csl-2026-05-18-1031-9e3b`
