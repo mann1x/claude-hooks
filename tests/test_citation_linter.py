@@ -389,5 +389,111 @@ class TestRegressionCsl1031(unittest.TestCase):
         self.assertIn("not _distill_group", annotated)
 
 
+class TestGraphFastPath(unittest.TestCase):
+    """The linter prefers the on-disk code_graph for symbol lookup
+    when available, falling back to on-demand ast.parse otherwise.
+
+    The graph path is exercised end-to-end: build a tiny project,
+    run the linter against a fabrication targeting the project's
+    files, and verify the issue is caught. A second test then
+    DELETES the graph and re-runs to confirm the ast.parse fallback
+    still catches the same fabrication.
+    """
+
+    def setUp(self):
+        # Tests build temp graphs; make sure the helper's process-
+        # global mtime cache doesn't leak between scenarios.
+        from claude_hooks.code_graph import enclosing
+        enclosing.clear_cache()
+
+    def _build_repo(self, tmp: Path) -> None:
+        (tmp / ".git").mkdir()
+        body = textwrap.dedent('''\
+            """Sample for the graph fast-path test."""
+
+            def helper_a():
+                return 1
+
+
+            def helper_b():
+                return 2
+
+
+            class Holder:
+                def method_one(self):
+                    return helper_a()
+
+                def method_two(self):
+                    return helper_b()
+        ''')
+        _write(tmp / "pkg" / "code.py", body)
+
+    def test_graph_catches_wrong_symbol(self):
+        from claude_hooks.code_graph.builder import build_graph
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._build_repo(root)
+            build_graph(root)
+
+            # Line 4 is inside helper_a, NOT helper_b. The fabrication
+            # mirrors gemma's wrong-line failure mode.
+            answer = (
+                "The helper at `helper_b` lives at `pkg/code.py:4`."
+            )
+            annotated, issues = lint_answer(
+                answer, allowed_roots=[str(root)],
+            )
+            self.assertEqual(len(issues), 1)
+            self.assertIn("not helper_b", issues[0].replacement)
+            self.assertIn("[in helper_a", annotated)
+
+    def test_fallback_when_graph_missing(self):
+        """Without a graph the linter still catches the same fab via
+        ast.parse — i.e. coverage doesn't depend on the graph being
+        present."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._build_repo(root)
+            # NO build_graph call: graphify-out/ doesn't exist.
+            answer = (
+                "The helper at `helper_b` lives at `pkg/code.py:4`."
+            )
+            annotated, issues = lint_answer(
+                answer, allowed_roots=[str(root)],
+            )
+            self.assertEqual(len(issues), 1)
+            self.assertIn("not helper_b", issues[0].replacement)
+
+    def test_fallback_when_file_outside_graph(self):
+        """A cite that points at an allowed_root file outside the
+        graph build root must still be checked via ast.parse."""
+        from claude_hooks.code_graph.builder import build_graph
+        with tempfile.TemporaryDirectory() as graph_root, \
+             tempfile.TemporaryDirectory() as off_graph_root:
+            gr = Path(graph_root)
+            ogr = Path(off_graph_root)
+            self._build_repo(gr)
+            build_graph(gr)
+            # File only exists outside the graph build root.
+            body = textwrap.dedent('''\
+                def outsider():
+                    return 0
+
+
+                def neighbour():
+                    return 1
+            ''')
+            _write(ogr / "src" / "outside.py", body)
+            # Claim neighbour at line 2, which is inside outsider.
+            answer = "The fn `neighbour` is at `src/outside.py:2`."
+            annotated, issues = lint_answer(
+                answer,
+                allowed_roots=[str(gr), str(ogr)],
+            )
+            self.assertEqual(len(issues), 1)
+            self.assertIn("not neighbour", issues[0].replacement)
+            self.assertIn("[in outsider", annotated)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

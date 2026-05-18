@@ -321,6 +321,34 @@ class TestDiscoverWithDisplay(unittest.TestCase):
                 self.assertEqual(reals[1], os.path.realpath(real_sub))
                 self.assertNotEqual(displays[1], reals[1])
 
+    def test_symlinked_cwd_keeps_display_on_primary(self):
+        # 2026-05-18 (#199 regression): when the cwd ITSELF is the
+        # symlink path (e.g. /shared/dev/x → /srv/.../x), the primary
+        # entry must keep the symlink display form too — not just the
+        # extras. Pre-fix, app.py was calling Path(cwd).resolve()
+        # before handing it to the discoverer, which collapsed
+        # display==real and dropped the alias from the log.
+        with tempfile.TemporaryDirectory() as real_root, \
+             tempfile.TemporaryDirectory() as link_root:
+            real_sub = os.path.join(real_root, "project")
+            os.makedirs(real_sub)
+            link_sub = os.path.join(link_root, "project")
+            os.symlink(real_sub, link_sub)
+            # Pass the symlink form as cwd; expanduser-only (no resolve).
+            reals, displays = discover_allowed_roots_with_display(
+                link_sub, settings_files=[],
+            )
+            self.assertEqual(len(reals), 1)
+            self.assertEqual(len(displays), 1)
+            self.assertEqual(displays[0], link_sub)
+            self.assertEqual(reals[0], os.path.realpath(real_sub))
+            self.assertNotEqual(displays[0], reals[0])
+            # Round-trip through render_for_log: primary line shows both.
+            out = render_for_log(reals, display_roots=displays)
+            self.assertIn(
+                f"primary: {link_sub}  ({os.path.realpath(real_sub)})", out,
+            )
+
     def test_dedup_by_realpath_still_dedups(self):
         # Two entries pointing at the same realpath via different
         # symlinks: only the first survives in both lists.

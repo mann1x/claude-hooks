@@ -381,8 +381,17 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
                 status_code=400,
                 detail="extra_roots must be a list of strings",
             )
+        # 2026-05-18 (#199): pass the user-typed cwd (``~`` expanded
+        # but symlinks NOT resolved) so the discoverer can record both
+        # forms — display = ``/shared/dev/claude-hooks``, real =
+        # ``/srv/dev-disk-by-label-opt/dev/claude-hooks``. Passing
+        # ``str(cwd_path)`` (already realpath-resolved) would make
+        # display == real and the primary log line would drop the
+        # alias. Validation via ``cwd_path.is_dir()`` above already
+        # confirmed the resolved form exists.
+        cwd_for_display = str(Path(cwd).expanduser())
         discovered, discovered_display = discover_allowed_roots_with_display(
-            str(cwd_path), add_dirs=body_extras,
+            cwd_for_display, add_dirs=body_extras,
         )
         # discover_allowed_roots prepends the primary cwd; the runner
         # wants extras only. Both lists share order so the parallel

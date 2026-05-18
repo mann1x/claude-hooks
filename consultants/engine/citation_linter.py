@@ -30,20 +30,26 @@ Detection rules:
   has N lines]``.
 * AST symbol mismatch (Python files only) — when the answer
   mentions a symbol name within ``_SYMBOL_PROXIMITY_CHARS``
-  characters before the cite, and the stdlib :mod:`ast` parse
-  shows the cited line falls inside a different (or no)
-  function/class, annotate ``path:line [in <actual>, not
-  <claimed>]``. Catches the round-2 fabrication mode that the
-  bounds check alone misses.
+  characters before the cite, and the cited line falls inside a
+  different (or no) function/class, annotate ``path:line [in
+  <actual>, not <claimed>]``. Catches the round-2 fabrication
+  mode that the bounds check alone misses. The lookup prefers
+  the on-disk code_graph artifact at ``graphify-out/graph.json``
+  (mtime-cached in-process; 27× faster than stdlib :mod:`ast`
+  parsing in the warm-cache case) and falls back to on-demand
+  ``ast.parse`` when the graph is missing, predates
+  ``EXTRACTOR_VERSION=2`` (no ``end_line`` field), or doesn't
+  cover the cited file. See
+  :mod:`claude_hooks.code_graph.enclosing` for the lookup API.
 * path + line + AST all agree → leave the cite unchanged.
 
 The linter is intentionally **non-blocking**: it never rejects
 or rewrites the answer's prose, only annotates citations. The
 user sees the synthesizer's reasoning AND the linter's verdict
 on each cite side-by-side and can judge. Non-Python files (no
-parse possible with stdlib ast) skip the symbol-mismatch check
-and only get path + bounds verification — that's where the
-on-disk code_graph would help if it ever covers consultants/.
+parse possible with stdlib ast and no code_graph extractor
+today) skip the symbol-mismatch check and only get path +
+bounds verification.
 
 Public API:
 
@@ -425,7 +431,18 @@ def _verify_symbol_match(
     if resolved is None:
         return None  # already covered by verify_citation
 
-    actual = _enclosing_symbol_at_line(resolved, line_start)
+    # 2026-05-18 (#200): try the on-disk code_graph first. When the
+    # graph is built and covers the cited file, the lookup is O(1)
+    # against an mtime-cached in-process index — repeat lints across
+    # sessions in the same project hit the cache. Fall back to
+    # on-demand ast.parse when the graph is missing, predates the
+    # end_line field, or doesn't cover the file (non-repo file pulled
+    # in via an allowed_root that isn't under the graph build root).
+    actual = _enclosing_symbol_via_graph(
+        path, line_start, allowed_roots=allowed_roots,
+    )
+    if actual is None:
+        actual = _enclosing_symbol_at_line(resolved, line_start)
 
     # Compare bare leaf names (drop class-qualifier dots so
     # ``StoreReaper.sweep_once`` matches the AST node named
@@ -509,6 +526,64 @@ def _extract_claimed_symbol(
             continue
         last_match = sym
     return last_match
+
+
+def _enclosing_symbol_via_graph(
+    path: str,
+    line: int,
+    *,
+    allowed_roots: Sequence[str],
+) -> Optional[str]:
+    """Try the on-disk code_graph for the enclosing symbol.
+
+    Walks the allowed_roots in order — for each root, asks the graph
+    "what symbol contains ``<path>:<line>``?" against that root's
+    ``graphify-out/graph.json``. The first root whose graph both
+    exists AND covers the file wins; returns ``None`` if no root
+    has a usable graph entry for the file.
+
+    Importantly, returns ``None`` for both:
+
+    * "No graph available" (caller should fall back to ast.parse).
+    * "Graph says line is in module scope" (caller should treat as
+      the latter via the same ast.parse fallback — defensive in case
+      the graph build is incomplete).
+
+    Distinguishing the two would let us avoid the redundant ast
+    parse when the graph is authoritative, but the safety margin is
+    cheap: ast.parse on a single file is ~10 ms even for large
+    modules, and only fires when the graph disagrees.
+    """
+    try:
+        from claude_hooks.code_graph.enclosing import (
+            enclosing_symbol_at, graph_covers_file,
+        )
+    except ImportError:
+        return None
+    p = Path(path)
+    if p.is_absolute():
+        # Absolute path in a cite: we can only map it to a relative
+        # form against a root that contains it. The graph's lookup
+        # keys are realpath-canonical relatives, so try each root.
+        for root in allowed_roots:
+            if not root:
+                continue
+            root_p = Path(root)
+            try:
+                rel = str(p.resolve().relative_to(root_p.resolve()))
+            except ValueError:
+                continue
+            if graph_covers_file(root_p, rel):
+                return enclosing_symbol_at(root_p, rel, line)
+        return None
+    for root in allowed_roots:
+        if not root:
+            continue
+        root_p = Path(root)
+        if not graph_covers_file(root_p, path):
+            continue
+        return enclosing_symbol_at(root_p, path, line)
+    return None
 
 
 def _enclosing_symbol_at_line(

@@ -16,6 +16,94 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added — code_graph: ``end_line`` on def/class/method nodes + ``enclosing_symbol_at`` query API (#200, 2026-05-18)
+
+The 2026-05-18 CitationLinter parsed every cited file on demand
+with stdlib :mod:`ast` to answer "is line L inside function F?".
+Acceptable for the M14 first-real-ask (5 cites pointing at one
+file, ~10 ms/lint), but doesn't scale and pays the same parse
+cost every consult turn.
+
+This change makes the on-disk code_graph the fast path:
+
+1. **Schema bump (additive)** —
+   ``claude_hooks/code_graph/builder.py`` now stamps ``end_line``
+   on every function, async function, method, and class node.
+   ``EXTRACTOR_VERSION`` constant moves from ``1`` → ``2`` and is
+   recorded in ``graphify-out/cache/manifest.json``. A mismatch
+   forces a full rebuild instead of trusting per-file SHA matches
+   that would otherwise replay stale extractions.
+2. **New module** —
+   ``claude_hooks/code_graph/enclosing.py`` (``enclosing_symbol_at``,
+   ``graph_covers_file``, ``clear_cache``). Loads
+   ``graphify-out/graph.json`` lazily, mtime-caches the per-file
+   index in-process, and answers the line-containment query in
+   O(N_defs_in_file). Legacy v1 graphs without ``end_line`` are
+   detected and reported as uncovered so callers correctly fall
+   back to :mod:`ast` parsing.
+3. **Linter wiring** —
+   ``consultants/engine/citation_linter.py`` tries the graph
+   helper first and falls back to its existing on-demand
+   :mod:`ast` walk when the graph is missing, predates the
+   ``end_line`` field, or doesn't cover the cited file. Existing
+   regression tests pass unchanged, including the 5
+   ``csl-2026-05-18-1031-9e3b`` fabrications.
+
+**Measured speedup** on the M14 fabrication corpus (5 cites,
+``store_reaper.py``):
+
+| Path                          | ms/lint (200 runs) |
+|-------------------------------|--------------------:|
+| ``ast.parse`` fallback (prior) |               10.46 |
+| Graph fast-path, warm cache   |                0.38 |
+| Graph fast-path, cold cache   |               32.15 |
+
+Net win in the steady-state consultants server (graph stays
+cached across consult turns). One-shot script invocations like
+``scripts/lint_consult_answer.py`` pay the cold-start tax but
+still produce identical output.
+
+New tests: ``tests/test_code_graph_enclosing.py`` (13 tests:
+schema correctness, line-containment lookup including innermost-
+span tiebreak, module-scope/EOF edges, mtime cache invalidation,
+no-graph and legacy-graph fallback). ``tests/test_citation_linter.py``
+gains ``TestGraphFastPath`` (3 tests: end-to-end graph-path
+catch, fallback-when-graph-missing, fallback-when-file-outside-
+graph). Both envs full sweep clean: 3808 + 3710 passing.
+
+### Fixed — consultants: primary cwd line in allowed-roots log now uses display form (#199, 2026-05-18)
+
+The 2026-05-18 M14 re-runs showed the `allowed roots:` log block
+rendering symlinked extras correctly (`/shared/dev/laserRMT
+(/srv/dev-disk-by-label-opt/dev/laserRMT)`) but the **primary**
+cwd line still showed the bare realpath:
+
+```
+primary: /srv/dev-disk-by-label-opt/dev/claude-hooks
+extra:
+  /shared/dev/laserRMT  (/srv/dev-disk-by-label-opt/dev/laserRMT)
+```
+
+Root cause: `consultants/server/app.py` was calling
+`Path(cwd).resolve()` upstream of
+`discover_allowed_roots_with_display`, so by the time the
+discoverer computed the display form it was operating on the
+already-resolved path — `display == real` for the primary entry.
+
+Fix: pass `str(Path(cwd).expanduser())` (expanduser-only, symlinks
+preserved) to the discoverer; keep the resolved form for the
+existing `is_dir()` validation only. Net effect: the primary line
+now renders `/shared/dev/claude-hooks
+(/srv/dev-disk-by-label-opt/dev/claude-hooks)` the same way extras
+do. Behavior unchanged when the cwd has no symlink alias.
+
+New regression test
+`TestDiscoverWithDisplay.test_symlinked_cwd_keeps_display_on_primary`
+(tests/test_allowed_roots.py) builds an explicit symlink chain and
+asserts both the discoverer output and the `render_for_log` round-
+trip preserve the alias on the primary entry. All 27 allowed_roots
+tests + 60 consultants server/multi-root tests pass.
+
 ### Added — consultants: CitationLinter + tightened prompts for path:line fabrications (2026-05-18)
 
 The 2026-05-18 M14 first-real-ask re-run produced a coherent
