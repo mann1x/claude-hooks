@@ -16,6 +16,65 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed — consultants: CitationLinter symbol-match — text-at-cited-line instead of enclosing-function (#205, 2026-05-18)
+
+The 2026-05-18 ``csl-2026-05-18-1428-589c`` re-run (M14 first-real-
+ask with #204 wired) reported **106 fabrications caught at the
+researcher boundary** — a 10× jump from prior runs that didn't
+match operator intuition about glm-5.1's normal behavior.
+
+Investigation: ~95% of those were **false positives** in the
+symbol-mismatch heuristic. The rule was "is line N inside the
+def of the claimed symbol?" — but natural prose like *"the
+reaper calls ``_distill_group`` at ``store_reaper.py:301``"*
+puts the cite at the CALL site (whose enclosing function is
+``sweep_once``). Line 301 genuinely contains
+``self._distill_group(…)`` — the model's claim about the call
+location was accurate; the linter was flagging it for not being
+the *definition* location.
+
+Re-classifying the 106:
+
+| Class | Count | Verdict |
+|---|---:|---|
+| ``sweep_once`` line claimed ``_delete_rows`` / ``_write_summary`` / ``_distill_group`` | 51 | **FALSE POSITIVE** — call sites |
+| Method body lines claimed callee names | 8 | **FALSE POSITIVE** — internal calls |
+| ``file not found`` | 3 | REAL — glm-5.1 fake paths |
+| Genuine wrong-line / fake-symbol | ~37 | REAL — module-scope claims for non-existent functions |
+
+The new rule (``_symbol_appears_in_range`` in
+``consultants/engine/citation_linter.py``) replaces the enclosing-
+function compare with a text-occurrence check at the cited line
+range (±1 line slack for off-by-one prose like decorator-vs-def).
+If the claimed identifier appears as a word-boundary substring
+inside the cited line(s), the cite is treated as a valid
+reference; otherwise it's flagged with annotation showing where
+line N actually lives. Path-not-found and line-bounds checks
+unchanged.
+
+Net effect on the live ``csl-2026-05-18-1428-589c`` answer
+(re-linted with the new rule after annotation strip):
+
+* Old rule: 10 annotations in shipped answer (mix of real + FP).
+* New rule: 9 annotations, **all real** — every flagged symbol
+  is a fabricated method/table name that doesn't exist anywhere
+  in the cited file (``_find_candidates``,
+  ``_distillation_confirmed``, ``_remove_originals``,
+  ``_mark_ledger_completed``, ``_write_to_project``,
+  ``_SimpleScheduler``, ``research_originals``, ``distillation_ledger``,
+  ``distill``). All 8 trace back to ``glm-5.1:cloud`` researcher
+  lanes via transcript.db cross-trace — same fabrication mode as
+  ``csl-2026-05-18-1031-9e3b``.
+
+Annotation format changed from ``[in X, not Y]`` to
+``[no Y at this line; line is in X]`` — same semantics, clearer
+phrasing. Tests in ``tests/test_citation_linter.py``
+updated to match. New ``TestCallSiteIsNotFabrication`` class
+(4 tests) explicitly locks in the no-flag behavior for call
+sites + the ±1 slack window for decorator-line cites.
+
+Both envs full sweep: 3815 + 3717 passing.
+
 ### Fixed — consultants: CitationLinter now runs at researcher boundary, not just synthesizer (#204, 2026-05-18)
 
 The CitationLinter shipped in commit ``159d353`` runs at the

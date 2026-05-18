@@ -207,15 +207,23 @@ class TestSymbolMismatch(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             _write(Path(root) / "src/sample.py", _sample_python_module())
             # helper_func is at line 6, but the answer cites :20
-            # (which is inside Container.method_two).
+            # (which is inside Container.method_two and contains no
+            # ``helper_func`` text — genuine wrong-line claim).
+            # 2026-05-18 (#205): annotation format changed from
+            # ``[in method_two, not helper_func]`` to
+            # ``[no helper_func at this line; line is in method_two]``
+            # — same semantics, clearer phrasing.
             answer = "the call to `helper_func` at `src/sample.py:20`"
             annotated, issues = lint_answer(
                 answer, allowed_roots=[root],
             )
             self.assertEqual(len(issues), 1)
             self.assertIn("method_two", issues[0].replacement)
-            self.assertIn("not helper_func", issues[0].replacement)
-            self.assertIn("[in method_two, not helper_func]", annotated)
+            self.assertIn("no helper_func", issues[0].replacement)
+            self.assertIn(
+                "[no helper_func at this line; line is in method_two]",
+                annotated,
+            )
 
     def test_claimed_symbol_at_module_scope_annotated(self):
         with tempfile.TemporaryDirectory() as root:
@@ -227,7 +235,7 @@ class TestSymbolMismatch(unittest.TestCase):
                 answer, allowed_roots=[root],
             )
             self.assertEqual(len(issues), 1)
-            self.assertIn("<module scope>", issues[0].replacement)
+            self.assertIn("module scope", issues[0].replacement)
 
     def test_no_claimed_symbol_no_annotation(self):
         with tempfile.TemporaryDirectory() as root:
@@ -368,6 +376,12 @@ class TestRegressionCsl1031(unittest.TestCase):
     def test_against_real_repo(self):
         # Resolve the actual claude-hooks repo root from this test
         # file location so the linter has real files to check.
+        # 2026-05-18 (#205): annotation format changed to
+        # "[no <symbol> at this line; line is in <actual>]". Real
+        # fabrications still caught — line 128 of store_reaper.py
+        # is in ``_question_hint_for_group`` and contains no
+        # ``_distill_group`` text, so the cite is correctly flagged
+        # as a wrong-line claim.
         repo_root = str(Path(__file__).resolve().parents[1])
         annotated, issues = lint_answer(
             self.REAL_ANSWER_FRAGMENT,
@@ -381,12 +395,113 @@ class TestRegressionCsl1031(unittest.TestCase):
             f"store_sql.py fabrication missed; got: {replacements}",
         )
         self.assertTrue(
-            any("not _distill_group" in r for r in replacements),
+            any("no _distill_group" in r for r in replacements),
             f"_distill_group line-mismatch missed; got: {replacements}",
         )
         # The annotation must end up in the output text.
         self.assertIn("store_sql.py:41-61 [unverified", annotated)
-        self.assertIn("not _distill_group", annotated)
+        self.assertIn("no _distill_group at this line", annotated)
+
+
+class TestCallSiteIsNotFabrication(unittest.TestCase):
+    """#205 (2026-05-18): natural prose like "X calls Y at file:N"
+    used to false-positive when N was a call SITE inside a different
+    function. The csl-2026-05-18-1428-589c re-run made the bug
+    visible — the (old) symbol-mismatch rule flagged ~100 cites
+    that were correct claims about call locations.
+
+    Under the new rule (#205), a cite is flagged only when the
+    claimed symbol's text DOES NOT appear at the cited line range
+    (±1 line slack). Call sites contain the symbol text by
+    definition, so they no longer trip the linter.
+    """
+
+    def setUp(self):
+        # Clear the linter's mtime cache between tests so tempdir
+        # mtime collisions can't leak state across cases.
+        from consultants.engine.citation_linter import (
+            _FILE_LINES_CACHE,
+        )
+        _FILE_LINES_CACHE.clear()
+
+    def _write_source(self, root: Path) -> None:
+        body = textwrap.dedent('''\
+            def helper():
+                return 42
+
+
+            def caller():
+                # The call site lives here.
+                x = helper()
+                return x
+
+
+            class C:
+                def method(self):
+                    return helper()
+        ''')
+        _write(root / "pkg" / "code.py", body)
+
+    def test_call_site_cite_does_not_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_source(root)
+            # Line 7 contains ``x = helper()`` — a legitimate call
+            # site. Pre-#205 the linter flagged this because the
+            # enclosing function is ``caller``, not ``helper``. Now
+            # it correctly passes through.
+            answer = "The function `helper` is called at `pkg/code.py:7`."
+            annotated, issues = lint_answer(
+                answer, allowed_roots=[str(root)],
+            )
+            self.assertEqual(issues, [])
+            self.assertEqual(annotated, answer)
+
+    def test_method_call_site_does_not_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_source(root)
+            # Line 13 is ``return helper()`` inside C.method. Enclosing
+            # is method, not helper — but ``helper`` text IS on the
+            # line, so no flag.
+            answer = "`helper` is invoked at `pkg/code.py:13`."
+            annotated, issues = lint_answer(
+                answer, allowed_roots=[str(root)],
+            )
+            self.assertEqual(issues, [])
+
+    def test_genuine_wrong_line_still_flagged(self):
+        """Symbol mentioned NOWHERE near the cited line → still flag."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_source(root)
+            # Line 2 (``return 42``) has no ``caller`` text and is
+            # inside helper, not caller — genuine wrong-line claim.
+            answer = "The function `caller` is at `pkg/code.py:2`."
+            annotated, issues = lint_answer(
+                answer, allowed_roots=[str(root)],
+            )
+            self.assertEqual(len(issues), 1)
+            self.assertIn("no caller at this line", issues[0].replacement)
+
+    def test_slack_window_allows_off_by_one(self):
+        """A cite at the def line ±1 (decorator vs def) should pass."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            body = textwrap.dedent('''\
+                # comment
+
+                def real_def():
+                    return 1
+            ''')
+            _write(root / "pkg" / "code.py", body)
+            # def at line 3; cite line 2 (the blank line just before).
+            # Default slack=1 should accept this as valid (within ±1).
+            answer = "`real_def` lives at `pkg/code.py:2`."
+            annotated, issues = lint_answer(
+                answer, allowed_roots=[str(root)],
+            )
+            self.assertEqual(issues, [])
 
 
 class TestGraphFastPath(unittest.TestCase):
@@ -435,8 +550,10 @@ class TestGraphFastPath(unittest.TestCase):
             self._build_repo(root)
             build_graph(root)
 
-            # Line 4 is inside helper_a, NOT helper_b. The fabrication
-            # mirrors gemma's wrong-line failure mode.
+            # Line 4 is inside helper_a (which returns 1) and contains
+            # zero ``helper_b`` text. The fabrication mirrors gemma's
+            # wrong-line failure mode — the symbol is real elsewhere
+            # in the file but absent at the cited line.
             answer = (
                 "The helper at `helper_b` lives at `pkg/code.py:4`."
             )
@@ -444,8 +561,8 @@ class TestGraphFastPath(unittest.TestCase):
                 answer, allowed_roots=[str(root)],
             )
             self.assertEqual(len(issues), 1)
-            self.assertIn("not helper_b", issues[0].replacement)
-            self.assertIn("[in helper_a", annotated)
+            self.assertIn("no helper_b", issues[0].replacement)
+            self.assertIn("line is in helper_a", annotated)
 
     def test_fallback_when_graph_missing(self):
         """Without a graph the linter still catches the same fab via
@@ -462,7 +579,7 @@ class TestGraphFastPath(unittest.TestCase):
                 answer, allowed_roots=[str(root)],
             )
             self.assertEqual(len(issues), 1)
-            self.assertIn("not helper_b", issues[0].replacement)
+            self.assertIn("no helper_b", issues[0].replacement)
 
     def test_fallback_when_file_outside_graph(self):
         """A cite that points at an allowed_root file outside the
@@ -484,15 +601,17 @@ class TestGraphFastPath(unittest.TestCase):
                     return 1
             ''')
             _write(ogr / "src" / "outside.py", body)
-            # Claim neighbour at line 2, which is inside outsider.
+            # Claim neighbour at line 2 (``return 0`` in outsider's
+            # body) — no ``neighbour`` text on that line, so it's a
+            # genuine wrong-line claim.
             answer = "The fn `neighbour` is at `src/outside.py:2`."
             annotated, issues = lint_answer(
                 answer,
                 allowed_roots=[str(gr), str(ogr)],
             )
             self.assertEqual(len(issues), 1)
-            self.assertIn("not neighbour", issues[0].replacement)
-            self.assertIn("[in outsider", annotated)
+            self.assertIn("no neighbour", issues[0].replacement)
+            self.assertIn("line is in outsider", annotated)
 
 
 if __name__ == "__main__":  # pragma: no cover

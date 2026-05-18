@@ -403,19 +403,41 @@ def _verify_symbol_match(
     *,
     allowed_roots: Sequence[str],
 ) -> Optional[CitationIssue]:
-    """Cross-check the cite's claimed symbol against AST ground truth.
+    """Cross-check the cite's claimed symbol against the actual file
+    text at the cited line range.
 
-    Only runs on ``.py`` files (stdlib :mod:`ast` parses them
-    directly; non-Python files require a different parser and are
-    skipped — those cites pass through with only path + bounds
-    verification).
+    Only runs on ``.py`` files (extending to other languages is fine
+    and trivial, but the claimed-symbol extractor today only
+    recognises Python identifiers — and our high-fanout fab-test
+    corpus is all Python).
 
     Looks back ``_SYMBOL_PROXIMITY_CHARS`` characters from the cite
-    for a backtick-wrapped identifier. If found, that's the
-    "claimed symbol". Parses the cited file's AST and walks for
-    function/class defs; the innermost def whose
-    ``[lineno, end_lineno]`` range contains ``line_start`` is the
-    "actual symbol". Mismatch → annotate; match → no issue.
+    for a backtick-wrapped identifier — that is the "claimed
+    symbol". Then reads the cited line range (with a small ±1 line
+    margin to absorb off-by-one prose) and checks whether the
+    claimed identifier appears as a word-boundary substring there.
+
+    2026-05-18 (#205) — the symbol-match rule used to ask "is line N
+    *inside the def of* the claimed symbol?" and flagged every cite
+    where the enclosing function differed. That over-flags by ~95%
+    on natural prose: "the reaper *calls* ``_distill_group`` at
+    ``store_reaper.py:301``" puts the cite at the CALL site, whose
+    enclosing function is ``sweep_once`` — but the line genuinely
+    contains ``self._distill_group(…)`` and the model's claim is
+    accurate.
+
+    The current rule:
+    * Symbol text appears at the cited line range (±1 margin) →
+      cite is a valid reference / call / definition; no flag.
+    * Symbol text does NOT appear at the cited line range → cite
+      is unsupported by the file content at that location; flag
+      with the enclosing-function context for the annotation
+      message so the user knows where line N really lives.
+
+    This keeps the genuine wrong-line catch (the gemma "_distill_group
+    at line 128" forensic — line 128 has no ``_distill_group`` text
+    anywhere in its source) while eliminating the call-site false
+    positive class.
 
     No-claimed-symbol (cite stands alone) → no annotation either —
     we don't insert "in X" for clean cites because that's noise.
@@ -431,23 +453,28 @@ def _verify_symbol_match(
     if resolved is None:
         return None  # already covered by verify_citation
 
-    # 2026-05-18 (#200): try the on-disk code_graph first. When the
-    # graph is built and covers the cited file, the lookup is O(1)
-    # against an mtime-cached in-process index — repeat lints across
-    # sessions in the same project hit the cache. Fall back to
-    # on-demand ast.parse when the graph is missing, predates the
-    # end_line field, or doesn't cover the file (non-repo file pulled
-    # in via an allowed_root that isn't under the graph build root).
+    # Compare bare leaf names (drop class-qualifier dots so
+    # ``StoreReaper.sweep_once`` matches the bare ``sweep_once``
+    # identifier in source text).
+    claimed_leaf = claimed.rsplit(".", 1)[-1]
+
+    # #205: primary check — does the symbol text actually appear at
+    # the cited line range? Cheap (single file read), language-
+    # agnostic, and accurate for the "X at file:N" prose pattern.
+    if _symbol_appears_in_range(
+        resolved, claimed_leaf, line_start, line_end,
+    ):
+        return None  # valid reference / call / definition
+
+    # Symbol text NOT at cited line — genuine wrong-line claim.
+    # Look up the enclosing function for the annotation message so
+    # the user knows where line N really lives. Prefer the on-disk
+    # code_graph (#200, O(1) mtime-cached) and fall back to ast.parse.
     actual = _enclosing_symbol_via_graph(
         path, line_start, allowed_roots=allowed_roots,
     )
     if actual is None:
         actual = _enclosing_symbol_at_line(resolved, line_start)
-
-    # Compare bare leaf names (drop class-qualifier dots so
-    # ``StoreReaper.sweep_once`` matches the AST node named
-    # ``sweep_once`` inside class ``StoreReaper``).
-    claimed_leaf = claimed.rsplit(".", 1)[-1]
 
     line_repr = (
         f"{line_start}-{line_end}" if line_end is not None
@@ -459,12 +486,12 @@ def _verify_symbol_match(
         return CitationIssue(
             original_match=full_cite,
             replacement=(
-                f"{full_cite} [in <module scope>, "
-                f"not {claimed_leaf}]"
+                f"{full_cite} [no {claimed_leaf} at this line; "
+                f"module scope]"
             ),
             reason=(
-                f"line {line_start} is not inside any function/class; "
-                f"answer claims {claimed_leaf}"
+                f"line {line_start} does not contain {claimed_leaf}; "
+                f"line is in module scope"
             ),
             path=path,
             line_start=line_start,
@@ -474,11 +501,12 @@ def _verify_symbol_match(
         return CitationIssue(
             original_match=full_cite,
             replacement=(
-                f"{full_cite} [in {actual}, not {claimed_leaf}]"
+                f"{full_cite} [no {claimed_leaf} at this line; "
+                f"line is in {actual}]"
             ),
             reason=(
-                f"line {line_start} is inside {actual}; "
-                f"answer claims {claimed_leaf}"
+                f"line {line_start} does not contain {claimed_leaf}; "
+                f"line is inside {actual}"
             ),
             path=path,
             line_start=line_start,
@@ -627,6 +655,82 @@ def _enclosing_symbol_at_line(
 # ---------------------------------------------------------------- #
 # Private helpers.
 # ---------------------------------------------------------------- #
+
+# Per-process cache so a single lint pass that hits the same file
+# repeatedly (typical: 5–30 cites pointing at one file) pays the
+# file-read once. Keyed by absolute path + mtime so an edit during
+# a long-running session invalidates cleanly.
+_FILE_LINES_CACHE: dict[str, tuple[float, list[str]]] = {}
+
+
+def _load_file_lines(path: Path) -> Optional[list[str]]:
+    """Return file contents as a list of lines (1-indexed by adding
+    ``[None] + lines`` later), mtime-cached. ``None`` on read error.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    key = str(path)
+    cached = _FILE_LINES_CACHE.get(key)
+    if cached is not None and cached[0] == st.st_mtime:
+        return cached[1]
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    lines = text.splitlines()
+    _FILE_LINES_CACHE[key] = (st.st_mtime, lines)
+    return lines
+
+
+# Word-boundary regex cache so we compile each identifier once
+# across a lint pass.
+_SYMBOL_RE_CACHE: dict[str, "re.Pattern[str]"] = {}
+
+
+def _symbol_appears_in_range(
+    path: Path,
+    symbol: str,
+    line_start: int,
+    line_end: Optional[int],
+    *,
+    slack: int = 1,
+) -> bool:
+    """True iff ``symbol`` appears as a word-boundary substring in
+    the cited line range (with ±``slack`` extra lines on each side).
+
+    The slack absorbs natural off-by-one prose — a model claiming
+    "X at file:N" when X actually lives at N±1 (e.g. the decorator
+    line vs the def line) shouldn't be flagged as fabricating.
+
+    Word-boundary matching prevents false positives on substring
+    collisions like ``_distill`` matching inside ``_distill_group``
+    — though for our case (whole identifiers in code) this is more
+    a safety net than a frequent concern.
+    """
+    if not symbol:
+        return False
+    lines = _load_file_lines(path)
+    if not lines:
+        return False
+    # 1-index the line array for natural arithmetic; sentinel at [0]
+    # so ``lines_1[N]`` returns line N.
+    n = len(lines)
+    lo = max(1, line_start - slack)
+    hi = min(n, (line_end if line_end is not None else line_start) + slack)
+    if lo > hi:
+        return False
+    pattern = _SYMBOL_RE_CACHE.get(symbol)
+    if pattern is None:
+        # Escape regex metachars in identifiers (unlikely but safe).
+        pattern = re.compile(rf"\b{re.escape(symbol)}\b")
+        _SYMBOL_RE_CACHE[symbol] = pattern
+    for ln in range(lo, hi + 1):
+        if pattern.search(lines[ln - 1]):
+            return True
+    return False
+
 
 def _resolve_path(
     path: str,
