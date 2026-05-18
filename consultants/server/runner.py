@@ -44,6 +44,19 @@ def make_runner(*, ollama_base_url: str):
     from consultants.engine.trace import (
         Tracer, TracedChat, traced_tool, traced_node,
     )
+    # #214: Default to an in-memory checkpointer so the M9 control
+    # surface (state / cancel / inject / pause / resume) works in
+    # the standard config. LangGraph's get_state / update_state
+    # require a checkpointer; without one, every M9 endpoint that
+    # calls those raises ValueError("No checkpointer set") and 500s.
+    # The cost is one in-process write per superstep — bounded for
+    # a council with ~10 supersteps per run. Persistence isn't a
+    # requirement here: the recorder's transcript.db is the durable
+    # audit log; the checkpointer is for live introspection only.
+    try:
+        from langgraph.checkpoint.memory import MemorySaver
+    except ImportError:  # pragma: no cover — minimal langgraph
+        MemorySaver = None  # type: ignore[assignment]
 
     def run_council(state, runner_input: dict) -> None:
         cfg: cc.ConsultantsConfig = runner_input["config"]
@@ -298,13 +311,23 @@ def make_runner(*, ollama_base_url: str):
                 interrupt_before = ["synthesizer"]
         except AttributeError:
             interrupt_before = None
+        # #214 Fix B: attach a MemorySaver checkpointer so the M9
+        # control surface (state / cancel / inject / pause / resume)
+        # works in the standard config. Falls back to None if
+        # langgraph's checkpoint.memory module isn't importable
+        # (defensive — every langgraph release we depend on ships it).
+        checkpointer = MemorySaver() if MemorySaver is not None else None
         if interrupt_before:
             compiled = build_council_graph(
                 deps, tracer=tracer,
                 interrupt_before=interrupt_before,
+                checkpointer=checkpointer,
             )
         else:
-            compiled = build_council_graph(deps, tracer=tracer)
+            compiled = build_council_graph(
+                deps, tracer=tracer,
+                checkpointer=checkpointer,
+            )
 
         # M9: attach the live graph + thread config + recorder to
         # SessionState so the HTTP control route handlers can read

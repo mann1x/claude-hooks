@@ -16,6 +16,102 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed — consultants: M9 control surface — runtime_events emission + default checkpointer + node-enter INFO log (#214, 2026-05-18)
+
+The live regression run for #213 (Q2 × xhigh × tool_exec=OFF, sid
+``csl-2026-05-18-1724-0f9f``) deadlocked at the planner→researcher
+transition. While diagnosing, three independent M9 control-surface
+failures surfaced simultaneously — explaining why we'd been
+running blind:
+
+1. **``runtime_events`` writer never fired.** The recorder shipped
+   a ``record_event`` method (writes a narrow row into
+   ``runtime_events``), and the SSE bridge reads from
+   ``runtime_events`` via ``list_runtime_events``, but **nothing in
+   the engine ever called the writer**. Census across all
+   sessions on this host: 6 sessions had the table, 0 sessions had
+   any rows in it (the 8 older sessions don't even have the
+   table). SSE has been emitting empty streams since M9 shipped.
+
+2. **``state`` / ``cancel`` / ``inject`` / ``pause`` / ``resume``
+   endpoints all 500'd with ``ValueError: No checkpointer set``.**
+   The runner compiled ``build_council_graph`` without passing a
+   checkpointer; LangGraph's ``get_state`` / ``update_state``
+   require one. Every M9 mutation endpoint went through one of
+   those calls.
+
+3. **Daemon app log emitted zero structured lines between role
+   transitions** — only ``uvicorn.access`` records, no per-node
+   INFO. Ops watching ``~/.claude/claude-hooks-consultants.log``
+   couldn't see what the runner was doing.
+
+Three fixes shipped together since they share root causes:
+
+**Fix A: recorder auto-emits ``runtime_events`` mirror rows.**
+``MessageRecorder.record_node`` / ``record_llm`` / ``record_tool``
+each gain a narrow mirror row into ``runtime_events`` alongside
+their existing detailed-events row. Single source of truth at the
+recorder; no engine changes needed. Payload shape:
+
+| Method | Mirror kind | Narrow payload (omits) |
+|---|---|---|
+| ``record_node`` | ``node_enter`` / ``node_exit`` | ``ts`` / ``duration_ms`` / ``error`` |
+| ``record_llm`` | ``llm_call`` | ``model`` / ``duration_ms`` / ``prompt_tokens`` / ``completion_tokens`` / ``error`` (omits full request_json / response_json — those stay in the audit log) |
+| ``record_tool`` | ``tool_call`` | ``tool`` / ``output_chars`` / ``duration_ms`` / ``error`` (omits full args / output) |
+
+The audit log table (``events``) is untouched — every audit row
+the post-mortem queries need is still written. The mirror is
+additive.
+
+**Fix B: runner attaches an ``in-memory`` LangGraph checkpointer
+by default.** ``consultants/server/runner.py:make_runner`` now
+imports ``MemorySaver`` from ``langgraph.checkpoint.memory`` and
+passes it to both ``build_council_graph`` call sites. Cost: one
+in-process checkpoint write per superstep, bounded for a council
+with ~10 supersteps per run. Persistence isn't a goal — the
+recorder's ``transcript.db`` is the durable audit log; this
+checkpointer is purely for live introspection via M9 endpoints.
+
+**Fix D: ``record_node(kind="node_enter")`` emits an INFO log
+line.** Single line at the recorder level, names role + round +
+lane_idx. Ops watching the daemon log now see role transitions
+without querying the DB.
+
+(Fix C in the original task draft — recorder-based reconstruction
+fallback when checkpointer is off — was rendered unnecessary by
+Fix B making the checkpointer default-on.)
+
+Test surface:
+
+- ``tests/test_consultants_recorder.py:TestRuntimeEventsMirror``
+  — 8 new tests pinning the mirror contract: ``node_enter`` /
+  ``node_exit`` / ``llm_call`` / ``tool_call`` each emit a row,
+  narrow payload omits the heavy blobs, audit log is still
+  written alongside, ``list_runtime_events`` returns rows in
+  insertion order, ``node_enter`` emits an INFO log line, and
+  ``node_exit`` does NOT (volume hygiene).
+- ``tests/test_consultants_v2_control_routes.py:TestGetState.test_real_graph_with_memory_checkpointer_serves_state``
+  — builds a real one-node ``StateGraph`` with ``MemorySaver``,
+  installs it on a session, and asserts ``GET /v1/consult/<sid>/state``
+  returns 200 (no ``ValueError("No checkpointer set")``).
+- ``tests/test_consultants_v2_control_routes.py:TestEvents.test_real_recorder_mirror_rows_stream_through_sse``
+  — drives a real ``MessageRecorder`` with node/llm/tool events,
+  installs the recorder on a session, asserts ``GET /v1/consult/
+  <sid>/events`` SSE-replays all three mirror rows with the
+  expected ``event:`` headers + narrow payload fields.
+
+Full sweep: 3821 → 3831 passed (+10 new tests). Targeted suites
+green.
+
+Out of scope for this commit:
+
+- The underlying **deadlock** that triggered the investigation
+  (planner→researcher transition stuck for 22+ min with all
+  threads on futex_wait, no upstream TCP, no CPU). The fix to
+  the introspection surface lands here; the deadlock root cause
+  is a separate investigation (next: py-spy on a fresh repro
+  with the new logging in place).
+
 ### Fixed — consultants: triple-fix (#213, 2026-05-18) — UNKNOWN preservation + exhaustive synthesizer + prompt compaction
 
 Three follow-ups from the csl-2026-05-18-1554-c8dc forensic + the

@@ -209,6 +209,64 @@ class TestGetState(unittest.TestCase):
         self.assertEqual(r.status_code, 500)
         self.assertIn("get_state failed", r.json()["detail"])
 
+    def test_real_graph_with_memory_checkpointer_serves_state(self):
+        """Regression for #214: pre-fix, ProviderBackedStore.run_council
+        compiled the council graph without passing a checkpointer.
+        LangGraph's get_state() then raised
+        ValueError("No checkpointer set") on every M9 state poll, and
+        the route returned HTTP 500 ("get_state failed: No
+        checkpointer set"). The fix attaches a MemorySaver in the
+        runner so the standard config works.
+
+        This test pins that contract by building a *real* (not
+        stubbed) compiled graph with a MemorySaver, installing it
+        on the session, and asserting the /state endpoint returns
+        200 with a valid snapshot — i.e. the route path that 500'd
+        on csl-2026-05-18-1724-0f9f now succeeds."""
+        try:
+            from langgraph.graph import StateGraph, START, END
+            from langgraph.checkpoint.memory import MemorySaver
+        except ImportError:
+            self.skipTest("langgraph not available")
+
+        # Minimal one-node graph that just sets a field. The
+        # control_routes /state endpoint reads from the snapshot's
+        # ``values`` dict — same shape regardless of how complex
+        # the underlying graph is.
+        def _node(state: dict) -> dict:
+            return {"plan": "x"}
+
+        sg = StateGraph(dict)
+        sg.add_node("only", _node)
+        sg.add_edge(START, "only")
+        sg.add_edge("only", END)
+        compiled = sg.compile(checkpointer=MemorySaver())
+        # Run it once so get_state has a snapshot to return.
+        thread_config = {"configurable": {"thread_id": "csl-real"}}
+        compiled.invoke({"plan": ""}, thread_config)
+
+        c, app = _client()
+        from consultants.server.app import SessionState
+        s = SessionState(
+            sid="csl-real", cwd="/tmp", question="Q",
+            effort="medium", topology="council",
+            status="completed", closed=False,
+        )
+        s._compiled = compiled
+        s._thread_config = thread_config
+        app.state.sessions["csl-real"] = s
+
+        r = c.get("/v1/consult/csl-real/state")
+        self.assertEqual(r.status_code, 200, msg=r.text)
+        body = r.json()
+        self.assertEqual(body["sid"], "csl-real")
+        # The route surfaces snapshot.values; our node set plan="x".
+        # The exact field surface depends on what the route picks
+        # out — at minimum, the call must NOT 500 with "No
+        # checkpointer set".
+        self.assertNotIn("get_state failed", r.text)
+        self.assertNotIn("No checkpointer set", r.text)
+
 
 # ============================================================== #
 # POST /inject
@@ -519,6 +577,67 @@ class TestEvents(unittest.TestCase):
         self.assertNotIn("id: 1", body)
         self.assertNotIn("id: 2", body)
         self.assertIn("id: 3", body)
+
+    def test_real_recorder_mirror_rows_stream_through_sse(self):
+        """Regression for #214: pre-fix, the engine's
+        record_node / record_llm / record_tool calls wrote to the
+        ``events`` audit table but never mirrored into
+        ``runtime_events``. The SSE endpoint reads from
+        ``runtime_events`` (via list_runtime_events), so the stream
+        was empty for every session that ever ran. csl-1554's
+        ``runtime_events`` table had 0 rows — same for all 6
+        sessions with that schema today.
+
+        Post-#214 fix the recorder auto-emits a narrow mirror into
+        runtime_events whenever record_node / record_llm /
+        record_tool fires. This test pins the contract end-to-end:
+        drive a real MessageRecorder, record a few node/llm/tool
+        events, install the recorder on a session, and assert the
+        /events SSE endpoint replays them."""
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        from consultants.engine.recorder import (
+            MessageRecorder, RecorderMeta,
+        )
+        with TemporaryDirectory() as td:
+            db_path = Path(td) / "transcript.db"
+            meta = RecorderMeta(
+                sid="csl-mirror", cwd="/tmp", question="Q?",
+                effort="medium", topology="council",
+                models={"planner": "m"},
+            )
+            rec = MessageRecorder(db_path, meta=meta)
+            try:
+                rec.record_node(role="planner", kind="node_enter")
+                rec.record_llm(
+                    role="planner", round=1, model="gemma4:31b-cloud",
+                    request={"r": 1}, response={"a": 1},
+                    prompt_tokens=10, completion_tokens=20,
+                    duration_ms=100,
+                )
+                rec.record_node(
+                    role="planner", kind="node_exit", duration_ms=110,
+                )
+                # Drive the real route through a TestClient.
+                c, app = _client()
+                _install_session(
+                    app, "csl-mirror",
+                    status="completed", recorder=rec,
+                )
+                r = c.get("/v1/consult/csl-mirror/events")
+                self.assertEqual(r.status_code, 200, msg=r.text)
+                body = r.text
+                # All three narrow mirror rows surface as SSE events
+                # in order: node_enter, llm_call, node_exit.
+                self.assertIn("event: node_enter", body)
+                self.assertIn("event: llm_call", body)
+                self.assertIn("event: node_exit", body)
+                # The narrow payload landed in the SSE data block.
+                self.assertIn("gemma4:31b-cloud", body)
+                self.assertIn("\"prompt_tokens\": 10", body)
+                self.assertIn("\"completion_tokens\": 20", body)
+            finally:
+                rec.close()
 
 
 if __name__ == "__main__":

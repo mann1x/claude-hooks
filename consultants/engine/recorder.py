@@ -25,12 +25,15 @@ stdlib. That keeps it usable from tests without spinning up a graph.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+
+log = logging.getLogger(__name__)
 
 
 SCHEMA_VERSION = 2
@@ -249,9 +252,15 @@ class MessageRecorder:
     ) -> None:
         """Append one LLM call event. `request` and `response` are
         full payloads — the recorder JSON-encodes them with default=str
-        so non-serializable values don't sink the run."""
+        so non-serializable values don't sink the run.
+
+        Also auto-emits a narrow mirror row into ``runtime_events`` so
+        the M9 SSE bridge has a coherent timeline without the engine
+        having to call ``record_runtime_event`` separately (#214).
+        """
         if self._closed:
             return
+        now = time.time()
         conn = self._conn()
         conn.execute(
             """
@@ -263,7 +272,7 @@ class MessageRecorder:
             ) VALUES (?, 'llm_call', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                time.time(),
+                now,
                 role,
                 round,
                 lane_idx,
@@ -277,6 +286,21 @@ class MessageRecorder:
             ),
         )
         conn.commit()
+        # Narrow mirror for SSE consumers.
+        self._emit_runtime_event(
+            kind="llm_call",
+            role=role,
+            round=round,
+            lane_idx=lane_idx,
+            payload={
+                "ts": now,
+                "model": model,
+                "duration_ms": duration_ms,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "error": error,
+            },
+        )
 
     def record_tool(
         self,
@@ -293,9 +317,17 @@ class MessageRecorder:
         """Append one tool execution event. `args` / `output` are
         stored as raw text (they're already strings on the agent_loop
         side); we record `output_chars` separately so summary queries
-        can SUM the volume without re-reading the blobs."""
+        can SUM the volume without re-reading the blobs.
+
+        Also auto-emits a narrow mirror row into ``runtime_events``
+        for SSE consumers (#214). The narrow payload omits the full
+        ``args`` / ``output`` blobs (they live in the audit log) and
+        keeps just the tool name, output volume, duration, and any
+        error.
+        """
         if self._closed:
             return
+        now = time.time()
         conn = self._conn()
         out_chars = len(output) if isinstance(output, str) else None
         conn.execute(
@@ -307,7 +339,7 @@ class MessageRecorder:
             ) VALUES (?, 'tool_call', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                time.time(),
+                now,
                 role,
                 round,
                 lane_idx,
@@ -320,6 +352,19 @@ class MessageRecorder:
             ),
         )
         conn.commit()
+        self._emit_runtime_event(
+            kind="tool_call",
+            role=role,
+            round=round,
+            lane_idx=lane_idx,
+            payload={
+                "ts": now,
+                "tool": tool,
+                "output_chars": out_chars,
+                "duration_ms": duration_ms,
+                "error": error,
+            },
+        )
 
     def record_node(
         self,
@@ -333,11 +378,19 @@ class MessageRecorder:
     ) -> None:
         """Append a node-boundary event. Cheap to skip if a caller
         doesn't care; debugging tools query these to render the graph
-        timeline."""
+        timeline.
+
+        Also auto-emits a narrow mirror row into ``runtime_events`` so
+        the M9 SSE bridge has a coherent timeline (#214). For
+        ``node_enter`` an INFO log line is also emitted so ops
+        watching the daemon log can see role transitions without
+        querying the DB.
+        """
         if self._closed:
             return
         if kind not in ("node_enter", "node_exit"):
             raise ValueError(f"node kind must be node_enter|node_exit, got {kind!r}")
+        now = time.time()
         conn = self._conn()
         conn.execute(
             """
@@ -346,9 +399,58 @@ class MessageRecorder:
                 duration_ms, error
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (time.time(), kind, role, round, lane_idx, duration_ms, error),
+            (now, kind, role, round, lane_idx, duration_ms, error),
         )
         conn.commit()
+        # M9 mirror for SSE consumers.
+        self._emit_runtime_event(
+            kind=kind,
+            role=role,
+            round=round,
+            lane_idx=lane_idx,
+            payload={
+                "ts": now,
+                "duration_ms": duration_ms,
+                "error": error,
+            },
+        )
+        # Per-role INFO log on node_enter — single source of truth
+        # for ops watching the daemon log (#214 Fix D).
+        if kind == "node_enter":
+            lane_tag = "" if lane_idx is None else f" lane={lane_idx}"
+            log.info(
+                "consultants: node_enter role=%s round=%d%s",
+                role, round, lane_tag,
+            )
+
+    def _emit_runtime_event(
+        self,
+        *,
+        kind: str,
+        role: Optional[str],
+        round: Optional[int],
+        lane_idx: Optional[int],
+        payload: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Best-effort narrow mirror to ``runtime_events``.
+
+        Used by ``record_node`` / ``record_llm`` / ``record_tool`` to
+        emit a coherent timeline for the M9 SSE bridge. Failures are
+        logged + swallowed — the audit-log writes (events table) are
+        the source of truth and must succeed; SSE timeline rows are
+        observability and best-effort.
+        """
+        try:
+            self.record_event(
+                kind=kind, role=role, round=round,
+                lane_idx=lane_idx, payload=payload,
+            )
+        except Exception:  # pragma: no cover — defensive
+            log.exception(
+                "recorder._emit_runtime_event failed; SSE will miss "
+                "kind=%s role=%s round=%s lane_idx=%s",
+                kind, role, round, lane_idx,
+            )
 
     def record_event(
         self,
