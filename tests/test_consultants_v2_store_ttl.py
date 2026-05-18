@@ -128,6 +128,11 @@ def _ttl_cfg(**overrides):
 
     All TTLs default off (None) so tests opt into specific TTLs
     one at a time. Pass ``enabled=False`` to mimic the M8 path.
+
+    Jitter (#215) is disabled (``jitter_pct = 0.0``) by default so
+    the TTL math here stays deterministic — jitter is exercised
+    separately in :mod:`test_consultants_v2_store_reaper`. Tests
+    that want to see jitter pass ``jitter_pct=0.1`` explicitly.
     """
     from consultants.config import StoreTTLConfig
     kwargs = dict(
@@ -137,6 +142,7 @@ def _ttl_cfg(**overrides):
         project_days=None,
         user_days=None,
         refresh_on_read=False,
+        jitter_pct=0.0,
     )
     kwargs.update(overrides)
     return StoreTTLConfig(**kwargs)

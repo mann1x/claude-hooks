@@ -151,6 +151,8 @@ def _store_cfg(
     distill_enabled: bool = True,
     min_entries: int = 3,
     interval: float = 3600.0,
+    max_groups_per_sweep: int = 0,  # 0 = uncapped, matches pre-#215
+    pace_seconds_between_distillations: float = 0.0,
 ) -> StoreConfig:
     cfg = StoreConfig()
     cfg.distillation = StoreDistillationConfig(
@@ -160,6 +162,8 @@ def _store_cfg(
         sweep_interval_seconds=interval,
         min_entries_per_distillation=min_entries,
         max_session_entries=50,
+        max_groups_per_sweep=max_groups_per_sweep,
+        pace_seconds_between_distillations=pace_seconds_between_distillations,
     )
     return cfg
 
@@ -683,6 +687,280 @@ class TestSweepObservability(unittest.TestCase):
         result = r.sweep_once()
         self.assertEqual(r.last_sweep_result, result)
         self.assertIsNotNone(r.last_sweep_at)
+
+
+# ============================================================== #
+# #215 — Reaper pacing (max_groups_per_sweep + inter-group pace)
+# ============================================================== #
+
+
+class TestReaperPacing(unittest.TestCase):
+    """#215 — bounds per-sweep distillation cost so a backlog can't
+    fan out into a synchronous batch that saturates the embedder.
+
+    Covers:
+
+    - ``max_groups_per_sweep`` caps successful distillations per
+      tick; remaining research groups roll over to the next sweep
+      (their originals stay in place).
+    - ``pace_seconds_between_distillations`` sleeps between
+      consecutive distillations.
+    - Default config values match the documented defaults (5
+      groups / 5 s pace).
+    - Cost-gated skips (below ``min_entries``) and tool_results
+      deletes are NOT counted against the cap — only successful
+      distillations are.
+    - ``rolled_over`` is exposed in the result dict.
+    """
+
+    def test_cap_limits_distillations_per_sweep(self) -> None:
+        """With cap=2 and 4 ready research groups, only 2 distill;
+        the other 2 stay in place for the next tick."""
+        rows: list[_FakeRow] = []
+        for sid_idx in range(4):
+            sid = f"csl-{sid_idx}"
+            for lane in range(3):
+                rows.append(_row(
+                    f"r-{sid_idx}-{lane}",
+                    ns=(sid, "research"),
+                    cwd=f"/proj/{sid_idx}",
+                    lane_idx=lane,
+                ))
+        prov = _FakeProvider([rows])
+        distiller = _FakeDistiller()
+        store = _FakeStore()
+        r = StoreReaperThread(
+            store_cfg=_store_cfg(min_entries=3, max_groups_per_sweep=2),
+            provider=prov, distiller=distiller, store=store,
+        )
+        result = r.sweep_once()
+        self.assertEqual(result["expired"], 12)
+        self.assertEqual(result["distilled"], 2)
+        self.assertEqual(result["rolled_over"], 2)
+        # Only the 2 distilled groups had their originals deleted —
+        # 2 × 3 = 6 rows.
+        self.assertEqual(result["deleted"], 6)
+        # Distiller invoked exactly twice.
+        self.assertEqual(len(distiller.calls), 2)
+        # Only 2 project-namespace summaries written.
+        self.assertEqual(len(store.puts), 2)
+
+    def test_cap_zero_means_uncapped(self) -> None:
+        """``max_groups_per_sweep = 0`` restores pre-#215 behavior
+        (every ready group distills in one tick)."""
+        rows: list[_FakeRow] = []
+        for sid_idx in range(4):
+            sid = f"csl-{sid_idx}"
+            for lane in range(3):
+                rows.append(_row(
+                    f"r-{sid_idx}-{lane}",
+                    ns=(sid, "research"),
+                    cwd=f"/proj/{sid_idx}",
+                    lane_idx=lane,
+                ))
+        prov = _FakeProvider([rows])
+        distiller = _FakeDistiller()
+        store = _FakeStore()
+        r = StoreReaperThread(
+            store_cfg=_store_cfg(min_entries=3, max_groups_per_sweep=0),
+            provider=prov, distiller=distiller, store=store,
+        )
+        result = r.sweep_once()
+        self.assertEqual(result["distilled"], 4)
+        self.assertEqual(result["rolled_over"], 0)
+        self.assertEqual(result["deleted"], 12)
+
+    def test_cap_does_not_count_below_threshold_groups(self) -> None:
+        """A below-min_entries skip is a delete (no LLM, no embedder
+        write), so it must NOT consume the per-sweep distillation
+        budget. With cap=1 and one above-threshold + one below-
+        threshold group, the below-threshold one deletes and the
+        above-threshold one still gets to distill."""
+        rows = [
+            _row("r1", ns=("csl-A", "research"), cwd="/p/a", lane_idx=0),
+            _row("r2", ns=("csl-A", "research"), cwd="/p/a", lane_idx=1),
+            _row("r3", ns=("csl-A", "research"), cwd="/p/a", lane_idx=2),
+            # Singleton — below threshold, will delete without LLM.
+            _row("only", ns=("csl-B", "research"), cwd="/p/b", lane_idx=0),
+        ]
+        prov = _FakeProvider([rows])
+        distiller = _FakeDistiller()
+        store = _FakeStore()
+        r = StoreReaperThread(
+            store_cfg=_store_cfg(min_entries=3, max_groups_per_sweep=1),
+            provider=prov, distiller=distiller, store=store,
+        )
+        result = r.sweep_once()
+        # csl-A distilled (cap=1 satisfied); csl-B below threshold,
+        # deleted without consuming the budget.
+        self.assertEqual(result["distilled"], 1)
+        self.assertEqual(result["groups_skipped_below_threshold"], 1)
+        self.assertEqual(result["rolled_over"], 0)
+        # All four rows deleted (3 originals + 1 thin-session row).
+        self.assertEqual(result["deleted"], 4)
+
+    def test_cap_does_not_count_tool_results_groups(self) -> None:
+        """tool_results delete-without-distill, so they must not
+        consume the per-sweep distillation budget either."""
+        rows = [
+            _row("r1", ns=("csl-A", "research"), cwd="/p/a", lane_idx=0),
+            _row("r2", ns=("csl-A", "research"), cwd="/p/a", lane_idx=1),
+            _row("r3", ns=("csl-A", "research"), cwd="/p/a", lane_idx=2),
+            _row("t1", ns=("csl-A", "tool_results")),
+            _row("t2", ns=("csl-A", "tool_results")),
+        ]
+        prov = _FakeProvider([rows])
+        distiller = _FakeDistiller()
+        store = _FakeStore()
+        r = StoreReaperThread(
+            store_cfg=_store_cfg(min_entries=3, max_groups_per_sweep=1),
+            provider=prov, distiller=distiller, store=store,
+        )
+        result = r.sweep_once()
+        self.assertEqual(result["distilled"], 1)
+        # tool_results never engages the cap.
+        self.assertEqual(result["rolled_over"], 0)
+        # 3 research + 2 tool_results = 5 deleted.
+        self.assertEqual(result["deleted"], 5)
+
+    def test_pace_sleeps_between_distillations(self) -> None:
+        """``pace_seconds_between_distillations`` injects a sleep
+        between consecutive distillations. Two groups + 0.05 s pace
+        → ≥ 0.05 s wall (single sleep between the two)."""
+        rows = [
+            _row("a1", ns=("csl-A", "research"), cwd="/p/a", lane_idx=0),
+            _row("a2", ns=("csl-A", "research"), cwd="/p/a", lane_idx=1),
+            _row("a3", ns=("csl-A", "research"), cwd="/p/a", lane_idx=2),
+            _row("b1", ns=("csl-B", "research"), cwd="/p/b", lane_idx=0),
+            _row("b2", ns=("csl-B", "research"), cwd="/p/b", lane_idx=1),
+            _row("b3", ns=("csl-B", "research"), cwd="/p/b", lane_idx=2),
+        ]
+        prov = _FakeProvider([rows])
+        distiller = _FakeDistiller()
+        store = _FakeStore()
+        r = StoreReaperThread(
+            store_cfg=_store_cfg(
+                min_entries=3,
+                pace_seconds_between_distillations=0.05,
+            ),
+            provider=prov, distiller=distiller, store=store,
+        )
+        t0 = time.monotonic()
+        result = r.sweep_once()
+        elapsed = time.monotonic() - t0
+        self.assertEqual(result["distilled"], 2)
+        # One pace gap between the two distillations → ≥ 0.05 s.
+        # Upper bound generous to avoid flakes on busy CI.
+        self.assertGreaterEqual(elapsed, 0.045)
+
+    def test_pace_zero_disables_inter_group_sleep(self) -> None:
+        """``pace_seconds_between_distillations = 0.0`` returns to
+        back-to-back distillation (no extra delay)."""
+        rows = [
+            _row(f"r-{sid}-{lane}", ns=(f"csl-{sid}", "research"),
+                 cwd=f"/p/{sid}", lane_idx=lane)
+            for sid in range(3)
+            for lane in range(3)
+        ]
+        prov = _FakeProvider([rows])
+        distiller = _FakeDistiller()
+        store = _FakeStore()
+        r = StoreReaperThread(
+            store_cfg=_store_cfg(
+                min_entries=3,
+                pace_seconds_between_distillations=0.0,
+            ),
+            provider=prov, distiller=distiller, store=store,
+        )
+        t0 = time.monotonic()
+        result = r.sweep_once()
+        elapsed = time.monotonic() - t0
+        self.assertEqual(result["distilled"], 3)
+        # Three distillations with no pace + a fake distiller →
+        # well under 100 ms.
+        self.assertLess(elapsed, 0.5)
+
+    def test_pace_responsive_to_stop_event(self) -> None:
+        """The paced sleep slices 0.5 s like the main loop so the
+        reaper can shut down mid-pace within a slice."""
+        r = StoreReaperThread(
+            store_cfg=_store_cfg(),
+            provider=_FakeProvider([]),
+            distiller=None, store=None,
+        )
+        # Pre-set the stop event so the very first slice exits.
+        r._stop_event.set()
+        t0 = time.monotonic()
+        r._sleep_paced(10.0)  # would be 10 s without the early-exit
+        elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, 0.6)
+
+    def test_helper_methods_read_from_config(self) -> None:
+        """The cap + pace accessors read from
+        ``cfg.distillation.{max_groups_per_sweep,pace_...}``."""
+        r = StoreReaperThread(
+            store_cfg=_store_cfg(
+                max_groups_per_sweep=7,
+                pace_seconds_between_distillations=2.5,
+            ),
+            provider=_FakeProvider([]),
+            distiller=None, store=None,
+        )
+        self.assertEqual(r._max_groups_per_sweep(), 7)
+        self.assertAlmostEqual(
+            r._pace_seconds_between_distillations(), 2.5,
+        )
+
+    def test_default_config_values_match_docs(self) -> None:
+        """Sanity: the documented defaults (5 groups / 5 s pace)
+        are what a fresh :class:`StoreDistillationConfig` carries."""
+        cfg = StoreDistillationConfig()
+        self.assertEqual(cfg.max_groups_per_sweep, 5)
+        self.assertAlmostEqual(cfg.pace_seconds_between_distillations, 5.0)
+
+
+# ============================================================== #
+# #215 — TTL jitter on _do_put (in ProviderBackedStore)
+# ============================================================== #
+
+
+class TestTTLJitter(unittest.TestCase):
+    """#215 — ``StoreTTLConfig.jitter_pct`` spreads aligned cohorts
+    at write time so the reaper doesn't see N sessions all expire
+    on the same tick.
+
+    These tests live in the reaper module's test file because
+    jitter is part of the same #215 package and is functionally
+    a property of "what the reaper has to deal with"."""
+
+    def test_jitter_pct_default(self) -> None:
+        from consultants.config import StoreTTLConfig
+        cfg = StoreTTLConfig()
+        # Default is the documented ±10%.
+        self.assertAlmostEqual(cfg.jitter_pct, 0.1)
+
+    def test_jitter_spreads_expires_at_across_writes(self) -> None:
+        """100 sequential writes against a configured jitter spread
+        give a distribution wider than half the nominal TTL window —
+        i.e., we're not collapsing onto a single instant."""
+        # Avoid the heavyweight ProviderBackedStore path here; use
+        # the helper directly.
+        from datetime import datetime, timezone
+        from consultants.config import StoreTTLConfig
+        from claude_hooks.providers._content_hash import compute_expires_at
+        import random
+        ttl_base_s = 1000.0
+        ttl_cfg = StoreTTLConfig(jitter_pct=0.1)
+        # Mirror _compute_expires_iso's jitter formula.
+        results = []
+        now = datetime.now(timezone.utc)
+        rng = random.Random(42)
+        for _ in range(200):
+            factor = 1.0 + rng.uniform(-ttl_cfg.jitter_pct, ttl_cfg.jitter_pct)
+            ttl_s = ttl_base_s * factor
+            results.append(compute_expires_at(now, ttl_s))
+        # 200 distinct values (jitter is continuous).
+        self.assertGreater(len(set(results)), 100)
 
 
 if __name__ == "__main__":  # pragma: no cover

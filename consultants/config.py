@@ -383,6 +383,12 @@ class StoreTTLConfig:
 
     M14 (2026-05-18) flipped ``enabled`` from False to True as
     part of the default-on flip for the consultants store.
+
+    #215 (2026-05-18) adds ``jitter_pct`` to spread aligned
+    cohorts at write time — see :func:`expires_at_seconds`. Default
+    10% means a 30-day TTL spreads ±3 days; the M14-default-on flip
+    no longer dumps every prior session's expiry onto the same
+    tick.
     """
     enabled: bool = True
     research_days: Optional[float] = 30.0
@@ -390,6 +396,13 @@ class StoreTTLConfig:
     project_days: Optional[float] = None  # never
     user_days: Optional[float] = None  # never
     refresh_on_read: bool = True
+    # #215: spread aligned cohorts at write time so the reaper never
+    # sees N sessions all expire on the same tick (e.g., M14
+    # default-on flip stamps every existing session's content with
+    # the same ``expires_at = now + 30d``). Applied multiplicatively
+    # to ttl_seconds: ``ttl * (1 + uniform(-jitter_pct, +jitter_pct))``.
+    # Set to 0.0 to disable; 0.1 = ±10% (recommended default).
+    jitter_pct: float = 0.1
 
     def ttl_for_namespace(
         self, ns: tuple[str, ...],
@@ -466,6 +479,18 @@ StoreReaperThread` finds expiring research rows, it groups them by
 
     M14 (2026-05-18) flipped ``enabled`` from False to True as
     part of the default-on flip for the consultants store.
+
+    #215 (2026-05-18) adds two pacing knobs to bound per-sweep
+    embedder + cloud-LLM load:
+
+    - ``max_groups_per_sweep = 5`` — caps how many session groups
+      one sweep tick distills. Remaining groups roll over to the
+      next tick. Bounds worst-case sweep wall time (5 × ~60 s LLM
+      + 5 × ~5 s embed = ~5 min) so the embedder always has
+      headroom for live consults.
+    - ``pace_seconds_between_distillations = 5.0`` — sleep
+      between consecutive distillations within a single sweep so
+      the embedder gets breathing room. Set to 0.0 to disable.
     """
     enabled: bool = True
     model: str = "gemma4:31b-cloud"
@@ -473,6 +498,15 @@ StoreReaperThread` finds expiring research rows, it groups them by
     sweep_interval_seconds: float = 3600.0
     min_entries_per_distillation: int = 3
     max_session_entries: int = 50
+    # #215: per-sweep distillation cap. Hosts with weaker embedders
+    # or shared infra should lower this; hosts with headroom can
+    # raise it. The reaper picks the first ``max_groups_per_sweep``
+    # research groups it finds and rolls the rest over to the next
+    # tick. Set to 0 to mean "no cap" (the pre-#215 behavior).
+    max_groups_per_sweep: int = 5
+    # #215: inter-group sleep. With 5 groups × 5 s pacing = +25 s
+    # added wall time per sweep. Set to 0.0 to disable.
+    pace_seconds_between_distillations: float = 5.0
 
 
 @dataclass
@@ -857,6 +891,18 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
                 base.store.ttl.refresh_on_read = bool(
                     ttl_raw["refresh_on_read"]
                 )
+            # #215: TTL jitter at write time.
+            if "jitter_pct" in ttl_raw:
+                try:
+                    j = float(ttl_raw["jitter_pct"])
+                    # Clamp to [0.0, 0.5] — 50% jitter is the max
+                    # sensible value; anything above that risks
+                    # rows expiring far earlier/later than the
+                    # nominal TTL.
+                    if 0.0 <= j <= 0.5:
+                        base.store.ttl.jitter_pct = j
+                except (TypeError, ValueError):
+                    pass
 
         # M14: nested [store.distillation] block.
         dist_raw = st.get("distillation") or {}
@@ -900,6 +946,25 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
                     m = int(dist_raw["max_session_entries"])
                     if m >= 1:
                         base.store.distillation.max_session_entries = m
+                except (TypeError, ValueError):
+                    pass
+            # #215: per-sweep distillation cap.
+            if "max_groups_per_sweep" in dist_raw:
+                try:
+                    n = int(dist_raw["max_groups_per_sweep"])
+                    if n >= 0:
+                        base.store.distillation.max_groups_per_sweep = n
+                except (TypeError, ValueError):
+                    pass
+            # #215: inter-group pacing sleep.
+            if "pace_seconds_between_distillations" in dist_raw:
+                try:
+                    p = float(
+                        dist_raw["pace_seconds_between_distillations"]
+                    )
+                    if p >= 0.0:
+                        base.store.distillation \
+                            .pace_seconds_between_distillations = p
                 except (TypeError, ValueError):
                     pass
 
@@ -1079,6 +1144,11 @@ def _render(cfg: ConsultantsConfig) -> str:
         f"refresh_on_read = "
         f"{'true' if cfg.store.ttl.refresh_on_read else 'false'}"
     )
+    L.append("# jitter_pct (#215): spread aligned cohorts at write "
+             "time so the reaper doesn't see N sessions all expire "
+             "on the same tick. ttl * (1 + uniform(-jitter, +jitter)). "
+             "0.0 = disabled; 0.1 = ±10% (recommended default).")
+    L.append(f"jitter_pct = {cfg.store.ttl.jitter_pct}")
     L.append("")
     # M14: nested [store.distillation] block.
     L.append("[store.distillation]")
@@ -1110,6 +1180,22 @@ def _render(cfg: ConsultantsConfig) -> str:
     L.append(
         f"max_session_entries = "
         f"{cfg.store.distillation.max_session_entries}"
+    )
+    L.append("# max_groups_per_sweep (#215): cap distillations per "
+             "sweep tick. Bounds per-hour embedder + cloud LLM load. "
+             "5 means ≤5 × (~60 s LLM + ~5 s embed) ≈ 5 min wall per "
+             "tick worst case. 0 = uncapped (pre-#215 behavior).")
+    L.append(
+        f"max_groups_per_sweep = "
+        f"{cfg.store.distillation.max_groups_per_sweep}"
+    )
+    L.append("# pace_seconds_between_distillations (#215): sleep "
+             "between consecutive distillations within a single "
+             "sweep. Gives the embedder breathing room. 0.0 = no "
+             "extra delay.")
+    L.append(
+        f"pace_seconds_between_distillations = "
+        f"{cfg.store.distillation.pace_seconds_between_distillations}"
     )
     L.append("")
     L.append("[coder_limits]")

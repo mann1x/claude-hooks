@@ -320,8 +320,24 @@ if HAVE_LANGGRAPH_STORE:
             self, ns: tuple[str, ...], now: datetime,
         ) -> Optional[str]:
             """ISO-8601 expiry stamp for a row in this namespace,
-            or ``None`` when the namespace has no TTL configured."""
+            or ``None`` when the namespace has no TTL configured.
+
+            #215: when ``self._ttl.jitter_pct > 0``, multiplies the
+            base TTL by ``1 + uniform(-jitter_pct, +jitter_pct)``
+            before stamping. This spreads aligned cohorts across
+            ±jitter_pct of the nominal TTL, so the reaper never sees
+            N sessions all expire on the same tick (e.g., the M14
+            default-on flip stamped every existing session's content
+            with the same ``now + 30d`` — without jitter they'd all
+            land in the same hour 30 days later).
+            """
             ttl_s = self._ttl_seconds_for(ns)
+            if ttl_s is not None and self._ttl is not None:
+                jitter = getattr(self._ttl, "jitter_pct", 0.0) or 0.0
+                if jitter > 0.0:
+                    import random
+                    factor = 1.0 + random.uniform(-jitter, jitter)
+                    ttl_s = ttl_s * factor
             return compute_expires_at(now, ttl_s)
 
         def _is_expired(

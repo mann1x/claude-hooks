@@ -16,6 +16,83 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed — consultants: M14 reaper pacing + TTL jitter to prevent embedder saturation (#215, 2026-05-18)
+
+Two compounding issues surfaced during the deadlock investigation of
+``csl-2026-05-18-1724-0f9f``:
+
+1. **Cohort alignment at write time.** When the M14 default-on flip
+   landed on 2026-05-18, every existing research row got stamped
+   with ``expires_at = now + 30d`` within the same minute. Without
+   jitter, the reaper would have seen those 30 days later all
+   collapsing onto the same hourly sweep tick — N session groups,
+   N distillations, N project-namespace writes, all back-to-back
+   against the single-llamafile CPU embedder.
+
+2. **Unbounded per-sweep fan-out.** ``sweep_once`` walked every
+   ready group in one tick, with no inter-group pacing. Even a
+   modest backlog (10 sessions × 3-5 findings each) would emit
+   10 LLM calls + 10 embedder writes inside the same wall-clock
+   window — exactly the saturation profile that caused the
+   embedder timeouts that pre-#212 swallowed silently.
+
+The fix is two additive knobs, all configurable, all with
+recommended defaults:
+
+| Knob | Default | Behavior |
+|---|---:|---|
+| ``store.ttl.jitter_pct`` | ``0.1`` (±10%) | At write time, ``expires_at = now + ttl * (1 + uniform(-jitter, +jitter))``. Spreads aligned cohorts across ±jitter of the nominal TTL so the reaper never sees N sessions expire on one tick. ``0.0`` disables. |
+| ``store.distillation.max_groups_per_sweep`` | ``5`` | Cap on **successful distillations** per sweep tick. Remaining research groups roll over to the next tick (their originals stay in place, counted under ``rolled_over`` in the result dict). Cost-gated skips (below ``min_entries_per_distillation``) and ``tool_results`` deletes do NOT consume the budget — only LLM-driven distillations do. ``0`` = uncapped (pre-#215 behavior). |
+| ``store.distillation.pace_seconds_between_distillations`` | ``5.0`` | Sleep N seconds between consecutive distillations within one sweep tick. Gives the embedder breathing room between project-namespace summary writes. Slept in 0.5 s slices so :meth:`StoreReaperThread.stop` stays responsive. ``0.0`` = back-to-back. |
+
+All three knobs live under their existing ``[store.ttl]`` and
+``[store.distillation]`` TOML blocks, render through
+``claude-consultants config show``, and round-trip through the
+TOML merge layer.
+
+Worst-case wall budget per sweep under defaults: ``5 groups × (~60 s
+cloud LLM + ~5 s embedder + 5 s pace) ≈ 5.5 min``. Backlogs larger
+than that bleed across multiple ticks at hourly cadence —
+intentional. The reaper is meant to be background hygiene, not a
+synchronous batch flush.
+
+The critical M14 invariant from #212 holds: a group that rolls over
+is **not deleted** — its originals stay in place and the next sweep
+re-attempts. Groups that distill successfully but fail to delete
+also stay in place (caller logs and moves on). The cap counter
+increments only after a successful end-to-end
+``distill → write_summary → delete`` cycle.
+
+Test surface:
+
+- ``tests/test_consultants_v2_store_reaper.py:TestReaperPacing``
+  — 9 tests covering cap behavior, pace timing, helper accessors,
+  default config sanity, and that cost-gated + tool_results
+  groups don't consume the budget.
+- ``tests/test_consultants_v2_store_reaper.py:TestTTLJitter`` —
+  jitter default + spread distribution sanity (200 writes
+  produce > 100 distinct expires_at stamps).
+- Existing TTL tests pin ``jitter_pct = 0.0`` explicitly so the
+  nominal-window assertions stay deterministic.
+
+Affected files:
+
+- ``consultants/config.py`` — ``StoreTTLConfig.jitter_pct`` (new),
+  ``StoreDistillationConfig.{max_groups_per_sweep,pace_seconds_between_distillations}`` (new), TOML parse + render for all three.
+- ``consultants/engine/store.py`` — ``_compute_expires_iso``
+  applies ``random.uniform`` jitter when configured.
+- ``consultants/engine/store_reaper.py`` — ``sweep_once`` cap +
+  pace logic, three new accessor methods, ``_sleep_paced`` helper,
+  ``rolled_over`` stat in result dict.
+- ``tests/test_consultants_v2_store_reaper.py`` — +10 tests.
+- ``tests/test_consultants_v2_store_ttl.py`` — ``_ttl_cfg`` helper
+  pins ``jitter_pct=0.0``.
+
+Both envs full sweep: ``claude-hooks-consultants`` 3842 + 30 skipped
++ 117 subtests; ``claude-hooks`` 3743 + 129 skipped + 110 subtests.
+M12 parity green (default ``effort=medium`` still gates the store
+off, so the new defaults don't reach the parity-recorded baseline).
+
 ### Fixed — consultants: M9 control surface — runtime_events emission + default checkpointer + node-enter INFO log (#214, 2026-05-18)
 
 The live regression run for #213 (Q2 × xhigh × tool_exec=OFF, sid

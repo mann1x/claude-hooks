@@ -249,7 +249,13 @@ class StoreReaperThread:
         Returns:
             ``{"expired": N, "distilled": K, "deleted": M,
             "groups_skipped_below_threshold": S,
-            "groups_distill_failed": F}``
+            "groups_distill_failed": F,
+            "rows_unknown_skipped": U,
+            "rolled_over": R}``
+
+            ``rolled_over`` (#215) counts research groups that the
+            per-sweep cap (``max_groups_per_sweep``) deferred to the
+            next sweep tick — their originals stay in place untouched.
         """
         now = datetime.now(timezone.utc)
         # 5-minute grace window — avoids racing rows whose ``put``
@@ -267,6 +273,7 @@ class StoreReaperThread:
                 "groups_skipped_below_threshold": 0,
                 "groups_distill_failed": 0,
                 "rows_unknown_skipped": 0,
+                "rolled_over": 0,
             }
         if not expiring:
             self._stamp(now)
@@ -275,6 +282,7 @@ class StoreReaperThread:
                 "groups_skipped_below_threshold": 0,
                 "groups_distill_failed": 0,
                 "rows_unknown_skipped": 0,
+                "rolled_over": 0,
             })
 
         groups = _group_by_sid_and_kind(expiring)
@@ -283,8 +291,15 @@ class StoreReaperThread:
         skipped_below = 0
         distill_failed = 0
         unknown_skipped = 0
+        rolled_over = 0
         min_entries = self._min_entries_per_distillation()
         distill_enabled = self._distillation_enabled()
+        # #215: per-sweep cap + inter-group pacing. The cap counts
+        # ONLY successful distillations (cost-gate skips, UNKNOWN
+        # leaks, and tool_results deletes are cheap and don't pay
+        # embedder or LLM cost, so they don't burn the budget).
+        max_groups = self._max_groups_per_sweep()  # 0 = uncapped
+        pace_seconds = self._pace_seconds_between_distillations()
 
         for (sid, kind), rows in groups.items():
             if not rows:
@@ -300,6 +315,16 @@ class StoreReaperThread:
                     except Exception:
                         log.exception("store-reaper: delete failed for sid=%s", sid)
                     continue
+                # #215: bail out of the distillation loop once we
+                # hit the cap. The remaining groups roll over to
+                # the next sweep tick.
+                if max_groups > 0 and distilled >= max_groups:
+                    rolled_over += 1
+                    continue
+                # #215: pace consecutive distillations so the
+                # embedder gets breathing room between groups.
+                if pace_seconds > 0.0 and distilled > 0:
+                    self._sleep_paced(pace_seconds)
                 try:
                     summary = self._distill_group(sid, rows)
                     self._write_summary(sid, rows, summary, distilled_at=now)
@@ -361,6 +386,7 @@ class StoreReaperThread:
             "groups_skipped_below_threshold": skipped_below,
             "groups_distill_failed": distill_failed,
             "rows_unknown_skipped": unknown_skipped,
+            "rolled_over": rolled_over,
         })
 
     # ---- helpers ---- #
@@ -386,6 +412,51 @@ class StoreReaperThread:
         if d is None:
             return False
         return bool(getattr(d, "enabled", False))
+
+    def _max_groups_per_sweep(self) -> int:
+        """#215: per-sweep distillation cap. ``0`` means uncapped.
+
+        Caps the number of LLM-driven distillations per sweep tick so
+        a backlog can't fan out into a synchronous batch that
+        saturates the embedder (each successful distillation writes
+        one project-namespace summary, and each researcher write in
+        the original session already paid one embedder round-trip).
+        Remaining groups roll over to the next tick (counted in the
+        result dict under ``rolled_over``).
+        """
+        d = getattr(self.cfg, "distillation", None)
+        if d is None:
+            return 5
+        return int(getattr(d, "max_groups_per_sweep", 5) or 0)
+
+    def _pace_seconds_between_distillations(self) -> float:
+        """#215: inter-group pacing — sleep N seconds between
+        consecutive distillations within one sweep tick. Default 5 s.
+
+        The pace gives the embedder breathing room between project-
+        namespace summary writes; on a single-llamafile CPU embedder
+        the rolling p95 sits around 1-3 s per write under load, and 5
+        s leaves headroom for variance. ``0.0`` disables pacing
+        entirely (back to back-to-back).
+        """
+        d = getattr(self.cfg, "distillation", None)
+        if d is None:
+            return 5.0
+        return float(getattr(d, "pace_seconds_between_distillations", 5.0) or 0.0)
+
+    def _sleep_paced(self, seconds: float) -> None:
+        """Sleep ``seconds`` in 0.5 s slices, leaving early if
+        :meth:`stop` is called. Same shape as the main ``_loop`` so
+        the reaper still shuts down within ~0.5 s of the stop event."""
+        if seconds <= 0.0:
+            return
+        slept = 0.0
+        while slept < seconds:
+            if self._stop_event.is_set():
+                return
+            slice_s = min(0.5, seconds - slept)
+            time.sleep(slice_s)
+            slept += slice_s
 
     def _distill_group(self, sid: str, rows: Sequence[Any]) -> str:
         """Run distillation for one group. The Distiller raises
