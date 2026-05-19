@@ -16,6 +16,8 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-05-19
+
 ### Added — consultants store: CLI surface + installer prompts + doc (#220, 2026-05-18)
 
 The M14 `[store]` / `[store.ttl]` / `[store.distillation]` blocks

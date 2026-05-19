@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.7.0** — ~2.7k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.8.0** — ~3.9k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -109,6 +109,40 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > key. See [`docs/sqlite-vec-runbook.md`](docs/sqlite-vec-runbook.md)
 > for the schema + migration walkthrough, RRF tuning, and KG usage
 > examples.
+>
+> v1.8 ships the **/consultants v2 engine** in its mature form: two
+> new roles (`tool_executor` PLAN-REPORT lane and sandboxed `coder`
+> with per-language model routing, both default OFF as of 2026-05-18
+> after the live A/B benchmark showed `tool_executor` lost on grep-
+> shaped questions); a three-layer **CitationLinter** that verifies
+> every `path:line` claim at the researcher boundary against a
+> mtime-cached `code_graph` (`#204`/`#205`/`#207`); the **M14
+> cross-session store** wired by default — an effort-gated LangGraph
+> BaseStore with four canonical namespaces, per-namespace TTL
+> (`research`=30 d / `tool_results`=24 h / `project`+`user`=never),
+> and an hourly Caliber-style **distillation reaper** that
+> summarizes expiring research into the durable `("project", pid)`
+> namespace before deleting originals (`gemma4:31b-cloud` primary,
+> `glm-5.1:cloud` fallback; research originals only deleted after a
+> successful project-namespace write); **#215 reaper pacing** knobs
+> (jitter, `max_groups_per_sweep`, `pace_seconds_between_distillations`)
+> to keep the embedder un-saturated when a cohort all expires on
+> the same tick; the **#220 store CLI surface** — three new verbs
+> (`set-store`, `set-store-ttl`, `set-store-distillation`) under
+> `claude-consultants config` plus an optional install.py
+> walkthrough for TTL + distillation knobs. The Stop hook's
+> **PreCompact**-companion (`#217`) preserves AskUserQuestion Q&A
+> across the compaction boundary via the new `wrapup` skill, and
+> the **stop_guard** gains 5 new commitment-stall patterns from
+> live observation (`#219`). Plus the May-18 hardening pass:
+> `#212` (silent durable-write hole), `#216` (tool_executor write
+> amplification), `#218` (pgvector read-only transaction leak
+> blocking concurrent DDL). See
+> [`docs/consultants.md`](docs/consultants.md) for the runbook,
+> [`docs/consultants-roles.md`](docs/consultants-roles.md) for the
+> role-by-role reference, and
+> [`benchmarks/consultants/results/2026-05-18/tool-executor-ab/report.md`](benchmarks/consultants/results/2026-05-18/tool-executor-ab/report.md)
+> for the A/B record behind the default flip.
 
 ---
 
