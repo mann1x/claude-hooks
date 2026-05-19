@@ -5596,10 +5596,22 @@ def _install_consultants_windows(*, consultants_py: Path, service_mode: str,
         print("    [!!] main claude-hooks env not found — can't register "
               "the forwarder. Run `python install.py` first.")
         return
+    # The forwarder spawns the engine on demand. Pass the CONSULTANTS
+    # env's pythonw.exe (not python.exe) so the spawned engine doesn't
+    # pop a visible console window on the user's desktop. Fall back to
+    # python.exe only if pythonw is missing; consultants_forwarder.py
+    # belt-and-braces with CREATE_NO_WINDOW | DETACHED_PROCESS so even
+    # a python.exe fallback stays hidden.
+    consultants_pyw = find_conda_env_pythonw(env_name=CONSULTANTS_ENV_NAME)
+    engine_exec = consultants_pyw if consultants_pyw is not None else consultants_py
+    if consultants_pyw is None:
+        print("    [!] pythonw.exe missing in consultants env — engine "
+              "will use python.exe (forwarder adds creationflags so no "
+              "console flashes anyway).")
     forwarder_args = (
         f"-m claude_hooks.consultants_forwarder "
         f"--listen-port {forwarder_port} "
-        f"--engine-python \"{consultants_py}\""
+        f"--engine-python \"{engine_exec}\""
     )
     ok = _register_consultants_task(
         task_name=_CONSULTANTS_FORWARDER_TASK_NAME,

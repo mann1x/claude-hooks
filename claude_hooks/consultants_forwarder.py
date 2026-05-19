@@ -147,14 +147,29 @@ class EngineManager:
                 *self.cfg.extra_engine_args,
             ]
             log.info("spawning engine: %s", " ".join(cmd))
-            try:
-                self.proc = subprocess.Popen(
-                    cmd,
-                    cwd=self.cfg.repo_root or None,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
+            # Windows: pythonw.exe alone is windowless, but if the
+            # registered --engine-python points at python.exe (e.g.
+            # pre-v1.8.1 install.py where consultants_py was passed
+            # instead of pyw), a visible console pops up on the user's
+            # desktop. CREATE_NO_WINDOW | DETACHED_PROCESS makes the
+            # spawn windowless regardless of which exe is used —
+            # mirroring chat_model_manager / embedding_manager /
+            # lsp_engine.client which already guard their spawns.
+            # POSIX: start_new_session=True suffices.
+            popen_kwargs: dict = dict(
+                cwd=self.cfg.repo_root or None,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = (
+                    getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    | getattr(subprocess, "DETACHED_PROCESS", 0)
                 )
+            else:
+                popen_kwargs["start_new_session"] = True
+            try:
+                self.proc = subprocess.Popen(cmd, **popen_kwargs)
             except OSError as e:
                 raise RuntimeError(f"engine spawn failed: {e}") from e
 

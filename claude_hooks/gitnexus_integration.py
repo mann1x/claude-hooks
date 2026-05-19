@@ -30,6 +30,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from claude_hooks._popen import detach_kwargs
+
 log = logging.getLogger("claude_hooks.gitnexus")
 
 _LOCK_FILENAME = ".gitnexus-reindex.lock"
@@ -125,7 +127,7 @@ def _spawn_analyze(binary: str, root: Path) -> None:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            **detach_kwargs(),
         )
         log.info("gitnexus: spawned analyze in %s", root)
     except OSError as e:

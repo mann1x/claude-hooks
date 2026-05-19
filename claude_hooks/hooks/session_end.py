@@ -18,6 +18,7 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+from claude_hooks._popen import detach_kwargs
 from claude_hooks.config import expand_user_path
 from claude_hooks.providers import Provider
 
@@ -107,10 +108,14 @@ def _local_sync(ep_cfg: dict) -> Optional[dict]:
     """Trigger a local episodic-memory sync (server mode)."""
     episodic_bin = ep_cfg.get("binary", "episodic-memory")
     try:
+        # Windows: hook context inherits a console from the .cmd shim;
+        # detach_kwargs adds CREATE_NO_WINDOW so the episodic-memory
+        # sync child doesn't flash one.
         subprocess.Popen(
             [episodic_bin, "sync", "--background"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            **detach_kwargs(),
         )
         log.debug("triggered local episodic-memory sync")
     except FileNotFoundError:
