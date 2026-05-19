@@ -799,7 +799,7 @@ class TestReopen:
         # Mocked compiled graph — yields no events (the runner's
         # streaming loop is then a no-op), but lets us return cleanly.
         class _FakeCompiled:
-            def stream(self, initial, *, stream_mode):
+            def stream(self, initial, *, stream_mode, config=None):
                 # Behave like the real langgraph: yield ("values",
                 # state) at the end so the runner picks up
                 # final_state == initial.
@@ -892,14 +892,14 @@ class TestReopen:
         from consultants import config as cc
 
         class _FakeCompiled:
-            def stream(self, initial, *, stream_mode):
+            def stream(self, initial, *, stream_mode, config=None):
                 yield ("values", dict(initial))
 
         captured_deps: dict = {}
         captured_initial: dict = {}
 
         class _RecordingCompiled:
-            def stream(self, initial, *, stream_mode):
+            def stream(self, initial, *, stream_mode, config=None):
                 captured_initial.update(initial)
                 yield ("values", dict(initial))
 

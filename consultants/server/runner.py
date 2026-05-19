@@ -29,9 +29,14 @@ def make_runner(*, ollama_base_url: str):
     ChatClient for clean usage tracking.
     """
     # Lazy imports — none of these are present in the main test env.
+    from claude_hooks.allowed_roots import (
+        discover_allowed_roots,
+        discover_allowed_roots_with_display,
+        render_for_log,
+    )
     from claude_hooks.get_advice.chat_client import ChatClient, make_agent_chat_client
     from claude_hooks.caliber_proxy.tools import (
-        openai_tool_specs, execute as tool_execute,
+        openai_tool_specs, make_executor,
     )
     from claude_hooks.caliber_proxy.prompt import build_grounding_messages
     from consultants.engine.graph import GraphDeps, build_council_graph
@@ -39,11 +44,29 @@ def make_runner(*, ollama_base_url: str):
     from consultants.engine.trace import (
         Tracer, TracedChat, traced_tool, traced_node,
     )
+    # #214: Default to an in-memory checkpointer so the M9 control
+    # surface (state / cancel / inject / pause / resume) works in
+    # the standard config. LangGraph's get_state / update_state
+    # require a checkpointer; without one, every M9 endpoint that
+    # calls those raises ValueError("No checkpointer set") and 500s.
+    # The cost is one in-process write per superstep — bounded for
+    # a council with ~10 supersteps per run. Persistence isn't a
+    # requirement here: the recorder's transcript.db is the durable
+    # audit log; the checkpointer is for live introspection only.
+    try:
+        from langgraph.checkpoint.memory import MemorySaver
+    except ImportError:  # pragma: no cover — minimal langgraph
+        MemorySaver = None  # type: ignore[assignment]
 
     def run_council(state, runner_input: dict) -> None:
         cfg: cc.ConsultantsConfig = runner_input["config"]
         cwd: str = runner_input["cwd"]
         question: str = runner_input["question"]
+        # v1.8+: extra allowed roots for the tool sandbox. Sourced from
+        # the CLI's ``--add-dir`` (already merged with settings-file
+        # auto-discovery by the HTTP layer). Empty tuple → tool layer
+        # falls back to the bare ``execute`` fast path.
+        extra_roots = tuple(runner_input.get("extra_roots") or ())
         enabled = tuple(cc.enabled_roles(cfg))
 
         # Effort-based critic strategy:
@@ -97,6 +120,34 @@ def make_runner(*, ollama_base_url: str):
             for r in enabled
         }
         models = {r: cfg.roles[r].model for r in enabled}
+
+        # Task #111: per-model ChatClient dict for the coder role's
+        # failover chain. Only materialised when ``coder`` is in
+        # ``enabled`` AND the cfg has per-language routing OR a
+        # global default route configured. Each model gets its own
+        # TracedChat so per-attempt usage rolls up under the right
+        # tag in the recorder.
+        coder_clients_by_model: dict[str, Any] = {}
+        coder_routes_by_language: dict[str, Any] = {}
+        coder_default_route = None
+        if "coder" in enabled:
+            coder_routes_by_language = dict(
+                cfg.roles["coder"].routes_by_language or {}
+            )
+            coder_default_route = cfg.roles["coder"].default_route
+            if coder_routes_by_language or coder_default_route is not None:
+                for m in cc.coder_unique_models(cfg):
+                    if m == cfg.roles["coder"].model and "coder" in chat_clients:
+                        # Re-use the legacy per-role client for the
+                        # primary model so the ChatClient's warm
+                        # /api/show probe + retry-budget state
+                        # carries across.
+                        coder_clients_by_model[m] = chat_clients["coder"]
+                        continue
+                    coder_clients_by_model[m] = TracedChat(
+                        make_agent_chat_client(m, ollama_base_url),
+                        role="coder", tracer=tracer,
+                    )
 
         grounding_msgs = build_grounding_messages(
             cwd, tools_available=True,
@@ -173,12 +224,52 @@ def make_runner(*, ollama_base_url: str):
             cfg.roles["synthesizer"].extra_models or []
         )
 
+        if extra_roots:
+            # 2026-05-18: render the display form (user-facing pre-realpath
+            # paths) when available so /shared/dev/<x> shows in the log
+            # instead of /srv/dev-disk-by-label-opt/dev/<x>. Falls back to
+            # realpath rendering when the upstream didn't pass display info
+            # (legacy / disk-reopened sessions).
+            cwd_display = runner_input.get("cwd_display") or cwd
+            extra_roots_display = tuple(
+                runner_input.get("extra_roots_display")
+                or extra_roots
+            )
+            if len(extra_roots_display) != len(extra_roots):
+                extra_roots_display = extra_roots
+            log.info(
+                "consultants sid=%s allowed roots:\n%s",
+                state.sid,
+                render_for_log(
+                    [cwd, *extra_roots],
+                    display_roots=[cwd_display, *extra_roots_display],
+                ),
+            )
+        # M8: build the long-term-memory store if cfg.store.enabled is
+        # true and the current effort tier is in the enable list.
+        # The factory returns None for every short-circuit case
+        # (disabled, below-gate, unknown backend, missing deps), so
+        # the v1 zero-store behavior is the default. Recall + record
+        # helpers downstream tolerate a None store.
+        try:
+            from consultants.engine.store import make_consultants_store
+            consultants_store = make_consultants_store(
+                cfg, sid=state.sid, effort=cfg.effort,
+            )
+        except Exception:  # pragma: no cover — defensive
+            log.exception(
+                "make_consultants_store raised; continuing with no store",
+            )
+            consultants_store = None
+
         deps = GraphDeps(
             chat_clients=chat_clients,
             models=models,
             enabled_roles=enabled,
             cwd=cwd,
-            tool_executor=traced_tool(tool_execute, tracer=tracer),
+            tool_executor=traced_tool(
+                make_executor(extra_roots), tracer=tracer,
+            ),
             tool_specs=openai_tool_specs(),
             grounding_msgs=grounding_msgs,
             think_by_role=think_by_role,
@@ -187,8 +278,67 @@ def make_runner(*, ollama_base_url: str):
             recorder=recorder,
             extra_models_by_role=extra_models_by_role,
             synthesizer_fallback_models=synthesizer_fallback,
+            store=consultants_store,
+            sid=state.sid,
+            # M10: coder sandbox caps. Consulted only when ``coder``
+            # is in ``enabled`` (otherwise the coder node is never
+            # registered, so these values are irrelevant).
+            coder_max_file_bytes=cfg.coder_limits.max_file_bytes,
+            coder_max_total_bytes=cfg.coder_limits.max_total_bytes,
+            coder_max_files=cfg.coder_limits.max_files,
+            # Task #111: per-language coder routing. Empty dicts /
+            # None when not configured ⇒ _wrap_coder returns the
+            # v1 single-attempt callable (full back-compat).
+            coder_chat_clients_by_model=coder_clients_by_model,
+            coder_routes_by_language=coder_routes_by_language,
+            coder_default_route=coder_default_route,
         )
-        compiled = build_council_graph(deps, tracer=tracer)
+        # M5: static review-before-synthesis interrupt. When the
+        # user opted in via cfg.runtime.review_before_synthesis,
+        # compile with interrupt_before=["synthesizer"] so the
+        # graph pauses just before the final-answer node. The HTTP
+        # /state endpoint exposes the partial research; the human
+        # POSTs /inject + /resume to continue.
+        #
+        # The kwarg is only passed when actually opted in — this
+        # keeps the call signature bit-for-bit identical to v1 for
+        # the default-config path, so test stubs that mock
+        # build_council_graph with a fake `(deps, tracer=...)`
+        # signature don't break.
+        interrupt_before: Optional[list[str]] = None
+        try:
+            if bool(getattr(cfg.runtime, "review_before_synthesis", False)):
+                interrupt_before = ["synthesizer"]
+        except AttributeError:
+            interrupt_before = None
+        # #214 Fix B: attach a MemorySaver checkpointer so the M9
+        # control surface (state / cancel / inject / pause / resume)
+        # works in the standard config. Falls back to None if
+        # langgraph's checkpoint.memory module isn't importable
+        # (defensive — every langgraph release we depend on ships it).
+        checkpointer = MemorySaver() if MemorySaver is not None else None
+        if interrupt_before:
+            compiled = build_council_graph(
+                deps, tracer=tracer,
+                interrupt_before=interrupt_before,
+                checkpointer=checkpointer,
+            )
+        else:
+            compiled = build_council_graph(
+                deps, tracer=tracer,
+                checkpointer=checkpointer,
+            )
+
+        # M9: attach the live graph + thread config + recorder to
+        # SessionState so the HTTP control route handlers can read
+        # state, apply injects, mutate runtime_control, interrupt,
+        # resume, and replay events. Set BEFORE streaming so a fast
+        # consumer that pings /state immediately gets the live
+        # snapshot (not a 503).
+        thread_config: dict = {"configurable": {"thread_id": state.sid}}
+        state._compiled = compiled
+        state._thread_config = thread_config
+        state._recorder = recorder
 
         # Build initial state, mark planner in_progress for the first
         # progress poll (it's the entry node by default).
@@ -196,6 +346,13 @@ def make_runner(*, ollama_base_url: str):
             question=question, cwd=cwd, models=models,
             topology=cfg.topology, effort=cfg.effort,
         )
+        # 2026-05-18: thread extra_roots into LangGraph state so the
+        # synthesizer's post-output citation linter can resolve cites
+        # under all session-allowed directories, not just cwd. Empty
+        # tuple is the safe default — the linter falls back to cwd
+        # alone when this key is absent.
+        if extra_roots:
+            initial["extra_roots"] = list(extra_roots)
         if enabled:
             state.progress[enabled[0]] = "in_progress"
 
@@ -213,7 +370,8 @@ def make_runner(*, ollama_base_url: str):
         final_state: dict = dict(initial)
         try:
             for mode, payload in compiled.stream(
-                    initial, stream_mode=["updates", "values"]):
+                    initial, config=thread_config,
+                    stream_mode=["updates", "values"]):
                 if mode == "values" and isinstance(payload, dict):
                     final_state = payload
                     continue
@@ -297,6 +455,13 @@ def make_runner(*, ollama_base_url: str):
         state._chat_clients = {
             r: getattr(c, "_client", c) for r, c in chat_clients.items()
         }
+        # Task #111: also stash the per-model raw clients so a
+        # follow-up's coder lanes can reuse warmed-up failover
+        # candidates without re-probing /api/show.
+        state._coder_chat_clients_by_model = {
+            m: getattr(c, "_client", c)
+            for m, c in coder_clients_by_model.items()
+        }
         state.bump_activity()
 
         state.status = terminal_status
@@ -330,9 +495,14 @@ def make_follow_up_runner(*, ollama_base_url: str):
     creating fresh ChatClients if the parent's are gone (e.g. the
     parent was reaped between completion and follow-up).
     """
+    from claude_hooks.allowed_roots import (
+        discover_allowed_roots,
+        discover_allowed_roots_with_display,
+        render_for_log,
+    )
     from claude_hooks.get_advice.chat_client import ChatClient, make_agent_chat_client
     from claude_hooks.caliber_proxy.tools import (
-        openai_tool_specs, execute as tool_execute,
+        openai_tool_specs, make_executor,
     )
     from claude_hooks.caliber_proxy.prompt import build_grounding_messages
     from consultants.engine.graph import GraphDeps, build_follow_up_graph
@@ -346,6 +516,20 @@ def make_follow_up_runner(*, ollama_base_url: str):
         cwd: str = runner_input["cwd"]
         question: str = runner_input["question"]
         parent_state = runner_input.get("parent_state")
+        # v1.8+: merge follow-up extras with whatever the parent had,
+        # so a follow-up inherits the parent's reach plus any new
+        # --add-dir on this turn. Order is preserved + dedup'd.
+        follow_extras = tuple(runner_input.get("extra_roots") or ())
+        parent_extras = tuple(
+            getattr(parent_state, "extra_roots", None) or ()
+        )
+        seen: set[str] = set()
+        merged: list[str] = []
+        for r in parent_extras + follow_extras:
+            if r and r not in seen:
+                seen.add(r)
+                merged.append(r)
+        extra_roots = tuple(merged)
 
         # Topology: researcher + synthesizer always; critic only at
         # high/max effort (matches the main runner's gate). x-tiers
@@ -388,6 +572,39 @@ def make_follow_up_runner(*, ollama_base_url: str):
                     state.sid, role, role_model,
                 )
             chat_clients[role] = TracedChat(raw, role=role, tracer=tracer)
+
+        # Task #111: per-model coder clients (mirrors the primary
+        # runner's logic). Re-use warm parent clients when present;
+        # otherwise cold-build. Follow-ups inherit the same routing
+        # configuration the parent ran with (via cfg).
+        coder_clients_by_model_fu: dict[str, Any] = {}
+        coder_routes_by_language_fu: dict[str, Any] = {}
+        coder_default_route_fu = None
+        warm_coder_clients = (
+            parent_state._coder_chat_clients_by_model
+            if parent_state is not None
+            and parent_state._coder_chat_clients_by_model is not None
+            else {}
+        )
+        if "coder" in enabled_t:
+            coder_routes_by_language_fu = dict(
+                cfg.roles["coder"].routes_by_language or {}
+            )
+            coder_default_route_fu = cfg.roles["coder"].default_route
+            if coder_routes_by_language_fu \
+                    or coder_default_route_fu is not None:
+                for m in cc.coder_unique_models(cfg):
+                    if m == cfg.roles["coder"].model \
+                            and "coder" in chat_clients:
+                        coder_clients_by_model_fu[m] = \
+                            chat_clients["coder"]
+                        continue
+                    raw = warm_coder_clients.get(m)
+                    if raw is None:
+                        raw = make_agent_chat_client(m, ollama_base_url)
+                    coder_clients_by_model_fu[m] = TracedChat(
+                        raw, role="coder", tracer=tracer,
+                    )
 
         # Models: prefer parent's recorded models so the follow-up
         # talks to the same models the parent used. Falls back to
@@ -437,12 +654,68 @@ def make_follow_up_runner(*, ollama_base_url: str):
             cfg.roles["synthesizer"].extra_models or []
         )
 
+        if extra_roots:
+            # 2026-05-18: render display form like run_council does.
+            cwd_display_fu = runner_input.get("cwd_display") or cwd
+            # ``extra_roots`` here is the parent ∪ follow-up merged
+            # realpath list. Build the parallel display form from the
+            # follow-up's body-extras-display and the parent's stored
+            # display info; fall back to realpath where neither is
+            # available.
+            parent_state_fu = runner_input.get("parent_state")
+            parent_real_to_display: dict[str, str] = {}
+            if parent_state_fu is not None:
+                p_real = list(getattr(parent_state_fu, "extra_roots", []) or [])
+                p_disp = list(
+                    getattr(parent_state_fu, "extra_roots_display", []) or []
+                )
+                if p_disp and len(p_disp) == len(p_real):
+                    parent_real_to_display = dict(zip(p_real, p_disp))
+            body_real_to_display: dict[str, str] = {}
+            body_disp = runner_input.get("extra_roots_display") or []
+            for raw in body_disp:
+                from claude_hooks.allowed_roots import _canonical
+                real = _canonical(raw)
+                if real:
+                    body_real_to_display.setdefault(real, raw)
+            extra_roots_display_fu = tuple(
+                parent_real_to_display.get(r) or body_real_to_display.get(r) or r
+                for r in extra_roots
+            )
+            log.info(
+                "consultants follow-up sid=%s allowed roots:\n%s",
+                state.sid,
+                render_for_log(
+                    [cwd, *extra_roots],
+                    display_roots=[cwd_display_fu, *extra_roots_display_fu],
+                ),
+            )
+        # M8: follow-ups share the store config with their parent.
+        # The store is keyed by the follow-up's own sid (each
+        # follow-up records under its own ``(sid, "research")``
+        # namespace) — but the follow-up runner's recall path can
+        # also fall back to ``(parent_sid, "research")`` via
+        # ``recall_for_follow_up`` when needed.
+        try:
+            from consultants.engine.store import make_consultants_store
+            consultants_store_followup = make_consultants_store(
+                cfg, sid=state.sid, effort=cfg.effort,
+            )
+        except Exception:  # pragma: no cover — defensive
+            log.exception(
+                "make_consultants_store (follow-up) raised; "
+                "continuing with no store",
+            )
+            consultants_store_followup = None
+
         deps = GraphDeps(
             chat_clients=chat_clients,
             models=models,
             enabled_roles=enabled_t,
             cwd=cwd,
-            tool_executor=traced_tool(tool_execute, tracer=tracer),
+            tool_executor=traced_tool(
+                make_executor(extra_roots), tracer=tracer,
+            ),
             tool_specs=openai_tool_specs(),
             grounding_msgs=grounding_msgs,
             think_by_role=think_by_role,
@@ -451,8 +724,28 @@ def make_follow_up_runner(*, ollama_base_url: str):
             recorder=recorder,
             prior_messages_by_role=prior_messages_by_role,
             synthesizer_fallback_models=synthesizer_fallback_followup,
+            store=consultants_store_followup,
+            sid=state.sid,
+            # M10: coder sandbox caps. Follow-ups inherit the
+            # parent's effective limits via cfg (which may have
+            # been mutated by a per-session control update).
+            coder_max_file_bytes=cfg.coder_limits.max_file_bytes,
+            coder_max_total_bytes=cfg.coder_limits.max_total_bytes,
+            coder_max_files=cfg.coder_limits.max_files,
+            # Task #111: per-language coder routing (warm-aware).
+            coder_chat_clients_by_model=coder_clients_by_model_fu,
+            coder_routes_by_language=coder_routes_by_language_fu,
+            coder_default_route=coder_default_route_fu,
         )
         compiled = build_follow_up_graph(deps, tracer=tracer)
+        # M9: follow-ups expose their own compiled graph + thread
+        # config under the follow-up's own sid (not the parent's).
+        # The control routes resolve a session by sid → SessionState;
+        # both the parent and the follow-up have distinct entries.
+        thread_config: dict = {"configurable": {"thread_id": state.sid}}
+        state._compiled = compiled
+        state._thread_config = thread_config
+        state._recorder = recorder
 
         # Initial state for the follow-up. Two cases:
         #
@@ -472,6 +765,11 @@ def make_follow_up_runner(*, ollama_base_url: str):
             question=question, cwd=cwd, models=models,
             topology=cfg.topology, effort=cfg.effort,
         )
+        # 2026-05-18: same extra_roots threading as the primary
+        # runner — the follow-up's synthesizer linter needs the
+        # merged parent+followup allowed-roots set.
+        if extra_roots:
+            initial["extra_roots"] = list(extra_roots)
         initial["plan"] = (
             parent_state.plan
             if parent_state is not None and parent_state.plan
@@ -499,7 +797,8 @@ def make_follow_up_runner(*, ollama_base_url: str):
         final_state: dict = dict(initial)
         try:
             for mode, payload in compiled.stream(
-                    initial, stream_mode=["updates", "values"]):
+                    initial, config=thread_config,
+                    stream_mode=["updates", "values"]):
                 if mode == "values" and isinstance(payload, dict):
                     final_state = payload
                     continue
@@ -573,6 +872,12 @@ def make_follow_up_runner(*, ollama_base_url: str):
         state._chat_clients = {
             r: getattr(c, "_client", c) for r, c in chat_clients.items()
         }
+        # Task #111: stash per-model coder clients for the next
+        # follow-up in the chain.
+        state._coder_chat_clients_by_model = {
+            m: getattr(c, "_client", c)
+            for m, c in coder_clients_by_model_fu.items()
+        }
         state.bump_activity()
         # Also bump the parent so an active iteration chain keeps
         # the whole lineage warm.
@@ -622,10 +927,18 @@ def _build_recorder(*, sid: str, cwd: str, question: str,
             models=dict(models),
             parent_sid=parent_sid,
         )
-        return MessageRecorder(
+        recorder = MessageRecorder(
             sdir / _storage.TRANSCRIPT_DB_FILENAME,
             meta=meta,
         )
+        # 2026-05-18: surface the transcript path in the session log so
+        # operators can locate it without having to grep the runner
+        # source for the convention.
+        log.info(
+            "consultants sid=%s transcript.db: %s",
+            sid, sdir / _storage.TRANSCRIPT_DB_FILENAME,
+        )
+        return recorder
     except Exception as exc:
         log.warning(
             "MessageRecorder construction failed (sid=%s): %s; "

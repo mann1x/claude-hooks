@@ -15,7 +15,7 @@ import os
 import time
 import urllib.error
 import urllib.request
-from typing import Optional
+from typing import Callable, Optional
 
 log = logging.getLogger("claude_hooks.get_advice.chat_client")
 
@@ -125,6 +125,19 @@ class ChatClient:
             "prompt_eval_count": 0,
             "eval_count": 0,
         }
+        # Inference-time accounting (separates real LLM work from
+        # retry sleeps + failed-attempt timeouts). Only the SUCCESSFUL
+        # attempt's duration is added to ``total_inference_s``; the
+        # 10-minute timeouts that fired before the successful retry
+        # are explicitly excluded. ``last_inference_s`` is the
+        # duration of the most recent successful chat() / stream call.
+        #
+        # Callers (notably the coder benchmark) reset these per-trial
+        # via ``reset_inference_timer()`` and read
+        # ``total_inference_s`` at trial end to get a
+        # retry-decontaminated cost signal.
+        self.last_inference_s: float = 0.0
+        self.total_inference_s: float = 0.0
         # Per-instance memo of model tags that 400'd on the ``think``
         # field. We strip ``think`` / ``reasoning_effort`` from
         # subsequent calls to that model so non-reasoning models
@@ -137,6 +150,18 @@ class ChatClient:
         # second call. ``None`` value = probe is unknown / failed and
         # we should fall back to the reactive (400-based) path.
         self._probed_think: dict[str, Optional[bool]] = {}
+
+    def reset_inference_timer(self) -> None:
+        """Reset the per-trial inference-time accumulators.
+
+        Call before a benchmark trial / consultant session so the
+        ``total_inference_s`` accumulator reflects only the work
+        done within that scope. ``last_inference_s`` is also
+        reset so a downstream reader that picks up the field
+        between calls won't see a stale value from a prior run.
+        """
+        self.last_inference_s = 0.0
+        self.total_inference_s = 0.0
 
     def _probe_supports_think(self, model: str) -> Optional[bool]:
         """Ask ``/api/show`` whether ``model`` advertises the
@@ -224,13 +249,24 @@ class ChatClient:
                 method="POST",
                 headers={"Content-Type": "application/json"},
             )
+            attempt_start = time.monotonic()
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
                     data = json.loads(resp.read())
+                # Inference-time accounting: ONLY the successful
+                # attempt's duration counts. Prior failed attempts
+                # (timeouts, retryable 5xx, network resets) and the
+                # exponential-backoff sleeps between them are excluded
+                # from total_inference_s. The bench reads this field
+                # at trial end to produce a retry-decontaminated cost
+                # signal.
+                self.last_inference_s = time.monotonic() - attempt_start
+                self.total_inference_s += self.last_inference_s
                 if attempt > 0:
                     log.info(
-                        "ollama chat: succeeded on retry %d/%d",
-                        attempt, self.max_retries,
+                        "ollama chat: succeeded on retry %d/%d "
+                        "(inference %.1fs)",
+                        attempt, self.max_retries, self.last_inference_s,
                     )
                 return self._from_ollama(data)
             except urllib.error.HTTPError as e:
@@ -312,6 +348,235 @@ class ChatClient:
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("ollama chat: no attempts made")
+
+    # ---- streaming variant ---------------------------------------- #
+
+    def chat_streamed(self, payload: dict,
+                      *,
+                      on_token: Optional[Callable[[str], None]] = None,
+                      cancel_check: Optional[Callable[[], bool]] = None,
+                      ) -> dict:
+        """Streaming counterpart to ``chat()``.
+
+        POSTs to ``/api/chat`` with ``stream=true``, reads the NDJSON
+        response line by line, calls ``on_token(text_delta)`` for each
+        non-empty content chunk, and on ``done=true`` returns the same
+        OpenAI-shape dict ``chat()`` would have returned for the same
+        payload — so the agent-loop runner and tracing layers stay
+        unchanged.
+
+        ``cancel_check``: callable returning True when the caller
+        wants the call aborted (e.g. ``StallController.is_cancelled``).
+        Checked between NDJSON lines so cancellation is cooperative
+        rather than rude (the orchestrator just stops waiting for
+        further tokens). When cancelled mid-stream this method raises
+        ``CancelledByOrchestrator`` — the caller catches it and
+        retries with a fresh controller.
+
+        Retry policy matches :py:meth:`chat`: transient 5xx /
+        retryable 4xx-bodies / URL errors restart the streaming
+        request from scratch (any partial output discarded) with
+        exponential backoff up to ``max_retries`` attempts. Mid-
+        stream stalls are NOT this method's responsibility — that's
+        the orchestrator's job, observing token cadence through
+        ``on_token``.
+        """
+        # Lazy import to avoid coupling get_advice -> consultants.
+        from consultants.engine.stall import CancelledByOrchestrator
+
+        # Same think-stripping path as chat().
+        model_tag = (payload or {}).get("model") or ""
+        strip_think = model_tag in self._unsupported_think
+        if (not strip_think
+                and "think" in (payload or {})
+                and model_tag
+                and model_tag not in self._probed_think):
+            probe = self._probe_supports_think(model_tag)
+            if probe is False:
+                strip_think = True
+
+        body = self._to_ollama(payload, strip_think=strip_think)
+        body["stream"] = True       # the one bit that actually changes
+        url = f"{self.base_url}/api/chat"
+        encoded = json.dumps(body).encode()
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(self.max_retries + 1):
+            req = urllib.request.Request(
+                url, data=encoded, method="POST",
+                headers={"Content-Type": "application/json",
+                         "Accept": "application/x-ndjson"},
+            )
+            attempt_start = time.monotonic()
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
+                    final = self._consume_ndjson(
+                        resp, on_token=on_token,
+                        cancel_check=cancel_check,
+                    )
+                # Inference-time accounting — same semantic as chat():
+                # only the successful attempt's duration is recorded.
+                self.last_inference_s = time.monotonic() - attempt_start
+                self.total_inference_s += self.last_inference_s
+                if attempt > 0:
+                    log.info(
+                        "ollama chat_streamed: succeeded on retry %d/%d "
+                        "(inference %.1fs)",
+                        attempt, self.max_retries, self.last_inference_s,
+                    )
+                return self._from_ollama(final)
+            except CancelledByOrchestrator:
+                # Cooperative abort — propagate without retrying. The
+                # orchestrator owns the retry decision.
+                raise
+            except urllib.error.HTTPError as e:
+                last_exc = e
+                try:
+                    err_body = e.read().decode(errors="replace")[:500]
+                except Exception:
+                    err_body = "<unreadable>"
+                think_rejected = (
+                    e.code in (400, 422)
+                    and "think" in body
+                    and any(s in err_body
+                            for s in THINK_UNSUPPORTED_4XX_BODY_SUBSTRINGS)
+                )
+                if think_rejected:
+                    log.warning(
+                        "ollama chat_streamed: model %s rejected 'think' "
+                        "field (HTTP %d). Stripping and retrying once.",
+                        model_tag, e.code,
+                    )
+                    self._unsupported_think.add(model_tag)
+                    body = self._to_ollama(payload, strip_think=True)
+                    body["stream"] = True
+                    encoded = json.dumps(body).encode()
+                    continue
+                retryable = (
+                    e.code in RETRYABLE_STATUS
+                    or (400 <= e.code < 500
+                        and any(s in err_body
+                                for s in RETRYABLE_4XX_BODY_SUBSTRINGS))
+                )
+                if retryable and attempt < self.max_retries:
+                    delay = min(
+                        self.retry_base_delay_s * (2 ** attempt),
+                        self.retry_max_delay_s,
+                    )
+                    log.warning(
+                        "ollama chat_streamed: HTTP %d on attempt %d/%d, "
+                        "retrying in %.1fs (body: %s)",
+                        e.code, attempt + 1, self.max_retries + 1, delay,
+                        err_body,
+                    )
+                    time.sleep(delay)
+                    continue
+                log.error(
+                    "ollama chat_streamed: HTTP %d (giving up) body=%s",
+                    e.code, err_body,
+                )
+                raise RuntimeError(
+                    f"ollama chat_streamed HTTP {e.code}: {err_body}"
+                ) from e
+            except (urllib.error.URLError, OSError) as e:
+                last_exc = e
+                if attempt < self.max_retries:
+                    delay = min(
+                        self.retry_base_delay_s * (2 ** attempt),
+                        self.retry_max_delay_s,
+                    )
+                    log.warning(
+                        "ollama chat_streamed: %s on attempt %d/%d, "
+                        "retrying in %.1fs",
+                        e, attempt + 1, self.max_retries + 1, delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                log.error("ollama chat_streamed: %s (giving up)", e)
+                raise
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("ollama chat_streamed: no attempts made")
+
+    def _consume_ndjson(self, resp,
+                        *,
+                        on_token: Optional[Callable[[str], None]],
+                        cancel_check: Optional[Callable[[], bool]],
+                        ) -> dict:
+        """Read Ollama NDJSON stream off ``resp`` and assemble the
+        final response dict.
+
+        Aggregates ``message.content`` deltas into a single string,
+        captures any ``tool_calls`` that arrive (typically only on
+        the final ``done=true`` line, but some models emit them
+        progressively), and returns the merged record with the
+        ``done=true`` fields (prompt_eval_count, eval_count) intact.
+
+        Raises :class:`CancelledByOrchestrator` if the cancel_check
+        returns True between lines.
+        """
+        from consultants.engine.stall import CancelledByOrchestrator
+
+        content_parts: list[str] = []
+        tool_calls: list[dict] = []
+        last_msg_extra: dict = {}
+        final_fields: dict = {}
+        role = "assistant"
+
+        for raw_line in resp:
+            if cancel_check is not None and cancel_check():
+                raise CancelledByOrchestrator()
+            if not raw_line:
+                continue
+            line = (raw_line.decode("utf-8", errors="replace")
+                    if isinstance(raw_line, bytes) else raw_line)
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                log.warning("ollama stream: skipping malformed line: %r",
+                            line[:80])
+                continue
+            msg = obj.get("message") or {}
+            if msg:
+                if "role" in msg:
+                    role = msg["role"] or role
+                delta = msg.get("content") or ""
+                if delta:
+                    content_parts.append(delta)
+                    if on_token is not None:
+                        try:
+                            on_token(delta)
+                        except Exception:  # pragma: no cover
+                            log.exception("on_token raised; ignored")
+                tcs = msg.get("tool_calls")
+                if tcs:
+                    tool_calls.extend(tcs)
+                # Carry forward any extra fields the model emitted
+                # (e.g. thinking content).
+                for k, v in msg.items():
+                    if k not in ("role", "content", "tool_calls"):
+                        last_msg_extra[k] = v
+            # Final record fields land on done=true.
+            if obj.get("done"):
+                for k in ("prompt_eval_count", "eval_count",
+                         "total_duration", "load_duration",
+                         "prompt_eval_duration", "eval_duration",
+                         "done_reason"):
+                    if k in obj:
+                        final_fields[k] = obj[k]
+
+        merged_message: dict = {"role": role,
+                                "content": "".join(content_parts)}
+        if tool_calls:
+            merged_message["tool_calls"] = tool_calls
+        merged_message.update(last_msg_extra)
+
+        result = {"message": merged_message}
+        result.update(final_fields)
+        return result
 
     def _to_ollama(self, payload: dict, *, strip_think: bool = False) -> dict:
         body: dict = {

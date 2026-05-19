@@ -278,6 +278,33 @@ def _cwd_for_request() -> str:
     return os.environ.get("CALIBER_GROUNDING_CWD", os.getcwd())
 
 
+def _extra_roots_for_request() -> tuple[str, ...]:
+    """Additional allowed roots for the tool sandbox.
+
+    v1.8+: union of (a) ``CALIBER_GROUNDING_ADD_DIRS`` env var
+    (``os.pathsep``-separated) and (b)
+    ``permissions.additionalDirectories`` discovered from
+    ``~/.claude/settings.json`` and ``<cwd>/.claude/settings*.json``
+    via :func:`claude_hooks.allowed_roots.discover_allowed_roots`.
+
+    We deliberately do NOT accept extra roots from the HTTP request
+    body — same posture as ``_cwd_for_request``. The body is
+    constructed by the LLM (caliber's grounding loop forwards user
+    prompts verbatim), so an attacker who can influence the prompt
+    could pivot into other projects. Settings files + operator env
+    var are both operator-trusted inputs.
+    """
+    from claude_hooks.allowed_roots import discover_allowed_roots
+    env_dirs: list[str] = []
+    raw = os.environ.get("CALIBER_GROUNDING_ADD_DIRS")
+    if raw:
+        env_dirs = [d for d in raw.split(os.pathsep) if d.strip()]
+    cwd = _cwd_for_request()
+    roots = discover_allowed_roots(cwd, add_dirs=env_dirs)
+    # discover returns [cwd, *extras]; the tool layer wants extras only.
+    return tuple(roots[1:])
+
+
 # -- Agent loop ------------------------------------------------------- #
 def _merge_tools(existing: Optional[list[dict]]) -> list[dict]:
     """Combine caliber's tool list (usually none) with ours. Thin shim
@@ -345,7 +372,8 @@ def _caliber_preseed_builder(cwd: str) -> Optional[tuple[list[dict], str, str]]:
 
 
 def run_agent_loop(payload: dict, cwd: str,
-                   max_iterations: Optional[int] = None) -> dict:
+                   max_iterations: Optional[int] = None,
+                   extra_roots: tuple[str, ...] = ()) -> dict:
     """Drive the tool-use loop until the model stops calling tools or the
     iteration cap is hit. Returns the final Ollama chat-completion JSON.
 
@@ -353,6 +381,10 @@ def run_agent_loop(payload: dict, cwd: str,
     caliber-specific concerns: env-driven config, grounding+recall
     injection, and the trailing-JSON sanitiser caliber's stream-parser
     requires.
+
+    ``extra_roots`` is the additional allowed-directory set for the
+    tool sandbox (typically ``_extra_roots_for_request()``). Empty
+    tuple gives byte-identical legacy behavior.
     """
     tools_available = _tools_enabled()
     cfg = agent_loop_runner.LoopConfig(
@@ -374,13 +406,14 @@ def run_agent_loop(payload: dict, cwd: str,
         payload.get("messages") or [], cwd, tools_available=tools_available,
     )
 
+    tool_executor = tools.make_executor(extra_roots)
     final = agent_loop_runner.run_loop(
         payload,
         cwd,
         config=cfg,
         tool_specs=tools.openai_tool_specs(),
         chat_fn=lambda p: ollama.chat_completions(p),
-        tool_executor=tools.execute,
+        tool_executor=tool_executor,
         preseed_builder=_caliber_preseed_builder,
     )
     sanitize_assistant_json(final)
@@ -686,6 +719,11 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         cwd = _cwd_for_request()
+        extra_roots = _extra_roots_for_request()
+        if extra_roots:
+            log.debug(
+                "tool sandbox extras: %s", ", ".join(extra_roots),
+            )
         stream_requested = bool(payload.get("stream"))
         # Optional dump of the full agent-loop result for debugging
         # truncation / JSON parse failures downstream. Set
@@ -726,7 +764,7 @@ class _Handler(BaseHTTPRequestHandler):
             hb_thread.start()
             try:
                 try:
-                    result = run_agent_loop(payload, cwd)
+                    result = run_agent_loop(payload, cwd, extra_roots=extra_roots)
                 except ollama.UpstreamError as e:
                     log.warning("upstream error %d: %s", e.status,
                                 str(e.body)[:200])
@@ -766,7 +804,7 @@ class _Handler(BaseHTTPRequestHandler):
         # Non-streaming path: classic request/response with a real
         # status code on failure.
         try:
-            result = run_agent_loop(payload, cwd)
+            result = run_agent_loop(payload, cwd, extra_roots=extra_roots)
         except ollama.UpstreamError as e:
             log.warning("upstream error %d: %s", e.status,
                         str(e.body)[:200])

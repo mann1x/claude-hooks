@@ -45,6 +45,17 @@ from claude_hooks.code_graph.detect import (
 
 log = logging.getLogger("claude_hooks.code_graph.builder")
 
+# Cache invalidation key — bump when the extractor schema changes in
+# a way that callers may rely on. The manifest stores this; a mismatch
+# forces a full rebuild instead of trusting per-file cached extractions.
+#
+# Version log:
+#   1 — initial schema (line, type, name, qualname, file).
+#   2 — added ``end_line`` to function/class/method nodes (2026-05-18,
+#       task #200) so citation_linter and friends can do line-range
+#       containment without re-parsing.
+EXTRACTOR_VERSION = 2
+
 # Node id helpers — keep stable, parseable, prefix-grep-friendly.
 def _module_id(dotted: str) -> str:
     return f"module:{dotted}"
@@ -148,6 +159,12 @@ class _PyExtractor(ast.NodeVisitor):
             "qualname": qual,
             "file": self.file_rel,
             "line": node.lineno,
+            # 2026-05-18 (#200): record end_lineno so downstream tools
+            # (citation_linter, debug-impact, future static analyzers)
+            # can answer "is line L inside this def?" without
+            # re-parsing the file. Additive — graph.json schema gains
+            # the key but old readers ignore unknown fields.
+            "end_line": getattr(node, "end_lineno", None) or node.lineno,
             "tag": "EXTRACTED",
             "doc": self._docstring(node),
         })
@@ -174,6 +191,8 @@ class _PyExtractor(ast.NodeVisitor):
             "qualname": qual,
             "file": self.file_rel,
             "line": node.lineno,
+            # 2026-05-18 (#200): see visit_ClassDef comment.
+            "end_line": getattr(node, "end_lineno", None) or node.lineno,
             "tag": "EXTRACTED",
             "doc": self._docstring(node),
             "is_async": is_async,
@@ -321,14 +340,29 @@ def build_graph(
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     # Cache layout: cache/<sha>.json  →  {"nodes": [...], "edges": [...]}
-    # Plus cache/manifest.json: {file_rel: sha}.
+    # Plus cache/manifest.json: {"_extractor_version": N, file_rel: sha, ...}.
+    # The ``_extractor_version`` key lets us invalidate the whole cache
+    # when the extractor schema changes without per-file SHA churn.
     manifest_path = cache_dir / "manifest.json"
     prev_manifest: dict[str, str] = {}
     if incremental and manifest_path.exists():
         try:
-            prev_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if not isinstance(prev_manifest, dict):
-                prev_manifest = {}
+            raw_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(raw_manifest, dict):
+                stored_version = raw_manifest.get("_extractor_version")
+                if stored_version == EXTRACTOR_VERSION:
+                    # Drop the meta key so the rest of the code can treat
+                    # the manifest as a pure {file_rel: sha} map.
+                    prev_manifest = {
+                        k: v for k, v in raw_manifest.items()
+                        if not k.startswith("_") and isinstance(v, str)
+                    }
+                else:
+                    log.info(
+                        "code_graph: extractor version %s -> %s, "
+                        "discarding cached extractions",
+                        stored_version, EXTRACTOR_VERSION,
+                    )
         except (OSError, json.JSONDecodeError):
             prev_manifest = {}
 
@@ -450,7 +484,16 @@ def build_graph(
 
     # Write graph.json + manifest + meta + report atomically-ish.
     _atomic_write(graph_json_path(root), json.dumps(payload, indent=2))
-    _atomic_write(manifest_path, json.dumps(new_manifest, indent=2, sort_keys=True))
+    # Stamp the extractor version so a future schema bump can detect
+    # this cache as stale instead of trusting per-file SHA matches.
+    manifest_with_version = {
+        "_extractor_version": EXTRACTOR_VERSION,
+        **new_manifest,
+    }
+    _atomic_write(
+        manifest_path,
+        json.dumps(manifest_with_version, indent=2, sort_keys=True),
+    )
     _atomic_write(out_dir / META_FILENAME, json.dumps({
         "managed_by": "claude-hooks",
         "version": 1,

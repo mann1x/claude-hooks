@@ -114,22 +114,31 @@ release at most. Update it during the same cut.
    The annotated tag (`-a`) is required — GitHub uses the tag
    message as the default release body when one is not supplied.
 
-6. **Create the GitHub release**
+6. **Create the GitHub release** — populate the body from the
+   CHANGELOG entry. **Do not use `--notes-from-tag`**: our tag
+   messages are one-line summaries, so the release page would
+   render with a title and an empty body.
 
    ```bash
+   awk '/^## \[X\.Y\.Z\]/{flag=1; next} /^## \[/{flag=0} flag' \
+       CHANGELOG.md > /tmp/release-notes-vX.Y.Z.md
+
    gh release create vX.Y.Z \
        --title "claude-hooks vX.Y.Z" \
-       --notes-from-tag \
+       --notes-file /tmp/release-notes-vX.Y.Z.md \
        --verify-tag
    ```
 
-   Or, to use the CHANGELOG entry verbatim:
+   The awk slice runs from the `## [X.Y.Z]` header (exclusive)
+   to the next `## [` header (exclusive), so the body starts at
+   the first `### Added` (or equivalent) and ends just before the
+   previous release's header.
+
+   **If you forgot:** if the release was already created with
+   `--notes-from-tag` (title-only body), fix it in place with:
 
    ```bash
-   gh release create vX.Y.Z \
-       --title "claude-hooks vX.Y.Z" \
-       --notes-file <(awk '/^## \[X\.Y\.Z\]/,/^## \[/' CHANGELOG.md | head -n -1) \
-       --verify-tag
+   gh release edit vX.Y.Z --notes-file /tmp/release-notes-vX.Y.Z.md
    ```
 
    GitHub auto-generates `Source code (zip)` and

@@ -1,0 +1,584 @@
+"""M9 HTTP control surface — FastAPI route handlers for the live
+LangGraph control endpoints.
+
+The pure-Python payload builders live in
+:mod:`consultants.server.control` (M5). This module is the thin
+adapter between FastAPI request bodies and those builders, plus
+the LangGraph-side application: ``graph.update_state`` for
+inject/control/interrupt/cancel, ``graph.invoke(Command(resume=…))``
+for resume, ``graph.get_state`` for state, and the SSE bridge
+(:mod:`consultants.server.events_sse`) for /events.
+
+Endpoint summary (all under ``/v1/consult/{sid}/``)::
+
+    GET  /state      -> live or last-known StateSnapshot (summary)
+    POST /inject     -> apply additional_context delta
+    POST /control    -> mutate runtime_control (deadline, caps, …)
+    POST /interrupt  -> flip pause_requested on runtime_control
+    POST /resume     -> Command(resume=...) re-entry (async)
+    POST /cancel     -> flip cancel_requested + optionally drop checkpoint
+    GET  /events     -> SSE replay + live stream over runtime_events
+
+The handlers share a small helper layer
+(:func:`_require_session`, :func:`_require_live_session`,
+:func:`_safe_apply_state_delta`) so the lifecycle rules are
+expressed once and uniformly. Lifecycle:
+
+- ``404`` — session not found (in memory or on disk).
+- ``410`` — session has been closed (idle reap, explicit close).
+- ``409`` — session is in a state that doesn't accept this verb
+  (e.g. POST /inject after the run completed).
+- ``503`` — runner not configured, or the live graph handles
+  aren't attached yet (race between create + run).
+- ``400`` — payload validation failure surfaced from the builder.
+
+Tests live in ``tests/test_consultants_v2_control_routes.py``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+from typing import TYPE_CHECKING, Any, Optional
+
+
+if TYPE_CHECKING:  # pragma: no cover — type-only imports
+    from fastapi import FastAPI
+
+
+# FastAPI is a hard dep of this module. The route handlers reference
+# ``Request`` in their signatures; FastAPI introspects the
+# annotation at registration time, so the import must resolve at
+# module load — a lazy import inside ``register_control_routes``
+# leaves the annotation as a bare string and FastAPI treats
+# ``request`` as a missing query param (422). The consultants env
+# always has fastapi installed; the main env imports
+# ``control.py`` (builders only) which has no fastapi dep.
+from fastapi import HTTPException, Request
+from fastapi.responses import StreamingResponse
+
+
+from consultants.server.control import (
+    ControlInputError,
+    build_cancel_request,
+    build_inject_delta,
+    build_interrupt_delta,
+    build_resume_command,
+    build_runtime_control_delta,
+    summarize_state_for_get,
+)
+
+
+log = logging.getLogger("consultants.server.control_routes")
+
+
+# Status codes hoisted as module constants so handlers stay
+# declarative — and tests can assert on them without re-typing
+# literals scattered across the file.
+_HTTP_BAD_REQUEST = 400
+_HTTP_NOT_FOUND = 404
+_HTTP_CONFLICT = 409
+_HTTP_GONE = 410
+_HTTP_INTERNAL = 500
+_HTTP_UNAVAILABLE = 503
+
+
+# ============================================================== #
+# Lifecycle helpers
+# ============================================================== #
+
+def _require_session(app, sid: str):
+    """Look up a SessionState in memory. ``404`` if unknown.
+
+    Disk-fallback (the v1 path that re-loads a finished session
+    from artifacts) is intentionally NOT hooked here — the control
+    verbs only make sense on live in-memory sessions. ``GET /state``
+    on a closed session that's gone from memory should use the
+    existing ``GET /v1/consult/{sid}`` poll endpoint, which already
+    has the disk fallback.
+    """
+    sessions = getattr(app.state, "sessions", None) or {}
+    s = sessions.get(sid)
+    if s is None:
+        raise HTTPException(
+            status_code=_HTTP_NOT_FOUND,
+            detail=f"session not found: {sid}",
+        )
+    return s
+
+
+def _require_live_session(app, sid: str, *, allow_paused: bool = True):
+    """Look up a session and assert it can accept a control verb.
+
+    - 404 when unknown.
+    - 410 when closed (idle reap / explicit close).
+    - 409 when status is ``completed`` / ``failed`` (run is over —
+      mutations are a no-op semantically, so we reject them
+      explicitly rather than silently swallow).
+    - 503 when the runner hasn't attached the live graph handles
+      yet. This is a millisecond-window race between
+      ``executor.submit`` and the runner's first line; clients
+      should retry.
+
+    ``allow_paused`` is True by default — pause-and-then-mutate is
+    the standard HITL flow. Set False from /resume (you don't
+    re-resume something that isn't paused).
+    """
+    s = _require_session(app, sid)
+    if getattr(s, "closed", False):
+        raise HTTPException(
+            status_code=_HTTP_GONE,
+            detail=f"session closed: {sid}",
+        )
+    status = getattr(s, "status", "")
+    if status not in ("running",):
+        raise HTTPException(
+            status_code=_HTTP_CONFLICT,
+            detail=(
+                f"session is {status!r}; control verbs require a "
+                f"running session"
+            ),
+        )
+    if (getattr(s, "_compiled", None) is None
+            or getattr(s, "_thread_config", None) is None):
+        raise HTTPException(
+            status_code=_HTTP_UNAVAILABLE,
+            detail=(
+                f"session {sid} has no live graph handles yet — "
+                "the runner is still spinning up; retry"
+            ),
+        )
+    return s
+
+
+def _safe_apply_state_delta(
+    s, delta: dict, *,
+    as_node: Optional[str] = None,
+) -> None:
+    """Wrap ``compiled.update_state`` so a LangGraph error becomes
+    a 500 with a structured detail (not a bare stack trace).
+
+    Re-raises as ``HTTPException(500, …)`` instead of letting the
+    LangGraph error propagate — keeps the HTTP contract sane.
+    """
+    try:
+        if as_node is not None:
+            s._compiled.update_state(s._thread_config, delta,
+                                       as_node=as_node)
+        else:
+            s._compiled.update_state(s._thread_config, delta)
+    except Exception as e:  # pragma: no cover — defensive
+        log.exception("update_state raised for sid=%s", s.sid)
+        raise HTTPException(
+            status_code=_HTTP_INTERNAL,
+            detail=f"update_state failed: {type(e).__name__}: {e}",
+        )
+
+
+def _snapshot_to_dict(snapshot: Any) -> dict:
+    """Convert a LangGraph ``StateSnapshot`` (NamedTuple) to a
+    dict shape :func:`summarize_state_for_get` understands.
+
+    LangGraph snapshots have ``.values`` (state dict), ``.next``
+    (tuple of pending nodes), ``.tasks`` (tuple of PregelTask).
+    The summarizer reads them via dict access, so we mirror.
+    """
+    if snapshot is None:
+        return {}
+    if isinstance(snapshot, dict):
+        return snapshot
+    return {
+        "values": getattr(snapshot, "values", {}) or {},
+        "next": list(getattr(snapshot, "next", ()) or ()),
+        "tasks": list(getattr(snapshot, "tasks", ()) or ()),
+    }
+
+
+# ============================================================== #
+# Route registration
+# ============================================================== #
+
+def register_control_routes(app: "FastAPI") -> None:
+    """Attach the seven M9 control endpoints to ``app``.
+
+    Idempotent in spirit but FastAPI itself raises if you register
+    the same path twice — ``create_app`` calls this exactly once.
+    """
+    # -------------------- GET /state --------------------------- #
+    @app.get("/v1/consult/{sid}/state")
+    def get_state(sid: str) -> dict:
+        s = _require_session(app, sid)
+        # A completed run can still be inspected; we return the
+        # final state as a static snapshot. The live-graph path is
+        # only used while the run is still in flight.
+        if (getattr(s, "_compiled", None) is None
+                or getattr(s, "_thread_config", None) is None):
+            # No live graph (run finished + cleaned up, or never
+            # had one). Synthesize a summary from SessionState
+            # fields so callers always get the same shape.
+            static = {
+                "values": {
+                    "research": list(getattr(s, "research", []) or []),
+                    "plan_items": list(getattr(s, "plan_items", []) or []),
+                    "research_rounds_used": 0,
+                    "critic_reroutes_used": 0,
+                    "critic_decision": None,
+                    "partial_synthesis": None,
+                    "additional_context": [],
+                    "error": getattr(s, "error", None),
+                    "final_answer": getattr(s, "final_answer", "") or "",
+                },
+                "next": [],
+                "tasks": [],
+            }
+            payload = summarize_state_for_get(static, sid=sid)
+            payload["status"] = getattr(s, "status", "")
+            payload["closed"] = bool(getattr(s, "closed", False))
+            return payload
+        try:
+            snapshot = s._compiled.get_state(s._thread_config)
+        except Exception as e:
+            log.exception("get_state raised for sid=%s", sid)
+            raise HTTPException(
+                status_code=_HTTP_INTERNAL,
+                detail=f"get_state failed: {type(e).__name__}: {e}",
+            )
+        payload = summarize_state_for_get(
+            _snapshot_to_dict(snapshot), sid=sid,
+        )
+        payload["status"] = getattr(s, "status", "")
+        payload["closed"] = bool(getattr(s, "closed", False))
+        s.bump_activity()
+        return payload
+
+    # -------------------- POST /inject ------------------------- #
+    @app.post("/v1/consult/{sid}/inject")
+    def inject(sid: str, body: dict) -> dict:
+        s = _require_live_session(app, sid)
+        try:
+            delta = build_inject_delta(
+                role=str(body.get("role") or "any"),
+                text=str(body.get("text") or ""),
+                source=str(body.get("source") or "user"),
+                ts=body.get("ts"),
+            )
+        except ControlInputError as e:
+            raise HTTPException(_HTTP_BAD_REQUEST, str(e))
+        # ``as_node="researcher"`` matches M5's e2e — using an
+        # existing node name keeps LangGraph's update_state happy
+        # (it requires the node name to be registered in the
+        # compiled graph; "injector" would 500).
+        _safe_apply_state_delta(s, delta, as_node="researcher")
+        s.bump_activity()
+        return {"ok": True, "applied": _serialize_for_json(delta)}
+
+    # -------------------- POST /control ------------------------ #
+    @app.post("/v1/consult/{sid}/control")
+    def control(sid: str, body: dict) -> dict:
+        s = _require_live_session(app, sid)
+        rc_in = body.get("runtime_control")
+        if not isinstance(rc_in, dict):
+            raise HTTPException(
+                _HTTP_BAD_REQUEST,
+                "body.runtime_control must be a dict of "
+                "partial-update fields",
+            )
+        # The builder takes a single dict of changes (NOT kwargs)
+        # so it can validate per-key without splatting through the
+        # function signature. Unknown keys raise ControlInputError
+        # which maps to 400 below.
+        try:
+            delta = build_runtime_control_delta(rc_in)
+        except ControlInputError as e:
+            raise HTTPException(_HTTP_BAD_REQUEST, str(e))
+        _safe_apply_state_delta(s, delta)
+        s.bump_activity()
+        return {"ok": True, "applied": _serialize_for_json(delta)}
+
+    # -------------------- POST /interrupt ---------------------- #
+    @app.post("/v1/consult/{sid}/interrupt")
+    def interrupt_(sid: str, body: Optional[dict] = None) -> dict:
+        s = _require_live_session(app, sid)
+        body = body or {}
+        delta = build_interrupt_delta(
+            reason=str(body.get("reason") or "user-pause"),
+        )
+        _safe_apply_state_delta(s, delta)
+        s.bump_activity()
+        return {"ok": True, "applied": _serialize_for_json(delta)}
+
+    # -------------------- POST /resume ------------------------- #
+    @app.post("/v1/consult/{sid}/resume")
+    def resume(sid: str, body: Optional[dict] = None) -> dict:
+        # Resume re-enters the graph at the interrupt point with
+        # Command(resume=value). We can't reuse the runner's stream
+        # loop (it's already returned at the interrupt). We DO need
+        # to keep the HTTP request short, so the actual re-invoke
+        # gets queued on the executor and the handler returns 202.
+        s = _require_live_session(app, sid)
+        body = body or {}
+        value = body.get("value")
+        decision = str(body.get("decision") or "")
+        resume_cmd = build_resume_command(value, decision=decision)
+
+        # Clear the interrupt_state channel BEFORE re-entry so the
+        # next-node guard in interrupt_policy doesn't immediately
+        # re-trigger the pause. update_state respects the reducer
+        # for runtime_control (merge); pause_requested goes false.
+        from consultants.engine.interrupt_policy import clear_interrupt
+        clear_delta = clear_interrupt({})
+        _safe_apply_state_delta(s, clear_delta)
+
+        # Schedule the re-invoke on the executor. Use lazy import
+        # to avoid the top-level dependency cycle (app imports
+        # this module; the runner imports app).
+        from concurrent.futures import Future
+        try:
+            from langgraph.types import Command
+        except ImportError as e:
+            raise HTTPException(
+                _HTTP_UNAVAILABLE,
+                f"langgraph not available: {e}",
+            )
+
+        def _resume_in_executor():
+            try:
+                # invoke (not stream) — we want to drive to the
+                # next interrupt / END synchronously.
+                s._compiled.invoke(
+                    Command(resume=resume_cmd.value),
+                    config=s._thread_config,
+                )
+            except Exception:  # pragma: no cover — runner-side
+                log.exception("resume re-invoke failed for sid=%s", sid)
+
+        executor = getattr(app.state, "executor", None)
+        if executor is None:
+            # No executor — run inline (test path).
+            _resume_in_executor()
+            return {"ok": True, "mode": "inline",
+                    "resume_value": _serialize_for_json(value)}
+        fut: Future = executor.submit(_resume_in_executor)
+        s.bump_activity()
+        return {
+            "ok": True,
+            "mode": "scheduled",
+            "resume_value": _serialize_for_json(value),
+            "future_id": id(fut),
+        }
+
+    # -------------------- POST /cancel ------------------------- #
+    @app.post("/v1/consult/{sid}/cancel")
+    def cancel(sid: str, body: Optional[dict] = None) -> dict:
+        # Cancel is the one verb that MUST work even on completed/
+        # failed sessions (idempotent no-op). For closed sessions
+        # we still 410 because the session is gone from memory.
+        body = body or {}
+        s = _require_session(app, sid)
+        if getattr(s, "closed", False):
+            raise HTTPException(
+                _HTTP_GONE, f"session closed: {sid}",
+            )
+        discard = bool(body.get("discard_partial") or False)
+        reason = str(body.get("reason") or "user-cancel")
+        req = build_cancel_request(
+            discard_partial=discard, reason=reason,
+        )
+        # If the run is still going, flip cancel_requested on
+        # runtime_control. Nodes consult this at entry and exit
+        # early. We don't have RunControl.request_drain on a sync
+        # CompiledStateGraph — the cooperative flag is the
+        # mechanism. For tests + future async work, this is the
+        # extension point.
+        if (getattr(s, "status", "") == "running"
+                and getattr(s, "_compiled", None) is not None
+                and getattr(s, "_thread_config", None) is not None):
+            _safe_apply_state_delta(s, req.state_delta)
+        # Discard the checkpoint file if asked. The checkpointer
+        # factory uses per-session SQLite under the session dir; a
+        # naive unlink is correct but only safe AFTER the runner
+        # has released the file handle, which it does at stream
+        # completion. Defer to the close path which already handles
+        # the cleanup race.
+        if discard and hasattr(app.state, "_close_session"):
+            try:
+                app.state._close_session(
+                    app, sid, reason="cancel-discard",
+                )
+            except Exception:  # pragma: no cover — defensive
+                log.exception("cancel-discard cleanup raised")
+        s.bump_activity()
+        return {
+            "ok": True,
+            "discard_partial": discard,
+            "applied": _serialize_for_json(req.state_delta),
+        }
+
+    # -------------------- GET /events (SSE) -------------------- #
+    @app.get("/v1/consult/{sid}/events")
+    async def events(sid: str, request: Request):
+        # SSE — replay any persisted runtime_events the consumer
+        # missed (Last-Event-ID), then poll the recorder for new
+        # rows. The runner pumps custom events into the
+        # runtime_events table; we don't subscribe to
+        # ``astream_events`` directly (that would start a fresh
+        # invocation). Polling cadence is 200ms — comfortably under
+        # human-perceptible latency, comfortably above DB load
+        # threshold for the SQLite recorder.
+        s = _require_session(app, sid)
+        last_event_id = _parse_last_event_id(
+            request.headers.get("last-event-id"),
+        )
+        recorder = getattr(s, "_recorder", None)
+        return StreamingResponse(
+            _sse_stream_for_session(
+                s, recorder, request,
+                start_event_id=last_event_id,
+            ),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",  # nginx
+            },
+        )
+
+
+# ============================================================== #
+# SSE stream loop
+# ============================================================== #
+
+async def _sse_stream_for_session(
+    session,
+    recorder,
+    request,
+    *,
+    start_event_id: int = 0,
+    poll_interval_s: float = 0.2,
+    heartbeat_s: float = 15.0,
+):
+    """Async generator emitting SSE bytes for one session.
+
+    Two-phase:
+
+    1. **Replay** — emit every persisted ``runtime_events`` row with
+       ``event_id > start_event_id``. Honors Last-Event-ID resume.
+    2. **Tail** — poll the recorder every ``poll_interval_s`` for
+       new rows; emit them as SSE; emit a comment-line heartbeat
+       every ``heartbeat_s`` of quiet. End when the session reaches
+       a terminal state (``completed`` / ``failed`` / closed) AND
+       no new rows show up for one poll cycle.
+
+    Client disconnect — FastAPI sets ``request.is_disconnected()``;
+    we honor it by returning, which closes the generator and lets
+    the StreamingResponse clean up.
+    """
+    from consultants.server.events_sse import (
+        format_sse_event, format_sse_heartbeat,
+    )
+
+    last_id = int(start_event_id)
+    last_emit_ts = time.monotonic()
+
+    # Phase 1: replay
+    if recorder is not None and hasattr(recorder, "list_runtime_events"):
+        try:
+            rows = recorder.list_runtime_events(since_event_id=last_id)
+        except Exception:  # pragma: no cover — defensive
+            rows = []
+        for row in rows:
+            eid = int(row.get("event_id") or 0)
+            if eid <= last_id:
+                continue
+            yield format_sse_event(
+                event_id=eid,
+                event_type=str(row.get("kind") or "custom"),
+                data=dict(row.get("payload") or {}),
+            )
+            last_id = eid
+            last_emit_ts = time.monotonic()
+
+    # Phase 2: tail
+    while True:
+        # Disconnect detection — FastAPI returns True once the TCP
+        # connection has closed. Quick exit on disconnect avoids
+        # keeping the generator + executor task alive.
+        try:
+            disconnected = await request.is_disconnected()
+        except Exception:  # pragma: no cover — older fastapi
+            disconnected = False
+        if disconnected:
+            return
+
+        # Read any new rows.
+        new_rows: list[dict] = []
+        if recorder is not None and hasattr(recorder, "list_runtime_events"):
+            try:
+                new_rows = recorder.list_runtime_events(since_event_id=last_id)
+            except Exception:  # pragma: no cover
+                new_rows = []
+        for row in new_rows:
+            eid = int(row.get("event_id") or 0)
+            if eid <= last_id:
+                continue
+            yield format_sse_event(
+                event_id=eid,
+                event_type=str(row.get("kind") or "custom"),
+                data=dict(row.get("payload") or {}),
+            )
+            last_id = eid
+            last_emit_ts = time.monotonic()
+
+        # Heartbeat when quiet.
+        if (time.monotonic() - last_emit_ts) >= heartbeat_s:
+            yield format_sse_heartbeat()
+            last_emit_ts = time.monotonic()
+
+        # Termination check.
+        if (getattr(session, "status", "") in ("completed", "failed")
+                or getattr(session, "closed", False)):
+            # One final poll already happened above. If no new rows,
+            # this is the last lap.
+            if not new_rows:
+                return
+
+        await asyncio.sleep(poll_interval_s)
+
+
+# ============================================================== #
+# Small helpers
+# ============================================================== #
+
+def _parse_last_event_id(raw: Optional[str]) -> int:
+    """Parse the SSE ``Last-Event-ID`` header to an int. Returns 0
+    when missing or unparseable — that's the "start from the
+    beginning" sentinel."""
+    if not raw:
+        return 0
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _serialize_for_json(obj: Any) -> Any:
+    """Best-effort dict-ification for arbitrary control objects.
+
+    The builders return native dicts plus a couple of small
+    dataclasses (Doc, ToolPlanItem). FastAPI's default JSON
+    encoder handles dicts/lists/scalars but chokes on dataclasses;
+    this normalizes them recursively.
+    """
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, dict):
+        return {k: _serialize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_serialize_for_json(v) for v in obj]
+    # Dataclasses + named tuples + simple objects with __dict__.
+    d = getattr(obj, "__dict__", None)
+    if isinstance(d, dict):
+        return _serialize_for_json(dict(d))
+    # Fallback — repr it so we never crash the JSON encoder.
+    return repr(obj)

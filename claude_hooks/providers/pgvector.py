@@ -48,6 +48,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 from typing import Optional
 
 
@@ -77,6 +78,19 @@ class PgvectorProvider(Provider):
         self._embedder: Optional[Embedder] = None
         self._conn = None
         self._table_created = False
+        # M14 follow-up (2026-05-18): the consultants engine shares a
+        # single PgvectorProvider across concurrent researcher /
+        # tool_executor fanout lanes. psycopg's connection is NOT
+        # thread-safe — concurrent ``cursor()`` calls on the same
+        # connection race each other's transaction state, producing
+        # the "current transaction is aborted, commands ignored
+        # until end of transaction block" cascade. RLock (not Lock)
+        # because public methods occasionally call each other —
+        # e.g. ``kg_search_nodes`` calls ``recall_hybrid`` which
+        # itself takes the lock. Lock around the full SQL sequence
+        # (open cursor → execute → commit) so a single logical
+        # operation is atomic on the connection.
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------------ #
     # Detection — there is no MCP server, so this is always empty.
@@ -143,18 +157,19 @@ class PgvectorProvider(Provider):
     def recall(self, query: str, k: int = 5) -> list[Memory]:
         if not query.strip():
             return []
-        try:
-            self._ensure_ready()
-        except (ImportError, EmbedderError) as e:
-            log.warning("pgvector unavailable: %s", e)
-            return []
-        try:
-            qvec = self._embedder.embed(query)  # type: ignore[union-attr]
-        except EmbedderError as e:
-            log.warning("pgvector embed failed: %s", e)
-            return []
+        with self._lock:
+            try:
+                self._ensure_ready()
+            except (ImportError, EmbedderError) as e:
+                log.warning("pgvector unavailable: %s", e)
+                return []
+            try:
+                qvec = self._embedder.embed(query)  # type: ignore[union-attr]
+            except EmbedderError as e:
+                log.warning("pgvector embed failed: %s", e)
+                return []
 
-        return self._search_tables(qvec, k)
+            return self._search_tables(qvec, k)
 
     def _resolve_tables(self) -> list[str]:
         """Return the validated list of tables to search.
@@ -196,6 +211,13 @@ class PgvectorProvider(Provider):
                     rows.extend(cur.fetchall())
             except Exception as e:
                 log.warning("pgvector query on %s failed: %s", t, e)
+                # Roll back so the next table's query (or any
+                # subsequent caller on this connection) doesn't
+                # see "current transaction is aborted".
+                try:
+                    self._conn.rollback()  # type: ignore[union-attr]
+                except Exception:
+                    pass
                 continue
         rows.sort(key=lambda r: r[2])
         result: list[Memory] = []
@@ -204,49 +226,249 @@ class PgvectorProvider(Provider):
             meta["_distance"] = distance
             meta["_table"] = src
             result.append(Memory(text=content, metadata=meta))
+        # #218: close read-only transaction before returning.
+        self._read_only_finish()
         return result
 
     def store(self, content: str, metadata: Optional[dict] = None) -> None:
         if not content.strip():
             return
+        with self._lock:
+            try:
+                self._ensure_ready()
+                vec = self._embedder.embed(content)  # type: ignore[union-attr]
+            except (ImportError, EmbedderError) as e:
+                raise RuntimeError(f"pgvector store failed: {e}")
+            table = _safe_table(self.options.get("table") or "claude_hooks_memory")
+            # M14: pull expires_at out of metadata. ISO-8601 strings are
+            # implicitly cast to TIMESTAMPTZ by Postgres on INSERT. NULL
+            # (or absent key) is "never expire", the v1.7 default.
+            expires_at = None
+            if isinstance(metadata, dict):
+                ea = metadata.get("expires_at")
+                if isinstance(ea, str) and ea.strip():
+                    expires_at = ea
+            try:
+                with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                    # ``content_hash`` matches the migration-script schema —
+                    # without it inserts into ``memories_<model>`` (which has
+                    # NOT NULL on content_hash) fail. ON CONFLICT DO NOTHING
+                    # makes repeat stores of identical content a silent no-op
+                    # rather than a unique-constraint error.
+                    cur.execute(
+                        f"INSERT INTO {table} "
+                        f"(content, content_hash, metadata, embedding, "
+                        f"expires_at) "
+                        f"VALUES (%s, %s, %s, %s, %s) "
+                        f"ON CONFLICT (content_hash) DO NOTHING",
+                        (
+                            content, _content_hash(content),
+                            json.dumps(metadata or {}), str(vec),
+                            expires_at,
+                        ),
+                    )
+                    self._conn.commit()  # type: ignore[union-attr]
+            except Exception as e:
+                log.warning("pgvector insert failed: %s", e)
+                raise
+
+    # ------------------------------------------------------------------ #
+    # M14 — TTL surface (per-row ``expires_at``)
+    # ------------------------------------------------------------------ #
+
+    def _read_only_finish(self) -> None:
+        """#218 (2026-05-18): close any open read-only transaction
+        on this connection. psycopg3's default mode auto-starts a
+        transaction on the first ``execute()`` and keeps it open
+        until ``commit()``/``rollback()``. Read-only methods that
+        return on the happy path without committing leave the
+        connection ``idle in transaction`` — holding ``AccessShareLock``
+        on every table they touched.
+
+        That lock blocks any concurrent ``ALTER TABLE`` from another
+        connection. The 2026-05-18 cell-2 deadlock of the #214
+        regression matrix surfaced this: the store-reaper called
+        ``expire_before`` (read-only, no commit), went back to sleep
+        with the transaction still open, and the next researcher
+        session's ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS
+        expires_at`` from M14's lazy migration in ``_create_table``
+        sat blocked for 14 minutes until manually terminated.
+
+        Every read-only method must call this before returning. Uses
+        rollback (not commit) because read-only commit and rollback
+        are semantically identical at the PG level — and rollback
+        is cheaper. Tolerates an already-closed/aborted connection
+        defensively; if the rollback itself raises, log and
+        proceed (the caller is in a finally-style cleanup path).
+        """
         try:
+            if self._conn is not None:
+                self._conn.rollback()  # type: ignore[union-attr]
+        except Exception:  # pragma: no cover — defensive
+            log.exception(
+                "pgvector: _read_only_finish rollback raised "
+                "(connection may have been reset); ignoring"
+            )
+
+    def expire_before(
+        self, *, before_iso: str, limit: int = 1000,
+    ) -> list:
+        """Return rows whose ``expires_at`` is non-NULL and older
+        than ``before_iso``.
+
+        Uses the partial index ``<table>_expires_at_idx`` (created
+        at ``_create_table`` time), so the scan is O(N) over TTL'd
+        rows rather than O(rows). The string-to-TIMESTAMPTZ implicit
+        cast is safe on ISO-8601 input — anything else surfaces as
+        a DataError, which logs and returns ``[]``.
+
+        Returns a list of :class:`ExpiringRow` ordered ascending by
+        ``expires_at`` (oldest first), matching the sqlite_vec
+        contract so the daemon can treat both backends identically.
+        """
+        from claude_hooks.providers._content_hash import ExpiringRow
+        if not before_iso:
+            return []
+        with self._lock:
             self._ensure_ready()
-            vec = self._embedder.embed(content)  # type: ignore[union-attr]
-        except (ImportError, EmbedderError) as e:
-            raise RuntimeError(f"pgvector store failed: {e}")
-        table = _safe_table(self.options.get("table") or "claude_hooks_memory")
-        try:
-            with self._conn.cursor() as cur:  # type: ignore[union-attr]
-                # ``content_hash`` matches the migration-script schema —
-                # without it inserts into ``memories_<model>`` (which has
-                # NOT NULL on content_hash) fail. ON CONFLICT DO NOTHING
-                # makes repeat stores of identical content a silent no-op
-                # rather than a unique-constraint error.
-                cur.execute(
-                    f"INSERT INTO {table} (content, content_hash, metadata, embedding) "
-                    f"VALUES (%s, %s, %s, %s) "
-                    f"ON CONFLICT (content_hash) DO NOTHING",
-                    (content, _content_hash(content), json.dumps(metadata or {}), str(vec)),
-                )
-                self._conn.commit()  # type: ignore[union-attr]
-        except Exception as e:
-            log.warning("pgvector insert failed: %s", e)
-            raise
+            table = _safe_table(
+                self.options.get("table") or "claude_hooks_memory"
+            )
+            try:
+                with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                    cur.execute(
+                        f"SELECT content_hash, content, metadata, expires_at "
+                        f"FROM {table} "
+                        f"WHERE expires_at IS NOT NULL "
+                        f"AND expires_at < %s::timestamptz "
+                        f"ORDER BY expires_at ASC "
+                        f"LIMIT %s",
+                        (before_iso, int(limit)),
+                    )
+                    rows = cur.fetchall()
+                # #218: close the read-only transaction before returning.
+                # Without this, the connection sits "idle in transaction"
+                # holding AccessShareLock on the table — blocking any
+                # concurrent DDL (M14's lazy ALTER TABLE) from another
+                # connection until the next call lands. See
+                # _read_only_finish for the full forensic.
+                self._read_only_finish()
+            except Exception as e:
+                log.warning("pgvector expire_before failed: %s", e)
+                try:
+                    self._conn.rollback()  # type: ignore[union-attr]
+                except Exception:
+                    pass
+                return []
+        out: list = []
+        for ch, content, meta, exp in rows:
+            # psycopg returns BYTEA as memoryview; coerce to bytes.
+            ch_bytes = bytes(ch) if ch is not None else b""
+            # JSONB comes back as dict already; passthrough.
+            md = dict(meta) if meta else {}
+            # TIMESTAMPTZ comes back as ``datetime`` with tzinfo;
+            # the daemon wants ISO strings end-to-end so the sweep's
+            # forensic logs and the sqlite_vec ExpiringRow have the
+            # same shape.
+            exp_iso = exp.isoformat() if exp is not None else ""
+            out.append(ExpiringRow(
+                content_hash=ch_bytes,
+                content=content or "",
+                metadata=md,
+                expires_at=exp_iso,
+            ))
+        return out
+
+    def refresh_expires_at(
+        self, content_hash_bytes: bytes, new_expires_iso: str,
+    ) -> None:
+        """Bump one row's ``expires_at`` forward by content_hash.
+
+        Driven by ProviderBackedStore's refresh-on-read closure.
+        Silent no-op when the row doesn't exist; errors log + raise
+        so a buggy caller surfaces in tests.
+        """
+        if not content_hash_bytes or not new_expires_iso:
+            return
+        with self._lock:
+            self._ensure_ready()
+            table = _safe_table(
+                self.options.get("table") or "claude_hooks_memory"
+            )
+            try:
+                with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                    cur.execute(
+                        f"UPDATE {table} "
+                        f"SET expires_at = %s::timestamptz "
+                        f"WHERE content_hash = %s",
+                        (new_expires_iso, content_hash_bytes),
+                    )
+                    self._conn.commit()  # type: ignore[union-attr]
+            except Exception as e:
+                log.warning("pgvector refresh_expires_at failed: %s", e)
+                try:
+                    self._conn.rollback()  # type: ignore[union-attr]
+                except Exception:
+                    pass
+                raise
+
+    def delete_by_hashes(self, hashes: list) -> int:
+        """Hard-delete rows by ``content_hash``. Returns count
+        deleted.
+
+        Empty input is a no-op. Postgres doesn't have a 999-param
+        limit like SQLite, but the daemon batches in pages of 500
+        anyway for predictable transaction sizes.
+        """
+        if not hashes:
+            return 0
+        with self._lock:
+            self._ensure_ready()
+            table = _safe_table(
+                self.options.get("table") or "claude_hooks_memory"
+            )
+            hashes = [bytes(h) for h in hashes if h]
+            if not hashes:
+                return 0
+            try:
+                with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                    cur.execute(
+                        f"DELETE FROM {table} WHERE content_hash = ANY(%s)",
+                        (hashes,),
+                    )
+                    deleted = int(cur.rowcount or 0)
+                    self._conn.commit()  # type: ignore[union-attr]
+                    return deleted
+            except Exception as e:
+                log.warning("pgvector delete_by_hashes failed: %s", e)
+                try:
+                    self._conn.rollback()  # type: ignore[union-attr]
+                except Exception:
+                    pass
+                raise
 
     def count(self) -> int:
         """Return the number of stored memories."""
-        if self._conn is None:
+        with self._lock:
+            if self._conn is None:
+                try:
+                    self._ensure_ready()
+                except Exception:
+                    return 0
+            table = _safe_table(self.options.get("table") or "claude_hooks_memory")
             try:
-                self._ensure_ready()
+                with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                    cur.execute(f"SELECT COUNT(*) FROM {table}")
+                    n = cur.fetchone()[0]
+                # #218: close read-only transaction before returning.
+                self._read_only_finish()
+                return n
             except Exception:
+                try:
+                    self._conn.rollback()  # type: ignore[union-attr]
+                except Exception:
+                    pass
                 return 0
-        table = _safe_table(self.options.get("table") or "claude_hooks_memory")
-        try:
-            with self._conn.cursor() as cur:  # type: ignore[union-attr]
-                cur.execute(f"SELECT COUNT(*) FROM {table}")
-                return cur.fetchone()[0]
-        except Exception:
-            return 0
 
     # ------------------------------------------------------------------ #
     # Batch overrides
@@ -260,25 +482,26 @@ class PgvectorProvider(Provider):
         non_empty = [(i, q) for i, q in enumerate(queries) if q.strip()]
         if not non_empty:
             return [[] for _ in queries]
-        try:
-            self._ensure_ready()
-        except (ImportError, EmbedderError) as e:
-            log.warning("pgvector unavailable: %s", e)
-            return [[] for _ in queries]
-        try:
-            vectors = self._embedder.embed_batch([q for _, q in non_empty])  # type: ignore[union-attr]
-        except EmbedderError as e:
-            log.warning("pgvector batch_embed failed: %s", e)
-            return [[] for _ in queries]
-
-        results: list[list[Memory]] = [[] for _ in queries]
-        for (idx, _), vec in zip(non_empty, vectors):
+        with self._lock:
             try:
-                results[idx] = self._search_tables(vec, k)
-            except Exception as e:
-                log.warning("pgvector batch_recall query %d failed: %s", idx, e)
-                continue
-        return results
+                self._ensure_ready()
+            except (ImportError, EmbedderError) as e:
+                log.warning("pgvector unavailable: %s", e)
+                return [[] for _ in queries]
+            try:
+                vectors = self._embedder.embed_batch([q for _, q in non_empty])  # type: ignore[union-attr]
+            except EmbedderError as e:
+                log.warning("pgvector batch_embed failed: %s", e)
+                return [[] for _ in queries]
+
+            results: list[list[Memory]] = [[] for _ in queries]
+            for (idx, _), vec in zip(non_empty, vectors):
+                try:
+                    results[idx] = self._search_tables(vec, k)
+                except Exception as e:
+                    log.warning("pgvector batch_recall query %d failed: %s", idx, e)
+                    continue
+            return results
 
     def batch_store(self, items: list[tuple[str, Optional[dict]]]) -> None:
         """One Ollama batch + one ``executemany`` per chunk. Idempotent on
@@ -287,31 +510,36 @@ class PgvectorProvider(Provider):
         items = [(c, m) for (c, m) in items if isinstance(c, str) and c.strip()]
         if not items:
             return
-        try:
-            self._ensure_ready()
-        except (ImportError, EmbedderError) as e:
-            raise RuntimeError(f"pgvector batch_store failed: {e}")
-        try:
-            vectors = self._embedder.embed_batch([c for c, _ in items])  # type: ignore[union-attr]
-        except EmbedderError as e:
-            raise RuntimeError(f"pgvector batch embed failed: {e}")
-        table = _safe_table(self.options.get("table") or "claude_hooks_memory")
-        params = [
-            (c, _content_hash(c), json.dumps(m or {}), str(v))
-            for (c, m), v in zip(items, vectors)
-        ]
-        try:
-            with self._conn.cursor() as cur:  # type: ignore[union-attr]
-                cur.executemany(
-                    f"INSERT INTO {table} (content, content_hash, metadata, embedding) "
-                    f"VALUES (%s, %s, %s, %s) "
-                    f"ON CONFLICT (content_hash) DO NOTHING",
-                    params,
-                )
-                self._conn.commit()  # type: ignore[union-attr]
-        except Exception as e:
-            log.warning("pgvector batch insert failed: %s", e)
-            raise
+        with self._lock:
+            try:
+                self._ensure_ready()
+            except (ImportError, EmbedderError) as e:
+                raise RuntimeError(f"pgvector batch_store failed: {e}")
+            try:
+                vectors = self._embedder.embed_batch([c for c, _ in items])  # type: ignore[union-attr]
+            except EmbedderError as e:
+                raise RuntimeError(f"pgvector batch embed failed: {e}")
+            table = _safe_table(self.options.get("table") or "claude_hooks_memory")
+            params = [
+                (c, _content_hash(c), json.dumps(m or {}), str(v))
+                for (c, m), v in zip(items, vectors)
+            ]
+            try:
+                with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                    cur.executemany(
+                        f"INSERT INTO {table} (content, content_hash, metadata, embedding) "
+                        f"VALUES (%s, %s, %s, %s) "
+                        f"ON CONFLICT (content_hash) DO NOTHING",
+                        params,
+                    )
+                    self._conn.commit()  # type: ignore[union-attr]
+            except Exception as e:
+                log.warning("pgvector batch insert failed: %s", e)
+                try:
+                    self._conn.rollback()  # type: ignore[union-attr]
+                except Exception:
+                    pass
+                raise
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -335,7 +563,18 @@ class PgvectorProvider(Provider):
             self._create_table()
 
     def _create_table(self) -> None:
-        """Create the memory table + HNSW index if they don't exist."""
+        """Create the memory table + HNSW index if they don't exist,
+        then run the additive M14 migration (``expires_at`` column +
+        partial index) on every connection.
+
+        The migration steps are split from the create step on purpose
+        — pre-M14 tables exist without ``expires_at``, so an early
+        return when the table exists would leave the user's
+        ``memories_qwen3`` (and any other live tables) stuck on the
+        v1.7 schema forever. Both ALTER TABLE and CREATE INDEX use
+        IF NOT EXISTS, so re-running them on a v2 table is a
+        committed no-op (PG 9.6+).
+        """
         table = _safe_table(self.options.get("table") or "claude_hooks_memory")
         dim = self._embedder.dim if self._embedder and self._embedder.dim else 0  # type: ignore[union-attr]
 
@@ -345,43 +584,72 @@ class PgvectorProvider(Provider):
                 "SELECT 1 FROM information_schema.tables WHERE table_name = %s",
                 (table,),
             )
-            if cur.fetchone():
-                self._table_created = True
-                return
+            table_exists = bool(cur.fetchone())
 
-        # Need the embedding dimension. Probe if unknown.
-        if dim == 0:
-            try:
-                probe = self._embedder.embed("dimension probe")  # type: ignore[union-attr]
-                dim = len(probe)
-            except EmbedderError as e:
-                raise RuntimeError(
-                    f"cannot create table: need embedding dimension but embedder failed: {e}"
+        if not table_exists:
+            # Need the embedding dimension. Probe if unknown.
+            if dim == 0:
+                try:
+                    probe = self._embedder.embed("dimension probe")  # type: ignore[union-attr]
+                    dim = len(probe)
+                except EmbedderError as e:
+                    raise RuntimeError(
+                        f"cannot create table: need embedding dimension but embedder failed: {e}"
+                    )
+            with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                # Schema mirrors scripts/migrate_to_pgvector.py:schema_sql_for_model
+                # so production stores from the live hook collide on the same
+                # content_hash key as migration-loaded rows.
+                cur.execute(
+                    f"""CREATE TABLE IF NOT EXISTS {table} (
+                        id              BIGSERIAL PRIMARY KEY,
+                        content         TEXT NOT NULL,
+                        content_hash    BYTEA NOT NULL,
+                        metadata        JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                        embedding       vector({dim}) NOT NULL,
+                        created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        CONSTRAINT {table}_content_hash_unique UNIQUE (content_hash)
+                    )"""
                 )
+                cur.execute(
+                    f"""CREATE INDEX IF NOT EXISTS {table}_embedding_hnsw
+                        ON {table} USING hnsw (embedding vector_cosine_ops)
+                        WITH (m = 16, ef_construction = 64)"""
+                )
+            self._conn.commit()  # type: ignore[union-attr]
+            log.info("created pgvector table: %s (dim=%d)", table, dim)
 
-        with self._conn.cursor() as cur:  # type: ignore[union-attr]
-            # Schema mirrors scripts/migrate_to_pgvector.py:schema_sql_for_model
-            # so production stores from the live hook collide on the same
-            # content_hash key as migration-loaded rows.
-            cur.execute(
-                f"""CREATE TABLE IF NOT EXISTS {table} (
-                    id              BIGSERIAL PRIMARY KEY,
-                    content         TEXT NOT NULL,
-                    content_hash    BYTEA NOT NULL,
-                    metadata        JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-                    embedding       vector({dim}) NOT NULL,
-                    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    CONSTRAINT {table}_content_hash_unique UNIQUE (content_hash)
-                )"""
-            )
-            cur.execute(
-                f"""CREATE INDEX IF NOT EXISTS {table}_embedding_hnsw
-                    ON {table} USING hnsw (embedding vector_cosine_ops)
-                    WITH (m = 16, ef_construction = 64)"""
-            )
-        self._conn.commit()  # type: ignore[union-attr]
+        # M14 lazy migration — runs on BOTH the just-created path and
+        # the table-already-existed path. Idempotent: ADD COLUMN IF
+        # NOT EXISTS + CREATE INDEX IF NOT EXISTS. Split off so a
+        # smoke that catches one half (column added, index missing)
+        # or vice-versa doesn't permanently break — the next open
+        # converges. Partial index keeps NULL rows (legacy /
+        # never-expire) out of the cleanup-scan path.
+        try:
+            with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                cur.execute(
+                    f"ALTER TABLE {table} "
+                    f"ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ"
+                )
+                cur.execute(
+                    f"CREATE INDEX IF NOT EXISTS {table}_expires_at_idx "
+                    f"ON {table} (expires_at) "
+                    f"WHERE expires_at IS NOT NULL"
+                )
+            self._conn.commit()  # type: ignore[union-attr]
+        except Exception:
+            # If the migration step blew up (e.g. permissions, race
+            # against another writer), roll back the failing
+            # transaction so subsequent queries on this connection
+            # don't see "current transaction is aborted". The next
+            # _ensure_ready will retry.
+            try:
+                self._conn.rollback()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            raise
         self._table_created = True
-        log.info("created pgvector table: %s (dim=%d)", table, dim)
 
 
 def _safe_table(name: str) -> str:
@@ -431,20 +699,36 @@ def _recall_hybrid(self: PgvectorProvider, query: str, k: int = 5,
     contributes its own pair of ranked lists, which are merged with RRF
     across the union. Tables without a ``content_tsv`` column fall
     back to vector-only contribution.
+
+    M14 follow-up (2026-05-18): the whole multi-table multi-statement
+    sequence runs under ``self._lock`` so concurrent fanout-lane
+    callers don't interleave on the shared psycopg connection. RLock
+    makes this safe even though the caller might be
+    ``kg_search_nodes`` (which itself locks).
     """
     if not query.strip():
         return []
-    try:
-        self._ensure_ready()
-    except (ImportError, EmbedderError) as e:
-        log.warning("pgvector unavailable: %s", e)
-        return []
-    try:
-        qvec = self._embedder.embed(query)  # type: ignore[union-attr]
-    except EmbedderError as e:
-        log.warning("pgvector embed failed: %s", e)
-        return []
+    with self._lock:
+        try:
+            self._ensure_ready()
+        except (ImportError, EmbedderError) as e:
+            log.warning("pgvector unavailable: %s", e)
+            return []
+        try:
+            qvec = self._embedder.embed(query)  # type: ignore[union-attr]
+        except EmbedderError as e:
+            log.warning("pgvector embed failed: %s", e)
+            return []
+        return _recall_hybrid_unlocked(
+            self, query, qvec, k=k, alpha=alpha, rrf_k=rrf_k,
+        )
 
+
+def _recall_hybrid_unlocked(
+    self: PgvectorProvider, query: str, qvec: list, *,
+    k: int = 5, alpha: float = 0.5, rrf_k: int = 60,
+) -> list[Memory]:
+    """``recall_hybrid`` body — caller MUST hold ``self._lock``."""
     vec_literal = str(qvec)
     tables = self._resolve_tables()
     # Keyed by (table, content_hash_hex) so the same row contributes to
@@ -466,6 +750,13 @@ def _recall_hybrid(self: PgvectorProvider, query: str, k: int = 5,
         except Exception as e:
             log.warning("pgvector hybrid vector query on %s failed: %s", t, e)
             vec_rows = []
+            # Roll back so the next query on this connection doesn't
+            # see "current transaction is aborted, commands ignored".
+            # Surfaced by the M14 distillation smoke 2026-05-18.
+            try:
+                self._conn.rollback()  # type: ignore[union-attr]
+            except Exception:
+                pass
         for rank, (content, meta, distance, ch) in enumerate(vec_rows, start=1):
             key = (t, ch.hex() if isinstance(ch, (bytes, bytearray)) else str(ch))
             entry = fused.setdefault(key, {
@@ -493,9 +784,16 @@ def _recall_hybrid(self: PgvectorProvider, query: str, k: int = 5,
                 kw_rows = cur.fetchall()
         except Exception as e:
             # content_tsv missing or query error — silently degrade to
-            # vector-only signal for this table.
+            # vector-only signal for this table. Roll back so the
+            # connection isn't left aborted for the next query
+            # (the smoke's test table doesn't have content_tsv —
+            # surfaced 2026-05-18).
             log.debug("pgvector hybrid keyword query on %s skipped: %s", t, e)
             kw_rows = []
+            try:
+                self._conn.rollback()  # type: ignore[union-attr]
+            except Exception:
+                pass
         for rank, (content, meta, _score, ch) in enumerate(kw_rows, start=1):
             key = (t, ch.hex() if isinstance(ch, (bytes, bytearray)) else str(ch))
             entry = fused.setdefault(key, {
@@ -525,6 +823,13 @@ def _recall_hybrid(self: PgvectorProvider, query: str, k: int = 5,
         meta["_vec_rank"] = e["vec_rank"]
         meta["_kw_rank"] = e["kw_rank"]
         out.append(Memory(text=e["content"], metadata=meta))
+    # #218: close the read-only transaction before returning. Both
+    # the vector ranking SELECT and the BM25 SELECT above leave the
+    # connection ``idle in transaction``; without this, every
+    # ``recall_hybrid`` (the hot path for researcher_node peer-
+    # findings recall) silently holds AccessShareLock on every
+    # touched table until the next call from the same connection.
+    self._read_only_finish()
     return out
 
 
@@ -551,21 +856,26 @@ def _kg_create_entities(self: PgvectorProvider, entities: list[dict]) -> int:
         rows.append((name, etype, json.dumps(e.get("metadata") or {})))
     if not rows:
         return 0
-    self._ensure_ready()
-    try:
-        with self._conn.cursor() as cur:  # type: ignore[union-attr]
-            before = self._kg_entity_count_unsafe(cur)
-            cur.executemany(
-                "INSERT INTO kg_entities (name, entity_type, metadata) "
-                "VALUES (%s, %s, %s) ON CONFLICT (name) DO NOTHING",
-                rows,
-            )
-            self._conn.commit()  # type: ignore[union-attr]
-            after = self._kg_entity_count_unsafe(cur)
-            return after - before
-    except Exception as e:
-        log.warning("kg_create_entities failed: %s", e)
-        raise
+    with self._lock:
+        self._ensure_ready()
+        try:
+            with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                before = self._kg_entity_count_unsafe(cur)
+                cur.executemany(
+                    "INSERT INTO kg_entities (name, entity_type, metadata) "
+                    "VALUES (%s, %s, %s) ON CONFLICT (name) DO NOTHING",
+                    rows,
+                )
+                self._conn.commit()  # type: ignore[union-attr]
+                after = self._kg_entity_count_unsafe(cur)
+                return after - before
+        except Exception as e:
+            log.warning("kg_create_entities failed: %s", e)
+            try:
+                self._conn.rollback()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            raise
 
 
 def _kg_entity_count_unsafe(self: PgvectorProvider, cur) -> int:
@@ -588,11 +898,22 @@ def _kg_add_observations(self: PgvectorProvider, items: list[dict]) -> int:
     items = [(n, c) for (n, c) in items if n and c]
     if not items:
         return 0
-    self._ensure_ready()
-    try:
-        vectors = self._embedder.embed_batch([c for _, c in items])  # type: ignore[union-attr]
-    except EmbedderError as e:
-        raise RuntimeError(f"kg_add_observations embed failed: {e}")
+    with self._lock:
+        self._ensure_ready()
+        try:
+            vectors = self._embedder.embed_batch([c for _, c in items])  # type: ignore[union-attr]
+        except EmbedderError as e:
+            raise RuntimeError(f"kg_add_observations embed failed: {e}")
+        return _kg_add_observations_unlocked(self, items, vectors)
+
+
+def _kg_add_observations_unlocked(
+    self: PgvectorProvider, items: list, vectors: list,
+) -> int:
+    """``kg_add_observations`` body — caller MUST hold ``self._lock``."""
+    obs_table = _kg_obs_table(self)
+    if not obs_table:
+        raise RuntimeError("kg_observations table is not configured (set kg_observations_table or additional_tables)")
     inserted = 0
     try:
         with self._conn.cursor() as cur:  # type: ignore[union-attr]
@@ -624,6 +945,10 @@ def _kg_add_observations(self: PgvectorProvider, items: list[dict]) -> int:
             self._conn.commit()  # type: ignore[union-attr]
     except Exception as e:
         log.warning("kg_add_observations failed: %s", e)
+        try:
+            self._conn.rollback()  # type: ignore[union-attr]
+        except Exception:
+            pass
         raise
     return inserted
 
@@ -641,25 +966,30 @@ def _kg_create_relations(self: PgvectorProvider, relations: list[dict]) -> int:
         rows.append((f, t, rt, json.dumps(r.get("metadata") or {})))
     if not rows:
         return 0
-    self._ensure_ready()
-    inserted = 0
-    try:
-        with self._conn.cursor() as cur:  # type: ignore[union-attr]
-            for f, t, rt, meta in rows:
-                cur.execute(
-                    "INSERT INTO kg_relations (from_entity_id, to_entity_id, relation_type, metadata) "
-                    "SELECT a.id, b.id, %s, %s::jsonb "
-                    "FROM kg_entities a, kg_entities b WHERE a.name = %s AND b.name = %s "
-                    "ON CONFLICT (from_entity_id, to_entity_id, relation_type) DO NOTHING",
-                    (rt, meta, f, t),
-                )
-                if cur.rowcount and cur.rowcount > 0:
-                    inserted += 1
-            self._conn.commit()  # type: ignore[union-attr]
-    except Exception as e:
-        log.warning("kg_create_relations failed: %s", e)
-        raise
-    return inserted
+    with self._lock:
+        self._ensure_ready()
+        inserted = 0
+        try:
+            with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                for f, t, rt, meta in rows:
+                    cur.execute(
+                        "INSERT INTO kg_relations (from_entity_id, to_entity_id, relation_type, metadata) "
+                        "SELECT a.id, b.id, %s, %s::jsonb "
+                        "FROM kg_entities a, kg_entities b WHERE a.name = %s AND b.name = %s "
+                        "ON CONFLICT (from_entity_id, to_entity_id, relation_type) DO NOTHING",
+                        (rt, meta, f, t),
+                    )
+                    if cur.rowcount and cur.rowcount > 0:
+                        inserted += 1
+                self._conn.commit()  # type: ignore[union-attr]
+        except Exception as e:
+            log.warning("kg_create_relations failed: %s", e)
+            try:
+                self._conn.rollback()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            raise
+        return inserted
 
 
 def _kg_search_nodes(self: PgvectorProvider, query: str, k: int = 5) -> list[dict]:
@@ -672,86 +1002,106 @@ def _kg_search_nodes(self: PgvectorProvider, query: str, k: int = 5) -> list[dic
     """
     if not query.strip():
         return []
-    self._ensure_ready()
-    out: dict[str, dict] = {}
+    with self._lock:
+        self._ensure_ready()
+        out: dict[str, dict] = {}
 
-    # Pass 1: entity-name fuzzy match (trigram via gin_trgm_ops index).
-    try:
-        with self._conn.cursor() as cur:  # type: ignore[union-attr]
-            cur.execute(
-                "SELECT id, name, entity_type, metadata, similarity(name, %s) AS sim "
-                "FROM kg_entities WHERE name %% %s "
-                "ORDER BY sim DESC LIMIT %s",
-                (query, query, k * 2),
-            )
-            for eid, name, etype, meta, sim in cur.fetchall():
-                out[name] = {
-                    "id": eid, "name": name, "entity_type": etype,
-                    "metadata": dict(meta or {}),
-                    "observations": [],
-                    "_score": float(sim or 0.0),
-                    "_match": "name",
-                }
-    except Exception as e:
-        log.debug("kg_search_nodes name pass failed: %s", e)
-
-    # Pass 2: observation hybrid → resolve to entity.
-    obs_table = _kg_obs_table(self)
-    if obs_table:
-        obs_hits = self.recall_hybrid(query, k=k * 2)
-        # Map content back to entity via a single round-trip.
-        contents = [m.text for m in obs_hits if m.metadata.get("_table") == obs_table]
-        if contents:
+        # Pass 1: entity-name fuzzy match (trigram via gin_trgm_ops index).
+        try:
+            with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                cur.execute(
+                    "SELECT id, name, entity_type, metadata, similarity(name, %s) AS sim "
+                    "FROM kg_entities WHERE name %% %s "
+                    "ORDER BY sim DESC LIMIT %s",
+                    (query, query, k * 2),
+                )
+                for eid, name, etype, meta, sim in cur.fetchall():
+                    out[name] = {
+                        "id": eid, "name": name, "entity_type": etype,
+                        "metadata": dict(meta or {}),
+                        "observations": [],
+                        "_score": float(sim or 0.0),
+                        "_match": "name",
+                    }
+        except Exception as e:
+            log.debug("kg_search_nodes name pass failed: %s", e)
             try:
-                with self._conn.cursor() as cur:  # type: ignore[union-attr]
-                    cur.execute(
-                        f"SELECT e.id, e.name, e.entity_type, e.metadata, o.content "
-                        f"FROM {obs_table} o JOIN kg_entities e ON e.id = o.entity_id "
-                        f"WHERE o.content = ANY(%s)",
-                        (contents,),
-                    )
-                    for eid, name, etype, meta, content in cur.fetchall():
-                        node = out.setdefault(name, {
-                            "id": eid, "name": name, "entity_type": etype,
-                            "metadata": dict(meta or {}),
-                            "observations": [],
-                            "_score": 0.0,
-                            "_match": "observation",
-                        })
-                        if content not in node["observations"]:
-                            node["observations"].append(content)
-                        # Bump score for observation hits so they rise.
-                        node["_score"] += 0.5
-            except Exception as e:
-                log.debug("kg_search_nodes observation pass failed: %s", e)
+                self._conn.rollback()  # type: ignore[union-attr]
+            except Exception:
+                pass
 
-    # Fill observations for name-matched entities (top N only) so the
-    # caller gets a useful payload even when the match was on the entity
-    # name and not the content.
-    if obs_table and out:
-        ids_needing_obs = [n["id"] for n in out.values() if not n["observations"]][:k]
-        if ids_needing_obs:
-            try:
-                with self._conn.cursor() as cur:  # type: ignore[union-attr]
-                    cur.execute(
-                        f"SELECT entity_id, content FROM {obs_table} "
-                        f"WHERE entity_id = ANY(%s) ORDER BY id DESC LIMIT %s",
-                        (ids_needing_obs, len(ids_needing_obs) * 5),
-                    )
-                    by_id: dict[int, list[str]] = {}
-                    for eid, content in cur.fetchall():
-                        by_id.setdefault(eid, []).append(content)
-                    for n in out.values():
-                        if not n["observations"]:
-                            n["observations"] = by_id.get(n["id"], [])[:3]
-            except Exception as e:
-                log.debug("kg_search_nodes obs-fill failed: %s", e)
+        # Pass 2: observation hybrid → resolve to entity. ``recall_hybrid``
+        # reacquires ``self._lock`` (RLock — safe for re-entrance).
+        obs_table = _kg_obs_table(self)
+        if obs_table:
+            obs_hits = self.recall_hybrid(query, k=k * 2)
+            # Map content back to entity via a single round-trip.
+            contents = [m.text for m in obs_hits if m.metadata.get("_table") == obs_table]
+            if contents:
+                try:
+                    with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                        cur.execute(
+                            f"SELECT e.id, e.name, e.entity_type, e.metadata, o.content "
+                            f"FROM {obs_table} o JOIN kg_entities e ON e.id = o.entity_id "
+                            f"WHERE o.content = ANY(%s)",
+                            (contents,),
+                        )
+                        for eid, name, etype, meta, content in cur.fetchall():
+                            node = out.setdefault(name, {
+                                "id": eid, "name": name, "entity_type": etype,
+                                "metadata": dict(meta or {}),
+                                "observations": [],
+                                "_score": 0.0,
+                                "_match": "observation",
+                            })
+                            if content not in node["observations"]:
+                                node["observations"].append(content)
+                            # Bump score for observation hits so they rise.
+                            node["_score"] += 0.5
+                except Exception as e:
+                    log.debug("kg_search_nodes observation pass failed: %s", e)
+                    try:
+                        self._conn.rollback()  # type: ignore[union-attr]
+                    except Exception:
+                        pass
 
-    ranked = sorted(out.values(), key=lambda n: n["_score"], reverse=True)[:k]
-    # Drop internal id from public payload (keep _score/_match for ranking transparency).
-    for n in ranked:
-        n.pop("id", None)
-    return ranked
+        # Fill observations for name-matched entities (top N only) so the
+        # caller gets a useful payload even when the match was on the entity
+        # name and not the content.
+        if obs_table and out:
+            ids_needing_obs = [n["id"] for n in out.values() if not n["observations"]][:k]
+            if ids_needing_obs:
+                try:
+                    with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                        cur.execute(
+                            f"SELECT entity_id, content FROM {obs_table} "
+                            f"WHERE entity_id = ANY(%s) ORDER BY id DESC LIMIT %s",
+                            (ids_needing_obs, len(ids_needing_obs) * 5),
+                        )
+                        by_id: dict[int, list[str]] = {}
+                        for eid, content in cur.fetchall():
+                            by_id.setdefault(eid, []).append(content)
+                        for n in out.values():
+                            if not n["observations"]:
+                                n["observations"] = by_id.get(n["id"], [])[:3]
+                except Exception as e:
+                    log.debug("kg_search_nodes obs-fill failed: %s", e)
+                    try:
+                        self._conn.rollback()  # type: ignore[union-attr]
+                    except Exception:
+                        pass
+
+        ranked = sorted(out.values(), key=lambda n: n["_score"], reverse=True)[:k]
+        # Drop internal id from public payload (keep _score/_match for ranking transparency).
+        for n in ranked:
+            n.pop("id", None)
+        # #218: close the read-only transaction. Three SELECTs landed on
+        # this connection (entity-name pass, observation-resolve pass,
+        # observation-fill pass) and the inner recall_hybrid call also
+        # closed its own — but the outer KG SELECTs left their own
+        # implicit transaction open. Close it here.
+        self._read_only_finish()
+        return ranked
 
 
 # Bind extensions onto PgvectorProvider so the public class API now

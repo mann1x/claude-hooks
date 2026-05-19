@@ -52,7 +52,14 @@ def main(argv: list[str] | None = None) -> int:
     base_url = default_ollama_url()
     runner = make_runner(ollama_base_url=base_url)
     follow_up_runner = make_follow_up_runner(ollama_base_url=base_url)
-    app = create_app(run_council=runner, run_follow_up=follow_up_runner)
+    # M14: thread cfg + base_url so the app factory can spawn the
+    # store reaper when ``cfg.store.enabled`` and TTL / distillation
+    # are configured. Older callers that don't pass these continue
+    # to work — the reaper is opt-in.
+    app = create_app(
+        run_council=runner, run_follow_up=follow_up_runner,
+        cfg=cfg, ollama_base_url=base_url,
+    )
 
     uvicorn.run(app, host=args.host, port=port, log_config=None)
     return 0

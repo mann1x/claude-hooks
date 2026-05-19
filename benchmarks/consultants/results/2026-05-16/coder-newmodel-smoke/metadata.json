@@ -1,0 +1,64 @@
+{
+  "harness_version": "1.0",
+  "suite": "coder",
+  "suite_version": "1.0",
+  "suite_hash": "9aa6eaf011d2a8b34e41d31ef003ab7f9ea0544a3cb87b1c78e0da553be2725f",
+  "suite_released": "2026-05-16",
+  "manifest": [
+    "trivial-01-truncate",
+    "trivial-02-strlen",
+    "easy-01-dedupe",
+    "easy-02-fib",
+    "medium-01-balance",
+    "medium-02-prime-length",
+    "hard-01-matrix-path",
+    "hard-02-digit-filter"
+  ],
+  "rubric": {
+    "pass_rate_floor": 0.7,
+    "quality_score_floor": 3.5,
+    "tie_breaker": "median_tokens"
+  },
+  "models": [
+    "deepseek-v4-flash:cloud",
+    "deepseek-v4-pro:cloud",
+    "minimax-m2.7:cloud"
+  ],
+  "mode": "live",
+  "ollama_base": "http://192.168.178.2:11433",
+  "judge_model": "kimi-k2.6:cloud",
+  "git_commit": "25ed2d4",
+  "host": "solidpc",
+  "run_started_at": "2026-05-16T15:20:21.166566Z",
+  "questions": [
+    "trivial-01-truncate",
+    "trivial-02-strlen"
+  ],
+  "estimate": {
+    "trials": 6,
+    "by_model": {
+      "deepseek-v4-flash:cloud": {
+        "iterations": 10,
+        "prompt_tokens": 80000,
+        "completion_tokens": 15000,
+        "total_tokens": 95000
+      },
+      "deepseek-v4-pro:cloud": {
+        "iterations": 12,
+        "prompt_tokens": 108000,
+        "completion_tokens": 21600,
+        "total_tokens": 129600
+      },
+      "minimax-m2.7:cloud": {
+        "iterations": 10,
+        "prompt_tokens": 80000,
+        "completion_tokens": 15000,
+        "total_tokens": 95000
+      }
+    },
+    "judge_model": "kimi-k2.6:cloud",
+    "judge_tokens": 6600,
+    "total_tokens": 326200,
+    "summary_line": "3 models \u00d7 2 questions = 6 trials. ~0.33M tokens estimated (+~7K for the kimi-k2.6:cloud judge)."
+  }
+}

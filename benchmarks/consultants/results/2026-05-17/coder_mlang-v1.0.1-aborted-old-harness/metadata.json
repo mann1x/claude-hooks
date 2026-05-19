@@ -1,0 +1,96 @@
+{
+  "harness_version": "1.0",
+  "suite": "coder_mlang",
+  "suite_version": "1.0.1",
+  "suite_hash": "f70fff48736e73d488225862ed9af1a94cc0d28614a7b6e65987f363adfff841",
+  "suite_released": "2026-05-17",
+  "manifest": [
+    "python-medium-01-meeting-rooms",
+    "rust-medium-01-search-rotated",
+    "go-medium-01-koko-bananas",
+    "c-medium-01-longest-valid-parens",
+    "cpp-medium-01-cycle-list",
+    "csharp-medium-01-trapped-rainwater",
+    "python-hard-01-lru-cache",
+    "rust-hard-01-iter-window-pairs",
+    "go-hard-01-shortest-path-k-stops",
+    "c-hard-01-quicksort-3way",
+    "cpp-hard-01-expr-eval",
+    "csharp-hard-01-async-debounce",
+    "python-very_hard-01-parser-combinator",
+    "rust-very_hard-01-bank-transfer",
+    "go-very_hard-01-spsc-queue",
+    "c-very_hard-01-rbtree-insert",
+    "cpp-very_hard-01-small-vector",
+    "csharp-very_hard-01-di-container"
+  ],
+  "rubric": {
+    "pass_rate_floor": 0.7,
+    "quality_score_floor": 3.5,
+    "tie_breaker": "median_tokens"
+  },
+  "models": [
+    "kimi-k2.6:cloud",
+    "glm-5.1:cloud",
+    "deepseek-v4-flash:cloud",
+    "deepseek-v4-pro:cloud",
+    "minimax-m2.7:cloud"
+  ],
+  "mode": "live",
+  "ollama_base": "http://192.168.178.2:11433",
+  "judge_model": "kimi-k2.6:cloud",
+  "git_commit": "85d08a5",
+  "host": "solidpc",
+  "run_started_at": "2026-05-17T03:18:59.147003Z",
+  "questions": [
+    "c-hard-01-quicksort-3way",
+    "c-very_hard-01-rbtree-insert",
+    "cpp-hard-01-expr-eval",
+    "cpp-very_hard-01-small-vector",
+    "csharp-hard-01-async-debounce",
+    "csharp-very_hard-01-di-container",
+    "go-very_hard-01-spsc-queue",
+    "python-very_hard-01-parser-combinator",
+    "rust-hard-01-iter-window-pairs",
+    "rust-very_hard-01-bank-transfer"
+  ],
+  "estimate": {
+    "trials": 50,
+    "by_model": {
+      "kimi-k2.6:cloud": {
+        "iterations": 50,
+        "prompt_tokens": 400000,
+        "completion_tokens": 75000,
+        "total_tokens": 475000
+      },
+      "glm-5.1:cloud": {
+        "iterations": 50,
+        "prompt_tokens": 400000,
+        "completion_tokens": 70000,
+        "total_tokens": 470000
+      },
+      "deepseek-v4-flash:cloud": {
+        "iterations": 50,
+        "prompt_tokens": 400000,
+        "completion_tokens": 75000,
+        "total_tokens": 475000
+      },
+      "deepseek-v4-pro:cloud": {
+        "iterations": 60,
+        "prompt_tokens": 540000,
+        "completion_tokens": 108000,
+        "total_tokens": 648000
+      },
+      "minimax-m2.7:cloud": {
+        "iterations": 50,
+        "prompt_tokens": 400000,
+        "completion_tokens": 75000,
+        "total_tokens": 475000
+      }
+    },
+    "judge_model": "kimi-k2.6:cloud",
+    "judge_tokens": 66000,
+    "total_tokens": 2609000,
+    "summary_line": "5 models \u00d7 10 questions = 50 trials. ~2.61M tokens estimated (+~66K for the kimi-k2.6:cloud judge)."
+  }
+}

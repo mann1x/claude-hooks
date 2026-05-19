@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -28,6 +29,8 @@ from claude_hooks.get_advice import (
 )
 from claude_hooks.get_advice.chat_client import ChatClient, make_agent_chat_client
 from claude_hooks.get_advice.ctx_probe import base_url_default, probe_max_ctx
+
+log = logging.getLogger("claude_hooks.get_advice")
 
 
 # First-message instructions injected ahead of Claude's framing text on
@@ -78,11 +81,16 @@ def _filter_tool_specs(allowed: list[str]) -> list[dict]:
             if s.get("function", {}).get("name") in set(allowed)]
 
 
-def _adapt_tool_executor():
+def _adapt_tool_executor(extra_roots: tuple[str, ...] = ()):
     """The agent-loop runner expects ``(name, args_str, cwd) -> str``.
-    ``caliber_tools.execute`` already has that signature, so we forward
-    it directly."""
-    return caliber_tools.execute
+
+    Without extra roots we forward ``caliber_tools.execute`` directly
+    (zero-cost). With extras, we build a closure via
+    :func:`caliber_tools.make_executor` that captures the additional
+    allowed roots so the model can read files outside the primary
+    cwd (e.g. dirs listed in ``~/.claude/settings.json`` →
+    ``permissions.additionalDirectories``)."""
+    return caliber_tools.make_executor(extra_roots)
 
 
 # ----------------------- subcommand handlers ----------------------- #
@@ -241,13 +249,32 @@ def cmd_turn(args: argparse.Namespace) -> int:
     # refs (and ``:cloud`` suffix) continue through the existing
     # native ``/api/chat`` client.
     client = make_agent_chat_client(cfg.model, base_url)
+
+    # v1.8+: discover the full allow-list for the tool sandbox so the
+    # advisor can read files in directories Claude Code itself has
+    # granted access to (user settings, project settings.local.json,
+    # plus any --add-dir flags passed on this invocation). The list
+    # is logged once per turn so the user can see what the advisor
+    # can reach.
+    from claude_hooks.allowed_roots import (
+        discover_allowed_roots,
+        render_for_log,
+    )
+    allowed = discover_allowed_roots(
+        str(cwd),
+        add_dirs=tuple(getattr(args, "add_dir", None) or ()),
+    )
+    if len(allowed) > 1:
+        log.info("get-advice allowed roots:\n%s", render_for_log(allowed))
+    tool_executor = _adapt_tool_executor(tuple(allowed[1:]))
+
     result = agent_loop_runner.run_loop(
         payload,
         str(cwd),
         config=cfg_loop,
         tool_specs=tool_specs,
         chat_fn=client.chat,
-        tool_executor=_adapt_tool_executor(),
+        tool_executor=tool_executor,
         preseed_builder=None,
     )
 
@@ -356,6 +383,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_t.add_argument("--message", required=True)
     p_t.add_argument("--first", action="store_true")
     p_t.add_argument("--cwd", default=None)
+    p_t.add_argument(
+        "--add-dir",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "Additional directory the advisor's tools may read from "
+            "(repeatable). Unioned with permissions.additionalDirectories "
+            "from ~/.claude/settings.json and the project's "
+            ".claude/settings*.json."
+        ),
+    )
     p_t.add_argument("--max-iter", default=8)
     p_t.add_argument("--force-answer-after", default=4)
     p_t.add_argument("--max-tool-calls-per-turn", default=6)

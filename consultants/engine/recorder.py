@@ -25,6 +25,7 @@ stdlib. That keeps it usable from tests without spinning up a graph.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -32,8 +33,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+
+SCHEMA_VERSION = 2
 
 
 _SCHEMA_SQL = """\
@@ -75,6 +78,23 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_role_kind ON events(role, kind, round);
 CREATE INDEX IF NOT EXISTS idx_events_ts        ON events(ts);
+
+-- v2 (M4): typed CouncilEvent stream. Separate table from
+-- ``events`` so the existing LLM/tool/node-boundary rows stay
+-- untouched and old post-mortem tooling keeps working. The SSE
+-- bridge reads from this table for ``Last-Event-ID`` resume.
+CREATE TABLE IF NOT EXISTS runtime_events (
+    event_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          REAL    NOT NULL,
+    kind        TEXT    NOT NULL,
+    role        TEXT,
+    round       INTEGER,
+    lane_idx    INTEGER,
+    payload     TEXT    NOT NULL  -- json blob of the full event dict
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_events_kind ON runtime_events(kind);
+CREATE INDEX IF NOT EXISTS idx_runtime_events_ts   ON runtime_events(ts);
 """
 
 
@@ -232,9 +252,15 @@ class MessageRecorder:
     ) -> None:
         """Append one LLM call event. `request` and `response` are
         full payloads — the recorder JSON-encodes them with default=str
-        so non-serializable values don't sink the run."""
+        so non-serializable values don't sink the run.
+
+        Also auto-emits a narrow mirror row into ``runtime_events`` so
+        the M9 SSE bridge has a coherent timeline without the engine
+        having to call ``record_runtime_event`` separately (#214).
+        """
         if self._closed:
             return
+        now = time.time()
         conn = self._conn()
         conn.execute(
             """
@@ -246,7 +272,7 @@ class MessageRecorder:
             ) VALUES (?, 'llm_call', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                time.time(),
+                now,
                 role,
                 round,
                 lane_idx,
@@ -260,6 +286,21 @@ class MessageRecorder:
             ),
         )
         conn.commit()
+        # Narrow mirror for SSE consumers.
+        self._emit_runtime_event(
+            kind="llm_call",
+            role=role,
+            round=round,
+            lane_idx=lane_idx,
+            payload={
+                "ts": now,
+                "model": model,
+                "duration_ms": duration_ms,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "error": error,
+            },
+        )
 
     def record_tool(
         self,
@@ -276,9 +317,17 @@ class MessageRecorder:
         """Append one tool execution event. `args` / `output` are
         stored as raw text (they're already strings on the agent_loop
         side); we record `output_chars` separately so summary queries
-        can SUM the volume without re-reading the blobs."""
+        can SUM the volume without re-reading the blobs.
+
+        Also auto-emits a narrow mirror row into ``runtime_events``
+        for SSE consumers (#214). The narrow payload omits the full
+        ``args`` / ``output`` blobs (they live in the audit log) and
+        keeps just the tool name, output volume, duration, and any
+        error.
+        """
         if self._closed:
             return
+        now = time.time()
         conn = self._conn()
         out_chars = len(output) if isinstance(output, str) else None
         conn.execute(
@@ -290,7 +339,7 @@ class MessageRecorder:
             ) VALUES (?, 'tool_call', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                time.time(),
+                now,
                 role,
                 round,
                 lane_idx,
@@ -303,6 +352,19 @@ class MessageRecorder:
             ),
         )
         conn.commit()
+        self._emit_runtime_event(
+            kind="tool_call",
+            role=role,
+            round=round,
+            lane_idx=lane_idx,
+            payload={
+                "ts": now,
+                "tool": tool,
+                "output_chars": out_chars,
+                "duration_ms": duration_ms,
+                "error": error,
+            },
+        )
 
     def record_node(
         self,
@@ -316,11 +378,19 @@ class MessageRecorder:
     ) -> None:
         """Append a node-boundary event. Cheap to skip if a caller
         doesn't care; debugging tools query these to render the graph
-        timeline."""
+        timeline.
+
+        Also auto-emits a narrow mirror row into ``runtime_events`` so
+        the M9 SSE bridge has a coherent timeline (#214). For
+        ``node_enter`` an INFO log line is also emitted so ops
+        watching the daemon log can see role transitions without
+        querying the DB.
+        """
         if self._closed:
             return
         if kind not in ("node_enter", "node_exit"):
             raise ValueError(f"node kind must be node_enter|node_exit, got {kind!r}")
+        now = time.time()
         conn = self._conn()
         conn.execute(
             """
@@ -329,9 +399,156 @@ class MessageRecorder:
                 duration_ms, error
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (time.time(), kind, role, round, lane_idx, duration_ms, error),
+            (now, kind, role, round, lane_idx, duration_ms, error),
         )
         conn.commit()
+        # M9 mirror for SSE consumers.
+        self._emit_runtime_event(
+            kind=kind,
+            role=role,
+            round=round,
+            lane_idx=lane_idx,
+            payload={
+                "ts": now,
+                "duration_ms": duration_ms,
+                "error": error,
+            },
+        )
+        # Per-role INFO log on node_enter — single source of truth
+        # for ops watching the daemon log (#214 Fix D).
+        if kind == "node_enter":
+            lane_tag = "" if lane_idx is None else f" lane={lane_idx}"
+            log.info(
+                "consultants: node_enter role=%s round=%d%s",
+                role, round, lane_tag,
+            )
+
+    def _emit_runtime_event(
+        self,
+        *,
+        kind: str,
+        role: Optional[str],
+        round: Optional[int],
+        lane_idx: Optional[int],
+        payload: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Best-effort narrow mirror to ``runtime_events``.
+
+        Used by ``record_node`` / ``record_llm`` / ``record_tool`` to
+        emit a coherent timeline for the M9 SSE bridge. Failures are
+        logged + swallowed — the audit-log writes (events table) are
+        the source of truth and must succeed; SSE timeline rows are
+        observability and best-effort.
+        """
+        try:
+            self.record_event(
+                kind=kind, role=role, round=round,
+                lane_idx=lane_idx, payload=payload,
+            )
+        except Exception:  # pragma: no cover — defensive
+            log.exception(
+                "recorder._emit_runtime_event failed; SSE will miss "
+                "kind=%s role=%s round=%s lane_idx=%s",
+                kind, role, round, lane_idx,
+            )
+
+    def record_event(
+        self,
+        *,
+        kind: str,
+        role: Optional[str] = None,
+        round: Optional[int] = None,
+        lane_idx: Optional[int] = None,
+        payload: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Append a typed CouncilEvent row to ``runtime_events``.
+
+        The M3 stall layer's ``on_event`` sink and the M4 SSE
+        bridge both call this. Schema is intentionally narrow:
+        the ``payload`` JSON column carries the full event dict so
+        new event types don't need a schema migration. The
+        indexed top-level columns (kind, role, round, lane_idx)
+        let post-mortem queries filter without parsing JSON.
+
+        ``ts`` is read from ``payload["ts"]`` when present; falls
+        back to ``time.time()``. This keeps the wall-clock the
+        emitter saw consistent with what the consumer sees, even
+        if the recorder write is slightly delayed.
+
+        No-op when the recorder is closed (the same pattern as
+        ``record_llm`` / ``record_tool`` / ``record_node``).
+        """
+        if self._closed:
+            return
+        if not kind:
+            raise ValueError("record_event: kind is required")
+        payload_dict = dict(payload or {})
+        ts = float(payload_dict.get("ts") or time.time())
+        # Belt and braces: ensure 'kind' is in the payload so a
+        # consumer reading just the JSON blob doesn't have to
+        # cross-reference the row's ``kind`` column.
+        payload_dict.setdefault("kind", kind)
+        conn = self._conn()
+        conn.execute(
+            """
+            INSERT INTO runtime_events (
+                ts, kind, role, round, lane_idx, payload
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (ts, kind, role, round, lane_idx,
+             _safe_dumps(payload_dict) or "{}"),
+        )
+        conn.commit()
+
+    def list_runtime_events(
+        self,
+        *,
+        since_event_id: int = 0,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Read back runtime_events rows in insertion order.
+
+        Used by the SSE bridge's ``Last-Event-ID`` resume path:
+        the consumer sends ``Last-Event-ID: 42`` and we replay
+        every row with ``event_id > 42`` before resuming the live
+        stream. ``limit`` caps replay so a long-disconnected
+        consumer doesn't choke the bridge.
+
+        Returns a list of dicts shaped
+        ``{"event_id": int, "ts": float, "kind": str,
+        "role": str|None, "round": int|None,
+        "lane_idx": int|None, "payload": dict}`` — the payload is
+        parsed back from JSON for caller convenience.
+        """
+        if self._closed:
+            return []
+        conn = self._conn()
+        rows = conn.execute(
+            """
+            SELECT event_id, ts, kind, role, round, lane_idx, payload
+            FROM runtime_events
+            WHERE event_id > ?
+            ORDER BY event_id ASC
+            LIMIT ?
+            """,
+            (int(since_event_id), int(limit)),
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            try:
+                payload = json.loads(r[6]) if r[6] else {}
+            except json.JSONDecodeError:
+                payload = {"__parse_error__": r[6][:200]}
+            out.append({
+                "event_id": r[0],
+                "ts": r[1],
+                "kind": r[2],
+                "role": r[3],
+                "round": r[4],
+                "lane_idx": r[5],
+                "payload": payload,
+            })
+        return out
 
     # ------------------------------------------------------------------ #
     # Lifecycle

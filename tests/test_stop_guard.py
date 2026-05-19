@@ -360,5 +360,138 @@ class StallAfterCommitmentTests(unittest.TestCase):
         self.assertIsNone(check_stall_after_commitment(msg))
 
 
+# --------------------------------------------------------------------------- #
+# 2026-05-18: five new stall events collected from real solidPC sessions
+# (M26/M27, T17.3, Step 1 scripts, Phase 1 fan-out, _maybe_start_store_reaper
+# mid-edit). Each test pins the exact tail prose from the event so a future
+# regex tightening can be regressed against the captured shape.
+# --------------------------------------------------------------------------- #
+class StallAfterCommitmentLiveEventsTests(unittest.TestCase):
+    """Live stall events captured pre-v1.7.x release cut."""
+
+    def setUp(self):
+        from claude_hooks.stop_guard import reset_commitment_cache
+        reset_commitment_cache()
+
+    # --- Event 1: M26/M27 "Going to update X, log Y, then start Z" ---
+    def test_event1_going_to_update_log_then_start_blocks(self):
+        from claude_hooks.stop_guard import check_stall_after_commitment
+        msg = _assistant_msg(
+            "Logging this as a major finding — it invalidates the whole "
+            "off-policy KL on cache approach for cross-vocab and means the "
+            "only viable cross-vocab paths remain: On-policy KL (M6b: 53.0), "
+            "Same-vocab SFT (M16: 58.5), M27 GRPO+KL hybrid (still untested). "
+            "Going to update STYLE_SHIFT_ISSUE.md with the M26 finding, log "
+            "the result to RESULTS.md, then start M27."
+        )
+        self.assertIsNotNone(check_stall_after_commitment(msg))
+
+    # --- Event 2: T17.3 "Now drafting X" ---
+    def test_event2_now_drafting_blocks(self):
+        from claude_hooks.stop_guard import check_stall_after_commitment
+        msg = _assistant_msg(
+            "Now drafting T17.3 mapping script in the meantime — when probe "
+            "lands I'll surface the diagnosis and we can decide whether to "
+            "launch T17.3 immediately."
+        )
+        self.assertIsNotNone(check_stall_after_commitment(msg))
+
+    # --- Event 3a: "Writing the three Step 1 scripts now:" ---
+    def test_event3a_writing_X_now_with_multiword_object_blocks(self):
+        """The pre-#218 pattern required strict adjacency
+        ``writing the {script|code|...}``; this multi-word object form
+        slipped through. The new tail-end "verb … now[:.]\\s*$" pattern
+        catches it."""
+        from claude_hooks.stop_guard import check_stall_after_commitment
+        msg = _assistant_msg(
+            "The router is three tensors (Gemma 4's scale + proj + "
+            "per_expert_scale decomposition). Config keys are non-standard. "
+            "Writing the three Step 1 scripts now:"
+        )
+        self.assertIsNotNone(check_stall_after_commitment(msg))
+
+    # --- Event 3b: "Now writing the orchestrator wrapper" ---
+    def test_event3b_now_writing_orchestrator_blocks(self):
+        from claude_hooks.stop_guard import check_stall_after_commitment
+        msg = _assistant_msg(
+            "All three Step 1 scripts syntactically valid. Sweep alive 1h34m. "
+            "Now writing the orchestrator wrapper that applies Step 1 + "
+            "re-smokes a variant, and a Step 2 stub for EAC-MoE (full "
+            "implementation deferred until sweep results inform whether we "
+            "need it):"
+        )
+        self.assertIsNotNone(check_stall_after_commitment(msg))
+
+    # --- Event 4: "Starting with Phase 1: two parallel Explore agents" ---
+    def test_event4_starting_with_phase_blocks(self):
+        from claude_hooks.stop_guard import check_stall_after_commitment
+        msg = _assistant_msg(
+            "Continuing — the existing plan file is for M11c (now complete "
+            "and committed as 235fe6c), so I'll overwrite it with a fresh "
+            "plan for #103 Option 2. Starting with Phase 1: two parallel "
+            "Explore agents to map the current wiring before I draft the "
+            "refactor."
+        )
+        self.assertIsNotNone(check_stall_after_commitment(msg))
+
+    # --- Event 5: "Now add the helper. Let me insert it..." ---
+    def test_event5_now_add_and_let_me_insert_blocks(self):
+        from claude_hooks.stop_guard import check_stall_after_commitment
+        msg = _assistant_msg(
+            "Now add the _maybe_start_store_reaper helper. Let me insert "
+            "it near _start_idle_reaper:"
+        )
+        self.assertIsNotNone(check_stall_after_commitment(msg))
+
+    # --- Critical negatives — must NOT fire on these ---
+    def test_negative_now_examining_does_not_fire(self):
+        """Read verbs (examine, check, search, look) without tool calls
+        are fine — the model is thinking aloud, not committing to action."""
+        from claude_hooks.stop_guard import check_stall_after_commitment
+        msg = _assistant_msg(
+            "Now examining the structure of consultants/engine/graph.py to "
+            "understand the routing logic before proposing a change."
+        )
+        self.assertIsNone(check_stall_after_commitment(msg))
+
+    def test_negative_continuing_research_does_not_fire(self):
+        """Bare 'Continuing' / 'Continuing the X' is too broad to anchor on."""
+        from claude_hooks.stop_guard import check_stall_after_commitment
+        msg = _assistant_msg(
+            "Continuing the research into how Pregel dispatches Send "
+            "operations — looking at the additive reducer for tool_results."
+        )
+        self.assertIsNone(check_stall_after_commitment(msg))
+
+    def test_negative_past_tense_does_not_fire(self):
+        """Past-tense 'I wrote / implemented / added' is reporting, not committing."""
+        from claude_hooks.stop_guard import check_stall_after_commitment
+        msg = _assistant_msg(
+            "I wrote the helper and inserted it near _start_idle_reaper. "
+            "All tests pass. Ready for review."
+        )
+        self.assertIsNone(check_stall_after_commitment(msg))
+
+    def test_negative_starting_with_phase_no_colon_does_not_fire(self):
+        """The Starting-with-Phase pattern requires the colon to fire —
+        bare 'starting with Phase 1' as conditional planning shouldn't."""
+        from claude_hooks.stop_guard import check_stall_after_commitment
+        msg = _assistant_msg(
+            "We could approach this two ways: starting with Phase 1 would "
+            "be too risky given the sweep is still alive, so let's wait."
+        )
+        self.assertIsNone(check_stall_after_commitment(msg))
+
+    def test_negative_going_to_with_non_action_verb_does_not_fire(self):
+        """'Going to think about X' / 'Going to consider Y' aren't tool
+        commitments — only action verbs from the curated list fire."""
+        from claude_hooks.stop_guard import check_stall_after_commitment
+        msg = _assistant_msg(
+            "Going to think about this overnight before deciding on the "
+            "approach. The trade-offs aren't obvious."
+        )
+        self.assertIsNone(check_stall_after_commitment(msg))
+
+
 if __name__ == "__main__":
     unittest.main()

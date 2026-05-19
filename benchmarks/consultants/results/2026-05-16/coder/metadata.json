@@ -1,0 +1,77 @@
+{
+  "harness_version": "1.0",
+  "suite": "coder",
+  "suite_version": "1.0",
+  "suite_hash": "9aa6eaf011d2a8b34e41d31ef003ab7f9ea0544a3cb87b1c78e0da553be2725f",
+  "suite_released": "2026-05-16",
+  "manifest": [
+    "trivial-01-truncate",
+    "trivial-02-strlen",
+    "easy-01-dedupe",
+    "easy-02-fib",
+    "medium-01-balance",
+    "medium-02-prime-length",
+    "hard-01-matrix-path",
+    "hard-02-digit-filter"
+  ],
+  "rubric": {
+    "pass_rate_floor": 0.7,
+    "quality_score_floor": 3.5,
+    "tie_breaker": "median_tokens"
+  },
+  "models": [
+    "kimi-k2.6:cloud",
+    "qwen3-coder-next:cloud",
+    "glm-5.1:cloud",
+    "gemma4:31b-cloud"
+  ],
+  "mode": "live",
+  "ollama_base": "http://192.168.178.2:11433",
+  "judge_model": "kimi-k2.6:cloud",
+  "git_commit": "554a354",
+  "host": "solidpc",
+  "run_started_at": "2026-05-16T14:13:28.525976Z",
+  "questions": [
+    "easy-01-dedupe",
+    "easy-02-fib",
+    "hard-01-matrix-path",
+    "hard-02-digit-filter",
+    "medium-01-balance",
+    "medium-02-prime-length",
+    "trivial-01-truncate",
+    "trivial-02-strlen"
+  ],
+  "estimate": {
+    "trials": 32,
+    "by_model": {
+      "kimi-k2.6:cloud": {
+        "iterations": 40,
+        "prompt_tokens": 320000,
+        "completion_tokens": 60000,
+        "total_tokens": 380000
+      },
+      "qwen3-coder-next:cloud": {
+        "iterations": 40,
+        "prompt_tokens": 320000,
+        "completion_tokens": 60000,
+        "total_tokens": 380000
+      },
+      "glm-5.1:cloud": {
+        "iterations": 40,
+        "prompt_tokens": 320000,
+        "completion_tokens": 56000,
+        "total_tokens": 376000
+      },
+      "gemma4:31b-cloud": {
+        "iterations": 32,
+        "prompt_tokens": 208000,
+        "completion_tokens": 38400,
+        "total_tokens": 246400
+      }
+    },
+    "judge_model": "kimi-k2.6:cloud",
+    "judge_tokens": 41250,
+    "total_tokens": 1423650,
+    "summary_line": "4 models \u00d7 8 questions = 32 trials. ~1.42M tokens estimated (+~41K for the kimi-k2.6:cloud judge)."
+  }
+}

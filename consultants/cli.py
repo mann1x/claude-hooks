@@ -149,6 +149,11 @@ def cmd_consult(args, base: str) -> int:
     }
     if args.effort:
         body["effort"] = args.effort
+    if getattr(args, "add_dir", None):
+        # v1.8+: forward extra allowed roots to the engine. The engine
+        # unions them with settings-file auto-discovery and stores the
+        # result on the session record so follow-ups inherit.
+        body["extra_roots"] = list(args.add_dir)
     # --trace / --no-trace are deprecated in v1.1 (the JSONL trace
     # was replaced by the per-session transcript.db). The flag is
     # still accepted but no longer forwarded to the engine; warn
@@ -183,6 +188,11 @@ def cmd_follow_up(args, base: str) -> int:
     # service restarted) can reopen from disk without a separate
     # reopen call.
     body["cwd"] = str(Path(args.cwd or os.getcwd()).resolve())
+    if getattr(args, "add_dir", None):
+        # v1.8+: extends the parent's extra_roots with this follow-up's
+        # entries. The engine merges the two lists (parent first, then
+        # this turn's, dedup'd) before running the executor.
+        body["extra_roots"] = list(args.add_dir)
     out = _http("POST",
                 f"{base}/v1/consult/{args.parent_sid}/follow-up",
                 body=body)
@@ -367,6 +377,7 @@ def _cmd_show_raw(args, sdir: Path) -> int:
 # ----------------------- config --------------------------------- #
 
 def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
+    s = cfg.store
     return {
         "topology": cfg.topology,
         "effort": cfg.effort,
@@ -397,10 +408,46 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
             }
             for r in cc.ROLES
         },
+        # M8 + M14 (#220): expose the cross-session store block so
+        # `config show` reveals the same knobs that `set-store{,-ttl,
+        # -distillation}` mutate. The skill renders this; the test
+        # suite asserts on the round-trip.
+        "store": {
+            "enabled": s.enabled,
+            "backend": s.backend,
+            "enable_at_efforts": list(s.enable_at_efforts),
+            "recall_limit": s.recall_limit,
+            "pgvector_dsn": s.pgvector_dsn,
+            "pgvector_table": s.pgvector_table,
+            "sqlite_vec_path": s.sqlite_vec_path,
+            "embedder": s.embedder,
+            "ttl": {
+                "enabled": s.ttl.enabled,
+                "research_days": s.ttl.research_days,
+                "tool_results_hours": s.ttl.tool_results_hours,
+                "project_days": s.ttl.project_days,
+                "user_days": s.ttl.user_days,
+                "refresh_on_read": s.ttl.refresh_on_read,
+                "jitter_pct": s.ttl.jitter_pct,
+            },
+            "distillation": {
+                "enabled": s.distillation.enabled,
+                "model": s.distillation.model,
+                "fallback_models": list(s.distillation.fallback_models),
+                "sweep_interval_seconds": s.distillation.sweep_interval_seconds,
+                "min_entries_per_distillation":
+                    s.distillation.min_entries_per_distillation,
+                "max_session_entries": s.distillation.max_session_entries,
+                "max_groups_per_sweep": s.distillation.max_groups_per_sweep,
+                "pace_seconds_between_distillations":
+                    s.distillation.pace_seconds_between_distillations,
+            },
+        },
         "extras_active": cc.extras_active(cfg.effort),
         "mandatory_roles": sorted(cc.MANDATORY_ROLES),
         "valid_efforts": sorted(cc.EFFORT_BUDGETS),
         "valid_service_modes": sorted(cc.VALID_SERVICE_MODES),
+        "valid_store_backends": list(cc.VALID_STORE_BACKENDS),
     }
 
 
@@ -532,6 +579,111 @@ def cmd_config_set_idle_timeout(args, base: str) -> int:
     return 0
 
 
+def _parse_cli_bool(raw: Optional[str], *, flag: str) -> Optional[bool]:
+    """Parse the canonical CLI bool ladder used by set-role.
+
+    Returns ``None`` when ``raw`` is None (= "leave unchanged"). Raises
+    :class:`CLIError` on anything other than the documented synonyms
+    so a typo stays loud instead of silently flipping a wrong knob.
+    """
+    if raw is None:
+        return None
+    s = raw.strip().lower()
+    if s in ("true", "yes", "1", "on"):
+        return True
+    if s in ("false", "no", "0", "off"):
+        return False
+    raise CLIError(
+        f"{flag} must be true/false (got {raw!r})",
+        exit_code=2,
+    )
+
+
+def cmd_config_set_store(args, base: str) -> int:
+    """``config set-store`` — top-level [store] block knobs."""
+    try:
+        enabled = _parse_cli_bool(args.enabled, flag="--enabled")
+        cfg = cc.set_store(
+            enabled=enabled,
+            backend=args.backend,
+            recall_limit=args.recall_limit,
+            sqlite_vec_path=args.sqlite_vec_path,
+            pgvector_dsn=args.pgvector_dsn,
+            pgvector_table=args.pgvector_table,
+            embedder=args.embedder,
+            add_enable_at_effort=args.add_effort,
+            remove_enable_at_effort=args.remove_effort,
+            clear_enable_at_efforts=bool(args.clear_efforts),
+            scope="project" if args.project else "user",
+            cwd=Path(args.cwd or os.getcwd()).resolve()
+            if args.project else None,
+        )
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    block = _read_claude_hooks_consultants_block()
+    smart = block.get("smart_start") or {}
+    print(json.dumps({"ok": True, **_config_dump(cfg, smart_block=smart)},
+                     indent=2))
+    return 0
+
+
+def cmd_config_set_store_ttl(args, base: str) -> int:
+    """``config set-store-ttl`` — per-namespace TTL + #215 jitter."""
+    try:
+        enabled = _parse_cli_bool(args.enabled, flag="--enabled")
+        refresh = _parse_cli_bool(args.refresh_on_read,
+                                  flag="--refresh-on-read")
+        cfg = cc.set_store_ttl(
+            enabled=enabled,
+            research_days=args.research_days,
+            tool_results_hours=args.tool_results_hours,
+            project_days=args.project_days,
+            user_days=args.user_days,
+            refresh_on_read=refresh,
+            jitter_pct=args.jitter_pct,
+            scope="project" if args.project else "user",
+            cwd=Path(args.cwd or os.getcwd()).resolve()
+            if args.project else None,
+        )
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    block = _read_claude_hooks_consultants_block()
+    smart = block.get("smart_start") or {}
+    print(json.dumps({"ok": True, **_config_dump(cfg, smart_block=smart)},
+                     indent=2))
+    return 0
+
+
+def cmd_config_set_store_distillation(args, base: str) -> int:
+    """``config set-store-distillation`` — M14 sweep + #215 pacing."""
+    try:
+        enabled = _parse_cli_bool(args.enabled, flag="--enabled")
+        cfg = cc.set_store_distillation(
+            enabled=enabled,
+            model=args.model,
+            add_fallback_model=args.add_fallback_model,
+            remove_fallback_model=args.remove_fallback_model,
+            clear_fallback_models=bool(args.clear_fallback_models),
+            sweep_interval_seconds=args.sweep_interval_seconds,
+            min_entries_per_distillation=args.min_entries_per_distillation,
+            max_session_entries=args.max_session_entries,
+            max_groups_per_sweep=args.max_groups_per_sweep,
+            pace_seconds_between_distillations=(
+                args.pace_seconds_between_distillations
+            ),
+            scope="project" if args.project else "user",
+            cwd=Path(args.cwd or os.getcwd()).resolve()
+            if args.project else None,
+        )
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    block = _read_claude_hooks_consultants_block()
+    smart = block.get("smart_start") or {}
+    print(json.dumps({"ok": True, **_config_dump(cfg, smart_block=smart)},
+                     indent=2))
+    return 0
+
+
 def cmd_config_list_models(args, base: str) -> int:
     """Proxy /api/tags from the configured Ollama upstream and filter
     to tools-capable models. The skill uses this to populate the
@@ -567,6 +719,468 @@ def cmd_config_list_models(args, base: str) -> int:
     return 0
 
 
+# ----------------------- Task #111: config coder ---------------- #
+# Sub-subparser under ``config coder`` for managing the per-language
+# coder model routes + global default route. The single-source
+# resolver lives in ``consultants.config.coder_resolve_route``; the
+# CLI is a thin adapter onto the three mutators (set_coder_route /
+# unset_coder_route / set_coder_default_route) plus a JSON pretty-
+# printer for the ``list`` verb. Same --cwd/--project scope handling
+# as ``set-role``.
+
+
+def _route_to_dict(route) -> Optional[dict]:
+    """Coerce a CoderLanguageRoute (or None) to a JSON-friendly dict."""
+    if route is None:
+        return None
+    return {
+        "primary": getattr(route, "primary", ""),
+        "fallback": getattr(route, "fallback", ""),
+    }
+
+
+def _coder_route_block(cfg) -> dict:
+    """Build the {default_route, routes_by_language} dict used by
+    ``config coder list``'s JSON output. Pure-function — no I/O."""
+    rc = cfg.roles["coder"]
+    return {
+        "model": rc.model,
+        "default_route": _route_to_dict(rc.default_route),
+        "routes_by_language": {
+            lang: _route_to_dict(route)
+            for lang, route in sorted(rc.routes_by_language.items())
+        },
+    }
+
+
+def cmd_config_coder_list(args, base: str) -> int:
+    cwd = Path(args.cwd).resolve() if args.cwd else None
+    cfg = cc.load_config(cwd)
+    print(json.dumps({"ok": True, "coder": _coder_route_block(cfg)},
+                     indent=2))
+    return 0
+
+
+def _scope_kwargs(args) -> dict:
+    """Translate ``args.project`` + ``args.cwd`` into the kwargs the
+    config-mutator functions expect. Mirrors ``cmd_config_set_role``."""
+    return {
+        "scope": "project" if getattr(args, "project", False) else "user",
+        "cwd": (
+            Path(args.cwd or os.getcwd()).resolve()
+            if getattr(args, "project", False) else None
+        ),
+    }
+
+
+def cmd_config_coder_set(args, base: str) -> int:
+    # ``primary``/``fallback`` are optional on update, required on
+    # create — cc.set_coder_route enforces this. The CLI defers
+    # entirely to the mutator's validation so the rules live in one
+    # place.
+    try:
+        cfg = cc.set_coder_route(
+            args.language,
+            primary=args.primary,
+            fallback=args.fallback,
+            **_scope_kwargs(args),
+        )
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    print(json.dumps({"ok": True, "coder": _coder_route_block(cfg)},
+                     indent=2))
+    return 0
+
+
+def cmd_config_coder_unset(args, base: str) -> int:
+    try:
+        cfg = cc.unset_coder_route(args.language, **_scope_kwargs(args))
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    print(json.dumps({"ok": True, "coder": _coder_route_block(cfg)},
+                     indent=2))
+    return 0
+
+
+def cmd_config_coder_set_default(args, base: str) -> int:
+    try:
+        cfg = cc.set_coder_default_route(
+            primary=args.primary,
+            fallback=args.fallback,
+            **_scope_kwargs(args),
+        )
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    print(json.dumps({"ok": True, "coder": _coder_route_block(cfg)},
+                     indent=2))
+    return 0
+
+
+# ----------------------- M9 control verbs ----------------------- #
+# These mirror the seven HTTP control endpoints exposed by
+# consultants.server.control_routes. Each handler is a thin
+# adapter: parse argv → POST/GET → pretty-print the response.
+
+
+def _parse_relative_time(spec: str) -> float:
+    """Parse a relative-time string like ``+30m`` / ``+2h`` / ``+45s``.
+
+    Returns the absolute ``time.time()`` value to put into
+    ``deadline_ts``. The CLI's ``--time`` flag is the only entry
+    point — the HTTP layer takes absolute timestamps because that's
+    less ambiguous across daylight-saving rolls.
+
+    Empty / non-prefixed strings raise CLIError. Bare integers
+    (``30m``, ``2h``) are accepted in addition to the ``+`` prefix
+    for ergonomic reasons.
+    """
+    import time as _time
+    s = (spec or "").strip().lstrip("+").lower()
+    if not s:
+        raise CLIError("--time requires a value like +30m / +2h / +45s")
+    unit = s[-1]
+    if unit in ("s", "m", "h", "d"):
+        try:
+            n = float(s[:-1])
+        except ValueError:
+            raise CLIError(f"--time: cannot parse {spec!r}")
+        mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+        delta = n * mult
+    else:
+        try:
+            delta = float(s)
+        except ValueError:
+            raise CLIError(f"--time: cannot parse {spec!r}")
+    if delta <= 0:
+        raise CLIError("--time must be a positive delta")
+    return _time.time() + delta
+
+
+def cmd_state(args, base: str) -> int:
+    """GET /v1/consult/<sid>/state — the M9 deep-state view (vs
+    ``status``, which is the v1 lightweight progress poll)."""
+    out = _http("GET", f"{base}/v1/consult/{args.sid}/state")
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
+
+
+def cmd_inject(args, base: str) -> int:
+    """POST /v1/consult/<sid>/inject — inject additional context
+    into the in-flight consultation. The text can come from
+    ``--message`` directly or from ``--file`` (whole-file read)."""
+    if args.file:
+        try:
+            text = Path(args.file).read_text(encoding="utf-8")
+        except OSError as e:
+            raise CLIError(f"could not read {args.file}: {e}")
+    else:
+        text = args.message or ""
+    body = {
+        "role": args.role,
+        "text": text,
+        "source": args.source or "user",
+    }
+    out = _http("POST",
+                f"{base}/v1/consult/{args.sid}/inject", body=body)
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
+
+
+def cmd_control(args, base: str) -> int:
+    """POST /v1/consult/<sid>/control — mutate one or more
+    RuntimeControl knobs. Multiple flags coalesce into a single
+    PATCH body; an empty PATCH is a 400 from the server."""
+    rc: dict = {}
+    if args.time:
+        rc["deadline_ts"] = _parse_relative_time(args.time)
+    if args.soft_target:
+        rc["soft_target_ts"] = _parse_relative_time(args.soft_target)
+    if args.max_rounds is not None:
+        rc["max_rounds"] = int(args.max_rounds)
+    if args.max_reroutes is not None:
+        rc["max_reroutes"] = int(args.max_reroutes)
+    if args.confidence is not None:
+        rc["confidence_target"] = float(args.confidence)
+    if args.strictness:
+        rc["critic_strictness"] = args.strictness
+    if args.enable:
+        rc["enabled_roles"] = sorted({r.strip() for r in args.enable})
+    if args.disable:
+        # The server-side delta replaces enabled_roles outright, so
+        # `disable` only makes sense when the caller knows the
+        # current set. For ergonomics we GET /state first and
+        # subtract.
+        snap = _http("GET", f"{base}/v1/consult/{args.sid}/state")
+        current = (
+            (snap.get("runtime_control") or {}).get("enabled_roles")
+            or []
+        )
+        kill = {r.strip() for r in args.disable}
+        rc["enabled_roles"] = [r for r in current if r not in kill]
+    if not rc:
+        raise CLIError(
+            "control requires at least one knob: "
+            "--time / --soft-target / --max-rounds / --max-reroutes / "
+            "--confidence / --strictness / --enable / --disable",
+        )
+    out = _http(
+        "POST", f"{base}/v1/consult/{args.sid}/control",
+        body={"runtime_control": rc},
+    )
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
+
+
+def cmd_pause(args, base: str) -> int:
+    """POST /v1/consult/<sid>/interrupt — flip pause_requested.
+    ``pause`` is the friendlier verb name; the HTTP route is
+    ``/interrupt`` because that matches LangGraph's terminology."""
+    body = {"reason": args.reason or "user-pause"}
+    out = _http("POST",
+                f"{base}/v1/consult/{args.sid}/interrupt", body=body)
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
+
+
+def cmd_resume(args, base: str) -> int:
+    """POST /v1/consult/<sid>/resume — clear the interrupt and
+    re-enter via Command(resume=value). The actual graph re-invoke
+    runs on the server's executor pool; this returns 200 with a
+    ``mode: scheduled`` payload and the caller polls /state."""
+    value: Any = None
+    if args.value:
+        try:
+            value = json.loads(args.value)
+        except json.JSONDecodeError:
+            # Treat bare strings as the literal resume value.
+            value = args.value
+    body = {"value": value, "decision": args.decision or ""}
+    out = _http("POST",
+                f"{base}/v1/consult/{args.sid}/resume", body=body)
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
+
+
+def cmd_cancel(args, base: str) -> int:
+    """POST /v1/consult/<sid>/cancel — flip cancel_requested.
+    ``--keep-partial`` is the default; pass ``--discard-partial`` to
+    delete the checkpoint file too."""
+    body = {
+        "discard_partial": bool(args.discard_partial),
+        "reason": args.reason or "user-cancel",
+    }
+    out = _http("POST",
+                f"{base}/v1/consult/{args.sid}/cancel", body=body)
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
+
+
+def cmd_events(args, base: str) -> int:
+    """GET /v1/consult/<sid>/events — SSE stream over runtime_events.
+
+    Streams indefinitely (until the session terminates or the user
+    hits ^C). The endpoint supports Last-Event-ID resume; pass
+    ``--since`` to skip events older than the given id.
+    """
+    headers = {}
+    if args.since:
+        headers["Last-Event-ID"] = str(int(args.since))
+    url = f"{base}/v1/consult/{args.sid}/events"
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        # Long timeout — SSE connections are long-lived by design.
+        resp = urllib.request.urlopen(req, timeout=86400.0)
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = e.read().decode(errors="replace")
+        except Exception:
+            err_body = "<unreadable>"
+        raise CLIError(f"HTTP {e.code} from {url}: {err_body}")
+    except urllib.error.URLError as e:
+        raise CLIError(
+            f"Could not reach {url}: {e.reason}",
+        )
+    # Read line-by-line and pretty-print each event block. SSE
+    # records are separated by a blank line, so we accumulate
+    # lines until we see one.
+    try:
+        record_lines: list[str] = []
+        while True:
+            raw = resp.readline()
+            if not raw:
+                break
+            line = raw.decode("utf-8", errors="replace").rstrip("\n")
+            if line == "":
+                if record_lines:
+                    print("\n".join(record_lines))
+                    print()  # blank line separator in the CLI output
+                    record_lines = []
+                continue
+            record_lines.append(line)
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
+# ----------------------- skill-eval (M11) ------------------------- #
+
+def cmd_skill_eval_coder(args, base: str) -> int:
+    """Run the coder skill-eval suite. Thin wrapper around
+    ``benchmarks.consultants.coder_bench.main`` — keeps the bench
+    script as the source of truth for behavior while giving users
+    a friendly ``claude-consultants skill-eval coder`` entry point.
+
+    Args translation:
+
+    - The bench script wants ``--models`` as a comma-separated
+      string; this wrapper accepts the same and passes through.
+    - ``--id`` and ``--tier`` are repeatable on both sides.
+    - The wrapper resolves a default ``--output-dir`` to the
+      conventional date-stamped location if the user didn't supply
+      one.
+
+    Exit codes mirror the bench script: 0 on success, 1 on no
+    trials (empty match), 2 when --live is set but --accept-cost
+    isn't.
+    """
+    # Lazy import — keeps the CLI fast on the no-bench paths.
+    try:
+        from benchmarks.consultants.coder_bench import main as _bench_main
+    except ImportError as e:
+        raise CLIError(
+            "benchmarks.consultants.coder_bench is not importable. "
+            f"Run from the repo root or set PYTHONPATH. Underlying: {e}"
+        )
+    argv: list[str] = []
+    if args.dry_run:
+        argv.append("--dry-run")
+    if args.live:
+        argv.append("--live")
+    if args.accept_cost:
+        argv.append("--accept-cost")
+    if args.models:
+        argv.extend(["--models", args.models])
+    if args.ollama_base:
+        argv.extend(["--ollama-base", args.ollama_base])
+    if args.judge_model is not None:
+        argv.extend(["--judge-model", args.judge_model])
+    if args.output_dir:
+        argv.extend(["--output-dir", args.output_dir])
+    for t in (args.tier or []):
+        argv.extend(["--tier", t])
+    for qid in (args.id or []):
+        argv.extend(["--id", qid])
+    if args.smoke:
+        argv.append("--smoke")
+    if getattr(args, "commit_report", False):
+        argv.append("--commit-report")
+    return int(_bench_main(argv))
+
+
+def cmd_skill_eval_stall(args, base: str) -> int:
+    """Run the stall skill-eval suite (M11a). Thin wrapper around
+    ``benchmarks.consultants.stall_bench.main`` — same shape as
+    :func:`cmd_skill_eval_coder` but the stall bench has no judge,
+    no per-tier filter (the tier dimension is standalone vs
+    council and is selected via ``--tier1`` / ``--tier2`` / ``--both``),
+    and two trial-count knobs (``--trials-tier1`` / ``--trials-tier2``).
+
+    Exit codes mirror the bench script: 0 on success, 1 on no
+    trials (empty match), 2 when --live is set but --accept-cost
+    isn't.
+    """
+    try:
+        from benchmarks.consultants.stall_bench import main as _bench_main
+    except ImportError as e:
+        raise CLIError(
+            "benchmarks.consultants.stall_bench is not importable. "
+            f"Run from the repo root or set PYTHONPATH. Underlying: {e}"
+        )
+    argv: list[str] = []
+    if args.dry_run:
+        argv.append("--dry-run")
+    if args.live:
+        argv.append("--live")
+    if args.accept_cost:
+        argv.append("--accept-cost")
+    if args.models:
+        argv.extend(["--models", args.models])
+    if args.ollama_base:
+        argv.extend(["--ollama-base", args.ollama_base])
+    if args.output_dir:
+        argv.extend(["--output-dir", args.output_dir])
+    # Tier selection — mutually exclusive in the parser, so at most
+    # one of these is set. The bench's parser is also mutually
+    # exclusive so we forward at most one.
+    if args.tier1:
+        argv.append("--tier1")
+    elif args.tier2:
+        argv.append("--tier2")
+    elif args.both:
+        argv.append("--both")
+    if args.trials_tier1 is not None:
+        argv.extend(["--trials-tier1", str(args.trials_tier1)])
+    if args.trials_tier2 is not None:
+        argv.extend(["--trials-tier2", str(args.trials_tier2)])
+    for qid in (args.id or []):
+        argv.extend(["--id", qid])
+    if args.smoke:
+        argv.append("--smoke")
+    return int(_bench_main(argv))
+
+
+def cmd_skill_eval_tool_executor(args, base: str) -> int:
+    """Run the tool_executor skill-eval suite (M11c). Thin wrapper
+    around ``benchmarks.consultants.tool_executor_bench.main`` —
+    same shape as :func:`cmd_skill_eval_coder` and
+    :func:`cmd_skill_eval_stall` but the suite measures the
+    tool_executor role (reading + reasoning over a codebase via
+    tool calls), not code generation or streaming cadence.
+
+    Exit codes mirror the bench script: 0 on success, 1 on no
+    trials (empty match), 2 when --live is set but --accept-cost
+    isn't.
+    """
+    try:
+        from benchmarks.consultants.tool_executor_bench import (
+            main as _bench_main,
+        )
+    except ImportError as e:
+        raise CLIError(
+            "benchmarks.consultants.tool_executor_bench is not "
+            "importable. Run from the repo root or set PYTHONPATH. "
+            f"Underlying: {e}"
+        )
+    argv: list[str] = []
+    if args.dry_run:
+        argv.append("--dry-run")
+    if args.live:
+        argv.append("--live")
+    if args.accept_cost:
+        argv.append("--accept-cost")
+    if args.models:
+        argv.extend(["--models", args.models])
+    if args.ollama_base:
+        argv.extend(["--ollama-base", args.ollama_base])
+    # ``--judge-model`` distinguishes "user set ''" (disable judge)
+    # from "user didn't pass the flag" (use bench default). The
+    # CLI's default is None ⇒ forward only when explicitly set,
+    # mirroring the coder bench's treatment.
+    if args.judge_model is not None:
+        argv.extend(["--judge-model", args.judge_model])
+    if args.trials is not None:
+        argv.extend(["--trials", str(args.trials)])
+    if args.output_dir:
+        argv.extend(["--output-dir", args.output_dir])
+    for t in (args.tier or []):
+        argv.extend(["--tier", t])
+    for qid in (args.id or []):
+        argv.extend(["--id", qid])
+    if args.smoke:
+        argv.append("--smoke")
+    return int(_bench_main(argv))
+
+
 # ----------------------- argparse wiring ------------------------- #
 
 def build_parser() -> argparse.ArgumentParser:
@@ -597,6 +1211,16 @@ def build_parser() -> argparse.ArgumentParser:
                         "in v1.2.")
     c.add_argument("--no-trace", dest="trace", action="store_false",
                    help="DEPRECATED: no-op in v1.1.")
+    c.add_argument(
+        "--add-dir", action="append", default=[], metavar="PATH",
+        help=(
+            "Additional directory the consultants' tools may read from "
+            "(repeatable). Unioned with permissions.additionalDirectories "
+            "from ~/.claude/settings.json and the project's "
+            ".claude/settings*.json. Persisted on the session record so "
+            "follow-ups inherit."
+        ),
+    )
     c.set_defaults(fn=cmd_consult)
 
     # status
@@ -633,6 +1257,15 @@ def build_parser() -> argparse.ArgumentParser:
                          "parent isn't in engine memory (default: "
                          "current dir). Always sent so closed / "
                          "evicted parents auto-reopen.")
+    fu.add_argument(
+        "--add-dir", action="append", default=[], metavar="PATH",
+        help=(
+            "Additional directory (repeatable) for the follow-up's "
+            "tool sandbox. Merged with the parent's extra_roots "
+            "(parent first, then this turn, dedup'd) before the "
+            "executor runs."
+        ),
+    )
     fu.set_defaults(fn=cmd_follow_up)
 
     # reopen — disk-fallback to restore a closed / evicted session.
@@ -696,6 +1329,131 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sh.set_defaults(fn=cmd_show)
 
+    # ---- M9 control verbs: drive an in-flight consultation ---- #
+
+    # state — deep state snapshot (vs ``status`` which is the v1
+    # progress-poll alias).
+    st = sub.add_parser(
+        "state",
+        help="Fetch the live v2 state snapshot (runtime_control, "
+             "interrupts, partial_synthesis, …).",
+    )
+    st.add_argument("sid")
+    st.set_defaults(fn=cmd_state)
+
+    # inject — surface additional context into a live consult.
+    inj = sub.add_parser(
+        "inject",
+        help="Inject additional_context into a live consultation. "
+             "Text from --message or --file.",
+    )
+    inj.add_argument("sid")
+    inj.add_argument("--role", default="any",
+                     choices=("any", "planner", "researcher",
+                                "critic", "synthesizer"),
+                     help="Target role for the inject (default: any).")
+    src = inj.add_mutually_exclusive_group(required=True)
+    src.add_argument("-m", "--message",
+                     help="The text to inject inline.")
+    src.add_argument("-f", "--file",
+                     help="Read the inject text from a file.")
+    inj.add_argument("--source", default="user",
+                     help="Source label on the injected Doc "
+                          "(default: user).")
+    inj.set_defaults(fn=cmd_inject)
+
+    # control — mutate one or more runtime_control knobs.
+    ctl = sub.add_parser(
+        "control",
+        help="Mutate RuntimeControl knobs on a live consultation. "
+             "Multiple flags batch into one PATCH.",
+    )
+    ctl.add_argument("sid")
+    ctl.add_argument(
+        "--time",
+        help="Relative deadline extension (e.g. +30m / +2h / +45s). "
+             "Sets deadline_ts to now + delta.",
+    )
+    ctl.add_argument(
+        "--soft-target",
+        help="Same shape as --time but for soft_target_ts.",
+    )
+    ctl.add_argument("--max-rounds", type=int,
+                     help="Researcher max-rounds cap (non-negative).")
+    ctl.add_argument("--max-reroutes", type=int,
+                     help="Critic max-reroutes cap (non-negative).")
+    ctl.add_argument("--confidence", type=float,
+                     help="confidence_target in [0, 1].")
+    ctl.add_argument(
+        "--strictness",
+        choices=("lax", "normal", "strict"),
+        help="Critic strictness preset.",
+    )
+    ctl.add_argument(
+        "--enable", action="append", default=[],
+        help="Role to enable (repeatable). Replaces enabled_roles.",
+    )
+    ctl.add_argument(
+        "--disable", action="append", default=[],
+        help="Role to disable (repeatable). Subtracts from the "
+             "current enabled_roles snapshot (issues a GET /state "
+             "first).",
+    )
+    ctl.set_defaults(fn=cmd_control)
+
+    # pause — friendlier alias for /interrupt.
+    pause = sub.add_parser(
+        "pause",
+        help="Request a cooperative pause at the next node entry.",
+    )
+    pause.add_argument("sid")
+    pause.add_argument("--reason", default="user-pause",
+                       help="Human-readable reason (logged).")
+    pause.set_defaults(fn=cmd_pause)
+
+    # resume — Command(resume=...) re-entry.
+    res = sub.add_parser(
+        "resume",
+        help="Resume a paused consultation with a value.",
+    )
+    res.add_argument("sid")
+    res.add_argument(
+        "--value",
+        help="Resume value (JSON). Bare strings are accepted as "
+             "literals.",
+    )
+    res.add_argument(
+        "--decision", default="",
+        help="Optional human-readable decision label.",
+    )
+    res.set_defaults(fn=cmd_resume)
+
+    # cancel — flip cancel_requested.
+    can = sub.add_parser(
+        "cancel",
+        help="Cancel a running consultation cooperatively.",
+    )
+    can.add_argument("sid")
+    can.add_argument(
+        "--discard-partial", action="store_true",
+        help="Also delete the checkpoint file (default: keep).",
+    )
+    can.add_argument("--reason", default="user-cancel",
+                     help="Human-readable cancel reason (logged).")
+    can.set_defaults(fn=cmd_cancel)
+
+    # events — SSE stream.
+    ev = sub.add_parser(
+        "events",
+        help="Tail the SSE event stream for a session.",
+    )
+    ev.add_argument("sid")
+    ev.add_argument(
+        "--since", type=int,
+        help="Resume from this event_id (Last-Event-ID).",
+    )
+    ev.set_defaults(fn=cmd_events)
+
     # config
     cfg = sub.add_parser("config", help="Inspect or modify config.")
     cfg_sub = cfg.add_subparsers(dest="config_cmd", required=True)
@@ -750,9 +1508,420 @@ def build_parser() -> argparse.ArgumentParser:
     cit.add_argument("seconds", type=int)
     cit.set_defaults(fn=cmd_config_set_idle_timeout)
 
+    # ----- #220: [store] / [store.ttl] / [store.distillation] -----
+    # Pre-#220 these blocks were TOML-only. The three subparsers below
+    # mirror the set-role pattern: every knob is optional, None means
+    # "leave unchanged", and validation lives in consultants.config.
+    css = cfg_sub.add_parser(
+        "set-store",
+        help=("Configure the [store] block (cross-session memory). "
+              "Pre-#220 this required hand-editing the TOML."),
+    )
+    css.add_argument("--enabled",
+                     help="true|false — toggle the store on/off.")
+    css.add_argument("--backend",
+                     choices=cc.VALID_STORE_BACKENDS,
+                     help="memory | pgvector | sqlite_vec.")
+    css.add_argument("--recall-limit", dest="recall_limit", type=int,
+                     help="Top-K results returned by peer_findings recall "
+                          "(default 5).")
+    css.add_argument("--sqlite-vec-path", dest="sqlite_vec_path",
+                     help="Override path for sqlite_vec backend "
+                          "(default ~/.claude/consultants-store.db).")
+    css.add_argument("--pgvector-dsn", dest="pgvector_dsn",
+                     help="postgres://user:pass@host:5432/db for pgvector.")
+    css.add_argument("--pgvector-table", dest="pgvector_table",
+                     help="Table name on the pgvector backend (default "
+                          "consultants_store).")
+    css.add_argument("--embedder",
+                     help="Embedder identifier (e.g. llamafile / ollama).")
+    css.add_argument("--add-effort", dest="add_effort",
+                     help="Enable the store at this effort tier "
+                          "(low|medium|high|max|xmedium|xhigh|xmax). "
+                          "Default set = high/max/xhigh/xmax. Idempotent.")
+    css.add_argument("--remove-effort", dest="remove_effort",
+                     help="Drop a tier from enable_at_efforts.")
+    css.add_argument("--clear-efforts", dest="clear_efforts",
+                     action="store_true",
+                     help="Empty enable_at_efforts (store becomes "
+                          "inert at every tier).")
+    css.add_argument("--project", action="store_true",
+                     help="Save under per-project scope "
+                          "(.claude-hooks/consultants.toml).")
+    css.add_argument("--cwd",
+                     help="Project root (only used with --project).")
+    css.set_defaults(fn=cmd_config_set_store)
+
+    cst = cfg_sub.add_parser(
+        "set-store-ttl",
+        help=("Configure the [store.ttl] block: per-namespace TTL, "
+              "refresh-on-read, #215 jitter."),
+    )
+    cst.add_argument("--enabled",
+                     help="true|false — master TTL switch.")
+    cst.add_argument("--research-days", dest="research_days", type=float,
+                     help="Days before research entries expire "
+                          "(default 30). 0 or negative = never.")
+    cst.add_argument("--tool-results-hours", dest="tool_results_hours",
+                     type=float,
+                     help="Hours before tool_results entries expire "
+                          "(default 24). 0 or negative = never.")
+    cst.add_argument("--project-days", dest="project_days", type=float,
+                     help="Days before ('project', pid) entries expire "
+                          "(default never). 0 or negative = never.")
+    cst.add_argument("--user-days", dest="user_days", type=float,
+                     help="Days before ('user', uid) entries expire "
+                          "(default never). 0 or negative = never.")
+    cst.add_argument("--refresh-on-read", dest="refresh_on_read",
+                     help="true|false — bump expires_at forward on every "
+                          "successful recall hit (default true).")
+    cst.add_argument("--jitter-pct", dest="jitter_pct", type=float,
+                     help="#215 cohort jitter — 0.0..1.0. Spreads aligned "
+                          "writes across ±jitter of the nominal TTL so "
+                          "the reaper doesn't see N sessions expire on "
+                          "one tick. Default 0.1 (=±10%%).")
+    cst.add_argument("--project", action="store_true",
+                     help="Save under per-project scope.")
+    cst.add_argument("--cwd", help="Project root.")
+    cst.set_defaults(fn=cmd_config_set_store_ttl)
+
+    csd = cfg_sub.add_parser(
+        "set-store-distillation",
+        help=("Configure the [store.distillation] block: M14 sweep + "
+              "#215 cap + pace."),
+    )
+    csd.add_argument("--enabled",
+                     help="true|false — master distillation switch. "
+                          "OFF = research originals just delete at TTL.")
+    csd.add_argument("--model",
+                     help="Primary distillation LLM "
+                          "(default gemma4:31b-cloud).")
+    csd.add_argument("--add-fallback-model", dest="add_fallback_model",
+                     help="Append a model to the fallback chain "
+                          "(idempotent; dedup'd against the primary).")
+    csd.add_argument("--remove-fallback-model",
+                     dest="remove_fallback_model",
+                     help="Drop a model from the fallback chain.")
+    csd.add_argument("--clear-fallback-models",
+                     dest="clear_fallback_models",
+                     action="store_true",
+                     help="Empty the fallback chain (primary-only).")
+    csd.add_argument("--sweep-interval-seconds",
+                     dest="sweep_interval_seconds", type=float,
+                     help="Reaper sweep cadence (default 3600 = 1 h, "
+                          "minimum 30).")
+    csd.add_argument("--min-entries-per-distillation",
+                     dest="min_entries_per_distillation", type=int,
+                     help="Cost gate — research groups below this "
+                          "count delete without LLM call (default 3).")
+    csd.add_argument("--max-session-entries",
+                     dest="max_session_entries", type=int,
+                     help="Truncation cap before prompt assembly "
+                          "(default 50; bounds per-call token cost).")
+    csd.add_argument("--max-groups-per-sweep",
+                     dest="max_groups_per_sweep", type=int,
+                     help="#215 — cap successful distillations per "
+                          "sweep tick. Cost-gated skips and tool_results "
+                          "deletes don't count. Default 5; 0 = uncapped.")
+    csd.add_argument("--pace-seconds-between-distillations",
+                     dest="pace_seconds_between_distillations", type=float,
+                     help="#215 — sleep N seconds between consecutive "
+                          "distillations within one sweep. Default 5.0; "
+                          "0.0 disables. Sliced 0.5 s for shutdown.")
+    csd.add_argument("--project", action="store_true",
+                     help="Save under per-project scope.")
+    csd.add_argument("--cwd", help="Project root.")
+    csd.set_defaults(fn=cmd_config_set_store_distillation)
+
     clm = cfg_sub.add_parser("list-models",
                              help="Available Ollama tags.")
     clm.set_defaults(fn=cmd_config_list_models)
+
+    # ----- Task #111: config coder ---------------------------------
+    # Sub-namespace under ``config`` for the coder role's per-language
+    # routing. Verbs: list / set / unset / set-default. All share the
+    # standard --cwd/--project scope flags.
+    coder_parser = cfg_sub.add_parser(
+        "coder",
+        help=("Manage the coder role's per-language model routing "
+              "(primary + fallback per language, plus a global "
+              "default). The map is seeded from the v1.0.1-mlang "
+              "bench winners; overrides land here."),
+    )
+    coder_sub = coder_parser.add_subparsers(
+        dest="coder_cmd", required=True,
+    )
+
+    cl = coder_sub.add_parser(
+        "list",
+        help="Print the resolved coder routing table.",
+    )
+    cl.add_argument("--cwd",
+                    help="Project root (loads project overrides too).")
+    cl.set_defaults(fn=cmd_config_coder_list)
+
+    cset = coder_sub.add_parser(
+        "set",
+        help=("Upsert a per-language coder route. --primary is "
+              "required on create; either flag alone works on "
+              "update. Pass --fallback '' to clear failover."),
+    )
+    cset.add_argument("language",
+                      help="Language id (e.g. python, csharp, cpp).")
+    cset.add_argument("--primary",
+                      help="Primary model tag (e.g. glm-5.1:cloud).")
+    cset.add_argument("--fallback", default=None,
+                      help="Fallback model tag. Empty string clears "
+                           "the failover model on an existing entry.")
+    cset.add_argument("--project", action="store_true",
+                      help="Save under per-project scope "
+                           "(.claude-hooks/) instead of user-global.")
+    cset.add_argument("--cwd",
+                      help="Project root (only used with --project).")
+    cset.set_defaults(fn=cmd_config_coder_set)
+
+    cunset = coder_sub.add_parser(
+        "unset",
+        help=("Remove a per-language coder route. The language then "
+              "falls through to the global default route. Idempotent."),
+    )
+    cunset.add_argument("language",
+                        help="Language id to remove.")
+    cunset.add_argument("--project", action="store_true",
+                        help="Save under per-project scope.")
+    cunset.add_argument("--cwd",
+                        help="Project root (only used with --project).")
+    cunset.set_defaults(fn=cmd_config_coder_unset)
+
+    csd = coder_sub.add_parser(
+        "set-default",
+        help=("Set or update the GLOBAL default coder route — used "
+              "when a language has no per-language entry."),
+    )
+    csd.add_argument("--primary",
+                     help="Primary model tag for the default route.")
+    csd.add_argument("--fallback", default=None,
+                     help="Fallback model tag. Empty string clears "
+                          "the failover model on an existing default.")
+    csd.add_argument("--project", action="store_true",
+                     help="Save under per-project scope.")
+    csd.add_argument("--cwd",
+                     help="Project root (only used with --project).")
+    csd.set_defaults(fn=cmd_config_coder_set_default)
+
+    # ----- skill-eval (M11) — wraps benchmarks/consultants/*.py ----
+    se = sub.add_parser(
+        "skill-eval",
+        help=("Run the Consultancy Skill-Eval Protocol against one or "
+              "more candidate models. See "
+              "docs/consultants-skill-eval-protocol.md."),
+    )
+    se_sub = se.add_subparsers(dest="protocol", required=True)
+    se_coder = se_sub.add_parser(
+        "coder",
+        help=("Run the coder suite (M11b). Picks the default for "
+              "cfg.roles.coder.model."),
+    )
+    se_coder_mode = se_coder.add_mutually_exclusive_group(required=True)
+    se_coder_mode.add_argument(
+        "--dry-run", action="store_true",
+        help="Stub ChatClient; validates the harness without "
+             "cloud spend.",
+    )
+    se_coder_mode.add_argument(
+        "--live", action="store_true",
+        help="Real ChatClients against --ollama-base. Requires "
+             "--accept-cost.",
+    )
+    se_coder.add_argument(
+        "--accept-cost", action="store_true",
+        help="Required with --live. Acknowledges Ollama-Pro token "
+             "spend (see the summary line).",
+    )
+    se_coder.add_argument(
+        "--models", default=None,
+        help="Comma-separated model list. Default: the 4-model "
+             "candidate set from coder_bench.py.",
+    )
+    se_coder.add_argument(
+        "--ollama-base", default=None,
+        help="Override the cloud proxy URL. Default: read from "
+             "config or 192.168.178.2:11433.",
+    )
+    se_coder.add_argument(
+        "--judge-model", default=None,
+        help="Model used as the code-quality judge. Set to '' to skip.",
+    )
+    se_coder.add_argument(
+        "--output-dir", default=None,
+        help=("Per-run output directory. Default: "
+              "benchmarks/consultants/results/<YYYY-MM-DD>/coder/"),
+    )
+    se_coder.add_argument(
+        "--tier", action="append",
+        choices=("trivial", "easy", "medium", "hard"),
+        help="Filter by tier (repeatable). Default: all tiers.",
+    )
+    se_coder.add_argument(
+        "--id", action="append",
+        help="Filter by question id (repeatable). Default: all.",
+    )
+    se_coder.add_argument(
+        "--smoke", action="store_true",
+        help="Shorthand for --tier trivial.",
+    )
+    se_coder.add_argument(
+        "--commit-report", action="store_true",
+        dest="commit_report",
+        help=(
+            "After the run, force-add report.md + metadata.json "
+            "(+ quota.md if present) so they're staged for the "
+            "next commit alongside the baselines.md row. Does NOT "
+            "create a commit."
+        ),
+    )
+    se_coder.set_defaults(fn=cmd_skill_eval_coder)
+
+    # ----- skill-eval stall (M11a) ----- #
+    se_stall = se_sub.add_parser(
+        "stall",
+        help=("Run the stall suite (M11a). Measures per-model "
+              "streaming-token cadence + derives recommended "
+              "(stall_threshold_s, hard_cap_s) thresholds."),
+    )
+    se_stall_mode = se_stall.add_mutually_exclusive_group(required=True)
+    se_stall_mode.add_argument(
+        "--dry-run", action="store_true",
+        help="Stub ChatClients; validates the harness without "
+             "cloud spend.",
+    )
+    se_stall_mode.add_argument(
+        "--live", action="store_true",
+        help="Real ChatClients against --ollama-base. Requires "
+             "--accept-cost.",
+    )
+    se_stall.add_argument(
+        "--accept-cost", action="store_true",
+        help="Required with --live. Acknowledges Ollama-Pro token "
+             "spend (see the summary line).",
+    )
+    se_stall.add_argument(
+        "--models", default=None,
+        help="Comma-separated model list. Default: the M11b-mlang "
+             "cohort + gemini-3-flash-preview (7 models).",
+    )
+    se_stall.add_argument(
+        "--ollama-base", default=None,
+        help="Override the cloud proxy URL. Default: read from "
+             "config or 192.168.178.2:11433.",
+    )
+    se_stall.add_argument(
+        "--output-dir", default=None,
+        help=("Per-run output directory. Default: "
+              "benchmarks/consultants/results/<YYYY-MM-DD>/stall/"),
+    )
+    # Tier selection — mutually exclusive on the bench too.
+    se_stall_tier = se_stall.add_mutually_exclusive_group()
+    se_stall_tier.add_argument(
+        "--tier1", action="store_true",
+        help="Run only Tier 1 (standalone chat_streamed calls).",
+    )
+    se_stall_tier.add_argument(
+        "--tier2", action="store_true",
+        help="Run only Tier 2 (full council with single-model "
+             "researcher pinned to the model under test).",
+    )
+    se_stall_tier.add_argument(
+        "--both", action="store_true",
+        help="Run both tiers (default).",
+    )
+    se_stall.add_argument(
+        "--trials-tier1", type=int, default=None,
+        help="Trials per (question × model) for Tier 1. "
+             "Default 3 (set by the bench).",
+    )
+    se_stall.add_argument(
+        "--trials-tier2", type=int, default=None,
+        help="Trials per (question × model) for Tier 2. "
+             "Default 2 (set by the bench).",
+    )
+    se_stall.add_argument(
+        "--id", action="append",
+        help="Filter by question id (repeatable). Default: all.",
+    )
+    se_stall.add_argument(
+        "--smoke", action="store_true",
+        help="Smoke mode: 1 question per tier × 2 models × 1 trial. "
+             "End-to-end validation at minimal spend.",
+    )
+    se_stall.set_defaults(fn=cmd_skill_eval_stall)
+
+    # ----- skill-eval tool_executor (M11c) ----- #
+    se_te = se_sub.add_parser(
+        "tool_executor",
+        help=("Run the tool_executor suite (M11c). Picks the default "
+              "for cfg.roles.tool_executor.model based on the 8-"
+              "question × 4-tier reading + reasoning corpus."),
+    )
+    se_te_mode = se_te.add_mutually_exclusive_group(required=True)
+    se_te_mode.add_argument(
+        "--dry-run", action="store_true",
+        help="Stub ChatClients; validates the harness without "
+             "cloud spend.",
+    )
+    se_te_mode.add_argument(
+        "--live", action="store_true",
+        help="Real ChatClients against --ollama-base. Requires "
+             "--accept-cost.",
+    )
+    se_te.add_argument(
+        "--accept-cost", action="store_true",
+        help="Required with --live. Acknowledges Ollama-Pro token "
+             "spend (see the summary line).",
+    )
+    se_te.add_argument(
+        "--models", default=None,
+        help="Comma-separated model list. Default: the M11b-mlang "
+             "cohort minus deepseek-v4-flash + "
+             "gemini-3-flash-preview (6 models).",
+    )
+    se_te.add_argument(
+        "--ollama-base", default=None,
+        help="Override the cloud proxy URL. Default: read from "
+             "config or 192.168.178.2:11433.",
+    )
+    se_te.add_argument(
+        "--judge-model", default=None,
+        help="Model used as the answer-quality judge (one call "
+             "per trial). Set to '' to skip. Default: "
+             "gemma4:31b-cloud.",
+    )
+    se_te.add_argument(
+        "--trials", type=int, default=None,
+        help="Trials per (question × model). Default 1 (set by "
+             "the bench).",
+    )
+    se_te.add_argument(
+        "--output-dir", default=None,
+        help=("Per-run output directory. Default: "
+              "benchmarks/consultants/results/<YYYY-MM-DD>/"
+              "tool_executor/"),
+    )
+    se_te.add_argument(
+        "--tier", action="append",
+        choices=("trivial", "easy", "medium", "hard"),
+        help="Filter by tier (repeatable). Default: all tiers.",
+    )
+    se_te.add_argument(
+        "--id", action="append",
+        help="Filter by question id (repeatable). Default: all.",
+    )
+    se_te.add_argument(
+        "--smoke", action="store_true",
+        help="Smoke mode: trivial tier × 1 model × 1 trial. "
+             "End-to-end validation at minimal spend.",
+    )
+    se_te.set_defaults(fn=cmd_skill_eval_tool_executor)
 
     return p
 

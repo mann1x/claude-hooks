@@ -11,25 +11,46 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "claude-hooks contributors" }]
 
-# Pinned to known-working minor versions. Bumping is a separate task —
-# the LangChain ecosystem is an aggressive churn zone.
+# Pinned to LangGraph 1.x stack (1.0 GA Oct 2025, 1.2 May 2026). The
+# v2 council overhaul targets 1.2-specific features (TimeoutPolicy,
+# RunControl, astream_events v3, DeltaChannel). langchain +
+# langchain-community were declared but never imported by the engine
+# — dropped 2026-05-16 along with the 1.2 bump.
 dependencies = [
-    "langgraph>=0.2,<0.4",
-    "langchain>=0.3,<0.5",
-    "langchain-community>=0.3,<0.5",
-    "langchain-ollama>=0.2,<0.4",
-    "langgraph-checkpoint-sqlite>=2.0,<3.0",
-    "langserve[server]>=0.3,<0.5",
-    "fastapi>=0.115,<0.130",
-    "uvicorn[standard]>=0.32,<0.40",
-    "httpx>=0.27,<0.30",
+    "langgraph>=1.2,<2.0",
+    "langgraph-checkpoint>=4.1,<5.0",
+    "langgraph-checkpoint-sqlite>=3.1,<4.0",
+    "langgraph-prebuilt>=1.1,<2.0",
+    "langchain-core>=1.4,<2.0",
+    "langchain-ollama>=1.0,<2.0",
+    "fastapi>=0.115,<0.140",
+    "uvicorn[standard]>=0.32,<0.50",
+    # ``[http2]`` pulls in the ``h2`` library. The proxy module's
+    # forwarder + the proxy test suite both assume HTTP/2; plain
+    # ``httpx`` fails at runtime with "Using http2=True, but the
+    # 'h2' package is not installed". The main env gets this via
+    # ``requirements.txt``; the consultants env needs it pinned
+    # here.
+    "httpx[http2]>=0.27,<0.30",
     "pyyaml>=6.0,<7.0",
 ]
 
 [project.optional-dependencies]
+# Opt-in Postgres checkpointer for production. Requires psycopg in
+# the env. Default behavior (sqlite-file checkpointer) needs no extra
+# install.
+postgres = [
+    "langgraph-checkpoint-postgres>=3.1,<4.0",
+    "psycopg[binary,pool]>=3.2,<4.0",
+]
 test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    # pytest-timeout: needed by the bench harness's
+    # ``run_pytest_against_sandbox`` (M11b coder + M11c
+    # tool_executor benches subprocess pytest with
+    # ``--timeout=<s>`` + ``--timeout-method=signal``).
+    "pytest-timeout>=2.0",
 ]
 
 [project.scripts]

@@ -44,6 +44,80 @@ from consultants.engine.storage import RoleTurn
 log = logging.getLogger("consultants.engine.council")
 
 
+# ---------- v2 event emission (M4) -------------------------------- #
+# ``events.emit`` is a defensive no-op outside a LangGraph runnable
+# context, so sprinkling these calls in node bodies is safe for
+# plain-Python unit tests. When the node runs through a compiled
+# graph, the events surface on ``astream_events``' custom channel
+# and the SSE bridge demuxes them to the wire.
+
+def _emit_started(role: str, *,
+                  round: int = 1,
+                  lane_idx: Optional[int] = None,
+                  model: Optional[str] = None) -> None:
+    """Emit a :class:`NodeStarted` event. Never raises."""
+    try:
+        from consultants.engine.events import NodeStarted, emit
+        emit(NodeStarted(role=role, round=round,
+                          lane_idx=lane_idx, model=model))
+    except Exception:  # pragma: no cover
+        log.exception("emit NodeStarted raised; ignored")
+
+
+def _emit_finished(role: str, *,
+                   round: int = 1,
+                   lane_idx: Optional[int] = None,
+                   duration_ms: int = 0,
+                   ok: bool = True,
+                   error: Optional[str] = None) -> None:
+    """Emit a :class:`NodeFinished` event. Never raises."""
+    try:
+        from consultants.engine.events import NodeFinished, emit
+        emit(NodeFinished(role=role, round=round,
+                           lane_idx=lane_idx,
+                           duration_ms=duration_ms,
+                           ok=ok, error=error))
+    except Exception:  # pragma: no cover
+        log.exception("emit NodeFinished raised; ignored")
+
+
+# ---------- v2 additional_context channel (M5) -------------------- #
+# The v2 state schema adds an ``additional_context`` channel — an
+# append-only list of ``Doc`` records the HTTP ``/inject`` endpoint
+# populates mid-flight. Each Doc targets a specific role ("researcher",
+# "planner", "synthesizer", "any"). Node prompt builders call
+# ``_additional_context_for(state, role)`` to retrieve the docs that
+# should be surfaced on this role's next entry.
+#
+# When ``state`` carries no v2 channel (v1 path), the helper returns
+# an empty list — message builders see ``additional_context=[]`` and
+# render byte-identical to the v1 prompt shape. The full migration
+# to ``state_v2.unconsumed_context_for`` is gated on whether
+# ``state_v2`` imports cleanly (it should always; the module is
+# pure-Python with no langgraph dep), but we keep the local helper
+# defensive against partial installs.
+
+def _additional_context_for(state: dict, role: str) -> list:
+    """Return injected Docs targeted at ``role`` or ``"any"``.
+
+    Wrapping the v2 helper here keeps council.py importable on hosts
+    where the v2 state module is missing for any reason — the
+    fallback (empty list) preserves v1 prompt rendering exactly.
+    """
+    try:
+        from consultants.engine.state_v2 import (
+            unconsumed_context_for,
+        )
+    except ImportError:  # pragma: no cover — state_v2 ships in-tree
+        return []
+    try:
+        return unconsumed_context_for(state, role)
+    except Exception:  # pragma: no cover — defensive
+        log.exception("_additional_context_for: helper raised; "
+                       "falling back to empty list")
+        return []
+
+
 # ----------------------- effort -> budget ------------------------- #
 # Each effort tier maps to (researcher_rounds_max, critic_reroutes_max,
 # critic_enabled_when_optional). Critic enabledness here is the budget
@@ -146,7 +220,25 @@ RESEARCHER_SYSTEM = _role_prompt(
     "finding, each with a `path:line` reference. Do NOT speculate "
     "beyond evidence. Do NOT answer the user's question — that's "
     "the synthesizer's job. The critic reads this; verbosity costs "
-    "another full council round."
+    "another full council round.\n\n"
+    "CITATION INTEGRITY (load-bearing). Every `path:line` you emit "
+    "MUST come from a real tool result you saw this turn — not "
+    "from inference, not from a plausible-sounding filename. A "
+    "downstream linter marks unverified cites inline. Three "
+    "failure modes to avoid:\n"
+    "  (1) citing a sibling file you never actually read;\n"
+    "  (2) writing a line number from memory instead of grep output;\n"
+    "  (3) writing a numbered SOURCE LISTING (lines of code with "
+    "prepended line numbers) for a file you did not read — a long "
+    "block of plausible-looking imports / fields / methods that "
+    "reads like a verbatim quote but isn't grounded in any "
+    "tool_result.\n"
+    "If tool_results don't cover a file, say so — 'evidence "
+    "insufficient: did not read X' is a valid report. If you "
+    "know the function name but not its verified line, cite "
+    "`path: <function_name>` and leave the line-precision gap "
+    "visible. NEVER fabricate path, line, or source-listing "
+    "content."
 )
 
 CRITIC_SYSTEM = _role_prompt(
@@ -236,6 +328,11 @@ SYNTHESIZER_SYSTEM = _role_prompt(
     "user only wants the answer. Do NOT restate the question. Do "
     "NOT add markdown headings unless the answer genuinely has 3+ "
     "distinct sections.\n\n"
+    "EXHAUSTIVE ENUMERATION. For list-shaped questions (edge "
+    "cases, failure modes, gotchas, options, alternatives): if the "
+    "researchers identified N items, cover all N. Walk the reports "
+    "item by item before emitting your stop token. Mark a sub-case "
+    "explicitly rather than dropping it.\n\n"
     "If any researcher report is a failure tombstone — a string that "
     "begins with `(researcher lane failed:` or `(planner failed:` — "
     "do NOT silently synthesize over the gap. Either name the "
@@ -243,7 +340,16 @@ SYNTHESIZER_SYSTEM = _role_prompt(
     "(\"could not verify <X> because <lane> failed: <error>\"), or, "
     "when the surviving evidence is too thin to answer at all, "
     "state that plainly and stop. The tombstone is the system's "
-    "signal that a lane crashed; never treat it as evidence."
+    "signal that a lane crashed; never treat it as evidence.\n\n"
+    "CITATION INTEGRITY (load-bearing). Every `path:line` in your "
+    "answer MUST appear verbatim in a researcher report or tool "
+    "result. A downstream linter checks every cite against the "
+    "filesystem and tags fabrications inline as "
+    "`path:line [unverified — …]`. Do NOT swap a researcher's "
+    "`path` for a sibling that sounds related; do NOT 'sharpen' a "
+    "line number — relay the exact cite or omit the line. If "
+    "researchers disagree, name both as `path:lineA / lineB "
+    "(researchers disagree)`."
 )
 
 # Self-critic variant — used at effort=low/medium when the critic
@@ -269,6 +375,9 @@ SYNTHESIZER_SELF_CRITIC_SYSTEM = _role_prompt(
     "user only wants the answer. Do NOT restate the question. Do "
     "NOT add markdown headings unless the answer genuinely has 3+ "
     "distinct sections.\n\n"
+    "EXHAUSTIVE ENUMERATION. For list-shaped questions: cover "
+    "every item the researchers reported. Walk the reports item "
+    "by item before stopping.\n\n"
     "If any researcher report is a failure tombstone — a string that "
     "begins with `(researcher lane failed:` or `(planner failed:` — "
     "do NOT silently synthesize over the gap. Either name the "
@@ -276,24 +385,94 @@ SYNTHESIZER_SELF_CRITIC_SYSTEM = _role_prompt(
     "(\"could not verify <X> because <lane> failed: <error>\"), or, "
     "when the surviving evidence is too thin to answer at all, "
     "state that plainly and stop. The tombstone is the system's "
-    "signal that a lane crashed; never treat it as evidence."
+    "signal that a lane crashed; never treat it as evidence.\n\n"
+    "CITATION INTEGRITY (load-bearing). Every `path:line` you put "
+    "in the final answer MUST appear verbatim in at least one "
+    "researcher report or tool result you were given. Do NOT "
+    "introduce new path:line citations no researcher emitted — a "
+    "downstream linter scans the answer against the actual "
+    "filesystem and will mark every fabrication inline. Do NOT "
+    "swap a researcher's `path` for a sibling 'sounds-related' "
+    "filename. Do NOT replace a researcher's line number with one "
+    "that 'looks more precise'. Relay exactly, or omit the line."
 )
 
 
-def build_planner_messages(question: str) -> list[dict]:
+def _additional_context_block(additional_context) -> str:
+    """Render the v2 ``additional_context`` channel as a tail block
+    on the user message.
+
+    Accepts a list of Doc-shaped objects (dataclass with ``role`` +
+    ``text`` attributes) or a falsy value. Returns the empty string
+    when nothing to surface — call sites can blindly concatenate the
+    result, no None-guard needed.
+
+    Format::
+
+        ADDITIONAL CONTEXT (injected after session start, in order received):
+        1. <text>
+        2. <text>
+
+    The trailing newline-prefix is the responsibility of the caller
+    (they use ``"\\n".join([..., block])`` style) — keeping the block
+    body free of leading whitespace makes the helper testable in
+    isolation.
+    """
+    if not additional_context:
+        return ""
+    lines = ["ADDITIONAL CONTEXT (injected after session start, "
+             "in order received):"]
+    for i, doc in enumerate(additional_context, start=1):
+        text = getattr(doc, "text", "") or ""
+        lines.append(f"{i}. {text.strip()}")
+    return "\n".join(lines)
+
+
+def build_planner_messages(question: str,
+                           *,
+                           additional_context=None) -> list[dict]:
+    """Planner's conversation seed.
+
+    ``additional_context`` is the v2 ``additional_context`` channel
+    filtered to docs targeted at the planner (or ``"any"``). Appended
+    as a final user-message block so injected context is visible to
+    the planner on its next entry (re-entry case: critic re-route
+    triggered another planning round). Empty / None → unchanged
+    behavior, preserves v1 byte-for-byte.
+    """
+    user_text = question.strip()
+    extra = _additional_context_block(additional_context)
+    if extra:
+        user_text = user_text + "\n\n" + extra
     return [
         {"role": "system", "content": PLANNER_SYSTEM},
-        {"role": "user", "content": question.strip()},
+        {"role": "user", "content": user_text},
     ]
 
 
 def build_researcher_messages(question: str, plan: str,
                               prior_rounds: list[str],
-                              grounding_msgs: list[dict]) -> list[dict]:
+                              grounding_msgs: list[dict],
+                              *,
+                              additional_context=None,
+                              peer_findings: Optional[str] = None) -> list[dict]:
     """Researcher's conversation seed.
 
     Grounding (anchor files + structure map + addendum) goes first, so
     it sits at the start of context regardless of multi-round growth.
+
+    ``additional_context`` (v2 channel, see ``build_planner_messages``)
+    appends a final block to the user message so injected docs are
+    surfaced on each researcher round entry — covers both the
+    fanout-lane case (Send-injected) and the multi-round re-entry
+    case (critic asked for more research).
+
+    ``peer_findings`` (M8) is the rendered block from
+    :func:`consultants.engine.store.format_findings_block`, surfaced
+    just before ``additional_context`` so the researcher sees what
+    sibling lanes / prior rounds already discovered before formulating
+    its own report. Empty / None -> no block emitted (zero-cost path
+    when the store is disabled).
     """
     msgs: list[dict] = list(grounding_msgs)
     msgs.append({"role": "system", "content": RESEARCHER_SYSTEM})
@@ -311,18 +490,28 @@ def build_researcher_messages(question: str, plan: str,
             "in the next round; do not repeat findings already "
             "covered above."
         )
+    if peer_findings and peer_findings.strip():
+        user_parts.append("\n" + peer_findings.rstrip())
+    extra = _additional_context_block(additional_context)
+    if extra:
+        user_parts.append("\n" + extra)
     msgs.append({"role": "user", "content": "\n".join(user_parts)})
     return msgs
 
 
 def build_critic_messages(question: str, plan: str,
-                          research_rounds: list[str]) -> list[dict]:
+                          research_rounds: list[str],
+                          *,
+                          additional_context=None) -> list[dict]:
     parts = [
         f"USER QUESTION:\n{question.strip()}",
         f"\nPLANNER'S PLAN:\n{plan.strip()}",
     ]
     for i, r in enumerate(research_rounds, start=1):
         parts.append(f"\nRESEARCHER REPORT (round {i}):\n{r.strip()}")
+    extra = _additional_context_block(additional_context)
+    if extra:
+        parts.append("\n" + extra)
     return [
         {"role": "system", "content": CRITIC_SYSTEM},
         {"role": "user", "content": "\n".join(parts)},
@@ -332,7 +521,9 @@ def build_critic_messages(question: str, plan: str,
 def build_synthesizer_messages(question: str, plan: str,
                                research_rounds: list[str],
                                critique: Optional[str],
-                               *, self_critic: bool = False) -> list[dict]:
+                               *, self_critic: bool = False,
+                               additional_context=None,
+                               coder_artifacts: Optional[list] = None) -> list[dict]:
     parts = [
         f"USER QUESTION:\n{question.strip()}",
         f"\nPLANNER'S PLAN:\n{plan.strip()}",
@@ -341,6 +532,21 @@ def build_synthesizer_messages(question: str, plan: str,
         parts.append(f"\nRESEARCHER REPORT (round {i}):\n{r.strip()}")
     if critique:
         parts.append(f"\nCRITIC'S VERDICT:\n{critique.strip()}")
+    # M10: surface coder lane outputs (when present) so the
+    # synthesizer can reference the files it wrote in the final
+    # answer. Falsy / empty list -> block omitted entirely so the
+    # v1 prompt shape is byte-identical when the channel is unused.
+    if coder_artifacts:
+        try:
+            from consultants.engine.coder import build_coder_artifacts_block
+            block = build_coder_artifacts_block(coder_artifacts)
+            if block:
+                parts.append("\n" + block)
+        except ImportError:  # pragma: no cover — coder ships in-tree
+            pass
+    extra = _additional_context_block(additional_context)
+    if extra:
+        parts.append("\n" + extra)
     parts.append(
         "\nNow write the final answer for the user. Direct, concrete, "
         "cite `path:line` for any code-dependent claim."
@@ -453,25 +659,51 @@ ROUTE_RESEARCHER = "researcher"
 def route_after_critic(state: dict) -> str:
     """Decide whether to loop back to researcher or fall through to
     synthesizer. Pure function of the state — LangGraph's conditional
-    edge calls this."""
+    edge calls this.
+
+    v2 (2026-05-16): reads ``runtime_control.max_rounds`` and
+    ``max_reroutes`` when present, falling back to the v1 effort
+    caps when absent. This makes a mid-flight ``graph.update_state(
+    {"runtime_control": {"max_rounds": 5}})`` immediately tighten or
+    loosen the loop ceiling. Also short-circuits to synthesizer if
+    the runtime deadline has passed — the synthesizer composes from
+    whatever evidence is ready rather than burning more time.
+    """
     decision = state.get("critic_decision") or "ready"
     if decision == "ready":
         return ROUTE_SYNTHESIZER
+    # Lazy import — keeps council.py importable without state_v2's
+    # deps if a caller has a stripped-down env. control imports only
+    # config + stdlib.
+    from consultants.engine.control import (
+        runtime_max_rounds, runtime_max_reroutes, runtime_deadline_passed,
+    )
     rounds_used = int(state.get("research_rounds_used") or 1)
     reroutes_used = int(state.get("critic_reroutes_used") or 0)
     effort = str(state.get("effort") or "medium")
     caps = caps_for(effort)
-    if reroutes_used >= caps.critic_reroutes_max:
+    if runtime_deadline_passed(state):
         log.info(
-            "route_after_critic: reroute cap hit (%d >= %d); -> synthesizer",
-            reroutes_used, caps.critic_reroutes_max,
+            "route_after_critic: runtime deadline passed; -> synthesizer",
         )
         return ROUTE_SYNTHESIZER
-    if rounds_used >= caps.researcher_rounds_max:
+    max_reroutes = runtime_max_reroutes(
+        state, fallback=caps.critic_reroutes_max,
+    )
+    max_rounds = runtime_max_rounds(
+        state, fallback=caps.researcher_rounds_max,
+    )
+    if reroutes_used >= max_reroutes:
+        log.info(
+            "route_after_critic: reroute cap hit (%d >= %d); -> synthesizer",
+            reroutes_used, max_reroutes,
+        )
+        return ROUTE_SYNTHESIZER
+    if rounds_used >= max_rounds:
         log.info(
             "route_after_critic: researcher round cap hit (%d >= %d); "
             "-> synthesizer",
-            rounds_used, caps.researcher_rounds_max,
+            rounds_used, max_rounds,
         )
         return ROUTE_SYNTHESIZER
     return ROUTE_RESEARCHER
@@ -648,14 +880,44 @@ def _compose_degraded_answer(state: dict, *, error: str) -> str:
 # can plug these in directly.
 
 def planner_node(state: dict, *, chat_client, model: str,
-                 think: Any = True, recorder=None) -> dict:
+                 think: Any = True, recorder=None,
+                 coder_enabled: bool = False) -> dict:
     t0 = time.monotonic()
+    _emit_started("planner", round=1, model=model)
     if recorder is not None:
         try:
             recorder.record_node(role="planner", kind="node_enter")
         except Exception:  # pragma: no cover
             log.exception("recorder.record_node raised; ignored")
-    msgs = build_planner_messages(state["question"])
+    # M5: surface injected ``additional_context`` docs targeted at the
+    # planner. Returns [] if no v2 channel on state or no matching
+    # docs; the builder appends a final block to the user message
+    # only when non-empty so v1 prompt shape is byte-identical when
+    # the channel is absent.
+    extra_ctx_planner = _additional_context_for(state, "planner")
+    msgs = build_planner_messages(
+        state["question"], additional_context=extra_ctx_planner,
+    )
+    # M10: when the coder role is enabled, append the PLANNER_CODER_GATE_BLOCK
+    # to the planner's system message so the model knows it can
+    # opt into code-generation tasks. The block is intentionally
+    # surgical (single fenced JSON appendix) so a planner that
+    # decides code isn't needed emits exactly the v1 plan shape.
+    if coder_enabled:
+        try:
+            from consultants.engine.coder import PLANNER_CODER_GATE_BLOCK
+        except ImportError:  # pragma: no cover — coder ships in-tree
+            PLANNER_CODER_GATE_BLOCK = ""
+        if PLANNER_CODER_GATE_BLOCK:
+            # The first message is the system message; append, don't
+            # replace, so the v1 planner instructions still anchor
+            # the conversation.
+            sys_msg = msgs[0]
+            msgs[0] = {
+                "role": sys_msg.get("role", "system"),
+                "content": (sys_msg.get("content") or "")
+                            + PLANNER_CODER_GATE_BLOCK,
+            }
     try:
         plan, pt, ct = _single_shot(
             chat_client, model, msgs, think=think,
@@ -663,6 +925,11 @@ def planner_node(state: dict, *, chat_client, model: str,
         )
     except Exception as e:
         log.exception("planner_node failed: %s", e)
+        _emit_finished(
+            "planner", round=1,
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            ok=False, error=f"{type(e).__name__}: {e}",
+        )
         # Tombstone return: keep the graph progressing with a
         # visible failure marker. ``plan`` is non-additive so the
         # err_text replaces the empty initial value, which the
@@ -696,6 +963,45 @@ def planner_node(state: dict, *, chat_client, model: str,
             )
         except Exception:  # pragma: no cover
             log.exception("recorder.record_node raised; ignored")
+    _emit_finished("planner", round=1,
+                    duration_ms=int(dt * 1000), ok=True)
+    # M10: when the coder gate was offered, parse the planner's
+    # opt-in declaration. Three outcomes:
+    # - explicit ``true`` + non-empty tasks -> graph fans out to coder
+    # - explicit ``false`` or missing tasks -> bypass coder cleanly
+    # - parse failure on a malformed block -> bypass + log (the
+    #   planner output stays usable for the rest of the graph)
+    coder_delta: dict = {}
+    if coder_enabled:
+        try:
+            from consultants.engine.coder import (
+                parse_coder_preamble, parse_coder_tasks,
+            )
+            wants_code = parse_coder_preamble(plan)
+            if wants_code:
+                tasks = parse_coder_tasks(plan, parent_round=1)
+                if tasks:
+                    coder_delta = {
+                        "requires_code_generation": True,
+                        "coder_tasks": tasks,
+                    }
+                else:
+                    # Asserted code generation but emitted no tasks —
+                    # the planner is confused; treat as a non-coder
+                    # plan so the graph stays predictable.
+                    log.info(
+                        "planner asserted requires_code_generation=true "
+                        "but emitted no coder_tasks; treating as no-op",
+                    )
+                    coder_delta = {"requires_code_generation": False}
+            elif wants_code is False:
+                coder_delta = {"requires_code_generation": False}
+            # wants_code is None -> emit nothing; downstream readers
+            # default to no-coder behavior on missing channel.
+        except Exception:  # pragma: no cover — defensive
+            log.exception(
+                "planner coder-gate parse raised; skipping coder route",
+            )
     # Delta-only return — additive reducers in CouncilState merge
     # ``turns``, ``total_*_tokens``, ``research_rounds_used`` across
     # parallel fan-out lanes.
@@ -705,6 +1011,7 @@ def planner_node(state: dict, *, chat_client, model: str,
         "turns": [turn],
         "total_prompt_tokens": pt,
         "total_completion_tokens": ct,
+        **coder_delta,
     }
 
 
@@ -718,13 +1025,34 @@ def researcher_node(state: dict, *,
                     think: Any = True,
                     loop_runner=None,
                     recorder=None,
-                    prior_messages: Optional[list[dict]] = None) -> dict:
+                    prior_messages: Optional[list[dict]] = None,
+                    tool_executor_enabled: bool = False,
+                    store: Any = None,
+                    sid: Optional[str] = None) -> dict:
     """Researcher uses agent_loop.runner.run_loop for a tool sub-loop.
 
     ``loop_runner`` defaults to ``claude_hooks.agent_loop.runner.run_loop``
     but is injectable for tests. We import lazily to keep the module
     importable in environments where claude_hooks isn't on the path
     (although in practice it always is — this is just defensive).
+
+    M6: when ``tool_executor_enabled`` is True (set by the graph
+    wrapper when the tool_executor role is in deps.enabled_roles),
+    the researcher operates in a two-phase mode:
+
+    - **PLAN mode** (first entry of a research cycle): emit a
+      JSON ``tool_plan`` block instead of running tools inline.
+      Returns ``{"tool_plan": [items], "awaiting_tool_results":
+      True}``; the graph fans the items out to tool_executor
+      Send lanes.
+    - **REPORT mode** (re-entry after lanes complete): consume
+      ``state.tool_results`` filtered to the current round, weave
+      them into the standard research report, clear the awaiting
+      flag. No inline tool loop in either mode — the executor
+      lanes are the only tool callers.
+
+    ``tool_executor_enabled=False`` (default) preserves v1
+    behavior bit-for-bit: full inline agent_loop subloop.
     """
     if loop_runner is None:
         from claude_hooks.agent_loop.runner import run_loop  # lazy
@@ -736,10 +1064,88 @@ def researcher_node(state: dict, *,
     except Exception:  # pragma: no cover — only if claude_hooks missing
         LoopConfig = None  # type: ignore[assignment]
 
+    # Single timestamp covers both the M6 PLAN/REPORT branch and
+    # the v1 inline-agent-loop branch — each branch's exit emits
+    # its own duration delta from this anchor.
+    t0 = time.monotonic()
     rounds_used = int(state.get("research_rounds_used") or 0)
     this_round = rounds_used + 1
     prior_rounds: list[str] = list(state.get("research") or [])
     lane_idx = state.get("lane_idx")
+
+    # M8: closure that writes a successful research report to the
+    # shared store. Captures store + sid + lane + plan_item so each
+    # of the three "successful report" return sites (v1 inline,
+    # M6 REPORT, M6 PLAN-mode fallback) calls the same single
+    # function. No-op when store is None / sid missing / text empty.
+    def _record_finding_to_store(report_text: str) -> None:
+        if store is None or not sid:
+            return
+        try:
+            from consultants.engine.store import record_research
+            record_research(
+                store, sid,
+                lane_idx=lane_idx,
+                plan_item=state.get("plan_item"),
+                finding=report_text,
+            )
+        except Exception:  # pragma: no cover — defensive
+            log.exception(
+                "record_research raised in researcher lane "
+                "%s; lane continues",
+                lane_idx,
+            )
+
+    # 2026-05-18 (#204): citation lint on researcher REPORT output.
+    # The 2026-05-18 csl-2026-05-18-1031-9e3b forensic proved the
+    # worst-case fabrication (an entirely fake filename
+    # ``consultants/engine/store_sql.py``) originated in a researcher
+    # lane (glm-5.1:cloud, lane 5) with ZERO tool calls — pure
+    # hallucination. The bad cite then flowed unchallenged through
+    # peer_findings into the critic and synthesizer. The synthesizer-
+    # side linter (shipped in commit ``159d353``) caught it at the
+    # end, but the cite still contaminated every intermediate step.
+    #
+    # Wiring the linter at the researcher boundary fixes that: the
+    # annotated form (``store_sql.py [unverified — file not found]``)
+    # is what flows into peer_findings, the critic, and the
+    # synthesizer's input — so every downstream role sees the verdict
+    # alongside the claim instead of being silently misinformed. The
+    # synthesizer-side lint stays as belt-and-suspenders for cites
+    # the synthesizer itself introduces or transforms.
+    def _lint_research_text(text_in: str) -> str:
+        if not isinstance(text_in, str) or not text_in.strip():
+            return text_in
+        try:
+            from consultants.engine.citation_linter import lint_answer
+            roots: list[str] = []
+            if isinstance(cwd, str) and cwd:
+                roots.append(cwd)
+            for r in (state.get("extra_roots") or ()):
+                if isinstance(r, str) and r:
+                    roots.append(r)
+            if not roots:
+                return text_in
+            linted_text, issues = lint_answer(
+                text_in, allowed_roots=roots,
+            )
+            if issues:
+                log.info(
+                    "researcher citation lint sid=%s lane=%s round=%s: "
+                    "%d fabrication(s) annotated; %s",
+                    sid, lane_idx, this_round, len(issues),
+                    "; ".join(
+                        f"{i.original_match} ({i.reason})"
+                        for i in issues
+                    ),
+                )
+            return linted_text
+        except Exception:  # pragma: no cover — defensive
+            log.exception(
+                "citation_linter raised in researcher lane %s; "
+                "using unlinted text", lane_idx,
+            )
+            return text_in
     # Phase 9: per-lane multi-model fan-out. The dispatcher sets
     # ``state["model_override"]`` on each Send so different lanes
     # talk to different Ollama models. Falls back to the role's
@@ -748,6 +1154,8 @@ def researcher_node(state: dict, *,
     model_override = state.get("model_override")
     if isinstance(model_override, str) and model_override.strip():
         model = model_override.strip()
+    _emit_started("researcher", round=this_round,
+                   lane_idx=lane_idx, model=model)
     if recorder is not None:
         try:
             recorder.record_node(
@@ -789,7 +1197,46 @@ def researcher_node(state: dict, *,
         # (no plan_item) — used for critic re-routes and unfanned
         # topologies — uses the full plan + prior research rounds
         # for context.
+        # M5: surface injected docs targeted at the researcher. Same
+        # filter logic for both lane-focused and full-plan paths — a
+        # mid-flight inject should reach every researcher lane the
+        # next time it enters.
+        extra_ctx_res = _additional_context_for(state, "researcher")
         plan_item = state.get("plan_item")
+        # M8: shared-store recall — ask the store for findings that
+        # other lanes (this session) or prior consultations (when
+        # cross-session namespaces are wired) already produced for
+        # this plan item. Cheap protection against duplicate work,
+        # no-op when store is disabled. Query prefers the focused
+        # plan_item (high signal) and falls back to the full plan
+        # for the single-researcher path. Recall failures are
+        # swallowed inside the helper — they never break the lane.
+        peer_findings_block = None
+        if store is not None and sid:
+            from consultants.engine.store import (
+                format_findings_block,
+                recall_research,
+            )
+            recall_query = (
+                plan_item
+                if plan_item
+                else (state.get("plan") or state.get("question") or "")
+            )
+            hits = recall_research(
+                store, sid, recall_query, limit=5,
+            )
+            # Optional dedup: don't surface this lane's own prior
+            # findings (they're already in ``prior_rounds`` above).
+            my_lane = state.get("lane_idx")
+            if my_lane is not None:
+                hits = [
+                    h for h in hits
+                    if (getattr(h, "value", None) or {}).get(
+                        "lane_idx") != my_lane
+                ]
+            peer_findings_block = (
+                format_findings_block(hits) if hits else None
+            )
         if plan_item:
             focused_plan = (
                 f"Sub-research lane {state.get('lane_idx', 0) + 1}: "
@@ -797,11 +1244,259 @@ def researcher_node(state: dict, *,
             )
             msgs = build_researcher_messages(
                 state["question"], focused_plan, [], grounding_msgs,
+                additional_context=extra_ctx_res,
+                peer_findings=peer_findings_block,
             )
         else:
             msgs = build_researcher_messages(
-                state["question"], state["plan"], prior_rounds, grounding_msgs,
+                state["question"], state["plan"], prior_rounds,
+                grounding_msgs,
+                additional_context=extra_ctx_res,
+                peer_findings=peer_findings_block,
             )
+    # ---------- M6: tool_executor branch ----------------------- #
+    # When the tool_executor role is in the enabled set, the
+    # researcher does NOT run an inline tool subloop. Instead it
+    # alternates between two single-shot LLM calls:
+    #
+    #   PLAN MODE  — first entry of this research cycle.
+    #     Append the PLAN_MODE_BLOCK to the user message, call
+    #     chat once (no agent_loop, no tools_available), parse
+    #     the JSON ``tool_plan`` from the response, return
+    #     ``{"tool_plan": [items]}`` with each item stamped with
+    #     this lane's ``parent_lane_idx`` (#103). The graph fans
+    #     out one tool_executor Send per item.
+    #
+    #   REPORT MODE — re-entry after lanes complete.
+    #     Append the PRIOR TOOL RESULTS block (rendered from
+    #     ``tool_results_for_round(state, this_round,
+    #     parent_lane_idx=lane_idx)``) to the user message, call
+    #     chat once, return the v1 shape ``{"research": [text],
+    #     "research_rounds_used": 1}``.
+    #
+    # The mode is decided by whether tool_results exist for
+    # ``(this_round, parent_lane_idx=lane_idx)``: if any do, the
+    # lanes already ran for this round and this researcher lane
+    # and we're consuming their output (REPORT); otherwise we're
+    # emitting the plan (PLAN). The graph re-enters each lane in
+    # REPORT mode via the post-tool_executor fanback conditional
+    # edge (#103); LangGraph's state-merge ensures the new
+    # tool_results are visible here.
+    #
+    # #103 dropped the M6-era ``awaiting_tool_results: bool``
+    # scalar flag from the state schema — under x-tier multi-
+    # model researcher fanout, last-writer-wins on a scalar
+    # produced ambiguous routing. The router now derives the
+    # dispatch decision from ``tool_plan`` vs ``tool_results``
+    # directly (see ``_route_after_researcher`` in ``graph.py``).
+    if tool_executor_enabled:
+        from consultants.engine.state_v2 import (
+            tool_results_for_round,
+        )
+        from consultants.engine.tool_executor import (
+            RESEARCHER_PLAN_MODE_BLOCK,
+            build_tool_plan_user_appendix,
+            parse_tool_plan,
+        )
+
+        # #103 proper composition: pass this lane's identity as
+        # ``parent_lane_idx`` so REPORT mode reads only the
+        # ToolResults the dispatcher emitted for our own plan.
+        # ``lane_idx=None`` (single-researcher non-fanout path)
+        # is forwarded as-is — the helper's None branch returns
+        # all matching-round results, preserving the M6 contract.
+        prior_for_round = tool_results_for_round(
+            state, this_round, parent_lane_idx=lane_idx,
+        )
+        report_mode = bool(prior_for_round)
+        # M14 follow-up (2026-05-18): rebuild ``msgs`` without
+        # ``peer_findings`` in REPORT mode. When the M8 store is
+        # default-on (M14), sibling lanes' findings get recalled
+        # into ``peer_findings_block`` and surfaced as a "## Peer
+        # findings (recalled from earlier lanes)" block in the
+        # researcher's user message. In PLAN mode this is helpful
+        # (lets the lane dedup against what other lanes already
+        # tackled). But in REPORT mode it competes with the PRIOR
+        # TOOL RESULTS appendix below — the appendix carries no
+        # explicit "write a report now" instruction (see
+        # ``build_tool_plan_user_appendix``), so the model is left
+        # inferring. With peer findings present, gemini-3-flash-
+        # preview re-emits another ``tool_plan`` JSON ("let me
+        # verify what the peers found") instead of synthesizing
+        # the tool results into a report. The M13 smoke worked
+        # because the store was disabled and peer_findings was
+        # always None. The 2026-05-18 first real M14 consult
+        # (csl-2026-05-18-0937-4f4f, 737 s, refusal answer)
+        # caught this regression.
+        if report_mode:
+            extra_ctx_res_local = _additional_context_for(
+                state, "researcher",
+            )
+            if plan_item:
+                focused_plan_local = (
+                    f"Sub-research lane "
+                    f"{state.get('lane_idx', 0) + 1}: "
+                    f"{plan_item}"
+                )
+                msgs = build_researcher_messages(
+                    state["question"], focused_plan_local, [],
+                    grounding_msgs,
+                    additional_context=extra_ctx_res_local,
+                    peer_findings=None,
+                )
+            else:
+                msgs = build_researcher_messages(
+                    state["question"], state["plan"], prior_rounds,
+                    grounding_msgs,
+                    additional_context=extra_ctx_res_local,
+                    peer_findings=None,
+                )
+        # Append the mode-specific appendix to the user message.
+        # Both append to msgs[-1] (the v1 user message) so the
+        # researcher's existing context (plan, prior rounds,
+        # additional_context) stays intact.
+        appendix = (
+            build_tool_plan_user_appendix(prior_for_round)
+            if report_mode else RESEARCHER_PLAN_MODE_BLOCK
+        )
+        msgs = list(msgs)
+        msgs[-1] = dict(msgs[-1])
+        msgs[-1]["content"] = msgs[-1]["content"] + (
+            "\n\n" + appendix if appendix and report_mode else appendix
+        )
+
+        try:
+            text, pt, ct = _single_shot(
+                chat_client, model, msgs, think=think,
+                recorder=recorder, role="researcher",
+                round=this_round, lane_idx=lane_idx,
+            )
+        except Exception as e:
+            log.exception("researcher_node (M6 mode) failed: %s", e)
+            dt_ms = int((time.monotonic() - t0) * 1000)
+            _emit_finished(
+                "researcher", round=this_round, lane_idx=lane_idx,
+                duration_ms=dt_ms, ok=False,
+                error=f"{type(e).__name__}: {e}",
+            )
+            tomb_text = f"(researcher lane failed: {e})"
+            # #103: the legacy ``awaiting_tool_results=False`` key
+            # is dropped — the router now derives the dispatch
+            # decision from tool_plan vs tool_results directly,
+            # making the scalar flag redundant.
+            return {
+                "error": f"researcher failed: {e}",
+                "_role_failed": "researcher",
+                "research": [tomb_text] if not report_mode else [],
+                "turns": [RoleTurn(
+                    role="researcher", round=this_round,
+                    content=tomb_text,
+                    prompt_tokens=0, completion_tokens=0,
+                    duration_seconds=0.0,
+                )],
+            }
+        dt = time.monotonic() - t0
+        if report_mode:
+            # Tools already ran — write the report as the v1 shape.
+            # The turn record keeps the RAW model output so the
+            # transcript stays a faithful "what the model said"
+            # forensic — citation annotation flows only into the
+            # downstream-visible ``research`` field below (see #204
+            # docstring above).
+            turn = RoleTurn(
+                role="researcher", round=this_round, content=text,
+                prompt_tokens=pt, completion_tokens=ct,
+                duration_seconds=dt,
+            )
+            if recorder is not None:
+                try:
+                    recorder.record_node(
+                        role="researcher", kind="node_exit",
+                        round=this_round, lane_idx=lane_idx,
+                        duration_ms=int(dt * 1000),
+                    )
+                except Exception:  # pragma: no cover
+                    log.exception("recorder.record_node raised")
+            _emit_finished(
+                "researcher", round=this_round, lane_idx=lane_idx,
+                duration_ms=int(dt * 1000), ok=True,
+            )
+            # #204: annotate fabricated cites before they flow to
+            # peer_findings + the store + the synthesizer's input.
+            linted_text = _lint_research_text(text)
+            _record_finding_to_store(linted_text)
+            return {
+                "research": [linted_text],
+                "research_rounds_used": 1,
+                "turns": [turn],
+                "total_prompt_tokens": pt,
+                "total_completion_tokens": ct,
+            }
+        # PLAN MODE — parse the tool_plan JSON. An empty parse
+        # is a soft failure: the dispatcher's conditional edge
+        # falls through to the standard continuation rather than
+        # looping forever on an empty Send list.
+        # #103: stamp each emitted item with this researcher
+        # lane's identity so tool_executor → researcher fanback
+        # can route ToolResults back to the originating lane.
+        items = parse_tool_plan(
+            text,
+            parent_round=this_round,
+            parent_lane_idx=lane_idx,
+        )
+        turn = RoleTurn(
+            role="researcher", round=this_round, content=text,
+            prompt_tokens=pt, completion_tokens=ct,
+            duration_seconds=dt,
+        )
+        if recorder is not None:
+            try:
+                recorder.record_node(
+                    role="researcher", kind="node_exit",
+                    round=this_round, lane_idx=lane_idx,
+                    duration_ms=int(dt * 1000),
+                )
+            except Exception:  # pragma: no cover
+                log.exception("recorder.record_node raised")
+        _emit_finished(
+            "researcher", round=this_round, lane_idx=lane_idx,
+            duration_ms=int(dt * 1000), ok=True,
+        )
+        if not items:
+            # Empty plan — degrade to the v1 inline-report shape:
+            # treat the raw researcher text as the research report
+            # so the council still produces an answer. The graph's
+            # router falls through automatically because no plan
+            # items survive the "current-round + unconsumed" filter
+            # (#103 drops the scalar awaiting_tool_results flag in
+            # favour of deriving the dispatch decision from
+            # tool_plan vs tool_results directly).
+            log.warning(
+                "researcher M6 PLAN-mode returned empty/unparseable "
+                "tool_plan; falling back to inline research from raw text"
+            )
+            # #204: same downstream-annotation pattern as REPORT mode.
+            linted_text = _lint_research_text(text)
+            _record_finding_to_store(linted_text)
+            return {
+                "research": [linted_text],
+                "research_rounds_used": 1,
+                "turns": [turn],
+                "total_prompt_tokens": pt,
+                "total_completion_tokens": ct,
+            }
+        # #103: ``awaiting_tool_results`` is no longer written —
+        # the router infers PLAN-mode-just-completed from the
+        # presence of current-round tool_plan items that lack
+        # matching tool_results.
+        return {
+            "tool_plan": items,
+            "turns": [turn],
+            "total_prompt_tokens": pt,
+            "total_completion_tokens": ct,
+        }
+    # ---------- end M6 branch ------------------------------------ #
+
     caps = caps_for(state.get("effort") or "medium")
 
     payload = {
@@ -845,6 +1540,64 @@ def researcher_node(state: dict, *,
         on_iter_cb = _on_iter
         on_tool_cb = _on_tool
 
+    # M3 (v2): when state["runtime_control"] is wired through, route
+    # each iteration's chat call through a stall monitor. The
+    # researcher is the first role to consume this — the cloud
+    # gemini-3-flash stall pathology in csl-2026-05-15-1439-4ff0
+    # showed up on a researcher lane. Critic / synthesizer can
+    # follow in a later milestone if their failure mode shows up
+    # in the wild.
+    #
+    # When runtime_control isn't on state (v1 legacy path), we pass
+    # ``chat_client.chat`` unwrapped — preserves v1 behavior bit-for-bit.
+    chat_fn = chat_client.chat
+    rc = state.get("runtime_control") or {}
+    if rc and hasattr(chat_client, "chat_streamed"):
+        try:
+            # Lazy import — keeps council.py importable in envs
+            # where the consultants package partial-installs (the
+            # main claude-hooks test env runs without langgraph,
+            # but stall_chat is pure-Python and imports cleanly).
+            from consultants.engine.stall_chat import (
+                stall_protected_chat_fn_for,
+            )
+            stall_event_sink = None
+            if recorder is not None and hasattr(
+                    recorder, "record_event"):
+                def stall_event_sink(  # noqa: E306
+                        ev: dict, _round=this_round,
+                        _lane=lane_idx) -> None:
+                    try:
+                        recorder.record_event(
+                            kind=ev.get("kind") or "stall.event",
+                            role="researcher", round=_round,
+                            lane_idx=_lane, payload=ev,
+                        )
+                    except Exception:  # pragma: no cover
+                        log.exception(
+                            "recorder.record_event raised; ignored")
+            chat_fn = stall_protected_chat_fn_for(
+                chat_client,
+                stall_threshold_s=float(
+                    rc.get("stall_threshold_s") or 300.0),
+                hard_cap_s=float(
+                    rc.get("per_lane_hard_s") or 3600.0),
+                retries=int(rc.get("stall_retries") or 1),
+                on_event=stall_event_sink,
+            )
+        except Exception:  # pragma: no cover
+            # Never break the researcher because of stall-wrapper
+            # plumbing — fall back to the unwrapped chat fn.
+            log.exception(
+                "researcher: stall_protected_chat_fn_for failed; "
+                "falling back to chat_client.chat unwrapped"
+            )
+            chat_fn = chat_client.chat
+
+    # Re-anchor t0 just before the inline agent_loop so its duration
+    # is measured from when the loop actually starts (not from the
+    # node entry — M6 branch hoists the anchor earlier for its own
+    # exit paths, so legacy timing semantics stay intact here).
     t0 = time.monotonic()
     try:
         # Tests pass a stub loop_runner; inspect its signature so we
@@ -853,7 +1606,7 @@ def researcher_node(state: dict, *,
         loop_kwargs = dict(
             config=cfg,
             tool_specs=tool_specs,
-            chat_fn=chat_client.chat,
+            chat_fn=chat_fn,
             tool_executor=tool_executor,
         )
         if on_iter_cb is not None or on_tool_cb is not None:
@@ -869,6 +1622,11 @@ def researcher_node(state: dict, *,
         final = loop_runner(payload, cwd, **loop_kwargs)
     except Exception as e:
         log.exception("researcher_node failed: %s", e)
+        _emit_finished(
+            "researcher", round=this_round, lane_idx=lane_idx,
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            ok=False, error=f"{type(e).__name__}: {e}",
+        )
         # Tombstone return so the additive reducers record the
         # failure visibly. Without this, a crashed lane silently
         # contributes nothing — the synthesizer never sees the gap
@@ -992,8 +1750,14 @@ def researcher_node(state: dict, *,
             )
         except Exception:  # pragma: no cover
             log.exception("recorder.record_node raised; ignored")
+    _emit_finished("researcher", round=this_round, lane_idx=lane_idx,
+                    duration_ms=int(dt * 1000), ok=True)
+    # #204: v1 inline-loop researcher exit — same lint pattern as the
+    # M6 REPORT and PLAN-empty branches.
+    linted_text = _lint_research_text(text)
+    _record_finding_to_store(linted_text)
     return {
-        "research": [text],
+        "research": [linted_text],
         "research_rounds_used": 1,
         "turns": [turn],
         "total_prompt_tokens": pt,
@@ -1012,6 +1776,8 @@ def critic_node(state: dict, *, chat_client, model: str,
     if isinstance(model_override, str) and model_override.strip():
         model = model_override.strip()
     lane_idx = state.get("lane_idx")
+    _emit_started("critic", round=max(rounds_used_pre, 1),
+                   lane_idx=lane_idx, model=model)
     if recorder is not None:
         try:
             recorder.record_node(
@@ -1020,8 +1786,13 @@ def critic_node(state: dict, *, chat_client, model: str,
             )
         except Exception:  # pragma: no cover
             log.exception("recorder.record_node raised; ignored")
+    # M5: surface docs targeted at the critic (rare in practice;
+    # mostly "any" docs naming a quality bar like "must cite path:line
+    # for every claim"). Same defensive helper as the other roles.
+    extra_ctx_critic = _additional_context_for(state, "critic")
     msgs = build_critic_messages(
         state["question"], state["plan"], state.get("research") or [],
+        additional_context=extra_ctx_critic,
     )
     t0 = time.monotonic()
     try:
@@ -1033,6 +1804,11 @@ def critic_node(state: dict, *, chat_client, model: str,
         )
     except Exception as e:
         log.exception("critic_node failed: %s", e)
+        _emit_finished(
+            "critic", round=max(rounds_used_pre, 1), lane_idx=lane_idx,
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            ok=False, error=f"{type(e).__name__}: {e}",
+        )
         # On critic failure default to "ready" so the council still
         # produces an answer rather than stalling forever. Tombstone
         # the critique so the synthesizer sees the failure note and
@@ -1084,6 +1860,9 @@ def critic_node(state: dict, *, chat_client, model: str,
     #    blowing the re-route cap C× faster than intended. Meta-
     #    critic owns the single increment based on ITS final
     #    decision.
+    _emit_finished("critic", round=max(rounds_used, 1),
+                    lane_idx=lane_idx,
+                    duration_ms=int(dt * 1000), ok=True)
     if lane_idx is not None:
         return {
             "turns": [turn],
@@ -1120,6 +1899,7 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
     rounds_used = int(state.get("research_rounds_used") or 0)
     this_round = max(rounds_used, 1)
 
+    _emit_started("meta_critic", round=this_round, model=model)
     if recorder is not None:
         try:
             recorder.record_node(
@@ -1154,6 +1934,11 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
         )
     except Exception as e:
         log.exception("meta_critic_node failed: %s", e)
+        _emit_finished(
+            "meta_critic", round=this_round,
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            ok=False, error=f"{type(e).__name__}: {e}",
+        )
         # Failure mode: keep the council moving by defaulting to
         # ready and surfacing the error in critique. The C critics'
         # raw turns are still on the transcript so an audit can see
@@ -1194,6 +1979,8 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
             )
         except Exception:  # pragma: no cover
             log.exception("recorder.record_node raised; ignored")
+    _emit_finished("meta_critic", round=this_round,
+                    duration_ms=int(dt * 1000), ok=True)
     return {
         # Synthesizer reads ``critique`` + ``critic_decision``. In
         # multi-critic mode the C parallel critics deliberately don't
@@ -1213,6 +2000,7 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                      recorder=None,
                      prior_messages: Optional[list[dict]] = None,
                      fallback_models: Optional[list[str]] = None) -> dict:
+    _emit_started("synthesizer", round=1, model=model)
     if recorder is not None:
         try:
             recorder.record_node(role="synthesizer", kind="node_enter")
@@ -1255,11 +2043,22 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
             "role": "user", "content": "\n".join(user_parts),
         }]
     else:
+        # M5: surface injected docs targeted at the synthesizer or
+        # "any". The synthesizer is the place a user-injected
+        # constraint ("call out GDPR risk", "lead with the bottom
+        # line") most often needs to land — it shapes the final
+        # answer the user sees.
+        extra_ctx_syn = _additional_context_for(state, "synthesizer")
         msgs = build_synthesizer_messages(
             state["question"], state.get("plan", ""),
             state.get("research") or [],
             state.get("critique"),
             self_critic=self_critic,
+            additional_context=extra_ctx_syn,
+            # M10: surface coder lane outputs when the coder role
+            # contributed to this consultation. The block is omitted
+            # when the channel is empty / absent.
+            coder_artifacts=state.get("coder_artifacts") or [],
         )
     # 2026-05-07: serial fallback chain. The synthesizer always tries
     # ``model`` first (with its own ChatClient retry budget — ~15 min
@@ -1305,6 +2104,13 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                 model, list(fallback_models or []), e,
             )
     if text is None:
+        _emit_finished(
+            "synthesizer", round=1,
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            ok=False,
+            error=f"{type(last_exc).__name__}: {last_exc}" if last_exc
+                  else "synthesizer failed",
+        )
         # Synthesizer failure is terminal — propagate as an error
         # but try to surface the researcher + critic work that DID
         # complete as a "degraded answer" so the user gets the raw
@@ -1322,6 +2128,42 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
             )],
         }
     dt = time.monotonic() - t0
+    # 2026-05-18: post-synthesis citation lint. The 2026-05-18 first
+    # M14 consult caught two fabrication classes in the synthesizer's
+    # output — an entirely fake filename relayed forward from a
+    # researcher hallucination, plus several wrong-line cites within
+    # real files. The linter scans path:line patterns against the
+    # session's allowed_roots, annotates fabrications inline as
+    # ``path:line [unverified — …]``. Symbol-semantic verification
+    # (right function at right line) is out of scope — needs an AST
+    # pass; that's a follow-up if the inline annotation isn't enough.
+    # The linter is non-blocking: a clean answer survives unchanged.
+    try:
+        from consultants.engine.citation_linter import lint_answer
+        roots: list[str] = []
+        cwd = state.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            roots.append(cwd)
+        for r in (state.get("extra_roots") or ()):
+            if isinstance(r, str) and r:
+                roots.append(r)
+        if roots:
+            linted_text, issues = lint_answer(text, allowed_roots=roots)
+            if issues:
+                log.info(
+                    "synthesizer citation lint: %d fabrication(s) "
+                    "annotated; %s",
+                    len(issues),
+                    "; ".join(
+                        f"{i.original_match} ({i.reason})"
+                        for i in issues
+                    ),
+                )
+                text = linted_text
+    except Exception:  # pragma: no cover - defensive
+        log.exception(
+            "citation_linter raised; using unlinted synthesizer output"
+        )
     turn = RoleTurn(
         role="synthesizer", round=1, content=text,
         prompt_tokens=pt, completion_tokens=ct, duration_seconds=dt,
@@ -1334,6 +2176,8 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
             )
         except Exception:  # pragma: no cover
             log.exception("recorder.record_node raised; ignored")
+    _emit_finished("synthesizer", round=1,
+                    duration_ms=int(dt * 1000), ok=True)
     return {
         "final_answer": text,
         "turns": [turn],

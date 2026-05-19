@@ -31,12 +31,57 @@ forgetting. Beyond the core:
     failure-fallback model chain, and a degraded-answer composer
     that surfaces the researcher + critic work even when the
     synthesizer can't compose. See
-    [`docs/consultants.md`](docs/consultants.md) for the runbook
-    and [`docs/benchmarks/EVALUATION.md`](docs/benchmarks/EVALUATION.md)
+    [`docs/consultants.md`](docs/consultants.md) for the runbook,
+    [`docs/consultants-roles.md`](docs/consultants-roles.md) for the
+    role-by-role reference (all 6 active roles, including the
+    opt-in `tool_executor` + `coder`), and
+    [`docs/benchmarks/EVALUATION.md`](docs/benchmarks/EVALUATION.md)
     + [`docs/benchmarks/`](docs/benchmarks/) for the cloud-model
-    evaluation suite (smoke + audit-medium + audit-high sweeps
-    across kimi-k2.6, gemma4-31b, glm-5-1, qwen3-5, qwen3-5-397b,
-    minimax-m2-7).
+    evaluation suite.
+- **v1.2** — caliber-grounding-proxy cloud-resilience port +
+  in-repo caliber-eval cohort at
+  [`docs/caliber-eval-results/`](docs/caliber-eval-results/). Verdict:
+  `claude-cli` stays the default for caliber init, `glm-5.1:cloud`
+  is the recommended non-claude-cli fallback.
+- **v1.3** — collapses the per-verb slash-command skills into two
+  **dispatcher skills**: `/get-advice <verb>` (verbs:
+  `ask`/`model`/`effort`/`tools`) and `/consultants <verb>` (verbs:
+  `ask`/`followup`/`list`/`show`/`config`) with implicit `ask`
+  default. Cuts the upfront slash-command menu cost from 9 entries
+  to 2.
+- **v1.4** — adds **mozilla-ai/llamafile** as a fallback-capable
+  embedding engine for the `pgvector` + `sqlite_vec` providers,
+  supervised by the daemon (spawn-on-demand, 5-min idle reap).
+  Installer learns embedder dialogs for sqlite_vec and validate-only
+  connectivity reports for qdrant/memory-kg. See
+  [`docs/llamafile-integration.md`](docs/llamafile-integration.md).
+- **v1.5** — extends the llamafile integration to the
+  **chat-completion side**: HyDE / reflect / consolidate /
+  get-advice / consultants / caliber-grounding-proxy can route to
+  a daemon-supervised local llamafile via a new
+  `llamafile://<label>` model-identifier prefix. Multi-instance
+  `ChatModelManager` (LRU evict, per-label idle reap, CPU
+  fallback), `claude-hooks-models` CLI. See
+  [`docs/llamafile-chat-models.md`](docs/llamafile-chat-models.md).
+- **v1.7** — brings the `sqlite_vec` provider to **full pgvector
+  parity**: hybrid recall (RRF over vector cosine + BM25 via
+  FTS5), idempotent `store` on whitespace-normalised
+  `content_hash`, and a complete knowledge-graph surface
+  (`kg_create_entities` / `kg_add_observations` /
+  `kg_create_relations` / `kg_search_nodes`). The `sqlite-vec-mcp`
+  launcher grows from 3 to 8 tools (full pgvector-mcp parity).
+  See [`docs/sqlite-vec-runbook.md`](docs/sqlite-vec-runbook.md).
+- **v2 `/consultants` engine (post-v1.7, on `dev`)** — six-role
+  council (`planner`, `researcher` w/ optional PLAN-REPORT split,
+  `critic`, `synthesizer`, opt-in `tool_executor`, opt-in `coder`),
+  LangGraph-`Send` x-tier multi-model fan-out with proper
+  composition under tool_executor (M11c-3), opt-in BaseStore-backed
+  cross-session memory (M8) with per-namespace TTL + Caliber-style
+  distillation-on-expiry (M14), and a CitationLinter that verifies
+  every `path:line` claim before the answer leaves the council
+  (#204 / #205 / #207). Default-off opt-ins: see
+  [`docs/consultants-roles.md`](docs/consultants-roles.md) for
+  what to enable per question shape.
 
 ---
 
@@ -61,13 +106,16 @@ wiring, monitoring, uninstall — see [`docs/deployment.md`](docs/deployment.md)
 
 ### Releases & versioning
 
-- Current version: **v1.4.0** — see [CHANGELOG.md](CHANGELOG.md) for the full history,
+- Current version: **v1.7.0** — see [CHANGELOG.md](CHANGELOG.md) for the full history,
   or [`docs/whats-new.md`](docs/whats-new.md) for the human-readable
-  v1.4 highlights (older releases:
-  [v1.1](docs/whats-new-v1.1.md)).
+  v1.7 highlights (older releases archived alongside:
+  [v1.4](docs/whats-new-v1.4.md),
+  [v1.1](docs/whats-new-v1.1.md)). Significant unreleased work
+  on `dev` since v1.7.0: `/consultants` v2 (M8 store, M11c-3
+  proper composition, M14 TTL+distillation, CitationLinter).
 - Tagged releases live on [GitHub Releases](https://github.com/mann1x/claude-hooks/releases) with auto-generated `Source code (zip / tar.gz)` archives.
 - Branch model: `main` is the release branch (every commit shippable, tags live here); `dev` is the working branch (feature work + fixes land here first). See [`docs/RELEASING.md`](docs/RELEASING.md) for the cut procedure.
-- To track unreleased work: `git log v1.4.0..origin/dev` after fetching.
+- To track unreleased work: `git log v1.7.0..origin/dev` after fetching.
 - **Optional self-update check** (opt-in via `install.py` or
   `update_check.enabled = true`): the daemon polls
   `https://api.github.com/repos/mann1x/claude-hooks/releases/latest`
@@ -646,7 +694,7 @@ command in the Claude Code prompt.
 | `/setup-caliber` | v0.7 | caliber | Set up Caliber pre-commit hooks for config drift detection |
 | `/setup-compile-aware` | v0.7 | LSP engine | Detect build tools in the current project and propose a `[compile_aware.commands]` block for `.claude-hooks/lsp-engine.toml`. Asks for confirmation before writing. |
 | `/get-advice [ask] <query>` | **v1.3** | claude-advisor + Ollama | Multi-turn LLM-to-LLM second-opinion conversation with a configured Ollama advisor. Project tools (read_file, grep, glob, list_files, recall_memory) available to the advisor. Subverbs: `ask` (default, implicit — bare `/get-advice <query>` works), `model [name [ctx]]` (report or set), `effort [tier]` (report or set `low`/`medium`/`high`/`max`), `tools [csv\|all\|none]` (report or set the project-tool list exposed to the advisor). See [`docs/get-advice.md`](docs/get-advice.md). |
-| `/consultants [ask] <query>` | **v1.3** | claude-consultants | Multi-agent council consultation (planner → researcher → critic → synthesizer) with per-role message-history persistence in `transcript.db`. Subverbs: `ask` (default, implicit — bare `/consultants <query>` works), `followup [<sid>] <question>` (iterate on a prior session; failed-session-aware), `list [--limit N]` (past sessions), `show <sid> [--raw]` (re-read a stored summary), `config [<args>...]` (interactive walk-through to toggle roles, change per-role models, set context pins, switch effort tier `low`/`medium`/`high`/`max`/`xmedium`/`xhigh`/`xmax`, change service mode). See [`docs/consultants.md`](docs/consultants.md). |
+| `/consultants [ask] <query>` | **v1.3** (engine v2 on `dev`) | claude-consultants | Multi-agent council consultation with per-role message-history persistence in `transcript.db`. v2 engine ships 6 roles: `planner`, `researcher` (Mode A inline / Mode B PLAN-REPORT split), `critic`, `synthesizer`, opt-in `tool_executor`, opt-in `coder`. Opt-in cross-session memory (M8 BaseStore) with per-namespace TTL + distillation-on-expiry (M14). CitationLinter verifies every `path:line` claim before the answer leaves the council. Subverbs: `ask` (default, implicit — bare `/consultants <query>` works), `followup [<sid>] <question>` (iterate on a prior session; failed-session-aware), `list [--limit N]` (past sessions), `show <sid> [--raw]` (re-read a stored summary), `config [<args>...]` (interactive walk-through to toggle roles, change per-role models, set context pins, switch effort tier `low`/`medium`/`high`/`max`/`xmedium`/`xhigh`/`xmax`, change service mode). See [`docs/consultants.md`](docs/consultants.md) for the runbook, [`docs/consultants-roles.md`](docs/consultants-roles.md) for the role-by-role reference (when to enable `tool_executor` / `coder`, what their shortcomings are). |
 
 ### CLI commands (outside Claude Code)
 

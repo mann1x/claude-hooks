@@ -33,40 +33,84 @@ _GREP_MAX_FILE_BYTES = 2 * 1024 * 1024
 
 
 # -- Path resolution --------------------------------------------------- #
-def resolve_in_cwd(raw: str, cwd: str) -> str:
-    """Resolve ``raw`` relative to ``cwd`` and raise if the result is
-    outside the cwd. Returns the absolute real path.
+def resolve_in_roots(raw: str, primary_cwd: str,
+                     extra_roots: tuple[str, ...] = ()) -> str:
+    """Resolve ``raw`` relative to ``primary_cwd`` and raise if the
+    result is outside the allowed root set. Returns the absolute real
+    path.
+
+    The allowed set is ``[realpath(primary_cwd), *extra_roots]`` — a
+    realpath under any of them passes. Symlinks are followed before
+    the check, so a link inside an allowed root that points *out* of
+    every allowed root still rejects.
 
     Forgives common quoting mistakes from the model: leading/trailing
     backticks (gemma sometimes copies the markdown-quoted form straight
     out of the system prompt) and surrounding whitespace are stripped
     before the path is resolved. A path like `` `claude_hooks/` `` —
     backticks and trailing slash included — becomes ``claude_hooks``.
+
+    `extra_roots` is expected to already be realpath-canonical (the
+    ``make_executor`` factory and ``discover_allowed_roots`` both
+    canonicalise on entry). The empty-tuple default makes this a
+    drop-in for the legacy ``resolve_in_cwd`` posture.
     """
     cleaned = raw.strip().strip("`").strip().strip("'").strip('"').strip()
-    cwd_real = os.path.realpath(cwd)
+    primary_real = os.path.realpath(primary_cwd)
     joined = (
-        os.path.join(cwd_real, cleaned)
+        os.path.join(primary_real, cleaned)
         if not os.path.isabs(cleaned) else cleaned
     )
     resolved = os.path.realpath(joined)
-    if resolved != cwd_real and not resolved.startswith(cwd_real + os.sep):
-        raise ValueError(f"path escapes cwd: {raw!r}")
-    return resolved
+    allowed = (primary_real,) + tuple(extra_roots)
+    for root in allowed:
+        if resolved == root or resolved.startswith(root + os.sep):
+            return resolved
+    roots_pretty = ", ".join(allowed)
+    raise ValueError(
+        f"path escapes allowed roots: {raw!r}\n  allowed: {roots_pretty}"
+    )
 
 
+def resolve_in_cwd(raw: str, cwd: str) -> str:
+    """Backwards-compatible single-cwd shim around
+    :func:`resolve_in_roots`. Kept so external callers (and the legacy
+    test surface) keep working unchanged; new code should prefer
+    ``resolve_in_roots`` directly or build a closure via
+    :func:`make_executor`."""
+    return resolve_in_roots(raw, cwd, ())
+
+
+def _render_path(abs_path: str, primary_cwd: str) -> str:
+    """Render ``abs_path`` for tool output.
+
+    Files under ``primary_cwd`` render as a cwd-relative path so the
+    model sees the same compact paths it does today. Files under an
+    *extra* root render as their absolute path — keeps the output
+    unambiguous instead of producing an ugly ``../../../...`` rel
+    path that crosses sibling trees.
+    """
+    primary_real = os.path.realpath(primary_cwd)
+    if abs_path == primary_real or abs_path.startswith(primary_real + os.sep):
+        try:
+            return os.path.relpath(abs_path, primary_real)
+        except ValueError:
+            return abs_path
+    return abs_path
+
+
+# Backwards-compat alias — same single-cwd posture as before. Tools
+# that only ever care about cwd-relative rendering keep calling this.
 def _to_rel(abs_path: str, cwd: str) -> str:
-    try:
-        return os.path.relpath(abs_path, cwd)
-    except ValueError:
-        return abs_path
+    return _render_path(abs_path, cwd)
 
 
 # -- Tool: list_files -------------------------------------------------- #
-def list_files(args: dict, cwd: str) -> str:
+def list_files(args: dict, cwd: str,
+                extra_roots: tuple[str, ...] = ()) -> str:
     raw_path = str(args.get("path") or ".")
     try:
-        abs_path = resolve_in_cwd(raw_path, cwd)
+        abs_path = resolve_in_roots(raw_path, cwd, extra_roots)
     except ValueError as e:
         return f"error: {e}"
     if not os.path.exists(abs_path):
@@ -78,7 +122,7 @@ def list_files(args: dict, cwd: str) -> str:
         for name in sorted(os.listdir(abs_path)):
             full = os.path.join(abs_path, name)
             is_dir = os.path.isdir(full)
-            rel = _to_rel(full, cwd)
+            rel = _render_path(full, cwd)
             entries.append(f"{rel}{'/' if is_dir else ''}")
             if len(entries) >= _LIST_MAX_ENTRIES:
                 entries.append(f"... (truncated at {_LIST_MAX_ENTRIES})")
@@ -91,14 +135,15 @@ def list_files(args: dict, cwd: str) -> str:
 
 
 # -- Tool: read_file --------------------------------------------------- #
-def read_file(args: dict, cwd: str) -> str:
+def read_file(args: dict, cwd: str,
+              extra_roots: tuple[str, ...] = ()) -> str:
     raw_path = str(args.get("path") or "")
     start = args.get("start_line")
     end = args.get("end_line")
     if not raw_path:
         return "error: path is required"
     try:
-        abs_path = resolve_in_cwd(raw_path, cwd)
+        abs_path = resolve_in_roots(raw_path, cwd, extra_roots)
     except ValueError as e:
         return f"error: {e}"
     if not os.path.isfile(abs_path):
@@ -127,7 +172,7 @@ def read_file(args: dict, cwd: str) -> str:
         )
         truncated = True
 
-    header = f"{_to_rel(abs_path, cwd)}:{s}-{e}  (file has {total} lines)"
+    header = f"{_render_path(abs_path, cwd)}:{s}-{e}  (file has {total} lines)"
     if truncated:
         header += "  [output truncated to ~48 KB — use a smaller line range for more]"
     # Number each line so the model can cite path:line confidently.
@@ -138,7 +183,13 @@ def read_file(args: dict, cwd: str) -> str:
 
 
 # -- Tool: glob -------------------------------------------------------- #
-def glob_files(args: dict, cwd: str) -> str:
+def glob_files(args: dict, cwd: str,
+                extra_roots: tuple[str, ...] = ()) -> str:  # noqa: ARG001
+    # ``extra_roots`` is accepted for dispatch-signature uniformity but
+    # not used: glob walks only the primary cwd. To reach files under
+    # an extra root, the model uses ``read_file`` with the absolute
+    # path. Cross-root glob would require a separate output budget and
+    # is deferred to a later change.
     pattern = str(args.get("pattern") or "")
     if not pattern:
         return "error: pattern is required"
@@ -167,14 +218,22 @@ def glob_files(args: dict, cwd: str) -> str:
 
 
 # -- Tool: grep -------------------------------------------------------- #
-def grep(args: dict, cwd: str) -> str:
+def grep(args: dict, cwd: str,
+         extra_roots: tuple[str, ...] = ()) -> str:
+    # grep DOES honour ``extra_roots``: when the model passes
+    # ``path=/abs/outside/cwd``, ``resolve_in_roots`` lets it through
+    # if the path lives under any allowed root, and the walk then
+    # operates from there. The cross-root walk concern only applies
+    # to the no-path / pattern-only case below — which still walks
+    # whatever ``abs_root`` resolved to. Output is rendered relative
+    # to the primary cwd, falling back to absolute for files outside.
     pattern = str(args.get("pattern") or "")
     path = str(args.get("path") or ".")
     case_insensitive = bool(args.get("case_insensitive", False))
     if not pattern:
         return "error: pattern is required"
     try:
-        abs_root = resolve_in_cwd(path, cwd)
+        abs_root = resolve_in_roots(path, cwd, extra_roots)
     except ValueError as e:
         return f"error: {e}"
     try:
@@ -183,7 +242,6 @@ def grep(args: dict, cwd: str) -> str:
     except re.error as e:
         return f"error: invalid regex: {e}"
 
-    cwd_real = os.path.realpath(cwd)
     matches: list[str] = []
 
     def _match_file(abs_file: str) -> None:
@@ -198,7 +256,10 @@ def grep(args: dict, cwd: str) -> str:
             with open(abs_file, "r", encoding="utf-8", errors="replace") as f:
                 for lineno, line in enumerate(f, 1):
                     if rx.search(line):
-                        rel = os.path.relpath(abs_file, cwd_real)
+                        # Render relative to primary cwd when the file
+                        # lives there; otherwise absolute so the model
+                        # gets an unambiguous handle for non-cwd roots.
+                        rel = _render_path(abs_file, cwd)
                         matches.append(f"{rel}:{lineno}: {line.rstrip()[:200]}")
                         if len(matches) >= _GREP_MAX_MATCHES:
                             return
@@ -417,10 +478,22 @@ TOOL_IMPLS = {
 }
 
 
-def execute(name: str, raw_args: str, cwd: str) -> str:
+# Tools that participate in the multi-root sandbox. These accept the
+# extra ``extra_roots`` kwarg; all others ignore it. Keeps the dispatch
+# loop simple — survey_project / recall_memory don't need path
+# validation so we don't pay the parameter forwarding for them.
+_PATH_AWARE_TOOLS = {"list_files", "read_file", "glob", "grep"}
+
+
+def execute(name: str, raw_args: str, cwd: str,
+            *, _extra_roots: tuple[str, ...] = ()) -> str:
     """Parse ``raw_args`` JSON, call the matching tool, return its string
     output. Never raises — errors are returned as ``error: ...`` strings
     so the model sees them and can recover.
+
+    ``_extra_roots`` is private — use :func:`make_executor` to wire it
+    in. Callers that pass ``()`` (the default) get the legacy
+    single-cwd behavior byte-identically.
     """
     impl = TOOL_IMPLS.get(name)
     if impl is None:
@@ -432,11 +505,37 @@ def execute(name: str, raw_args: str, cwd: str) -> str:
     if not isinstance(args, dict):
         return "error: tool arguments must be a JSON object"
     try:
-        result = impl(args, cwd)
+        if name in _PATH_AWARE_TOOLS:
+            result = impl(args, cwd, _extra_roots)
+        else:
+            result = impl(args, cwd)
     except Exception as e:  # pragma: no cover - defensive
         log.warning("tool %s raised: %s", name, e)
         return f"error: tool raised: {e}"
     return result if isinstance(result, str) else str(result)
+
+
+def make_executor(extra_roots: tuple[str, ...] = ()):
+    """Build a 3-arg ``(name, args_str, cwd) -> str`` executor closure
+    that allows ``extra_roots`` on every call.
+
+    The returned callable matches the
+    :data:`claude_hooks.agent_loop.runner.ToolExecutor` type alias —
+    it's drop-in for ``tool_executor=tools.execute`` everywhere
+    ``run_loop`` is called.
+
+    Empty ``extra_roots`` returns the bare :func:`execute` function
+    unwrapped, so the closure-free fast path stays identical to today
+    for callers that don't opt in.
+    """
+    if not extra_roots:
+        return execute
+    canonical = tuple(
+        os.path.realpath(r) for r in extra_roots if r
+    )
+    def _executor(name: str, raw_args: str, cwd: str) -> str:
+        return execute(name, raw_args, cwd, _extra_roots=canonical)
+    return _executor
 
 
 # -- Tool schema sent to the model ------------------------------------ #

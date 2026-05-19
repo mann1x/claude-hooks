@@ -72,6 +72,25 @@ class SessionState:
     # children. The chain is reconstructable in either direction.
     parent_sid: Optional[str] = None
     follow_up_sids: list[str] = field(default_factory=list)
+    # v1.8+: extra allowed directories for the tool sandbox. Set on
+    # creation from the request body's ``extra_roots`` field (already
+    # auto-unioned with settings-file discovery by the HTTP layer).
+    # Follow-ups inherit this list and may extend it; ``run_follow_up``
+    # in the runner merges the parent's roots with the follow-up's.
+    extra_roots: list[str] = field(default_factory=list)
+    # 2026-05-18: parallel display form of ``extra_roots``, holding the
+    # user-facing pre-realpath path (``/shared/dev/<x>`` instead of
+    # ``/srv/dev-disk-by-label-opt/dev/<x>`` when the user's settings
+    # use the ``/shared`` symlink). ``extra_roots`` itself stays the
+    # realpath form for tool-sandbox checks. Same length + same order
+    # as ``extra_roots``. Empty list when display info wasn't
+    # captured at session-creation time (legacy sessions on disk).
+    extra_roots_display: list[str] = field(default_factory=list)
+    # Display form of the primary cwd (pre-realpath) — used only for
+    # log rendering, never for filesystem access. ``cwd`` itself
+    # remains the original path the runner received (so subsequent
+    # tool ops don't suddenly differ).
+    cwd_display: Optional[str] = None
     # Lifecycle. ``closed`` flips on explicit close OR idle reap;
     # downstream follow-up requests against a closed sid 410.
     # ``last_activity_at`` is bumped on every poll, follow-up start,
@@ -86,6 +105,17 @@ class SessionState:
     # The follow-up runner reuses these to skip the /api/show probe
     # and the upstream warmup.
     _chat_clients: Optional[dict] = field(default=None, repr=False)
+    # Task #111: per-model raw ChatClients for the coder role's
+    # failover chain. Same warm-reuse pattern as ``_chat_clients``
+    # but keyed by Ollama model tag (not role). ``None`` on parents
+    # that didn't enable per-language routing AND on v1.x sessions
+    # reopened from disk (the follow-up runner cold-builds them
+    # then). Empty dict means "enabled but only the default route
+    # in use" — pre-built clients are stashed so the next follow-up
+    # in the chain inherits them too.
+    _coder_chat_clients_by_model: Optional[dict] = field(
+        default=None, repr=False,
+    )
     # v1.1 message-history fields. Populated from transcript.db on
     # reopen-from-disk and from the live recorder on warm-session
     # completion, so the disk-loaded path is indistinguishable from
@@ -107,6 +137,20 @@ class SessionState:
     _role_lane_messages: Optional[dict[str, dict[int, list[dict]]]] = field(
         default=None, repr=False,
     )
+    # M9 (HTTP control surface): live LangGraph handles so the
+    # control route handlers can read state, mutate runtime_control,
+    # apply injects, schedule interrupts, and resume. Set by the
+    # runner just before it calls ``compiled.stream(...)``. Cleared
+    # to None when the session is closed/idle-reaped, freeing the
+    # checkpointer file lock + ChatClient caches.
+    #
+    # ``_compiled`` — the LangGraph CompiledStateGraph object.
+    # ``_thread_config`` — ``{"configurable": {"thread_id": sid}}``.
+    # ``_recorder`` — MessageRecorder instance for SSE event replay
+    # via runtime_events table. None when recorder is disabled.
+    _compiled: Optional[Any] = field(default=None, repr=False)
+    _thread_config: Optional[dict] = field(default=None, repr=False)
+    _recorder: Optional[Any] = field(default=None, repr=False)
 
     def public_dict(self) -> dict:
         return {
@@ -157,6 +201,22 @@ def _new_sid() -> str:
     return f"csl-{ts}-{secrets.token_hex(2)}"
 
 
+def _merge_extra_roots(parent: list[str], follow_up: list[str]) -> list[str]:
+    """Union parent's extra_roots with follow-up's, preserving order
+    and de-duplicating. Used at follow-up creation time so the child
+    SessionState records the full effective allow-list.
+
+    Reused by tests so the merge contract is one definition.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in list(parent) + list(follow_up):
+        if r and r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
+
+
 # Live-session lifecycle defaults — see EVALUATION.md and the
 # /consultants skill. The reaper closes idle sessions to bound
 # resource use; bump these for very long iteration cycles.
@@ -169,11 +229,21 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
                idle_timeout_s: float = DEFAULT_IDLE_TIMEOUT_S,
                reaper_interval_s: float = DEFAULT_REAPER_INTERVAL_S,
                run_follow_up: Optional[Callable[..., None]] = None,
-               start_reaper: bool = True) -> "FastAPI":
+               start_reaper: bool = True,
+               cfg: Optional["cc.ConsultantsConfig"] = None,
+               ollama_base_url: Optional[str] = None) -> "FastAPI":
     """Build a FastAPI app. ``run_council`` is the in-process
     council executor; if None, the app comes up but ``/v1/consult``
     returns 503 (useful for tests that only exercise the read-side
-    routes)."""
+    routes).
+
+    ``cfg`` + ``ollama_base_url`` enable the M14 store reaper. When
+    ``cfg.store.enabled`` is True and either ``cfg.store.ttl.enabled``
+    or ``cfg.store.distillation.enabled`` is set, a daemon
+    :class:`~consultants.engine.store_reaper.StoreReaperThread` is
+    spawned at startup and joined on shutdown. Tests / older callers
+    that don't pass cfg just skip the reaper — opt-in by design.
+    """
     try:
         from fastapi import FastAPI, HTTPException
     except ImportError as e:  # pragma: no cover
@@ -197,6 +267,54 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
     app.state.reaper_stop = threading.Event()
     if start_reaper:
         _start_idle_reaper(app)
+
+    # M14: optionally spawn the store reaper (TTL sweep +
+    # distillation-on-expiry). Off unless cfg + ollama_base_url are
+    # both supplied AND cfg.store enables either TTL or
+    # distillation. Failure to start is logged + non-fatal — the
+    # app still comes up.
+    app.state.store_reaper = None
+    if cfg is not None and ollama_base_url:
+        try:
+            _maybe_start_store_reaper(app, cfg, ollama_base_url)
+        except Exception:  # pragma: no cover — defensive
+            log.exception(
+                "_maybe_start_store_reaper failed; "
+                "M14 reaper unavailable",
+            )
+
+    # Shutdown hook — joins the store reaper if one was started.
+    # Idle-reaper shutdown is already handled via reaper_stop.
+    @app.on_event("shutdown")
+    async def _shutdown_store_reaper() -> None:  # pragma: no cover
+        reaper = getattr(app.state, "store_reaper", None)
+        if reaper is not None:
+            try:
+                reaper.stop(timeout=5.0)
+            except Exception:
+                log.exception("store_reaper.stop failed")
+        # Also signal the idle reaper to exit (uvicorn already does
+        # this for the daemon thread, but we're explicit).
+        try:
+            app.state.reaper_stop.set()
+        except Exception:
+            pass
+
+    # M9: register the control-surface routes (GET /state, POST
+    # /inject / /control / /interrupt / /resume / /cancel, GET
+    # /events SSE). Lazy import so test envs that only need the
+    # builders (consultants.server.control) don't pay the routes
+    # cost. Failure is non-fatal — the app comes up without M9
+    # routes when the import path is unhappy.
+    try:
+        from consultants.server.control_routes import (
+            register_control_routes,
+        )
+        register_control_routes(app)
+    except Exception:  # pragma: no cover — defensive
+        log.exception(
+            "register_control_routes failed; M9 endpoints unavailable",
+        )
 
     # ----------------------- health ------------------------------ #
     @app.get("/v1/health")
@@ -246,14 +364,54 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         if err:
             raise HTTPException(status_code=400, detail=err)
 
+        # v1.8+: union of (a) extra_roots from the body (CLI's --add-dir)
+        # and (b) auto-discovered settings.json roots. The HTTP server
+        # is invoked by the CLI which is operator-driven (not LLM-driven
+        # like caliber-grounding-proxy), so body-supplied roots are
+        # operator-trusted here. Settings-file values come from disk
+        # files the operator wrote.
+        from claude_hooks.allowed_roots import (
+            discover_allowed_roots_with_display,
+        )
+        body_extras = body.get("extra_roots") or []
+        if not isinstance(body_extras, list) or not all(
+            isinstance(x, str) for x in body_extras
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="extra_roots must be a list of strings",
+            )
+        # 2026-05-18 (#199): pass the user-typed cwd (``~`` expanded
+        # but symlinks NOT resolved) so the discoverer can record both
+        # forms — display = ``/shared/dev/claude-hooks``, real =
+        # ``/srv/dev-disk-by-label-opt/dev/claude-hooks``. Passing
+        # ``str(cwd_path)`` (already realpath-resolved) would make
+        # display == real and the primary log line would drop the
+        # alias. Validation via ``cwd_path.is_dir()`` above already
+        # confirmed the resolved form exists.
+        cwd_for_display = str(Path(cwd).expanduser())
+        discovered, discovered_display = discover_allowed_roots_with_display(
+            cwd_for_display, add_dirs=body_extras,
+        )
+        # discover_allowed_roots prepends the primary cwd; the runner
+        # wants extras only. Both lists share order so the parallel
+        # ``[1:]`` slices stay aligned.
+        session_extra_roots: list[str] = list(discovered[1:])
+        session_extra_roots_display: list[str] = list(
+            discovered_display[1:]
+        )
+
         sid = _new_sid()
         state = SessionState(
             sid=sid,
             cwd=str(cwd_path),
+            cwd_display=discovered_display[0],
             question=question,
             effort=cfg.effort,
             topology=cfg.topology,
             progress={r: "pending" for r in cc.enabled_roles(cfg)},
+            extra_roots=session_extra_roots,
+            extra_roots_display=session_extra_roots_display,
         )
         with app.state.sessions_lock:
             app.state.sessions[sid] = state
@@ -288,8 +446,11 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         runner_input = {
             "config": cfg,
             "cwd": str(cwd_path),
+            "cwd_display": discovered_display[0],
             "question": question,
             "trace": trace_flag,
+            "extra_roots": session_extra_roots,
+            "extra_roots_display": session_extra_roots_display,
         }
 
         # Hand off to the executor. The runner mutates ``state`` and
@@ -380,14 +541,63 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         child_progress = {"researcher": "pending", "synthesizer": "pending"}
         if cfg.effort in ("high", "max") and "critic" in cc.enabled_roles(cfg):
             child_progress["critic"] = "pending"
+        # v1.8+: follow-up may extend the parent's extra_roots with its
+        # own --add-dir entries. Validate the body shape, then let the
+        # runner do the parent+follow-up merge so both lists round-trip
+        # cleanly.
+        followup_body_extras = body.get("extra_roots") or []
+        if not isinstance(followup_body_extras, list) or not all(
+            isinstance(x, str) for x in followup_body_extras
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="extra_roots must be a list of strings",
+            )
+        # 2026-05-18: parallel display-form merge so follow-up logs
+        # also show the user-facing paths (the parent already carries
+        # ``extra_roots_display`` for itself; we extend it with the
+        # follow-up body's extras, treating them as their own display
+        # form). Body entries that resolve to a parent entry's
+        # realpath get dropped via ``_merge_extra_roots``; the display
+        # list mirrors the same dedupe in step.
+        merged_extra = _merge_extra_roots(
+            parent.extra_roots, followup_body_extras,
+        )
+        if parent.extra_roots_display and len(parent.extra_roots_display) == len(parent.extra_roots):
+            base_display = list(parent.extra_roots_display)
+        else:
+            base_display = list(parent.extra_roots)
+        # Reconstruct display by stepping through ``merged_extra`` and
+        # mapping each realpath back to (parent's display) if it came
+        # from the parent, or to the user-supplied body extra otherwise.
+        from claude_hooks.allowed_roots import _canonical  # internal
+        body_real_to_display: dict[str, str] = {}
+        for raw in followup_body_extras:
+            real = _canonical(raw)
+            if real:
+                body_real_to_display.setdefault(real, raw)
+        parent_real_to_display = dict(
+            zip(parent.extra_roots, base_display)
+        )
+        merged_display = [
+            parent_real_to_display.get(r) or body_real_to_display.get(r) or r
+            for r in merged_extra
+        ]
         child = SessionState(
             sid=child_sid,
             cwd=parent.cwd,
+            cwd_display=parent.cwd_display or parent.cwd,
             question=message,
             effort=cfg.effort,
             topology=parent.topology,
             progress=child_progress,
             parent_sid=sid,
+            # Stored extra_roots = parent's + this follow-up's, merged
+            # in order with dedup. The runner does the same merge for
+            # the in-flight executor; we persist it so disk-reopen of
+            # the child surfaces the full set.
+            extra_roots=merged_extra,
+            extra_roots_display=merged_display,
         )
         with app.state.sessions_lock:
             app.state.sessions[child_sid] = child
@@ -413,9 +623,16 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         runner_input = {
             "config": cfg,
             "cwd": parent.cwd,
+            "cwd_display": parent.cwd_display or parent.cwd,
             "question": message,
             "trace": trace_flag,
             "parent_state": parent,   # warm ChatClients + prior data
+            # New follow-up extras only; the runner merges with
+            # parent_state.extra_roots so a follow-up always sees the
+            # parent's reach plus whatever this turn added.
+            "extra_roots": followup_body_extras,
+            # Parallel pre-realpath display form of the body extras.
+            "extra_roots_display": list(followup_body_extras),
         }
         future = app.state.executor.submit(
             _run_with_state, app.state.run_follow_up, child, runner_input,
@@ -879,7 +1096,122 @@ def _close_session(app, sid: str, *, reason: str) -> None:
     # but no open sockets (urllib opens per-call), so this is just
     # a memory release.
     state._chat_clients = None
+    state._coder_chat_clients_by_model = None
     log.info("closed session %s (reason=%s)", sid, reason)
+
+
+def _maybe_start_store_reaper(app, cfg, ollama_base_url: str) -> None:
+    """Spawn the M14 :class:`StoreReaperThread` when config opts in.
+
+    Gates (any False short-circuits to no-op):
+
+    - ``cfg.store`` exists.
+    - ``cfg.store.enabled`` is True.
+    - Either ``cfg.store.ttl.enabled`` or
+      ``cfg.store.distillation.enabled`` is True.
+    - A provider can be loaded for ``cfg.store.backend``.
+
+    On success the reaper is stashed at ``app.state.store_reaper`` so
+    the shutdown hook can join it. Failures are logged + non-fatal
+    — the app still comes up without a reaper.
+    """
+    store_cfg = getattr(cfg, "store", None)
+    if store_cfg is None or not getattr(store_cfg, "enabled", False):
+        log.info(
+            "store reaper: cfg.store.enabled is False "
+            "(M14 default is True; admin set it false); not starting",
+        )
+        return
+    ttl_enabled = bool(getattr(getattr(store_cfg, "ttl", None), "enabled", False))
+    dist_enabled = bool(getattr(
+        getattr(store_cfg, "distillation", None), "enabled", False,
+    ))
+    if not ttl_enabled and not dist_enabled:
+        log.info(
+            "store reaper: neither store.ttl nor store.distillation "
+            "is enabled; not starting",
+        )
+        return
+
+    # Reuse the same backend loaders the consultants store uses so
+    # the daemon and the per-session stores write through the same
+    # connection class. The reaper-side provider is independent of
+    # any specific session — the reaper sweeps across sids.
+    backend = (getattr(store_cfg, "backend", "memory") or "memory").lower()
+    if backend == "memory":
+        log.info(
+            "store reaper: backend=memory is per-process; "
+            "no cross-session sweep needed — not starting",
+        )
+        return
+    try:
+        from consultants.engine.store import (
+            _load_pgvector, _load_sqlite_vec, make_consultants_store,
+        )
+    except Exception:
+        log.exception("store reaper: store module import failed")
+        return
+    if backend == "pgvector":
+        provider = _load_pgvector(store_cfg)
+    elif backend == "sqlite_vec":
+        provider = _load_sqlite_vec(store_cfg)
+    else:
+        log.warning(
+            "store reaper: unknown backend %r; not starting", backend,
+        )
+        return
+    if provider is None:
+        log.warning(
+            "store reaper: provider load failed for backend=%r; "
+            "not starting", backend,
+        )
+        return
+
+    # Build a long-lived store for the project-namespace writes
+    # ``write_distilled_summary`` performs. Bypass the effort gate
+    # (the reaper is daemon-side, not session-side) by passing
+    # ``effort=None``.
+    try:
+        store = make_consultants_store(
+            cfg, sid="<reaper>", effort=None,
+        )
+    except Exception:
+        log.exception("store reaper: make_consultants_store raised")
+        return
+    if store is None:
+        log.warning(
+            "store reaper: make_consultants_store returned None; "
+            "not starting",
+        )
+        return
+
+    distiller = None
+    if dist_enabled:
+        try:
+            from consultants.engine.distillation import Distiller
+            distiller = Distiller(
+                store_cfg.distillation, ollama_base_url,
+            )
+        except Exception:
+            log.exception(
+                "store reaper: Distiller init failed; sweep will "
+                "delete-only, no distillation",
+            )
+
+    from consultants.engine.store_reaper import StoreReaperThread
+    reaper = StoreReaperThread(
+        store_cfg=store_cfg,
+        provider=provider,
+        distiller=distiller,
+        store=store,
+    )
+    reaper.start()
+    app.state.store_reaper = reaper
+    log.info(
+        "store reaper: started (backend=%s, ttl=%s, distill=%s, "
+        "interval=%.0fs)",
+        backend, ttl_enabled, dist_enabled, reaper.interval_seconds,
+    )
 
 
 def _start_idle_reaper(app) -> None:
