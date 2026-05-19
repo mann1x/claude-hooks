@@ -16,6 +16,69 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [1.8.3] — 2026-05-19
+
+### Fixed — install.py: service-mode-aware consultants restart + drift detection (#223, 2026-05-19)
+
+The v1.8.2 pandorum re-deploy surfaced four follow-up issues
+that the #222 robustness pass didn't catch:
+
+1. **`_restart_consultants_service` was always-on-only.** It always
+   `/End`-ed the `claude-hooks-consultants` task and probed port
+   38095, even on smart-start hosts where the registered task is
+   `claude-hooks-consultants-forwarder` listening on 38096. Every
+   smart-start install hit a 15 s false-negative health-check
+   timeout on restart.
+2. **15 s consultants health-check window was too tight** for the
+   engine's LangGraph cold import (10–30 s on Windows). Bumped to
+   60 s.
+3. **1.5 s daemon ping in `_service_state_report` was too short.**
+   When the daemon was busy right after restart, the single ping
+   missed and printed *"not responding"* for a daemon that was
+   healthy seconds later. Bumped to 5 s with one retry.
+4. **Two-source config drift.** `config/claude-hooks.json`'s
+   `hooks.consultants.smart_start.enabled` and
+   `~/.claude/consultants-config.toml`'s `[service].mode` could
+   silently disagree. The installer wrote only the JSON flag; the
+   engine honored only the TOML. Same root cause across (1)+(4).
+
+### Changed — `install.py`
+
+- New helpers: `_detect_consultants_service_mode(cfg)`,
+  `_consultants_restart_target(mode)`,
+  `_sync_consultants_service_mode(mode, ...)`,
+  `_read_consultants_config_service_mode(consultants_py)`,
+  `_detect_consultants_config_drift(cfg, ...)`.
+- `_restart_consultants_service(*, cfg=None)` — service-mode-aware
+  target selection, 60 s timeout, `_wait_for_port_free` between
+  `/End` and `/Run`.
+- `_restart_managed_services(*, dry_run, skip, cfg=None)` — threads
+  `cfg` through.
+- `_service_state_report(*, dry_run, cfg=None)` — 5 s ping with
+  one retry, probes the expected port first, flags drift when a
+  different port responds.
+- `_install_consultants(...)` — calls drift detector before the
+  service-mode prompt (when the env already exists) and
+  `_sync_consultants_service_mode` after the JSON write, so the
+  TOML always tracks the JSON.
+- `main()` — passes `cfg` to both `_restart_managed_services` and
+  `_service_state_report`.
+
+### Tests
+
+- `tests/test_install_robustness.py` (+13):
+  - `TestDetectConsultantsServiceMode` (6) — empty / non-dict /
+    missing block / true / false / block-without-enabled.
+  - `TestConsultantsRestartTarget` (3) — always-on / smart-start /
+    unknown-mode fall-through.
+  - `TestServiceStateReportDriftAware` (2) — dry-run with cfg,
+    cfg=None doesn't crash.
+  - `TestSyncConsultantsServiceMode` (2) — dry-run intent,
+    missing env warns instead of raising.
+- Both envs full sweep:
+  - claude-hooks: 3848 passed, 136 skipped, 110 subtests.
+  - claude-hooks-consultants: 3954 passed, 30 skipped, 117 subtests.
+
 ## [1.8.2] — 2026-05-19
 
 ### Fixed — install.py: daemon restart race + stale-task cleanup + bytecode hygiene (#222, 2026-05-19)

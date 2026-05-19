@@ -2125,23 +2125,38 @@ def _clear_pycache(root: Path) -> int:
     return removed
 
 
-def _service_state_report(*, dry_run: bool) -> None:
+def _service_state_report(*, dry_run: bool,
+                              cfg: Optional[dict] = None) -> None:
     """Print a final summary of what's running + what's listening.
 
     Intentionally non-actionable — operator gets a single glance at
     end-state to confirm everything is wired up. The accompanying
     ``[!]`` flags surface anomalies that warrant a manual followup
-    (e.g. duplicate processes, missing ports).
+    (e.g. duplicate processes, missing ports, mode/runtime drift).
+
+    #223 (2026-05-19) hardening:
+    - Daemon ping uses 5 s timeout with one retry (was 1.5 s, no
+      retry). Pre-#223 the daemon-restart-then-consultants-restart
+      sequence sometimes left the daemon busy for >1.5 s when the
+      ping fired, producing a false-negative "not responding"
+      warning even though the daemon was healthy 30 s later.
+    - Probe order matches the EXPECTED service mode from cfg —
+      surfaces mode-vs-runtime drift (e.g. cfg says always-on but
+      forwarder is running, the v1.8.2 pandorum symptom).
     """
     print("\n==> Service state")
     if dry_run:
         print("  [dry-run] would inspect running processes + listening ports.")
         return
-    # Daemon ping
+    # Daemon ping — 5 s timeout, single retry to absorb a busy moment.
     daemon_ok = False
     try:
         from claude_hooks.daemon_client import ping  # noqa: PLC0415
-        daemon_ok = bool(ping(timeout=1.5))
+        if not ping(timeout=5.0):
+            time.sleep(1.0)
+            daemon_ok = bool(ping(timeout=5.0))
+        else:
+            daemon_ok = True
     except Exception:
         daemon_ok = False
     if daemon_ok:
@@ -2149,29 +2164,45 @@ def _service_state_report(*, dry_run: bool) -> None:
     else:
         print("  [!] claude-hooks-daemon:        not responding "
               "(check ~/.claude/claude-hooks-daemon.log)")
-    # Consultants engine — try the smart-start forwarder first since
-    # it's the lightweight path; fall back to the always-on engine.
+    # Consultants engine — probe the EXPECTED port first based on cfg,
+    # then fall back to the other one. If the responding port differs
+    # from the expected mode, surface drift.
+    expected_mode = _detect_consultants_service_mode(cfg or {})
+    expected_port = (38096 if expected_mode == "smart-start" else 38095)
+    other_port = 38095 if expected_port == 38096 else 38096
+    expected_label = ("smart-start forwarder" if expected_mode == "smart-start"
+                      else "always-on engine")
+    found_port: Optional[int] = None
     try:
         import urllib.error  # noqa: PLC0415
         import urllib.request  # noqa: PLC0415
-        for port in (38096, 38095):
+        for port in (expected_port, other_port):
             try:
                 with urllib.request.urlopen(
                         f"http://127.0.0.1:{port}/v1/health",
-                        timeout=1.5) as resp:
+                        timeout=5.0) as resp:
                     if 200 <= resp.status < 300:
-                        kind = ("smart-start forwarder" if port == 38096
-                                else "always-on engine")
-                        print(f"  · claude-hooks-consultants:   "
-                              f"{kind} on 127.0.0.1:{port}")
+                        found_port = port
                         break
             except (urllib.error.URLError, OSError):
                 continue
-        else:
-            print("  [!] claude-hooks-consultants:   no service responding on "
-                  "127.0.0.1:{38095,38096}")
     except Exception:
         pass
+    if found_port is None:
+        print(f"  [!] claude-hooks-consultants:   no service responding on "
+              f"127.0.0.1:{{{expected_port},{other_port}}}")
+    elif found_port == expected_port:
+        print(f"  · claude-hooks-consultants:   {expected_label} "
+              f"on 127.0.0.1:{found_port}")
+    else:
+        # Drift: cfg says one mode, a different mode answered.
+        actual_label = ("smart-start forwarder" if found_port == 38096
+                        else "always-on engine")
+        print(f"  [!] claude-hooks-consultants:   {actual_label} "
+              f"on 127.0.0.1:{found_port}, but claude-hooks.json "
+              f"is configured for {expected_label}.")
+        print(f"        Re-run install.py to align the service mode "
+              f"or run claude-consultants config set-service-mode.")
     # Orphan / duplicate scan
     if os.name == "nt":
         procs = _find_claude_hooks_pythonw_processes()
@@ -2196,7 +2227,8 @@ def _service_state_report(*, dry_run: bool) -> None:
                       "clean them up, or kill manually via Task Manager.")
 
 
-def _restart_managed_services(*, dry_run: bool, skip: bool) -> None:
+def _restart_managed_services(*, dry_run: bool, skip: bool,
+                                  cfg: Optional[dict] = None) -> None:
     """End-of-install hook (v1.5.2+): restart the long-lived
     ``claude-hooks-daemon`` and the always-on
     ``claude-hooks-consultants`` engine so they pick up code that was
@@ -2226,7 +2258,7 @@ def _restart_managed_services(*, dry_run: bool, skip: bool) -> None:
         return
     print("\n==> Restarting managed services to load new code")
     _restart_claude_hooks_daemon()
-    _restart_consultants_service()
+    _restart_consultants_service(cfg=cfg)
 
 
 def _restart_claude_hooks_daemon() -> None:
@@ -2304,32 +2336,86 @@ def _restart_claude_hooks_daemon() -> None:
               f"~/.claude/claude-hooks-daemon.log")
 
 
-def _restart_consultants_service() -> None:
+def _detect_consultants_service_mode(cfg: dict) -> str:
+    """Determine the currently-configured consultants service mode.
+
+    Reads ``hooks.consultants.smart_start.enabled`` from
+    ``config/claude-hooks.json`` (the canonical installer-side
+    record). Returns ``"smart-start"`` if enabled, ``"always-on"``
+    otherwise — matching the default service-mode prompt branch in
+    ``_setup_consultants_engine``.
+
+    Used by the post-install restart logic so it talks to the RIGHT
+    schtasks task + port, not the always-on defaults. Pre-#223 the
+    restart code was always-on-only and produced a 15 s health-check
+    timeout on smart-start hosts.
+    """
+    if not isinstance(cfg, dict):
+        return "always-on"
+    smart = (cfg.get("hooks", {})
+                .get("consultants", {})
+                .get("smart_start", {}))
+    return "smart-start" if smart.get("enabled") else "always-on"
+
+
+def _consultants_restart_target(service_mode: str) -> tuple[str, int, str]:
+    """Return ``(schtasks_task_name, health_port, friendly_label)``
+    for the given service mode.
+
+    The forwarder lives on 38096 and lazily spawns the engine on an
+    ephemeral port; its own health endpoint serves through the same
+    /v1/health proxy. Always-on engine listens on 38095 directly.
+    """
+    if service_mode == "smart-start":
+        return (_CONSULTANTS_FORWARDER_TASK_NAME, 38096,
+                "smart-start forwarder")
+    return (_CONSULTANTS_TASK_NAME, 38095, "always-on engine")
+
+
+def _restart_consultants_service(*, cfg: Optional[dict] = None) -> None:
     """Restart the claude-hooks-consultants engine if installed.
 
     The consultants engine has two service modes (``always-on`` and
-    ``smart-start``); only always-on has a long-lived process to
-    restart. smart-start lazily spawns on demand so there's nothing
-    to recycle here — it'll get fresh code on its next cold spawn.
+    ``smart-start``); install.py registers ONE task per host based on
+    the user's choice. #223 (2026-05-19) makes this function read
+    the chosen mode from ``cfg`` and target the right task + port —
+    pre-#223 it was always-on-only and hit a 15 s timeout on every
+    smart-start host's restart cycle.
+
+    Timeouts also bumped (60 s health-check) so a cold LangGraph
+    import doesn't false-negative. Pass ``cfg=None`` to fall back to
+    reading the file directly (used by main() and by tests).
     """
+    # Resolve service mode + target task + port from cfg.
+    if cfg is None:
+        try:
+            cfg_path = HERE / "config" / "claude-hooks.json"
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cfg = {}
+    service_mode = _detect_consultants_service_mode(cfg)
+    task_name, port, label = _consultants_restart_target(service_mode)
+
     plat = sys.platform
     if plat == "win32":
-        if not _windows_task_exists(_CONSULTANTS_TASK_NAME):
-            print("  claude-hooks-consultants: not installed (always-on)"
-                  " — skipping restart")
+        if not _windows_task_exists(task_name):
+            print(f"  claude-hooks-consultants: not installed "
+                  f"({label}, task '{task_name}' missing) — "
+                  "skipping restart")
             return
-        subprocess.run(["schtasks", "/End", "/TN", _CONSULTANTS_TASK_NAME],
+        subprocess.run(["schtasks", "/End", "/TN", task_name],
                        capture_output=True, text=True)
-        rc = subprocess.run(["schtasks", "/Run", "/TN", _CONSULTANTS_TASK_NAME],
+        # #222 helper: wait for port release before /Run (TIME_WAIT).
+        _wait_for_port_free(port, timeout=15.0)
+        rc = subprocess.run(["schtasks", "/Run", "/TN", task_name],
                             capture_output=True, text=True)
         if rc.returncode != 0:
             print(f"  claude-hooks-consultants: schtasks /Run failed:"
                   f" {rc.stderr.strip()[-200:]}")
             return
     else:
-        # Linux + macOS: systemd --user unit
+        # Linux + macOS: systemd --user unit (always-on only on POSIX).
         unit = "claude-hooks-consultants.service"
-        # Check if user is configured for systemd --user
         rc = subprocess.run(
             ["systemctl", "--user", "is-enabled", unit],
             capture_output=True, text=True,
@@ -2346,19 +2432,15 @@ def _restart_consultants_service() -> None:
             print(f"  claude-hooks-consultants: systemctl --user restart "
                   f"failed: {rc.stderr.strip()[-200:]}")
             return
-    # Best-effort health check. Default engine port is 38095 — same
-    # port _setup_consultants_engine binds when service_mode="always-on".
-    # The existing `_wait_for_consultants_health(port, timeout)` helper
-    # (defined later in the file alongside the consultants installer)
-    # polls /v1/health and returns bool. Reuse it rather than
-    # duplicating the loop; reads cleaner and avoids name collisions.
-    port = 38095
-    if _wait_for_consultants_health(port, timeout=15.0):
+    # #223: bumped 15 s → 60 s to cover the consultants engine's
+    # LangGraph cold-import cost (10-30 s on Windows).
+    if _wait_for_consultants_health(port, timeout=60.0):
         print(f"  claude-hooks-consultants: restarted + responding on "
-              f"127.0.0.1:{port}")
+              f"127.0.0.1:{port} ({label})")
     else:
         print(f"  [!!] claude-hooks-consultants: restarted but not "
-              f"responding within 15 s on 127.0.0.1:{port}/v1/health")
+              f"responding within 60 s on 127.0.0.1:{port}/v1/health "
+              f"({label}). Check ~/.claude/claude-hooks-consultants.log")
 
 
 def _wait_for_daemon(*, timeout: float = 15.0) -> bool:
@@ -5190,6 +5272,16 @@ def _install_consultants(cfg: dict, cfg_path: Path, *,
               "and (optionally) install service unit.")
         return already_present
 
+    # #223 (2026-05-19): if a previous consultants install already
+    # exists, surface any drift between claude-hooks.json's
+    # smart_start flag and consultants-config.toml's [service].mode
+    # so the user knows the prompt below is the resolution step.
+    if already_present:
+        _detect_consultants_config_drift(
+            cfg, consultants_py=consultants_py,
+            non_interactive=non_interactive, dry_run=dry_run,
+        )
+
     # Service mode prompt — non-interactive defaults to always-on.
     service_mode = "always-on"
     if not non_interactive:
@@ -5247,6 +5339,17 @@ def _install_consultants(cfg: dict, cfg_path: Path, *,
     cfg_path.write_text(json.dumps(cfg, indent=2) + "\n",
                         encoding="utf-8")
     print(f"    Service mode: {service_mode}")
+
+    # #223 (2026-05-19): mirror the chosen service mode to
+    # ``~/.claude/consultants-config.toml`` via the canonical
+    # ``set_service_mode`` mutator. Pre-#223 only the claude-hooks.json
+    # smart_start flag was written, so the engine's own TOML still
+    # said ``mode = "always-on"`` even after the operator picked
+    # smart-start — a silent two-source drift the v1.8.2 pandorum
+    # restart hit head-on. Best-effort: a failure here just logs.
+    _sync_consultants_service_mode(
+        service_mode, consultants_py=consultants_py, dry_run=dry_run,
+    )
 
     # Persist the engine port the install picked (currently the
     # config default) so the verify step uses the same number the
@@ -5540,6 +5643,133 @@ def _customize_consultants_store_knobs(*, non_interactive: bool
         distill_over["pace_seconds_between_distillations"] = float(val)
 
     return ttl_over, distill_over
+
+
+def _sync_consultants_service_mode(service_mode: str, *,
+                                   consultants_py: Path,
+                                   dry_run: bool) -> None:
+    """Write ``[service].mode = <service_mode>`` into
+    ``~/.claude/consultants-config.toml`` via the consultants-env
+    ``consultants.config.set_service_mode`` mutator.
+
+    Pre-#223 (2026-05-19) the installer wrote the chosen mode ONLY to
+    ``config/claude-hooks.json`` (``hooks.consultants.smart_start.enabled``),
+    leaving the consultants engine's own TOML at its previous value.
+    The two-source drift was silent until the v1.8.2 pandorum reinstall
+    hit a "configured for always-on but smart-start forwarder is
+    answering" mismatch — the installer's restart logic was always-on-only
+    and produced false-negative health-check timeouts.
+
+    Best-effort: if the consultants env isn't installed yet, or the
+    subprocess fails, this logs a warning but doesn't fail the install
+    (the user can fix it later with ``claude-consultants config
+    set-service-mode``). The companion drift detector in
+    :func:`_detect_consultants_config_drift` is the recovery path.
+    """
+    if dry_run:
+        print(f"    [dry-run] Would sync [service].mode = "
+              f"{service_mode!r} into consultants-config.toml")
+        return
+    if not consultants_py.exists():
+        print(f"    [warn] consultants env python not found at "
+              f"{consultants_py}; skipping [service].mode sync. "
+              f"Run `claude-consultants config set-service-mode "
+              f"{service_mode}` after install.")
+        return
+    helper = (
+        "import sys\n"
+        "from consultants.config import set_service_mode\n"
+        "set_service_mode(sys.argv[1], scope='user')\n"
+        "print('ok')\n"
+    )
+    try:
+        proc = subprocess.run(
+            [str(consultants_py), "-c", helper, service_mode],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"    [warn] [service].mode sync subprocess failed: {e}")
+        return
+    if proc.returncode != 0:
+        print("    [warn] [service].mode sync failed:")
+        print(f"           {proc.stderr.strip()[-300:]}")
+        print(f"           Run `claude-consultants config "
+              f"set-service-mode {service_mode}` to fix manually.")
+        return
+    print(f"    Synced [service].mode = {service_mode!r} into "
+          f"~/.claude/consultants-config.toml")
+
+
+def _read_consultants_config_service_mode(
+        consultants_py: Path) -> Optional[str]:
+    """Return the ``[service].mode`` currently persisted in
+    ``~/.claude/consultants-config.toml``, or ``None`` if the env
+    isn't installed / the file doesn't exist / parsing fails.
+
+    Used by :func:`_detect_consultants_config_drift` to compare
+    against ``hooks.consultants.smart_start.enabled`` in
+    ``config/claude-hooks.json`` at install start. A drift means
+    one side was edited by hand (or by an older installer) without
+    the other catching up.
+    """
+    if not consultants_py.exists():
+        return None
+    helper = (
+        "from consultants.config import load_config\n"
+        "cfg = load_config()\n"
+        "print(cfg.service.mode)\n"
+    )
+    try:
+        proc = subprocess.run(
+            [str(consultants_py), "-c", helper],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    mode = proc.stdout.strip()
+    return mode if mode in ("always-on", "smart-start") else None
+
+
+def _detect_consultants_config_drift(cfg: dict, *,
+                                     consultants_py: Path,
+                                     non_interactive: bool,
+                                     dry_run: bool) -> None:
+    """Compare ``hooks.consultants.smart_start.enabled`` in
+    ``config/claude-hooks.json`` against ``[service].mode`` in
+    ``~/.claude/consultants-config.toml`` and warn (or offer to fix
+    when interactive) on drift.
+
+    Called at the START of ``_setup_consultants_engine`` BEFORE the
+    user is prompted for the service mode, so the prompt can default
+    to the value that's actually being honored at runtime.
+
+    Returns the drift state as a side-effect via printed output. The
+    installer continues either way — the user picks the mode they
+    want from the prompt and the sync at the END of the function will
+    realign both files.
+    """
+    if dry_run:
+        return
+    smart_enabled = bool((cfg.get("hooks", {})
+                            .get("consultants", {})
+                            .get("smart_start", {})
+                            .get("enabled")))
+    json_mode = "smart-start" if smart_enabled else "always-on"
+    toml_mode = _read_consultants_config_service_mode(consultants_py)
+    if toml_mode is None:
+        # No consultants env or no TOML — fresh install, nothing to drift.
+        return
+    if toml_mode == json_mode:
+        return
+    print(f"    [drift] config/claude-hooks.json says service_mode = "
+          f"{json_mode!r}, but ~/.claude/consultants-config.toml says "
+          f"{toml_mode!r}.")
+    print("            The runtime engine honors the TOML; the installer's "
+            "restart logic honors the JSON. They must agree.")
+    print("            The service-mode prompt below will resolve it: "
+          "whichever mode you pick gets written to both files.")
 
 
 def _setup_consultants_store(cfg: dict, *, consultants_py: Path,
@@ -6410,15 +6640,22 @@ def main() -> int:
     # was loaded at its spawn time, so `git pull && python install.py`
     # has no observable effect until the next host reboot or manual
     # restart.
+    # #223: thread the loaded config through so the restart logic
+    # can target the right consultants task + port for the host's
+    # selected service mode (smart-start vs always-on), and so the
+    # state report can flag mode-vs-runtime drift.
     _restart_managed_services(
         dry_run=args.dry_run,
         skip=bool(getattr(args, "skip_daemon_restart", False)),
+        cfg=cfg,
     )
 
     # #222: end-of-install state report so the operator can confirm
     # the expected services are up + no duplicates / orphans remain.
+    # #223: cfg threaded in so the report knows which port to probe
+    # first (matches the chosen service mode) and can surface drift.
     if not bool(getattr(args, "skip_daemon_restart", False)):
-        _service_state_report(dry_run=args.dry_run)
+        _service_state_report(dry_run=args.dry_run, cfg=cfg)
 
     conda_py = find_conda_env_python()
     print("\n==> Done.")
