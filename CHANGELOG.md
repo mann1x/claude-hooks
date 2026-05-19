@@ -16,6 +16,77 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [1.8.1] — 2026-05-19
+
+### Fixed — consultants smart-start: visible python.exe console window on Windows (#221, 2026-05-19)
+
+The v1.8.0 pandorum deploy exposed a regression specific to the
+smart-start forwarder. Symptom: a black console window titled
+``C:\Users\manni\miniconda3\envs\claude-hooks-consultants\python.exe``
+permanently visible on the user's desktop after install.py completed.
+The always-on engine task and the daemon task stayed hidden as
+expected; only the forwarder-spawned engine popped.
+
+Root cause: ``install.py:_install_consultants_windows`` passed the
+consultants env's ``python.exe`` as the forwarder's
+``--engine-python`` argument instead of ``pythonw.exe``, and
+``consultants_forwarder.EngineManager._spawn_engine`` issued the
+``subprocess.Popen`` call without the Windows
+``CREATE_NO_WINDOW | DETACHED_PROCESS`` ``creationflags``. Either
+fix alone closes the visible-window path; both ship together so
+operator-overridden ``--engine-python`` values stay windowless too.
+
+Audit pass — surveyed every long-lived / fire-and-forget
+``subprocess.Popen`` site and found five more spawns missing the
+Windows guard. None were the loud immediate-window kind the
+consultants forwarder produced (those spawns are short-lived
+binaries or fire from a daemon parent that's already windowless),
+but every one of them could flash a console under the right
+conditions:
+
+| Module                                | Site               | Trigger                                  |
+|---------------------------------------|--------------------|------------------------------------------|
+| ``consultants_forwarder.py``          | engine spawn       | smart-start forwarder (THE BUG)         |
+| ``store_async.py``                    | detached store     | Stop hook with ``detach_store=true``     |
+| ``code_graph/__main__.py``            | build_async        | SessionStart / Stop builder refresh      |
+| ``gitnexus_integration.py``           | analyze            | Stop / SessionEnd companion update       |
+| ``axon_integration.py``               | analyze            | Stop / SessionEnd companion update       |
+| ``hooks/session_end.py``              | episodic sync      | SessionEnd local-mode push               |
+
+Already protected (no change): ``chat_model_manager`` (llamafile
+chat), ``embedding_manager`` (llamafile embed),
+``claudemem_reindex`` (mnemex), ``lsp_engine.client.spawn_daemon``
+(LSP daemon). The LSP-server child at ``lsp_engine/lsp.py:157`` is
+also left alone — its parent is the LSP daemon which is already
+windowless, so the child inherits the no-console state.
+
+Net change:
+
+- New ``claude_hooks/_popen.py:detach_kwargs()`` returns the
+  platform-specific kwargs dict (Windows:
+  ``creationflags = CREATE_NO_WINDOW | DETACHED_PROCESS``; POSIX:
+  ``start_new_session = True``). Single source of truth so the next
+  spawn site doesn't have to remember the incantation.
+- All six unguarded spawn sites adopt the helper.
+- ``install.py:_install_consultants_windows`` now resolves
+  ``find_conda_env_pythonw(env_name=CONSULTANTS_ENV_NAME)`` and
+  passes the result as ``--engine-python``, falling back to
+  ``python.exe`` only if ``pythonw.exe`` is missing.
+- 8 new unit tests in ``tests/test_popen_helpers.py`` cover POSIX +
+  Windows + missing-constants paths and confirm the kwargs dict
+  unpacks cleanly into ``subprocess.Popen``'s call signature.
+
+Windows-only impact. POSIX hosts see no behavior change — the
+``start_new_session=True`` semantic is preserved by the helper.
+
+### Recovery on already-deployed hosts
+
+Hosts that ran v1.8.0's install.py have the broken ``--engine-python``
+baked into ``schtasks``. Re-run ``python install.py`` to overwrite
+the task; on Linux/macOS a single ``systemctl --user restart
+claude-hooks-consultants`` is sufficient because the systemd unit
+template never had the bug.
+
 ## [1.8.0] — 2026-05-19
 
 ### Added — consultants store: CLI surface + installer prompts + doc (#220, 2026-05-18)

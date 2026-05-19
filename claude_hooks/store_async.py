@@ -47,6 +47,8 @@ import subprocess
 import sys
 from typing import Optional
 
+from claude_hooks._popen import detach_kwargs
+
 log = logging.getLogger("claude_hooks.store_async")
 
 
@@ -74,13 +76,17 @@ def spawn(payload: dict) -> bool:
         return False
 
     try:
+        # Windows: hook context arrives via .cmd → python.exe with a
+        # console attached; without CREATE_NO_WINDOW the detached
+        # store child would inherit / flash that console. POSIX:
+        # start_new_session=True suffices. Helper picks per-platform.
         proc = subprocess.Popen(
             [sys.executable, "-m", "claude_hooks.store_async"],
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
             close_fds=True,
+            **detach_kwargs(),
         )
     except OSError as e:
         log.debug("store_async.spawn: Popen failed: %s", e)

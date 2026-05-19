@@ -18,6 +18,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from claude_hooks._popen import detach_kwargs
+
 from claude_hooks.code_graph.builder import build_graph
 from claude_hooks.code_graph.detect import (
     graph_dir,
@@ -93,7 +95,10 @@ def build_async(
         out_dir = graph_dir(root)
         if not _acquire_lock(out_dir, lock_min_age_seconds):
             return
-        # Detached subprocess — don't await.
+        # Detached subprocess — don't await. detach_kwargs adds
+        # CREATE_NO_WINDOW | DETACHED_PROCESS on Windows so the
+        # builder doesn't flash a console when triggered from a
+        # python.exe-based hook context.
         subprocess.Popen(
             [sys.executable, "-m", "claude_hooks.code_graph", "build",
              "--root", str(root)],
@@ -101,8 +106,8 @@ def build_async(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
             env={**os.environ, "PYTHONPATH": _self_pythonpath()},
+            **detach_kwargs(),
         )
         log.info("code_graph: spawned build in %s", root)
     except Exception as e:
