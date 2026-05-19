@@ -365,3 +365,128 @@ class TestServiceStateReport:
         out = capsys.readouterr().out
         assert "claude-hooks-daemon" in out
         assert "not responding" in out
+
+
+# ----------------------- #223: service-mode helpers ------------- #
+
+class TestDetectConsultantsServiceMode:
+    """``_detect_consultants_service_mode(cfg)`` reads the smart_start
+    flag from ``hooks.consultants.smart_start.enabled`` and returns the
+    matching service-mode label. Backwards-compatible for the missing-
+    key cases — installs without the consultants block fall back to
+    'always-on'."""
+
+    def test_empty_cfg_falls_back_to_always_on(self, install_mod):
+        assert install_mod._detect_consultants_service_mode({}) == "always-on"
+
+    def test_non_dict_cfg_falls_back_to_always_on(self, install_mod):
+        # Defensive — caller might pass None or a string accidentally.
+        assert install_mod._detect_consultants_service_mode(None) == "always-on"  # type: ignore[arg-type]
+
+    def test_missing_consultants_block_is_always_on(self, install_mod):
+        cfg = {"hooks": {"other": {}}}
+        assert install_mod._detect_consultants_service_mode(cfg) == "always-on"
+
+    def test_smart_start_enabled_true_returns_smart_start(self, install_mod):
+        cfg = {"hooks": {"consultants": {"smart_start": {"enabled": True}}}}
+        assert install_mod._detect_consultants_service_mode(cfg) == "smart-start"
+
+    def test_smart_start_enabled_false_returns_always_on(self, install_mod):
+        cfg = {"hooks": {"consultants": {"smart_start": {"enabled": False}}}}
+        assert install_mod._detect_consultants_service_mode(cfg) == "always-on"
+
+    def test_smart_start_block_present_but_no_enabled_key(self, install_mod):
+        # The block exists but the flag was never set — treated as
+        # always-on so the installer's restart logic doesn't try to
+        # speak to a forwarder that was never registered.
+        cfg = {"hooks": {"consultants": {"smart_start": {}}}}
+        assert install_mod._detect_consultants_service_mode(cfg) == "always-on"
+
+
+class TestConsultantsRestartTarget:
+    """``_consultants_restart_target(mode)`` resolves the schtasks task
+    name, the health-check port, and the friendly label for the chosen
+    service mode. Used by ``_restart_consultants_service`` so it talks
+    to the right task and probes the right port."""
+
+    def test_always_on_returns_engine_task(self, install_mod):
+        task, port, label = install_mod._consultants_restart_target("always-on")
+        assert task == install_mod._CONSULTANTS_TASK_NAME
+        assert port == 38095
+        assert "always-on" in label
+
+    def test_smart_start_returns_forwarder_task(self, install_mod):
+        task, port, label = install_mod._consultants_restart_target("smart-start")
+        assert task == install_mod._CONSULTANTS_FORWARDER_TASK_NAME
+        assert port == 38096
+        assert "smart-start" in label
+
+    def test_unknown_mode_defaults_to_always_on(self, install_mod):
+        # Defensive fall-through — unrecognised modes (typos, future
+        # values from a newer config) shouldn't crash; they get the
+        # safe-default path. Pre-#223 the restart logic was always-on-
+        # only, so unknown == always-on preserves that contract.
+        task, port, _ = install_mod._consultants_restart_target("frobnicate")
+        assert task == install_mod._CONSULTANTS_TASK_NAME
+        assert port == 38095
+
+
+class TestServiceStateReportDriftAware:
+    """``_service_state_report`` (post-#223) takes an optional ``cfg``
+    so it can probe the EXPECTED port first based on the configured
+    mode and surface drift when a different port is actually serving.
+    """
+
+    def test_dry_run_with_cfg_still_returns_early(
+            self, install_mod, capsys):
+        install_mod._service_state_report(
+            dry_run=True,
+            cfg={"hooks": {"consultants": {"smart_start": {"enabled": True}}}},
+        )
+        out = capsys.readouterr().out
+        assert "dry-run" in out
+
+    def test_cfg_none_does_not_crash(
+            self, install_mod, capsys, monkeypatch):
+        # When cfg is None, _detect_consultants_service_mode falls back
+        # to always-on; ensure the function still completes cleanly
+        # without TypeError.
+        import types
+        fake = types.SimpleNamespace(ping=lambda **kw: True)
+        monkeypatch.setitem(
+            __import__("sys").modules, "claude_hooks.daemon_client", fake)
+        install_mod._service_state_report(dry_run=False, cfg=None)
+        out = capsys.readouterr().out
+        assert "claude-hooks-daemon" in out
+
+
+class TestSyncConsultantsServiceMode:
+    """``_sync_consultants_service_mode`` writes the chosen mode into
+    ``~/.claude/consultants-config.toml`` via the consultants-env
+    ``set_service_mode`` mutator. Best-effort: a missing env or a
+    failed subprocess prints a warning and doesn't raise.
+    """
+
+    def test_dry_run_prints_intent_and_returns(
+            self, install_mod, tmp_path, capsys):
+        install_mod._sync_consultants_service_mode(
+            "smart-start",
+            consultants_py=tmp_path / "py",
+            dry_run=True,
+        )
+        out = capsys.readouterr().out
+        assert "dry-run" in out
+        assert "smart-start" in out
+
+    def test_missing_consultants_py_warns_does_not_raise(
+            self, install_mod, tmp_path, capsys):
+        # Env not installed yet — best-effort path: print + return.
+        nonexistent = tmp_path / "absent-env" / "python"
+        install_mod._sync_consultants_service_mode(
+            "always-on",
+            consultants_py=nonexistent,
+            dry_run=False,
+        )
+        out = capsys.readouterr().out
+        assert "consultants env python not found" in out
+        assert "claude-consultants config set-service-mode" in out
