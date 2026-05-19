@@ -16,6 +16,108 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [1.8.2] — 2026-05-19
+
+### Fixed — install.py: daemon restart race + stale-task cleanup + bytecode hygiene (#222, 2026-05-19)
+
+The v1.8.1 pandorum deploy surfaced five systemic install-time
+failure modes. None of them caused the v1.8.1 hotfix to fail outright,
+but together they left the host with: a dead daemon, two consultants
+engines, a leftover scheduled task, and the misleading message
+*"claude-hooks-daemon: restarted but not responding within 20 s"*.
+
+Root causes:
+
+1. **Daemon restart race.** ``schtasks /End`` killed the process but
+   the OS held port 47018 in TIME_WAIT for 30-60 s. The immediate
+   ``schtasks /Run`` exited with "already in use", which is exit 1,
+   which triggered ``RestartOnFailure`` (1-minute interval), which
+   eventually started a clean daemon — well past install.py's 20 s
+   ``_wait_for_daemon`` window.
+2. **Opposite service-mode task left registered.** A host that
+   flipped between ``always-on`` and ``smart-start`` accumulated
+   both ``claude-hooks-consultants`` and
+   ``claude-hooks-consultants-forwarder`` tasks. Both ran, two
+   engines, one on port 38095 and another on a forwarder-allocated
+   ephemeral port.
+3. **Stale ``__pycache__``.** A ``git pull && python install.py``
+   cycle left ``.pyc`` files whose source-mtime matched pre-pull
+   bytecode timestamps. Python loaded those instead of recompiling
+   the new ``.py`` source — and the daemon's running protocol
+   version silently drifted from what ``daemon_client`` expected,
+   causing ``ping()`` to return False even with a healthy socket.
+4. **Health-check timeout too short.** 20 s never lined up with
+   the ``RestartOnFailure`` interval (60 s default on Windows
+   scheduled tasks), so the race was guaranteed to print a
+   false-negative warning.
+5. **No end-of-install verification.** The operator had no easy
+   way to confirm everything was wired up correctly after the
+   install completed.
+
+#222 introduces six helpers in install.py and rewires the relevant
+flows around them:
+
+- **``_wait_for_port_free(port, timeout=15)``** — polls a TCP port
+  until refusal (= free), or hits timeout. Used between
+  ``schtasks /End`` and ``/Run`` to bridge TIME_WAIT.
+- **``_find_claude_hooks_pythonw_processes()``** — Windows-only
+  PowerShell+JSON probe; returns ``[(pid, cmdline), ...]`` for
+  every claude-hooks-touching pythonw process. Used by the
+  end-state report to flag duplicates / orphans.
+- **``_kill_pids_windows(pids)``** — best-effort Stop-Process,
+  returns count actually killed. Errors swallowed (already-dead
+  PIDs don't fail the install).
+- **``_prune_stale_consultants_task(service_mode, ...)``** —
+  detects the OPPOSITE service mode's task and offers to delete
+  it. Conservative-by-default: dry-run prints intent,
+  non-interactive prints a manual ``schtasks /Delete`` command,
+  interactive prompts with default-Y.
+- **``_clear_pycache(root)``** — walks the repo and removes every
+  ``__pycache__`` directory. Cheap to call every install; rules
+  out the post-pull bytecode failure mode for free.
+- **``_service_state_report(dry_run)``** — end-of-install summary:
+  daemon ping result, consultants engine health (tries forwarder
+  port 38096 first, falls back to always-on port 38095), and a
+  duplicate-process scan on Windows.
+
+Behavioral changes in ``_restart_claude_hooks_daemon``:
+
+- Wait for port 47018 to actually release after ``/End`` (Windows:
+  15 s; macOS: 5 s).
+- Bump Windows health-check window from 20 s to 60 s so the
+  ``RestartOnFailure`` cycle lands within the install session.
+
+24 new tests in ``tests/test_install_robustness.py`` pin every
+helper's contract (POSIX no-op paths, Windows JSON-parse paths,
+interactive prompt defaults, busy-port + becomes-free-mid-wait
+race-window scenarios).
+
+**Default behavior preserved.** Non-interactive runs print
+warnings but never delete tasks or kill processes. The
+``__pycache__`` cleanup is unconditional but only ever removes
+the cache directories — never source. The end-of-install report
+is read-only.
+
+### Recovery on already-broken hosts
+
+If your v1.8.1 install left you with the pandorum-shape failure
+(dead daemon, two consultants engines, leftover forwarder task),
+the cleanup procedure is:
+
+```powershell
+# Kill orphan forwarder + its spawned engine
+Stop-Process -Id <forwarder_pid>, <orphan_engine_pid> -Force
+# Delete the stale task (whichever opposite-mode one)
+schtasks /Delete /TN claude-hooks-consultants-forwarder /F
+# Restart the daemon, waiting for port release
+schtasks /End /TN claude-hooks-daemon
+# (wait ~30 s for TIME_WAIT to clear)
+schtasks /Run /TN claude-hooks-daemon
+```
+
+Or just re-run ``python install.py`` on v1.8.2 — the new
+prune + wait + verify path handles it.
+
 ## [1.8.1] — 2026-05-19
 
 ### Fixed — consultants smart-start: visible python.exe console window on Windows (#221, 2026-05-19)

@@ -30,6 +30,7 @@ import json
 import os
 import platform
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -1945,6 +1946,256 @@ def _write_daemon_task_xml(
     return Path(path)
 
 
+# --------------------------------------------------------------- #
+# #222 robustness helpers — port waits, orphan detection,
+# stale-task pruning, __pycache__ cleanup, final state report.
+#
+# Each helper is platform-conditional but the public surface stays
+# uniform so callers don't have to branch. Tested via
+# tests/test_install_robustness.py with the platform paths mocked.
+# --------------------------------------------------------------- #
+
+
+def _wait_for_port_free(port: int, *,
+                          host: str = "127.0.0.1",
+                          timeout: float = 15.0) -> bool:
+    """Poll until the local TCP port is free (no LISTEN binding).
+
+    Bridges the gap between ``schtasks /End`` (which kills the process
+    but leaves the socket in TIME_WAIT for 30-60 s on Windows) and the
+    follow-up ``/Run`` that tries to bind the same port. Returns True
+    once the port is observed free, False on timeout.
+
+    Implementation: rely on the same ``_addr_in_use`` semantic the
+    daemon's __main__ uses — try a TCP connect; refusal means free.
+    """
+    import time as _time  # noqa: PLC0415
+    deadline = _time.monotonic() + max(0.1, timeout)
+    while _time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.4):
+                pass  # something accepted → still busy
+        except (ConnectionRefusedError, socket.timeout, OSError):
+            return True
+        _time.sleep(0.4)
+    return False
+
+
+def _find_claude_hooks_pythonw_processes() -> list[tuple[int, str]]:
+    """Return [(pid, command_line), ...] for every running pythonw
+    process whose command line touches a claude-hooks entry point.
+
+    Windows-only. POSIX returns ``[]``. The detection is intentionally
+    permissive — any claude_hooks / consultants.server / run_daemon
+    match counts. The caller decides what's expected vs orphan.
+    """
+    if os.name != "nt":
+        return []
+    try:
+        ps = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process | "
+             "Where-Object { $_.Name -match 'pythonw' } | "
+             "Select-Object ProcessId, CommandLine | "
+             "ConvertTo-Json -Depth 2"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if ps.returncode != 0 or not ps.stdout.strip():
+        return []
+    try:
+        data = json.loads(ps.stdout)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    out: list[tuple[int, str]] = []
+    keywords = ("claude_hooks", "claude-hooks", "consultants.server",
+                "run_daemon.py", "consultants_forwarder")
+    for entry in data:
+        cmd = (entry.get("CommandLine") or "") if isinstance(entry, dict) else ""
+        pid = int(entry.get("ProcessId") or 0) if isinstance(entry, dict) else 0
+        if not pid or not cmd:
+            continue
+        if any(k in cmd for k in keywords):
+            out.append((pid, cmd))
+    return out
+
+
+def _kill_pids_windows(pids: list[int]) -> int:
+    """Best-effort Stop-Process for a list of PIDs. Returns count killed.
+
+    No-op on POSIX (caller checks os.name first). Errors swallowed —
+    a missing PID just means the process already exited.
+    """
+    if os.name != "nt" or not pids:
+        return 0
+    killed = 0
+    for pid in pids:
+        rc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"Stop-Process -Id {int(pid)} -Force "
+             "-ErrorAction SilentlyContinue"],
+            capture_output=True, text=True,
+        )
+        if rc.returncode == 0:
+            killed += 1
+    return killed
+
+
+# Map of opt-in service-mode → the OPPOSITE schtasks task name that
+# install.py should offer to prune. Pre-#222 a host that flipped
+# service modes (always-on ↔ smart-start) ended up with both tasks
+# registered and both engines running.
+_OPPOSITE_CONSULTANTS_TASK: dict[str, str] = {
+    "always-on":   "claude-hooks-consultants-forwarder",
+    "smart-start": "claude-hooks-consultants",
+}
+
+
+def _prune_stale_consultants_task(*, service_mode: str,
+                                     non_interactive: bool,
+                                     dry_run: bool) -> Optional[str]:
+    """If the OPPOSITE service mode's task is still registered, offer
+    to delete it. Returns the task name deleted, or None if nothing
+    was done.
+
+    Conservative-by-default: non-interactive runs report-only.
+    """
+    if os.name != "nt":
+        return None
+    other = _OPPOSITE_CONSULTANTS_TASK.get(service_mode)
+    if not other or not _windows_task_exists(other):
+        return None
+    if dry_run:
+        print(f"  [dry-run] would offer to delete stale task '{other}' "
+              f"(this host now uses service_mode={service_mode!r}).")
+        return None
+    if non_interactive:
+        print(f"  [warn] stale task '{other}' still registered (this "
+              f"host now uses service_mode={service_mode!r}). Re-run "
+              "interactively to clean it up, or delete manually: "
+              f"schtasks /Delete /TN \"{other}\" /F")
+        return None
+    ans = input(
+        f"  Stale task '{other}' is still registered but this host "
+        f"now uses service_mode={service_mode!r}. Delete it? [Y/n]: "
+    ).strip().lower()
+    if ans and ans not in ("y", "yes"):
+        return None
+    rc = subprocess.run(
+        ["schtasks", "/Delete", "/TN", other, "/F"],
+        capture_output=True, text=True,
+    )
+    if rc.returncode != 0:
+        print(f"  [!] failed to delete '{other}': "
+              f"{rc.stderr.strip()[-200:]}")
+        return None
+    print(f"  · deleted stale task '{other}'")
+    return other
+
+
+def _clear_pycache(root: Path) -> int:
+    """Walk ``root`` and ``rmtree`` every ``__pycache__`` directory.
+
+    The 2026-05-19 pandorum diagnosis revealed that a v1.7.0 → v1.8.1
+    git pull left stale ``.pyc`` files whose source mtimes matched
+    pre-pull bytecode timestamps; the daemon-side ping handshake
+    failed because the bytecode that was actually executed was the
+    older protocol version. Clearing __pycache__ before service
+    restart guarantees the post-pull bytecode is what runs.
+
+    Returns the count of directories removed. Errors are swallowed
+    (a permission-denied __pycache__ doesn't fail the install).
+    """
+    import shutil  # noqa: PLC0415
+    removed = 0
+    try:
+        for d in root.rglob("__pycache__"):
+            if not d.is_dir():
+                continue
+            try:
+                shutil.rmtree(d)
+                removed += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return removed
+
+
+def _service_state_report(*, dry_run: bool) -> None:
+    """Print a final summary of what's running + what's listening.
+
+    Intentionally non-actionable — operator gets a single glance at
+    end-state to confirm everything is wired up. The accompanying
+    ``[!]`` flags surface anomalies that warrant a manual followup
+    (e.g. duplicate processes, missing ports).
+    """
+    print("\n==> Service state")
+    if dry_run:
+        print("  [dry-run] would inspect running processes + listening ports.")
+        return
+    # Daemon ping
+    daemon_ok = False
+    try:
+        from claude_hooks.daemon_client import ping  # noqa: PLC0415
+        daemon_ok = bool(ping(timeout=1.5))
+    except Exception:
+        daemon_ok = False
+    if daemon_ok:
+        print("  · claude-hooks-daemon:        responding on 127.0.0.1:47018")
+    else:
+        print("  [!] claude-hooks-daemon:        not responding "
+              "(check ~/.claude/claude-hooks-daemon.log)")
+    # Consultants engine — try the smart-start forwarder first since
+    # it's the lightweight path; fall back to the always-on engine.
+    try:
+        import urllib.error  # noqa: PLC0415
+        import urllib.request  # noqa: PLC0415
+        for port in (38096, 38095):
+            try:
+                with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/v1/health",
+                        timeout=1.5) as resp:
+                    if 200 <= resp.status < 300:
+                        kind = ("smart-start forwarder" if port == 38096
+                                else "always-on engine")
+                        print(f"  · claude-hooks-consultants:   "
+                              f"{kind} on 127.0.0.1:{port}")
+                        break
+            except (urllib.error.URLError, OSError):
+                continue
+        else:
+            print("  [!] claude-hooks-consultants:   no service responding on "
+                  "127.0.0.1:{38095,38096}")
+    except Exception:
+        pass
+    # Orphan / duplicate scan
+    if os.name == "nt":
+        procs = _find_claude_hooks_pythonw_processes()
+        if procs:
+            # Group by what they look like to make duplicates visible.
+            from collections import Counter
+            buckets = Counter()
+            for _pid, cmd in procs:
+                key = (
+                    "consultants engine" if "consultants.server" in cmd
+                    else "forwarder" if "consultants_forwarder" in cmd
+                    else "daemon" if "run_daemon" in cmd
+                    else "other"
+                )
+                buckets[key] += 1
+            extra = {k: v for k, v in buckets.items() if v > 1}
+            if extra:
+                print("  [!] duplicate processes detected:")
+                for k, n in extra.items():
+                    print(f"        {k}: {n} instances")
+                print("        re-run install.py interactively to "
+                      "clean them up, or kill manually via Task Manager.")
+
+
 def _restart_managed_services(*, dry_run: bool, skip: bool) -> None:
     """End-of-install hook (v1.5.2+): restart the long-lived
     ``claude-hooks-daemon`` and the always-on
@@ -1980,25 +2231,43 @@ def _restart_managed_services(*, dry_run: bool, skip: bool) -> None:
 
 def _restart_claude_hooks_daemon() -> None:
     """Restart the claude-hooks-daemon process on whichever platform
-    manages it. No-op when the service isn't installed."""
+    manages it. No-op when the service isn't installed.
+
+    #222 (2026-05-19) hardening:
+    - Wait for port 47018 to actually release after ``schtasks /End``
+      before ``/Run``. Pre-#222 the End→Run sequence raced the
+      OS TIME_WAIT window and the new daemon hit "already in use",
+      exited 1, then the task's RestartOnFailure retried 60 s later —
+      well past install.py's 20 s health-wait, producing a confusing
+      "restarted but not responding" message.
+    - Bump health-wait from 20 s to 60 s on Windows so the retry path
+      lands within the install.py session, not after the user has
+      walked away wondering whether the install succeeded.
+    """
     plat = sys.platform
     if plat == "win32":
         if not _windows_task_exists(_DAEMON_TASK_NAME):
             print("  claude-hooks-daemon: not installed (no scheduled task)"
                   " — skipping restart")
             return
-        # End existing instances (best-effort — task may not be running),
-        # then trigger a fresh Run. Using subprocess directly so we don't
-        # require UAC elevation for the End+Run cycle (the task is owned
-        # by the current user).
+        # End existing instances (best-effort — task may not be running).
         subprocess.run(["schtasks", "/End", "/TN", _DAEMON_TASK_NAME],
                        capture_output=True, text=True)
+        # #222: wait for the OS to release port 47018. Without this
+        # the next /Run hits TIME_WAIT and exits with "already in use".
+        if not _wait_for_port_free(47018, timeout=15.0):
+            print("  [warn] daemon port 47018 still held after /End; "
+                  "/Run may fail with 'already in use' — task auto-"
+                  "restart will eventually recover.")
         rc = subprocess.run(["schtasks", "/Run", "/TN", _DAEMON_TASK_NAME],
                             capture_output=True, text=True)
         if rc.returncode != 0:
             print(f"  claude-hooks-daemon: schtasks /Run failed:"
                   f" {rc.stderr.strip()[-200:]}")
             return
+        # Generous wait — covers schtasks RestartOnFailure (60 s
+        # interval) so a transient race still surfaces a clean OK.
+        timeout = 60.0
     elif plat == "darwin":
         plist = Path.home() / "Library" / "LaunchAgents" / "com.claude-hooks.daemon.plist"
         if not plist.exists():
@@ -2007,8 +2276,11 @@ def _restart_claude_hooks_daemon() -> None:
             return
         subprocess.run(["launchctl", "unload", str(plist)],
                        capture_output=True)
+        # Same TIME_WAIT race exists on macOS, though shorter.
+        _wait_for_port_free(47018, timeout=5.0)
         subprocess.run(["launchctl", "load", "-w", str(plist)],
                        capture_output=True)
+        timeout = 20.0
     else:
         unit_path = Path("/etc/systemd/system") / _DAEMON_UNIT
         if not unit_path.exists():
@@ -2021,13 +2293,15 @@ def _restart_claude_hooks_daemon() -> None:
             print(f"  claude-hooks-daemon: systemctl restart failed: "
                   f"{rc.stderr.strip()[-200:]}")
             return
+        timeout = 20.0
     # Verify the daemon came back. Cold-start can take a few seconds
     # (secret-file creation, port bind, embedding-manager init).
-    if _wait_for_daemon(timeout=20.0):
-        print("  claude-hooks-daemon: restarted + responding on 127.0.0.1:47018")
+    if _wait_for_daemon(timeout=timeout):
+        print(f"  claude-hooks-daemon: restarted + responding on 127.0.0.1:47018")
     else:
-        print("  [!!] claude-hooks-daemon: restarted but not responding "
-              "within 20 s. Check logs at ~/.claude/claude-hooks-daemon.log")
+        print(f"  [!!] claude-hooks-daemon: restarted but not responding "
+              f"within {timeout:.0f} s. Check logs at "
+              f"~/.claude/claude-hooks-daemon.log")
 
 
 def _restart_consultants_service() -> None:
@@ -5021,6 +5295,15 @@ def _install_consultants(cfg: dict, cfg_path: Path, *,
             non_interactive=non_interactive,
             dry_run=dry_run,
         )
+        # #222: a host that previously ran the OTHER service mode
+        # ends up with both tasks registered + both engines running.
+        # Offer to prune the stale one now that we know what mode
+        # this install picked.
+        _prune_stale_consultants_task(
+            service_mode=service_mode,
+            non_interactive=non_interactive,
+            dry_run=dry_run,
+        )
     elif sys.platform == "darwin":
         _install_consultants_launchd(
             consultants_py=consultants_py,
@@ -6107,6 +6390,20 @@ def main() -> int:
         dry_run=args.dry_run,
     )
 
+    # #222 (2026-05-19): clear __pycache__ before the service restart
+    # below. Stale .pyc files survived the pandorum v1.7.0→v1.8.1
+    # pull and the daemon's running bytecode ended up out of sync
+    # with what was on disk — the ping handshake silently rejected
+    # because the protocol const had changed in a module whose .pyc
+    # was loaded from cache. Clearing on every install is cheap and
+    # rules the failure mode out across the board.
+    if not args.dry_run:
+        removed = _clear_pycache(HERE)
+        if removed:
+            print(f"\n==> Cleared {removed} __pycache__ director"
+                  f"{'y' if removed == 1 else 'ies'} (post-pull "
+                  "bytecode hygiene)")
+
     # v1.5.2+: pick up newly-pulled code by restarting the long-lived
     # daemon (and the consultants engine if installed). Without this,
     # the running pythonw process keeps executing whatever bytecode
@@ -6117,6 +6414,11 @@ def main() -> int:
         dry_run=args.dry_run,
         skip=bool(getattr(args, "skip_daemon_restart", False)),
     )
+
+    # #222: end-of-install state report so the operator can confirm
+    # the expected services are up + no duplicates / orphans remain.
+    if not bool(getattr(args, "skip_daemon_restart", False)):
+        _service_state_report(dry_run=args.dry_run)
 
     conda_py = find_conda_env_python()
     print("\n==> Done.")
