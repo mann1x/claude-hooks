@@ -3726,7 +3726,16 @@ def _setup_ollama_chat(cfg: dict, *, non_interactive: bool, dry_run: bool) -> No
         hyde_enabled = ans in ("y", "yes")
 
     proposed_hyde_model = existing_hyde_model or "gemma4:e2b"
-    proposed_hyde_fallback = existing_hyde_fallback or proposed_hyde_model
+    # #225 (2026-05-19): default the HyDE fallback to a *different*
+    # model than the primary on fresh installs so the fallback is
+    # meaningful (a primary-failure that lands on the same model has
+    # no chance of succeeding). ``gemma4:31b-cloud`` is the chosen
+    # default because Ollama's free tier currently includes free
+    # inference on it — no quota cost for users who haven't paid
+    # for Ollama Pro yet, and a strict capability bump from the
+    # local ``gemma4:e2b`` primary. Existing installs that already
+    # have a fallback set keep theirs (back-compat).
+    proposed_hyde_fallback = existing_hyde_fallback or "gemma4:31b-cloud"
     if non_interactive:
         hyde_model = proposed_hyde_model
         hyde_fallback = proposed_hyde_fallback

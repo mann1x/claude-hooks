@@ -173,7 +173,7 @@
       "hyde_ground_k": 3,
       "hyde_ground_max_chars": 1500,
       "hyde_model": "gemma4:e2b",
-      "hyde_fallback_model": "gemma4:e4b",
+      "hyde_fallback_model": "gemma4:31b-cloud",
       "hyde_url": "http://localhost:11434/api/generate",
       "hyde_timeout": 30.0,
       "hyde_max_tokens": 150,

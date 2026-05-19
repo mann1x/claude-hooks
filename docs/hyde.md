@@ -160,7 +160,7 @@ Under `hooks.user_prompt_submit` in `config/claude-hooks.json`:
 | `hyde_ground_max_chars` | `1500` | Cap on the grounding block (per-entry cap = `max_chars / k`, min 200) |
 | `hyde_grounding_provider` | unset | Force a specific provider (e.g. `pgvector`); auto-pick by default |
 | `hyde_model` | `gemma4:e2b` | Primary Ollama model |
-| `hyde_fallback_model` | `gemma4:e4b` | Tried if primary fails |
+| `hyde_fallback_model` | `gemma4:31b-cloud` | Tried if primary fails. Cloud model on Ollama's free tier so no quota cost; strict capability bump from the local primary |
 | `hyde_url` | `http://localhost:11434/api/generate` | Ollama generate endpoint |
 | `hyde_timeout` | `30.0` | Per-call timeout in seconds |
 | `hyde_max_tokens` | `150` | Cap on expansion length (`num_predict`) |
