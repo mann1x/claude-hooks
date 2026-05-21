@@ -150,7 +150,7 @@ Claude responds (knowing the prior context, deterministically)
 
 ### Core (v0.1)
 - **Stdlib only** for the core (Qdrant + Memory KG providers, hooks, dispatcher) — no `pip install` needed. Optional features (pgvector, sqlite-vec, code-graph, MCP server, clustering) pull in their own deps via the `[code-graph]` / `[clustering]` / `[mcp-server]` extras.
-- **Python 3.9+**, runs identically on Linux, macOS, and Windows.
+- **Python 3.10+**, runs identically on Linux, macOS, and Windows.
 - **Auto-detection** of MCP servers from `~/.claude.json`
 - **Plugin model**: each memory backend is one file (qdrant, memory_kg, pgvector, sqlite_vec)
 - **OpenWolf integration**: injects Do-Not-Repeat and recent bugs from `.wolf/` projects
@@ -463,7 +463,7 @@ installer handles all three).
 
 ## Requirements
 
-- **Python 3.9+**. The recall/store core is **stdlib-only**; only the proxy
+- **Python 3.10+**. The recall/store core is **stdlib-only**; only the proxy
   and the optional DB-backed providers (pgvector, sqlite-vec) need wheels.
 - **Claude Code** with hooks support.
 - **At least one memory backend** — pick from the table below. Multiple can

@@ -397,7 +397,7 @@ HTTP MCP servers actually live; Desktop only has stdio entries via the
 
 ## Cross-platform strategy
 
-**Language: Python 3.9+** (stdlib only for the core). Justification:
+**Language: Python 3.10+** (stdlib only for the core). Justification:
 
 - Already present on most Linux systems (`/usr/bin/python3`) and on every
   modern Windows install (Microsoft Store python or `py` launcher).

@@ -16,6 +16,24 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Changed — Python floor bump 3.9 → 3.10
+
+`pyproject.toml` `requires-python` raised from `>=3.9` to `>=3.10`.
+Reflects the reality that the test suite already requires 3.10+
+(uses `dataclass(kw_only=True)` and other 3.10+ features in
+`tests/test_consultants_v2_events.py` and elsewhere). The dual-env
+sweep convention (3.9 + 3.11) had been broken since at least early
+v1.8.x — system `python3.9` collection-errors on the 3.10+ test
+files, producing a non-signal CI run. Documentation updates in
+`README.md`, `CLAUDE.md`, and `docs/deployment.md` track the new
+floor.
+
+Impact: Debian 11 / Proxmox 7 / Ubuntu 20.04 LTS stock `python3`
+(3.9) no longer pip-installs claude-hooks. Affected users were
+already running a conda env or pyenv to get a working stack;
+nothing operationally changes for them. The 3.9 classifier is
+removed from the `Programming Language ::` list.
+
 ## [1.9.1] — 2026-05-21
 
 Windows installer hardening pass on top of v1.9.0's LSP engine

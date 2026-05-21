@@ -2142,6 +2142,17 @@ def _prune_stale_consultants_task(*, service_mode: str,
     was done.
 
     Conservative-by-default: non-interactive runs report-only.
+
+    The delete must be **elevated** (matching the elevation the
+    create used via :func:`_run_schtasks_elevated`) — without it, the
+    schtasks subprocess inherits the unprivileged shell and the
+    delete fails with ``ERROR: Access is denied`` on hosts where the
+    task's principal is HighestAvailable / Run-As-Admin. We also
+    stop the running pythonw process first via
+    :func:`_force_kill_task_processes` because ``schtasks /Delete``
+    deregisters the schedule but does NOT kill the launched
+    payload — leaving an orphan pythonw bound to the engine's port
+    until the user reboots.
     """
     if os.name != "nt":
         return None
@@ -2164,14 +2175,38 @@ def _prune_stale_consultants_task(*, service_mode: str,
     ).strip().lower()
     if ans and ans not in ("y", "yes"):
         return None
-    rc = subprocess.run(
-        ["schtasks", "/Delete", "/TN", other, "/F"],
-        capture_output=True, text=True,
-    )
-    if rc.returncode != 0:
-        print(f"  [!] failed to delete '{other}': "
-              f"{rc.stderr.strip()[-200:]}")
+
+    # Step 1: stop the running payload. The opposite-task port is the
+    # engine's bound port — always-on lives on 38095, smart-start
+    # forwarder on 38096. Without this, ``schtasks /Delete`` succeeds
+    # but the pythonw process keeps running, holding the port, and
+    # surviving until the user reboots.
+    other_port = 38095 if other == _CONSULTANTS_TASK_NAME else 38096
+    _force_kill_task_processes(other, other_port)
+
+    # Step 2: elevated /Delete /F. Bare subprocess.run inherits the
+    # unprivileged shell — Access-denied on tasks whose principal is
+    # HighestAvailable. Mirrors the create-side elevation at
+    # _register_consultants_task.
+    delete_argstr = f'/Delete /TN "{other}" /F'
+    delete_argv = ["/Delete", "/TN", other, "/F"]
+    if not _run_schtasks_elevated(delete_argstr, delete_argv):
+        print(f"  [!] failed to delete '{other}': UAC declined or "
+              f"schtasks refused. Run from an elevated cmd: "
+              f"schtasks {delete_argstr}")
         return None
+
+    # Step 3: verify deletion. ``_run_schtasks_elevated`` returns True
+    # for the PowerShell ``Start-Process -Wait`` path even when the
+    # child schtasks failed (rc is hidden). Re-query the registry to
+    # confirm the task is actually gone.
+    if _windows_task_exists(other):
+        print(f"  [!] task '{other}' still exists after /Delete — "
+              "elevation may have been declined or the task is "
+              f"protected. Delete manually from an elevated cmd: "
+              f"schtasks {delete_argstr}")
+        return None
+
     print(f"  · deleted stale task '{other}'")
     return other
 
@@ -2442,6 +2477,45 @@ def _detect_consultants_service_mode(cfg: dict) -> str:
                 .get("consultants", {})
                 .get("smart_start", {}))
     return "smart-start" if smart.get("enabled") else "always-on"
+
+
+def _prompt_consultants_service_mode(cfg: dict, *,
+                                       non_interactive: bool) -> str:
+    """Resolve the consultants service mode the install run should target.
+
+    Reads the *currently configured* mode via
+    :func:`_detect_consultants_service_mode` and uses it as the prompt
+    default. The marker is shown dynamically so the user sees what
+    accepting the default will do:
+
+    - configured = always-on  → prompt shows ``[A/s]``
+    - configured = smart-start → prompt shows ``[a/S]``
+
+    Pre-fix the prompt hardcoded ``"always-on"`` as the default,
+    which meant accepting the default (or piping ``\\n`` to stdin)
+    silently flipped smart-start hosts to always-on. The current
+    function preserves the configured mode on empty / unrecognized
+    input — never auto-flips.
+
+    Non-interactive returns the configured mode verbatim. Note this
+    is a behaviour change from the pre-fix code which forced
+    always-on under ``--non-interactive``; the rationale is the same
+    (never silently flip).
+    """
+    current_mode = _detect_consultants_service_mode(cfg)
+    if non_interactive:
+        return current_mode
+    marker = "[A/s]" if current_mode == "always-on" else "[a/S]"
+    ans = input(
+        f"    Service mode: [a]lways-on or [s]mart-start "
+        f"(engine spawned on demand). Current: {current_mode}. "
+        f"{marker}: "
+    ).strip().lower()
+    if ans.startswith("s"):
+        return "smart-start"
+    if ans.startswith("a"):
+        return "always-on"
+    return current_mode  # empty / unrecognized → keep current
 
 
 def _consultants_restart_target(service_mode: str) -> tuple[str, int, str]:
@@ -5661,13 +5735,10 @@ def _install_consultants(cfg: dict, cfg_path: Path, *,
             non_interactive=non_interactive, dry_run=dry_run,
         )
 
-    # Service mode prompt — non-interactive defaults to always-on.
-    service_mode = "always-on"
-    if not non_interactive:
-        ans = input("    Service mode: [a]lways-on (default) or "
-                    "[s]mart-start (engine spawned on demand): ").strip().lower()
-        if ans.startswith("s"):
-            service_mode = "smart-start"
+    # Service mode prompt — see ``_prompt_consultants_service_mode``.
+    service_mode = _prompt_consultants_service_mode(
+        cfg, non_interactive=non_interactive,
+    )
 
     # Create env if needed.
     if not already_present:

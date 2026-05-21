@@ -30,7 +30,7 @@ Scale down as needed.
 
 ## 2. Prereqs (server side)
 
-- Linux with Python 3.9+ (stdlib only for the core — no `pip install`
+- Linux with Python 3.10+ (stdlib only for the core — no `pip install`
   required until you want the dev deps)
 - A Qdrant MCP server (e.g. `ghcr.io/sparfenyuk/mcp-proxy` wrapping
   `mcp-server-qdrant`) reachable on HTTP
