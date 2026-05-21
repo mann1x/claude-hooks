@@ -16,6 +16,141 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [1.8.4] — 2026-05-21
+
+This release lands four small but useful installer + dev-tooling
+improvements that piled up after the v1.8.3 cut. All additive,
+opt-in, no breaking changes. Both env sweeps green: 3860 / 3966.
+
+### Changed — install.py: bake `gemma4:31b-cloud` as HyDE fallback default (#225, 2026-05-21)
+
+`_setup_ollama_chat`'s HyDE-fallback prompt previously defaulted to
+the same model as the primary, which gave no real capability bump
+on primary-model failure. New default is `gemma4:31b-cloud`: free
+inference under Ollama's free tier and a strict capability step up
+from a local primary like `gemma4:e4b-32000`. Existing configs are
+preserved — the new default only fires on a fresh install or when
+the field was previously unset.
+
+`docs/hyde.md` updated to document the new default and the Ollama
+free-tier rationale.
+
+### Added — install.py: remote llamafile as primary embedder (#237, 2026-05-21)
+
+`_setup_embedding_engine` grew a new dialog branch between
+"Ollama? no" and "OpenAI? no": the user can now point at a
+**remote** llamafile (e.g. one running on a sibling LAN host) as
+the primary embedder, instead of being forced to spawn a local one.
+
+When chosen, the installer writes:
+
+```json
+"embedder": "llamafile",
+"embedder_options": {
+  "url": "http://<remote-host>:38092/embedding",
+  "daemon_ensure": false,
+  "timeout": 30.0
+}
+```
+
+`daemon_ensure: false` keeps the local `claude-hooks-daemon` from
+spawning a competing process. A stale local `[embedding]` block is
+stripped on the spot. The dialog runs a best-effort connectivity
+probe and continues regardless — the URL may be intermittently
+reachable but still valid.
+
+### Added — install.py: `_validate_sqlite_vec_only` validator (#237, 2026-05-21)
+
+Previously the validate-only `[V]alidate only / [R]e-install / [S]kip`
+shortcut existed only for pgvector. `_setup_sqlite_vec_mcp` now
+exposes the same flow when the provider is fully configured. The
+new ~95-line helper:
+
+- opens the configured `.db` read-only and reads the
+  `claude_hooks_schema` version (v0 / v1 / v2),
+- dispatches to the embedder-specific connectivity check
+  (`llamafile` w/ daemon_ensure suffix, `ollama` `/api/embeddings`,
+  `openai`),
+- confirms the v1.6+ MCP launcher is on disk at `~/.local/bin`.
+
+Mirrors `_validate_pgvector_only` byte-for-byte where the dispatch
+is identical. Re-runs on fully-configured hosts no longer force the
+full setup path.
+
+Stale docstring in `_setup_sqlite_vec_mcp` removed — the function
+claimed there was no MCP launcher and no schema migration, both of
+which became false in v1.6 and v1.7 respectively.
+
+### Added — install.py: LAN-exposure prompt for local llamafile (#242, 2026-05-21)
+
+`_setup_llamafile_engine` grew a new prompt at the end of the local
+llamafile dialog:
+
+```
+Expose this embedder on the LAN so other hosts can use it? [y/N]:
+```
+
+Default is loopback (`127.0.0.1`). On `y` the configured host is
+flipped to `0.0.0.0` and the LAN URL is printed via
+`socket.gethostbyname` so the user knows where to point their other
+hosts. Loud WARNING that the embedder has no auth — opt in only on
+a trusted LAN.
+
+Use case: a fast Linux host serves a slower Windows host's embeds
+over the LAN (the Linux llamafile build is ~2× faster than the
+Windows one at byte-identical weights). The consumer host
+configures with `daemon_ensure: false` against the LAN URL.
+
+`docs/llamafile-integration.md` gains a "LAN-shared topology"
+section with the full producer/consumer walkthrough.
+
+### Fixed — install.py: pgvector validator labels remote llamafile correctly (companion to #237)
+
+`_validate_pgvector_only` was always printing `(daemon-managed)`
+for `llamafile` embedders — including when the user had configured
+`daemon_ensure=false` to consume a LAN-shared llamafile. New
+behavior matches `_validate_sqlite_vec_only`: checks
+`daemon_ensure`, prints `(remote, no local supervision) @ <url>`
+when the daemon does not supervise the embedder locally, and
+suppresses the misleading "daemon spawns llamafile on demand" note
+in that mode.
+
+### Added — test suite: portable network-identifier fixtures + override mechanism (#243, 2026-05-21)
+
+Before this release the suite leaked the maintainer's LAN
+identifiers (192.168.x.x hosts, real DSNs, real URLs) into 14 test
+files as fixture values. Almost all were fed to mocked-out network
+calls so the tests passed regardless — but the IPs still made the
+suite feel private, confused outside contributors trying to tell
+real-infra references from fixture noise, and blocked anyone
+without the maintainer's network from running the live-integration
+test (the env-var override existed but the default still pointed
+at the maintainer's LAN).
+
+**New module: `tests/_fixtures_net.py`** — 16 named constants
+covering every fixture-shape network identifier (hosts, Ollama
+URLs, llamafile, proxy, episodic, two Postgres DSNs, regex test
+fodder). Defaults are drawn from RFC 5737 documentation address
+blocks (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`) — they
+can't reach anything and are obviously fake to anyone reading the
+test.
+
+**Two-tier override system:**
+
+1. `CLAUDE_HOOKS_TEST_*` environment variables (CI-friendly).
+2. A gitignored `tests/.env.local` file parsed at import time
+   (developer-friendly). Process env wins over file so CI can
+   override the developer override.
+
+**New doc: `tests/README.md`** — convention + override walkthrough,
+plus what qualifies as "real infra" vs "obviously fake fixture
+noise" (public model names like `qwen3-embedding:0.6b` stay
+literal; LAN hosts go through the fixtures module).
+
+**Sweep:** 14 test files, every baked LAN identifier replaced with
+the appropriate `FIXTURE_*` import. `grep -rE
+'192\.168\.[0-9]+|10\.0\.0\.'` against `tests/` now returns nothing.
+
 ## [1.8.3] — 2026-05-19
 
 ### Fixed — install.py: service-mode-aware consultants restart + drift detection (#223, 2026-05-19)

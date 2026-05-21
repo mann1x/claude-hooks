@@ -12,6 +12,8 @@ import pytest
 
 from claude_hooks import daemon, daemon_client
 
+from tests._fixtures_net import FIXTURE_LAN_HOST
+
 
 # ===================================================================== #
 # Secret management
@@ -118,7 +120,7 @@ class TestServerBindSafety:
 
     def test_refuses_arbitrary_address(self):
         with pytest.raises(ValueError):
-            daemon.DaemonServer("192.168.1.5", 0, secret="s")
+            daemon.DaemonServer(FIXTURE_LAN_HOST, 0, secret="s")
 
     def test_accepts_loopback(self):
         # port 0 = pick any free port — we close immediately.

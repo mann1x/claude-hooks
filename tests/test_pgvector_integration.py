@@ -20,6 +20,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 
+from tests._fixtures_net import (  # noqa: E402
+    FIXTURE_OLLAMA_DIRECT_EMBEDDINGS,
+)
+
+
 def _dsn_from_env_file() -> str:
     """Best-effort .env reader for /shared/config/mcp-pgvector/.env."""
     pg_env: dict[str, str] = {}
@@ -39,10 +44,19 @@ def _dsn_from_env_file() -> str:
     return "postgresql://claude:hooks@localhost:5433/memory"
 
 
-# Connection defaults — override with env vars for CI.
-PGVECTOR_DSN = os.environ.get("PGVECTOR_DSN") or _dsn_from_env_file()
+# Connection defaults. The legacy ``PGVECTOR_DSN`` / ``OLLAMA_EMBEDDINGS_URL``
+# env vars are honored for backward compatibility, but the modern path is
+# to override via the shared ``CLAUDE_HOOKS_TEST_*`` knobs in
+# ``tests/_fixtures_net.py`` (which can also be set in ``tests/.env.local``).
+# Defaults are RFC 5737 documentation IPs — they can't reach anything, so
+# the integration tests will be skipped (or fail loudly with a connection
+# refused) unless the contributor explicitly points at real infra.
+PGVECTOR_DSN = (
+    os.environ.get("PGVECTOR_DSN")
+    or _dsn_from_env_file()
+)
 OLLAMA_URL = os.environ.get(
-    "OLLAMA_EMBEDDINGS_URL", "http://192.168.178.2:11434/api/embeddings"
+    "OLLAMA_EMBEDDINGS_URL", FIXTURE_OLLAMA_DIRECT_EMBEDDINGS,
 )
 
 # Use a unique table name per test run to avoid collisions.

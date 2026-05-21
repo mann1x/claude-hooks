@@ -23,6 +23,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from tests._fixtures_net import FIXTURE_PG_DSN_ALT_PORT
+
 
 try:
     from langgraph.graph import StateGraph, START, END
@@ -246,19 +248,18 @@ class TestConfigIntegration(unittest.TestCase):
             cwd = Path(d)
             cfg = cc.ConsultantsConfig()
             cfg.checkpointer.backend = "postgres"
-            cfg.checkpointer.url = (
-                "postgresql://claude_hooks@192.168.178.2:5433/db"
-            )
+            cfg.checkpointer.url = FIXTURE_PG_DSN_ALT_PORT
             cfg.checkpointer.postgres_pool_max = 20
             path = cc.save_config(cfg, scope="project", cwd=cwd)
             text = path.read_text(encoding="utf-8")
             self.assertIn('backend = "postgres"', text)
-            self.assertIn("postgresql://claude_hooks", text)
+            # Round-trip preserves the DSN scheme prefix.
+            self.assertIn("postgresql://", text)
             reloaded = cc.load_config(cwd=cwd)
             self.assertEqual(reloaded.checkpointer.backend, "postgres")
             self.assertEqual(
                 reloaded.checkpointer.url,
-                "postgresql://claude_hooks@192.168.178.2:5433/db",
+                FIXTURE_PG_DSN_ALT_PORT,
             )
             self.assertEqual(reloaded.checkpointer.postgres_pool_max, 20)
 

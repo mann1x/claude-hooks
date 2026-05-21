@@ -137,6 +137,7 @@ class TestEnable:
             "y",                # llamafile fallback? yes
             "",                 # llamafile defaults
             "cpu",              # CPU mode
+            "",                 # #242: accept LAN-exposure default (loopback)
             "n",                # v1.6: skip MCP launcher drop (covered
                                 # by test_install_sqlite_vec_launcher.py)
         ]))
@@ -161,9 +162,11 @@ class TestEnable:
             "y",
             str(db),
             "n",    # use Ollama? no
+            "n",    # #237: use remote llamafile? no
             "n",    # use OpenAI? no
             "",     # llamafile defaults
             "cpu",  # CPU mode
+            "",     # #242: accept LAN-exposure default (loopback)
             "n",    # v1.6: skip MCP launcher drop
         ]))
         install._setup_sqlite_vec_mcp(
@@ -239,9 +242,11 @@ class TestEnable:
             "y",
             str(db),
             "n",   # use Ollama? no
+            "n",   # #237: use remote llamafile? no
             "n",   # use OpenAI? no
             "",    # llamafile defaults
             "cpu", # CPU mode
+            "",    # #242: accept LAN-exposure default (loopback)
             "n",   # v1.6: skip MCP launcher drop
         ]))
         with patch.object(install, "_sqlite_vec_extension_available",
@@ -260,11 +265,13 @@ class TestEnable:
         monkeypatch.setattr("builtins.input", _scripted_input([
             "y",
             str(db),
-            "n",
-            "n",
-            "",
-            "cpu",
-            "n",  # v1.6: skip MCP launcher drop
+            "n",   # Ollama? no
+            "n",   # #237: remote llamafile? no
+            "n",   # OpenAI? no
+            "",    # llamafile defaults
+            "cpu", # CPU
+            "",    # #242: LAN-exposure default
+            "n",   # v1.6: skip MCP launcher drop
         ]))
         with patch.object(install, "_sqlite_vec_extension_available",
                           return_value=True):

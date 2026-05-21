@@ -32,6 +32,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 import install  # noqa: E402
+from tests._fixtures_net import FIXTURE_LAN_HOST_ALT, FIXTURE_PROXY_URL  # noqa: E402
 
 
 def _scripted_input(answers):
@@ -86,7 +87,7 @@ class TestClassify(unittest.TestCase):
 
     def test_remote_lan(self):
         self.assertEqual(install._classify_proxy_url(
-            "http://192.168.178.2:38080"), "remote")
+            FIXTURE_PROXY_URL), "remote")
         self.assertEqual(install._classify_proxy_url(
             "https://proxy.example.com"), "remote")
 
@@ -112,11 +113,11 @@ class TestReadCurrentUrl(unittest.TestCase):
         with TemporaryDirectory() as d:
             p = Path(d) / "settings.json"
             p.write_text(json.dumps({
-                "env": {"ANTHROPIC_BASE_URL": "http://192.168.178.2:38080"},
+                "env": {"ANTHROPIC_BASE_URL": FIXTURE_PROXY_URL},
             }))
             self.assertEqual(
                 install._read_current_anthropic_base_url(p),
-                "http://192.168.178.2:38080",
+                FIXTURE_PROXY_URL,
             )
 
     def test_malformed_json(self):
@@ -287,10 +288,10 @@ class TestProxyDialogQ2Labels(unittest.TestCase):
         # Pandorum's scenario: remote URL, no local install.
         p = self._label_in_q2(
             installed=False, kind="",
-            current_url="http://192.168.178.2:38080",
+            current_url=FIXTURE_PROXY_URL,
             q1_answer="n",  # don't install locally
         )
-        self.assertIn("remote @ http://192.168.178.2:38080", p)
+        self.assertIn(f"remote @ {FIXTURE_PROXY_URL}", p)
         self.assertIn("[Y/n]", p)  # default Y when configured
 
     def test_label_local(self):
@@ -353,13 +354,13 @@ class TestProxyDialogQ2EndpointDefault(unittest.TestCase):
         """Currently-configured remote URL is the proposed default —
         empty input accepts it."""
         captured = self._run_and_capture_set(
-            installed=False, current_url="http://192.168.178.2:38080",
+            installed=False, current_url=FIXTURE_PROXY_URL,
             q1="n",                  # don't install locally
             q2_url="",               # accept default (current URL)
         )
         self.assertEqual(
             captured.get("ANTHROPIC_BASE_URL"),
-            "http://192.168.178.2:38080",
+            FIXTURE_PROXY_URL,
         )
 
     def test_endpoint_default_uses_local_when_just_installed(self):
@@ -379,11 +380,11 @@ class TestProxyDialogQ2EndpointDefault(unittest.TestCase):
         captured = self._run_and_capture_set(
             installed=False, current_url="",
             q1="n",                  # don't install locally
-            q2_url="http://10.0.0.5:38080",  # explicit endpoint
+            q2_url=f"http://{FIXTURE_LAN_HOST_ALT}:38080",  # explicit endpoint
         )
         self.assertEqual(
             captured.get("ANTHROPIC_BASE_URL"),
-            "http://10.0.0.5:38080",
+            f"http://{FIXTURE_LAN_HOST_ALT}:38080",
         )
 
 
@@ -407,7 +408,7 @@ class TestSkipPath(unittest.TestCase):
         with patch.object(install, "_proxy_locally_installed",
                           return_value=(False, "")), \
              patch.object(install, "_read_current_anthropic_base_url",
-                          return_value="http://192.168.178.2:38080"), \
+                          return_value=FIXTURE_PROXY_URL), \
              patch.object(install, "_set_settings_env_vars",
                           side_effect=fake_set), \
              patch("builtins.input",

@@ -29,6 +29,12 @@ from unittest.mock import patch
 
 import pytest
 
+from tests._fixtures_net import (
+    FIXTURE_LAN_HOST,
+    FIXTURE_LAN_HOST_ALT,
+    FIXTURE_LLAMAFILE_URL,
+)
+
 
 @pytest.fixture(scope="module")
 def install_mod():
@@ -490,3 +496,244 @@ class TestSyncConsultantsServiceMode:
         out = capsys.readouterr().out
         assert "consultants env python not found" in out
         assert "claude-consultants config set-service-mode" in out
+
+
+# ----- #237: install.py audit (2026-05-21) ----------------------------- #
+#
+# Coordinated tests for four findings landed together:
+#   1. Stale docstring at _setup_sqlite_vec_mcp (smoke: must mention
+#      both "MCP launcher" AND "schema migration" so the v1.6+/v1.7+
+#      capabilities aren't denied).
+#   2. _validate_sqlite_vec_only — read-only probe, no mutations to
+#      cfg, handles missing db_path / missing file / pre-v1.7 schema.
+#   3. Remote llamafile primary path in _setup_embedding_engine —
+#      saves embedder="llamafile" with daemon_ensure=false and
+#      removes any stale local cfg["embedding"] block.
+#   4. LAN-exposure prompt in _setup_llamafile_engine — default
+#      loopback, opt-in 0.0.0.0, preserves existing on re-run.
+
+
+class TestSqliteVecDocstringNotStale:
+    """Finding 1 — sentinel test for the docstring claims. If a
+    future regression re-introduces the pre-v1.6 wording, this
+    catches it before users see misleading guidance."""
+
+    def test_docstring_mentions_mcp_launcher(self, install_mod):
+        doc = install_mod._setup_sqlite_vec_mcp.__doc__ or ""
+        assert "MCP launcher" in doc, (
+            "v1.6+ ships a system-wide MCP launcher; docstring must "
+            "not claim 'no MCP server, no system-wide launcher'."
+        )
+
+    def test_docstring_mentions_schema_migration(self, install_mod):
+        doc = install_mod._setup_sqlite_vec_mcp.__doc__ or ""
+        assert "schema migration" in doc, (
+            "v1.7+ ships lazy schema migration; docstring must not "
+            "claim 'no schema migration'."
+        )
+
+
+class TestValidateSqliteVecOnly:
+    """Finding 2 — read-only validator twin of _validate_pgvector_only."""
+
+    def test_no_db_path_in_cfg_prints_and_returns(self, install_mod, capsys):
+        install_mod._validate_sqlite_vec_only({})
+        out = capsys.readouterr().out
+        assert "No db_path in config" in out
+
+    def test_missing_db_file_is_handled(
+            self, install_mod, tmp_path, capsys):
+        missing = tmp_path / "absent.db"
+        install_mod._validate_sqlite_vec_only({
+            "providers": {"sqlite_vec": {"db_path": str(missing)}},
+        })
+        out = capsys.readouterr().out
+        assert "does not exist" in out
+        assert "nothing to validate" in out
+
+    def test_pre_v17_db_reports_pre_v17_schema(
+            self, install_mod, tmp_path, capsys):
+        # Create a SQLite file without the v1.7 bookkeeping table.
+        import sqlite3
+        db = tmp_path / "memory.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE legacy(x INTEGER)")
+        conn.commit()
+        conn.close()
+        install_mod._validate_sqlite_vec_only({
+            "providers": {"sqlite_vec": {
+                "db_path": str(db),
+                "embedder": "llamafile",
+                "embedder_options": {
+                    "url": "http://127.0.0.1:38092/embedding",
+                    "daemon_ensure": True,
+                },
+            }},
+        })
+        out = capsys.readouterr().out
+        assert "pre-v1.7" in out
+        # Daemon-managed llamafile is the most common embedder kind on
+        # solidpc-style hosts; verify the dispatch branch fires.
+        assert "daemon-managed" in out
+
+    def test_v17_db_reports_schema_version_and_launcher(
+            self, install_mod, tmp_path, capsys, monkeypatch):
+        # Create a sqlite db with the v1.7 bookkeeping shape.
+        import sqlite3
+        db = tmp_path / "memory.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE claude_hooks_schema(version INTEGER)")
+        conn.execute("INSERT INTO claude_hooks_schema(version) VALUES (?)", (2,))
+        conn.commit()
+        conn.close()
+        # Stub the launcher path so the assertion is host-independent.
+        from pathlib import Path
+        fake_launcher = tmp_path / "fake-launcher"
+        fake_launcher.write_text("#!/bin/sh\necho launcher\n")
+        monkeypatch.setattr(
+            install_mod, "_sqlite_vec_launcher_path",
+            lambda: fake_launcher,
+        )
+        install_mod._validate_sqlite_vec_only({
+            "providers": {"sqlite_vec": {
+                "db_path": str(db),
+                "embedder": "llamafile",
+                "embedder_options": {
+                    "url": FIXTURE_LLAMAFILE_URL,
+                    "daemon_ensure": False,
+                },
+            }},
+        })
+        out = capsys.readouterr().out
+        assert "schema version: v2" in out
+        assert "present" in out
+        # Remote-llamafile dispatch surfaces the no-supervision label
+        # so the operator sees the LAN topology without checking config.
+        assert "remote, no local supervision" in out
+
+
+class TestRemoteLlamafilePrimaryDialog:
+    """Finding 3 — non-interactive convergence test for the new
+    remote-llamafile-as-primary branch in _setup_embedding_engine.
+    """
+
+    def test_existing_remote_llamafile_preserved_non_interactive(
+            self, install_mod):
+        # Simulate a host already configured with a remote llamafile
+        # primary; --non-interactive must keep it.
+        cfg = {
+            "providers": {"pgvector": {
+                "embedder": "llamafile",
+                "embedder_options": {
+                    "url": FIXTURE_LLAMAFILE_URL,
+                    "daemon_ensure": False,
+                    "timeout": 30.0,
+                },
+            }},
+            # Stale local embedding block from a previous local install
+            # — the remote-primary branch must strip it.
+            "embedding": {"enabled": True, "llamafile_path": "/nope"},
+        }
+        # Force the Ollama branch off so we hit the remote-llamafile branch.
+        install_mod._setup_embedding_engine(
+            cfg, provider="pgvector",
+            non_interactive=True, dry_run=False,
+        )
+        # The non-interactive code path falls through Ollama=true by
+        # default because existing_kind="llamafile" doesn't match the
+        # "ollama"/"composite" check at the top — so it takes the
+        # "use_ollama=False" branch, sees use_remote_llamafile=True
+        # from the existing config, and re-saves the same shape.
+        opts = cfg["providers"]["pgvector"]["embedder_options"]
+        assert cfg["providers"]["pgvector"]["embedder"] == "llamafile"
+        assert opts["url"] == FIXTURE_LLAMAFILE_URL
+        assert opts["daemon_ensure"] is False
+        assert "embedding" not in cfg, (
+            "remote-primary path must strip a stale local embedding block"
+        )
+
+    def test_helper_strips_stale_local_embedding_block(self, install_mod):
+        # Just verifies the post-condition documented in Finding 3:
+        # remote-llamafile primary == no local supervision required.
+        # We exercise the same path as the test above but with a
+        # different stale-block shape to guard against the cleanup
+        # being too narrow.
+        cfg = {
+            "providers": {"pgvector": {
+                "embedder": "llamafile",
+                "embedder_options": {
+                    "url": f"http://{FIXTURE_LAN_HOST_ALT}:38092/embedding",
+                    "daemon_ensure": False,
+                },
+            }},
+            "embedding": {
+                "enabled": True,
+                "host": "0.0.0.0",  # was producer; now consumer.
+                "llamafile_path": "/legacy/path",
+                "port": 38092,
+            },
+        }
+        install_mod._setup_embedding_engine(
+            cfg, provider="pgvector",
+            non_interactive=True, dry_run=False,
+        )
+        assert "embedding" not in cfg
+
+
+class TestLanExposurePrompt:
+    """Finding 4 — LAN exposure prompt in _setup_llamafile_engine.
+    Verifies the default-loopback behavior + the round-trip of an
+    existing 0.0.0.0 setting across re-installs.
+    """
+
+    def test_non_interactive_default_keeps_loopback(
+            self, install_mod, tmp_path, monkeypatch, capsys):
+        # Skip composite fetch + GPU probe paths by stubbing them.
+        cfg = {"embedding": {}}  # no existing host -> default loopback
+        # Stub the GPU probe + composite fetch so the unit doesn't
+        # touch the filesystem / network. mode=cpu is the simplest
+        # non-interactive branch.
+        monkeypatch.setattr(
+            install_mod, "_download_composite_llamafile",
+            lambda *a, **kw: True,
+        )
+        block = install_mod._setup_llamafile_engine(
+            cfg, non_interactive=True, dry_run=True,
+        )
+        assert block["host"] == "127.0.0.1", (
+            "fresh non-interactive install must default to loopback"
+        )
+
+    def test_non_interactive_preserves_existing_lan_host(
+            self, install_mod, monkeypatch):
+        # A host that's already set to 0.0.0.0 must NOT be reset to
+        # loopback by a --non-interactive re-run.
+        cfg = {"embedding": {"host": "0.0.0.0"}}
+        monkeypatch.setattr(
+            install_mod, "_download_composite_llamafile",
+            lambda *a, **kw: True,
+        )
+        block = install_mod._setup_llamafile_engine(
+            cfg, non_interactive=True, dry_run=True,
+        )
+        assert block["host"] == "0.0.0.0", (
+            "non-interactive re-run must preserve existing LAN exposure"
+        )
+
+    def test_block_shape_includes_host_field(self, install_mod, monkeypatch):
+        # Schema sentinel: the returned block must always carry "host"
+        # so callers (and the EmbeddingConfig dataclass) get a stable
+        # field set across the v1.4 (no host) -> #237 (host) transition.
+        cfg = {}
+        monkeypatch.setattr(
+            install_mod, "_download_composite_llamafile",
+            lambda *a, **kw: True,
+        )
+        block = install_mod._setup_llamafile_engine(
+            cfg, non_interactive=True, dry_run=True,
+        )
+        for key in (
+                "enabled", "llamafile_path", "model_gguf",
+                "host", "port", "ctx_size", "pooling",
+                "mode", "idle_timeout_seconds"):
+            assert key in block, f"missing key in block: {key!r}"

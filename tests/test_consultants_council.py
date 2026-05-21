@@ -191,8 +191,9 @@ class TestGroupItemsIntoLanes:
         assert text == "1. foo\n2. bar"
 
     def test_fanout_max_lanes_constant(self):
-        # 3 lanes is the cloud-serialization-effective cap on
-        # 192.168.178.2:11433. Bumping requires re-measuring.
+        # 3 lanes is the cloud-serialization-effective cap measured
+        # against an Ollama proxy on the maintainer's LAN. Bumping
+        # this constant requires re-measuring on the target host.
         assert council.FANOUT_MAX_LANES == 3
 
 

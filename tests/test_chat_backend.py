@@ -31,6 +31,8 @@ from claude_hooks.chat_backend import (
     parse_model_ref,
 )
 
+from tests._fixtures_net import FIXTURE_LAN_HOST_ALT
+
 
 # ----------------------------------------------------------------- #
 # helpers
@@ -311,10 +313,9 @@ class TestFactory(unittest.TestCase):
         self.assertEqual(client.label, "gemma-q5")
 
     def test_factory_passes_ollama_url(self):
-        client, _ = make_chat_client(
-            "x", ollama_url="http://192.168.1.1:11434/api/generate"
-        )
-        self.assertEqual(client.url, "http://192.168.1.1:11434/api/generate")
+        url = f"http://{FIXTURE_LAN_HOST_ALT}:11434/api/generate"
+        client, _ = make_chat_client("x", ollama_url=url)
+        self.assertEqual(client.url, url)
 
 
 class TestCallOneShot(unittest.TestCase):

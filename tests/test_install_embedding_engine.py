@@ -259,6 +259,7 @@ class TestSetupLlamafileEngine:
         monkeypatch.setattr("builtins.input", _scripted_input([
             "",   # accept default settings
             "",   # accept GPU mode default (auto when GPU detected)
+            "",   # #242: accept LAN-exposure default (loopback)
         ]))
         with patch.object(Path, "is_file", return_value=True):
             # Pretend an NVIDIA GPU was detected.
@@ -271,12 +272,15 @@ class TestSetupLlamafileEngine:
                 )
         assert block["mode"] == "auto"
         assert block["model_gguf"] == ""  # default = baked composite
+        # #242: default LAN-exposure answer is loopback.
+        assert block["host"] == "127.0.0.1"
 
     def test_interactive_cpu_mode(self, tmp_path, monkeypatch):
         cfg = {}
         monkeypatch.setattr("builtins.input", _scripted_input([
             "",      # accept default settings
             "cpu",   # force CPU mode
+            "",      # #242: accept LAN-exposure default (loopback)
         ]))
         with patch.object(Path, "is_file", return_value=True):
             with patch("claude_hooks.gpu_probe.probe", return_value={
@@ -299,6 +303,7 @@ class TestSetupLlamafileEngine:
             str(gguf),    # custom GGUF path
             "8192",       # custom ctx
             "cpu",        # CPU mode
+            "",           # #242: accept LAN-exposure default (loopback)
         ]))
         with patch.object(Path, "is_file", return_value=True):
             block = install._setup_llamafile_engine(
@@ -321,6 +326,7 @@ class TestSetupLlamafileEngine:
             str(good),          # good path
             "",                 # accept default ctx
             "cpu",              # CPU mode
+            "",                 # #242: accept LAN-exposure default (loopback)
         ]))
         with patch.object(Path, "is_file", return_value=True):
             block = install._setup_llamafile_engine(
@@ -393,6 +399,7 @@ class TestSetupEmbeddingEngine:
             "y",      # use llamafile fallback? yes
             "",       # accept llamafile defaults
             "cpu",    # CPU mode for predictability
+            "",       # #242: accept LAN-exposure default (loopback)
         ]))
         with patch("claude_hooks.gpu_probe.probe", return_value={
                 "vendor": "nvidia", "total_mb": 1, "free_mb": 1, "raw": "x"
@@ -416,9 +423,11 @@ class TestSetupEmbeddingEngine:
         cfg = {"providers": {"pgvector": {}}}
         monkeypatch.setattr("builtins.input", _scripted_input([
             "n",      # use Ollama? no
+            "n",      # #237: use remote llamafile? no
             "n",      # use OpenAI? no
             "",       # accept llamafile defaults
             "cpu",    # CPU mode
+            "",       # #242: accept LAN-exposure default (loopback)
         ]))
         with patch("claude_hooks.gpu_probe.probe", return_value={
                 "vendor": "none", "total_mb": None, "free_mb": None, "raw": None
@@ -436,6 +445,7 @@ class TestSetupEmbeddingEngine:
         cfg = {"providers": {"pgvector": {}}}
         monkeypatch.setattr("builtins.input", _scripted_input([
             "n",                                  # use Ollama? no
+            "n",                                  # #237: use remote llamafile? no
             "y",                                  # use OpenAI? yes
             "https://my-server/v1/embeddings",    # URL
             "text-embedding-3-large",             # model
@@ -443,6 +453,7 @@ class TestSetupEmbeddingEngine:
             "y",                                  # use llamafile fallback? yes
             "",                                   # llamafile defaults
             "cpu",                                # CPU
+            "",                                   # #242: LAN-exposure default
         ]))
         with patch("claude_hooks.gpu_probe.probe", return_value={
                 "vendor": "none", "total_mb": None, "free_mb": None, "raw": None
@@ -464,9 +475,11 @@ class TestSetupEmbeddingEngine:
         cfg = {"providers": {"sqlite_vec": {"db_path": "~/x.db"}}}
         monkeypatch.setattr("builtins.input", _scripted_input([
             "n",      # use Ollama? no
+            "n",      # #237: use remote llamafile? no
             "n",      # use OpenAI? no
             "",       # llamafile defaults
             "cpu",    # CPU
+            "",       # #242: LAN-exposure default
         ]))
         with patch("claude_hooks.gpu_probe.probe", return_value={
                 "vendor": "none", "total_mb": None, "free_mb": None, "raw": None

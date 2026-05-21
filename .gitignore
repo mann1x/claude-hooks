@@ -100,3 +100,10 @@ benchmarks/consultants/results/**/*
 !benchmarks/consultants/results/**/quota.md
 !benchmarks/consultants/results/**/metadata.json
 !benchmarks/consultants/results/**/smoke-metadata.json
+
+
+# Local developer overrides for test-fixture network identifiers (URLs,
+# DSNs, hosts). See tests/README.md and tests/_fixtures_net.py — this
+# file lets contributors point the test suite at their real infra
+# without leaking those values into version control.
+tests/.env.local
