@@ -16,7 +16,77 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-### Changed — Python floor bump 3.9 → 3.10
+## [1.9.2] — 2026-05-21
+
+Two install.py bugfixes uncovered by the v1.9.1 deploy itself, plus
+the Python floor bump that the test suite was implicitly requiring
+since early v1.8.x. PATCH release — every change is bug fix or
+honesty-about-what's-required, no new opt-in subsystems, no config
+schema changes.
+
+Pandorum-validated end-to-end on 2026-05-21 (the install.py fixes
+were the entire reason v1.9.2 exists — they have to be verified on
+the host where v1.9.1's deploy triggered them).
+
+Test suite: 4010 passed / 136 skipped on Python 3.11 (+12 vs
+v1.9.1 from the new prompt and prune-task regression tests).
+
+### Fixed — install.py: configured consultants service mode preserved on scripted-stdin deploys (`5443463`)
+
+The `_install_consultants` service-mode prompt hardcoded
+`service_mode = "always-on"` as its default branch and rendered
+the prompt label as `[a]lways-on (default)`. Accepting the default
+(empty input — including a `\n` piped from a scripted deploy)
+silently flipped any host whose configured mode was smart-start to
+always-on. This is **exactly** what happened during the v1.9.1
+deploy: `printf '\n%.0s' {1..250} | install.py` flipped pandorum
+from smart-start → always-on, silently.
+
+Fix: extract a new `_prompt_consultants_service_mode(cfg, *,
+non_interactive)` helper that:
+
+- Reads the currently configured mode via the existing
+  `_detect_consultants_service_mode(cfg)`.
+- Uses *that* as the default branch.
+- Renders the prompt marker dynamically — `[A/s]` when configured
+  always-on, `[a/S]` when configured smart-start — and echoes
+  `Current: <mode>` so the user can never wonder which default
+  applies.
+- Empty / unrecognized input preserves the current mode; explicit
+  `a` / `A` / `s` / `S` flips correctly.
+- Non-interactive returns the configured mode verbatim (pre-fix
+  forced always-on under `--non-interactive` too — equally wrong).
+
+The generalizable rule (don't hardcode a `(default)` if the value
+lives in cfg) is now captured in the project memory at
+`memory/feedback_prompt_default_must_reflect_config.md`. Worth
+applying to every `(default)` in install.py at a future cleanup
+pass.
+
+### Fixed — install.py: stale opposite-mode schtasks delete now elevated + kills running process (`5443463`)
+
+`_prune_stale_consultants_task` ran the schtasks `/Delete /F` via
+bare `subprocess.run` — no UAC elevation. The task itself was
+registered via `_run_schtasks_elevated`, so its principal is
+HighestAvailable / Run-As-Admin; deleting it requires the same
+elevation. Plus `schtasks /Delete` only deregisters the schedule —
+it does NOT kill the launched pythonw payload, so a successful
+delete still left an orphan bound to the engine's port.
+
+Fix:
+
+1. Step 1: call `_force_kill_task_processes(other, other_port)`
+   first to taskkill the running pythonw. Port mapping is the
+   well-known one — always-on → 38095, smart-start forwarder →
+   38096.
+2. Step 2: route the `/Delete /F` through
+   `_run_schtasks_elevated` (mirrors the create-side elevation).
+3. Step 3: re-verify via `_windows_task_exists` because
+   `Start-Process -Wait` hides the child schtasks's exit code —
+   without this we'd cheerfully report "deleted stale task ..."
+   even when the elevated child actually errored out.
+
+### Changed — Python floor bump 3.9 → 3.10 (`ec36588`)
 
 `pyproject.toml` `requires-python` raised from `>=3.9` to `>=3.10`.
 Reflects the reality that the test suite already requires 3.10+
@@ -33,6 +103,16 @@ Impact: Debian 11 / Proxmox 7 / Ubuntu 20.04 LTS stock `python3`
 already running a conda env or pyenv to get a working stack;
 nothing operationally changes for them. The 3.9 classifier is
 removed from the `Programming Language ::` list.
+
+### Upgrade notes
+
+PATCH release — no config changes, no hook contract changes.
+Existing v1.9.1 configs upgrade in place. Re-run `python
+install.py` on every host so the new prompt logic + elevated
+cleanup paths take effect; on Windows hosts that previously had
+both opposite-mode schtasks registered (e.g. flipped by the
+v1.9.1 deploy bug), install.py now offers to clean up the stale
+opposite-task with one UAC prompt for the elevated delete.
 
 ## [1.9.1] — 2026-05-21
 
@@ -6636,7 +6716,8 @@ prior tag. From any unreleased checkout, just `git pull` on `main`
 once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
-[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.9.1...HEAD
+[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.9.2...HEAD
+[1.9.2]: https://github.com/mann1x/claude-hooks/compare/v1.9.1...v1.9.2
 [1.9.1]: https://github.com/mann1x/claude-hooks/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/mann1x/claude-hooks/compare/v1.8.4...v1.9.0
 [1.0.3]: https://github.com/mann1x/claude-hooks/compare/v1.0.2...v1.0.3
