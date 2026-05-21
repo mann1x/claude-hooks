@@ -260,34 +260,50 @@ class TestPruneStaleConsultantsTask:
         assert "interactively" in out
 
     def test_interactive_yes_deletes(self, install_mod, capsys):
+        # Existence sequence: True (initial check) → False (post-delete
+        # verification). The delete itself goes through
+        # _run_schtasks_elevated (UAC-elevated), not bare subprocess —
+        # mirrors the create-side elevation. _force_kill_task_processes
+        # also fires before the delete to clean any orphan pythonw.
         with patch.object(install_mod.os, "name", "nt"), \
              patch.object(install_mod, "_windows_task_exists",
-                          return_value=True), \
-             patch.object(install_mod.subprocess, "run") as run, \
+                          side_effect=[True, False]), \
+             patch.object(install_mod, "_force_kill_task_processes") as kill, \
+             patch.object(install_mod, "_run_schtasks_elevated",
+                          return_value=True) as elevated, \
              patch("builtins.input", return_value="y"):
-            run.return_value = type("R", (), {
-                "returncode": 0, "stdout": "ok", "stderr": ""})()
             ret = install_mod._prune_stale_consultants_task(
                 service_mode="always-on",
                 non_interactive=False, dry_run=False,
             )
         assert ret == "claude-hooks-consultants-forwarder"
+        # Opposite of always-on is the smart-start forwarder, which
+        # binds 38096. The kill helper must be called with that port
+        # so the running pythonw is reaped before the task delete.
+        kill.assert_called_once_with(
+            "claude-hooks-consultants-forwarder", 38096,
+        )
+        # Delete went through the elevated path.
+        elevated.assert_called_once()
 
     def test_interactive_default_accepts_yes(self, install_mod):
-        # Empty input → default Y/yes
+        # Empty input → default Y/yes. service_mode=smart-start → the
+        # opposite task is claude-hooks-consultants (always-on, port
+        # 38095).
         with patch.object(install_mod.os, "name", "nt"), \
              patch.object(install_mod, "_windows_task_exists",
+                          side_effect=[True, False]), \
+             patch.object(install_mod, "_force_kill_task_processes") as kill, \
+             patch.object(install_mod, "_run_schtasks_elevated",
                           return_value=True), \
-             patch.object(install_mod.subprocess, "run") as run, \
              patch("builtins.input", return_value=""):
-            run.return_value = type("R", (), {
-                "returncode": 0, "stdout": "", "stderr": ""})()
             ret = install_mod._prune_stale_consultants_task(
                 service_mode="smart-start",
                 non_interactive=False, dry_run=False,
             )
         # default-yes → opposite of smart-start is the always-on task
         assert ret == "claude-hooks-consultants"
+        kill.assert_called_once_with("claude-hooks-consultants", 38095)
 
     def test_interactive_no_skips(self, install_mod):
         with patch.object(install_mod.os, "name", "nt"), \
@@ -299,6 +315,46 @@ class TestPruneStaleConsultantsTask:
                 non_interactive=False, dry_run=False,
             )
         assert ret is None
+
+    def test_uac_declined_returns_none(self, install_mod, capsys):
+        # _run_schtasks_elevated returns False when the user declines
+        # the UAC prompt (or schtasks itself errors). The function
+        # must surface the failure and return None — no spurious
+        # "deleted" report.
+        with patch.object(install_mod.os, "name", "nt"), \
+             patch.object(install_mod, "_windows_task_exists",
+                          return_value=True), \
+             patch.object(install_mod, "_force_kill_task_processes"), \
+             patch.object(install_mod, "_run_schtasks_elevated",
+                          return_value=False), \
+             patch("builtins.input", return_value="y"):
+            ret = install_mod._prune_stale_consultants_task(
+                service_mode="always-on",
+                non_interactive=False, dry_run=False,
+            )
+        assert ret is None
+        out = capsys.readouterr().out
+        assert "UAC declined" in out or "failed to delete" in out
+
+    def test_elevated_succeeded_but_task_still_exists(self, install_mod, capsys):
+        # _run_schtasks_elevated may return True via the
+        # ``Start-Process -Wait`` path even when the child schtasks
+        # actually failed (rc is hidden by Start-Process). Function
+        # must re-verify and report when the task is still present.
+        with patch.object(install_mod.os, "name", "nt"), \
+             patch.object(install_mod, "_windows_task_exists",
+                          side_effect=[True, True]), \
+             patch.object(install_mod, "_force_kill_task_processes"), \
+             patch.object(install_mod, "_run_schtasks_elevated",
+                          return_value=True), \
+             patch("builtins.input", return_value="y"):
+            ret = install_mod._prune_stale_consultants_task(
+                service_mode="always-on",
+                non_interactive=False, dry_run=False,
+            )
+        assert ret is None
+        out = capsys.readouterr().out
+        assert "still exists after /Delete" in out
 
     def test_no_stale_task_returns_none(self, install_mod):
         with patch.object(install_mod.os, "name", "nt"), \
@@ -317,6 +373,101 @@ class TestPruneStaleConsultantsTask:
                 non_interactive=False, dry_run=False,
             )
         assert ret is None
+
+
+# ----------------------- _prompt_consultants_service_mode ------ #
+#
+# Regression pin for the 2026-05-21 bug where the service-mode
+# prompt hardcoded ``"always-on"`` as the default, so piping ``\n``
+# on stdin silently flipped configured-smart-start hosts to
+# always-on. The fix reads the currently-configured mode via
+# ``_detect_consultants_service_mode`` and uses it as the default
+# and the prompt marker.
+
+class TestPromptConsultantsServiceMode:
+    def _smart_cfg(self) -> dict:
+        return {"hooks": {"consultants": {
+            "smart_start": {"enabled": True}}}}
+
+    def _always_cfg(self) -> dict:
+        return {"hooks": {"consultants": {
+            "smart_start": {"enabled": False}}}}
+
+    def test_non_interactive_preserves_smart_start(self, install_mod):
+        # Pre-fix bug: non-interactive forced always-on. Post-fix
+        # must keep whatever is configured.
+        assert install_mod._prompt_consultants_service_mode(
+            self._smart_cfg(), non_interactive=True,
+        ) == "smart-start"
+
+    def test_non_interactive_preserves_always_on(self, install_mod):
+        assert install_mod._prompt_consultants_service_mode(
+            self._always_cfg(), non_interactive=True,
+        ) == "always-on"
+
+    def test_empty_input_keeps_smart_start_default(self, install_mod):
+        # The reproducer: piping ``\n`` to stdin must NOT flip a
+        # configured smart-start host to always-on.
+        with patch("builtins.input", return_value=""):
+            assert install_mod._prompt_consultants_service_mode(
+                self._smart_cfg(), non_interactive=False,
+            ) == "smart-start"
+
+    def test_empty_input_keeps_always_on_default(self, install_mod):
+        with patch("builtins.input", return_value=""):
+            assert install_mod._prompt_consultants_service_mode(
+                self._always_cfg(), non_interactive=False,
+            ) == "always-on"
+
+    def test_user_picks_smart_start_explicitly(self, install_mod):
+        with patch("builtins.input", return_value="s"):
+            assert install_mod._prompt_consultants_service_mode(
+                self._always_cfg(), non_interactive=False,
+            ) == "smart-start"
+
+    def test_user_picks_always_on_explicitly(self, install_mod):
+        with patch("builtins.input", return_value="a"):
+            assert install_mod._prompt_consultants_service_mode(
+                self._smart_cfg(), non_interactive=False,
+            ) == "always-on"
+
+    def test_unrecognized_input_keeps_current(self, install_mod):
+        # Garbage input must not silently flip — keep current_mode.
+        with patch("builtins.input", return_value="xyz"):
+            assert install_mod._prompt_consultants_service_mode(
+                self._smart_cfg(), non_interactive=False,
+            ) == "smart-start"
+
+    def test_prompt_marker_reflects_always_on(self, install_mod, capsys):
+        captured = []
+        with patch("builtins.input",
+                   side_effect=lambda prompt: (captured.append(prompt) or "")):
+            install_mod._prompt_consultants_service_mode(
+                self._always_cfg(), non_interactive=False,
+            )
+        assert captured, "input prompt was never called"
+        assert "[A/s]" in captured[0]
+        assert "Current: always-on" in captured[0]
+
+    def test_prompt_marker_reflects_smart_start(self, install_mod):
+        # Mirror of the always-on test for the smart-start branch.
+        captured = []
+        with patch("builtins.input",
+                   side_effect=lambda prompt: (captured.append(prompt) or "")):
+            install_mod._prompt_consultants_service_mode(
+                self._smart_cfg(), non_interactive=False,
+            )
+        assert captured
+        assert "[a/S]" in captured[0]
+        assert "Current: smart-start" in captured[0]
+
+    def test_uppercase_input_recognized(self, install_mod):
+        # ``"S"`` (capital) must be recognized as smart-start too —
+        # the function lower-cases before matching.
+        with patch("builtins.input", return_value="S"):
+            assert install_mod._prompt_consultants_service_mode(
+                self._always_cfg(), non_interactive=False,
+            ) == "smart-start"
 
 
 # ----------------------- _clear_pycache ------------------------ #
