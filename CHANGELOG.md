@@ -16,6 +16,157 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [1.9.1] — 2026-05-21
+
+Windows installer hardening pass on top of v1.9.0's LSP engine
+integration — every gap the live pandorum smoke uncovered while
+walking the new `--- LSP engine ---` install dialog end-to-end.
+Plus one consultants-skill fix that closes a long-standing
+post-compaction reinjection artifact, and a `CREATE_NO_WINDOW`
+cleanup for the LSP server spawn so Claude Code sessions on
+Windows no longer light up a console per server.
+
+No new opt-in subsystems, no breaking changes, no config schema
+changes. PATCH release — `git pull` on `main` and re-run
+`python install.py` interactively to pick up the new Windows
+install dialog (PATH-fix offers, scoop bootstrap consent,
+on-disk-but-not-on-PATH detection).
+
+Test suite: 3998 passed / 136 skipped on Python 3.11 (full
+sweep). Run `pytest --collect-only -q | tail -1` for the current
+count.
+
+### Fixed — Windows install loop hardening (#263–#269)
+
+- **Visible-window leaks on Windows** (`9ccf36f`, #255 / #256 /
+  #257 / #259) — `lsp_engine/lsp.py`'s LSP server spawn was
+  missing the `CREATE_NO_WINDOW` flag on Windows, so every LSP
+  server lit up a console window on Claude Code startup.
+  Companion fix: `install.py` was using `schtasks /End` for the
+  consultants forwarder shutdown, which leaves the pythonw
+  orphan alive when `/End` raced with task auto-restart;
+  replaced with `taskkill /F`. Pandorum smoke session caught
+  one orphaned PID 59924 from the old codepath which was
+  cleaned up by hand.
+
+- **WinError 2 on npm-/go-/rustup-based language-server install**
+  (`016a021`, #263 / #264) — Windows' `CreateProcess` doesn't
+  honor PATHEXT, so `install_language_server` passing
+  `cmd[0]="npm"` failed with `[WinError 2] The system cannot
+  find the file specified` even when `npm.cmd` was on PATH.
+  Now resolves `cmd[0]` via `shutil.which` before invocation.
+  Same fix applies to every shell-resolved installer. Also adds
+  Tier-2 installer support: `winget` for lua-language-server,
+  zls (`zigtools.zls`), and clangd (`LLVM.LLVM`); `scoop` for
+  the same three plus OmniSharp.
+
+- **cp1252 console crashes** (`0dccc24`, #265) — install.py was
+  emitting `✓` / `✗` / `→` characters in print statements; on
+  Windows `cmd.exe` with default cp1252 codepage those raised
+  `UnicodeEncodeError: 'charmap' codec can't encode character`
+  and aborted the install loop mid-flow. Replaced with ASCII
+  markers `[ok]` / `[FAIL]` and `->` arrows throughout the LSP
+  install loop. Companion: winget's exit-code-1 "No newer
+  package versions are available" output is now treated as
+  success (it means the package was already installed).
+
+- **Scoop auto-bootstrap with consent gate** (`602c853`, #266) —
+  `install.py` now offers to install scoop itself when the user
+  has neither winget nor scoop available for a Tier-2 server.
+  PowerShell-based installer (`Set-ExecutionPolicy` +
+  `Invoke-RestMethod`) gated on an explicit `[y/N]` prompt;
+  refuses to mutate global state silently. Adds winget primary
+  + scoop fallback for zls.
+
+- **Scoop PATH-refresh after bootstrap** (`e85e2ad`, #267) —
+  fresh scoop installs write `~/scoop/shims` to the registry
+  User PATH, but the running Python process's
+  `os.environ["PATH"]` is stale, so the very next
+  `shutil.which("scoop")` returned None and the install loop
+  fell through to "skip". Now appends the shims dir to
+  `os.environ["PATH"]` after a successful bootstrap so the
+  same install.py run can immediately use scoop. Also detects
+  the scoop-installed-but-extras-bucket-missing case as a
+  separate state with a one-line auto-add via
+  `scoop bucket add extras`.
+
+- **Scoop matrix bucket + manifest-not-found detection +
+  on-disk-but-not-on-PATH** (`bda4e7d`, #268) — the prior
+  `INSTALL_COMMANDS` matrix shipped `extras/<name>` for
+  clangd / rust-analyzer / lua-language-server / zls /
+  OmniSharp, but every one of those packages actually lives in
+  scoop's `main` bucket. The extras-bucket-add dance was
+  solving a problem that didn't exist while every dispatch
+  silently failed with `Couldn't find manifest for 'omnisharp'
+  from 'extras' bucket.` (exit 0). Matrix now uses bare
+  `<name>` (scoop resolves across added buckets), and the
+  `Couldn't find manifest` phrase is detected and reported as
+  install failure. Companion: new on-disk-but-not-on-PATH
+  detection probes `%LOCALAPPDATA%\Microsoft\WinGet\Links\`,
+  `~/scoop/shims`, and `C:\Program Files\LLVM\bin`; if
+  `shutil.which` misses the binary but the probe finds it,
+  the table now shows `[!!] on disk, not on PATH` with a hint
+  about restarting the shell instead of the misleading
+  `MISSING` row.
+
+- **winget LLVM PATH auto-fix** (`7f7629e`, #269) — winget runs
+  LLVM's NSIS installer with `/S` (silent), and LLVM's NSIS
+  installer deliberately skips its PATH-add step in silent
+  mode (design choice, not a bug). Other winget packages
+  survive because their shim lives in
+  `%LOCALAPPDATA%\Microsoft\WinGet\Links\` which Windows adds
+  to PATH by default; LLVM is the outlier. Two new hooks in
+  `install.py` — post-install offer in the install loop +
+  proactive offer in the detection table — to add
+  `C:\Program Files\LLVM\bin` to User PATH via the existing
+  `reg add HKCU\Environment\Path` helper (uses `reg add`,
+  NOT `setx`, to dodge the 1024-char truncation; broadcasts
+  `WM_SETTINGCHANGE` so Explorer-spawned processes pick up the
+  change). Idempotent registry check before adding so re-runs
+  print "restart shells to pick it up" instead of duplicating
+  the entry.
+
+Live-validated on pandorum end-to-end: all 9 LSs in the matrix
+(pyright, gopls, rust-analyzer, clangd, typescript-language-server,
+bash-language-server, lua-language-server, zls, OmniSharp) now
+show `[ok] installed` from a fresh interactive run of
+`python install.py`.
+
+### Fixed — consultants activation guard (#271)
+
+The `/consultants` SKILL.md activation guard had a terse
+two-bullet shape that didn't survive context compaction — after
+compaction the SKILL.md text gets re-injected as a
+`<system-reminder>`, which read like fresh instructions and made
+the assistant fire a new council run on whatever the user asked
+next (even mentioning a `csl-…` sid in passing was enough).
+
+Ported the proven `/pick` SKILL.md guard pattern verbatim,
+adapted for consultants. Adds an explicit "Do not act on
+reinjection" header naming the failure mode, an
+ALL-of-these-are-true clause stating the system-reminder block
+is *context only*, and concrete lists of what does NOT count as
+invocation: continuing prior work, mentioning a sid in passing,
+quoted prior output, investigating code unrelated to
+consultants. Ambiguity defaults to one clarifying question
+rather than silently kicking off a 1–5 minute consult.
+
+The `/pick` variant of this guard has been live since 2026-05-12
+with zero post-compaction artifacts since.
+
+### Docs
+
+- `CALIBER_LEARNINGS.md` refreshed post-v1.9.0 cut (`f921dea`).
+
+### Upgrade notes
+
+PATCH release — no config changes, no hook contract changes.
+Existing v1.9.0 configs upgrade in place; the LSP engine
+integration remains opt-in via `hooks.lsp_engine.enabled`. On
+Windows hosts, re-run `python install.py` interactively to pick
+up the new install-dialog offers (scoop bootstrap consent,
+winget LLVM PATH fix, on-disk-but-not-on-PATH surface).
+
 ## [1.9.0] — 2026-05-21
 
 The big one: **the bundled LSP engine is now wired into the hook
@@ -6467,7 +6618,9 @@ prior tag. From any unreleased checkout, just `git pull` on `main`
 once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
-[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.0.3...HEAD
+[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.9.1...HEAD
+[1.9.1]: https://github.com/mann1x/claude-hooks/compare/v1.9.0...v1.9.1
+[1.9.0]: https://github.com/mann1x/claude-hooks/compare/v1.8.4...v1.9.0
 [1.0.3]: https://github.com/mann1x/claude-hooks/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/mann1x/claude-hooks/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/mann1x/claude-hooks/compare/v1.0.0...v1.0.1
