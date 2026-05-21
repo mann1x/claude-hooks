@@ -867,3 +867,182 @@ class TestMainWiring:
         i_save = src.find("save_config(cfg, cfg_path)")
         assert i_proxy > 0 and i_lsp > 0 and i_save > 0
         assert i_proxy < i_lsp < i_save
+
+
+# --------------------------------------------------------------------- #
+# On-disk-but-not-on-PATH USER PATH fix (Windows)
+#
+# When detection finds a binary at a known install location (e.g.
+# clangd at C:\Program Files\LLVM\bin\clangd.exe from winget LLVM.LLVM)
+# but it's NOT on the current shell's PATH, install.py offers to add
+# the bin dir to the user's PATH via the existing
+# ``_ensure_windows_user_path_includes`` helper. Skips on POSIX.
+# Skips silently when the dir is already in the registry User PATH
+# (process just hasn't picked it up — shell restart fixes it).
+# Live-caught on pandorum 2026-05-21 after the user saw clangd's bin
+# dir wasn't added to PATH despite winget reporting success.
+# --------------------------------------------------------------------- #
+
+
+class TestOnDiskPathFix:
+    def test_offers_path_fix_for_on_disk_clangd(
+            self, monkeypatch, tmp_path, capsys):
+        """Accept the offer → _ensure_windows_user_path_includes
+        is called with the LLVM bin dir."""
+        monkeypatch.chdir(tmp_path)
+        cfg = {}
+
+        state = _state_all_installed()
+        clangd_spec = state["clangd"].spec
+        fake_llvm_bin = tmp_path / "Program Files" / "LLVM" / "bin"
+        fake_llvm_bin.mkdir(parents=True)
+        fake_clangd = fake_llvm_bin / "clangd.exe"
+        fake_clangd.write_text("")
+        state["clangd"] = ls.InstalledState(
+            spec=clangd_spec, installed=False, binary_path=None,
+            installer_for_missing=None,
+            on_disk_path=str(fake_clangd),
+        )
+
+        monkeypatch.setattr(
+            "builtins.input",
+            _scripted_input([
+                "y",   # accept "Add ... to your User PATH?"
+                "",    # starter cclsp default Y
+                "",    # enable engine default Y
+            ]),
+        )
+
+        ensure_calls: list[str] = []
+
+        def fake_ensure(wrapper_dir):
+            ensure_calls.append(str(wrapper_dir))
+
+        with patch.object(install, "_lsp_is_windows", return_value=True), \
+             patch.object(install, "_ensure_windows_user_path_includes",
+                          side_effect=fake_ensure), \
+             patch.object(install, "_read_windows_user_path",
+                          return_value=""), \
+             patch.object(ls, "detect_language_servers",
+                          return_value=state):
+            install._setup_lsp_engine(
+                cfg, non_interactive=False, dry_run=False,
+            )
+
+        out = capsys.readouterr().out
+        assert "is installed at" in out
+        assert "not on your User PATH" in out
+        assert len(ensure_calls) == 1
+        assert ensure_calls[0] == str(fake_llvm_bin)
+
+    def test_declines_path_fix_keeps_state(
+            self, monkeypatch, tmp_path, capsys):
+        monkeypatch.chdir(tmp_path)
+        cfg = {}
+
+        state = _state_all_installed()
+        clangd_spec = state["clangd"].spec
+        fake_clangd = tmp_path / "LLVM" / "clangd.exe"
+        fake_clangd.parent.mkdir(parents=True)
+        fake_clangd.write_text("")
+        state["clangd"] = ls.InstalledState(
+            spec=clangd_spec, installed=False, binary_path=None,
+            installer_for_missing=None,
+            on_disk_path=str(fake_clangd),
+        )
+
+        monkeypatch.setattr(
+            "builtins.input",
+            _scripted_input(["n", "", ""]),
+        )
+
+        with patch.object(install, "_lsp_is_windows", return_value=True), \
+             patch.object(install, "_ensure_windows_user_path_includes") as ensure_mock, \
+             patch.object(install, "_read_windows_user_path",
+                          return_value=""), \
+             patch.object(ls, "detect_language_servers",
+                          return_value=state):
+            install._setup_lsp_engine(
+                cfg, non_interactive=False, dry_run=False,
+            )
+
+        out = capsys.readouterr().out
+        assert "[skipped]" in out
+        ensure_mock.assert_not_called()
+
+    def test_skipped_when_already_on_registry_user_path(
+            self, monkeypatch, tmp_path, capsys):
+        """If the bin dir is ALREADY in the registry User PATH (just
+        not visible to this process yet), don't ask the user — print
+        a one-liner saying the next shell will pick it up."""
+        monkeypatch.chdir(tmp_path)
+        cfg = {}
+
+        state = _state_all_installed()
+        clangd_spec = state["clangd"].spec
+        fake_dir = tmp_path / "LLVM"
+        fake_dir.mkdir()
+        fake_clangd = fake_dir / "clangd.exe"
+        fake_clangd.write_text("")
+        state["clangd"] = ls.InstalledState(
+            spec=clangd_spec, installed=False, binary_path=None,
+            installer_for_missing=None,
+            on_disk_path=str(fake_clangd),
+        )
+
+        registry_user_path = str(fake_dir) + r";C:\Other"
+
+        monkeypatch.setattr(
+            "builtins.input",
+            _scripted_input(["", ""]),
+        )
+
+        with patch.object(install, "_lsp_is_windows", return_value=True), \
+             patch.object(install, "_ensure_windows_user_path_includes") as ensure_mock, \
+             patch.object(install, "_read_windows_user_path",
+                          return_value=registry_user_path), \
+             patch.object(ls, "detect_language_servers",
+                          return_value=state):
+            install._setup_lsp_engine(
+                cfg, non_interactive=False, dry_run=False,
+            )
+
+        out = capsys.readouterr().out
+        assert "already on" in out and "User PATH" in out
+        ensure_mock.assert_not_called()
+
+    def test_not_offered_on_posix(self, monkeypatch, tmp_path, capsys):
+        """On Linux/macOS the on-disk PATH-fix is a no-op — the helper
+        is gated on ``os.name == 'nt'`` because it writes to the
+        Windows registry."""
+        monkeypatch.chdir(tmp_path)
+        cfg = {}
+
+        # Even with on_disk_path set, POSIX should skip.
+        state = _state_all_installed()
+        clangd_spec = state["clangd"].spec
+        fake_clangd = tmp_path / "LLVM" / "clangd"
+        fake_clangd.parent.mkdir(parents=True)
+        fake_clangd.write_text("")
+        state["clangd"] = ls.InstalledState(
+            spec=clangd_spec, installed=False, binary_path=None,
+            installer_for_missing=None,
+            on_disk_path=str(fake_clangd),
+        )
+
+        monkeypatch.setattr(
+            "builtins.input",
+            _scripted_input(["", ""]),
+        )
+
+        with patch.object(install, "_lsp_is_windows", return_value=False), \
+             patch.object(install, "_ensure_windows_user_path_includes") as ensure_mock, \
+             patch.object(ls, "detect_language_servers",
+                          return_value=state):
+            install._setup_lsp_engine(
+                cfg, non_interactive=False, dry_run=False,
+            )
+
+        ensure_mock.assert_not_called()
+        out = capsys.readouterr().out
+        assert "not on your User PATH" not in out

@@ -6244,6 +6244,13 @@ def _setup_lsp_engine(cfg: dict, *, non_interactive: bool, dry_run: bool) -> Non
     # Print detection table so the user can see what's installed.
     _lsp_print_detection_table(state)
 
+    # Offer PATH fixes for any LS already on disk but not on PATH.
+    # This catches the LLVM.LLVM-via-winget case proactively, so the
+    # user doesn't have to wait for an install loop run that won't
+    # happen (re-installing isn't the right fix).
+    if _lsp_is_windows():
+        _lsp_offer_path_fix_for_on_disk_specs(state)
+
     # Offer the install loop for every missing LS where we have
     # something useful to say:
     #   - Tier 1: always include (the loop prints either an
@@ -6539,15 +6546,124 @@ def _lsp_run_install_loop(
         if ok:
             # Resolve the now-installed binary path.
             import shutil as _sh
-            path = _sh.which(st.spec.bin) or "(not on PATH yet)"
-            # ASCII markers only — Windows cp1252 console crashes on
-            # U+2713 / U+2717. Matches the existing [ok] / [FAIL] style
-            # used elsewhere in the installer.
-            print(f"    [ok] {st.spec.name} now at {path}")
+            on_path = _sh.which(st.spec.bin)
+            if on_path:
+                # ASCII markers only — Windows cp1252 console crashes
+                # on U+2713 / U+2717. Matches the existing [ok] /
+                # [FAIL] style used elsewhere in the installer.
+                print(f"    [ok] {st.spec.name} now at {on_path}")
+            else:
+                # Some installers (notably winget LLVM.LLVM with
+                # --silent) put the binary on disk but don't update
+                # the user's PATH. Detect this case, surface the
+                # path the user should know about, and offer to
+                # add it to User PATH via the same ``reg add`` path
+                # used by ``_ensure_windows_user_path_includes`` for
+                # the bin-wrappers dir.
+                on_disk = _lang._probe_on_disk(st.spec)
+                if on_disk and os.name == "nt":
+                    print(f"    [ok] {st.spec.name} installed at "
+                          f"{on_disk} (not on shell PATH)")
+                    _lsp_offer_user_path_fix(on_disk, st.spec.bin)
+                else:
+                    print(f"    [ok] {st.spec.name} now at "
+                          "(not on PATH yet)")
         else:
             print(f"    [FAIL] {st.spec.name} install failed: {msg}")
             print(f"    (continuing — install manually later from "
                   f"{st.spec.docs_url or 'the docs'})")
+
+
+def _lsp_offer_path_fix_for_on_disk_specs(state) -> None:
+    """Walk the detection state and offer to add the bin-dir of each
+    on-disk-but-not-on-PATH LS to the user's PATH. Fires once per
+    re-run of install.py so a user who declines on one pass can
+    accept on the next without re-installing.
+
+    Canonical case: clangd from winget LLVM.LLVM lands at
+    ``C:\\Program Files\\LLVM\\bin\\clangd.exe`` but LLVM's silent
+    installer doesn't add to PATH. We surface the row in detection
+    (``[!!] on disk, not on PATH``) and offer the one-click fix
+    here so the user doesn't have to ``setx PATH ...`` manually."""
+    on_disk_lss = [
+        st for st in state.values()
+        if getattr(st, "on_disk_path", None) and not st.installed
+    ]
+    if not on_disk_lss:
+        return
+
+    for st in on_disk_lss:
+        bin_dir = os.path.dirname(st.on_disk_path)
+        if not bin_dir or not os.path.isdir(bin_dir):
+            continue
+        # Skip if already on USER PATH (the registry one, not the
+        # process inherited one). The user may have added it from a
+        # different shell that hasn't propagated to this Python.
+        user_path = _read_windows_user_path() or ""
+        user_dirs = [
+            d.lower().rstrip("\\")
+            for d in user_path.split(";") if d
+        ]
+        if bin_dir.lower().rstrip("\\") in user_dirs:
+            # Already in registry — process just doesn't see it yet.
+            print(f"\n  {st.spec.name} bin dir {bin_dir} is already on "
+                  f"your User PATH (in registry — restart shells to "
+                  f"pick it up).")
+            continue
+        print(f"\n  {st.spec.name} is installed at {st.on_disk_path}")
+        print(f"  but {bin_dir} is not on your User PATH.")
+        ans = input(
+            f"  Add {bin_dir} to your User PATH? [Y/n]: ",
+        ).strip().lower()
+        if ans and ans not in ("y", "yes"):
+            print(f"  [skipped] Add {bin_dir} to PATH manually if you "
+                  f"want the LSP engine to spawn {st.spec.bin}.")
+            continue
+        _ensure_windows_user_path_includes(Path(bin_dir))
+        # Update current process so the next ``detect_language_servers``
+        # call promotes this LS from on_disk_path to installed.
+        current = os.environ.get("PATH", "")
+        if bin_dir not in current.split(os.pathsep):
+            os.environ["PATH"] = (
+                bin_dir + os.pathsep + current if current else bin_dir
+            )
+
+
+def _lsp_offer_user_path_fix(binary_path: str, bin_name: str) -> None:
+    """Offer to add ``dirname(binary_path)`` to the user's PATH so the
+    LSP engine (and other tools spawned from new shells) can find the
+    binary by name.
+
+    This handles the LLVM.LLVM / winget --silent case where LLVM's
+    NSIS installer deliberately skips the "add to PATH" step in
+    silent mode. The user would otherwise have to add
+    ``C:\\Program Files\\LLVM\\bin`` to their User PATH manually.
+
+    Idempotent + safe: ``_ensure_windows_user_path_includes`` uses
+    ``reg add`` (not ``setx`` which truncates at 1024 chars),
+    refuses to extend past 16 KB, and broadcasts WM_SETTINGCHANGE
+    so Explorer-spawned processes pick up the change. Opt-in via
+    [Y/n] confirmation so the user can decline if they manage PATH
+    elsewhere (chocolatey, manual scripts, etc.)."""
+    bin_dir = os.path.dirname(binary_path)
+    if not bin_dir or not os.path.isdir(bin_dir):
+        return
+    ans = input(
+        f"    Add {bin_dir} to your User PATH so future shells "
+        f"resolve {bin_name}? [Y/n]: ",
+    ).strip().lower()
+    if ans and ans not in ("y", "yes"):
+        print(f"    [skipped] Add {bin_dir} to PATH manually or "
+              f"restart from a shell that has it.")
+        return
+    _ensure_windows_user_path_includes(Path(bin_dir))
+    # Also update the current process so subsequent ``shutil.which``
+    # calls in this install.py run resolve the binary.
+    current = os.environ.get("PATH", "")
+    if bin_dir not in current.split(os.pathsep):
+        os.environ["PATH"] = (
+            bin_dir + os.pathsep + current if current else bin_dir
+        )
 
 
 def _lsp_offer_starter_cclsp(
