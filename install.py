@@ -6064,6 +6064,281 @@ def _detect_consultants_config_drift(cfg: dict, *,
           "whichever mode you pick gets written to both files.")
 
 
+def _setup_lsp_engine(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
+    """v1.9+: wire the bundled ``claude_hooks.lsp_engine`` daemon
+    integration. Three pieces:
+
+    1. **Detect installed language servers** via the matrix in
+       ``claude_hooks.lang_servers``. Tier 1 LSs that are missing
+       can be auto-installed via the host's native package manager
+       (npm / go / rustup / apt / dnf / brew / scoop); Tier 2 LSs
+       (lua-language-server, zls, omnisharp) are detection-only —
+       the user installs them manually.
+
+    2. **Drop a starter cclsp.json** when at least one Tier-1 LS is
+       on disk and no ``cclsp.json`` already exists at the project
+       root. The file is what the engine reads to know which LSP
+       handles which extension — installer never touches an
+       existing file.
+
+    3. **Toggle ``hooks.lsp_engine.enabled``** based on the user's
+       answer. Off by default; the prompt explains the latency
+       tradeoff so an informed yes lands.
+
+    Validate-only path: when the engine is already enabled and at
+    least one Tier-1 LS is on disk, offers the same ``[V/R/S]``
+    shortcut as the pgvector / sqlite_vec dialogs.
+
+    All destructive ops (install commands, file writes) honor
+    ``dry_run``; ``non_interactive`` skips every prompt that would
+    otherwise auto-execute a subprocess (mirrors the
+    ``feedback_install_destructive_noninteractive`` posture — never
+    auto-install without explicit y/N).
+    """
+    eng_cfg = (cfg.setdefault("hooks", {})
+               .setdefault("lsp_engine", {}))
+    enabled = bool(eng_cfg.get("enabled", False))
+
+    print("\n--- LSP engine (v1.9+) ---")
+    print("  Optional: per-project session-scoped LSP daemon. Adds live")
+    print("  type-error / undefined-symbol diagnostics from pyright /")
+    print("  gopls / rust-analyzer / clangd / etc into PostToolUse")
+    print("  alongside ruff. See docs/lsp-engine.md for the design.")
+
+    try:
+        from claude_hooks import lang_servers as _lang
+    except Exception as e:  # pragma: no cover - import surface
+        print(f"  Skipping — lang_servers module failed to import: {e}")
+        return
+
+    state = _lang.detect_language_servers()
+    n_tier1_installed = sum(
+        1 for st in state.values()
+        if st.installed and st.spec.tier == 1
+    )
+
+    cclsp_target = Path(os.getcwd()) / "cclsp.json"
+    cclsp_present = cclsp_target.exists()
+    fully_configured = enabled and n_tier1_installed > 0 and cclsp_present
+
+    if non_interactive:
+        if not enabled:
+            print("  --non-interactive: keeping LSP engine disabled "
+                  "(opt-in only). Re-run install.py interactively to enable.")
+            return
+        # Already enabled + non-interactive: report state only.
+        _lsp_print_detection_table(state)
+        if cclsp_present:
+            print(f"  cclsp.json: present at {cclsp_target}")
+        else:
+            print(f"  cclsp.json: MISSING at {cclsp_target} "
+                  "(run interactively to drop a starter)")
+        return
+
+    # Validate-only shortcut when fully configured.
+    if fully_configured:
+        print(f"  Currently configured: enabled, {n_tier1_installed} "
+              f"Tier-1 LS(s) installed, cclsp.json at {cclsp_target}")
+        choice = input(
+            "  [V]alidate only / [R]e-install / [S]kip? [V/r/s]: ",
+        ).strip().lower()
+        if not choice:
+            choice = "v"
+        if choice in ("s", "skip", "n", "no"):
+            print("  Skipped.")
+            return
+        if choice in ("v", "validate", "y", "yes"):
+            _lsp_print_detection_table(state)
+            print(f"  cclsp.json: {cclsp_target} (present)")
+            print("  LSP engine: validate-only complete. No writes performed.")
+            return
+        # On "r" fall through to the full re-install flow.
+
+    # Print detection table so the user can see what's installed.
+    _lsp_print_detection_table(state)
+
+    # Offer auto-install for missing Tier-1 servers.
+    missing_t1 = [
+        st for st in state.values()
+        if not st.installed and st.spec.tier == 1
+    ]
+    if missing_t1:
+        ans = input(
+            "\n  Install missing Tier 1 servers now? [y/N]: ",
+        ).strip().lower()
+        if ans in ("y", "yes"):
+            _lsp_run_install_loop(missing_t1, state, dry_run=dry_run)
+        else:
+            print("  Skipped install loop. Re-run anytime to install.")
+
+    # Re-detect after the install loop so the starter cclsp.json
+    # reflects what's now on disk.
+    state = _lang.detect_language_servers()
+    n_tier1_installed = sum(
+        1 for st in state.values()
+        if st.installed and st.spec.tier == 1
+    )
+
+    if n_tier1_installed == 0:
+        print("\n  No Tier-1 language servers detected — LSP engine "
+              "integration won't have anything to query. Skipping "
+              "cclsp.json + enable toggle.")
+        return
+
+    # Offer starter cclsp.json.
+    _lsp_offer_starter_cclsp(
+        state, cclsp_target, dry_run=dry_run,
+    )
+
+    # Enable toggle.
+    if enabled:
+        print("\n  LSP engine integration: already enabled in config.")
+    else:
+        prompt_default = "Y"
+        ans = input(
+            "\n  Enable LSP engine hook integration "
+            f"(hooks.lsp_engine.enabled = true)?\n"
+            "  Adds ~10 ms to SessionStart and ~5-15 ms to PostToolUse on\n"
+            "  edited files. Diagnostics show up in the same context\n"
+            f"  block as ruff. [{prompt_default}/n]: ",
+        ).strip().lower()
+        if not ans:
+            ans = prompt_default.lower()
+        if ans in ("y", "yes"):
+            if dry_run:
+                print("  [dry-run] Would set hooks.lsp_engine.enabled = true")
+            else:
+                eng_cfg["enabled"] = True
+            print("  LSP engine: enabled. Restart Claude Code sessions to "
+                  "pick up the new hook wiring.")
+        else:
+            print("  Kept disabled. Re-run install.py to flip later.")
+
+
+def _lsp_print_detection_table(state) -> None:
+    """Print the LS detection table grouped by tier."""
+    tier1 = [(n, st) for n, st in state.items() if st.spec.tier == 1]
+    tier2 = [(n, st) for n, st in state.items() if st.spec.tier == 2]
+
+    print("\n  Tier 1 (universal, auto-install offered):")
+    for name, st in tier1:
+        _lsp_print_row(name, st)
+    if tier2:
+        print("  Tier 2 (optional, manual install):")
+        for name, st in tier2:
+            _lsp_print_row(name, st)
+
+
+def _lsp_print_row(name: str, st) -> None:
+    """One row of the LS detection table."""
+    label = st.spec.display
+    if st.installed:
+        # 32-char column so the longest LS name
+        # ("typescript-language-server") fits.
+        print(f"    [ok]  {label:32} installed ({st.binary_path})")
+        return
+    suffix = "MISSING"
+    if st.installer_for_missing is not None:
+        suffix = f"MISSING — installable via {st.installer_for_missing.value}"
+    elif st.spec.tier == 2:
+        suffix = "MISSING (see docs/lsp-engine.md)"
+    elif st.spec.docs_url:
+        suffix = f"MISSING — install manually ({st.spec.docs_url})"
+    print(f"    [!!]  {label:32} {suffix}")
+
+
+def _lsp_run_install_loop(
+    missing_specs,
+    state,
+    *,
+    dry_run: bool,
+) -> None:
+    """Per-missing-spec install loop. Each [Y/n] confirmation is its
+    own decision — the user can pick and choose. Toolchain-missing
+    paths print a manual-install message instead of trying."""
+    from claude_hooks import lang_servers as _lang  # local — kept light
+
+    for st in missing_specs:
+        installer = st.installer_for_missing
+        if installer is None:
+            # No installable path — surface why and skip.
+            url = st.spec.docs_url or "the project's docs"
+            print(f"\n  Install {st.spec.name}? Requires a package manager "
+                  "not found on PATH.")
+            print(f"  Install manually from {url} and re-run.")
+            print(f"  [skipping {st.spec.name}]")
+            continue
+
+        cmd = _lang.INSTALL_COMMANDS.get(installer, {}).get(st.spec.name)
+        if not cmd:
+            print(f"\n  [skipping {st.spec.name}] no install command "
+                  f"registered for {installer.value}.")
+            continue
+
+        cmd_str = " ".join(cmd)
+        ans = input(
+            f"\n  Install {st.spec.name} via `{cmd_str}`? [Y/n]: ",
+        ).strip().lower()
+        if ans and ans not in ("y", "yes"):
+            print(f"  [skipping {st.spec.name}]")
+            continue
+
+        if dry_run:
+            print(f"    [dry-run] Would run: {cmd_str}")
+            continue
+
+        print(f"    Running: {cmd_str}")
+        ok, msg = _lang.install_language_server(
+            st.spec, installer, dry_run=False,
+        )
+        if ok:
+            # Resolve the now-installed binary path.
+            import shutil as _sh
+            path = _sh.which(st.spec.bin) or "(not on PATH yet)"
+            print(f"    ✓ {st.spec.name} now at {path}")
+        else:
+            print(f"    ✗ {st.spec.name} install failed: {msg}")
+            print(f"    (continuing — install manually later from "
+                  f"{st.spec.docs_url or 'the docs'})")
+
+
+def _lsp_offer_starter_cclsp(
+    state,
+    target: Path,
+    *,
+    dry_run: bool,
+) -> None:
+    """Offer to write the starter cclsp.json based on detected LSs.
+
+    Refuses to overwrite an existing file (matches the engine's
+    convention: cclsp.json is user-owned, project state, not
+    installer-owned)."""
+    from claude_hooks import lang_servers as _lang  # local
+
+    if target.exists():
+        print(f"\n  cclsp.json already at {target} — leaving it untouched.")
+        return
+
+    blob = _lang.starter_cclsp_json(state)
+    server_names = [s["command"][0] for s in blob["servers"]]
+    if not server_names:
+        return
+
+    print(f"\n  Drop a starter cclsp.json at {target}?")
+    print(f"  Will include: {', '.join(server_names)}")
+    ans = input("  [Y/n]: ").strip().lower()
+    if ans and ans not in ("y", "yes"):
+        print("  Skipped. The LSP engine will return [] for every file "
+              "until a cclsp.json is provided.")
+        return
+
+    ok, msg = _lang.write_starter_cclsp_json(state, target, dry_run=dry_run)
+    if ok:
+        print(f"    ✓ {msg}")
+    else:
+        print(f"    ✗ {msg}")
+
+
 def _setup_consultants_store(cfg: dict, *, consultants_py: Path,
                              non_interactive: bool,
                              dry_run: bool) -> None:
@@ -6753,6 +7028,17 @@ def main() -> int:
     _setup_proxy_orchestrator(
         cfg,
         user_settings_path(),
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
+
+    # LSP engine (v1.9+): opt-in per-project LSP daemon that feeds
+    # pyright / gopls / rust-analyzer / clangd / etc diagnostics into
+    # PostToolUse alongside ruff. Detects installed language servers,
+    # offers per-OS auto-install for missing Tier-1 servers, drops a
+    # starter cclsp.json, toggles ``hooks.lsp_engine.enabled``.
+    _setup_lsp_engine(
+        cfg,
         non_interactive=args.non_interactive,
         dry_run=args.dry_run,
     )

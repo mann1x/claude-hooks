@@ -30,6 +30,11 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     if not hook_cfg.get("enabled", True):
         return None
 
+    # LSP engine (v1.9+) — detach this session from the daemon so its
+    # affinity locks release and the daemon's refcount drops cleanly.
+    # Best-effort, no-op when engine disabled / daemon already gone.
+    _detach_lsp_engine_session(event, config)
+
     ep_cfg = config.get("episodic") or {}
     mode = (ep_cfg.get("mode") or "off").lower()
 
@@ -40,6 +45,49 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
 
     log.debug("session ended (episodic off): %s", event.get("session_id"))
     return None
+
+
+def _detach_lsp_engine_session(event: dict, config: dict) -> None:
+    """Best-effort detach from the LSP engine daemon. Soft-fails
+    silently on every dependency issue (daemon already reaped, socket
+    missing, ipc error). Detaching is courtesy: even if we skip,
+    affinity locks expire on their own debounce timer."""
+    try:
+        from claude_hooks import lsp_integration as _lsp
+    except Exception as e:
+        log.debug("lsp_engine SessionEnd import skipped: %s", e)
+        return
+
+    if not _lsp.engine_enabled(config):
+        return
+    eng_cfg = _lsp.lsp_engine_cfg(config)
+    if not eng_cfg.get("detach_on_session_end", True):
+        return
+
+    # SessionEnd needs a real session_id; the fallback (hook-<pid>-<ms>)
+    # would never match what SessionStart attached with, so we skip
+    # rather than detach the wrong session.
+    sid = (event.get("session_id") or "").strip()
+    if not sid:
+        log.debug("lsp_engine SessionEnd: no session_id; skipping detach")
+        return
+
+    cwd = event.get("cwd") or os.getcwd()
+    client = _lsp.open_client_safely(
+        project_root=cwd, session_id=sid, cfg=config,
+    )
+    if client is None:
+        return
+    try:
+        try:
+            client.detach()
+        except Exception as e:
+            log.debug("lsp_engine: detach RPC failed: %s", e)
+    finally:
+        try:
+            client.close()
+        except Exception as e:
+            log.debug("lsp_engine: client.close failed: %s", e)
 
 
 def _push_transcript(event: dict, ep_cfg: dict) -> Optional[dict]:

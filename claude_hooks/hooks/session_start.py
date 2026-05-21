@@ -69,6 +69,36 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
         except Exception as e:
             log.debug("code_graph SessionStart skipped: %s", e)
 
+    # LSP engine (v1.9+): if enabled, spawn the per-project daemon and
+    # collect a one-line status row to append to the SessionStart
+    # context block. Soft-fails to no-row on any error — never blocks
+    # the hook chain.
+    lsp_block = ""
+    try:
+        from claude_hooks import lsp_integration as _lsp
+        if _lsp.engine_enabled(config) and _lsp.lsp_engine_cfg(config).get(
+                "spawn_on_session_start", True,
+        ):
+            sid = _lsp.session_id_for_event(event)
+            project_root = cwd or "."
+            client = _lsp.spawn_engine_safely(
+                project_root=project_root,
+                session_id=sid,
+                cfg=config,
+            )
+            if client is not None:
+                try:
+                    row = _lsp.format_session_start_status(client)
+                    if row:
+                        lsp_block = f"_{row}._"
+                finally:
+                    try:
+                        client.close()
+                    except Exception as e:
+                        log.debug("lsp_engine: client.close failed: %s", e)
+    except Exception as e:
+        log.warning("lsp_engine SessionStart skipped: %s", e)
+
     # Claudemem freshness: if the index is stale compared to the newest
     # source file, kick off a detached reindex. Silent no-op if claudemem
     # is not installed or the project has no .claudemem directory.
@@ -129,6 +159,8 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
                 parts = [p for p in [now, status_line, recalled] if p]
                 if cg_block:
                     parts.append(cg_block)
+                if lsp_block:
+                    parts.append(lsp_block)
                 return {
                     "hookSpecificOutput": {
                         "hookEventName": "SessionStart",
@@ -148,6 +180,8 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
         parts.append(status_line)
     if cg_block:
         parts.append(cg_block)
+    if lsp_block:
+        parts.append(lsp_block)
     if not parts:
         return None
 

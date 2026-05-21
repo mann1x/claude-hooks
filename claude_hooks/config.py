@@ -281,6 +281,63 @@ DEFAULT_CONFIG: dict[str, Any] = {
             # many edits land in rapid succession.
             "rebuild_on_stop": True,
         },
+        "lsp_engine": {
+            # Opt-in integration with the bundled ``claude_hooks.lsp_engine``
+            # daemon (v1.9+). When enabled, SessionStart calls
+            # ``connect_or_spawn`` to bring a per-project LSP daemon up;
+            # PostToolUse fires ``did_change`` + ``diagnostics`` against
+            # edited files and merges the results into the same
+            # ``additionalContext`` ruff writes. SessionEnd detaches so
+            # the daemon's refcount drops cleanly.
+            #
+            # Off by default — install.py's LSP-engine dialog flips this
+            # to ``true`` on confirmation. Requires at least one language
+            # server (pyright / gopls / rust-analyzer / clangd / etc) on
+            # ``$PATH`` and a ``cclsp.json`` mapping extensions to LSP
+            # commands. install.py can drop a starter cclsp.json based
+            # on detected language servers.
+            "enabled": False,
+            # Whether SessionStart should pre-spawn the daemon. When
+            # ``false``, the daemon spawns lazily on the first
+            # PostToolUse query (slower but correct).
+            "spawn_on_session_start": True,
+            # Whether SessionEnd should detach to release the daemon's
+            # session refcount. Affinity locks for files this session
+            # owned release immediately on detach.
+            "detach_on_session_end": True,
+            # Override the cclsp.json lookup chain. ``null`` =
+            # ``$CCLSP_CONFIG_PATH`` → ``~/.config/cclsp/cclsp.json`` →
+            # ``<project_root>/cclsp.json`` (the engine's default).
+            "cclsp_config_path": None,
+            # Override the daemon state directory.
+            # ``null`` = ``~/.claude/lsp-engine``.
+            "state_base": None,
+            # Cap on ``connect_or_spawn`` — how long to wait for the
+            # daemon socket to appear after fork-and-exec.
+            "spawn_timeout_s": 5.0,
+            # Per-file affinity-lock timeout (``lock_timeout_ms`` passed
+            # to the engine). If another session holds the lock for
+            # this file, our diagnostics query blocks this long before
+            # serving the owner's view as a stale fallback.
+            "diagnostics_timeout_ms": 500,
+            # Server-side timeout for the diagnostics RPC itself
+            # (``diag_timeout_s``). Bounds how long pyright / gopls /
+            # etc has to respond before we surface what's cached.
+            "diagnostics_wait_s": 2.0,
+            # Skip diagnostics for these file extensions even if
+            # cclsp.json claims them. Each entry is the extension
+            # with no leading dot ("toml", "md", ...).
+            "extensions_blacklist": [],
+            # Truncate diagnostics arrays at this length per file —
+            # noisy auto-generated code can otherwise flood the
+            # additionalContext block.
+            "max_diagnostics_per_file": 50,
+            # Where the engine writes daemon-side logs (``log_path``
+            # passed to ``connect_or_spawn``). Distinct from
+            # ``~/.claude/claude-hooks.log`` so engine churn doesn't
+            # swamp the hook log.
+            "log_path": "~/.claude/claude-hooks-lsp-engine.log",
+        },
         "companions": {
             # Coordinator for heavier-weight code-graph engines that
             # claude-hooks integrates when present:
