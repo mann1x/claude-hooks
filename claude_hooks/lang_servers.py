@@ -142,7 +142,12 @@ SPECS: tuple[LangServerSpec, ...] = (
         extensions=("c", "cc", "cpp", "cxx", "h", "hh", "hpp"),
         cclsp_command=("clangd",),
         tier=1,
-        installers=(Installer.APT, Installer.DNF, Installer.BREW, Installer.SCOOP),
+        # Windows: prefer winget (ships clangd in the LLVM bundle) over
+        # scoop because winget is in-box on Win10 1909+ and doesn't
+        # require an opt-in package manager install. scoop is still
+        # listed as a fallback for users who have it set up.
+        installers=(Installer.APT, Installer.DNF, Installer.BREW,
+                    Installer.WINGET, Installer.SCOOP),
         docs_url="https://clangd.llvm.org/",
     ),
     LangServerSpec(
@@ -165,7 +170,10 @@ SPECS: tuple[LangServerSpec, ...] = (
         installers=(Installer.NPM,),
         docs_url="https://github.com/bash-lsp/bash-language-server",
     ),
-    # Tier 2 — detection only.
+    # Tier 2 — optional. Auto-install offered when a known package
+    # manager is available; otherwise displayed as MISSING with the
+    # docs_url. Promoted from manual-only in v1.9.x once the per-OS
+    # install matrix was filled in.
     LangServerSpec(
         name="lua-language-server",
         display="lua-language-server (Lua)",
@@ -173,7 +181,7 @@ SPECS: tuple[LangServerSpec, ...] = (
         extensions=("lua",),
         cclsp_command=("lua-language-server",),
         tier=2,
-        installers=(Installer.MANUAL,),
+        installers=(Installer.BREW, Installer.WINGET, Installer.SCOOP),
         docs_url="https://luals.github.io/",
     ),
     LangServerSpec(
@@ -183,7 +191,7 @@ SPECS: tuple[LangServerSpec, ...] = (
         extensions=("zig",),
         cclsp_command=("zls",),
         tier=2,
-        installers=(Installer.MANUAL,),
+        installers=(Installer.BREW, Installer.SCOOP),
         docs_url="https://github.com/zigtools/zls",
     ),
     LangServerSpec(
@@ -193,7 +201,7 @@ SPECS: tuple[LangServerSpec, ...] = (
         extensions=("cs",),
         cclsp_command=("omnisharp", "-lsp"),
         tier=2,
-        installers=(Installer.MANUAL,),
+        installers=(Installer.SCOOP,),
         docs_url="https://github.com/OmniSharp/omnisharp-roslyn",
     ),
 )
@@ -232,12 +240,40 @@ INSTALL_COMMANDS: dict[Installer, dict[str, list[str]]] = {
     Installer.BREW: {
         "clangd": ["brew", "install", "llvm"],
         "rust-analyzer": ["brew", "install", "rust-analyzer"],
+        "lua-language-server": ["brew", "install", "lua-language-server"],
+        "zls": ["brew", "install", "zls"],
     },
     Installer.SCOOP: {
-        "clangd": ["scoop", "install", "llvm"],
-        "rust-analyzer": ["scoop", "install", "rust-analyzer"],
+        # scoop's "extras" bucket ships most LSs. Users without the
+        # bucket added will see scoop print an "unknown" error — we
+        # don't auto-add buckets because that mutates global scoop
+        # state without the user's blanket consent. Hint surfaced in
+        # the failure path via the docs_url.
+        "clangd": ["scoop", "install", "extras/llvm"],
+        "rust-analyzer": ["scoop", "install", "extras/rust-analyzer"],
+        "lua-language-server": ["scoop", "install", "extras/lua-language-server"],
+        "zls": ["scoop", "install", "extras/zls"],
+        "omnisharp": ["scoop", "install", "extras/omnisharp"],
     },
-    Installer.WINGET: {},
+    Installer.WINGET: {
+        # winget is preinstalled on Win10 1909+ / Win11 and doesn't
+        # require any opt-in package-bucket setup. ``--silent`` keeps
+        # the install non-interactive; the two ``--accept-*`` flags
+        # auto-accept EULA + source-trust prompts so the install
+        # actually proceeds in a script-driven flow.
+        "clangd": [
+            "winget", "install", "--id", "LLVM.LLVM",
+            "--silent",
+            "--accept-source-agreements",
+            "--accept-package-agreements",
+        ],
+        "lua-language-server": [
+            "winget", "install", "--id", "LuaLS.lua-language-server",
+            "--silent",
+            "--accept-source-agreements",
+            "--accept-package-agreements",
+        ],
+    },
     Installer.MANUAL: {},
 }
 
@@ -351,6 +387,24 @@ def install_language_server(
     cmd = INSTALL_COMMANDS.get(installer, {}).get(spec.name)
     if not cmd:
         return False, f"no install command registered for {spec.name} via {installer.value}"
+
+    # Windows: ``CreateProcess`` does NOT honor ``PATHEXT`` — a bare
+    # argv of ``["npm", "install", ...]`` fails with
+    # ``WinError 2 ("The system cannot find the file specified")``
+    # because the actual binary on disk is ``npm.cmd`` (or ``.bat`` /
+    # ``.ps1`` for some managers). ``shutil.which`` DOES walk
+    # ``PATHEXT`` and finds the right extension. POSIX: ``shutil.which``
+    # returns the absolute path of the same binary, so the substitution
+    # is a no-op on Linux / macOS. If the resolution fails (manager
+    # not on PATH), keep ``cmd[0]`` as-is so the caller still gets a
+    # consistent FileNotFoundError they can surface.
+    #
+    # This is the same class of bug that bit ``claudemem_reindex.py``
+    # — see its ``_resolve_npm_cmd_shim`` for the equivalent fix at
+    # that spawn site.
+    resolved = shutil.which(cmd[0])
+    if resolved:
+        cmd = [resolved, *cmd[1:]]
 
     if dry_run:
         return True, f"[dry-run] would run: {' '.join(cmd)}"

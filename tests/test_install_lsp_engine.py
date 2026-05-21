@@ -226,12 +226,15 @@ class TestInstallLoop:
         monkeypatch.chdir(tmp_path)
         cfg = {}
         # Only pyright installed; user opts into install loop and accepts
-        # every install prompt (5 missing Tier-1 specs to confirm).
+        # every install prompt. Post-v1.9.x the loop covers Tier 2 too
+        # (lua / zls / omnisharp), so there are 8 install prompts
+        # (5 Tier-1 + 3 Tier-2) rather than 5.
         monkeypatch.setattr(
             "builtins.input",
             _scripted_input([
-                "y",       # opt into install loop
-                "y", "y", "y", "y", "y",  # install each missing Tier-1
+                "y",                                  # opt into install loop
+                "y", "y", "y", "y", "y",              # 5 Tier-1
+                "y", "y", "y",                        # 3 Tier-2
                 "",        # accept starter cclsp.json default Y
                 "",        # accept enable default Y
             ]),
@@ -253,13 +256,17 @@ class TestInstallLoop:
                 cfg, non_interactive=False, dry_run=False,
             )
 
-        # 5 install dispatches (the 5 Tier-1 LSs other than pyright).
+        # All 8 missing-with-installer specs dispatch.
         names = [n for n, _ in install_calls]
         assert "gopls" in names
         assert "rust-analyzer" in names
         assert "clangd" in names
         assert "typescript-language-server" in names
         assert "bash-language-server" in names
+        # Tier-2 also dispatches under v1.9.x semantics.
+        assert "lua-language-server" in names
+        assert "zls" in names
+        assert "omnisharp" in names
 
     def test_install_loop_skipped_when_no_tier1_missing(self, monkeypatch,
                                                        tmp_path):
@@ -286,13 +293,15 @@ class TestInstallLoop:
         monkeypatch.chdir(tmp_path)
         cfg = {}
         # Only pyright installed; user opts into install loop but
-        # declines gopls — others still get installed.
+        # declines gopls — others still get installed (4 remaining
+        # Tier-1 + 3 Tier-2 under v1.9.x semantics).
         monkeypatch.setattr(
             "builtins.input",
             _scripted_input([
-                "y",       # opt into install loop
-                "n",       # decline gopls
-                "y", "y", "y", "y",  # install remaining 4
+                "y",                          # opt into install loop
+                "n",                          # decline gopls
+                "y", "y", "y", "y",           # remaining 4 Tier-1
+                "y", "y", "y",                # 3 Tier-2
                 "",        # starter cclsp.json default Y
                 "",        # enable default Y
             ]),
@@ -321,8 +330,9 @@ class TestInstallLoop:
         monkeypatch.setattr(
             "builtins.input",
             _scripted_input([
-                "y",       # opt in
-                "y", "y", "y", "y", "y",  # try all 5
+                "y",                                  # opt in
+                "y", "y", "y", "y", "y",              # 5 Tier-1
+                "y", "y", "y",                        # 3 Tier-2
                 "",        # starter cclsp.json default Y
                 "",        # enable default Y
             ]),
@@ -362,8 +372,9 @@ class TestInstallLoop:
         monkeypatch.setattr(
             "builtins.input",
             _scripted_input([
-                "y",       # opt in
-                "y", "y", "y", "y",  # remaining 4 (gopls auto-skips)
+                "y",                                  # opt in
+                "y", "y", "y", "y",                   # remaining 4 Tier-1 (gopls auto-skips)
+                "y", "y", "y",                        # 3 Tier-2
                 "",        # starter cclsp.json default Y
                 "",        # enable default Y
             ]),
@@ -509,8 +520,9 @@ class TestDryRun:
         monkeypatch.setattr(
             "builtins.input",
             _scripted_input([
-                "y",                   # opt into install loop
-                "y", "y", "y", "y", "y",  # 5 install confirmations
+                "y",                                  # opt into install loop
+                "y", "y", "y", "y", "y",              # 5 Tier-1
+                "y", "y", "y",                        # 3 Tier-2 (v1.9.x)
                 "",                    # cclsp.json default Y
                 "",                    # enable default Y
             ]),

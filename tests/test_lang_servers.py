@@ -42,14 +42,17 @@ class TestMatrixInvariants:
                 f"Tier 1 spec {spec.name!r} has only MANUAL installers"
             )
 
-    def test_tier1_spec_has_install_command_for_each_installer(self):
-        """For every Tier 1 spec and every non-MANUAL installer it
-        declares, there must be a matching entry in
+    def test_every_spec_install_command_present_for_each_installer(self):
+        """For every spec (Tier 1 OR 2) and every non-MANUAL installer
+        it declares, there must be a matching entry in
         ``INSTALL_COMMANDS`` — otherwise ``select_installer_for``
-        could return an installer the dispatch table can't act on."""
+        could return an installer the dispatch table can't act on.
+
+        Extended in v1.9.x from a Tier-1-only check to cover Tier 2 as
+        well, after lua / zls / omnisharp were promoted from MANUAL to
+        real installers via scoop / brew / winget.
+        """
         for spec in ls.SPECS:
-            if spec.tier != 1:
-                continue
             for inst in spec.installers:
                 if inst is ls.Installer.MANUAL:
                     continue
@@ -57,14 +60,6 @@ class TestMatrixInvariants:
                 assert spec.name in cmds, (
                     f"missing INSTALL_COMMANDS[{inst}][{spec.name!r}]"
                 )
-
-    def test_tier2_specs_use_only_manual(self):
-        for spec in ls.SPECS:
-            if spec.tier != 2:
-                continue
-            assert all(i is ls.Installer.MANUAL for i in spec.installers), (
-                f"Tier 2 spec {spec.name!r} declares non-MANUAL installers"
-            )
 
     def test_extensions_are_normalized_no_leading_dot(self):
         """Engine config.py normalises extensions to lowercase
@@ -376,3 +371,169 @@ class TestStarterCclspJson:
         loaded = json.loads(target.read_text(encoding="utf-8"))
         assert "servers" in loaded
         assert any("pyright-langserver" in s["command"][0] for s in loaded["servers"])
+
+
+
+# --------------------------------------------------------------------- #
+# Windows binary resolution (WinError 2 fix)
+#
+# install_language_server must resolve the manager binary via
+# ``shutil.which`` before invoking subprocess, otherwise plain argv
+# like ["npm", "install", ...] fails on Windows with
+# ``WinError 2 ("The system cannot find the file specified")``
+# because CreateProcess doesn't honor PATHEXT and the real binary is
+# ``npm.cmd``. See v1.9.x post-deploy regression on pandorum:
+#   ✗ typescript-language-server install failed: binary not found:
+#     [WinError 2] The system cannot find the file specified
+# --------------------------------------------------------------------- #
+
+class TestInstallBinaryResolution:
+    def test_resolves_bare_npm_via_shutil_which(self):
+        """``shutil.which`` returns the full path including ``.cmd`` on
+        Windows; install_language_server must replace ``cmd[0]`` with
+        that path so subprocess can actually find it."""
+        spec = next(s for s in ls.SPECS if s.name == "pyright")
+
+        captured_argv: list[list[str]] = []
+
+        class _Proc:
+            returncode = 0
+            stdout = "+ pyright@1.2.3"
+            stderr = ""
+
+        def _fake_run(argv, **kw):  # noqa: ANN001
+            captured_argv.append(list(argv))
+            return _Proc()
+
+        with patch.object(ls.shutil, "which",
+                          side_effect=lambda b: r"C:\Users\u\AppData\Roaming\npm\npm.cmd"
+                          if b == "npm" else None), \
+             patch.object(ls.subprocess, "run", side_effect=_fake_run):
+            ok, _ = ls.install_language_server(spec, ls.Installer.NPM)
+        assert ok is True
+        assert captured_argv, "subprocess.run was never called"
+        argv = captured_argv[0]
+        # cmd[0] must be the .cmd-resolved path, not the bare "npm"
+        assert argv[0].endswith("npm.cmd"), (
+            f"argv[0]={argv[0]!r} — install_language_server did not "
+            "swap in the shutil.which result; would WinError 2 on Windows"
+        )
+        # The rest of the argv stays untouched.
+        assert argv[1:] == ["install", "-g", "pyright"]
+
+    def test_falls_back_to_bare_name_when_which_returns_none(self):
+        """When ``shutil.which`` finds nothing, keep ``cmd[0]`` as-is
+        so the caller still gets a deterministic FileNotFoundError
+        from the OS rather than us short-circuiting silently."""
+        spec = next(s for s in ls.SPECS if s.name == "pyright")
+        captured_argv: list[list[str]] = []
+
+        def _fake_run(argv, **kw):  # noqa: ANN001
+            captured_argv.append(list(argv))
+            raise FileNotFoundError("npm not on PATH")
+
+        with patch.object(ls.shutil, "which", return_value=None), \
+             patch.object(ls.subprocess, "run", side_effect=_fake_run):
+            ok, msg = ls.install_language_server(spec, ls.Installer.NPM)
+        assert ok is False
+        assert "binary not found" in msg
+        # argv stays the original bare-name form — no silent rewrite.
+        assert captured_argv and captured_argv[0][0] == "npm"
+
+    def test_posix_resolution_is_noop_safe(self):
+        """``shutil.which`` returns an absolute path on POSIX; the
+        substitution is harmless (same binary, same call result)."""
+        spec = next(s for s in ls.SPECS if s.name == "gopls")
+        captured_argv: list[list[str]] = []
+
+        class _Proc:
+            returncode = 0
+            stdout = "gopls installed"
+            stderr = ""
+
+        def _fake_run(argv, **kw):  # noqa: ANN001
+            captured_argv.append(list(argv))
+            return _Proc()
+
+        with patch.object(ls.shutil, "which",
+                          side_effect=lambda b: "/usr/local/bin/go" if b == "go" else None), \
+             patch.object(ls.subprocess, "run", side_effect=_fake_run):
+            ok, _ = ls.install_language_server(spec, ls.Installer.GO)
+        assert ok is True
+        assert captured_argv[0][0] == "/usr/local/bin/go"
+
+
+# --------------------------------------------------------------------- #
+# Tier-2 LS now have real installers (v1.9.x)
+# --------------------------------------------------------------------- #
+
+class TestTier2Installers:
+    """Tier 2 LSs (lua-language-server / zls / omnisharp) were
+    promoted from MANUAL-only to real per-OS installers so the
+    install.py loop can offer auto-install. Lock the matrix down so
+    future regressions surface here, not on a Windows user's deploy."""
+
+    def test_lua_language_server_has_brew_scoop_winget(self):
+        spec = next(s for s in ls.SPECS if s.name == "lua-language-server")
+        names = {i for i in spec.installers}
+        assert ls.Installer.BREW in names
+        assert ls.Installer.SCOOP in names
+        assert ls.Installer.WINGET in names
+        # Each must have an actual command registered.
+        for inst in (ls.Installer.BREW, ls.Installer.SCOOP, ls.Installer.WINGET):
+            assert "lua-language-server" in ls.INSTALL_COMMANDS[inst]
+
+    def test_zls_has_brew_scoop(self):
+        spec = next(s for s in ls.SPECS if s.name == "zls")
+        names = {i for i in spec.installers}
+        assert ls.Installer.BREW in names
+        assert ls.Installer.SCOOP in names
+        assert "zls" in ls.INSTALL_COMMANDS[ls.Installer.BREW]
+        assert "zls" in ls.INSTALL_COMMANDS[ls.Installer.SCOOP]
+
+    def test_omnisharp_has_scoop(self):
+        spec = next(s for s in ls.SPECS if s.name == "omnisharp")
+        names = {i for i in spec.installers}
+        assert ls.Installer.SCOOP in names
+        assert "omnisharp" in ls.INSTALL_COMMANDS[ls.Installer.SCOOP]
+
+    def test_select_installer_picks_winget_for_lua_on_windows(self):
+        spec = next(s for s in ls.SPECS if s.name == "lua-language-server")
+        # Spec installers tuple is (BREW, WINGET, SCOOP); on win32 with
+        # only winget available, BREW is filtered by OS, SCOOP not on
+        # PATH → WINGET wins.
+        ctxs = _patch_platform_and_path("win32", {"winget"})
+        entered = _apply(ctxs)
+        try:
+            picked = ls.select_installer_for(spec)
+        finally:
+            _exit(entered)
+        assert picked is ls.Installer.WINGET
+
+
+# --------------------------------------------------------------------- #
+# clangd Windows installer (winget LLVM.LLVM)
+# --------------------------------------------------------------------- #
+
+class TestClangdWindows:
+    def test_clangd_has_winget_installer(self):
+        spec = next(s for s in ls.SPECS if s.name == "clangd")
+        assert ls.Installer.WINGET in spec.installers
+        cmd = ls.INSTALL_COMMANDS[ls.Installer.WINGET]["clangd"]
+        # LLVM bundle is the canonical winget package containing clangd.
+        assert "LLVM.LLVM" in cmd
+        # Non-interactive flags so the install actually proceeds when
+        # driven from install.py without a tty for the EULA prompt.
+        assert "--silent" in cmd
+        assert "--accept-source-agreements" in cmd
+        assert "--accept-package-agreements" in cmd
+
+    def test_clangd_picks_winget_on_windows_when_only_winget_available(self):
+        spec = next(s for s in ls.SPECS if s.name == "clangd")
+        ctxs = _patch_platform_and_path("win32", {"winget"})
+        entered = _apply(ctxs)
+        try:
+            picked = ls.select_installer_for(spec)
+        finally:
+            _exit(entered)
+        assert picked is ls.Installer.WINGET

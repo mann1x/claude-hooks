@@ -2366,11 +2366,17 @@ def _restart_claude_hooks_daemon() -> None:
         # no-op against windowless pythonw (no WM_CLOSE target), which
         # used to leave the new /Run racing the old process for port
         # 47018 — see :func:`_force_kill_task_processes`.
+        #
+        # We deliberately do NOT print a "port still held" warning
+        # here even though ``_wait_for_port_free`` may return False:
+        # the task's ``RestartOnFailure`` policy can re-spawn the
+        # daemon faster than our wait window, so the LISTEN we
+        # observe is the NEW daemon binding, not the old one. The
+        # subsequent ``_wait_for_daemon`` call is the canonical "did
+        # it come back up" gate — if that fails we surface it with a
+        # specific message; if it succeeds, the early port-held
+        # warning was a false alarm and would only confuse users.
         _force_kill_task_processes(_DAEMON_TASK_NAME, port=47018)
-        if not _wait_for_port_free(47018, timeout=10.0):
-            print("  [warn] daemon port 47018 still held after force-kill;"
-                  " /Run may fail with 'already in use' — task auto-"
-                  "restart will eventually recover.")
         rc = subprocess.run(["schtasks", "/Run", "/TN", _DAEMON_TASK_NAME],
                             capture_output=True, text=True)
         if rc.returncode != 0:
@@ -6238,17 +6244,32 @@ def _setup_lsp_engine(cfg: dict, *, non_interactive: bool, dry_run: bool) -> Non
     # Print detection table so the user can see what's installed.
     _lsp_print_detection_table(state)
 
-    # Offer auto-install for missing Tier-1 servers.
-    missing_t1 = [
+    # Offer the install loop for every missing LS where we have
+    # something useful to say:
+    #   - Tier 1: always include (the loop prints either an
+    #     [Y/n] auto-install prompt OR a "no package manager found,
+    #     install manually" pointer — both are user-visible signal).
+    #   - Tier 2: only include when we DO have a usable installer —
+    #     no point asking about niche LSs no one on this host has a
+    #     package manager for.
+    #
+    # Pre-v1.9.x this filtered strictly on ``spec.tier == 1``, leaving
+    # lua / zls / omnisharp permanently in the "manual only" bucket
+    # even on hosts where scoop / brew / winget would have happily
+    # installed them. The display table still groups by tier
+    # (cosmetic).
+    missing_to_offer = [
         st for st in state.values()
-        if not st.installed and st.spec.tier == 1
+        if not st.installed and (
+            st.spec.tier == 1 or st.installer_for_missing is not None
+        )
     ]
-    if missing_t1:
+    if missing_to_offer:
         ans = input(
-            "\n  Install missing Tier 1 servers now? [y/N]: ",
+            "\n  Install missing language servers now? [y/N]: ",
         ).strip().lower()
         if ans in ("y", "yes"):
-            _lsp_run_install_loop(missing_t1, state, dry_run=dry_run)
+            _lsp_run_install_loop(missing_to_offer, state, dry_run=dry_run)
         else:
             print("  Skipped install loop. Re-run anytime to install.")
 
@@ -6301,11 +6322,14 @@ def _lsp_print_detection_table(state) -> None:
     tier1 = [(n, st) for n, st in state.items() if st.spec.tier == 1]
     tier2 = [(n, st) for n, st in state.items() if st.spec.tier == 2]
 
-    print("\n  Tier 1 (universal, auto-install offered):")
+    # Heading labels reflect the v1.9.x change to offer auto-install
+    # for any LS with a registered package-manager command. Tier 2
+    # is no longer "manual only" — it's just lower-priority / niche.
+    print("\n  Tier 1 (universal, recommended):")
     for name, st in tier1:
         _lsp_print_row(name, st)
     if tier2:
-        print("  Tier 2 (optional, manual install):")
+        print("  Tier 2 (optional, niche languages):")
         for name, st in tier2:
             _lsp_print_row(name, st)
 
