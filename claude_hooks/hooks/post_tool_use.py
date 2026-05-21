@@ -120,6 +120,14 @@ def handle(*, event: dict, config: dict,
         if block:
             blocks.append(block)
 
+    # LSP engine (v1.9+) — pyright / gopls / rust-analyzer / clangd /
+    # etc diagnostics for the edited file. Opt-in via
+    # ``hooks.lsp_engine.enabled``; defaults off. Soft-fails to no-block
+    # on any error so the ruff layer still flows.
+    block = _run_lsp_engine(abs_path, config, event, cwd)
+    if block:
+        blocks.append(block)
+
     # Future stages would tack on their own blocks here:
     #   gofmt / go vet for *.go
     #   cargo check for *.rs (cached, daemon-fronted)
@@ -312,3 +320,89 @@ def _shorten_path(abs_path: str, project_cwd: str = "") -> str:
         return os.path.relpath(abs_path)
     except ValueError:
         return abs_path
+
+
+def _run_lsp_engine(
+    abs_path: str,
+    config: dict,
+    event: dict,
+    project_cwd: str,
+) -> Optional[str]:
+    """LSP engine layer (v1.9+). Returns a markdown block ready to drop
+    into ``additionalContext``, or ``None`` when there's nothing to
+    surface (disabled, extension not claimed by any LSP, daemon
+    down, no diagnostics).
+
+    Mirrors the soft-fail posture of ``_run_ruff``: every dependency
+    failure logs a warning and returns ``None``; never raises.
+    """
+    try:
+        from claude_hooks import lsp_integration as _lsp
+    except Exception as e:
+        log.debug("lsp_engine post_tool_use import failed: %s", e)
+        return None
+
+    if not _lsp.engine_enabled(config):
+        return None
+
+    eng_cfg = _lsp.lsp_engine_cfg(config)
+    blacklist = {
+        e.lower().lstrip(".")
+        for e in (eng_cfg.get("extensions_blacklist") or [])
+    }
+    ext = os.path.splitext(abs_path)[1].lower().lstrip(".")
+    if ext in blacklist:
+        return None
+
+    sid = _lsp.session_id_for_event(event)
+    project_root = project_cwd or os.getcwd()
+
+    client = _lsp.open_client_safely(
+        project_root=project_root, session_id=sid, cfg=config,
+    )
+    if client is None:
+        # Daemon isn't running — try a one-shot spawn-on-demand. Honors
+        # ``spawn_timeout_s`` from config (default 5s) so a missing
+        # daemon doesn't stall PostToolUse.
+        client = _lsp.spawn_engine_safely(
+            project_root=project_root, session_id=sid, cfg=config,
+        )
+        if client is None:
+            return None
+
+    try:
+        try:
+            content = open(abs_path, encoding="utf-8").read()
+        except (OSError, UnicodeDecodeError) as e:
+            log.warning("lsp_engine: read %s failed: %s", abs_path, e)
+            return None
+
+        try:
+            client.did_open(abs_path, content)
+            client.did_change(abs_path, content)
+        except (RuntimeError, OSError) as e:
+            log.warning("lsp_engine: did_open/did_change failed: %s", e)
+            return None
+
+        try:
+            diags, stale = client.diagnostics(
+                abs_path,
+                lock_timeout_ms=int(eng_cfg.get("diagnostics_timeout_ms", 500)),
+                diag_timeout_s=float(eng_cfg.get("diagnostics_wait_s", 2.0)),
+            )
+        except (RuntimeError, OSError) as e:
+            log.warning("lsp_engine: diagnostics RPC failed: %s", e)
+            return None
+    finally:
+        try:
+            client.close()
+        except Exception as e:
+            log.debug("lsp_engine: client.close failed: %s", e)
+
+    return _lsp.format_diagnostics_block(
+        path=abs_path,
+        diagnostics=diags,
+        stale=stale,
+        cwd=project_cwd,
+        max_per_file=int(eng_cfg.get("max_diagnostics_per_file", 50)),
+    )
