@@ -2887,6 +2887,97 @@ def _validate_pgvector_only(cfg: dict) -> None:
     print("  pgvector: validate-only complete. No writes performed.")
 
 
+def _validate_sqlite_vec_only(cfg: dict) -> None:
+    """Validate-only path for sqlite_vec (#237, 2026-05-21).
+
+    Mirror of :func:`_validate_pgvector_only`: probes the db file +
+    schema version + embedder reachability + launcher presence without
+    touching the config, the launcher script, or ``~/.claude.json``.
+    Lets a re-run against a healthy sqlite_vec install confirm
+    everything is wired without the side effects of a full re-install
+    (which would re-write the launcher, re-register the MCP entry,
+    re-run the embedder dialog).
+
+    Pre-v1.7 sqlite_vec had no schema bookkeeping, so the version
+    probe is best-effort: a db that lacks the ``claude_hooks_schema``
+    table is reported as ``pre-v1.7`` (the next ``store()`` / ``recall()``
+    call will lazily migrate it). v1.7+ dbs report the integer version
+    written into the bookkeeping row.
+    """
+    pcfg = (cfg.get("providers") or {}).get("sqlite_vec") or {}
+    db_path = pcfg.get("db_path") or ""
+    if not db_path:
+        print("  [!!] No db_path in config — can't validate.")
+        return
+    expanded = os.path.expanduser(db_path)
+
+    print(f"  db_path      : {expanded}")
+    db_file = Path(expanded)
+    if not db_file.exists():
+        print(f"  [!!] db file does not exist; nothing to validate. "
+              f"Run a full re-install or write the first recall/store "
+              f"to lazily create it.")
+        return
+    print(f"  db file size : {db_file.stat().st_size:,} bytes")
+
+    # Best-effort schema-version probe. Stays read-only — we never
+    # open the file write-mode here so concurrent recall pipelines
+    # aren't disturbed.
+    try:
+        import sqlite3  # noqa: PLC0415
+        conn = sqlite3.connect(f"file:{expanded}?mode=ro", uri=True, timeout=2.0)
+        try:
+            cur = conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='claude_hooks_schema'"
+            )
+            if cur.fetchone() is None:
+                print("  schema version: pre-v1.7 (lazy migration runs on "
+                      "next store/recall)")
+            else:
+                row = conn.execute(
+                    "SELECT version FROM claude_hooks_schema "
+                    "ORDER BY rowid DESC LIMIT 1"
+                ).fetchone()
+                if row is not None:
+                    print(f"  schema version: v{row[0]}")
+                else:
+                    print("  schema version: bookkeeping table empty (no rows)")
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"  [!] could not read schema version: {e}")
+
+    # Embedder probe — same dispatch table as the pgvector validator
+    # so the user sees consistent messages across both providers.
+    embedder_opts = pcfg.get("embedder_options") or {}
+    embed_url = embedder_opts.get("url") or ""
+    model = embedder_opts.get("model") or ""
+    embedder = pcfg.get("embedder") or "ollama"
+    if embedder == "llamafile":
+        ensure = embedder_opts.get("daemon_ensure", True)
+        suffix = (" (daemon-managed)" if ensure
+                  else " (remote, no local supervision)")
+        print(f"  Embedder     : llamafile{suffix} @ {embed_url}")
+        if ensure:
+            print("  Note: daemon spawns llamafile on demand; URL may be "
+                  "unbound until first recall.")
+    elif model and embed_url:
+        base = _ollama_base_from_embed_url(embed_url)
+        print(f"  Probing Ollama at {base} for {model}...", end=" ", flush=True)
+        present = _ollama_model_present(base, model)
+        print("present" if present else "missing")
+        if not present:
+            print(f"  Run `ollama pull {model}` against {base} to repair.")
+    else:
+        print("  Embedder options incomplete in config — skipping embedder probe.")
+
+    launcher = _sqlite_vec_launcher_path()
+    print(f"  Launcher     : {launcher} "
+          f"({'present' if launcher.exists() else 'MISSING'})")
+    print("  sqlite_vec: validate-only complete. No writes performed.")
+
+
 def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
     """Ask if pgvector is available and set up the system-wide MCP server.
 
@@ -3365,11 +3456,56 @@ def _setup_llamafile_engine(
         ).strip().lower() or default
         mode = "cpu" if ans in ("cpu", "c") else "auto"
 
+    # LAN-exposure prompt (#242, 2026-05-21). Default loopback so the
+    # embedder isn't exposed to the network without an explicit opt-in
+    # — matches the EmbeddingConfig dataclass default and the original
+    # "we don't want to expose it" guidance. Set to 0.0.0.0 to share
+    # the embedder with other LAN hosts (then configure those hosts
+    # with the remote-llamafile primary option in their install.py
+    # runs). Existing 0.0.0.0 hosts are remembered across re-installs
+    # so a re-run doesn't silently undo the LAN exposure.
+    existing_host = existing.get("host") or "127.0.0.1"
+    if non_interactive:
+        host = existing_host
+        if host != "127.0.0.1":
+            print(f"    --non-interactive: keeping LAN exposure host={host}.")
+        else:
+            print("    --non-interactive: keeping loopback host=127.0.0.1.")
+    else:
+        default_lan = (existing_host != "127.0.0.1")
+        default_label = "Y" if default_lan else "N"
+        other_label = "n" if default_lan else "y"
+        print("    Expose this llamafile on the LAN so other hosts can")
+        print("    use it as a remote embedder?")
+        print("    WARNING: the /embedding endpoint has NO authentication.")
+        print("    Only opt in on a trusted LAN.")
+        ans = input(
+            f"    Bind LAN-wide (0.0.0.0)? [{default_label}/{other_label}]: "
+        ).strip().lower() or default_label.lower()
+        if ans in ("y", "yes"):
+            host = "0.0.0.0"
+            # Surface the LAN-reachable URL so the operator can paste it
+            # straight into another host's config without hunting for
+            # their own IP.
+            try:
+                import socket as _socket  # noqa: PLC0415
+                _socket.setdefaulttimeout(1.0)
+                hostname = _socket.gethostname()
+                lan_ip = _socket.gethostbyname(hostname)
+            except Exception:
+                lan_ip = "<this-host-LAN-IP>"
+            port = int(existing.get("port") or 38092)
+            print(f"    LAN URL  : http://{lan_ip}:{port}/embedding")
+            print(f"             Paste this URL into other hosts' "
+                  f"`providers.<pg|sqlite_vec>.embedder_options.url`.")
+        else:
+            host = "127.0.0.1"
+
     block = {
         "enabled": True,
         "llamafile_path": llamafile_path,
         "model_gguf": model_gguf,
-        "host": "127.0.0.1",
+        "host": host,
         "port": int(existing.get("port") or 38092),
         "ctx_size": int(ctx_size),
         "pooling": "last",
@@ -3455,6 +3591,108 @@ def _setup_embedding_engine(
             "timeout": 30.0, "num_ctx": num_ctx, "max_chars": 30000,
         }
     else:
+        # Offer remote-llamafile primary BEFORE OpenAI — #237 (2026-05-21).
+        # The recall pipeline can point at a llamafile running on
+        # another LAN host (the LAN-exposure prompt in
+        # _setup_llamafile_engine is the producer side; this is the
+        # consumer side). The embedder kind stays "llamafile" but
+        # daemon_ensure is set to false so the local daemon never
+        # tries to spawn a llamafile here.
+        remote_url_existing = ""
+        if (existing_kind == "llamafile"
+                and not bool(existing_options.get("daemon_ensure", True))):
+            remote_url_existing = existing_options.get("url") or ""
+        if non_interactive:
+            use_remote_llamafile = bool(remote_url_existing)
+            if use_remote_llamafile:
+                print(f"    --non-interactive: keeping remote llamafile @ "
+                      f"{remote_url_existing}.")
+        else:
+            default_remote = "Y" if remote_url_existing else "N"
+            other = "n" if remote_url_existing else "y"
+            ans = input(
+                f"    Use a remote llamafile endpoint as primary "
+                f"(another LAN host)? [{default_remote}/{other}]: "
+            ).strip().lower() or default_remote.lower()
+            use_remote_llamafile = ans in ("y", "yes")
+
+        remote_llamafile_block: Optional[dict] = None
+        if use_remote_llamafile:
+            default_url = remote_url_existing or "http://192.168.178.2:38092/embedding"
+            if non_interactive:
+                url = remote_url_existing or default_url
+                timeout = float(existing_options.get("timeout") or 30.0)
+            else:
+                url = input(
+                    f"    Endpoint URL [{default_url}]: "
+                ).strip() or default_url
+                raw_to = input("    Timeout seconds [30]: ").strip()
+                try:
+                    timeout = float(raw_to) if raw_to else 30.0
+                except ValueError:
+                    timeout = 30.0
+            # Best-effort probe so misconfigured URLs surface here
+            # rather than at the first recall. Failure is non-fatal —
+            # the user may be wiring before the producer host is up.
+            print(f"    Probing {url} ...", end=" ", flush=True)
+            try:
+                import urllib.request as _urlreq  # noqa: PLC0415
+                import urllib.error as _urlerr  # noqa: PLC0415
+                import json as _json  # noqa: PLC0415
+                body = _json.dumps({"content": "probe"}).encode("utf-8")
+                req = _urlreq.Request(
+                    url, data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with _urlreq.urlopen(req, timeout=5.0) as resp:
+                    data = _json.loads(resp.read().decode("utf-8"))
+                # llama.cpp emits either {"embedding":[...]} or
+                # [{"embedding":[[...]]}] depending on build — both
+                # carry a vector somewhere we can len() against.
+                vec_len: Optional[int] = None
+                if isinstance(data, list) and data:
+                    em = data[0].get("embedding")
+                    if isinstance(em, list):
+                        if em and isinstance(em[0], list):
+                            vec_len = len(em[0])
+                        else:
+                            vec_len = len(em)
+                elif isinstance(data, dict):
+                    em = data.get("embedding")
+                    if isinstance(em, list):
+                        vec_len = len(em)
+                if vec_len:
+                    print(f"OK, dim={vec_len}")
+                else:
+                    print("OK (vector shape not recognised; will validate at first recall)")
+            except (_urlerr.URLError, OSError, ValueError) as e:
+                print(f"unreachable ({e})")
+                print("    Saving the URL anyway; recall will surface the "
+                      "error if the endpoint is still down at runtime.")
+            remote_llamafile_block = {
+                "url": url,
+                "timeout": timeout,
+                "daemon_ensure": False,
+            }
+            # Skip the OpenAI branch entirely — the remote llamafile
+            # IS the primary now. Also skip the local llamafile fallback
+            # path further down (we don't want to spawn locally if the
+            # whole point is to NOT have a local embedder).
+            ollama_block = None
+            openai_block = None
+            # Stash the resolved block into the cfg directly so the
+            # composition step below sees it as the primary.
+            pcfg["embedder"] = "llamafile"
+            pcfg["embedder_options"] = remote_llamafile_block
+            print(f"    -> {provider}.embedder = llamafile (remote, "
+                  f"daemon_ensure=false)")
+            # No local embedding block — explicitly remove any stale
+            # one so re-runs from a local-llamafile install converge
+            # cleanly. The remote producer host owns that block.
+            cfg.pop("embedding", None)
+            return
+
         # Offer OpenAI-compatible primary as an alternative.
         if non_interactive:
             use_openai = existing_kind in ("openai", "openai_compatible")
@@ -4015,24 +4253,35 @@ def _sqlite_vec_extension_available() -> bool:
 
 
 def _setup_sqlite_vec_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
-    """Ask if sqlite_vec is wanted and wire its config block (v1.4).
+    """Ask if sqlite_vec is wanted and wire its config block (v1.4+).
 
-    Unlike pgvector, sqlite_vec is a strictly local provider — no
-    MCP server, no system-wide launcher, no schema migration.
-    The provider lazily creates the table on first ``store()``.
-    All we do here is:
+    Pre-v1.6 sqlite_vec was a strictly local provider; v1.6 added a
+    system-wide MCP launcher (so Cursor / Codex / OpenWebUI / Claude
+    Desktop can share the same .db file), and v1.7 added lazy schema
+    migration (``sqlite_vec_schema.py``, ``LATEST_VERSION = 2`` covers
+    the M14 ``expires_at`` column). The launcher drops at
+    ``~/.local/bin/sqlite-vec-mcp`` (POSIX) or
+    ``%LOCALAPPDATA%/claude-hooks/bin/sqlite-vec-mcp.cmd`` (Windows)
+    and registers under ``mcpServers.sqlite_vec`` in ``~/.claude.json``.
 
-    1. Ask whether to enable the provider.
-    2. Prompt for the SQLite db_path (default
+    Dialog steps:
+
+    1. Probe whether sqlite_vec is fully configured already (DSN +
+       enabled + launcher present); if so, offer a
+       ``[V]alidate-only / [R]e-install / [S]kip`` shortcut via
+       :func:`_validate_sqlite_vec_only` (#237, 2026-05-21) — mirrors
+       the pgvector validate-only pattern.
+    2. Ask whether to enable the provider (skipped on validate-only path).
+    3. Prompt for the SQLite db_path (default
        ``~/.claude/claude-hooks-memory.db``).
-    3. Surface a one-line ``pip install sqlite-vec`` breadcrumb if
-       the Python dep is missing.
-    4. Delegate the embedder choice (Ollama / OpenAI / llamafile) to
-       :func:`_setup_embedding_engine`.
+    4. Drop the system-wide MCP launcher and register it in
+       ``~/.claude.json``.
+    5. Delegate the embedder choice (Ollama / remote llamafile /
+       OpenAI / local llamafile) to :func:`_setup_embedding_engine`.
 
-    Idempotent: if ``cfg.providers.sqlite_vec.embedder`` is already
-    set the dialog runs but proposes the existing values as
-    defaults; brand-new installs get the full prompt sequence.
+    Idempotent: re-runs upgrade the launcher in place; the lazy
+    schema migration in the provider carries existing dbs to the
+    current ``LATEST_VERSION`` on first ``store()``/``recall()`` call.
 
     Skipped silently in non-interactive mode when the provider isn't
     already enabled — same precedent as ``_setup_pgvector_mcp``.
@@ -4040,6 +4289,14 @@ def _setup_sqlite_vec_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) ->
     pcfg = (cfg.get("providers") or {}).get("sqlite_vec") or {}
     already_enabled = bool(pcfg.get("enabled"))
     existing_db = pcfg.get("db_path") or "~/.claude/claude-hooks-memory.db"
+    launcher_path = _sqlite_vec_launcher_path()
+    launcher_present = launcher_path.exists()
+    expanded_db = Path(os.path.expanduser(existing_db))
+    fully_configured = bool(
+        already_enabled
+        and expanded_db.exists()
+        and launcher_present
+    )
 
     print("\n--- sqlite_vec ---")
     print("  Optional: local-only persistent memory backed by SQLite + sqlite-vec.")
@@ -4054,6 +4311,27 @@ def _setup_sqlite_vec_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) ->
             return
         ans = "y"
         print("  --non-interactive: keeping existing sqlite_vec config.")
+    elif fully_configured:
+        # #237 (2026-05-21): mirror pgvector's validate-only shortcut.
+        # When sqlite_vec is already fully configured (enabled, db file
+        # present, launcher dropped), default V so the lowest-impact
+        # action is the easy one.
+        print(f"  Currently configured: enabled, db at {expanded_db},")
+        print(f"  launcher at {launcher_path}")
+        choice = input(
+            "  [V]alidate only / [R]e-install / [S]kip? [V/r/s]: "
+        ).strip().lower() or "v"
+        if choice in ("s", "skip", "n", "no"):
+            print("  Skipped.")
+            return
+        if choice in ("v", "validate", "y", "yes"):
+            # Yes/y maps to validate here for the same reason as pgvector:
+            # the natural "yes I want this" answer for an already-working
+            # install is "yes, confirm it's working".
+            _validate_sqlite_vec_only(cfg)
+            return
+        # Fall through to full re-install on R / re-install / anything else.
+        ans = "y"
     else:
         default = "Y" if already_enabled else "N"
         ans = input(

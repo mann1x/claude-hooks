@@ -141,7 +141,12 @@ class TestEnableSharedSkills:
         assert ups["hyde_url"] == "http://localhost:11434/api/generate"
         assert ups["hyde_enabled"] is True
         assert ups["hyde_model"] == "gemma4:e2b"
-        assert ups["hyde_fallback_model"] == "gemma4:e2b"
+        # #225 (2026-05-19): fresh installs default the HyDE fallback to
+        # gemma4:31b-cloud (Ollama free-tier inference, strict capability
+        # bump from the local primary). The scripted "" answer accepts
+        # this new default in place of the primary-equals-fallback v1.4
+        # behavior.
+        assert ups["hyde_fallback_model"] == "gemma4:31b-cloud"
         assert ups["hyde_num_ctx"] == 16384
 
         # Skills share the HyDE model + URL.

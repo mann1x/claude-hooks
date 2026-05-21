@@ -111,8 +111,17 @@
         "     embedder='llamafile'",
         "     embedder_options={ url: 'http://127.0.0.1:38092/embedding',",
         "                        timeout: 30.0, daemon_ensure: true }",
+        "  4) Remote llamafile (#237, v1.8.4+): point at a llamafile",
+        "     running on another LAN host (the producer host enables the",
+        "     LAN exposure prompt in install.py). daemon_ensure MUST be",
+        "     false so the local daemon doesn't try to spawn its own.",
+        "     embedder='llamafile'",
+        "     embedder_options={ url: 'http://192.168.X.Y:38092/embedding',",
+        "                        timeout: 30.0, daemon_ensure: false }",
         "When using shapes 2 or 3, the top-level 'embedding' block below",
-        "configures the daemon-managed llamafile engine."
+        "configures the LOCAL daemon-managed llamafile engine. Shape 4",
+        "(remote) does NOT need the 'embedding' block — the producer host",
+        "owns supervision."
       ],
       "embedder": "ollama",
       "embedder_options": {
@@ -147,7 +156,12 @@
       "provider. The daemon spawns the binary on demand and idle-reaps",
       "after idle_timeout_seconds. Single engine shared across providers.",
       "Set enabled=false to disable the engine even if providers still",
-      "reference http://127.0.0.1:38092/embedding (they will hard-fail)."
+      "reference http://127.0.0.1:38092/embedding (they will hard-fail).",
+      "host (#242, v1.8.4+): 127.0.0.1 binds loopback only (the safe",
+      "default). Set to 0.0.0.0 to expose the embedder on the LAN so",
+      "other hosts can use it as a remote primary. WARNING: the",
+      "/embedding endpoint has NO authentication — only opt in on a",
+      "trusted LAN. install.py asks during the llamafile sub-dialog."
     ],
     "enabled": false,
     "llamafile_path": "vendor/llamafile/dist/qwen3-embedding-0.6b-16k.llamafile",

@@ -308,6 +308,75 @@ the `-ngl 99` attempt when no GPU is visible.
   `install.py` falls back to `urllib.request` with progress +
   SHA verification.
 
+## LAN-shared topology (#237 / #242, v1.8.4+)
+
+The default install puts a llamafile on every host. On a multi-host
+home setup that's wasteful — a desktop with limited RAM pays a
+~200–400 MB resident cost for a service the LAN's beefier server
+could provide once. v1.8.4 adds a producer/consumer split:
+
+```
+                 ┌──────────────────────────────────────────────┐
+                 │ producer host (Linux server, lots of RAM)    │
+   ┌──────────┐  │   embedding.host = "0.0.0.0"                 │
+   │ consumer │──┼──> http://<producer-LAN-IP>:38092/embedding  │
+   │ host A   │  │       (daemon supervises + idle-reaps)       │
+   └──────────┘  │                                              │
+   ┌──────────┐  │       same vector space, byte-identical     │
+   │ consumer │──┼──>    weights → cross-host queries work     │
+   │ host B   │  │                                              │
+   └──────────┘  └──────────────────────────────────────────────┘
+```
+
+### Producer host (the one that runs the llamafile)
+
+`install.py` asks during the llamafile sub-dialog:
+
+```
+Expose this llamafile on the LAN so other hosts can use it as a
+remote embedder?
+WARNING: the /embedding endpoint has NO authentication.
+Only opt in on a trusted LAN.
+Bind LAN-wide (0.0.0.0)? [y/N]:
+```
+
+Picking `y` writes `embedding.host = "0.0.0.0"` (default is
+`127.0.0.1`). On the next daemon restart the llamafile binds all
+interfaces and is reachable at `http://<this-host-LAN-IP>:38092/embedding`.
+
+### Consumer host (the one without a local llamafile)
+
+`install.py` asks during the embedding-engine dialog, after `Use
+Ollama for embeddings? [Y/n]: n`:
+
+```
+Use a remote llamafile endpoint as primary (another LAN host)? [y/N]: y
+  Endpoint URL [http://192.168.178.2:38092/embedding]:
+  Timeout seconds [30]:
+  Probing http://192.168.178.2:38092/embedding ... OK, dim=1024
+```
+
+The resulting config has `embedder = "llamafile"` with
+`embedder_options = {url, timeout, daemon_ensure: false}`. The
+`daemon_ensure: false` is critical — without it the consumer host's
+daemon would try to spawn its own llamafile on every embed call,
+defeating the whole point. install.py also strips any stale local
+`embedding` block on the consumer side.
+
+### Trade-offs
+
+- **No auth on the embedder endpoint.** The home LAN is treated as
+  a trust boundary. If your LAN isn't trusted, don't enable this.
+- **Producer downtime takes consumers offline too.** Acceptable in
+  practice because the pgvector / sqlite_vec store usually lives on
+  the same producer host — recall would be down either way.
+- **Linux producers serve Windows consumers faster than the consumer
+  could embed locally.** Empirical 2026-05-19: pandorum (Windows)
+  cold = 354 ms locally vs 28 ms via solidpc LAN, warm = 46 ms vs
+  39 ms. llama.cpp's Windows build is consistently ~2× slower than
+  the Linux build at identical model weights — the LAN hop is faster
+  than running the Windows build locally.
+
 ## Out of scope (v1.4)
 
 - **Chat-model migration**: llamafile's `--tools all` mode could
