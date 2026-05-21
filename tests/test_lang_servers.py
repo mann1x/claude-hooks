@@ -754,6 +754,100 @@ class TestScoopBootstrap:
         assert ok is False
         assert "Could not connect" in msg
 
+    def test_install_scoop_appends_shims_to_path_on_success(self, monkeypatch,
+                                                            tmp_path):
+        """After PowerShell returns success, the running process's
+        ``os.environ['PATH']`` MUST be updated to include scoop's
+        shims dir — otherwise the immediately-following
+        ``is_scoop_installed()`` / ``ensure_scoop_bucket()`` calls
+        see stale PATH and report 'scoop not installed' even though
+        the binary is on disk. Live-caught on pandorum 2026-05-21."""
+        class _Proc:
+            returncode = 0
+            stdout = "Type 'scoop help' for instructions."
+            stderr = ""
+
+        fake_home = tmp_path
+        fake_shims = fake_home / "scoop" / "shims"
+        fake_shims.mkdir(parents=True)
+
+        starting_path = "/usr/bin:/bin"
+        monkeypatch.setenv("PATH", starting_path)
+        monkeypatch.delenv("SCOOP", raising=False)
+
+        with patch.object(ls.os, "name", "nt"), \
+             patch.object(ls.os.path, "expanduser",
+                          side_effect=lambda p: str(fake_home) if p == "~" else p), \
+             patch.object(ls.shutil, "which",
+                          side_effect=lambda b: "powershell.exe"
+                          if b in ("powershell", "pwsh") else None), \
+             patch.object(ls.subprocess, "run", return_value=_Proc()):
+            ok, _ = ls.install_scoop_windows()
+
+        assert ok is True
+        # PATH MUST now contain the shims dir we created.
+        assert str(fake_shims) in ls.os.environ["PATH"], (
+            "PATH was not refreshed after scoop install — "
+            f"os.environ['PATH']={ls.os.environ['PATH']!r} "
+            f"did not include {fake_shims}"
+        )
+        # The starting PATH entries are preserved (prepended, not replaced).
+        assert starting_path in ls.os.environ["PATH"]
+
+    def test_install_scoop_honors_scoop_env_override(self, monkeypatch, tmp_path):
+        """If the user sets ``$SCOOP=<custom>``, the shims dir we
+        append must be ``<custom>/shims``, not the default
+        ``~/scoop/shims``."""
+        class _Proc:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        custom_root = tmp_path / "custom-scoop"
+        custom_shims = custom_root / "shims"
+        custom_shims.mkdir(parents=True)
+
+        monkeypatch.setenv("SCOOP", str(custom_root))
+        monkeypatch.setenv("PATH", "/usr/bin")
+
+        with patch.object(ls.os, "name", "nt"), \
+             patch.object(ls.shutil, "which",
+                          side_effect=lambda b: "powershell.exe"
+                          if b in ("powershell", "pwsh") else None), \
+             patch.object(ls.subprocess, "run", return_value=_Proc()):
+            ok, _ = ls.install_scoop_windows()
+
+        assert ok is True
+        assert str(custom_shims) in ls.os.environ["PATH"]
+
+    def test_install_scoop_skips_path_update_if_shims_dir_missing(
+            self, monkeypatch, tmp_path):
+        """Safety: if scoop install claims success but the shims dir
+        doesn't actually exist on disk (weird edge case), don't add
+        a bogus entry to PATH."""
+        class _Proc:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        fake_home = tmp_path  # NO scoop/shims subdir created
+        starting_path = "/usr/bin:/bin"
+        monkeypatch.setenv("PATH", starting_path)
+        monkeypatch.delenv("SCOOP", raising=False)
+
+        with patch.object(ls.os, "name", "nt"), \
+             patch.object(ls.os.path, "expanduser",
+                          side_effect=lambda p: str(fake_home) if p == "~" else p), \
+             patch.object(ls.shutil, "which",
+                          side_effect=lambda b: "powershell.exe"
+                          if b in ("powershell", "pwsh") else None), \
+             patch.object(ls.subprocess, "run", return_value=_Proc()):
+            ok, _ = ls.install_scoop_windows()
+
+        assert ok is True
+        # PATH unchanged — no scoop/shims appended.
+        assert ls.os.environ["PATH"] == starting_path
+
     def test_ensure_bucket_refuses_when_scoop_missing(self):
         with patch.object(ls.shutil, "which", return_value=None):
             ok, msg = ls.ensure_scoop_bucket("extras")

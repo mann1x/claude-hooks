@@ -595,12 +595,17 @@ class TestScoopBootstrapDialog:
         scoop_install.assert_not_called()
         ensure_bucket.assert_not_called()
 
-    def test_not_offered_when_scoop_already_installed(
+    def test_scoop_installed_but_extras_bucket_missing_silently_adds(
             self, monkeypatch, tmp_path, capsys):
-        """If scoop is already on PATH, the bootstrap prompt is
-        silently skipped. omnisharp's installer_for_missing would
-        have been set to SCOOP by the real detect, so no special-case
-        needed in the install loop."""
+        """When scoop is already on PATH but the extras bucket isn't
+        added yet, and any LS in the queue uses ``scoop install
+        extras/<name>``, the helper silently ensures the bucket.
+
+        This handles the case where the user installed scoop in some
+        other context (or where a prior install.py run installed scoop
+        but crashed before adding the bucket — live-caught on pandorum
+        2026-05-21). Without this, ``scoop install extras/omnisharp``
+        would fail with 'Could not find manifest for extras/omnisharp'."""
         monkeypatch.chdir(tmp_path)
         cfg = {}
 
@@ -630,9 +635,65 @@ class TestScoopBootstrapDialog:
         with patch.object(install, "_lsp_is_windows", return_value=True), \
              patch.object(ls, "is_scoop_installed", return_value=True), \
              patch.object(ls, "install_scoop_windows") as scoop_install, \
-             patch.object(ls, "ensure_scoop_bucket") as ensure_bucket, \
+             patch.object(ls, "ensure_scoop_bucket",
+                          return_value=(True, "added bucket extras")) as ensure_bucket, \
              patch.object(ls, "detect_language_servers",
                           side_effect=[state_with_scoop,
+                                       state_with_scoop,  # post bucket-add
+                                       _state_all_installed()]), \
+             patch.object(ls, "install_language_server",
+                          side_effect=fake_install):
+            install._setup_lsp_engine(
+                cfg, non_interactive=False, dry_run=False,
+            )
+
+        out = capsys.readouterr().out
+        # The "Install scoop now" prompt is NOT shown (scoop is present).
+        assert "can be installed via scoop" not in out
+        scoop_install.assert_not_called()
+        # But the bucket ensure IS called, idempotently.
+        ensure_bucket.assert_called_once_with("extras", dry_run=False)
+        # Bucket was added (msg didn't contain "already"), so the
+        # one-line notice is printed.
+        assert "scoop extras bucket" in out
+
+    def test_scoop_installed_extras_already_added_no_print(
+            self, monkeypatch, tmp_path, capsys):
+        """If scoop AND extras bucket are already in place, ensure
+        bucket runs but its 'already added' return triggers no
+        user-visible print — the install loop just runs as if it had
+        been from the start."""
+        monkeypatch.chdir(tmp_path)
+        cfg = {}
+        state_with_scoop = _state_omnisharp_blocked_on_windows()
+        state_with_scoop["omnisharp"] = ls.InstalledState(
+            spec=state_with_scoop["omnisharp"].spec,
+            installed=False, binary_path=None,
+            installer_for_missing=ls.Installer.SCOOP,
+        )
+
+        monkeypatch.setattr(
+            "builtins.input",
+            _scripted_input([
+                "y",                                  # opt into install loop
+                "y", "y", "y", "y", "y",              # 5 Tier-1
+                "y", "y", "y",                        # 3 Tier-2
+                "",   # cclsp
+                "",   # enable
+            ]),
+        )
+
+        def fake_install(spec, installer, *, dry_run=False):
+            return True, "ok"
+
+        with patch.object(install, "_lsp_is_windows", return_value=True), \
+             patch.object(ls, "is_scoop_installed", return_value=True), \
+             patch.object(ls, "install_scoop_windows") as scoop_install, \
+             patch.object(ls, "ensure_scoop_bucket",
+                          return_value=(True, "bucket extras already added")) as ensure_bucket, \
+             patch.object(ls, "detect_language_servers",
+                          side_effect=[state_with_scoop,
+                                       state_with_scoop,
                                        _state_all_installed()]), \
              patch.object(ls, "install_language_server",
                           side_effect=fake_install):
@@ -643,7 +704,10 @@ class TestScoopBootstrapDialog:
         out = capsys.readouterr().out
         assert "can be installed via scoop" not in out
         scoop_install.assert_not_called()
-        ensure_bucket.assert_not_called()
+        # Bucket ensure called (idempotent) but no user-visible print
+        # for the "already added" case.
+        ensure_bucket.assert_called_once()
+        assert "[ok] scoop extras bucket" not in out
 
     def test_dry_run_does_not_invoke_subprocess(
             self, monkeypatch, tmp_path, capsys):

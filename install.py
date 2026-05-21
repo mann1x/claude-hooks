@@ -6383,97 +6383,138 @@ def _lsp_is_windows() -> bool:
 
 
 def _lsp_maybe_bootstrap_scoop(state, *, dry_run: bool):
-    """If we're on Windows and have missing LSs whose ONLY available
-    installer is scoop (and scoop isn't installed), offer a one-shot
-    bootstrap. Returns the (possibly re-detected) state dict so the
-    caller can refresh ``installer_for_missing`` after a successful
-    bootstrap.
+    """Set up scoop + its ``extras`` bucket on Windows when the install
+    loop is about to dispatch any ``scoop install extras/<name>``
+    command. Two cases handled:
 
-    The canonical case is OmniSharp — scoop is the only auto-install
-    path. zls and lua-language-server have winget alternatives so
-    they bypass this path. Without the bootstrap OmniSharp would
-    permanently sit in the MANUAL bucket on Windows, which is the
-    UX the user explicitly asked to fix.
+    1. **Scoop not on PATH AND there are scoop-only blocked LSs**
+       (canonical: OmniSharp) — offer to install scoop via the
+       official PowerShell one-liner, then add the extras bucket.
+       Requires user confirmation; declining keeps those LSs manual.
+
+    2. **Scoop is on PATH but extras bucket is missing AND there's
+       at least one LS in the queue whose install command uses
+       ``extras/<name>``** — silently add the bucket (it's a
+       no-op when already present; the user already opted into
+       "install missing language servers" so adding a bucket is
+       within scope).
+
+    Returns the (possibly re-detected) state dict so the caller's
+    ``missing_to_offer`` filter refreshes ``installer_for_missing``
+    promotions correctly.
+
+    Live-caught case 2 on pandorum 2026-05-21: scoop was installed
+    in a prior failed install.py run (we recovered the PATH issue
+    too late to add the bucket), so the host had scoop without
+    extras. Without this branch, ``scoop install extras/omnisharp``
+    would error with "Could not find manifest for 'extras/omnisharp'".
     """
     from claude_hooks import lang_servers as _lang  # local import
 
     if not _lsp_is_windows():
         return state
-    if _lang.is_scoop_installed():
-        return state
 
-    # Find LSs that (a) are missing, (b) would be installable via scoop,
-    # (c) currently have no installer (because scoop isn't on PATH).
-    scoop_only_blocked = []
+    # Survey what scoop-related work this install loop needs done.
+    scoop_only_blocked = []   # LSs that would be MANUAL without scoop
+    uses_extras_bucket = False  # Any LS dispatching via extras/<name>?
     for st in state.values():
-        if st.installed or st.installer_for_missing is not None:
+        if st.installed:
             continue
-        # Does this spec have scoop in its installer list at all?
-        if _lang.Installer.SCOOP not in st.spec.installers:
-            continue
-        # Does the install matrix actually have a scoop command for it?
-        cmd = _lang.INSTALL_COMMANDS.get(
+        scoop_cmd = _lang.INSTALL_COMMANDS.get(
             _lang.Installer.SCOOP, {},
         ).get(st.spec.name)
-        if not cmd:
+        if not scoop_cmd:
             continue
-        scoop_only_blocked.append(st)
+        # Any LS whose scoop command references extras/?
+        if any("extras/" in a for a in scoop_cmd):
+            uses_extras_bucket = True
+        # LSs with no installer available right now (scoop missing
+        # from PATH) AND only scoop in their spec installers.
+        if st.installer_for_missing is None and (
+            _lang.Installer.SCOOP in st.spec.installers
+        ):
+            scoop_only_blocked.append(st)
 
-    if not scoop_only_blocked:
-        return state
+    scoop_present = _lang.is_scoop_installed()
 
-    names = ", ".join(st.spec.name for st in scoop_only_blocked)
-    print(
-        f"\n  These language servers can be installed via scoop on "
-        f"Windows but scoop isn't on PATH: {names}."
-    )
-    print(
-        "  scoop installs entirely to the user profile (no admin, no "
-        "system PATH changes)."
-    )
-    print("  See https://scoop.sh/ for the project.")
-    ans = input(
-        "  Install scoop now to unlock these? [y/N]: ",
-    ).strip().lower()
-    if ans not in ("y", "yes"):
-        print("  Skipped scoop bootstrap. These LSs will stay manual.")
-        return state
-
-    if dry_run:
-        print("    [dry-run] Would install scoop via PowerShell.")
+    # Case 1: Scoop missing AND we have scoop-only blocked LSs.
+    if not scoop_present and scoop_only_blocked:
+        names = ", ".join(st.spec.name for st in scoop_only_blocked)
         print(
-            "    [dry-run] Would add the 'extras' bucket "
-            "(`scoop bucket add extras`)."
+            f"\n  These language servers can be installed via scoop on "
+            f"Windows but scoop isn't on PATH: {names}."
         )
-        return state
-
-    print("    Running: PowerShell scoop installer...")
-    ok, msg = _lang.install_scoop_windows(dry_run=False)
-    if not ok:
-        print(f"    [FAIL] scoop install failed: {msg}")
         print(
-            "    (continuing — these LSs will stay manual; install "
-            "scoop yourself from https://scoop.sh/ and re-run)"
+            "  scoop installs entirely to the user profile (no admin, no "
+            "system PATH changes)."
         )
-        return state
-    print(f"    [ok] {msg}")
+        print("  See https://scoop.sh/ for the project.")
+        ans = input(
+            "  Install scoop now to unlock these? [y/N]: ",
+        ).strip().lower()
+        if ans not in ("y", "yes"):
+            print("  Skipped scoop bootstrap. These LSs will stay manual.")
+            return state
 
-    # extras bucket holds the LSs we care about (omnisharp, zls,
-    # lua-language-server, and the scoop-build clangd / rust-analyzer).
-    print("    Adding the 'extras' bucket...")
-    ok, msg = _lang.ensure_scoop_bucket("extras", dry_run=False)
-    if not ok:
-        print(f"    [WARN] could not add extras bucket: {msg}")
-        print(
-            "    (subsequent `scoop install extras/<name>` commands "
-            "will fail until you run `scoop bucket add extras` manually)"
-        )
-    else:
+        if dry_run:
+            print("    [dry-run] Would install scoop via PowerShell.")
+            print(
+                "    [dry-run] Would add the 'extras' bucket "
+                "(`scoop bucket add extras`)."
+            )
+            return state
+
+        print("    Running: PowerShell scoop installer...")
+        ok, msg = _lang.install_scoop_windows(dry_run=False)
+        if not ok:
+            print(f"    [FAIL] scoop install failed: {msg}")
+            print(
+                "    (continuing — these LSs will stay manual; install "
+                "scoop yourself from https://scoop.sh/ and re-run)"
+            )
+            return state
         print(f"    [ok] {msg}")
 
-    # Re-detect — scoop is now on PATH, so installer_for_missing
-    # promotes from None to SCOOP for the affected LSs.
-    return _lang.detect_language_servers()
+        # install_scoop_windows already refreshed PATH on success, so
+        # ensure_scoop_bucket below will find scoop.
+        if uses_extras_bucket:
+            print("    Adding the 'extras' bucket...")
+            ok, msg = _lang.ensure_scoop_bucket("extras", dry_run=False)
+            if not ok:
+                print(f"    [WARN] could not add extras bucket: {msg}")
+                print(
+                    "    (subsequent `scoop install extras/<name>` commands "
+                    "will fail until you run `scoop bucket add extras` manually)"
+                )
+            else:
+                print(f"    [ok] {msg}")
+
+        # Re-detect — scoop is now on PATH, so installer_for_missing
+        # promotes from None to SCOOP for the affected LSs.
+        return _lang.detect_language_servers()
+
+    # Case 2: Scoop is present but extras bucket may be missing.
+    # Silently add it when needed — user already opted into "install
+    # missing language servers", and a missing bucket would cause
+    # `scoop install extras/<name>` to fail with a manifest error.
+    if scoop_present and uses_extras_bucket:
+        if dry_run:
+            print("\n  [dry-run] Would ensure scoop's 'extras' bucket is added.")
+            return state
+        ok, msg = _lang.ensure_scoop_bucket("extras", dry_run=False)
+        if not ok:
+            print(f"\n  [WARN] could not add scoop extras bucket: {msg}")
+            print(
+                "  (subsequent `scoop install extras/<name>` commands "
+                "will fail until you run `scoop bucket add extras` manually)"
+            )
+        elif "already" not in msg.lower():
+            # Was missing, now added — surface the one-line notice.
+            print(f"\n  [ok] scoop extras bucket: {msg}")
+        # Re-detect in case bucket-add unblocked something.
+        return _lang.detect_language_servers()
+
+    return state
 
 
 def _lsp_run_install_loop(

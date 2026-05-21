@@ -574,6 +574,31 @@ def install_scoop_windows(*, dry_run: bool = False) -> tuple[bool, str]:
         return False, f"PowerShell invocation failed: {e}"
 
     if proc.returncode == 0:
+        # ``Set-EnvironmentVariable('PATH', ..., 'User')`` updates the
+        # USER PATH in registry — but the running Python process took
+        # a snapshot of ``os.environ`` at launch and won't see that
+        # change without an explicit refresh. Without this, the very
+        # next ``shutil.which("scoop")`` returns ``None`` and
+        # ``ensure_scoop_bucket`` immediately reports "scoop not
+        # installed", even though the binary IS on disk.
+        #
+        # Scoop's default layout is ``%USERPROFILE%\scoop\shims\``.
+        # Append it idempotently so the rest of this install.py run
+        # can find scoop. (Honor ``$SCOOP`` env override for the
+        # non-default install dir.)
+        scoop_root = os.environ.get(
+            "SCOOP", os.path.join(os.path.expanduser("~"), "scoop"),
+        )
+        shims_dir = os.path.join(scoop_root, "shims")
+        current = os.environ.get("PATH", "")
+        path_sep = os.pathsep
+        path_entries = current.split(path_sep) if current else []
+        if shims_dir not in path_entries and os.path.isdir(shims_dir):
+            os.environ["PATH"] = (
+                shims_dir + path_sep + current if current else shims_dir
+            )
+            log.info("install_scoop_windows: prepended %s to PATH", shims_dir)
+
         tail = (proc.stdout or "").strip().splitlines()
         last = tail[-1] if tail else "scoop installed"
         return True, last[:200]
