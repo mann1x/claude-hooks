@@ -17,6 +17,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 import install  # noqa: E402
+from tests._fixtures_net import FIXTURE_LAN_HOST  # noqa: E402
 
 
 @pytest.fixture
@@ -172,10 +173,10 @@ class TestPostInstallHint:
 
     def test_uses_lan_address_when_listen_host_is_explicit(self, capsys):
         install._print_proxy_post_install_hint(
-            {"listen_host": "192.168.178.2", "listen_port": 38090},
+            {"listen_host": FIXTURE_LAN_HOST, "listen_port": 38090},
         )
         out = capsys.readouterr().out
-        assert "192.168.178.2:38090" in out
+        assert f"{FIXTURE_LAN_HOST}:38090" in out
 
     def test_defaults_when_fields_missing(self, capsys):
         install._print_proxy_post_install_hint({})

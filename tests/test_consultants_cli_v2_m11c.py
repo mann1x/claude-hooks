@@ -29,6 +29,8 @@ from consultants.cli import (
     cmd_skill_eval_tool_executor,
 )
 
+from tests._fixtures_net import FIXTURE_OLLAMA_PROXY_BASE
+
 
 # ============================================================== #
 # argv → fn dispatch
@@ -59,7 +61,7 @@ class TestSkillEvalToolExecutorArgv(unittest.TestCase):
             "skill-eval", "tool_executor",
             "--live", "--accept-cost",
             "--models", "kimi-k2.6:cloud,gemma4:31b-cloud",
-            "--ollama-base", "http://192.168.178.2:11433",
+            "--ollama-base", FIXTURE_OLLAMA_PROXY_BASE,
             "--judge-model", "gemma4:31b-cloud",
             "--trials", "2",
             "--output-dir", "/tmp/te-out",
@@ -74,7 +76,7 @@ class TestSkillEvalToolExecutorArgv(unittest.TestCase):
         self.assertEqual(args.models,
                          "kimi-k2.6:cloud,gemma4:31b-cloud")
         self.assertEqual(args.ollama_base,
-                         "http://192.168.178.2:11433")
+                         FIXTURE_OLLAMA_PROXY_BASE)
         self.assertEqual(args.judge_model, "gemma4:31b-cloud")
         self.assertEqual(args.trials, 2)
         self.assertEqual(args.output_dir, "/tmp/te-out")
@@ -185,11 +187,11 @@ class TestSkillEvalToolExecutorHandlerForwarding(unittest.TestCase):
 
     def test_ollama_base_forwarded(self) -> None:
         argv = self._call(self._minimal_ns(
-            ollama_base="http://192.168.178.2:11433",
+            ollama_base=FIXTURE_OLLAMA_PROXY_BASE,
         ))
         i = argv.index("--ollama-base")
         self.assertEqual(argv[i + 1],
-                         "http://192.168.178.2:11433")
+                         FIXTURE_OLLAMA_PROXY_BASE)
 
     def test_judge_model_empty_forwarded_explicitly(self) -> None:
         """An empty ``--judge-model`` is the documented way to

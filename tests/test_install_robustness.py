@@ -29,6 +29,12 @@ from unittest.mock import patch
 
 import pytest
 
+from tests._fixtures_net import (
+    FIXTURE_LAN_HOST,
+    FIXTURE_LAN_HOST_ALT,
+    FIXTURE_LLAMAFILE_URL,
+)
+
 
 @pytest.fixture(scope="module")
 def install_mod():
@@ -593,7 +599,7 @@ class TestValidateSqliteVecOnly:
                 "db_path": str(db),
                 "embedder": "llamafile",
                 "embedder_options": {
-                    "url": "http://192.168.178.2:38092/embedding",
+                    "url": FIXTURE_LLAMAFILE_URL,
                     "daemon_ensure": False,
                 },
             }},
@@ -619,7 +625,7 @@ class TestRemoteLlamafilePrimaryDialog:
             "providers": {"pgvector": {
                 "embedder": "llamafile",
                 "embedder_options": {
-                    "url": "http://192.168.178.2:38092/embedding",
+                    "url": FIXTURE_LLAMAFILE_URL,
                     "daemon_ensure": False,
                     "timeout": 30.0,
                 },
@@ -640,7 +646,7 @@ class TestRemoteLlamafilePrimaryDialog:
         # from the existing config, and re-saves the same shape.
         opts = cfg["providers"]["pgvector"]["embedder_options"]
         assert cfg["providers"]["pgvector"]["embedder"] == "llamafile"
-        assert opts["url"] == "http://192.168.178.2:38092/embedding"
+        assert opts["url"] == FIXTURE_LLAMAFILE_URL
         assert opts["daemon_ensure"] is False
         assert "embedding" not in cfg, (
             "remote-primary path must strip a stale local embedding block"
@@ -656,7 +662,7 @@ class TestRemoteLlamafilePrimaryDialog:
             "providers": {"pgvector": {
                 "embedder": "llamafile",
                 "embedder_options": {
-                    "url": "http://10.0.0.5:38092/embedding",
+                    "url": f"http://{FIXTURE_LAN_HOST_ALT}:38092/embedding",
                     "daemon_ensure": False,
                 },
             }},

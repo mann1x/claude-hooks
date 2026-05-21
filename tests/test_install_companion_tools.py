@@ -20,6 +20,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 import install  # noqa: E402
+from tests._fixtures_net import FIXTURE_EPISODIC_URL  # noqa: E402
 
 
 def _run(cfg):
@@ -43,7 +44,7 @@ class TestEpisodicSpecialCase(unittest.TestCase):
 
     def test_client_mode_reports_na_not_missing(self):
         cfg = {"episodic": {"mode": "client",
-                            "server_url": "http://192.168.178.2:11435"}}
+                            "server_url": FIXTURE_EPISODIC_URL}}
         result, text = _run(cfg)
         # Row marker is [ok], status is n/a (CLIENT)
         self.assertIn("[ok] episodic-memory", text)

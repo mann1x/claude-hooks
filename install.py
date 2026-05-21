@@ -2863,14 +2863,19 @@ def _validate_pgvector_only(cfg: dict) -> None:
     model = embedder_opts.get("model") or ""
     embedder = pcfg.get("embedder") or "ollama"
     if embedder == "llamafile":
-        # llamafile is daemon-managed; the daemon will spawn it on
-        # demand. Validate by hitting the daemon's chat_model_status-
-        # equivalent embedding probe rather than the embedder URL
-        # directly (the embedder URL may be unbound when the daemon
-        # has reaped the llamafile child).
-        print(f"  Embedder: llamafile (daemon-managed @ {embed_url})")
-        print("  Note: daemon spawns llamafile on demand; URL may be "
-              "unbound until first recall.")
+        # llamafile lives in one of two modes, exactly like
+        # _validate_sqlite_vec_only does it: local (daemon-managed,
+        # daemon_ensure=True) where this host's daemon spawns it on
+        # demand, or remote (daemon_ensure=False) where some other
+        # host serves /embedding on the LAN. Surface the difference
+        # so the user can tell which one their config selected.
+        ensure = embedder_opts.get("daemon_ensure", True)
+        suffix = (" (daemon-managed)" if ensure
+                  else " (remote, no local supervision)")
+        print(f"  Embedder: llamafile{suffix} @ {embed_url}")
+        if ensure:
+            print("  Note: daemon spawns llamafile on demand; URL may be "
+                  "unbound until first recall.")
     elif model and embed_url:
         base = _ollama_base_from_embed_url(embed_url)
         print(f"  Probing Ollama at {base} for {model}...", end=" ", flush=True)

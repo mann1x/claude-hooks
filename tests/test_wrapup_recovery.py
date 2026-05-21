@@ -12,6 +12,10 @@ sys.path.insert(0, str(HERE))
 
 from claude_hooks import wrapup_synth as ws  # noqa: E402
 from claude_hooks import wrapup_recovery as wr  # noqa: E402
+from tests._fixtures_net import (  # noqa: E402
+    FIXTURE_REGEX_IP_PRIMARY,
+    FIXTURE_REGEX_IP_SECONDARY,
+)
 
 
 def _assistant_text(text: str) -> dict:
@@ -32,9 +36,13 @@ class CollectEndpointsTests(unittest.TestCase):
         self.assertIn("abcd1234ef-8888.proxy.runpod.net", out["pod_ids"])
 
     def test_ipv4_with_port_extracted(self):
-        transcript = [_assistant_text("ssh root@192.168.178.25:22 to reach pandorum.")]
+        # The IP is regex test fodder, not infrastructure. Drawn from
+        # the RFC 5737 documentation pool so the test stays portable.
+        ip = FIXTURE_REGEX_IP_PRIMARY
+        transcript = [_assistant_text(f"ssh root@{ip}:22 to reach a host.")]
         out = ws.collect_endpoints(transcript, [])
-        self.assertTrue(any(ip.startswith("192.168.178.25") for ip in out["ips"]))
+        self.assertTrue(any(extracted.startswith(ip)
+                            for extracted in out["ips"]))
 
     def test_invalid_octet_rejected(self):
         transcript = [_assistant_text("Bogus IP 999.1.1.1 should not match.")]
@@ -61,14 +69,15 @@ class CollectEndpointsTests(unittest.TestCase):
         self.assertIn("https://example.com/foo", out["urls"])
 
     def test_synthesize_markdown_includes_endpoints(self):
+        ip = FIXTURE_REGEX_IP_SECONDARY
         transcript = [
-            _assistant_text("Pod: https://xyz12345ab-7860.proxy.runpod.net "
-                            "and IP 10.0.0.5"),
+            _assistant_text(f"Pod: https://xyz12345ab-7860.proxy.runpod.net "
+                            f"and IP {ip}"),
         ]
         md = ws.synthesize_markdown(transcript, cwd="", session_id="s")
         self.assertIn("Connection state", md)
         self.assertIn("xyz12345ab-7860.proxy.runpod.net", md)
-        self.assertIn("10.0.0.5", md)
+        self.assertIn(ip, md)
 
     def test_synthesize_markdown_no_endpoints_message(self):
         transcript = [_assistant_text("just refactoring some code.")]

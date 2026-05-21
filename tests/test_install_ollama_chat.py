@@ -24,6 +24,10 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 import install  # noqa: E402
+from tests._fixtures_net import (  # noqa: E402
+    FIXTURE_LAN_HOST_ALT,
+    FIXTURE_OLLAMA_PROXY_GENERATE,
+)
 
 
 def _scripted_input(answers):
@@ -158,9 +162,10 @@ class TestEnableSharedSkills:
 
     def test_interactive_custom_model(self, monkeypatch):
         cfg: dict = {}
+        custom_url = f"http://{FIXTURE_LAN_HOST_ALT}:11434/api/generate"
         monkeypatch.setattr("builtins.input", _scripted_input([
             "y",                                     # use Ollama? yes
-            "http://192.168.1.5:11434/api/generate", # URL
+            custom_url,                              # URL
             "",                                      # HyDE enabled default
             "gemma4:e4b-32000",                      # HyDE model
             "gemma4:e4b-32000",                      # HyDE fallback (same)
@@ -173,7 +178,7 @@ class TestEnableSharedSkills:
             cfg, non_interactive=False, dry_run=False,
         )
         ups = cfg["hooks"]["user_prompt_submit"]
-        assert ups["hyde_url"] == "http://192.168.1.5:11434/api/generate"
+        assert ups["hyde_url"] == custom_url
         assert ups["hyde_model"] == "gemma4:e4b-32000"
         assert ups["hyde_num_ctx"] == 32768
         assert cfg["reflect"]["num_ctx"] == 32768
@@ -232,7 +237,7 @@ class TestExistingConfig:
     def test_non_interactive_keeps_existing(self, monkeypatch):
         cfg: dict = {
             "hooks": {"user_prompt_submit": {
-                "hyde_url": "http://192.168.178.2:11433/api/generate",
+                "hyde_url": FIXTURE_OLLAMA_PROXY_GENERATE,
                 "hyde_enabled": True,
                 "hyde_model": "gemma4:e4b-32000",
                 "hyde_fallback_model": "gemma4:e4b-32000",

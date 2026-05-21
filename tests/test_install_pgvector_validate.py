@@ -27,6 +27,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 import install  # noqa: E402
+from tests._fixtures_net import FIXTURE_LAN_HOST, FIXTURE_PG_DSN  # noqa: E402
 
 
 def _scripted_input(answers):
@@ -45,7 +46,7 @@ def _scripted_input(answers):
 def _fully_configured_cfg() -> dict:
     return {"providers": {"pgvector": {
         "enabled": True,
-        "dsn": "postgresql://claude:pw@192.168.178.2:5432/memory",
+        "dsn": FIXTURE_PG_DSN,
         "table": "memories_qwen3",
         "embedder": "llamafile",
         "embedder_options": {
@@ -99,7 +100,38 @@ class TestValidateOnly(unittest.TestCase):
              patch.object(sys, "stdout", out):
             install._validate_pgvector_only(cfg)
         ollama_probe.assert_not_called()
+        # Default daemon_ensure (unset) → True → "daemon-managed" label.
         self.assertIn("daemon-managed", out.getvalue())
+        self.assertNotIn("remote, no local supervision", out.getvalue())
+
+    def test_validate_remote_llamafile_labels_correctly(self):
+        """Consumer-of-LAN-shared-llamafile config: pgvector + llamafile +
+        daemon_ensure=false. The validator must NOT claim it's
+        daemon-managed — the daemon does not spawn it locally — and
+        must NOT print the "daemon spawns on demand" note. URL uses
+        a TEST-NET-1 (RFC 5737) address so the assertion is local to
+        the test and doesn't bake any real infra into the suite."""
+        out = io.StringIO()
+        cfg = _fully_configured_cfg()
+        remote_url = f"http://{FIXTURE_LAN_HOST}:38092/embedding"
+        cfg["providers"]["pgvector"]["embedder_options"]["url"] = remote_url
+        cfg["providers"]["pgvector"]["embedder_options"]["daemon_ensure"] = False
+        with patch.object(install, "_verify_pgvector_dsn",
+                          return_value=(True, "")), \
+             patch.object(install, "_ollama_model_present") as ollama_probe, \
+             patch.object(sys, "stdout", out):
+            install._validate_pgvector_only(cfg)
+        ollama_probe.assert_not_called()
+        text = out.getvalue()
+        self.assertIn("remote, no local supervision", text)
+        self.assertNotIn("(daemon-managed)", text)
+        # And the "daemon spawns llamafile on demand" note must not fire
+        # — that note is wrong when this host isn't the spawning host.
+        self.assertNotIn("daemon spawns llamafile on demand", text)
+        # The configured URL is surfaced so the user can verify their
+        # config points where they expect. Reference the URL we put in
+        # the fixture, not any real network address.
+        self.assertIn(remote_url, text)
 
     def test_validate_runs_ollama_probe_when_ollama_embedder(self):
         out = io.StringIO()
