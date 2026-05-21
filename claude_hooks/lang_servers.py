@@ -246,14 +246,22 @@ INSTALL_COMMANDS: dict[Installer, dict[str, list[str]]] = {
         "zls": ["brew", "install", "zls"],
     },
     Installer.SCOOP: {
-        # scoop's ``extras`` bucket ships most LSs. ``ensure_scoop_bucket``
-        # / ``install.py`` add the bucket on user opt-in before the
-        # install dispatch, so all of these are safe to use as-is.
-        "clangd": ["scoop", "install", "extras/llvm"],
-        "rust-analyzer": ["scoop", "install", "extras/rust-analyzer"],
-        "lua-language-server": ["scoop", "install", "extras/lua-language-server"],
-        "zls": ["scoop", "install", "extras/zls"],
-        "omnisharp": ["scoop", "install", "extras/omnisharp"],
+        # All these LSs live in scoop's ``main`` bucket — the default
+        # one added at scoop install time. No ``scoop bucket add extras``
+        # required. Verified via ``scoop search`` on 2026-05-21:
+        #   clangd 22.1.0 (main), llvm 22.1.6 (main),
+        #   rust-analyzer 2026-05-18 (main), lua-language-server 3.18.2 (main),
+        #   zls 0.16.0 (main), omnisharp 1.39.15 (main).
+        # Bare ``<name>`` (without ``<bucket>/`` prefix) lets scoop
+        # search across all installed buckets — safest default.
+        # Earlier v1.9.x shipped ``extras/<name>`` which silently
+        # failed (scoop exits 0 with "Couldn't find manifest"), making
+        # install.py report [ok] for a no-op install.
+        "clangd": ["scoop", "install", "llvm"],
+        "rust-analyzer": ["scoop", "install", "rust-analyzer"],
+        "lua-language-server": ["scoop", "install", "lua-language-server"],
+        "zls": ["scoop", "install", "zls"],
+        "omnisharp": ["scoop", "install", "omnisharp"],
     },
     Installer.WINGET: {
         # winget is preinstalled on Win10 1909+ / Win11 and doesn't
@@ -351,11 +359,118 @@ def select_installer_for(spec: LangServerSpec) -> Optional[Installer]:
 
 @dataclass(frozen=True)
 class InstalledState:
-    """Per-spec detection result returned by :func:`detect_language_servers`."""
+    """Per-spec detection result returned by :func:`detect_language_servers`.
+
+    Three possible states (in order of preference):
+
+    1. ``installed=True`` + ``binary_path`` — the binary is on
+       ``$PATH`` and the LSP engine can spawn it as-is.
+    2. ``installed=False`` + ``on_disk_path`` set — the binary
+       exists at a known install location (winget Links, scoop
+       shims, ``Program Files\\LLVM\\bin``, etc.) but isn't on
+       the current shell's PATH. Surfacing this lets install.py
+       tell the user "restart your shell" instead of offering to
+       re-install something that's already there.
+    3. ``installed=False`` + ``installer_for_missing`` set — not
+       installed anywhere we can detect. Offer the install.
+    """
     spec: LangServerSpec
     installed: bool
     binary_path: Optional[str]
     installer_for_missing: Optional[Installer]
+    on_disk_path: Optional[str] = None  # case 2 above
+
+
+def _windows_extra_search_paths(spec: LangServerSpec) -> list[str]:
+    """Return a list of Windows-specific paths where ``spec.bin``
+    may have landed after a winget/scoop install but where the
+    parent directory hasn't been added to the current shell's PATH
+    yet. Empty list on non-Windows; ``shutil.which`` is the only
+    reliable check on POSIX (the conventions there put installs
+    on PATH immediately).
+
+    These are checked AFTER ``shutil.which`` fails. False positives
+    are harmless — we only surface "on disk, not on PATH" UI when
+    one of these paths actually exists.
+    """
+    if os.name != "nt":
+        return []
+
+    paths: list[str] = []
+    home = os.path.expanduser("~")
+    program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+    local_appdata = os.environ.get(
+        "LOCALAPPDATA",
+        os.path.join(home, "AppData", "Local"),
+    )
+
+    bin_name = spec.bin
+    # ``shutil.which`` checks PATHEXT — we mirror that here so a
+    # ``clangd.exe`` install is found whether the binary on disk is
+    # ``clangd``, ``clangd.exe``, or ``clangd.cmd``.
+    bin_variants = [bin_name, bin_name + ".exe", bin_name + ".cmd",
+                    bin_name + ".CMD", bin_name + ".EXE"]
+
+    # ---- Winget aliases ---------------------------------------------
+    # Winget creates per-binary shims under ``Microsoft\WinGet\Links``
+    # that point at the actual install — these are NOT on the default
+    # PATH on every Windows install, so a fresh shell may miss them.
+    if Installer.WINGET in spec.installers:
+        winget_links = os.path.join(
+            local_appdata, "Microsoft", "WinGet", "Links",
+        )
+        for v in bin_variants:
+            paths.append(os.path.join(winget_links, v))
+
+    # ---- Scoop shims -----------------------------------------------
+    # Scoop ALWAYS creates ``%USERPROFILE%\scoop\shims\<bin>.<ext>``
+    # for any installed app. ``scoop\shims`` should be on PATH after
+    # ``install_scoop_windows`` ran, but a fresh shell that started
+    # before scoop install was done won't see it.
+    if Installer.SCOOP in spec.installers:
+        scoop_root = os.environ.get(
+            "SCOOP", os.path.join(home, "scoop"),
+        )
+        for v in bin_variants:
+            paths.append(os.path.join(scoop_root, "shims", v))
+
+    # ---- Spec-specific known install locations ----------------------
+    # Some installers place binaries at known per-package paths that
+    # the user might also know about. clangd via winget LLVM.LLVM is
+    # the canonical case — installs to Program Files but doesn't
+    # always update the current shell's PATH.
+    if spec.name == "clangd":
+        paths.extend([
+            os.path.join(program_files, "LLVM", "bin", "clangd.exe"),
+            os.path.join(local_appdata, "Programs", "LLVM", "bin", "clangd.exe"),
+            os.path.join(home, "scoop", "apps", "llvm", "current",
+                         "bin", "clangd.exe"),
+        ])
+    if spec.name == "omnisharp":
+        paths.append(os.path.join(
+            home, "scoop", "apps", "omnisharp", "current", "OmniSharp.exe",
+        ))
+    if spec.name == "lua-language-server":
+        # Winget's package-specific install dir (long suffix is winget's
+        # naming convention with the publisher GUID).
+        paths.append(os.path.join(
+            local_appdata, "Microsoft", "WinGet", "Packages",
+            "LuaLS.lua-language-server_Microsoft.Winget.Source_8wekyb3d8bbwe",
+            "bin", "lua-language-server.exe",
+        ))
+
+    return paths
+
+
+def _probe_on_disk(spec: LangServerSpec) -> Optional[str]:
+    """Search the spec-specific extra paths for an existing binary.
+    Returns the first match or None. Skips entries that don't exist
+    on disk — false positives are eliminated by the actual filesystem
+    check rather than guessed install layouts."""
+    for p in _windows_extra_search_paths(spec):
+        if os.path.isfile(p):
+            return p
+    return None
 
 
 def detect_language_servers() -> dict[str, InstalledState]:
@@ -364,16 +479,29 @@ def detect_language_servers() -> dict[str, InstalledState]:
     Returns a dict keyed by spec name. Each value is an
     :class:`InstalledState` with the resolved binary path (when
     installed) and the recommended installer (when missing).
+
+    Windows: when ``shutil.which`` doesn't find a binary on PATH,
+    fall back to ``_probe_on_disk`` to surface the "installed but
+    not on PATH" case — this avoids prompting the user to re-install
+    something that already exists on disk.
     """
     out: dict[str, InstalledState] = {}
     for spec in SPECS:
         path = shutil.which(spec.bin)
-        installer = None if path else select_installer_for(spec)
+        on_disk = None if path else _probe_on_disk(spec)
+        # Only offer to install when the binary is genuinely absent
+        # (not on PATH, not on disk). The on-disk case prompts the
+        # user to restart their shell instead.
+        installer = (
+            None if (path or on_disk)
+            else select_installer_for(spec)
+        )
         out[spec.name] = InstalledState(
             spec=spec,
             installed=bool(path),
             binary_path=path,
             installer_for_missing=installer,
+            on_disk_path=on_disk,
         )
     return out
 
@@ -427,7 +555,22 @@ def install_language_server(
     except OSError as e:
         return False, f"invocation failed: {e}"
 
+    combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
+
     if proc.returncode == 0:
+        # Scoop silent-failure trap: scoop exits 0 even when the
+        # manifest isn't found ("Couldn't find manifest for 'X' from
+        # 'Y' bucket."), making naive exit-code checks report success
+        # for an install that did literally nothing. Catch the phrase
+        # explicitly and re-classify as failure.
+        if installer is Installer.SCOOP and (
+            "Couldn't find manifest" in combined
+            or "could not find manifest" in combined.lower()
+        ):
+            return False, (
+                "scoop reported manifest not found (no install performed); "
+                "check that the bucket containing this package is added"
+            )
         tail = (proc.stdout or "").strip().splitlines()
         last = tail[-1] if tail else "ok"
         return True, last[:200]
@@ -439,7 +582,6 @@ def install_language_server(
     # would be more rigorous but those numeric codes don't always reach
     # ``proc.returncode`` as signed/unsigned cleanly, while the phrase is
     # stable across winget versions.)
-    combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
     if installer is Installer.WINGET and (
         "No newer package versions are available" in combined
         or "already installed" in combined.lower()

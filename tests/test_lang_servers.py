@@ -565,6 +565,204 @@ class TestWingetAlreadyInstalled:
 # Tier-2 LS now have real installers (v1.9.x)
 # --------------------------------------------------------------------- #
 
+class TestScoopManifestNotFound:
+    """Scoop exits with code 0 even when the requested package isn't
+    in any added bucket — ``Couldn't find manifest for 'X' from 'Y'
+    bucket.`` Without explicit detection, install_language_server
+    reports [ok] for an install that did nothing. The phrase-based
+    re-classification was the v1.9.x fix that surfaced after the
+    extras-bucket matrix mistake on pandorum 2026-05-21."""
+
+    def test_couldnt_find_manifest_treated_as_failure(self):
+        spec = next(s for s in ls.SPECS if s.name == "omnisharp")
+
+        class _Proc:
+            returncode = 0
+            stdout = "Couldn't find manifest for 'omnisharp' from 'extras' bucket.\n"
+            stderr = ""
+
+        with patch.object(ls.shutil, "which",
+                          side_effect=lambda b: r"C:\scoop.cmd"
+                          if b == "scoop" else None), \
+             patch.object(ls.subprocess, "run", return_value=_Proc()):
+            ok, msg = ls.install_language_server(spec, ls.Installer.SCOOP)
+        assert ok is False, (
+            "scoop 'Couldn't find manifest' should be a failure, "
+            f"got ok={ok!r} msg={msg!r}"
+        )
+        assert "manifest not found" in msg.lower()
+
+    def test_case_insensitive_could_not_find_variant(self):
+        """Older scoop builds emit lowercased variants — must catch."""
+        spec = next(s for s in ls.SPECS if s.name == "clangd")
+
+        class _Proc:
+            returncode = 0
+            stdout = "could not find manifest for 'clangd'\n"
+            stderr = ""
+
+        with patch.object(ls.shutil, "which",
+                          side_effect=lambda b: r"C:\scoop.cmd"
+                          if b == "scoop" else None), \
+             patch.object(ls.subprocess, "run", return_value=_Proc()):
+            ok, _ = ls.install_language_server(spec, ls.Installer.SCOOP)
+        assert ok is False
+
+    def test_normal_scoop_success_still_succeeds(self):
+        """Don't over-swallow — a legitimate scoop install (exit 0
+        without the manifest-not-found phrase) must still report
+        success."""
+        spec = next(s for s in ls.SPECS if s.name == "omnisharp")
+
+        class _Proc:
+            returncode = 0
+            stdout = (
+                "Installing 'omnisharp' (1.39.15) [64bit] from 'main' bucket\n"
+                "Linking ~\\scoop\\apps\\omnisharp\\current => ...\n"
+                "'omnisharp' (1.39.15) was installed successfully!\n"
+            )
+            stderr = ""
+
+        with patch.object(ls.shutil, "which",
+                          side_effect=lambda b: r"C:\scoop.cmd"
+                          if b == "scoop" else None), \
+             patch.object(ls.subprocess, "run", return_value=_Proc()):
+            ok, msg = ls.install_language_server(spec, ls.Installer.SCOOP)
+        assert ok is True
+        assert "successfully" in msg
+
+    def test_manifest_check_does_not_leak_to_other_installers(self):
+        """The scoop-specific phrase check must NOT misfire on other
+        installers (npm/winget) that happen to emit similar text."""
+        spec = next(s for s in ls.SPECS if s.name == "pyright")
+
+        class _Proc:
+            returncode = 0
+            stdout = "Couldn't find manifest for 'pyright'\n"  # red herring
+            stderr = ""
+
+        with patch.object(ls.shutil, "which",
+                          side_effect=lambda b: r"C:\npm.cmd"
+                          if b == "npm" else None), \
+             patch.object(ls.subprocess, "run", return_value=_Proc()):
+            ok, _ = ls.install_language_server(spec, ls.Installer.NPM)
+        # NPM exit-0 stays a success regardless of phrase — the
+        # check is scoop-only.
+        assert ok is True
+
+
+class TestScoopMatrixBucket:
+    """All scoop install commands must use bare package names (or
+    ``main/<name>``) — NOT ``extras/<name>``. v1.9.x earlier shipped
+    extras/ prefixes that silently failed because scoop's main
+    bucket has these packages. Lock the matrix down."""
+
+    def test_no_scoop_command_uses_extras_bucket(self):
+        for name, cmd in ls.INSTALL_COMMANDS[ls.Installer.SCOOP].items():
+            assert not any("extras/" in arg for arg in cmd), (
+                f"Scoop command for {name!r} uses extras/ prefix: {cmd}. "
+                "Move to bare <name> — packages are in main bucket."
+            )
+
+    def test_omnisharp_uses_bare_name(self):
+        cmd = ls.INSTALL_COMMANDS[ls.Installer.SCOOP]["omnisharp"]
+        assert cmd[:3] == ["scoop", "install", "omnisharp"]
+
+    def test_clangd_scoop_uses_llvm_package(self):
+        # The scoop main bucket ships llvm (not clangd as a separate
+        # package); install llvm gives you clangd.exe.
+        cmd = ls.INSTALL_COMMANDS[ls.Installer.SCOOP]["clangd"]
+        assert cmd[:3] == ["scoop", "install", "llvm"]
+
+
+class TestOnDiskNotOnPathDetection:
+    """When the binary exists at a known install location but isn't
+    on the current shell's PATH, detect_language_servers surfaces
+    it as on_disk_path so install.py can tell the user "restart
+    your shell" instead of offering a redundant re-install.
+
+    Live-caught on pandorum 2026-05-21 after the user reopened cmd
+    and saw clangd reported MISSING despite winget LLVM.LLVM having
+    installed it to ``C:\\Program Files\\LLVM\\bin\\clangd.exe``."""
+
+    def test_extra_search_paths_empty_on_posix(self):
+        with patch.object(ls.os, "name", "posix"):
+            spec = next(s for s in ls.SPECS if s.name == "clangd")
+            assert ls._windows_extra_search_paths(spec) == []
+
+    def test_extra_search_paths_includes_winget_links(self):
+        spec = next(s for s in ls.SPECS if s.name == "lua-language-server")
+        with patch.object(ls.os, "name", "nt"):
+            paths = ls._windows_extra_search_paths(spec)
+        # Should include winget Links dir under %LOCALAPPDATA%.
+        assert any("Microsoft\\WinGet\\Links" in p or
+                   "Microsoft/WinGet/Links" in p
+                   for p in paths), paths
+
+    def test_extra_search_paths_includes_scoop_shims(self):
+        spec = next(s for s in ls.SPECS if s.name == "omnisharp")
+        with patch.object(ls.os, "name", "nt"):
+            paths = ls._windows_extra_search_paths(spec)
+        # Scoop shims path.
+        assert any("scoop" in p and "shims" in p for p in paths), paths
+
+    def test_extra_search_paths_includes_program_files_llvm_for_clangd(self):
+        spec = next(s for s in ls.SPECS if s.name == "clangd")
+        with patch.object(ls.os, "name", "nt"):
+            paths = ls._windows_extra_search_paths(spec)
+        # The canonical winget LLVM.LLVM install location.
+        assert any("LLVM" in p and "clangd.exe" in p for p in paths), paths
+
+    def test_detect_promotes_on_disk_when_shutil_which_fails(
+            self, tmp_path, monkeypatch):
+        """When shutil.which can't find the binary but it exists at
+        a known install location, the state should have
+        installed=False but on_disk_path set, and installer_for_missing
+        should be None (we don't offer to re-install)."""
+        # Create a fake clangd at a path that mimics Program Files\LLVM\bin
+        fake_pf = tmp_path / "Program Files"
+        fake_clangd = fake_pf / "LLVM" / "bin" / "clangd.exe"
+        fake_clangd.parent.mkdir(parents=True)
+        fake_clangd.write_text("")  # empty binary stand-in
+
+        monkeypatch.setenv("ProgramFiles", str(fake_pf))
+
+        with patch.object(ls.os, "name", "nt"), \
+             patch.object(ls.shutil, "which", return_value=None):
+            state = ls.detect_language_servers()
+
+        clangd = state["clangd"]
+        assert clangd.installed is False
+        assert clangd.on_disk_path == str(fake_clangd), (
+            f"expected on_disk_path={fake_clangd}, got {clangd.on_disk_path}"
+        )
+        assert clangd.installer_for_missing is None, (
+            "should NOT offer to install when binary already on disk"
+        )
+
+    def test_detect_prefers_on_path_over_on_disk(
+            self, tmp_path, monkeypatch):
+        """When the binary IS on PATH, on_disk_path stays None even
+        if it also exists at a known install location."""
+        fake_pf = tmp_path / "Program Files"
+        fake_clangd = fake_pf / "LLVM" / "bin" / "clangd.exe"
+        fake_clangd.parent.mkdir(parents=True)
+        fake_clangd.write_text("")
+
+        monkeypatch.setenv("ProgramFiles", str(fake_pf))
+
+        with patch.object(ls.os, "name", "nt"), \
+             patch.object(ls.shutil, "which",
+                          side_effect=lambda b: r"C:\some\path\clangd.exe"
+                          if b == "clangd" else None):
+            state = ls.detect_language_servers()
+
+        clangd = state["clangd"]
+        assert clangd.installed is True
+        assert clangd.binary_path == r"C:\some\path\clangd.exe"
+        assert clangd.on_disk_path is None
+
+
 class TestTier2Installers:
     """Tier 2 LSs (lua-language-server / zls / omnisharp) were
     promoted from MANUAL-only to real per-OS installers so the
