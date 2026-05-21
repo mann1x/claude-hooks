@@ -2044,6 +2044,86 @@ def _kill_pids_windows(pids: list[int]) -> int:
     return killed
 
 
+# Argv-substring keywords used by ``_force_kill_task_processes`` to
+# find orphaned pythonw children of a given scheduled task. Each task
+# binds one specific subprocess module / script that we can grep for
+# in ``CommandLine``. Forwarder also matches engine children — the
+# smart-start forwarder spawns ``consultants.server`` as a child, and
+# killing the forwarder without the child leaks the engine.
+_TASK_ARGV_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "claude-hooks-daemon": ("run_daemon.py",),
+    "claude-hooks-consultants": ("consultants.server",),
+    "claude-hooks-consultants-forwarder": (
+        "consultants_forwarder",
+        # An engine the forwarder spawned: parent (forwarder) is
+        # about to die, so the engine becomes an orphan. Sweep it
+        # too — otherwise the next /Run leaks (every restart adds
+        # another stranded engine).
+        "consultants.server",
+    ),
+}
+
+
+def _force_kill_task_processes(task_name: str, port: int) -> None:
+    """Belt-and-braces shutdown for a Windows scheduled task whose
+    payload is a **windowless** ``pythonw.exe`` script.
+
+    ``schtasks /End`` sends ``WM_CLOSE`` to the foreground window of
+    the task's tracked process. Windowless pythonw has no window —
+    the message has nowhere to land — so ``/End`` is a no-op against
+    our daemon / forwarder / always-on tasks. Pre-fix this left
+    orphans whenever the installer restarted a service:
+
+    * ``/End`` returns 0 (schtasks thinks it worked)
+    * ``_wait_for_port_free`` warns but installer continues
+    * ``/Run`` spawns a fresh process — the old one keeps running
+
+    Symptom: the 2026-05-21 v1.9.0 pandorum install left a
+    duplicate ``consultants_forwarder`` PID with no port bound,
+    living until reboot. Same class for the daemon — pre-#222
+    surfaced the symptom but the fix only added a port-wait, not a
+    hard kill.
+
+    Sequence here:
+
+    1. ``/End`` — gentle, in case some future payload regains a window.
+    2. Brief port-free wait (up to 5 s).
+    3. Find every pythonw process whose ``CommandLine`` contains any
+       of the task's distinguishing keywords (see
+       :data:`_TASK_ARGV_KEYWORDS`) and ``Stop-Process -Force`` them.
+       This catches BOTH the port-bound primary AND any orphans.
+    4. Final port-free wait so the next ``/Run`` doesn't hit
+       ``EADDRINUSE``.
+
+    POSIX no-op (Linux / macOS use systemd / launchctl which handle
+    process trees natively).
+    """
+    if os.name != "nt":
+        return
+
+    # Step 1: gentle End. Always best-effort.
+    subprocess.run(
+        ["schtasks", "/End", "/TN", task_name],
+        capture_output=True, text=True,
+    )
+
+    # Step 2: brief port-free wait.
+    _wait_for_port_free(port, timeout=5.0)
+
+    keywords = _TASK_ARGV_KEYWORDS.get(task_name, ())
+    if not keywords:
+        return  # unknown task — refuse to sweep blindly
+
+    # Step 3: hard-kill any matched pythonw.
+    procs = _find_claude_hooks_pythonw_processes()
+    targets = [pid for pid, cmd in procs if any(k in cmd for k in keywords)]
+    if targets:
+        _kill_pids_windows(targets)
+        # Step 4: another short wait so /Run doesn't race the
+        # OS releasing the bound socket from the killed process.
+        _wait_for_port_free(port, timeout=5.0)
+
+
 # Map of opt-in service-mode → the OPPOSITE schtasks task name that
 # install.py should offer to prune. Pre-#222 a host that flipped
 # service modes (always-on ↔ smart-start) ended up with both tasks
@@ -2282,14 +2362,14 @@ def _restart_claude_hooks_daemon() -> None:
             print("  claude-hooks-daemon: not installed (no scheduled task)"
                   " — skipping restart")
             return
-        # End existing instances (best-effort — task may not be running).
-        subprocess.run(["schtasks", "/End", "/TN", _DAEMON_TASK_NAME],
-                       capture_output=True, text=True)
-        # #222: wait for the OS to release port 47018. Without this
-        # the next /Run hits TIME_WAIT and exits with "already in use".
-        if not _wait_for_port_free(47018, timeout=15.0):
-            print("  [warn] daemon port 47018 still held after /End; "
-                  "/Run may fail with 'already in use' — task auto-"
+        # Hard-kill existing instances. ``schtasks /End`` alone is a
+        # no-op against windowless pythonw (no WM_CLOSE target), which
+        # used to leave the new /Run racing the old process for port
+        # 47018 — see :func:`_force_kill_task_processes`.
+        _force_kill_task_processes(_DAEMON_TASK_NAME, port=47018)
+        if not _wait_for_port_free(47018, timeout=10.0):
+            print("  [warn] daemon port 47018 still held after force-kill;"
+                  " /Run may fail with 'already in use' — task auto-"
                   "restart will eventually recover.")
         rc = subprocess.run(["schtasks", "/Run", "/TN", _DAEMON_TASK_NAME],
                             capture_output=True, text=True)
@@ -2403,10 +2483,11 @@ def _restart_consultants_service(*, cfg: Optional[dict] = None) -> None:
                   f"({label}, task '{task_name}' missing) — "
                   "skipping restart")
             return
-        subprocess.run(["schtasks", "/End", "/TN", task_name],
-                       capture_output=True, text=True)
-        # #222 helper: wait for port release before /Run (TIME_WAIT).
-        _wait_for_port_free(port, timeout=15.0)
+        # Hard-kill prior instances (+ any orphaned engine children
+        # the forwarder spawned). schtasks /End alone is a no-op
+        # against windowless pythonw — see
+        # :func:`_force_kill_task_processes`.
+        _force_kill_task_processes(task_name, port=port)
         rc = subprocess.run(["schtasks", "/Run", "/TN", task_name],
                             capture_output=True, text=True)
         if rc.returncode != 0:
