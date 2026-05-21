@@ -16,6 +16,180 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-05-21
+
+The big one: **the bundled LSP engine is now wired into the hook
+pipeline**. Before v1.9 the `claude_hooks/lsp_engine/` module was
+a complete daemon (~1.5k LOC: spawn-on-demand, per-file affinity
+locks, adaptive preload, compile-aware orchestrator, all unit-tested)
+that no hook handler actually called — `docs/lsp-engine.md` said
+*"the hook integration spawns it on SessionStart"* but the
+integration didn't exist. v1.9 closes that gap: three hooks
+(SessionStart / PostToolUse / SessionEnd) call into the engine,
+and `install.py` grows a per-OS language-server installer so
+users can wire up pyright / gopls / rust-analyzer / clangd / etc
+in one walk-through.
+
+The integration is opt-in via `hooks.lsp_engine.enabled` (default
+`false`) — every other v1.8 hook stays byte-identical when the
+flag is off. Both env full sweeps green: 3939 / 4045.
+
+### Added — hook integration (#244, 2026-05-21)
+
+New module: `claude_hooks/lsp_integration.py` — shared helpers used
+by the three new hook branches:
+
+- `session_id_for_event(event)` — pulls `session_id` from the hook
+  payload with a deterministic-per-pid fallback so two simultaneous
+  hooks in the same project never collide on the same affinity lock.
+- `spawn_engine_safely(...)` — soft-fail wrapper around the engine's
+  `connect_or_spawn`. Returns `None` on any failure (timeout, OSError,
+  RuntimeError) instead of bubbling.
+- `open_client_safely(...)` — non-spawning client for hooks that
+  assume the daemon is already up. Honest about not retrying — if
+  the caller wants spawn-on-demand, it picks `spawn_engine_safely`
+  explicitly.
+- `format_diagnostics_block(...)` — markdown block matching the
+  shape of `post_tool_use._run_ruff`'s output so the model sees
+  both layers as one uniform layer:
+
+  ```markdown
+  ## LSP diagnostics — `claude_hooks/hooks/post_tool_use.py`
+
+      post_tool_use.py:42:5: error[pyright] "x" is possibly unbound
+      post_tool_use.py:91:14: warning[pyright] Type of "ret" partial
+  ```
+
+  Plus an `_(stale: another session holds the affinity lock)_`
+  suffix when the engine's per-file lock didn't release within
+  `diagnostics_timeout_ms` (default 500).
+
+- `format_session_start_status(client)` — one-line status row:
+  `LSP engine: running (4 servers: pyright, gopls, ...; 1 session)`.
+
+Hooks:
+
+- **SessionStart** (`claude_hooks/hooks/session_start.py`) — new
+  branch between the code_graph block and the claudemem-reindex
+  block: spawns the daemon, probes status, appends the status row
+  to `additionalContext`. Suppressed when zero servers are
+  configured (treats "engine up, 0 LSPs" as silently nothing
+  rather than misleading "(0 servers)").
+- **PostToolUse** (`claude_hooks/hooks/post_tool_use.py`) — new
+  `_run_lsp_engine` helper fires after the ruff + TOML-advisor
+  blocks. For every edited file whose extension isn't blacklisted,
+  sends `did_open` + `did_change` + `diagnostics` to the daemon
+  and merges the markdown block into the same `additionalContext`
+  as ruff. Daemon-down fallback to a lazy `spawn_engine_safely`
+  so a fresh project where SessionStart didn't pre-spawn still
+  gets diagnostics.
+- **SessionEnd** (`claude_hooks/hooks/session_end.py`) — new
+  `_detach_lsp_engine_session` finalizer that fires `detach` so
+  the daemon's refcount drops cleanly and per-file affinity locks
+  release. Skipped when `session_id` is missing from the event
+  (the fallback would never match what SessionStart attached
+  with — detaching the wrong session is worse than not detaching
+  at all).
+
+All three handlers soft-fail to `None` on any dependency failure.
+The hook chain is never blocked by an LSP-engine issue.
+
+### Added — installer + per-OS language-server matrix (#245, 2026-05-21)
+
+New module: `claude_hooks/lang_servers.py` — data-driven LS
+catalog. 9 specs, two tiers:
+
+- **Tier 1** (auto-install offered): pyright, gopls, rust-analyzer,
+  clangd, typescript-language-server, bash-language-server.
+- **Tier 2** (detection-only — manual install): lua-language-server,
+  zls, omnisharp.
+
+The installer matrix dispatches per-OS:
+
+| Manager | Linux | macOS | Windows |
+|---------|-------|-------|---------|
+| `npm`   | ✓     | ✓     | ✓       |
+| `go`    | ✓     | ✓     | ✓       |
+| `rustup`| ✓     | ✓     | ✓       |
+| `apt`   | ✓     |       |         |
+| `dnf`   | ✓     |       |         |
+| `brew`  |       | ✓     |         |
+| `scoop` |       |       | ✓       |
+
+`install.py`'s new `--- LSP engine (v1.9+) ---` section runs four
+phases:
+
+1. **Detection table** — `[ok] pyright (Python) installed (/usr/local/bin/pyright-langserver)`
+   per LS, grouped by tier.
+2. **Install loop** for missing Tier-1 servers — one `[Y/n]` per
+   spec, dispatches `subprocess.run` for the per-OS install
+   command. Toolchain missing (no go / no rustup) → prints manual
+   install pointer and skips. **Never** fires under
+   `--non-interactive` — destructive ops require explicit y/N.
+3. **Starter `cclsp.json`** at `<project_root>/cclsp.json` — only
+   when no file exists; refuses to overwrite a user-authored one.
+   Servers list reflects detected binaries, never adds an entry
+   for a binary the user doesn't have.
+4. **Enable toggle** — single `[Y/n]` for
+   `hooks.lsp_engine.enabled`. Prompt names the latency cost
+   (~10 ms at SessionStart + ~5-15 ms per PostToolUse on edited
+   files) so an informed yes lands.
+
+Validate-only shortcut when fully configured (engine enabled +
+`cclsp.json` present + ≥1 Tier-1 LS on disk) — `[V/r/s]` matching
+the pgvector / sqlite_vec dialog pattern.
+
+### Changed — `config/claude-hooks.json` schema
+
+New `hooks.lsp_engine` block (defaults: all opt-in / safe):
+
+```jsonc
+{
+  "enabled": false,
+  "spawn_on_session_start": true,
+  "detach_on_session_end": true,
+  "cclsp_config_path": null,
+  "state_base": null,
+  "spawn_timeout_s": 5.0,
+  "diagnostics_timeout_ms": 500,
+  "diagnostics_wait_s": 2.0,
+  "extensions_blacklist": [],
+  "max_diagnostics_per_file": 50,
+  "log_path": "~/.claude/claude-hooks-lsp-engine.log"
+}
+```
+
+### Tests
+
++ `tests/test_hooks_lsp_engine_session_start.py` — 9 tests.
++ `tests/test_hooks_lsp_engine_post_tool_use.py` — 13 tests.
++ `tests/test_hooks_lsp_engine_session_end.py` — 9 tests.
++ `tests/test_lang_servers.py` — 31 tests covering matrix
+  invariants + per-OS dispatch + install / detect / starter-cclsp.
++ `tests/test_install_lsp_engine.py` — 17 tests covering the
+  install.py section: non-interactive skip, install-loop dispatch,
+  starter cclsp.json + overwrite-refusal, validate-only V default,
+  dry-run honored.
+
+All existing `tests/test_post_tool_use.py` (29) and the other
+install.py test files pass unchanged — the LSP section runs
+between `_setup_proxy_orchestrator` and `_setup_update_check`,
+new code-path only when the user opts in.
+
+### Docs
+
+- `docs/lsp-engine.md` — removed the aspirational "the hook
+  integration spawns it on SessionStart" line; added a real
+  "Hook integration (v1.9+)" section with the three hook flows,
+  the full config block, and the LS-catalog table.
+- `docs/lsp-mcp.md` — new "When to use this vs the built-in LSP
+  engine" table explaining the cclsp-MCP-vs-engine tradeoff
+  (latency / persistence / coverage / invocation style). The two
+  layers are complementary — most users want the engine on (low
+  latency, deterministic, fires on every edit) and can add the
+  cclsp MCP on top if they want the model itself to be able to
+  ask "go to definition" between edits.
+
 ## [1.8.4] — 2026-05-21
 
 This release lands four small but useful installer + dev-tooling

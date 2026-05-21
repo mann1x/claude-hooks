@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.8.4** — ~3.9k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.9.0** — ~3.9k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -143,6 +143,32 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > role-by-role reference, and
 > [`benchmarks/consultants/results/2026-05-18/tool-executor-ab/report.md`](benchmarks/consultants/results/2026-05-18/tool-executor-ab/report.md)
 > for the A/B record behind the default flip.
+>
+> v1.9 closes the **LSP-engine wiring gap**: the
+> `claude_hooks/lsp_engine/` daemon (Tier 3.8, shipped in v0.7
+> with full unit-test coverage) is now actually called by three
+> hook handlers — SessionStart spawns it via `connect_or_spawn`,
+> PostToolUse fires `did_change` + `diagnostics` for every edit
+> and folds the markdown block in next to ruff's, SessionEnd
+> detaches. Diagnostics from pyright / gopls / rust-analyzer /
+> clangd / typescript-language-server / bash-language-server land
+> in the same `additionalContext` the model already reads after
+> a tool call. New `claude_hooks/lsp_integration.py` houses the
+> three soft-fail helpers (`spawn_engine_safely`,
+> `open_client_safely`, `format_diagnostics_block`) so the hooks
+> stay thin. `install.py` grows an `--- LSP engine (v1.9+) ---`
+> section that detects installed language servers, **offers to
+> install missing Tier-1 servers** via the host's native package
+> manager (npm / go / rustup / apt / dnf / brew / scoop;
+> `claude_hooks/lang_servers.py` has the matrix), drops a starter
+> `cclsp.json`, and toggles `hooks.lsp_engine.enabled`. The
+> integration is opt-in by default (every v1.8 hook stays
+> byte-identical when the flag is off), and the destructive
+> install loop is gated on interactive mode per the
+> `feedback_install_destructive_noninteractive` rule. See
+> [`docs/lsp-engine.md`](docs/lsp-engine.md) for the runbook and
+> [`docs/lsp-mcp.md`](docs/lsp-mcp.md) for the "when to use the
+> built-in engine vs the external cclsp MCP" guidance.
 
 ---
 

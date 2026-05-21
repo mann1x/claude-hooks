@@ -11,6 +11,25 @@ and Windows (pandorum-style). Once installed and registered in
 `~/.claude.json`, Claude Code can call `mcp__lsp__*` tools on any file
 it edits.
 
+### When to use this vs the built-in LSP engine (v1.9+)
+
+Two layers that look similar but solve different problems:
+
+| | `cclsp` MCP (this page) | LSP engine ([`docs/lsp-engine.md`](lsp-engine.md)) |
+|---|---|---|
+| Invocation | model-driven via `mcp__lsp__*` tools | deterministic via PostToolUse hook |
+| Latency / call | ~100-500 ms (subprocess + MCP roundtrip) | ~5-15 ms (in-process daemon over Unix socket / named pipe) |
+| Persistence | per-call (cclsp spawns LSPs on demand) | per-project (one daemon shared across sessions) |
+| Coverage | every file the model decides to query | every file Claude Code edits via Edit/Write/MultiEdit |
+| Default | opt-in via `~/.claude.json` MCP registration | opt-in via `hooks.lsp_engine.enabled` |
+
+Both read the same `cclsp.json` for the LSP-command roster — they
+are complementary, not exclusive. Most users want at least the
+LSP engine on (deterministic, low latency, fires automatically on
+every edit), and can layer the `cclsp` MCP on top if they want the
+model itself to be able to ask "go to definition" / "find references"
+between edits.
+
 ---
 
 ## What you get

@@ -39,28 +39,130 @@ feel the per-call cost of `cclsp` adding up.
 
 ## Quick start
 
-```bash
-# 1. Verify cclsp.json is configured
-cclsp --version           # confirm cclsp is on PATH
-cat $CCLSP_CONFIG_PATH    # or the default at ~/.config/cclsp/cclsp.json
+The fastest path is to let `install.py` set everything up for you:
 
-# 2. (Optional) configure engine knobs
+```bash
+python install.py
+# Walk to the "--- LSP engine (v1.9+) ---" section. It:
+#   1. detects installed language servers (pyright / gopls /
+#      rust-analyzer / clangd / typescript-language-server /
+#      bash-language-server)
+#   2. offers to install missing Tier-1 ones via your host's
+#      native package manager (npm / go / rustup / apt / dnf /
+#      brew / scoop)
+#   3. drops a starter cclsp.json at <project_root>/cclsp.json
+#      if you don't already have one
+#   4. flips hooks.lsp_engine.enabled = true in your config
+```
+
+If you'd rather wire it up manually:
+
+```bash
+# 1. Install at least one language server. See "Language servers"
+#    below for one-liners per language + per OS.
+pyright-langserver --version    # confirm the binary is on PATH
+gopls version
+# ...
+
+# 2. Drop a cclsp.json at <project_root>/cclsp.json mapping
+#    extensions to LSP commands. Minimal example:
+cat > cclsp.json <<'EOF'
+{
+  "servers": [
+    {"extensions": ["py", "pyi"],
+     "command": ["pyright-langserver", "--stdio"]}
+  ]
+}
+EOF
+
+# 3. (Optional) per-project engine knobs in lsp-engine.toml.
 mkdir -p .claude-hooks
 $EDITOR .claude-hooks/lsp-engine.toml
 
-# 3. Verify the daemon for this project
-python -m claude_hooks.lsp_engine status --project .
-# {"running": false, "pid": null, "socket": ".../daemon.sock"}
+# 4. Enable the hook integration. Either edit config/claude-hooks.json
+#    by hand to set hooks.lsp_engine.enabled = true, or re-run
+#    install.py and confirm the toggle there.
 
-# 4. Start it (fork-and-detach via the spawn flow). Most users
-#    don't run this by hand — the hook integration spawns it on
-#    SessionStart. But you can drive it manually for debugging:
-python -m claude_hooks.lsp_engine daemon --project . &
-
-# 5. Re-check status — should now show running, with sessions=[],
-#    open_files=[], etc.
+# 5. Verify. The daemon spawns on the next Claude Code session —
+#    SessionStart calls connect_or_spawn(project_root) automatically.
 python -m claude_hooks.lsp_engine status --project .
+# {"running": true, "pid": ..., "active_servers": [...], ...}
 ```
+
+## Hook integration (v1.9+)
+
+The engine is wired into three claude-hooks handlers behind
+`hooks.lsp_engine.enabled` (default `false` — opt in via install.py
+or by editing config). When enabled:
+
+- **SessionStart** calls `connect_or_spawn(project_root, session_id)`.
+  The daemon starts (or attaches to an existing one in the same
+  project). A one-line status row lands in `additionalContext`:
+  `LSP engine: running (4 servers: pyright, gopls, ...; 1 session)`.
+- **PostToolUse** fires `did_change` + `diagnostics` for every
+  Edit / Write / MultiEdit on a file whose extension is claimed
+  by an LSP in `cclsp.json`. Diagnostics fold into the same
+  `additionalContext` block as the ruff hook, formatted as
+  `path:line:col: severity[source] message (code)`.
+- **SessionEnd** calls `detach` so the daemon's refcount drops
+  cleanly and per-file affinity locks release.
+
+All three hooks soft-fail to no-op on any dependency failure
+(daemon socket gone, no cclsp.json, IPC timeout, etc) — they never
+block the hook chain. The engine module itself is unchanged from
+v0.7; v1.9 only adds consumer wiring.
+
+### Configuration
+
+`config/claude-hooks.json` → `hooks.lsp_engine`:
+
+```jsonc
+{
+  "enabled": false,                  // master toggle
+  "spawn_on_session_start": true,    // pre-spawn vs lazy-spawn
+  "detach_on_session_end": true,     // release session refcount
+  "cclsp_config_path": null,         // override cclsp.json path
+  "state_base": null,                // override ~/.claude/lsp-engine
+  "spawn_timeout_s": 5.0,            // connect_or_spawn cap
+  "diagnostics_timeout_ms": 500,     // lock_timeout_ms
+  "diagnostics_wait_s": 2.0,         // diag_timeout_s
+  "extensions_blacklist": [],        // skip these even if cclsp claims them
+  "max_diagnostics_per_file": 50,    // truncate noisy files
+  "log_path": "~/.claude/claude-hooks-lsp-engine.log"
+}
+```
+
+### Manual debugging
+
+For driving the engine outside the hook context (e.g. when
+debugging a specific LSP's behavior), the CLI ops are unchanged:
+
+```bash
+python -m claude_hooks.lsp_engine status --project .
+python -m claude_hooks.lsp_engine daemon --project .   # foreground
+```
+
+### Language servers
+
+The installer's auto-install matrix (see `claude_hooks/lang_servers.py`)
+covers six Tier-1 LSPs across npm / go / rustup / apt / dnf / brew /
+scoop, plus three Tier-2 (detection-only):
+
+| Tier | LS | Extensions | Installer |
+|------|----|------------|-----------|
+| 1 | pyright | py, pyi | npm |
+| 1 | gopls | go | go install |
+| 1 | rust-analyzer | rs | rustup / brew / scoop |
+| 1 | clangd | c, cc, cpp, cxx, h, hh, hpp | apt / dnf / brew / scoop |
+| 1 | typescript-language-server | ts, tsx, js, jsx, mts, cts | npm |
+| 1 | bash-language-server | sh, bash | npm |
+| 2 | lua-language-server | lua | manual |
+| 2 | zls | zig | manual |
+| 2 | omnisharp | cs | manual |
+
+The installer never installs the toolchain underneath (Node, Go,
+Rust) — if the toolchain is missing it prints a manual-install
+pointer and skips that LS.
 
 ---
 
