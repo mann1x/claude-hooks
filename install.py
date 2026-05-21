@@ -2044,6 +2044,86 @@ def _kill_pids_windows(pids: list[int]) -> int:
     return killed
 
 
+# Argv-substring keywords used by ``_force_kill_task_processes`` to
+# find orphaned pythonw children of a given scheduled task. Each task
+# binds one specific subprocess module / script that we can grep for
+# in ``CommandLine``. Forwarder also matches engine children — the
+# smart-start forwarder spawns ``consultants.server`` as a child, and
+# killing the forwarder without the child leaks the engine.
+_TASK_ARGV_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "claude-hooks-daemon": ("run_daemon.py",),
+    "claude-hooks-consultants": ("consultants.server",),
+    "claude-hooks-consultants-forwarder": (
+        "consultants_forwarder",
+        # An engine the forwarder spawned: parent (forwarder) is
+        # about to die, so the engine becomes an orphan. Sweep it
+        # too — otherwise the next /Run leaks (every restart adds
+        # another stranded engine).
+        "consultants.server",
+    ),
+}
+
+
+def _force_kill_task_processes(task_name: str, port: int) -> None:
+    """Belt-and-braces shutdown for a Windows scheduled task whose
+    payload is a **windowless** ``pythonw.exe`` script.
+
+    ``schtasks /End`` sends ``WM_CLOSE`` to the foreground window of
+    the task's tracked process. Windowless pythonw has no window —
+    the message has nowhere to land — so ``/End`` is a no-op against
+    our daemon / forwarder / always-on tasks. Pre-fix this left
+    orphans whenever the installer restarted a service:
+
+    * ``/End`` returns 0 (schtasks thinks it worked)
+    * ``_wait_for_port_free`` warns but installer continues
+    * ``/Run`` spawns a fresh process — the old one keeps running
+
+    Symptom: the 2026-05-21 v1.9.0 pandorum install left a
+    duplicate ``consultants_forwarder`` PID with no port bound,
+    living until reboot. Same class for the daemon — pre-#222
+    surfaced the symptom but the fix only added a port-wait, not a
+    hard kill.
+
+    Sequence here:
+
+    1. ``/End`` — gentle, in case some future payload regains a window.
+    2. Brief port-free wait (up to 5 s).
+    3. Find every pythonw process whose ``CommandLine`` contains any
+       of the task's distinguishing keywords (see
+       :data:`_TASK_ARGV_KEYWORDS`) and ``Stop-Process -Force`` them.
+       This catches BOTH the port-bound primary AND any orphans.
+    4. Final port-free wait so the next ``/Run`` doesn't hit
+       ``EADDRINUSE``.
+
+    POSIX no-op (Linux / macOS use systemd / launchctl which handle
+    process trees natively).
+    """
+    if os.name != "nt":
+        return
+
+    # Step 1: gentle End. Always best-effort.
+    subprocess.run(
+        ["schtasks", "/End", "/TN", task_name],
+        capture_output=True, text=True,
+    )
+
+    # Step 2: brief port-free wait.
+    _wait_for_port_free(port, timeout=5.0)
+
+    keywords = _TASK_ARGV_KEYWORDS.get(task_name, ())
+    if not keywords:
+        return  # unknown task — refuse to sweep blindly
+
+    # Step 3: hard-kill any matched pythonw.
+    procs = _find_claude_hooks_pythonw_processes()
+    targets = [pid for pid, cmd in procs if any(k in cmd for k in keywords)]
+    if targets:
+        _kill_pids_windows(targets)
+        # Step 4: another short wait so /Run doesn't race the
+        # OS releasing the bound socket from the killed process.
+        _wait_for_port_free(port, timeout=5.0)
+
+
 # Map of opt-in service-mode → the OPPOSITE schtasks task name that
 # install.py should offer to prune. Pre-#222 a host that flipped
 # service modes (always-on ↔ smart-start) ended up with both tasks
@@ -2282,15 +2362,21 @@ def _restart_claude_hooks_daemon() -> None:
             print("  claude-hooks-daemon: not installed (no scheduled task)"
                   " — skipping restart")
             return
-        # End existing instances (best-effort — task may not be running).
-        subprocess.run(["schtasks", "/End", "/TN", _DAEMON_TASK_NAME],
-                       capture_output=True, text=True)
-        # #222: wait for the OS to release port 47018. Without this
-        # the next /Run hits TIME_WAIT and exits with "already in use".
-        if not _wait_for_port_free(47018, timeout=15.0):
-            print("  [warn] daemon port 47018 still held after /End; "
-                  "/Run may fail with 'already in use' — task auto-"
-                  "restart will eventually recover.")
+        # Hard-kill existing instances. ``schtasks /End`` alone is a
+        # no-op against windowless pythonw (no WM_CLOSE target), which
+        # used to leave the new /Run racing the old process for port
+        # 47018 — see :func:`_force_kill_task_processes`.
+        #
+        # We deliberately do NOT print a "port still held" warning
+        # here even though ``_wait_for_port_free`` may return False:
+        # the task's ``RestartOnFailure`` policy can re-spawn the
+        # daemon faster than our wait window, so the LISTEN we
+        # observe is the NEW daemon binding, not the old one. The
+        # subsequent ``_wait_for_daemon`` call is the canonical "did
+        # it come back up" gate — if that fails we surface it with a
+        # specific message; if it succeeds, the early port-held
+        # warning was a false alarm and would only confuse users.
+        _force_kill_task_processes(_DAEMON_TASK_NAME, port=47018)
         rc = subprocess.run(["schtasks", "/Run", "/TN", _DAEMON_TASK_NAME],
                             capture_output=True, text=True)
         if rc.returncode != 0:
@@ -2403,10 +2489,11 @@ def _restart_consultants_service(*, cfg: Optional[dict] = None) -> None:
                   f"({label}, task '{task_name}' missing) — "
                   "skipping restart")
             return
-        subprocess.run(["schtasks", "/End", "/TN", task_name],
-                       capture_output=True, text=True)
-        # #222 helper: wait for port release before /Run (TIME_WAIT).
-        _wait_for_port_free(port, timeout=15.0)
+        # Hard-kill prior instances (+ any orphaned engine children
+        # the forwarder spawned). schtasks /End alone is a no-op
+        # against windowless pythonw — see
+        # :func:`_force_kill_task_processes`.
+        _force_kill_task_processes(task_name, port=port)
         rc = subprocess.run(["schtasks", "/Run", "/TN", task_name],
                             capture_output=True, text=True)
         if rc.returncode != 0:
@@ -6157,17 +6244,67 @@ def _setup_lsp_engine(cfg: dict, *, non_interactive: bool, dry_run: bool) -> Non
     # Print detection table so the user can see what's installed.
     _lsp_print_detection_table(state)
 
-    # Offer auto-install for missing Tier-1 servers.
-    missing_t1 = [
+    # Offer PATH fixes for any LS already on disk but not on PATH.
+    # This catches the LLVM.LLVM-via-winget case proactively, so the
+    # user doesn't have to wait for an install loop run that won't
+    # happen (re-installing isn't the right fix).
+    if _lsp_is_windows():
+        _lsp_offer_path_fix_for_on_disk_specs(state)
+
+    # Offer the install loop for every missing LS where we have
+    # something useful to say:
+    #   - Tier 1: always include (the loop prints either an
+    #     [Y/n] auto-install prompt OR a "no package manager found,
+    #     install manually" pointer — both are user-visible signal).
+    #   - Tier 2: only include when we DO have a usable installer —
+    #     no point asking about niche LSs no one on this host has a
+    #     package manager for.
+    #
+    # Pre-v1.9.x this filtered strictly on ``spec.tier == 1``, leaving
+    # lua / zls / omnisharp permanently in the "manual only" bucket
+    # even on hosts where scoop / brew / winget would have happily
+    # installed them. The display table still groups by tier
+    # (cosmetic).
+    missing_to_offer = [
         st for st in state.values()
-        if not st.installed and st.spec.tier == 1
+        if not st.installed
+        # Skip the on-disk-but-not-on-PATH case — re-installing
+        # something already on disk would be wasteful and the
+        # detection table already shows the restart-shell hint.
+        and not getattr(st, "on_disk_path", None)
+        and (
+            st.spec.tier == 1 or st.installer_for_missing is not None
+        )
     ]
-    if missing_t1:
+    if missing_to_offer:
         ans = input(
-            "\n  Install missing Tier 1 servers now? [y/N]: ",
+            "\n  Install missing language servers now? [y/N]: ",
         ).strip().lower()
         if ans in ("y", "yes"):
-            _lsp_run_install_loop(missing_t1, state, dry_run=dry_run)
+            # Before iterating: on Windows, offer to bootstrap scoop if
+            # the user has any SCOOP-only LSs in the queue (OmniSharp is
+            # the canonical case — no winget package exists). One
+            # consolidated prompt rather than per-LS, so we don't
+            # nag the same question three times if OmniSharp + zls +
+            # lua are all queued. Bootstrap also adds the ``extras``
+            # bucket so the subsequent ``scoop install extras/...``
+            # commands resolve.
+            state = _lsp_maybe_bootstrap_scoop(
+                state, dry_run=dry_run,
+            )
+            # Re-build the offer list against the refreshed state —
+            # what was SCOOP-only (no installer) becomes SCOOP-with-
+            # installer after the bootstrap.
+            missing_to_offer = [
+                st for st in state.values()
+                if not st.installed
+                and not getattr(st, "on_disk_path", None)
+                and (
+                    st.spec.tier == 1
+                    or st.installer_for_missing is not None
+                )
+            ]
+            _lsp_run_install_loop(missing_to_offer, state, dry_run=dry_run)
         else:
             print("  Skipped install loop. Re-run anytime to install.")
 
@@ -6220,11 +6357,14 @@ def _lsp_print_detection_table(state) -> None:
     tier1 = [(n, st) for n, st in state.items() if st.spec.tier == 1]
     tier2 = [(n, st) for n, st in state.items() if st.spec.tier == 2]
 
-    print("\n  Tier 1 (universal, auto-install offered):")
+    # Heading labels reflect the v1.9.x change to offer auto-install
+    # for any LS with a registered package-manager command. Tier 2
+    # is no longer "manual only" — it's just lower-priority / niche.
+    print("\n  Tier 1 (universal, recommended):")
     for name, st in tier1:
         _lsp_print_row(name, st)
     if tier2:
-        print("  Tier 2 (optional, manual install):")
+        print("  Tier 2 (optional, niche languages):")
         for name, st in tier2:
             _lsp_print_row(name, st)
 
@@ -6237,6 +6377,27 @@ def _lsp_print_row(name: str, st) -> None:
         # ("typescript-language-server") fits.
         print(f"    [ok]  {label:32} installed ({st.binary_path})")
         return
+
+    # Three "missing-on-PATH" states (in preference order):
+    #
+    # 1. ON DISK but not on PATH — binary exists at a known install
+    #    location but the shell can't see it. Most common cause: the
+    #    user installed via winget LLVM.LLVM and hasn't restarted
+    #    cmd.exe yet (winget added Program Files\LLVM\bin to system
+    #    PATH in the registry, but the running shell took its PATH
+    #    snapshot at launch). Don't offer to re-install — tell the
+    #    user to restart their shell.
+    # 2. Missing AND we have an installer — surface that.
+    # 3. Missing with no installer — surface the manual path or docs.
+    if getattr(st, "on_disk_path", None):
+        # ASCII-only print — Windows cp1252 console can't encode
+        # U+2192 (→) and similar arrows. The "->" arrow + bracketed
+        # label survive in every console encoding.
+        print(f"    [!!]  {label:32} on disk, not on PATH "
+              f"({st.on_disk_path})")
+        print(f"          -> restart your shell to pick up updated PATH")
+        return
+
     suffix = "MISSING"
     if st.installer_for_missing is not None:
         suffix = f"MISSING — installable via {st.installer_for_missing.value}"
@@ -6245,6 +6406,97 @@ def _lsp_print_row(name: str, st) -> None:
     elif st.spec.docs_url:
         suffix = f"MISSING — install manually ({st.spec.docs_url})"
     print(f"    [!!]  {label:32} {suffix}")
+
+
+def _lsp_is_windows() -> bool:
+    """OS check wrapper — extracted so tests can patch this single
+    function instead of monkeypatching ``os.name``. Patching the
+    latter globally breaks ``pathlib.Path`` instantiation on Linux
+    test hosts because Path() picks a backend off ``os.name`` at
+    construction time."""
+    return os.name == "nt"
+
+
+def _lsp_maybe_bootstrap_scoop(state, *, dry_run: bool):
+    """Offer to install scoop on Windows when the install loop has
+    SCOOP-only blocked LSs (canonical: OmniSharp — no winget package).
+
+    Returns the (possibly re-detected) state dict so the caller's
+    ``missing_to_offer`` filter refreshes ``installer_for_missing``
+    promotions correctly.
+
+    Earlier v1.9.x had a "Case 2" here that silently added the
+    ``extras`` bucket — but all our LSs are actually in scoop's
+    ``main`` bucket (the default one added at install). Verified
+    via ``scoop search`` on 2026-05-21. So no bucket-management
+    needed; the install matrix dispatches plain ``scoop install
+    <name>`` and that just works after a vanilla scoop install.
+
+    Live-caught (PATH refresh / extras-bucket-wrongness saga,
+    pandorum 2026-05-21).
+    """
+    from claude_hooks import lang_servers as _lang  # local import
+
+    if not _lsp_is_windows():
+        return state
+    if _lang.is_scoop_installed():
+        return state
+
+    # Find LSs that (a) are missing, (b) have a scoop install command,
+    # (c) have no currently-available installer (e.g., OmniSharp on
+    # a host without scoop). zls/lua-LS have winget alternatives so
+    # they don't end up in this bucket — only the truly-blocked LSs do.
+    scoop_only_blocked = []
+    for st in state.values():
+        if st.installed or st.installer_for_missing is not None:
+            continue
+        if _lang.Installer.SCOOP not in st.spec.installers:
+            continue
+        if not _lang.INSTALL_COMMANDS.get(
+            _lang.Installer.SCOOP, {},
+        ).get(st.spec.name):
+            continue
+        scoop_only_blocked.append(st)
+
+    if not scoop_only_blocked:
+        return state
+
+    names = ", ".join(st.spec.name for st in scoop_only_blocked)
+    print(
+        f"\n  These language servers can be installed via scoop on "
+        f"Windows but scoop isn't on PATH: {names}."
+    )
+    print(
+        "  scoop installs entirely to the user profile (no admin, no "
+        "system PATH changes)."
+    )
+    print("  See https://scoop.sh/ for the project.")
+    ans = input(
+        "  Install scoop now to unlock these? [y/N]: ",
+    ).strip().lower()
+    if ans not in ("y", "yes"):
+        print("  Skipped scoop bootstrap. These LSs will stay manual.")
+        return state
+
+    if dry_run:
+        print("    [dry-run] Would install scoop via PowerShell.")
+        return state
+
+    print("    Running: PowerShell scoop installer...")
+    ok, msg = _lang.install_scoop_windows(dry_run=False)
+    if not ok:
+        print(f"    [FAIL] scoop install failed: {msg}")
+        print(
+            "    (continuing — these LSs will stay manual; install "
+            "scoop yourself from https://scoop.sh/ and re-run)"
+        )
+        return state
+    print(f"    [ok] {msg}")
+
+    # Re-detect — scoop is now on PATH (install_scoop_windows refreshes
+    # os.environ['PATH']), so ``installer_for_missing`` promotes from
+    # None to SCOOP for the affected LSs.
+    return _lang.detect_language_servers()
 
 
 def _lsp_run_install_loop(
@@ -6294,12 +6546,124 @@ def _lsp_run_install_loop(
         if ok:
             # Resolve the now-installed binary path.
             import shutil as _sh
-            path = _sh.which(st.spec.bin) or "(not on PATH yet)"
-            print(f"    ✓ {st.spec.name} now at {path}")
+            on_path = _sh.which(st.spec.bin)
+            if on_path:
+                # ASCII markers only — Windows cp1252 console crashes
+                # on U+2713 / U+2717. Matches the existing [ok] /
+                # [FAIL] style used elsewhere in the installer.
+                print(f"    [ok] {st.spec.name} now at {on_path}")
+            else:
+                # Some installers (notably winget LLVM.LLVM with
+                # --silent) put the binary on disk but don't update
+                # the user's PATH. Detect this case, surface the
+                # path the user should know about, and offer to
+                # add it to User PATH via the same ``reg add`` path
+                # used by ``_ensure_windows_user_path_includes`` for
+                # the bin-wrappers dir.
+                on_disk = _lang._probe_on_disk(st.spec)
+                if on_disk and os.name == "nt":
+                    print(f"    [ok] {st.spec.name} installed at "
+                          f"{on_disk} (not on shell PATH)")
+                    _lsp_offer_user_path_fix(on_disk, st.spec.bin)
+                else:
+                    print(f"    [ok] {st.spec.name} now at "
+                          "(not on PATH yet)")
         else:
-            print(f"    ✗ {st.spec.name} install failed: {msg}")
+            print(f"    [FAIL] {st.spec.name} install failed: {msg}")
             print(f"    (continuing — install manually later from "
                   f"{st.spec.docs_url or 'the docs'})")
+
+
+def _lsp_offer_path_fix_for_on_disk_specs(state) -> None:
+    """Walk the detection state and offer to add the bin-dir of each
+    on-disk-but-not-on-PATH LS to the user's PATH. Fires once per
+    re-run of install.py so a user who declines on one pass can
+    accept on the next without re-installing.
+
+    Canonical case: clangd from winget LLVM.LLVM lands at
+    ``C:\\Program Files\\LLVM\\bin\\clangd.exe`` but LLVM's silent
+    installer doesn't add to PATH. We surface the row in detection
+    (``[!!] on disk, not on PATH``) and offer the one-click fix
+    here so the user doesn't have to ``setx PATH ...`` manually."""
+    on_disk_lss = [
+        st for st in state.values()
+        if getattr(st, "on_disk_path", None) and not st.installed
+    ]
+    if not on_disk_lss:
+        return
+
+    for st in on_disk_lss:
+        bin_dir = os.path.dirname(st.on_disk_path)
+        if not bin_dir or not os.path.isdir(bin_dir):
+            continue
+        # Skip if already on USER PATH (the registry one, not the
+        # process inherited one). The user may have added it from a
+        # different shell that hasn't propagated to this Python.
+        user_path = _read_windows_user_path() or ""
+        user_dirs = [
+            d.lower().rstrip("\\")
+            for d in user_path.split(";") if d
+        ]
+        if bin_dir.lower().rstrip("\\") in user_dirs:
+            # Already in registry — process just doesn't see it yet.
+            print(f"\n  {st.spec.name} bin dir {bin_dir} is already on "
+                  f"your User PATH (in registry — restart shells to "
+                  f"pick it up).")
+            continue
+        print(f"\n  {st.spec.name} is installed at {st.on_disk_path}")
+        print(f"  but {bin_dir} is not on your User PATH.")
+        ans = input(
+            f"  Add {bin_dir} to your User PATH? [Y/n]: ",
+        ).strip().lower()
+        if ans and ans not in ("y", "yes"):
+            print(f"  [skipped] Add {bin_dir} to PATH manually if you "
+                  f"want the LSP engine to spawn {st.spec.bin}.")
+            continue
+        _ensure_windows_user_path_includes(Path(bin_dir))
+        # Update current process so the next ``detect_language_servers``
+        # call promotes this LS from on_disk_path to installed.
+        current = os.environ.get("PATH", "")
+        if bin_dir not in current.split(os.pathsep):
+            os.environ["PATH"] = (
+                bin_dir + os.pathsep + current if current else bin_dir
+            )
+
+
+def _lsp_offer_user_path_fix(binary_path: str, bin_name: str) -> None:
+    """Offer to add ``dirname(binary_path)`` to the user's PATH so the
+    LSP engine (and other tools spawned from new shells) can find the
+    binary by name.
+
+    This handles the LLVM.LLVM / winget --silent case where LLVM's
+    NSIS installer deliberately skips the "add to PATH" step in
+    silent mode. The user would otherwise have to add
+    ``C:\\Program Files\\LLVM\\bin`` to their User PATH manually.
+
+    Idempotent + safe: ``_ensure_windows_user_path_includes`` uses
+    ``reg add`` (not ``setx`` which truncates at 1024 chars),
+    refuses to extend past 16 KB, and broadcasts WM_SETTINGCHANGE
+    so Explorer-spawned processes pick up the change. Opt-in via
+    [Y/n] confirmation so the user can decline if they manage PATH
+    elsewhere (chocolatey, manual scripts, etc.)."""
+    bin_dir = os.path.dirname(binary_path)
+    if not bin_dir or not os.path.isdir(bin_dir):
+        return
+    ans = input(
+        f"    Add {bin_dir} to your User PATH so future shells "
+        f"resolve {bin_name}? [Y/n]: ",
+    ).strip().lower()
+    if ans and ans not in ("y", "yes"):
+        print(f"    [skipped] Add {bin_dir} to PATH manually or "
+              f"restart from a shell that has it.")
+        return
+    _ensure_windows_user_path_includes(Path(bin_dir))
+    # Also update the current process so subsequent ``shutil.which``
+    # calls in this install.py run resolve the binary.
+    current = os.environ.get("PATH", "")
+    if bin_dir not in current.split(os.pathsep):
+        os.environ["PATH"] = (
+            bin_dir + os.pathsep + current if current else bin_dir
+        )
 
 
 def _lsp_offer_starter_cclsp(
@@ -6334,9 +6698,9 @@ def _lsp_offer_starter_cclsp(
 
     ok, msg = _lang.write_starter_cclsp_json(state, target, dry_run=dry_run)
     if ok:
-        print(f"    ✓ {msg}")
+        print(f"    [ok] {msg}")
     else:
-        print(f"    ✗ {msg}")
+        print(f"    [FAIL] {msg}")
 
 
 def _setup_consultants_store(cfg: dict, *, consultants_py: Path,

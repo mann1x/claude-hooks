@@ -150,15 +150,21 @@ class TestRestartDaemonWindows(unittest.TestCase):
             return FakeProcResult(0)
 
         with patch.object(install.sys, "platform", "win32"), \
+             patch.object(install.os, "name", "nt"), \
              patch.object(install, "_windows_task_exists",
+                          return_value=True), \
+             patch.object(install, "_find_claude_hooks_pythonw_processes",
+                          return_value=[]), \
+             patch.object(install, "_wait_for_port_free",
                           return_value=True), \
              patch.object(install.subprocess, "run", side_effect=fake_run), \
              patch.object(install, "_wait_for_daemon", return_value=True), \
              patch.object(sys, "stdout", out):
             install._restart_claude_hooks_daemon()
-        # /End first, then /Run
-        self.assertEqual(calls[0], ["schtasks", "/End", "/TN"])
-        self.assertEqual(calls[1], ["schtasks", "/Run", "/TN"])
+        # /End first (inside _force_kill_task_processes), then /Run.
+        schtasks_calls = [c for c in calls if c[:1] == ["schtasks"]]
+        self.assertEqual(schtasks_calls[0], ["schtasks", "/End", "/TN"])
+        self.assertEqual(schtasks_calls[1], ["schtasks", "/Run", "/TN"])
 
     def test_warns_when_run_fails(self):
         out = io.StringIO()
@@ -170,7 +176,12 @@ class TestRestartDaemonWindows(unittest.TestCase):
             return FakeProcResult(0)
 
         with patch.object(install.sys, "platform", "win32"), \
+             patch.object(install.os, "name", "nt"), \
              patch.object(install, "_windows_task_exists",
+                          return_value=True), \
+             patch.object(install, "_find_claude_hooks_pythonw_processes",
+                          return_value=[]), \
+             patch.object(install, "_wait_for_port_free",
                           return_value=True), \
              patch.object(install.subprocess, "run", side_effect=fake_run), \
              patch.object(install, "_wait_for_daemon", return_value=True), \
@@ -201,13 +212,19 @@ class TestRestartConsultants(unittest.TestCase):
             return FakeProcResult(0)
 
         with patch.object(install.sys, "platform", "win32"), \
+             patch.object(install.os, "name", "nt"), \
              patch.object(install, "_windows_task_exists",
+                          return_value=True), \
+             patch.object(install, "_find_claude_hooks_pythonw_processes",
+                          return_value=[]), \
+             patch.object(install, "_wait_for_port_free",
                           return_value=True), \
              patch.object(install.subprocess, "run", side_effect=fake_run), \
              patch.object(install, "_wait_for_consultants_health"):
             install._restart_consultants_service()
-        self.assertEqual(calls[0], ["schtasks", "/End", "/TN"])
-        self.assertEqual(calls[1], ["schtasks", "/Run", "/TN"])
+        schtasks_calls = [c for c in calls if c[:1] == ["schtasks"]]
+        self.assertEqual(schtasks_calls[0], ["schtasks", "/End", "/TN"])
+        self.assertEqual(schtasks_calls[1], ["schtasks", "/Run", "/TN"])
 
     def test_linux_skips_when_user_unit_missing(self):
         out = io.StringIO()
@@ -239,6 +256,149 @@ class TestRestartConsultants(unittest.TestCase):
         # First call: is-enabled; second: restart
         self.assertEqual(calls[0][:3], ["systemctl", "--user", "is-enabled"])
         self.assertEqual(calls[1][:3], ["systemctl", "--user", "restart"])
+
+
+class TestForceKillTaskProcesses(unittest.TestCase):
+    """Coverage for :func:`install._force_kill_task_processes` — the
+    2026-05-21 fix for the windowless-pythonw orphan-leak bug surfaced
+    by the v1.9.0 pandorum install (duplicate forwarder PID with no
+    port bound).
+    """
+
+    def test_posix_no_op(self):
+        """POSIX never touches schtasks / Stop-Process — return early."""
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            return FakeProcResult(0)
+
+        with patch.object(install.os, "name", "posix"), \
+             patch.object(install.subprocess, "run", side_effect=fake_run), \
+             patch.object(install,
+                          "_find_claude_hooks_pythonw_processes") as find:
+            install._force_kill_task_processes("claude-hooks-daemon", port=47018)
+        self.assertEqual(calls, [])
+        find.assert_not_called()
+
+    def test_windows_unknown_task_no_sweep(self):
+        """An unmapped task name gets /End only — never Stop-Process,
+        since we don't know which argv to grep for."""
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv[:3])
+            return FakeProcResult(0)
+
+        with patch.object(install.os, "name", "nt"), \
+             patch.object(install.subprocess, "run", side_effect=fake_run), \
+             patch.object(install, "_wait_for_port_free",
+                          return_value=True), \
+             patch.object(install,
+                          "_find_claude_hooks_pythonw_processes") as find, \
+             patch.object(install, "_kill_pids_windows") as kill:
+            install._force_kill_task_processes("not-a-known-task", port=99999)
+        # /End was attempted...
+        self.assertEqual(calls[0], ["schtasks", "/End", "/TN"])
+        # ...but we never enumerated processes for an unmapped task.
+        find.assert_not_called()
+        kill.assert_not_called()
+
+    def test_windows_kills_matching_orphans(self):
+        """The forwarder task's keyword sweep must match BOTH
+        forwarder + its engine child — leaving the engine alive would
+        leak one engine per restart."""
+        procs = [
+            (1001, 'pythonw -m claude_hooks.consultants_forwarder ...'),
+            (1002, 'pythonw -m consultants.server --port 16370'),  # engine child
+            (1003, 'pythonw run_daemon.py'),  # daemon — DON'T touch
+            (1004, 'pythonw -m claude_hooks.code_graph build'),    # unrelated
+        ]
+        killed: list[int] = []
+
+        def fake_kill(pids):
+            killed.extend(pids)
+            return len(pids)
+
+        with patch.object(install.os, "name", "nt"), \
+             patch.object(install.subprocess, "run",
+                          return_value=FakeProcResult(0)), \
+             patch.object(install, "_wait_for_port_free",
+                          return_value=True), \
+             patch.object(install, "_find_claude_hooks_pythonw_processes",
+                          return_value=procs), \
+             patch.object(install, "_kill_pids_windows",
+                          side_effect=fake_kill):
+            install._force_kill_task_processes(
+                "claude-hooks-consultants-forwarder", port=38096)
+        # Forwarder + engine — yes; daemon + code_graph — no.
+        self.assertIn(1001, killed)
+        self.assertIn(1002, killed)
+        self.assertNotIn(1003, killed)
+        self.assertNotIn(1004, killed)
+
+    def test_windows_no_orphans_no_kill_call(self):
+        """When nobody matches, ``_kill_pids_windows`` is never invoked
+        (avoids spurious powershell startups)."""
+        with patch.object(install.os, "name", "nt"), \
+             patch.object(install.subprocess, "run",
+                          return_value=FakeProcResult(0)), \
+             patch.object(install, "_wait_for_port_free",
+                          return_value=True), \
+             patch.object(install, "_find_claude_hooks_pythonw_processes",
+                          return_value=[]), \
+             patch.object(install, "_kill_pids_windows") as kill:
+            install._force_kill_task_processes(
+                "claude-hooks-daemon", port=47018)
+        kill.assert_not_called()
+
+    def test_daemon_task_keyword_does_not_match_consultants(self):
+        """Daemon restart must NOT kill a running forwarder /
+        always-on engine that happens to be live in the same
+        session — keyword scope is tight."""
+        procs = [
+            (2001, 'pythonw run_daemon.py'),
+            (2002, 'pythonw -m claude_hooks.consultants_forwarder'),
+            (2003, 'pythonw -m consultants.server'),
+        ]
+        killed: list[int] = []
+
+        with patch.object(install.os, "name", "nt"), \
+             patch.object(install.subprocess, "run",
+                          return_value=FakeProcResult(0)), \
+             patch.object(install, "_wait_for_port_free",
+                          return_value=True), \
+             patch.object(install, "_find_claude_hooks_pythonw_processes",
+                          return_value=procs), \
+             patch.object(install, "_kill_pids_windows",
+                          side_effect=lambda pids: killed.extend(pids)):
+            install._force_kill_task_processes(
+                "claude-hooks-daemon", port=47018)
+        self.assertEqual(killed, [2001])  # daemon only
+
+    def test_always_on_task_only_kills_engine(self):
+        """The always-on consultants task is the engine itself — sweep
+        ``consultants.server`` but NOT the forwarder pattern (which
+        only exists in smart-start mode and would be installed under
+        a different task name)."""
+        procs = [
+            (3001, 'pythonw -m consultants.server --port 38095'),
+            (3002, 'pythonw -m claude_hooks.consultants_forwarder'),
+        ]
+        killed: list[int] = []
+
+        with patch.object(install.os, "name", "nt"), \
+             patch.object(install.subprocess, "run",
+                          return_value=FakeProcResult(0)), \
+             patch.object(install, "_wait_for_port_free",
+                          return_value=True), \
+             patch.object(install, "_find_claude_hooks_pythonw_processes",
+                          return_value=procs), \
+             patch.object(install, "_kill_pids_windows",
+                          side_effect=lambda pids: killed.extend(pids)):
+            install._force_kill_task_processes(
+                "claude-hooks-consultants", port=38095)
+        self.assertEqual(killed, [3001])  # engine only — leave forwarder alone
 
 
 class TestArgumentParser(unittest.TestCase):

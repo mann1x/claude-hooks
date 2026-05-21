@@ -153,15 +153,37 @@ class LspClient:
         if self._proc is not None:
             raise LspError("LspClient already started")
 
-        try:
-            self._proc = subprocess.Popen(
-                self._command,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=str(self._root_dir),
-                bufsize=0,
+        # Windows-only: the LSP engine daemon spawns this LspClient
+        # process to talk to pyright / gopls / clangd / etc. The
+        # daemon itself is windowless (it is spawned with
+        # ``CREATE_NO_WINDOW | DETACHED_PROCESS`` by
+        # :func:`claude_hooks.lsp_engine.client.connect_or_spawn`), so
+        # when *it* spawns one of these LSP children with no
+        # ``creationflags``, Windows allocates a brand-new console
+        # window for the child by default — i.e. every pyright /
+        # gopls / clangd spawn pops a console on the user's desktop.
+        # We deliberately do NOT add ``DETACHED_PROCESS`` here
+        # because we need the stdin / stdout / stderr pipes for LSP
+        # JSON-RPC (``DETACHED_PROCESS`` severs the inherited stdio
+        # handles, breaking the protocol). ``CREATE_NO_WINDOW`` alone
+        # is the minimal fix — keep pipes, suppress the console.
+        # Mirrors the inline pattern in
+        # :meth:`EmbeddingManager._spawn_once` / equivalent, but
+        # without the detach pair.
+        popen_kwargs: dict = {
+            "stdin": subprocess.PIPE,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "cwd": str(self._root_dir),
+            "bufsize": 0,
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = getattr(
+                subprocess, "CREATE_NO_WINDOW", 0,
             )
+
+        try:
+            self._proc = subprocess.Popen(self._command, **popen_kwargs)
         except FileNotFoundError as e:
             raise LspError(f"LSP binary not found: {self._command[0]}") from e
 

@@ -193,5 +193,112 @@ class TestDiagnosticDataclass(unittest.TestCase):
         self.assertEqual(d.source, None)
 
 
+class TestLspClientWindowlessSpawn(unittest.TestCase):
+    """``LspClient.start`` must pass ``CREATE_NO_WINDOW`` on Windows so
+    the LSP child (pyright / gopls / clangd / etc) doesn't flash a
+    console window when the daemon — itself spawned with
+    ``CREATE_NO_WINDOW | DETACHED_PROCESS`` — launches it.
+
+    Regression for the v1.9.0 visible-window class of bugs: a
+    detached parent on Windows yields children that allocate a
+    fresh console by default, so this flag must be on every LSP
+    server spawn even though the daemon is already windowless.
+
+    We mock ``subprocess.Popen`` and assert the kwargs that were
+    passed — runs on all platforms regardless of host OS.
+    """
+
+    def _make_client(self) -> LspClient:
+        # Build BEFORE patching os.name — Path() resolves at construct
+        # time and would crash on a Linux host with os.name="nt"
+        # (pathlib picks WindowsPath whose flavour fails to instantiate).
+        return LspClient(
+            command=["fake-lsp"],
+            root_dir=".",
+            startup_timeout=0.01,  # initialize will time out, that's fine
+            request_timeout=0.01,
+        )
+
+    def _capture_popen_kwargs(self, *, os_name: str | None = None) -> dict:
+        from unittest.mock import patch
+        import subprocess as _sub
+
+        client = self._make_client()
+        captured: dict = {}
+
+        def _fake_popen(cmd, **kwargs):  # noqa: ARG001
+            captured.update(kwargs)
+            raise FileNotFoundError("we only need the kwargs")
+
+        patches = [
+            patch(
+                "claude_hooks.lsp_engine.lsp.subprocess.Popen",
+                side_effect=_fake_popen,
+            ),
+        ]
+        if os_name is not None:
+            patches.append(patch("claude_hooks.lsp_engine.lsp.os.name", os_name))
+            # ``subprocess.CREATE_NO_WINDOW`` is a Windows-only
+            # constant; ``getattr(..., 0)`` in the production path
+            # would otherwise resolve to 0 when this test runs on
+            # Linux with a patched ``os.name == "nt"``. Inject the
+            # canonical value (``0x08000000``) so the assertion
+            # exercises the real branch.
+            if os_name == "nt" and not hasattr(_sub, "CREATE_NO_WINDOW"):
+                patches.append(
+                    patch.object(_sub, "CREATE_NO_WINDOW", 0x08000000, create=True),
+                )
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        with self.assertRaises(LspError):
+            client.start()
+        return captured
+
+    def test_pipes_are_set(self) -> None:
+        """Sanity: stdin/stdout/stderr must remain pipes for JSON-RPC."""
+        import subprocess
+
+        kw = self._capture_popen_kwargs()
+        self.assertEqual(kw.get("stdin"), subprocess.PIPE)
+        self.assertEqual(kw.get("stdout"), subprocess.PIPE)
+        self.assertEqual(kw.get("stderr"), subprocess.PIPE)
+
+    def test_no_detached_process_flag_on_windows(self) -> None:
+        """``DETACHED_PROCESS`` would sever stdio and break LSP — must
+        NOT appear in creationflags even on Windows."""
+        import subprocess
+
+        kw = self._capture_popen_kwargs(os_name="nt")
+        flags = kw.get("creationflags", 0)
+        detached = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+        self.assertEqual(
+            flags & detached, 0,
+            "DETACHED_PROCESS must not be set — would break LSP stdio",
+        )
+
+    def test_windows_sets_create_no_window(self) -> None:
+        """On Windows the daemon is detached, so children inherit no
+        console — without CREATE_NO_WINDOW one is allocated for them
+        and pops on the user's desktop."""
+        import subprocess
+
+        kw = self._capture_popen_kwargs(os_name="nt")
+        flags = kw.get("creationflags", 0)
+        # CREATE_NO_WINDOW is 0x08000000; assert at least that bit is on.
+        expected = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        self.assertTrue(
+            flags & expected,
+            f"creationflags=0x{flags:08x} missing CREATE_NO_WINDOW "
+            f"(0x{expected:08x}) — LSP children will pop console windows",
+        )
+
+    def test_posix_does_not_set_creationflags(self) -> None:
+        """``creationflags`` is a Windows-only kwarg; must not appear
+        on POSIX so ``subprocess.Popen`` stays portable."""
+        kw = self._capture_popen_kwargs(os_name="posix")
+        self.assertNotIn("creationflags", kw)
+
+
 if __name__ == "__main__":
     unittest.main()

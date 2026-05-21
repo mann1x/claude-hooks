@@ -226,12 +226,15 @@ class TestInstallLoop:
         monkeypatch.chdir(tmp_path)
         cfg = {}
         # Only pyright installed; user opts into install loop and accepts
-        # every install prompt (5 missing Tier-1 specs to confirm).
+        # every install prompt. Post-v1.9.x the loop covers Tier 2 too
+        # (lua / zls / omnisharp), so there are 8 install prompts
+        # (5 Tier-1 + 3 Tier-2) rather than 5.
         monkeypatch.setattr(
             "builtins.input",
             _scripted_input([
-                "y",       # opt into install loop
-                "y", "y", "y", "y", "y",  # install each missing Tier-1
+                "y",                                  # opt into install loop
+                "y", "y", "y", "y", "y",              # 5 Tier-1
+                "y", "y", "y",                        # 3 Tier-2
                 "",        # accept starter cclsp.json default Y
                 "",        # accept enable default Y
             ]),
@@ -253,13 +256,17 @@ class TestInstallLoop:
                 cfg, non_interactive=False, dry_run=False,
             )
 
-        # 5 install dispatches (the 5 Tier-1 LSs other than pyright).
+        # All 8 missing-with-installer specs dispatch.
         names = [n for n, _ in install_calls]
         assert "gopls" in names
         assert "rust-analyzer" in names
         assert "clangd" in names
         assert "typescript-language-server" in names
         assert "bash-language-server" in names
+        # Tier-2 also dispatches under v1.9.x semantics.
+        assert "lua-language-server" in names
+        assert "zls" in names
+        assert "omnisharp" in names
 
     def test_install_loop_skipped_when_no_tier1_missing(self, monkeypatch,
                                                        tmp_path):
@@ -286,13 +293,15 @@ class TestInstallLoop:
         monkeypatch.chdir(tmp_path)
         cfg = {}
         # Only pyright installed; user opts into install loop but
-        # declines gopls — others still get installed.
+        # declines gopls — others still get installed (4 remaining
+        # Tier-1 + 3 Tier-2 under v1.9.x semantics).
         monkeypatch.setattr(
             "builtins.input",
             _scripted_input([
-                "y",       # opt into install loop
-                "n",       # decline gopls
-                "y", "y", "y", "y",  # install remaining 4
+                "y",                          # opt into install loop
+                "n",                          # decline gopls
+                "y", "y", "y", "y",           # remaining 4 Tier-1
+                "y", "y", "y",                # 3 Tier-2
                 "",        # starter cclsp.json default Y
                 "",        # enable default Y
             ]),
@@ -321,8 +330,9 @@ class TestInstallLoop:
         monkeypatch.setattr(
             "builtins.input",
             _scripted_input([
-                "y",       # opt in
-                "y", "y", "y", "y", "y",  # try all 5
+                "y",                                  # opt in
+                "y", "y", "y", "y", "y",              # 5 Tier-1
+                "y", "y", "y",                        # 3 Tier-2
                 "",        # starter cclsp.json default Y
                 "",        # enable default Y
             ]),
@@ -362,8 +372,9 @@ class TestInstallLoop:
         monkeypatch.setattr(
             "builtins.input",
             _scripted_input([
-                "y",       # opt in
-                "y", "y", "y", "y",  # remaining 4 (gopls auto-skips)
+                "y",                                  # opt in
+                "y", "y", "y", "y",                   # remaining 4 Tier-1 (gopls auto-skips)
+                "y", "y", "y",                        # 3 Tier-2
                 "",        # starter cclsp.json default Y
                 "",        # enable default Y
             ]),
@@ -377,6 +388,317 @@ class TestInstallLoop:
             )
         out = capsys.readouterr().out
         assert "Install gopls? Requires a package manager not found on PATH" in out
+
+
+# --------------------------------------------------------------------- #
+# Scoop bootstrap (Windows only) — install loop side
+#
+# When the user opts into the install loop on a Windows host and any
+# missing LS is SCOOP-only (currently: OmniSharp), install.py offers a
+# one-shot scoop bootstrap before iterating. Decline keeps OmniSharp
+# in MANUAL; accept installs scoop, adds the ``extras`` bucket, and
+# re-detects so the install loop dispatches it.
+# --------------------------------------------------------------------- #
+
+
+def _state_omnisharp_blocked_on_windows() -> dict:
+    """Linux/POSIX OS by default — the helper sets installer_for_missing
+    correctly. For the bootstrap tests we then patch ``os.name`` to
+    ``"nt"`` and ``ls.is_scoop_installed`` to ``False`` to simulate
+    the Windows-without-scoop case."""
+    out = {}
+    for spec in ls.SPECS:
+        if spec.name == "pyright":
+            out[spec.name] = ls.InstalledState(
+                spec=spec, installed=True,
+                binary_path="/fake/bin/pyright-langserver",
+                installer_for_missing=None,
+            )
+            continue
+        if spec.name == "omnisharp":
+            # On Windows-without-scoop, omnisharp is SCOOP-only and
+            # blocked. ``installer_for_missing=None`` mirrors what
+            # detect_language_servers would set.
+            out[spec.name] = ls.InstalledState(
+                spec=spec, installed=False, binary_path=None,
+                installer_for_missing=None,
+            )
+            continue
+        # All other LSs have an installer available (gopls→go,
+        # ts-LS→npm, lua→winget, etc.).
+        installer = next(
+            (i for i in spec.installers if i is not ls.Installer.MANUAL),
+            None,
+        )
+        out[spec.name] = ls.InstalledState(
+            spec=spec, installed=False, binary_path=None,
+            installer_for_missing=installer,
+        )
+    return out
+
+
+class TestScoopBootstrapDialog:
+    def test_offered_when_omnisharp_scoop_only_on_windows(
+            self, monkeypatch, tmp_path, capsys):
+        """The 'Install scoop to unlock...' prompt fires exactly once
+        per install.py run, mentioning the affected LS."""
+        monkeypatch.chdir(tmp_path)
+        cfg = {}
+        # Decline the bootstrap, then accept the rest so the install
+        # loop still runs against the LSs that have non-scoop
+        # installers (omnisharp gets skipped because no installer).
+        # Tier-1 missing (5): gopls, rust-analyzer, clangd, ts-LS, bash-LS.
+        # Tier-2 missing (3): lua, zls, omnisharp — but omnisharp has
+        # no installer so the loop skips it (no prompt). 7 install prompts.
+        monkeypatch.setattr(
+            "builtins.input",
+            _scripted_input([
+                "y",                     # opt into install loop
+                "n",                     # decline scoop bootstrap
+                "y", "y", "y", "y", "y", # 5 Tier-1
+                "y", "y",                # lua + zls Tier-2
+                "",   # accept cclsp default Y
+                "",   # accept engine default Y
+            ]),
+        )
+
+        install_calls = []
+
+        def fake_install(spec, installer, *, dry_run=False):
+            install_calls.append(spec.name)
+            return True, "ok"
+
+        with patch.object(install, "_lsp_is_windows", return_value=True), \
+             patch.object(ls, "is_scoop_installed", return_value=False), \
+             patch.object(ls, "install_scoop_windows") as scoop_install, \
+             patch.object(ls, "ensure_scoop_bucket") as ensure_bucket, \
+             patch.object(ls, "detect_language_servers",
+                          side_effect=[_state_omnisharp_blocked_on_windows(),
+                                       _state_all_installed()]), \
+             patch.object(ls, "install_language_server",
+                          side_effect=fake_install):
+            install._setup_lsp_engine(
+                cfg, non_interactive=False, dry_run=False,
+            )
+
+        out = capsys.readouterr().out
+        # The bootstrap helper prints this banner (the input() prompt
+        # text is swallowed by _scripted_input, so we assert on the
+        # surrounding print()-emitted lines).
+        assert "can be installed via scoop on" in out
+        assert "omnisharp" in out
+        assert "scoop installs entirely to the user profile" in out
+        # User declined → bootstrap did not run.
+        scoop_install.assert_not_called()
+        ensure_bucket.assert_not_called()
+        # omnisharp dispatch was skipped (no installer was assigned).
+        assert "omnisharp" not in install_calls
+
+    def test_accepted_installs_scoop_and_dispatches_omnisharp(
+            self, monkeypatch, tmp_path, capsys):
+        """Accept the bootstrap → install_scoop_windows runs, state is
+        re-detected, and omnisharp dispatches via SCOOP.
+
+        Post-v1.9.x: no extras-bucket dance — all our LSs live in
+        scoop's ``main`` bucket which is added at scoop install."""
+        monkeypatch.chdir(tmp_path)
+        cfg = {}
+
+        # After bootstrap, the re-detected state must promote
+        # omnisharp's installer_for_missing from None to SCOOP.
+        post_bootstrap = _state_omnisharp_blocked_on_windows()
+        post_bootstrap["omnisharp"] = ls.InstalledState(
+            spec=post_bootstrap["omnisharp"].spec,
+            installed=False,
+            binary_path=None,
+            installer_for_missing=ls.Installer.SCOOP,
+        )
+
+        # 8 install prompts now (omnisharp included).
+        monkeypatch.setattr(
+            "builtins.input",
+            _scripted_input([
+                "y",                                  # opt into install loop
+                "y",                                  # accept scoop bootstrap
+                "y", "y", "y", "y", "y",              # 5 Tier-1
+                "y", "y", "y",                        # lua + zls + omnisharp
+                "",   # cclsp default Y
+                "",   # enable default Y
+            ]),
+        )
+
+        install_calls = []
+
+        def fake_install(spec, installer, *, dry_run=False):
+            install_calls.append((spec.name, installer))
+            return True, "ok"
+
+        with patch.object(install, "_lsp_is_windows", return_value=True), \
+             patch.object(ls, "is_scoop_installed", return_value=False), \
+             patch.object(ls, "install_scoop_windows",
+                          return_value=(True, "Scoop was installed successfully!")) as scoop_install, \
+             patch.object(ls, "ensure_scoop_bucket") as ensure_bucket, \
+             patch.object(ls, "detect_language_servers",
+                          side_effect=[_state_omnisharp_blocked_on_windows(),
+                                       post_bootstrap,        # after bootstrap
+                                       _state_all_installed()]), \
+             patch.object(ls, "install_language_server",
+                          side_effect=fake_install):
+            install._setup_lsp_engine(
+                cfg, non_interactive=False, dry_run=False,
+            )
+
+        scoop_install.assert_called_once()
+        # extras-bucket dance is gone — main bucket has everything.
+        ensure_bucket.assert_not_called()
+        # omnisharp dispatched via SCOOP after the bootstrap.
+        names = [n for n, _ in install_calls]
+        assert "omnisharp" in names
+        omnisharp_installer = next(i for n, i in install_calls if n == "omnisharp")
+        assert omnisharp_installer is ls.Installer.SCOOP
+
+    def test_not_offered_on_posix(self, monkeypatch, tmp_path, capsys):
+        """Bootstrap prompt must not appear on Linux/macOS even when
+        omnisharp is in the missing list."""
+        monkeypatch.chdir(tmp_path)
+        cfg = {}
+        # On POSIX, omnisharp's installer_for_missing stays None (no
+        # scoop/winget available). Loop skips it with a manual pointer.
+        # Tier-1 (5) all dispatch; Tier-2: lua + zls dispatch (via brew
+        # on macOS, but we don't actually invoke brew in the test);
+        # omnisharp gets the manual-pointer path.
+        monkeypatch.setattr(
+            "builtins.input",
+            _scripted_input([
+                "y",                                  # opt into install loop
+                "y", "y", "y", "y", "y",              # 5 Tier-1
+                "y", "y",                             # lua + zls Tier-2
+                "",   # cclsp
+                "",   # enable
+            ]),
+        )
+
+        def fake_install(spec, installer, *, dry_run=False):
+            return True, "ok"
+
+        with patch.object(install, "_lsp_is_windows", return_value=False), \
+             patch.object(ls, "install_scoop_windows") as scoop_install, \
+             patch.object(ls, "ensure_scoop_bucket") as ensure_bucket, \
+             patch.object(ls, "detect_language_servers",
+                          side_effect=[_state_omnisharp_blocked_on_windows(),
+                                       _state_all_installed()]), \
+             patch.object(ls, "install_language_server",
+                          side_effect=fake_install):
+            install._setup_lsp_engine(
+                cfg, non_interactive=False, dry_run=False,
+            )
+
+        out = capsys.readouterr().out
+        assert "can be installed via scoop" not in out
+        scoop_install.assert_not_called()
+        ensure_bucket.assert_not_called()
+
+    def test_scoop_already_installed_short_circuits(
+            self, monkeypatch, tmp_path, capsys):
+        """When scoop is already on PATH, the bootstrap helper
+        short-circuits — no prompt, no install_scoop_windows call,
+        no extras-bucket work. Detection promotes omnisharp's
+        installer_for_missing to SCOOP, and the install loop
+        dispatches ``scoop install omnisharp`` (main bucket).
+
+        Post-v1.9.x: extras-bucket logic is gone. All our LSs are
+        in scoop's main bucket — added by default at install time."""
+        monkeypatch.chdir(tmp_path)
+        cfg = {}
+        state_with_scoop = _state_omnisharp_blocked_on_windows()
+        state_with_scoop["omnisharp"] = ls.InstalledState(
+            spec=state_with_scoop["omnisharp"].spec,
+            installed=False, binary_path=None,
+            installer_for_missing=ls.Installer.SCOOP,
+        )
+
+        monkeypatch.setattr(
+            "builtins.input",
+            _scripted_input([
+                "y",                                  # opt into install loop
+                "y", "y", "y", "y", "y",              # 5 Tier-1
+                "y", "y", "y",                        # 3 Tier-2 (incl omnisharp)
+                "",   # cclsp
+                "",   # enable
+            ]),
+        )
+
+        install_calls = []
+
+        def fake_install(spec, installer, *, dry_run=False):
+            install_calls.append((spec.name, installer))
+            return True, "ok"
+
+        with patch.object(install, "_lsp_is_windows", return_value=True), \
+             patch.object(ls, "is_scoop_installed", return_value=True), \
+             patch.object(ls, "install_scoop_windows") as scoop_install, \
+             patch.object(ls, "ensure_scoop_bucket") as ensure_bucket, \
+             patch.object(ls, "detect_language_servers",
+                          side_effect=[state_with_scoop,
+                                       _state_all_installed()]), \
+             patch.object(ls, "install_language_server",
+                          side_effect=fake_install):
+            install._setup_lsp_engine(
+                cfg, non_interactive=False, dry_run=False,
+            )
+
+        out = capsys.readouterr().out
+        # Short-circuit: no prompt, no install_scoop_windows, no
+        # ensure_scoop_bucket — none of those are needed when scoop
+        # is already on PATH and the matrix uses main-bucket names.
+        assert "can be installed via scoop" not in out
+        scoop_install.assert_not_called()
+        ensure_bucket.assert_not_called()
+        # The install loop still dispatches omnisharp via SCOOP.
+        names = [n for n, _ in install_calls]
+        assert "omnisharp" in names
+
+    def test_dry_run_does_not_invoke_subprocess(
+            self, monkeypatch, tmp_path, capsys):
+        monkeypatch.chdir(tmp_path)
+        cfg = {}
+        monkeypatch.setattr(
+            "builtins.input",
+            _scripted_input([
+                "y",                                  # opt into install loop
+                "y",                                  # accept scoop bootstrap
+                "y", "y", "y", "y", "y",              # 5 Tier-1
+                "y", "y",                             # lua + zls Tier-2
+                # omnisharp not dispatched in dry-run path because state
+                # didn't get re-detected (we don't actually install scoop).
+                "",
+                "",
+            ]),
+        )
+
+        def fake_install(spec, installer, *, dry_run=False):
+            assert dry_run is True
+            return True, "[dry-run] ok"
+
+        with patch.object(install, "_lsp_is_windows", return_value=True), \
+             patch.object(ls, "is_scoop_installed", return_value=False), \
+             patch.object(ls, "install_scoop_windows") as scoop_install, \
+             patch.object(ls, "ensure_scoop_bucket") as ensure_bucket, \
+             patch.object(ls, "detect_language_servers",
+                          side_effect=[_state_omnisharp_blocked_on_windows(),
+                                       _state_all_installed()]), \
+             patch.object(ls, "install_language_server",
+                          side_effect=fake_install):
+            install._setup_lsp_engine(
+                cfg, non_interactive=False, dry_run=True,
+            )
+
+        out = capsys.readouterr().out
+        assert "[dry-run]" in out
+        # In dry-run we print "would install scoop" but don't actually
+        # call install_scoop_windows / ensure_scoop_bucket.
+        scoop_install.assert_not_called()
+        ensure_bucket.assert_not_called()
 
 
 # --------------------------------------------------------------------- #
@@ -509,8 +831,9 @@ class TestDryRun:
         monkeypatch.setattr(
             "builtins.input",
             _scripted_input([
-                "y",                   # opt into install loop
-                "y", "y", "y", "y", "y",  # 5 install confirmations
+                "y",                                  # opt into install loop
+                "y", "y", "y", "y", "y",              # 5 Tier-1
+                "y", "y", "y",                        # 3 Tier-2 (v1.9.x)
                 "",                    # cclsp.json default Y
                 "",                    # enable default Y
             ]),
@@ -544,3 +867,182 @@ class TestMainWiring:
         i_save = src.find("save_config(cfg, cfg_path)")
         assert i_proxy > 0 and i_lsp > 0 and i_save > 0
         assert i_proxy < i_lsp < i_save
+
+
+# --------------------------------------------------------------------- #
+# On-disk-but-not-on-PATH USER PATH fix (Windows)
+#
+# When detection finds a binary at a known install location (e.g.
+# clangd at C:\Program Files\LLVM\bin\clangd.exe from winget LLVM.LLVM)
+# but it's NOT on the current shell's PATH, install.py offers to add
+# the bin dir to the user's PATH via the existing
+# ``_ensure_windows_user_path_includes`` helper. Skips on POSIX.
+# Skips silently when the dir is already in the registry User PATH
+# (process just hasn't picked it up — shell restart fixes it).
+# Live-caught on pandorum 2026-05-21 after the user saw clangd's bin
+# dir wasn't added to PATH despite winget reporting success.
+# --------------------------------------------------------------------- #
+
+
+class TestOnDiskPathFix:
+    def test_offers_path_fix_for_on_disk_clangd(
+            self, monkeypatch, tmp_path, capsys):
+        """Accept the offer → _ensure_windows_user_path_includes
+        is called with the LLVM bin dir."""
+        monkeypatch.chdir(tmp_path)
+        cfg = {}
+
+        state = _state_all_installed()
+        clangd_spec = state["clangd"].spec
+        fake_llvm_bin = tmp_path / "Program Files" / "LLVM" / "bin"
+        fake_llvm_bin.mkdir(parents=True)
+        fake_clangd = fake_llvm_bin / "clangd.exe"
+        fake_clangd.write_text("")
+        state["clangd"] = ls.InstalledState(
+            spec=clangd_spec, installed=False, binary_path=None,
+            installer_for_missing=None,
+            on_disk_path=str(fake_clangd),
+        )
+
+        monkeypatch.setattr(
+            "builtins.input",
+            _scripted_input([
+                "y",   # accept "Add ... to your User PATH?"
+                "",    # starter cclsp default Y
+                "",    # enable engine default Y
+            ]),
+        )
+
+        ensure_calls: list[str] = []
+
+        def fake_ensure(wrapper_dir):
+            ensure_calls.append(str(wrapper_dir))
+
+        with patch.object(install, "_lsp_is_windows", return_value=True), \
+             patch.object(install, "_ensure_windows_user_path_includes",
+                          side_effect=fake_ensure), \
+             patch.object(install, "_read_windows_user_path",
+                          return_value=""), \
+             patch.object(ls, "detect_language_servers",
+                          return_value=state):
+            install._setup_lsp_engine(
+                cfg, non_interactive=False, dry_run=False,
+            )
+
+        out = capsys.readouterr().out
+        assert "is installed at" in out
+        assert "not on your User PATH" in out
+        assert len(ensure_calls) == 1
+        assert ensure_calls[0] == str(fake_llvm_bin)
+
+    def test_declines_path_fix_keeps_state(
+            self, monkeypatch, tmp_path, capsys):
+        monkeypatch.chdir(tmp_path)
+        cfg = {}
+
+        state = _state_all_installed()
+        clangd_spec = state["clangd"].spec
+        fake_clangd = tmp_path / "LLVM" / "clangd.exe"
+        fake_clangd.parent.mkdir(parents=True)
+        fake_clangd.write_text("")
+        state["clangd"] = ls.InstalledState(
+            spec=clangd_spec, installed=False, binary_path=None,
+            installer_for_missing=None,
+            on_disk_path=str(fake_clangd),
+        )
+
+        monkeypatch.setattr(
+            "builtins.input",
+            _scripted_input(["n", "", ""]),
+        )
+
+        with patch.object(install, "_lsp_is_windows", return_value=True), \
+             patch.object(install, "_ensure_windows_user_path_includes") as ensure_mock, \
+             patch.object(install, "_read_windows_user_path",
+                          return_value=""), \
+             patch.object(ls, "detect_language_servers",
+                          return_value=state):
+            install._setup_lsp_engine(
+                cfg, non_interactive=False, dry_run=False,
+            )
+
+        out = capsys.readouterr().out
+        assert "[skipped]" in out
+        ensure_mock.assert_not_called()
+
+    def test_skipped_when_already_on_registry_user_path(
+            self, monkeypatch, tmp_path, capsys):
+        """If the bin dir is ALREADY in the registry User PATH (just
+        not visible to this process yet), don't ask the user — print
+        a one-liner saying the next shell will pick it up."""
+        monkeypatch.chdir(tmp_path)
+        cfg = {}
+
+        state = _state_all_installed()
+        clangd_spec = state["clangd"].spec
+        fake_dir = tmp_path / "LLVM"
+        fake_dir.mkdir()
+        fake_clangd = fake_dir / "clangd.exe"
+        fake_clangd.write_text("")
+        state["clangd"] = ls.InstalledState(
+            spec=clangd_spec, installed=False, binary_path=None,
+            installer_for_missing=None,
+            on_disk_path=str(fake_clangd),
+        )
+
+        registry_user_path = str(fake_dir) + r";C:\Other"
+
+        monkeypatch.setattr(
+            "builtins.input",
+            _scripted_input(["", ""]),
+        )
+
+        with patch.object(install, "_lsp_is_windows", return_value=True), \
+             patch.object(install, "_ensure_windows_user_path_includes") as ensure_mock, \
+             patch.object(install, "_read_windows_user_path",
+                          return_value=registry_user_path), \
+             patch.object(ls, "detect_language_servers",
+                          return_value=state):
+            install._setup_lsp_engine(
+                cfg, non_interactive=False, dry_run=False,
+            )
+
+        out = capsys.readouterr().out
+        assert "already on" in out and "User PATH" in out
+        ensure_mock.assert_not_called()
+
+    def test_not_offered_on_posix(self, monkeypatch, tmp_path, capsys):
+        """On Linux/macOS the on-disk PATH-fix is a no-op — the helper
+        is gated on ``os.name == 'nt'`` because it writes to the
+        Windows registry."""
+        monkeypatch.chdir(tmp_path)
+        cfg = {}
+
+        # Even with on_disk_path set, POSIX should skip.
+        state = _state_all_installed()
+        clangd_spec = state["clangd"].spec
+        fake_clangd = tmp_path / "LLVM" / "clangd"
+        fake_clangd.parent.mkdir(parents=True)
+        fake_clangd.write_text("")
+        state["clangd"] = ls.InstalledState(
+            spec=clangd_spec, installed=False, binary_path=None,
+            installer_for_missing=None,
+            on_disk_path=str(fake_clangd),
+        )
+
+        monkeypatch.setattr(
+            "builtins.input",
+            _scripted_input(["", ""]),
+        )
+
+        with patch.object(install, "_lsp_is_windows", return_value=False), \
+             patch.object(install, "_ensure_windows_user_path_includes") as ensure_mock, \
+             patch.object(ls, "detect_language_servers",
+                          return_value=state):
+            install._setup_lsp_engine(
+                cfg, non_interactive=False, dry_run=False,
+            )
+
+        ensure_mock.assert_not_called()
+        out = capsys.readouterr().out
+        assert "not on your User PATH" not in out
