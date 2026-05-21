@@ -426,6 +426,20 @@ def install_language_server(
         last = tail[-1] if tail else "ok"
         return True, last[:200]
 
+    # Winget returns non-zero when the package is already installed at the
+    # latest available version. The stdout/stderr contains a distinctive
+    # phrase. Treat this as success — clangd / lua-language-server etc are
+    # in fact installed. (Winget exit codes like 0x8A150006 / 0x8A150007
+    # would be more rigorous but those numeric codes don't always reach
+    # ``proc.returncode`` as signed/unsigned cleanly, while the phrase is
+    # stable across winget versions.)
+    combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    if installer is Installer.WINGET and (
+        "No newer package versions are available" in combined
+        or "already installed" in combined.lower()
+    ):
+        return True, "already installed (winget reported no upgrade available)"
+
     err = (proc.stderr or proc.stdout or "").strip().splitlines()
     return False, (err[-1] if err else f"exit={proc.returncode}")[:200]
 

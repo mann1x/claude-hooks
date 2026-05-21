@@ -6400,9 +6400,12 @@ def _lsp_run_install_loop(
             # Resolve the now-installed binary path.
             import shutil as _sh
             path = _sh.which(st.spec.bin) or "(not on PATH yet)"
-            print(f"    ✓ {st.spec.name} now at {path}")
+            # ASCII markers only — Windows cp1252 console crashes on
+            # U+2713 / U+2717. Matches the existing [ok] / [FAIL] style
+            # used elsewhere in the installer.
+            print(f"    [ok] {st.spec.name} now at {path}")
         else:
-            print(f"    ✗ {st.spec.name} install failed: {msg}")
+            print(f"    [FAIL] {st.spec.name} install failed: {msg}")
             print(f"    (continuing — install manually later from "
                   f"{st.spec.docs_url or 'the docs'})")
 
@@ -6439,9 +6442,9 @@ def _lsp_offer_starter_cclsp(
 
     ok, msg = _lang.write_starter_cclsp_json(state, target, dry_run=dry_run)
     if ok:
-        print(f"    ✓ {msg}")
+        print(f"    [ok] {msg}")
     else:
-        print(f"    ✗ {msg}")
+        print(f"    [FAIL] {msg}")
 
 
 def _setup_consultants_store(cfg: dict, *, consultants_py: Path,

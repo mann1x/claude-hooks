@@ -464,6 +464,104 @@ class TestInstallBinaryResolution:
 
 
 # --------------------------------------------------------------------- #
+# Winget "already installed" is NOT a failure (v1.9.x)
+# --------------------------------------------------------------------- #
+# Winget returns non-zero ("No newer package versions are available
+# from the configured sources.") when the package is already at the
+# latest version. install_language_server must recognize this as
+# success, not surface a misleading "[FAIL] clangd install failed"
+# to the user — pandorum live regression 2026-05-21.
+
+class TestWingetAlreadyInstalled:
+    def test_no_newer_versions_phrase_treated_as_success(self):
+        """Winget exit-code-1 + stdout phrase 'No newer package
+        versions are available' means the package is in fact
+        installed. Treat as ok=True so install.py prints [ok], not
+        [FAIL]."""
+        spec = next(s for s in ls.SPECS if s.name == "clangd")
+
+        class _Proc:
+            returncode = 1
+            stdout = (
+                "Found Clang [LLVM.LLVM] Version 22.1.4\n"
+                "No newer package versions are available from the "
+                "configured sources.\n"
+            )
+            stderr = ""
+
+        with patch.object(ls.shutil, "which",
+                          side_effect=lambda b: "C:\\winget.exe"
+                          if b == "winget" else None), \
+             patch.object(ls.subprocess, "run", return_value=_Proc()):
+            ok, msg = ls.install_language_server(
+                spec, ls.Installer.WINGET,
+            )
+        assert ok is True, (
+            "winget 'No newer package versions' should be success, "
+            f"got ok={ok!r} msg={msg!r}"
+        )
+        assert "already installed" in msg
+
+    def test_already_installed_case_insensitive_phrase(self):
+        """Older winget builds emit 'Package is already installed';
+        the success heuristic must catch that variant too."""
+        spec = next(s for s in ls.SPECS if s.name == "lua-language-server")
+
+        class _Proc:
+            returncode = 2
+            stdout = "Package is already installed.\n"
+            stderr = ""
+
+        with patch.object(ls.shutil, "which",
+                          side_effect=lambda b: "C:\\winget.exe"
+                          if b == "winget" else None), \
+             patch.object(ls.subprocess, "run", return_value=_Proc()):
+            ok, _ = ls.install_language_server(
+                spec, ls.Installer.WINGET,
+            )
+        assert ok is True
+
+    def test_other_winget_failures_still_fail(self):
+        """Don't over-swallow — a real winget failure (network,
+        package-not-found) must still surface as ok=False."""
+        spec = next(s for s in ls.SPECS if s.name == "clangd")
+
+        class _Proc:
+            returncode = 1
+            stdout = ""
+            stderr = "No package found matching input criteria."
+
+        with patch.object(ls.shutil, "which",
+                          side_effect=lambda b: "C:\\winget.exe"
+                          if b == "winget" else None), \
+             patch.object(ls.subprocess, "run", return_value=_Proc()):
+            ok, msg = ls.install_language_server(
+                spec, ls.Installer.WINGET,
+            )
+        assert ok is False
+        assert "No package found" in msg
+
+    def test_already_installed_heuristic_does_not_apply_to_npm(self):
+        """npm has its own already-installed semantics ('up to date');
+        the winget heuristic must not leak across installers."""
+        spec = next(s for s in ls.SPECS if s.name == "pyright")
+
+        class _Proc:
+            returncode = 1
+            stdout = ""
+            stderr = "No newer package versions are available."  # red herring
+
+        with patch.object(ls.shutil, "which",
+                          side_effect=lambda b: "C:\\npm.cmd"
+                          if b == "npm" else None), \
+             patch.object(ls.subprocess, "run", return_value=_Proc()):
+            ok, _ = ls.install_language_server(spec, ls.Installer.NPM)
+        # NPM exit-1 stays a failure regardless of the phrase —
+        # the heuristic is winget-only.
+        assert ok is False
+
+
+# --------------------------------------------------------------------- #
 # Tier-2 LS now have real installers (v1.9.x)
 # --------------------------------------------------------------------- #
 
