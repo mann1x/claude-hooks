@@ -581,13 +581,33 @@ class TestTier2Installers:
         for inst in (ls.Installer.BREW, ls.Installer.SCOOP, ls.Installer.WINGET):
             assert "lua-language-server" in ls.INSTALL_COMMANDS[inst]
 
-    def test_zls_has_brew_scoop(self):
+    def test_zls_has_brew_winget_scoop(self):
+        """zls gained WINGET (``zigtools.zls``) so Windows hosts can
+        auto-install without needing scoop."""
         spec = next(s for s in ls.SPECS if s.name == "zls")
         names = {i for i in spec.installers}
         assert ls.Installer.BREW in names
+        assert ls.Installer.WINGET in names
         assert ls.Installer.SCOOP in names
-        assert "zls" in ls.INSTALL_COMMANDS[ls.Installer.BREW]
-        assert "zls" in ls.INSTALL_COMMANDS[ls.Installer.SCOOP]
+        # Each must have an actual command registered.
+        for inst in (ls.Installer.BREW, ls.Installer.WINGET, ls.Installer.SCOOP):
+            assert "zls" in ls.INSTALL_COMMANDS[inst], (
+                f"missing INSTALL_COMMANDS[{inst.value}]['zls']"
+            )
+        # The winget package ID is the upstream-published one.
+        assert "zigtools.zls" in ls.INSTALL_COMMANDS[ls.Installer.WINGET]["zls"]
+
+    def test_select_installer_picks_winget_for_zls_on_windows(self):
+        """On a Windows host with only winget available (no scoop),
+        zls picks WINGET rather than falling to MANUAL."""
+        spec = next(s for s in ls.SPECS if s.name == "zls")
+        ctxs = _patch_platform_and_path("win32", {"winget"})
+        entered = _apply(ctxs)
+        try:
+            picked = ls.select_installer_for(spec)
+        finally:
+            _exit(entered)
+        assert picked is ls.Installer.WINGET
 
     def test_omnisharp_has_scoop(self):
         spec = next(s for s in ls.SPECS if s.name == "omnisharp")
@@ -635,3 +655,187 @@ class TestClangdWindows:
         finally:
             _exit(entered)
         assert picked is ls.Installer.WINGET
+
+
+# --------------------------------------------------------------------- #
+# Scoop bootstrap (Windows only)
+#
+# Scoop is the only auto-install path for OmniSharp on Windows. The
+# bootstrap helpers must:
+#   - refuse to run on non-Windows,
+#   - short-circuit when scoop is already on PATH,
+#   - run the official PowerShell installer,
+#   - add the ``extras`` bucket idempotently.
+# --------------------------------------------------------------------- #
+
+class TestScoopBootstrap:
+    def test_is_scoop_installed_true_when_on_path(self):
+        with patch.object(ls.shutil, "which",
+                          side_effect=lambda b: r"C:\Users\u\scoop\shims\scoop.cmd"
+                          if b == "scoop" else None):
+            assert ls.is_scoop_installed() is True
+
+    def test_is_scoop_installed_false_when_not_on_path(self):
+        with patch.object(ls.shutil, "which", return_value=None):
+            assert ls.is_scoop_installed() is False
+
+    def test_install_scoop_refuses_on_non_windows(self):
+        with patch.object(ls.os, "name", "posix"):
+            ok, msg = ls.install_scoop_windows()
+        assert ok is False
+        assert "Windows-only" in msg
+
+    def test_install_scoop_short_circuits_when_already_installed(self):
+        with patch.object(ls.os, "name", "nt"), \
+             patch.object(ls.shutil, "which",
+                          side_effect=lambda b: r"C:\scoop.cmd"
+                          if b == "scoop" else None), \
+             patch.object(ls.subprocess, "run") as mock_run:
+            ok, msg = ls.install_scoop_windows()
+        assert ok is True
+        assert "already installed" in msg
+        mock_run.assert_not_called()
+
+    def test_install_scoop_dry_run_no_subprocess(self):
+        with patch.object(ls.os, "name", "nt"), \
+             patch.object(ls.shutil, "which", return_value=None), \
+             patch.object(ls.subprocess, "run") as mock_run:
+            ok, msg = ls.install_scoop_windows(dry_run=True)
+        assert ok is True
+        assert "[dry-run]" in msg
+        mock_run.assert_not_called()
+
+    def test_install_scoop_invokes_powershell_one_liner(self):
+        """The official scoop installer needs ``Set-ExecutionPolicy``
+        + ``Invoke-RestMethod | Invoke-Expression``. Verify we pass
+        both to PowerShell in one invocation so the policy change is
+        in effect when the script downloads."""
+        captured: list[list[str]] = []
+
+        class _Proc:
+            returncode = 0
+            stdout = "Scoop was installed successfully!"
+            stderr = ""
+
+        def _fake_run(argv, **kw):  # noqa: ANN001
+            captured.append(list(argv))
+            return _Proc()
+
+        with patch.object(ls.os, "name", "nt"), \
+             patch.object(ls.shutil, "which",
+                          side_effect=lambda b: r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+                          if b in ("powershell", "pwsh") else None), \
+             patch.object(ls.subprocess, "run", side_effect=_fake_run):
+            ok, msg = ls.install_scoop_windows()
+        assert ok is True
+        assert "successfully" in msg
+        argv = captured[0]
+        assert argv[0].endswith("powershell.exe")
+        script = argv[-1]
+        assert "Set-ExecutionPolicy" in script
+        assert "RemoteSigned" in script
+        assert "CurrentUser" in script
+        assert "Invoke-RestMethod" in script
+        assert "get.scoop.sh" in script
+        assert "Invoke-Expression" in script
+
+    def test_install_scoop_propagates_failure(self):
+        class _Proc:
+            returncode = 1
+            stdout = ""
+            stderr = "Could not connect to https://get.scoop.sh"
+
+        with patch.object(ls.os, "name", "nt"), \
+             patch.object(ls.shutil, "which",
+                          side_effect=lambda b: "powershell.exe"
+                          if b in ("powershell", "pwsh") else None), \
+             patch.object(ls.subprocess, "run", return_value=_Proc()):
+            ok, msg = ls.install_scoop_windows()
+        assert ok is False
+        assert "Could not connect" in msg
+
+    def test_ensure_bucket_refuses_when_scoop_missing(self):
+        with patch.object(ls.shutil, "which", return_value=None):
+            ok, msg = ls.ensure_scoop_bucket("extras")
+        assert ok is False
+        assert "scoop not installed" in msg
+
+    def test_ensure_bucket_idempotent_when_already_added(self):
+        """If ``scoop bucket list`` already contains the bucket name,
+        skip the add and return success — avoids a noisy non-zero exit
+        from a benign 'already added' case."""
+        class _ListProc:
+            returncode = 0
+            stdout = "Name    Source\nextras  https://github.com/ScoopInstaller/Extras\nmain    https://github.com/ScoopInstaller/Main\n"
+            stderr = ""
+
+        run_calls: list[list[str]] = []
+
+        def _fake_run(argv, **kw):  # noqa: ANN001
+            run_calls.append(list(argv))
+            return _ListProc()
+
+        with patch.object(ls.shutil, "which",
+                          side_effect=lambda b: r"C:\scoop.cmd"
+                          if b == "scoop" else None), \
+             patch.object(ls.subprocess, "run", side_effect=_fake_run):
+            ok, msg = ls.ensure_scoop_bucket("extras")
+        assert ok is True
+        assert "already" in msg.lower()
+        # Only the list probe ran — no `bucket add` because already present.
+        assert len(run_calls) == 1
+        assert run_calls[0][1:] == ["bucket", "list"]
+
+    def test_ensure_bucket_adds_when_missing(self):
+        class _ListProc:
+            returncode = 0
+            stdout = "Name    Source\nmain    https://github.com/ScoopInstaller/Main\n"
+            stderr = ""
+
+        class _AddProc:
+            returncode = 0
+            stdout = "Bucket 'extras' added successfully."
+            stderr = ""
+
+        run_seq = [_ListProc(), _AddProc()]
+        captured: list[list[str]] = []
+
+        def _fake_run(argv, **kw):  # noqa: ANN001
+            captured.append(list(argv))
+            return run_seq.pop(0)
+
+        with patch.object(ls.shutil, "which",
+                          side_effect=lambda b: r"C:\scoop.cmd"
+                          if b == "scoop" else None), \
+             patch.object(ls.subprocess, "run", side_effect=_fake_run):
+            ok, msg = ls.ensure_scoop_bucket("extras")
+        assert ok is True
+        assert "added bucket extras" in msg
+        # Two subprocess calls: bucket list, then bucket add.
+        assert len(captured) == 2
+        assert captured[1][1:] == ["bucket", "add", "extras"]
+
+    def test_ensure_bucket_handles_older_scoop_already_message(self):
+        """Older scoop builds return exit-1 with 'The bucket is
+        already added.' — treat that as success defensively."""
+        class _ListProc:
+            returncode = 0
+            stdout = ""  # bucket name not in list (older scoop quirk)
+            stderr = ""
+
+        class _AddProc:
+            returncode = 1
+            stdout = "The 'extras' bucket is already added."
+            stderr = ""
+
+        run_seq = [_ListProc(), _AddProc()]
+
+        def _fake_run(argv, **kw):  # noqa: ANN001
+            return run_seq.pop(0)
+
+        with patch.object(ls.shutil, "which",
+                          side_effect=lambda b: r"C:\scoop.cmd"
+                          if b == "scoop" else None), \
+             patch.object(ls.subprocess, "run", side_effect=_fake_run):
+            ok, _ = ls.ensure_scoop_bucket("extras")
+        assert ok is True

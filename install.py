@@ -6269,6 +6269,27 @@ def _setup_lsp_engine(cfg: dict, *, non_interactive: bool, dry_run: bool) -> Non
             "\n  Install missing language servers now? [y/N]: ",
         ).strip().lower()
         if ans in ("y", "yes"):
+            # Before iterating: on Windows, offer to bootstrap scoop if
+            # the user has any SCOOP-only LSs in the queue (OmniSharp is
+            # the canonical case — no winget package exists). One
+            # consolidated prompt rather than per-LS, so we don't
+            # nag the same question three times if OmniSharp + zls +
+            # lua are all queued. Bootstrap also adds the ``extras``
+            # bucket so the subsequent ``scoop install extras/...``
+            # commands resolve.
+            state = _lsp_maybe_bootstrap_scoop(
+                state, dry_run=dry_run,
+            )
+            # Re-build the offer list against the refreshed state —
+            # what was SCOOP-only (no installer) becomes SCOOP-with-
+            # installer after the bootstrap.
+            missing_to_offer = [
+                st for st in state.values()
+                if not st.installed and (
+                    st.spec.tier == 1
+                    or st.installer_for_missing is not None
+                )
+            ]
             _lsp_run_install_loop(missing_to_offer, state, dry_run=dry_run)
         else:
             print("  Skipped install loop. Re-run anytime to install.")
@@ -6350,6 +6371,109 @@ def _lsp_print_row(name: str, st) -> None:
     elif st.spec.docs_url:
         suffix = f"MISSING — install manually ({st.spec.docs_url})"
     print(f"    [!!]  {label:32} {suffix}")
+
+
+def _lsp_is_windows() -> bool:
+    """OS check wrapper — extracted so tests can patch this single
+    function instead of monkeypatching ``os.name``. Patching the
+    latter globally breaks ``pathlib.Path`` instantiation on Linux
+    test hosts because Path() picks a backend off ``os.name`` at
+    construction time."""
+    return os.name == "nt"
+
+
+def _lsp_maybe_bootstrap_scoop(state, *, dry_run: bool):
+    """If we're on Windows and have missing LSs whose ONLY available
+    installer is scoop (and scoop isn't installed), offer a one-shot
+    bootstrap. Returns the (possibly re-detected) state dict so the
+    caller can refresh ``installer_for_missing`` after a successful
+    bootstrap.
+
+    The canonical case is OmniSharp — scoop is the only auto-install
+    path. zls and lua-language-server have winget alternatives so
+    they bypass this path. Without the bootstrap OmniSharp would
+    permanently sit in the MANUAL bucket on Windows, which is the
+    UX the user explicitly asked to fix.
+    """
+    from claude_hooks import lang_servers as _lang  # local import
+
+    if not _lsp_is_windows():
+        return state
+    if _lang.is_scoop_installed():
+        return state
+
+    # Find LSs that (a) are missing, (b) would be installable via scoop,
+    # (c) currently have no installer (because scoop isn't on PATH).
+    scoop_only_blocked = []
+    for st in state.values():
+        if st.installed or st.installer_for_missing is not None:
+            continue
+        # Does this spec have scoop in its installer list at all?
+        if _lang.Installer.SCOOP not in st.spec.installers:
+            continue
+        # Does the install matrix actually have a scoop command for it?
+        cmd = _lang.INSTALL_COMMANDS.get(
+            _lang.Installer.SCOOP, {},
+        ).get(st.spec.name)
+        if not cmd:
+            continue
+        scoop_only_blocked.append(st)
+
+    if not scoop_only_blocked:
+        return state
+
+    names = ", ".join(st.spec.name for st in scoop_only_blocked)
+    print(
+        f"\n  These language servers can be installed via scoop on "
+        f"Windows but scoop isn't on PATH: {names}."
+    )
+    print(
+        "  scoop installs entirely to the user profile (no admin, no "
+        "system PATH changes)."
+    )
+    print("  See https://scoop.sh/ for the project.")
+    ans = input(
+        "  Install scoop now to unlock these? [y/N]: ",
+    ).strip().lower()
+    if ans not in ("y", "yes"):
+        print("  Skipped scoop bootstrap. These LSs will stay manual.")
+        return state
+
+    if dry_run:
+        print("    [dry-run] Would install scoop via PowerShell.")
+        print(
+            "    [dry-run] Would add the 'extras' bucket "
+            "(`scoop bucket add extras`)."
+        )
+        return state
+
+    print("    Running: PowerShell scoop installer...")
+    ok, msg = _lang.install_scoop_windows(dry_run=False)
+    if not ok:
+        print(f"    [FAIL] scoop install failed: {msg}")
+        print(
+            "    (continuing — these LSs will stay manual; install "
+            "scoop yourself from https://scoop.sh/ and re-run)"
+        )
+        return state
+    print(f"    [ok] {msg}")
+
+    # extras bucket holds the LSs we care about (omnisharp, zls,
+    # lua-language-server, and the scoop-build clangd / rust-analyzer).
+    print("    Adding the 'extras' bucket...")
+    ok, msg = _lang.ensure_scoop_bucket("extras", dry_run=False)
+    if not ok:
+        print(f"    [WARN] could not add extras bucket: {msg}")
+        print(
+            "    (subsequent `scoop install extras/<name>` commands "
+            "will fail until you run `scoop bucket add extras` manually)"
+        )
+    else:
+        print(f"    [ok] {msg}")
+
+    # Re-detect — scoop is now on PATH, so installer_for_missing
+    # promotes from None to SCOOP for the affected LSs.
+    return _lang.detect_language_servers()
 
 
 def _lsp_run_install_loop(

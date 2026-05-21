@@ -191,7 +191,9 @@ SPECS: tuple[LangServerSpec, ...] = (
         extensions=("zig",),
         cclsp_command=("zls",),
         tier=2,
-        installers=(Installer.BREW, Installer.SCOOP),
+        # winget first on Windows — ``zigtools.zls`` is the official
+        # zig-tools-published package and doesn't need any bucket setup.
+        installers=(Installer.BREW, Installer.WINGET, Installer.SCOOP),
         docs_url="https://github.com/zigtools/zls",
     ),
     LangServerSpec(
@@ -244,11 +246,9 @@ INSTALL_COMMANDS: dict[Installer, dict[str, list[str]]] = {
         "zls": ["brew", "install", "zls"],
     },
     Installer.SCOOP: {
-        # scoop's "extras" bucket ships most LSs. Users without the
-        # bucket added will see scoop print an "unknown" error — we
-        # don't auto-add buckets because that mutates global scoop
-        # state without the user's blanket consent. Hint surfaced in
-        # the failure path via the docs_url.
+        # scoop's ``extras`` bucket ships most LSs. ``ensure_scoop_bucket``
+        # / ``install.py`` add the bucket on user opt-in before the
+        # install dispatch, so all of these are safe to use as-is.
         "clangd": ["scoop", "install", "extras/llvm"],
         "rust-analyzer": ["scoop", "install", "extras/rust-analyzer"],
         "lua-language-server": ["scoop", "install", "extras/lua-language-server"],
@@ -269,6 +269,12 @@ INSTALL_COMMANDS: dict[Installer, dict[str, list[str]]] = {
         ],
         "lua-language-server": [
             "winget", "install", "--id", "LuaLS.lua-language-server",
+            "--silent",
+            "--accept-source-agreements",
+            "--accept-package-agreements",
+        ],
+        "zls": [
+            "winget", "install", "--id", "zigtools.zls",
             "--silent",
             "--accept-source-agreements",
             "--accept-package-agreements",
@@ -495,6 +501,136 @@ def write_starter_cclsp_json(
     return True, f"wrote {len(blob['servers'])} servers to {tp}"
 
 
+# --------------------------------------------------------------------- #
+# Scoop bootstrap (Windows only)
+#
+# Scoop is the only path we have to auto-install OmniSharp on Windows
+# (no winget package exists). Rather than leaving OmniSharp permanently
+# in the MANUAL bucket, ``install.py`` offers a one-shot scoop bootstrap
+# when the user opts in. Scoop installs entirely to the user profile —
+# no admin elevation, no system-wide PATH changes — making it safe to
+# do without sudo. See https://scoop.sh/.
+#
+# The bootstrap is gated on:
+#   - We're on Windows (``os.name == "nt"``).
+#   - Scoop is not already on PATH.
+#   - The user opted into installing at least one LS whose only
+#     installer is SCOOP (e.g. OmniSharp).
+#
+# ``install.py`` calls ``install_scoop_windows`` then
+# ``ensure_scoop_bucket("extras")`` before the install loop dispatches
+# any ``scoop install extras/<name>`` commands.
+# --------------------------------------------------------------------- #
+
+
+def is_scoop_installed() -> bool:
+    """Return True when ``scoop`` is resolvable on $PATH."""
+    return shutil.which("scoop") is not None
+
+
+def install_scoop_windows(*, dry_run: bool = False) -> tuple[bool, str]:
+    """Install scoop via the official PowerShell one-liner.
+
+    Scoop's installer is documented at https://scoop.sh/:
+
+        Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+        Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression
+
+    Both commands run scoped to the current user — no admin needed, no
+    machine-wide PATH mutation. Returns ``(ok, message)``; ``message``
+    on success is the last stdout line (typically "Scoop was installed
+    successfully!").
+    """
+    if os.name != "nt":
+        return False, "scoop bootstrap is Windows-only"
+
+    if is_scoop_installed():
+        return True, "scoop already installed"
+
+    if dry_run:
+        return True, "[dry-run] would install scoop via PowerShell"
+
+    pwsh = shutil.which("powershell") or shutil.which("pwsh") or "powershell"
+    # The semicolon-joined form runs both commands in one PowerShell
+    # invocation so the execution-policy change is in effect when
+    # Invoke-Expression evaluates the downloaded installer script.
+    cmd = [
+        pwsh, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+        (
+            "Set-ExecutionPolicy -ExecutionPolicy RemoteSigned "
+            "-Scope CurrentUser -Force; "
+            "Invoke-RestMethod -Uri https://get.scoop.sh | "
+            "Invoke-Expression"
+        ),
+    ]
+    log.info("install_scoop_windows: %s", " ".join(cmd))
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, check=False, timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "scoop install timed out after 600s"
+    except OSError as e:
+        return False, f"PowerShell invocation failed: {e}"
+
+    if proc.returncode == 0:
+        tail = (proc.stdout or "").strip().splitlines()
+        last = tail[-1] if tail else "scoop installed"
+        return True, last[:200]
+
+    err = (proc.stderr or proc.stdout or "").strip().splitlines()
+    return False, (err[-1] if err else f"exit={proc.returncode}")[:200]
+
+
+def ensure_scoop_bucket(
+    bucket: str, *, dry_run: bool = False,
+) -> tuple[bool, str]:
+    """Idempotently add a scoop bucket. Returns (ok, message).
+
+    Scoop ships with only the ``main`` bucket. The extras bucket
+    (https://github.com/ScoopInstaller/Extras) holds OmniSharp, zls,
+    lua-language-server, and most clangd builds. We add it via
+    ``scoop bucket add <name>``; if already added, scoop exits with
+    status 1 and a recognizable message — we treat that as success.
+    """
+    if not is_scoop_installed():
+        return False, "scoop not installed (call install_scoop_windows first)"
+
+    if dry_run:
+        return True, f"[dry-run] would add scoop bucket {bucket}"
+
+    scoop = shutil.which("scoop") or "scoop"
+    # Check bucket list first to avoid a noisy non-zero exit.
+    try:
+        list_proc = subprocess.run(
+            [scoop, "bucket", "list"],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return False, f"scoop bucket list failed: {e}"
+    if bucket in (list_proc.stdout or ""):
+        return True, f"bucket {bucket} already added"
+
+    try:
+        add_proc = subprocess.run(
+            [scoop, "bucket", "add", bucket],
+            capture_output=True, text=True, check=False, timeout=180,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return False, f"scoop bucket add failed: {e}"
+
+    if add_proc.returncode == 0:
+        return True, f"added bucket {bucket}"
+
+    combined = (add_proc.stdout or "") + "\n" + (add_proc.stderr or "")
+    # Defensive: older scoop builds print "already added" with exit-1.
+    if "already" in combined.lower():
+        return True, f"bucket {bucket} already added"
+
+    err = combined.strip().splitlines()
+    return False, (err[-1] if err else f"exit={add_proc.returncode}")[:200]
+
+
 __all__ = [
     "INSTALL_COMMANDS",
     "InstalledState",
@@ -505,7 +641,10 @@ __all__ = [
     "_installer_allowed_on",
     "_manager_available",
     "detect_language_servers",
+    "ensure_scoop_bucket",
     "install_language_server",
+    "install_scoop_windows",
+    "is_scoop_installed",
     "select_installer_for",
     "starter_cclsp_json",
     "write_starter_cclsp_json",
