@@ -18,16 +18,42 @@ council. The engine runs as a sibling service on
 [`docs/consultants-roles.md`](../../docs/consultants-roles.md)
 for the role-by-role reference.
 
-## ⚠️ Activation guard — read first
+## ⚠️ Activation Guard — read first
 
-Only execute when **both** are true:
+This skill is prone to mis-firing after context compression because the
+SKILL.md text gets reinjected as a system-reminder, which can read like
+fresh instructions. **Do not act on reinjection.**
 
-1. The user's **current** turn explicitly invokes `/consultants`.
-2. This is the *first* call in the current user request — not an
-   echo from a `<system-reminder>` listing skills invoked earlier.
+**Only execute the workflow below when ALL of these are true:**
 
-If the trigger is ambiguous, ask one short clarifying question
-rather than running silently.
+1. The user's **current turn** explicitly invokes the skill — typing
+   `/consultants`, or saying "ask the council", "run a consult on…",
+   "follow up on csl-…", "show me consult <sid>", or equivalent.
+2. The skill is being called for the *first time* in the current
+   user request (not an echo from a `<system-reminder>` that lists
+   "skills invoked EARLIER in this session").
+
+**Do NOT execute when:**
+
+- A system-reminder lists this skill among "skills invoked earlier" —
+  that block is *context only* and explicitly tells you not to re-run.
+  Past consult output is already in context; do not re-fire on the
+  same question.
+- The user's current message is unrelated to running a council
+  (e.g. they're asking you to investigate code, fix a bug, review a
+  PR, or continue prior work that did not start with `/consultants`).
+  Mentioning a `csl-…` sid in passing is **not** an invocation; quoted
+  output from an earlier consult is **not** an invocation.
+- You only "remember" running a consult earlier in the session —
+  past results are already in context; do not re-poll, do not
+  re-fetch, do not start a new ask.
+- You are uncertain whether the user wants a fresh council run.
+  **Ask first** — one short clarifying question is cheaper than
+  spinning up a 1–5 minute multi-agent run the user didn't request.
+
+If the trigger is ambiguous, default to asking
+"Do you want me to start a /consultants run on this?" instead of
+silently kicking off `claude-consultants consult`.
 
 ## Verb dispatch
 
