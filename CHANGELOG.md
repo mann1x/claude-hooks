@@ -16,6 +16,178 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [1.10.3] — 2026-05-22
+
+PATCH release. Closes ten distinct LSP-engine bugs surfaced by
+live use on pandorum 2026-05-22 while wiring the engine into the
+`PersistentWindows` C# project. The integration shipped in v1.9.0
+but had several Windows-only blockers that only surfaced once
+someone actually ran it in anger against a real cclsp.json +
+compile-aware msbuild config on a Windows host. v1.10.3 makes the
+engine **actually usable on Windows end-to-end**: daemon spawns
+windowless, survives parent exit, hot-reloads its toml, and the
+CLI surface (`status` / `stop` / `cleanup` / `restart`) does
+what it says on the tin.
+
+No config-file migration. v1.10.2 configs work unchanged.
+
+### Fixed
+
+- **A. Daemon never re-read `.claude-hooks/lsp-engine.toml`.**
+  `CompileRunner` snapshotted its compile command at daemon
+  startup and held it for the daemon's lifetime — toml edits
+  (e.g. swapping bare `msbuild` for the full VS2022 path) went
+  un-applied even across Claude Code restarts because the
+  daemon outlived the session. Fixed in `compile.py`: per-run
+  mtime check at the top of `_run_once` reparses via
+  `load_engine_config` and replaces `self._command` in place.
+  Invalid TOML is logged once and the previous command keeps
+  running; mtime is still advanced so a broken file isn't
+  re-parsed every run.
+
+- **B. Windows project-root hash was case-sensitive.** `c:\X`
+  and `C:\X` produced different SHA-prefix state dirs on
+  Windows even though they're the same project. The hook
+  spawned a daemon under one hash; CLI invocations from a
+  different case pointed at the other. `project_dir()` and
+  `windows_pipe_name_for()` now `os.path.normcase()` the
+  resolved path before hashing. POSIX is unaffected
+  (`normcase` is identity).
+
+- **C. `status` reported a stale dead PID as the live daemon.**
+  After a daemon crashed, its lock file persisted with a dead
+  PID and `status` faithfully reported it as if alive. Now
+  liveness-probes the lock-PID via cross-platform
+  `pid_is_alive` (`os.kill(pid, 0)` POSIX, `OpenProcess`
+  Windows) and surfaces `stale_lock: true` when the PID is
+  dead, suppressing the misleading number.
+
+- **D. `.cmd` shim's `cd /d %REPO%` defeated `--project .`.**
+  The Windows shim cd'd into the claude-hooks repo before
+  python parsed argv, so `Path(".").resolve()` resolved
+  against the **repo**, not the user's cwd. Shim now captures
+  `%CD%` into `CLAUDE_HOOKS_USER_CWD` before cd-ing;
+  `__main__.py` resolves non-absolute `--project` against it.
+
+- **E. No graceful daemon shutdown CLI.** A wedged daemon
+  could only be killed via `Stop-Process`, which left a stale
+  lock + state dir blocking the next spawn. Added
+  `claude-hooks-lsp stop` (sends `shutdown` IPC for graceful
+  teardown), `claude-hooks-lsp cleanup` (removes the per-
+  project state dir when no live daemon holds it, or with
+  `--force` regardless), and `restart` (stop +
+  wait-for-socket-gone + cleanup `--force`).
+
+- **F. Compile children spawned with a visible console
+  window.** The daemon itself runs windowless, but when it
+  subsequently spawned a compile child via `subprocess.run`
+  WITHOUT `CREATE_NO_WINDOW`, Windows allocated a fresh
+  console — visible to the user as a popping `cmd.exe`
+  window during every compile. Added
+  `silent_subprocess_kwargs()` helper in `_popen.py` and
+  wired it into `compile.py`. The engine now guarantees
+  windowless children framework-wide; callers and toml
+  authors don't need to opt in.
+
+- **G. Shell-mangled `--project` silently no-op'd.** Passing
+  an abs Windows path through cmd-with-escaped-quotes
+  produced a string the shell munged (cmd eats `\` inside
+  `\"...\"`) which `Path.resolve()` lexically-completed from
+  cwd. The CLI hashed the phantom and operated on a
+  fictitious address. `status` quietly returned
+  `running:false`; `restart` ran no-op then reported
+  `restarted: true` — silent success in wrapper scripts.
+  Now `main()` validates `--project` resolves to a real
+  directory (except for the `daemon` subcommand which may
+  create the dir). Failure: exit 2 with a diagnostic
+  listing all known daemon state dirs from
+  `~/.claude/lsp-engine/*/project` hint files.
+
+- **H. Windows lock file unreadable while daemon alive.**
+  The daemon held an exclusive byte-range lock at byte 0 —
+  exactly where `<pid>\n<timestamp>\n` was written. Any
+  reader hit `ERROR_LOCK_VIOLATION` / "Device or resource
+  busy". Now: lock a byte well past the payload (offset
+  4096). Windows lets you lock bytes beyond EOF as a
+  reservation; readers reading bytes 0..32 hit no
+  conflict; `daemon_pid()` works while the daemon is alive.
+  POSIX `flock` is whole-file advisory and never blocked
+  reads — no POSIX change.
+
+- **I. `cleanup` didn't reap stale state dirs from the
+  pre-case-norm era.** Pre-fix daemons hashed paths without
+  case normalization, so the same project could land in
+  multiple state dirs. New `_find_matching_state_dirs()`
+  scans `~/.claude/lsp-engine/*/project` and returns every
+  dir whose hint normcase-matches the input; `_run_cleanup`
+  under `--force` (and by extension `restart`) reaps them
+  all, with a per-dir liveness check so a live daemon at a
+  non-canonical hash isn't touched. Output schema gains
+  optional `stale_reaped` / `stale_skipped` keys.
+
+- **J. Daemon died within 0.5s of parent exit on Windows.**
+  `DETACHED_PROCESS | CREATE_NO_WINDOW` only handles
+  **console** inheritance; it does NOT detach a child from
+  a **job object** the parent participates in. SSH / cmd /
+  sandbox invocations frequently put the process tree into
+  an implicit job whose default cleanup policy terminates
+  every member on parent exit. `CREATE_BREAKAWAY_FROM_JOB`
+  (added to `detach_kwargs()`) is the actual mechanism for
+  "this child stands on its own". New `popen_detached()`
+  helper applies the flag with a graceful fallback to
+  no-BREAKAWAY for the rare strict-job case
+  (sandboxed contexts where `JOB_OBJECT_LIMIT_BREAKAWAY_OK`
+  is cleared and the flag would fail with `ACCESS_DENIED`).
+  `client._spawn_daemon` routes through the helper.
+  Post-fix bench: daemon at PID 75036 alive 12s after
+  parent exit; pre-fix it vanished within 0.5s.
+
+### Added
+
+- **`claude-hooks-lsp` CLI**: three new subcommands
+  (`stop`, `cleanup`, `restart`). `status` payload gains
+  `pid` (daemon-reported on Windows where the lock file
+  was unreadable pre-H) and `compile_aware_languages` so
+  operators can confirm which extensions the daemon has
+  runners for.
+
+- **`claude_hooks/_popen.py`** gains two helpers:
+  `silent_subprocess_kwargs()` for non-detached child
+  windows (Fix F) and `popen_detached()` for the
+  BREAKAWAY-with-fallback spawn pattern (Fix J).
+
+- **`__main__._find_matching_state_dirs()`** powers the
+  new `cleanup` reaper semantics (Fix I) and the Fix G
+  diagnostic.
+
+### Changed
+
+- `compile.py:CompileRunner` gains an `__post_init__`
+  that seeds a mutable `_command` from the immutable
+  `spec.command`. The hot-reload path (Fix A) mutates
+  `_command`; `spec` itself stays frozen.
+
+- `compile.py:CompileOrchestrator` now accepts a
+  `toml_path` kwarg; `Daemon.__init__` passes the
+  project's `.claude-hooks/lsp-engine.toml`.
+
+- `__main__.py:_run_cleanup` rmtree under `--force` uses
+  `ignore_errors=True` to tolerate the benign race where
+  the daemon's own teardown unlinks `daemon.sock` between
+  rmtree's listdir and unlink.
+
+### Tests
+
+- `tests/test_lsp_engine_v1103_fixes.py` — 23 tests for fixes B–E.
+- `tests/test_lsp_engine_v1104_fixes.py` — 22 tests for fix A and the alive-daemon pid surfaces.
+- `tests/test_lsp_engine_v1105_fixes.py` — 16 tests for fixes F, G.
+- `tests/test_lsp_engine_v1106_fixes.py` — 16 tests for fixes H, I.
+- `tests/test_popen_breakaway.py` — 10 tests for fix J.
+
+Full sweep on solidpc: **4176 passed / 136 skipped**, +64 over
+the v1.10.2 baseline of 4112. Every fix individually live-
+verified on pandorum.
+
 ## [1.10.2] — 2026-05-22
 
 PATCH release. Adds a diagnostic write-audit log to
