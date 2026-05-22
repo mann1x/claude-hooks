@@ -61,6 +61,7 @@ def test_cleanup_removes_all_legacy_variants(tmp_path, capsys):
     with patch.object(install.os.path, "expanduser",
                       side_effect=lambda p: p.replace("~", str(user_home))):
         install._install_skills(
+            {},  # empty cfg — no skills with deps configured
             installed_tools={"claude-consultants": False, "caliber": False},
             non_interactive=True,
             dry_run=False,
@@ -87,6 +88,7 @@ def test_cleanup_is_noop_on_fresh_install(tmp_path, capsys):
     with patch.object(install.os.path, "expanduser",
                       side_effect=lambda p: p.replace("~", str(user_home))):
         install._install_skills(
+            {},  # empty cfg — no skills with deps configured
             installed_tools={"claude-consultants": False, "caliber": False},
             non_interactive=True,
             dry_run=False,
@@ -112,12 +114,14 @@ def test_cleanup_is_idempotent(tmp_path, capsys):
     with patch.object(install.os.path, "expanduser",
                       side_effect=lambda p: p.replace("~", str(user_home))):
         install._install_skills(
+            {},  # empty cfg — no skills with deps configured
             installed_tools={"claude-consultants": False, "caliber": False},
             non_interactive=True,
             dry_run=False,
         )
         first = capsys.readouterr().out
         install._install_skills(
+            {},  # empty cfg — no skills with deps configured
             installed_tools={"claude-consultants": False, "caliber": False},
             non_interactive=True,
             dry_run=False,
@@ -139,6 +143,7 @@ def test_cleanup_respects_dry_run(tmp_path, capsys):
     with patch.object(install.os.path, "expanduser",
                       side_effect=lambda p: p.replace("~", str(user_home))):
         install._install_skills(
+            {},  # empty cfg
             installed_tools={"claude-consultants": False, "caliber": False},
             non_interactive=True,
             dry_run=True,
@@ -154,7 +159,7 @@ def test_cleanup_respects_dry_run(tmp_path, capsys):
 def test_skills_list_has_only_two_dispatcher_entries_for_renamed_families():
     """SKILLS no longer registers per-verb variants; just the two
     dispatchers for get-advice and consultants."""
-    names = [n for n, _ in install.SKILLS]
+    names = [spec.name for spec in install.SKILLS]
     # Dispatchers present.
     assert "get-advice" in names
     assert "consultants" in names

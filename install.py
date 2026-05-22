@@ -26,6 +26,7 @@ Flags:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import platform
@@ -36,7 +37,7 @@ import sys
 import time
 from copy import deepcopy
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 # Make claude_hooks importable when running from a checkout.
 HERE = Path(__file__).resolve().parent
@@ -5670,6 +5671,111 @@ def _check_conda_env(*, non_interactive: bool, dry_run: bool) -> None:
         print(f"Hook runtime:   system python3")
 
 
+def _is_claude_hooks_pip_installed(py_path: Path) -> bool:
+    """Probe whether the ``claude-hooks`` package is pip-installed in
+    the env owning ``py_path``. Returns True only if ``pip show`` exits
+    cleanly with a package record.
+
+    Used by ``_offer_pip_install_editable`` to skip the prompt when
+    the package is already importable from the env's site-packages —
+    a fresh ``pip install -e .`` would re-install identical state.
+    """
+    if not py_path.exists():
+        return False
+    try:
+        rc = subprocess.run(
+            [str(py_path), "-m", "pip", "show", "claude-hooks"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return rc.returncode == 0
+
+
+def _offer_pip_install_editable(
+    *, non_interactive: bool, dry_run: bool,
+) -> None:
+    """Offer to ``pip install -e .`` the claude-hooks package into
+    the conda env's site-packages.
+
+    **Why this is opt-in, not mandatory.** The POSIX bin shims work
+    without pip-install because ``bin/_resolve_python.sh`` exports
+    ``PYTHONPATH=$REPO`` (v1.10.0+). The hooks themselves work because
+    ``bin/claude-hook`` invokes ``$PY $REPO/run.py`` and the script's
+    dir lands on ``sys.path[0]`` automatically. Pip-install is for
+    the case where the user activates the conda env and types
+    ``python -m claude_hooks.<module>`` directly — without it, that
+    invocation fails with ``ModuleNotFoundError``. Also useful for
+    IDE / tool integrations that import claude_hooks programmatically.
+
+    Non-interactive deploys skip the offer (mutating the conda env is
+    a destructive-ish operation; the user should opt in once). On
+    re-runs, the probe at the top short-circuits when already
+    installed, so accepting once is enough.
+    """
+    conda_py = find_conda_env_python()
+    if not conda_py.exists():
+        # No conda env to install into — skip silently. The earlier
+        # ``_check_conda_env`` will have already surfaced the
+        # "Hook runtime: system python3" line.
+        return
+
+    if _is_claude_hooks_pip_installed(conda_py):
+        print(f"\n==> Package: claude-hooks already pip-installed in conda env")
+        return
+
+    print(f"\n==> Package: claude-hooks NOT pip-installed in conda env")
+    print(f"    Env python: {conda_py}")
+    print(f"    Repo:       {HERE}")
+    print(f"    Without this, ``python -m claude_hooks.<module>`` from a")
+    print(f"    manually-activated env fails. The bin/ shims work either")
+    print(f"    way (PYTHONPATH via _resolve_python.sh in v1.10.0+); this")
+    print(f"    is polish — useful for direct env-activated invocations")
+    print(f"    and IDE / tool integrations.")
+
+    if non_interactive:
+        print(f"    --non-interactive: skipping pip install -e .")
+        print(f"    Run install.py interactively to opt in, or:")
+        print(f"      {conda_py} -m pip install -e {HERE}")
+        return
+
+    ans = input("    pip install -e . into the conda env now? [Y/n]: ").strip().lower()
+    if ans not in ("", "y", "yes"):
+        print("    Skipped. Re-run install.py to opt in later.")
+        return
+
+    if dry_run:
+        print(f"    [dry-run] Would run: {conda_py} -m pip install -e {HERE}")
+        return
+
+    print(f"    Running: {conda_py} -m pip install -e {HERE}")
+    try:
+        rc = subprocess.run(
+            [str(conda_py), "-m", "pip", "install", "-e", str(HERE)],
+            capture_output=True, text=True, timeout=300,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        print(f"    [!!] pip install failed to run: {exc}")
+        return
+
+    if rc.returncode == 0:
+        print(f"    [ok] claude-hooks pip-installed into {conda_py.parent.parent.name}")
+        # Surface a brief summary line if pip emitted one — useful for
+        # confirming the editable install resolved the right setup.py.
+        for line in (rc.stdout or "").splitlines():
+            if "Successfully installed" in line or "claude-hooks" in line.lower():
+                print(f"    {line.strip()}")
+                break
+    else:
+        print(f"    [!!] pip install -e . failed (exit {rc.returncode}):")
+        tail = (rc.stderr or rc.stdout or "").splitlines()[-5:]
+        for line in tail:
+            print(f"      {line}")
+        print(f"    The shims and hooks still work without this — pip-install")
+        print(f"    is polish, not blocking. You can retry manually:")
+        print(f"      {conda_py} -m pip install -e {HERE}")
+
+
 CONSULTANTS_ENV_NAME = "claude-hooks-consultants"
 
 
@@ -7352,6 +7458,9 @@ def main() -> int:
     print("==> claude-hooks installer\n")
 
     _check_conda_env(non_interactive=args.non_interactive, dry_run=args.dry_run)
+    _offer_pip_install_editable(
+        non_interactive=args.non_interactive, dry_run=args.dry_run,
+    )
 
     cfg_path = Path(args.config) if args.config else default_config_path()
     print(f"Repo:           {HERE}")
@@ -7621,7 +7730,7 @@ def main() -> int:
     )
     installed_tools["claude-consultants"] = consultants_present
 
-    _install_skills(installed_tools, non_interactive=args.non_interactive, dry_run=args.dry_run)
+    _install_skills(cfg, installed_tools, non_interactive=args.non_interactive, dry_run=args.dry_run)
 
     # Episodic memory setup.
     _setup_episodic(cfg, cfg_path, args, dry_run=args.dry_run)
@@ -8030,35 +8139,228 @@ COMPANION_TOOLS = [
     ("episodic-memory", None,                       "HIGH",   "transcript search across past sessions (build from source)"),
 ]
 
-# Skills shipped with the repo and what they require.
-# requirement: None = always install, or a tool binary name.
-SKILLS = [
-    ("reflect",            None),    # built-in: uses claude-hooks reflect module
-    ("consolidate",        None),    # built-in: uses claude-hooks consolidate module
-    ("save-learning",      None),    # standalone
-    ("find-skills",        None),    # standalone
-    ("setup-caliber",      "caliber"),  # needs caliber installed
-    ("episodic",           None),    # queries remote episodic-server API
-    ("wrapup",             None),    # session state summary for hand-off / compact
-    # /get-advice — single dispatcher skill (v1.3+); routes by verb
-    # (`ask` default-implicit, `model`, `effort`, `tools`) through the
-    # already-subcommand-aware bin/claude-advisor CLI.
-    ("get-advice",         None),    # LLM-to-LLM advisor (uses bin/claude-advisor)
-    # /consultants — single dispatcher skill (v1.3+); routes by verb
-    # (`ask` default-implicit, `followup`, `list`, `show`, `config`)
-    # through the already-subcommand-aware bin/claude-consultants CLI.
-    # The skill requires the ``claude-hooks-consultants`` conda env
-    # which install.py creates on user opt-in via _install_consultants().
-    # When the consultants env is missing the skill is skipped silently.
-    ("consultants",        "claude-consultants"),
-    # /setup-compile-aware — v1.9+; helps the user populate the
-    # [compile_aware.commands] block of .claude-hooks/lsp-engine.toml
-    # by detecting build-tool markers (Cargo.toml, tsconfig.json,
-    # pyproject.toml, go.mod, Makefile, etc). Pure markdown skill —
-    # always installable; safe to ship even on hosts where the LSP
-    # engine is disabled, because the skill itself only proposes
-    # writes (the user controls whether to apply them).
-    ("setup-compile-aware", None),
+# --------------------------------------------------------------------- #
+# Skills (v1.10.0+: dep-aware, opt-in, dataclass-based)
+#
+# **Why this is opt-in and dep-aware (v1.10.0+):** every installed
+# skill costs description-bytes in the system prompt of EVERY Claude
+# Code session, whether the skill ever fires or not. Claude Code has
+# a cap on active skill count and starts disabling skills above it.
+# So:
+#
+#   * **Opt-in**: install.py asks per-skill. Default reflects current
+#     state (installed → keep with default Y; not installed → install
+#     with default N). User can keep a thin surface deliberately.
+#   * **Dep-aware**: skills whose runtime dependencies aren't
+#     configured are NOT offered. Installing /consultants without the
+#     claude-consultants binary would only burn description-bytes for
+#     no benefit. When deps disappear on a later run, install.py
+#     prompts for removal (the user has to consent — destruction
+#     never auto-fires).
+#
+# Each ``SkillSpec`` carries a ``requires`` callable that takes the
+# loaded config + the companion-tool detection dict and returns
+# ``(deps_satisfied: bool, dep_label: str)``. ``None`` means
+# "always satisfied" (the skill is standalone and works on any host).
+# --------------------------------------------------------------------- #
+
+
+@dataclasses.dataclass(frozen=True)
+class SkillSpec:
+    """Metadata for one in-repo skill.
+
+    - ``name``: skill directory name under ``.claude/skills/``.
+    - ``requires``: optional dep-check callable. Receives
+      ``(cfg: dict, installed_tools: dict[str, bool])`` and returns
+      ``(deps_ok: bool, dep_label: str)``. ``None`` = standalone.
+    - ``summary``: short blurb shown in the install-time prompt
+      so the user can decide without grepping for the SKILL.md.
+    """
+    name: str
+    requires: Optional[Callable[[dict, dict], tuple[bool, str]]] = None
+    summary: str = ""
+
+    @property
+    def requires_tool(self) -> Optional[str]:
+        """Back-compat shim — the v1.9.3 manifest tests + a few other
+        consumers used to read ``(name, requires_tool)`` tuples. They
+        now iterate ``SkillSpec`` objects but still query this attr.
+        Resolves the binary name baked into ``_requires_binary``
+        closures when applicable, or returns ``None``."""
+        if self.requires is None:
+            return None
+        # The factories below stash the binary name on the closure as
+        # ``__claude_hooks_requires_tool__`` for this shim's sake.
+        return getattr(self.requires, "__claude_hooks_requires_tool__", None)
+
+
+# --- Dep-check helpers --------------------------------------------------
+
+def _requires_binary(name: str) -> Callable[[dict, dict], tuple[bool, str]]:
+    """Skill is satisfied iff binary ``name`` is on PATH (or
+    pre-detected in ``installed_tools``).
+
+    Used by skills that shell out to an external binary
+    (``setup-caliber`` → ``caliber``, ``consultants`` →
+    ``claude-consultants``).
+    """
+    def check(cfg: dict, installed_tools: dict) -> tuple[bool, str]:
+        if installed_tools.get(name):
+            return (True, f"{name} (installed)")
+        if shutil.which(name):
+            return (True, f"{name} (on PATH)")
+        return (False, f"{name} not found")
+
+    check.__claude_hooks_requires_tool__ = name  # type: ignore[attr-defined]
+    return check
+
+
+def _requires_recall_pipeline(cfg: dict, installed_tools: dict) -> tuple[bool, str]:
+    """Skill is satisfied iff at least one memory provider is enabled
+    in cfg.
+
+    The recall pipeline (HyDE + provider fan-out) is what ``/reflect``
+    and ``/consolidate`` operate on. Without any enabled provider
+    they have nothing to reflect on or consolidate.
+    """
+    providers = (cfg.get("providers") or {})
+    enabled = [
+        pname for pname, pcfg in providers.items()
+        if isinstance(pcfg, dict) and pcfg.get("enabled")
+    ]
+    if enabled:
+        return (True, f"recall pipeline ({', '.join(sorted(enabled))})")
+    return (False, "no memory provider enabled")
+
+
+def _requires_episodic_configured(cfg: dict, installed_tools: dict) -> tuple[bool, str]:
+    """Skill is satisfied iff ``cfg.episodic.mode`` is not ``"off"``.
+
+    Both ``client`` and ``server`` modes mean the user has an
+    episodic-memory backend somewhere; the skill queries it. Mode
+    ``"off"`` (or missing block) means no backend → skip.
+    """
+    mode = ((cfg.get("episodic") or {}).get("mode") or "off")
+    if mode != "off":
+        return (True, f"episodic.mode = {mode!r}")
+    return (False, "episodic.mode is 'off'")
+
+
+def _requires_chat_backend(cfg: dict, installed_tools: dict) -> tuple[bool, str]:
+    """Skill is satisfied iff a chat backend is reachable for the
+    LLM-to-LLM advisor (``/get-advice``).
+
+    Acceptable backends:
+      * ``ollama`` binary on PATH (system Ollama, or proxy at 11433),
+      * a ``llamafile://`` chat model registered in
+        ``~/.claude/llamafile-models.json``,
+      * an explicit ``get_advice.backend`` block in cfg
+        (OpenAI-compatible / Anthropic-compatible).
+
+    Order matches preference; first true wins.
+    """
+    if shutil.which("ollama") or installed_tools.get("ollama"):
+        return (True, "ollama on PATH")
+
+    # Llamafile chat models registered host-wide
+    try:
+        reg_path = Path(os.path.expanduser("~/.claude/llamafile-models.json"))
+        if reg_path.exists():
+            reg = json.loads(reg_path.read_text(encoding="utf-8"))
+            models = reg.get("models") or {}
+            if models:
+                names = sorted(models)
+                head = ", ".join(names[:3])
+                tail = f" (+{len(names) - 3} more)" if len(names) > 3 else ""
+                return (True, f"llamafile chat models: {head}{tail}")
+    except (OSError, ValueError):
+        pass
+
+    # Explicit cfg-level backend (OpenAI / Anthropic / etc)
+    backend = ((cfg.get("get_advice") or {}).get("backend") or "")
+    if backend:
+        return (True, f"get_advice.backend = {backend!r}")
+
+    return (False, "no chat backend (ollama / llamafile / get_advice.backend)")
+
+
+def _requires_lsp_engine(cfg: dict, installed_tools: dict) -> tuple[bool, str]:
+    """Skill is satisfied iff the LSP engine is at least *configured*
+    in cfg (even if disabled).
+
+    The skill (``/setup-compile-aware``) helps the user populate the
+    engine's per-project files; needing the engine to be currently
+    enabled is too strict — the skill's role IS to help enable it.
+    But if the cfg has no ``hooks.lsp_engine`` block at all
+    (pre-v1.9.0 installs that never re-ran install.py to pick up the
+    default), the skill has nothing to point at.
+    """
+    if "lsp_engine" in (cfg.get("hooks") or {}):
+        enabled = bool((cfg["hooks"]["lsp_engine"] or {}).get("enabled"))
+        label = "lsp_engine configured (enabled)" if enabled else \
+                "lsp_engine configured (disabled — skill helps you enable)"
+        return (True, label)
+    return (False, "hooks.lsp_engine block missing from cfg")
+
+
+# --- The manifest --------------------------------------------------------
+
+SKILLS: list[SkillSpec] = [
+    # Built-in skills that operate on the recall pipeline. Useless
+    # without an enabled memory provider.
+    SkillSpec(
+        name="reflect",
+        requires=_requires_recall_pipeline,
+        summary="Memory pattern synthesis over recalled hits.",
+    ),
+    SkillSpec(
+        name="consolidate",
+        requires=_requires_recall_pipeline,
+        summary="Memory cleanup / dedup / merge.",
+    ),
+    # Standalone skills — work on any host regardless of cfg.
+    SkillSpec(
+        name="save-learning",
+        requires=None,
+        summary="Save user instructions as persistent learnings (writes file-based memory).",
+    ),
+    SkillSpec(
+        name="find-skills",
+        requires=None,
+        summary="Discover + install community skills from a public registry.",
+    ),
+    SkillSpec(
+        name="wrapup",
+        requires=None,
+        summary="Session state summary for hand-off / /compact recovery.",
+    ),
+    # Binary-dependent skills.
+    SkillSpec(
+        name="setup-caliber",
+        requires=_requires_binary("caliber"),
+        summary="One-shot Caliber pre-commit hook setup (config sync).",
+    ),
+    SkillSpec(
+        name="consultants",
+        requires=_requires_binary("claude-consultants"),
+        summary="Multi-agent council engine (planner/researcher/critic/synth).",
+    ),
+    # Config-dependent skills.
+    SkillSpec(
+        name="episodic",
+        requires=_requires_episodic_configured,
+        summary="Search past Claude Code sessions via episodic-memory.",
+    ),
+    SkillSpec(
+        name="get-advice",
+        requires=_requires_chat_backend,
+        summary="LLM-to-LLM advisor (uses bin/claude-advisor + a chat backend).",
+    ),
+    SkillSpec(
+        name="setup-compile-aware",
+        requires=_requires_lsp_engine,
+        summary="Configure LSP engine for the project (cclsp.json + compile_aware).",
+    ),
 ]
 
 # Legacy per-verb skill dirs from v1.2 and earlier. Removed
@@ -8169,13 +8471,90 @@ def _ensure_marketplace() -> None:
     print(f"\n       To add marketplace in Claude Code: /plugin marketplace add MadAppGang/claude-code")
 
 
+def _skill_state(
+    spec: SkillSpec,
+    cfg: dict,
+    installed_tools: dict[str, bool],
+    repo_skills_dir: Path,
+    user_skills_dir: Path,
+) -> dict:
+    """Compute the per-skill state used by ``_install_skills`` to pick
+    a prompt shape. Returns a dict with:
+
+    - ``src_exists``: whether the in-repo SKILL.md is present
+    - ``is_installed``: whether the user-scope SKILL.md is present
+    - ``content_changed``: whether repo and user versions differ
+    - ``deps_ok``: bool from ``spec.requires``, or True if standalone
+    - ``dep_label``: human-readable string describing the dep state
+
+    Single-pass state so the prompt-shape selector doesn't re-read
+    SKILL.md or re-run the dep callable multiple times.
+    """
+    src = repo_skills_dir / spec.name
+    dst = user_skills_dir / spec.name
+    src_exists = (src / "SKILL.md").is_file()
+    is_installed = dst.exists() and (dst / "SKILL.md").is_file()
+
+    content_changed = False
+    if src_exists and is_installed:
+        try:
+            src_content = (src / "SKILL.md").read_text(encoding="utf-8")
+            dst_content = (dst / "SKILL.md").read_text(encoding="utf-8")
+            content_changed = (src_content != dst_content)
+        except OSError:
+            content_changed = False
+
+    if spec.requires is None:
+        deps_ok, dep_label = (True, "standalone")
+    else:
+        try:
+            deps_ok, dep_label = spec.requires(cfg, installed_tools)
+        except Exception as exc:  # noqa: BLE001 — never break the installer
+            deps_ok, dep_label = (False, f"dep-check error: {exc}")
+
+    return {
+        "src_exists": src_exists,
+        "is_installed": is_installed,
+        "content_changed": content_changed,
+        "deps_ok": deps_ok,
+        "dep_label": dep_label,
+    }
+
+
 def _install_skills(
+    cfg: dict,
     installed_tools: dict[str, bool],
     *,
     non_interactive: bool,
     dry_run: bool,
 ) -> None:
-    """Copy skills from the repo to ~/.claude/skills/, respecting deps."""
+    """Per-skill opt-in install / keep / remove flow (v1.10.0+).
+
+    Every Claude Code session pays a per-installed-skill description-
+    token cost in its system prompt regardless of whether the skill
+    fires, and Claude Code disables skills above a hard cap. So this
+    installer is built to keep the skill surface deliberately thin:
+
+    - **Skills with unmet deps are NEVER offered.** A warning line
+      surfaces what's missing so the user can install the dep and
+      re-run, but no install prompt for a skill that can't function.
+    - **Skills already installed default to KEEP (Y).** The user
+      opted in once; re-running install.py preserves that choice
+      unless they actively type ``n`` to remove. Content-changed
+      updates ride the same prompt — accepting "keep" means "update".
+    - **Skills not yet installed default to SKIP (N).** True opt-in.
+      Empty newline (scripted-stdin deploys) does not silently grow
+      the surface.
+    - **Skills already installed but deps now missing prompt for
+      REMOVAL with default N.** Destructive ops never auto-fire;
+      the user must consent. Default-N means the skill stays in
+      place (wasting a few description-bytes) until the user comes
+      back to clean up.
+    - **Non-interactive deploys preserve current state.** No
+      prompts → install nothing new, remove nothing existing. The
+      v1.9.x install.py was already this way; v1.10 makes it
+      explicit and consistent.
+    """
     user_skills_dir = Path(os.path.expanduser("~/.claude/skills"))
     repo_skills_dir = HERE / ".claude" / "skills"
 
@@ -8186,8 +8565,7 @@ def _install_skills(
 
     # Legacy cleanup — remove `--variant` dirs from v1.2 and earlier
     # so the slash-command menu doesn't show stale entries after
-    # the v1.3 dispatcher-skill consolidation. Idempotent: no-op on
-    # fresh installs, removes on upgrades, no-op on re-runs.
+    # the v1.3 dispatcher-skill consolidation. Idempotent.
     for legacy in LEGACY_SKILL_DIRS:
         stale = user_skills_dir / legacy
         if stale.exists():
@@ -8195,61 +8573,132 @@ def _install_skills(
             if not dry_run:
                 shutil.rmtree(stale)
 
-    to_install: list[str] = []
-    skipped: list[tuple[str, str]] = []
+    actions_install: list[SkillSpec] = []
+    actions_update: list[SkillSpec] = []
+    actions_remove: list[SkillSpec] = []
+    summary_skipped_blocked: list[tuple[SkillSpec, str]] = []
+    summary_kept: list[SkillSpec] = []
 
-    for skill_name, requires_tool in SKILLS:
-        src = repo_skills_dir / skill_name
-        if not src.exists():
-            continue
-        dst = user_skills_dir / skill_name
-        already = dst.exists() and (dst / "SKILL.md").exists()
-
-        if requires_tool and not installed_tools.get(requires_tool, False):
-            if already:
-                skipped.append((skill_name, f"keeping existing, but {requires_tool} not found"))
-            else:
-                skipped.append((skill_name, f"requires {requires_tool}"))
+    for spec in SKILLS:
+        st = _skill_state(spec, cfg, installed_tools, repo_skills_dir, user_skills_dir)
+        if not st["src_exists"]:
+            # In-repo SKILL.md missing (manifest test would have caught
+            # this in CI; here we just skip the entry rather than crash).
             continue
 
-        if already:
-            # Check if repo version is newer (compare content).
-            src_content = (src / "SKILL.md").read_text(encoding="utf-8")
-            dst_content = (dst / "SKILL.md").read_text(encoding="utf-8")
-            if src_content == dst_content:
-                print(f"  [ok] /{skill_name:20} up to date")
+        # ── Case D: deps not OK + not installed → warn, no prompt
+        if not st["deps_ok"] and not st["is_installed"]:
+            print(f"  [skip] /{spec.name:20} blocked: {st['dep_label']}")
+            summary_skipped_blocked.append((spec, st["dep_label"]))
+            continue
+
+        # ── Case C: deps not OK + installed → prompt for REMOVAL, default N
+        if not st["deps_ok"] and st["is_installed"]:
+            print(f"  [!!]   /{spec.name:20} installed BUT dep missing: {st['dep_label']}")
+            if non_interactive:
+                # Non-interactive never destroys.
+                print(f"         --non-interactive: keeping (re-run interactively to remove)")
+                summary_kept.append(spec)
                 continue
+            ans = input(
+                f"         Remove /{spec.name}? [y/N]: "
+            ).strip().lower()
+            if ans in ("y", "yes"):
+                actions_remove.append(spec)
             else:
-                to_install.append(skill_name)
-                print(f"  [up] /{skill_name:20} will update")
+                print(f"         Kept (use re-run to remove later).")
+                summary_kept.append(spec)
+            continue
+
+        # ── deps OK from here on.
+
+        # ── Case A: deps OK + not installed → prompt INSTALL, default N
+        if not st["is_installed"]:
+            tag = f" — {spec.summary}" if spec.summary else ""
+            print(f"  [new]  /{spec.name:20} available ({st['dep_label']}){tag}")
+            if non_interactive:
+                # Non-interactive never auto-installs new skills (would
+                # silently grow the surface on scripted-stdin deploys).
+                print(f"         --non-interactive: skipping (re-run interactively to install)")
+                continue
+            ans = input(
+                f"         Install /{spec.name}? [y/N]: "
+            ).strip().lower()
+            if ans in ("y", "yes"):
+                actions_install.append(spec)
+            else:
+                print(f"         Skipped.")
+            continue
+
+        # ── Case B: deps OK + installed → prompt KEEP, default Y
+        # (content-changed → action becomes "update"; same prompt)
+        verb = "update available" if st["content_changed"] else "up to date"
+        print(f"  [{('upd' if st['content_changed'] else 'ok ')}]  /{spec.name:20} installed ({verb}; {st['dep_label']})")
+        if non_interactive:
+            # Non-interactive preserves state: keep existing + update
+            # in place if content changed. Both are user-opted-in
+            # already; this isn't a new install or destruction.
+            if st["content_changed"]:
+                actions_update.append(spec)
+            else:
+                summary_kept.append(spec)
+            continue
+        ans = input(
+            f"         Keep /{spec.name}? [Y/n]: "
+        ).strip().lower()
+        if ans in ("n", "no"):
+            actions_remove.append(spec)
         else:
-            to_install.append(skill_name)
-            print(f"  + /{skill_name:20} will install")
+            if st["content_changed"]:
+                actions_update.append(spec)
+            else:
+                summary_kept.append(spec)
 
-    for skill_name, reason in skipped:
-        print(f"  [--] /{skill_name:20} skipped ({reason})")
-
-    if not to_install:
-        if not skipped:
-            print("  All skills up to date.")
-        return
-
-    if not non_interactive:
-        ans = input(f"\n  Install/update {len(to_install)} skill(s)? [Y/n]: ").strip().lower()
-        if ans not in ("", "y", "yes"):
-            print("  Skipped.")
-            return
-
+    # ── Apply ─────────────────────────────────────────────────────
     if dry_run:
-        print(f"  [dry-run] Would install: {', '.join(to_install)}")
+        if actions_install:
+            print(f"\n  [dry-run] Would install: {', '.join(s.name for s in actions_install)}")
+        if actions_update:
+            print(f"  [dry-run] Would update:  {', '.join(s.name for s in actions_update)}")
+        if actions_remove:
+            print(f"  [dry-run] Would remove:  {', '.join(s.name for s in actions_remove)}")
         return
 
-    for skill_name in to_install:
-        src = repo_skills_dir / skill_name
-        dst = user_skills_dir / skill_name
+    for spec in actions_install:
+        src = repo_skills_dir / spec.name
+        dst = user_skills_dir / spec.name
         dst.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src / "SKILL.md", dst / "SKILL.md")
-        print(f"  [ok] /{skill_name} installed")
+        print(f"  [ok] /{spec.name} installed")
+
+    for spec in actions_update:
+        src = repo_skills_dir / spec.name
+        dst = user_skills_dir / spec.name
+        dst.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src / "SKILL.md", dst / "SKILL.md")
+        print(f"  [ok] /{spec.name} updated")
+
+    for spec in actions_remove:
+        dst = user_skills_dir / spec.name
+        if dst.exists():
+            shutil.rmtree(dst)
+            print(f"  [rm] /{spec.name} removed")
+
+    # ── Summary ───────────────────────────────────────────────────
+    total = len(actions_install) + len(actions_update) + len(actions_remove) + len(summary_kept) + len(summary_skipped_blocked)
+    parts = []
+    if actions_install:
+        parts.append(f"{len(actions_install)} installed")
+    if actions_update:
+        parts.append(f"{len(actions_update)} updated")
+    if actions_remove:
+        parts.append(f"{len(actions_remove)} removed")
+    if summary_kept:
+        parts.append(f"{len(summary_kept)} kept")
+    if summary_skipped_blocked:
+        parts.append(f"{len(summary_skipped_blocked)} blocked")
+    if parts:
+        print(f"  Summary: {total} skill(s) — " + ", ".join(parts))
 
 
 def _setup_episodic(cfg: dict, cfg_path: Path, args, *, dry_run: bool) -> None:

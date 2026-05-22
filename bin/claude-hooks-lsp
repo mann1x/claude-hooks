@@ -1,0 +1,30 @@
+#!/usr/bin/env sh
+# claude-hooks-lsp — POSIX entry point for the LSP engine CLI.
+#
+# Usage:
+#     claude-hooks-lsp status --project /path/to/project
+#     claude-hooks-lsp daemon --project /path/to/project [--log-level DEBUG]
+#
+# Companion to the in-process LSP engine wired into the SessionStart /
+# PostToolUse / SessionEnd hooks (v1.9+). This shim is the user-facing
+# CLI: smoke-test ``status``, manual daemon spawn for debugging, etc.
+#
+# It resolves the right Python via the shared ``_resolve_python.sh``
+# helper, which exports ``PYTHONPATH`` so ``python -m claude_hooks.*``
+# resolves regardless of the caller's cwd. Without this shim, users
+# hit ``ModuleNotFoundError: No module named 'claude_hooks'`` (the
+# package is intentionally not pip-installed by default).
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+
+. "$HERE/_resolve_python.sh"
+
+if [ -z "$PY" ]; then
+    echo "claude-hooks-lsp: no python found" >&2
+    echo "  Tried: \$CLAUDE_HOOKS_PY, repo .venv, conda env, system python3." >&2
+    echo "  See bin/_resolve_python.sh for the full probe list." >&2
+    exit 1
+fi
+
+exec "$PY" -m claude_hooks.lsp_engine "$@"

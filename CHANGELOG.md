@@ -16,6 +16,150 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-05-22
+
+MINOR release. Four interlocking fixes around the LSP engine + the
+skill installer. Cleans up a class of silent failures the hooks were
+papering over with soft-fail behavior, and reshapes the skill
+installer so it stops growing the per-session context cost
+unintentionally.
+
+Test suite: 4071 passed / 136 skipped on Python 3.11 (+61 vs v1.9.4).
+
+### Fixed — LSP engine daemon silently broken on Windows since v1.9.0 (commit `d8f91e1`)
+
+`claude_hooks/lsp_engine/daemon.py:__init__` hand-built
+`self._socket_path = self._dir / "daemon.sock"` — a filesystem path
+that Windows rejects as a named-pipe name (`CreateNamedPipe` →
+`WinError 123, invalid filename syntax`). The daemon crashed on
+every spawn since v1.9.0, but the hooks soft-fail to `None` on
+daemon-spawn failure, so the symptom was "no LSP diagnostics ever
+appear", not a visible error.
+
+The fix is one line — route through `socket_path_for(self._project_root,
+base=state_base)`, the helper that already did the platform branch
+correctly. Regression test in `tests/test_lsp_engine_windows_dispatch.py`
+guards via source inspection (can't full-init a Daemon under a
+mocked `os.name='nt'` on Linux because pathlib refuses).
+
+### Fixed — POSIX bin shims fail with ModuleNotFoundError outside repo (commit `4c82243`)
+
+Same root cause as the v1.9.x LSP-engine smoke-test failure but
+broader: every POSIX bin/ shim that did `exec "$PY" -m
+claude_hooks.<module>` worked only when invoked from inside the
+repo dir, because `claude_hooks` was never `pip install -e .`'d
+into the conda env. `.cmd` shims worked because they did
+`cd /d "%REPO%"`. POSIX shims didn't.
+
+Fix: one block in `bin/_resolve_python.sh` exports
+`PYTHONPATH="$REPO:$PYTHONPATH"` so every POSIX shim that sources
+this file (which is every POSIX shim) finds the package regardless
+of caller cwd. Verified: `cd / && claude-hooks-daemon-ctl status`
+now responds.
+
+### Added — `bin/claude-hooks-lsp` shim + skill smoke-test rewrite
+
+`bin/claude-hooks-lsp` (POSIX) and `bin/claude-hooks-lsp.cmd` (Windows)
+expose the LSP engine CLI without requiring repo-cwd activation.
+The `setup-compile-aware` skill's smoke-test instruction now uses
+the shim instead of the bare `python -m claude_hooks.lsp_engine`
+form that was always broken for shell users. Both shims are
+picked up automatically by `install.py`'s data-driven
+`_shim_names_to_install` walk.
+
+Skill content also trimmed: 18,505 bytes → 11,626 bytes (-37%).
+Strangers example folded into the audit example as a one-line
+aside, intro Phase 0/Phase 1 table collapsed, Step 0.6 ASCII art
+compressed, Phase 0 init + audit examples merged.
+
+### Added — install.py opt-in `pip install -e .` (commit `3f4819b`)
+
+`_offer_pip_install_editable` runs from `main()` after
+`_check_conda_env`. Probes `pip show claude-hooks`; if missing,
+prompts `[Y/n]` to install the package editable into the env.
+Closes the architectural root cause: bin shims work via the
+v1.10 PYTHONPATH fix, but env-activated `python -m claude_hooks.*`
++ IDE imports + interactive `pytest -v` still benefit from a real
+pip-install. Non-interactive deploys skip (env mutation requires
+explicit opt-in).
+
+12 tests in `tests/test_install_pip_editable.py` cover the probe,
+the four prompt branches, dry-run, and pip-failure stderr surfacing.
+
+### Changed — install.py skill installer is opt-in + dependency-aware (commit `ae9f545`)
+
+The user articulated the principle that drove this:
+
+> "skills are burning context at every turn. claude code will
+> disable those in excess, this is a terrible problem already.
+> keeping the surface of the skills thin, in numbers and weight,
+> is the principle. unfortunately."
+
+Every installed skill costs description-token bytes in the system
+prompt of EVERY Claude Code session whether the skill ever fires or
+not. Claude Code has a hard cap on active skills and starts
+disabling above it. So:
+
+#### SKILLS reshape
+
+The legacy `[(name, requires_tool)]` tuple list is now a list of
+`SkillSpec(name, requires, summary)` dataclasses. `requires` is
+an optional `(cfg, installed_tools) → (deps_ok, dep_label)`
+callable. Five built-in dep-checkers:
+
+- `_requires_binary(name)` — factory for binary-on-PATH checks
+  (`setup-caliber`, `consultants`).
+- `_requires_recall_pipeline` — at least one memory provider
+  enabled in cfg (`reflect`, `consolidate`).
+- `_requires_episodic_configured` — `cfg.episodic.mode != "off"`
+  (`episodic`).
+- `_requires_chat_backend` — ollama on PATH, llamafile model
+  registered, or `cfg.get_advice.backend` configured (`get-advice`).
+- `_requires_lsp_engine` — `hooks.lsp_engine` block present
+  (`setup-compile-aware`).
+
+`SkillSpec.requires_tool` back-compat property reads the binary
+name out of `_requires_binary` closures so v1.9.3 manifest tests
+keep working unchanged.
+
+#### `_install_skills` flow — four cases
+
+| Case | Deps ok | Installed | Prompt | Default |
+|---|---|---|---|---|
+| A | ✓ | ✗ | `Install /<name>? [y/N]` | **N** (true opt-in) |
+| B | ✓ | ✓ | `Keep /<name>? [Y/n]` | **Y** (preserve current state; content-changed → "update" on Y) |
+| C | ✗ | ✓ | `Remove /<name>? [y/N]` | **N** (destruction always needs explicit consent) |
+| D | ✗ | ✗ | _(no prompt — warning only)_ | n/a (blocked skill the user doesn't have shouldn't waste a prompt) |
+
+Non-interactive deploys preserve current state strictly: no new
+installs, no destructions. Content-changed updates still land
+(the user opted in once; an update on re-run is implicit consent).
+
+### Test coverage
+
+| File | Tests | Purpose |
+|---|---:|---|
+| `tests/test_lsp_engine_windows_dispatch.py` | +2 | Daemon Windows pipe-path source-inspection guard + POSIX init smoke |
+| `tests/test_install_pip_editable.py` | +12 | Pip-editable opt-in flow |
+| `tests/test_install_skills_optin.py` | +41 | Five dep-check helpers + `_skill_state` + cases A/B/C/D + non-interactive + dry-run + summary line |
+| `tests/test_install_skills_manifest.py` | refactored | SkillSpec shape + dep-check return shape |
+| `tests/test_install_skills_legacy_cleanup.py` | refactored | New `_install_skills(cfg, ...)` signature |
+
+### Upgrade notes
+
+Re-run `python install.py` on every host. The new skill installer
+prompts per skill — accept defaults (`Y` for installed, `N` for
+new, `N` for blocked-removal) to preserve current state, or pick
+deliberately. Non-interactive scripted deploys will not change
+which skills are installed; they only land content updates and the
+pip-editable install.
+
+The `bin/_resolve_python.sh` PYTHONPATH export is transparent — no
+config or workflow change needed. The Windows LSP fix lands
+automatically on the next session that spawns a daemon (existing
+daemons that never started won't suddenly appear; the spawn just
+finally succeeds).
+
 ## [1.9.4] — 2026-05-22
 
 PATCH release shipping a meaningful expansion of the
@@ -6876,7 +7020,8 @@ prior tag. From any unreleased checkout, just `git pull` on `main`
 once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
-[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.9.4...HEAD
+[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.10.0...HEAD
+[1.10.0]: https://github.com/mann1x/claude-hooks/compare/v1.9.4...v1.10.0
 [1.9.4]: https://github.com/mann1x/claude-hooks/compare/v1.9.3...v1.9.4
 [1.9.3]: https://github.com/mann1x/claude-hooks/compare/v1.9.2...v1.9.3
 [1.9.2]: https://github.com/mann1x/claude-hooks/compare/v1.9.1...v1.9.2

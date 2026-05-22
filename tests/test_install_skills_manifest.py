@@ -50,8 +50,9 @@ def _on_disk_skill_names() -> set[str]:
 
 def _enumerated_skill_names() -> set[str]:
     """Return the set of skill names enumerated in
-    ``install.SKILLS``."""
-    return {name for name, _requires_tool in install.SKILLS}
+    ``install.SKILLS``. v1.10.0+: entries are ``SkillSpec`` dataclass
+    instances, not tuples."""
+    return {spec.name for spec in install.SKILLS}
 
 
 class TestSkillsManifestCompleteness:
@@ -98,33 +99,53 @@ class TestSkillsManifestCompleteness:
             "hosts. Restore the ('setup-compile-aware', None) entry."
         )
 
-    def test_skills_manifest_is_a_list_of_pairs(self):
-        """Structural shape guard. _install_skills unpacks each
-        entry as ``(skill_name, requires_tool)``; anything else
-        would raise at install time."""
+    def test_skills_manifest_is_a_list_of_skillspec(self):
+        """Structural shape guard. v1.10.0+ uses ``SkillSpec``
+        dataclass entries with ``name``, optional ``requires``
+        callable, and a ``summary`` string."""
         for entry in install.SKILLS:
-            assert isinstance(entry, tuple), (
-                f"SKILLS entry is not a tuple: {entry!r}"
+            assert isinstance(entry, install.SkillSpec), (
+                f"SKILLS entry is not a SkillSpec: {entry!r}"
             )
-            assert len(entry) == 2, (
-                f"SKILLS entry has wrong arity: {entry!r}"
-            )
-            name, requires_tool = entry
-            assert isinstance(name, str) and name, (
+            assert isinstance(entry.name, str) and entry.name, (
                 f"SKILLS entry has empty/non-str name: {entry!r}"
             )
-            assert requires_tool is None or isinstance(requires_tool, str), (
-                f"SKILLS requires_tool must be None or str: {entry!r}"
+            assert entry.requires is None or callable(entry.requires), (
+                f"SKILLS requires must be None or callable: {entry!r}"
+            )
+            assert isinstance(entry.summary, str), (
+                f"SKILLS summary must be a str (use '' if none): {entry!r}"
             )
 
     def test_skills_manifest_has_no_duplicates(self):
         """A duplicate would cause _install_skills to copy the same
-        skill twice and confuse the 'install N skills' counter."""
-        names = [name for name, _ in install.SKILLS]
+        skill twice and confuse the install counter."""
+        names = [spec.name for spec in install.SKILLS]
         duplicates = {n for n in names if names.count(n) > 1}
         assert not duplicates, (
             f"Duplicate skill names in install.SKILLS: {sorted(duplicates)}"
         )
+
+    def test_every_dep_check_returns_tuple_bool_str(self):
+        """v1.10.0+: each non-None ``requires`` must return
+        ``(deps_ok: bool, dep_label: str)`` when called with an empty
+        cfg + empty installed_tools dict. The _install_skills flow
+        unpacks the tuple; a wrong return shape would crash the
+        installer."""
+        for spec in install.SKILLS:
+            if spec.requires is None:
+                continue
+            result = spec.requires({}, {})
+            assert isinstance(result, tuple) and len(result) == 2, (
+                f"/{spec.name} requires() returned non-tuple: {result!r}"
+            )
+            deps_ok, dep_label = result
+            assert isinstance(deps_ok, bool), (
+                f"/{spec.name} requires() returned non-bool deps_ok: {deps_ok!r}"
+            )
+            assert isinstance(dep_label, str) and dep_label, (
+                f"/{spec.name} requires() returned empty dep_label: {dep_label!r}"
+            )
 
 
 if __name__ == "__main__":
