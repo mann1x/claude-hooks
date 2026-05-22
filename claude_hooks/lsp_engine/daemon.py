@@ -124,7 +124,15 @@ class Daemon:
     ) -> None:
         self._project_root = Path(project_root).resolve()
         self._dir = project_dir(self._project_root, base=state_base)
-        self._socket_path = self._dir / "daemon.sock"
+        # IPC address: filesystem socket path on POSIX, ``\\.\pipe\<name>``
+        # on Windows. Going through ``socket_path_for`` is load-bearing —
+        # building it manually as ``self._dir / "daemon.sock"`` produces a
+        # filesystem path that Windows rejects as a named-pipe name
+        # (``WinError 123``), which silently broke the LSP engine on
+        # Windows from v1.9.0 → v1.9.4. The ``daemon.lock`` and
+        # ``project`` hint files still live on disk under ``self._dir``;
+        # only the live IPC endpoint switches namespace per platform.
+        self._socket_path = socket_path_for(self._project_root, base=state_base)
         self._lock_path = self._dir / "daemon.lock"
         self._project_hint_path = self._dir / "project"
 

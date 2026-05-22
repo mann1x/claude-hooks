@@ -82,6 +82,80 @@ class TestAddressHelpers(unittest.TestCase):
             self.assertIsInstance(addr, str)
             self.assertTrue(addr.startswith("\\\\.\\pipe\\"))
 
+    def test_daemon_init_uses_socket_path_for_helper(self) -> None:
+        """Source-inspection regression test for the v1.9.0 → v1.9.4
+        Windows engine crash (#290).
+
+        ``Daemon.__init__`` previously hand-built ``self._socket_path
+        = self._dir / "daemon.sock"`` — a filesystem path that Windows
+        rejects as a named-pipe name (WinError 123 — invalid filename
+        syntax), silently crashing the daemon on every Windows spawn
+        since v1.9.0. The fix routes through ``socket_path_for()`` so
+        Windows gets a ``\\\\.\\pipe\\<digest>`` address.
+
+        We can't instantiate a ``Daemon`` under a mocked
+        ``os.name='nt'`` on Linux (pathlib's ``Path()`` constructor
+        rejects ``WindowsPath`` on a POSIX host inside ``__init__``),
+        so this test inspects the source of ``Daemon.__init__`` directly
+        — the bug WAS a literal one-line shape, and that's the right
+        granularity to lock down here. The
+        ``test_socket_path_for_returns_pipe_on_windows`` test above
+        already covers the helper's correctness; this test only locks
+        down that the helper is the path the daemon takes.
+
+        End-to-end Windows verification is the matrix-CI / pandorum
+        live-run job, not this test.
+        """
+        import inspect
+
+        from claude_hooks.lsp_engine.daemon import Daemon
+
+        src = inspect.getsource(Daemon.__init__)
+
+        # The new shape MUST be present.
+        self.assertIn(
+            "socket_path_for(self._project_root", src,
+            "Daemon.__init__ does not call socket_path_for() for "
+            "_socket_path — the v1.9.0 Windows pipe-path bug is back. "
+            "Use socket_path_for(self._project_root, base=state_base).",
+        )
+
+        # The old buggy assignment MUST NOT be present. (Match the
+        # assignment shape specifically — the docstring on the fix
+        # references the buggy literal in prose for context, which
+        # would false-positive a substring match.)
+        self.assertNotIn(
+            'self._socket_path = self._dir / "daemon.sock"', src,
+            "Daemon.__init__ still hand-builds _socket_path as "
+            "<dir>/daemon.sock. On Windows this is rejected by "
+            "CreateNamedPipe with WinError 123, crashing the daemon "
+            "on every spawn (silently — hooks soft-fail to None). "
+            "Use socket_path_for() instead.",
+        )
+
+    def test_daemon_init_uses_socket_path_for_on_posix(self) -> None:
+        """The symmetric guard: on POSIX, ``_socket_path`` is a
+        filesystem ``Path`` ending in ``daemon.sock`` (existing
+        behavior). Confirms the fix doesn't regress POSIX."""
+        from claude_hooks.lsp_engine.daemon import Daemon
+
+        if os.name == "nt":
+            self.skipTest("POSIX-direction assertion; see "
+                          "test_socket_path_for_returns_path_on_posix.")
+
+        with TemporaryDirectory() as tmp_project, TemporaryDirectory() as tmp_state:
+            d = Daemon(
+                project_root=tmp_project,
+                servers=[],
+                state_base=Path(tmp_state),
+            )
+            self.assertIsInstance(d._socket_path, Path)
+            self.assertEqual(d._socket_path.name, "daemon.sock")
+            self.assertTrue(
+                str(d._socket_path).startswith(tmp_state),
+                f"_socket_path is not under state_base: {d._socket_path}",
+            )
+
     @unittest.skipIf(
         os.name == "nt",
         "POSIX-direction assertion: patching os.name='posix' on a Windows host "
