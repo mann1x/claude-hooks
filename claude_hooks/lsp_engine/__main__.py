@@ -349,6 +349,49 @@ def _run_stop(args: argparse.Namespace) -> int:
     return 0 if ok else 2
 
 
+def _find_matching_state_dirs(
+    project_root: str, state_base: Optional[Path] = None,
+) -> list[tuple[Path, str]]:
+    """Return ``(dir, hint_content)`` for every state dir whose
+    ``project`` hint file normcase-matches ``project_root``.
+
+    Used by ``cleanup`` / ``restart`` to reap stale dirs left over
+    from pre-case-norm versions of the daemon. A given project can
+    appear under multiple state-dir hashes if the same source path
+    was once hashed without case normalization (so ``c:\\x`` and
+    ``C:\\X`` produced different dirs even though they're the same
+    project on Windows). The canonical (post-v1.10.3) hash is the
+    only one new daemons land in; the legacy ones become orphans
+    until reaped.
+
+    The match uses ``os.path.normcase`` so case-divergent hint
+    files on Windows still group together, and ``str.rstrip()`` so
+    a trailing newline in the hint file doesn't defeat the
+    comparison.
+    """
+    base = state_base or (Path.home() / ".claude" / "lsp-engine")
+    if not base.is_dir():
+        return []
+    target_key = os.path.normcase(str(Path(project_root).resolve()))
+    matches: list[tuple[Path, str]] = []
+    for child in base.iterdir():
+        if not child.is_dir():
+            continue
+        hint_file = child / "project"
+        if not hint_file.is_file():
+            continue
+        try:
+            hint = hint_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if not hint:
+            continue
+        hint_key = os.path.normcase(hint)
+        if hint_key == target_key:
+            matches.append((child, hint))
+    return matches
+
+
 def _run_cleanup(args: argparse.Namespace) -> int:
     """Remove the per-project state dir when no live daemon holds it.
 
@@ -371,11 +414,54 @@ def _run_cleanup(args: argparse.Namespace) -> int:
     sock = socket_path_for(args.project, base=state_base)
 
     if not pdir.exists():
-        print(json.dumps({
+        # v1.10.6: the canonical dir is gone, but stale dirs (same
+        # project hint, non-canonical hash) might still remain.
+        # Reap them under --force so a cleanup-after-restart still
+        # tidies up orphans. Skip dirs whose lock-file PID is alive.
+        stale_only_reaped: list[str] = []
+        stale_only_skipped: list[dict] = []
+        if args.force:
+            for stale_dir, stale_hint in _find_matching_state_dirs(
+                args.project, state_base=state_base,
+            ):
+                if stale_dir == pdir:
+                    continue
+                stale_lock_file = stale_dir / "daemon.lock"
+                stale_pid = None
+                if stale_lock_file.is_file():
+                    try:
+                        first = stale_lock_file.read_text(
+                            encoding="ascii",
+                        ).splitlines()[0]
+                        stale_pid = int(first.strip())
+                    except (ValueError, IndexError, OSError):
+                        stale_pid = None
+                if stale_pid is not None and pid_is_alive(stale_pid):
+                    stale_only_skipped.append({
+                        "dir": str(stale_dir),
+                        "pid": stale_pid,
+                        "hint": stale_hint,
+                        "reason": "live daemon — stop it first",
+                    })
+                    continue
+                shutil.rmtree(stale_dir, ignore_errors=True)
+                if not stale_dir.exists():
+                    stale_only_reaped.append(str(stale_dir))
+                else:
+                    stale_only_skipped.append({
+                        "dir": str(stale_dir),
+                        "reason": "rmtree could not remove all files",
+                    })
+        payload = {
             "removed": False,
             "reason": "state dir already absent",
             "dir": str(pdir),
-        }))
+        }
+        if stale_only_reaped:
+            payload["stale_reaped"] = stale_only_reaped
+        if stale_only_skipped:
+            payload["stale_skipped"] = stale_only_skipped
+        print(json.dumps(payload))
         return 0
 
     live_daemon = (
@@ -417,11 +503,75 @@ def _run_cleanup(args: argparse.Namespace) -> int:
         }))
         return 2
 
-    print(json.dumps({
+    # v1.10.6: also reap stale state dirs whose ``project`` hint
+    # file points at the same project but lives under a non-
+    # canonical hash. These are leftovers from pre-v1.10.3
+    # daemons whose hash function wasn't case-normalized, so
+    # ``c:\X`` and ``C:\X`` produced different state dirs even
+    # though they're the same project. New daemons land only in
+    # the canonical-hash dir; the legacy ones become orphans
+    # until reaped. ``--force`` is required for stale reaping
+    # because removing a state dir is destructive and we don't
+    # want a default-cleanup walk to nuke dirs the user may want
+    # to inspect.
+    stale_reaped: list[str] = []
+    stale_skipped: list[dict] = []
+    if args.force:
+        for stale_dir, stale_hint in _find_matching_state_dirs(
+            args.project, state_base=state_base,
+        ):
+            # Skip the canonical dir we already removed (or never
+            # existed). Path equality is the right check here —
+            # both come off the same Path.home() / base / hash.
+            if stale_dir == pdir:
+                continue
+            # Liveness check per stale dir: don't touch one with a
+            # live daemon, even under --force, since that's almost
+            # certainly user-meaningful (running daemon at the old
+            # hash means a session is talking to it).
+            stale_lock_file = stale_dir / "daemon.lock"
+            stale_pid = None
+            if stale_lock_file.is_file():
+                try:
+                    first = stale_lock_file.read_text(
+                        encoding="ascii"
+                    ).splitlines()[0]
+                    stale_pid = int(first.strip())
+                except (ValueError, IndexError, OSError):
+                    stale_pid = None
+            if stale_pid is not None and pid_is_alive(stale_pid):
+                stale_skipped.append({
+                    "dir": str(stale_dir),
+                    "pid": stale_pid,
+                    "hint": stale_hint,
+                    "reason": "live daemon — stop it first",
+                })
+                continue
+            try:
+                shutil.rmtree(stale_dir, ignore_errors=True)
+                if not stale_dir.exists():
+                    stale_reaped.append(str(stale_dir))
+                else:
+                    stale_skipped.append({
+                        "dir": str(stale_dir),
+                        "reason": "rmtree could not remove all files",
+                    })
+            except OSError as e:
+                stale_skipped.append({
+                    "dir": str(stale_dir),
+                    "reason": f"{type(e).__name__}: {e}",
+                })
+
+    payload = {
         "removed": True,
         "dir": str(pdir),
         "forced": bool(args.force) and live_daemon,
-    }))
+    }
+    if stale_reaped:
+        payload["stale_reaped"] = stale_reaped
+    if stale_skipped:
+        payload["stale_skipped"] = stale_skipped
+    print(json.dumps(payload))
     return 0
 
 

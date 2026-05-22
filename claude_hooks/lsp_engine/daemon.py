@@ -365,17 +365,42 @@ class Daemon:
 
     # ─── lock file (POSIX flock / Windows msvcrt.locking) ────────────
 
+    # Byte offset of the Windows exclusion lock — well past any
+    # plausible PID + timestamp payload so other processes can
+    # ``read_text()`` the lock file without hitting the lock. See
+    # :func:`_acquire_lock_file` for the gory rationale.
+    _WIN_LOCK_OFFSET = 4096
+
     def _acquire_lock_file(self) -> None:
         fd = os.open(str(self._lock_path), os.O_RDWR | os.O_CREAT, 0o600)
         try:
             if os.name == "nt":
-                # ``msvcrt.locking`` locks ``length`` bytes from the
-                # current file pointer. We lock the first byte
-                # (``length=1``) which is enough to mark the file as
-                # held — Windows file locks are advisory across
-                # processes the same way ``flock`` is.
+                # ``msvcrt.locking`` (LK_NBLCK) is exclusive at the
+                # byte-range level — ANY other process trying to
+                # read the locked bytes hits ERROR_LOCK_VIOLATION
+                # ("Device or resource busy"). Pre-v1.10.6 we locked
+                # byte 0, exactly where the PID is written, so the
+                # ``daemon_pid()`` reader (and any operator running
+                # ``type daemon.lock``) saw EBUSY. The fix: lock a
+                # byte FAR past the payload — Windows lets you lock
+                # bytes beyond EOF (the lock is a reservation, no
+                # underlying file growth required). Other processes
+                # reading bytes 0..N where N << ``_WIN_LOCK_OFFSET``
+                # don't conflict with the lock at byte 4096.
+                #
+                # This obsoletes the v1.10.4 workaround of stuffing
+                # ``os.getpid()`` into the daemon's IPC ``status``
+                # response — we keep that workaround for backwards
+                # compatibility (downstream consumers may rely on
+                # it), but the lock file is now the authoritative
+                # PID source again.
+                os.lseek(fd, self._WIN_LOCK_OFFSET, os.SEEK_SET)
                 msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)  # type: ignore[union-attr]
+                os.lseek(fd, 0, os.SEEK_SET)  # reset for the upcoming write
             else:
+                # POSIX ``flock`` is whole-file advisory and doesn't
+                # block reads — ``daemon_pid()`` works without
+                # special handling.
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[union-attr]
         except OSError as e:
             os.close(fd)
@@ -401,10 +426,13 @@ class Daemon:
             return
         try:
             if os.name == "nt":
-                # Seek to 0 — ``msvcrt.locking`` operates from the
-                # current file pointer, and we wrote past it after
-                # acquiring.
-                os.lseek(self._lock_fd, 0, os.SEEK_SET)
+                # Mirror the acquire-time offset: unlock the same
+                # byte we locked. Pre-v1.10.6 we unlocked at 0;
+                # that's the wrong byte now and would leak the
+                # lock until process exit (CRT cleans up on close,
+                # so user-visible behaviour was fine, but explicit
+                # unlock is hygienic).
+                os.lseek(self._lock_fd, self._WIN_LOCK_OFFSET, os.SEEK_SET)
                 msvcrt.locking(self._lock_fd, msvcrt.LK_UNLCK, 1)  # type: ignore[union-attr]
             else:
                 fcntl.flock(self._lock_fd, fcntl.LOCK_UN)  # type: ignore[union-attr]
