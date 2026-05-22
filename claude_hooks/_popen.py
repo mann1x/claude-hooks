@@ -231,3 +231,51 @@ def windowless_python_executable() -> str:
     # for parity with install.find_conda_env_pythonw's layout 2.)
 
     return sys.executable
+
+
+def windowless_python_path(python_exe: str) -> str:
+    """Rewrite a *configured* Python interpreter path so daemon spawns
+    don't pop a visible console window on Windows.
+
+    Sibling of :func:`windowless_python_executable`. The difference:
+    that helper resolves against ``sys.executable`` (the *current*
+    interpreter), this one resolves against an arbitrary registered
+    path — used by spawn sites that read a Python interpreter out of
+    ``config/claude-hooks.json`` (the consultants forwarder's
+    ``engine_python``, future per-env CLIs, etc).
+
+    Same rewrite rules as the sibling helper: on Windows, if the path
+    ends in ``python.exe`` and a ``pythonw.exe`` exists alongside it,
+    return that instead. Otherwise pass through unchanged. POSIX always
+    passes through.
+
+    Surfaced 2026-05-22 on pandorum: the consultants engine subprocess
+    spawned by ``consultants_forwarder.EngineManager._ensure_engine``
+    inherits ``engine_python`` from config — installs done by older
+    install.py versions (pre-v1.8.1) registered ``python.exe`` there,
+    so the engine flashed a visible console window every cold start
+    even though ``CREATE_NO_WINDOW | DETACHED_PROCESS`` was set on the
+    Popen call. (Python self-allocates a console for console-subsystem
+    binaries at interpreter startup, before the flags can take effect.)
+
+    Empty / missing / non-Windows inputs return unchanged, so the
+    helper is safe to apply unconditionally at every spawn site.
+    """
+    if os.name != "nt" or not python_exe:
+        return python_exe
+
+    # Use os.path string ops so the helper stays callable from POSIX
+    # tests that patch ``os.name = "nt"`` — instantiating
+    # ``pathlib.WindowsPath`` on POSIX raises NotImplementedError.
+    base = os.path.basename(python_exe).lower()
+    if base == "pythonw.exe":
+        return python_exe
+    if base != "python.exe":
+        # Custom interpreter name; we don't know the windowless variant.
+        return python_exe
+
+    parent = os.path.dirname(python_exe)
+    pyw = os.path.join(parent, "pythonw.exe") if parent else "pythonw.exe"
+    if os.path.isfile(pyw):
+        return pyw
+    return python_exe
