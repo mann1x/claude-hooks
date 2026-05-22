@@ -5670,6 +5670,111 @@ def _check_conda_env(*, non_interactive: bool, dry_run: bool) -> None:
         print(f"Hook runtime:   system python3")
 
 
+def _is_claude_hooks_pip_installed(py_path: Path) -> bool:
+    """Probe whether the ``claude-hooks`` package is pip-installed in
+    the env owning ``py_path``. Returns True only if ``pip show`` exits
+    cleanly with a package record.
+
+    Used by ``_offer_pip_install_editable`` to skip the prompt when
+    the package is already importable from the env's site-packages —
+    a fresh ``pip install -e .`` would re-install identical state.
+    """
+    if not py_path.exists():
+        return False
+    try:
+        rc = subprocess.run(
+            [str(py_path), "-m", "pip", "show", "claude-hooks"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return rc.returncode == 0
+
+
+def _offer_pip_install_editable(
+    *, non_interactive: bool, dry_run: bool,
+) -> None:
+    """Offer to ``pip install -e .`` the claude-hooks package into
+    the conda env's site-packages.
+
+    **Why this is opt-in, not mandatory.** The POSIX bin shims work
+    without pip-install because ``bin/_resolve_python.sh`` exports
+    ``PYTHONPATH=$REPO`` (v1.10.0+). The hooks themselves work because
+    ``bin/claude-hook`` invokes ``$PY $REPO/run.py`` and the script's
+    dir lands on ``sys.path[0]`` automatically. Pip-install is for
+    the case where the user activates the conda env and types
+    ``python -m claude_hooks.<module>`` directly — without it, that
+    invocation fails with ``ModuleNotFoundError``. Also useful for
+    IDE / tool integrations that import claude_hooks programmatically.
+
+    Non-interactive deploys skip the offer (mutating the conda env is
+    a destructive-ish operation; the user should opt in once). On
+    re-runs, the probe at the top short-circuits when already
+    installed, so accepting once is enough.
+    """
+    conda_py = find_conda_env_python()
+    if not conda_py.exists():
+        # No conda env to install into — skip silently. The earlier
+        # ``_check_conda_env`` will have already surfaced the
+        # "Hook runtime: system python3" line.
+        return
+
+    if _is_claude_hooks_pip_installed(conda_py):
+        print(f"\n==> Package: claude-hooks already pip-installed in conda env")
+        return
+
+    print(f"\n==> Package: claude-hooks NOT pip-installed in conda env")
+    print(f"    Env python: {conda_py}")
+    print(f"    Repo:       {HERE}")
+    print(f"    Without this, ``python -m claude_hooks.<module>`` from a")
+    print(f"    manually-activated env fails. The bin/ shims work either")
+    print(f"    way (PYTHONPATH via _resolve_python.sh in v1.10.0+); this")
+    print(f"    is polish — useful for direct env-activated invocations")
+    print(f"    and IDE / tool integrations.")
+
+    if non_interactive:
+        print(f"    --non-interactive: skipping pip install -e .")
+        print(f"    Run install.py interactively to opt in, or:")
+        print(f"      {conda_py} -m pip install -e {HERE}")
+        return
+
+    ans = input("    pip install -e . into the conda env now? [Y/n]: ").strip().lower()
+    if ans not in ("", "y", "yes"):
+        print("    Skipped. Re-run install.py to opt in later.")
+        return
+
+    if dry_run:
+        print(f"    [dry-run] Would run: {conda_py} -m pip install -e {HERE}")
+        return
+
+    print(f"    Running: {conda_py} -m pip install -e {HERE}")
+    try:
+        rc = subprocess.run(
+            [str(conda_py), "-m", "pip", "install", "-e", str(HERE)],
+            capture_output=True, text=True, timeout=300,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        print(f"    [!!] pip install failed to run: {exc}")
+        return
+
+    if rc.returncode == 0:
+        print(f"    [ok] claude-hooks pip-installed into {conda_py.parent.parent.name}")
+        # Surface a brief summary line if pip emitted one — useful for
+        # confirming the editable install resolved the right setup.py.
+        for line in (rc.stdout or "").splitlines():
+            if "Successfully installed" in line or "claude-hooks" in line.lower():
+                print(f"    {line.strip()}")
+                break
+    else:
+        print(f"    [!!] pip install -e . failed (exit {rc.returncode}):")
+        tail = (rc.stderr or rc.stdout or "").splitlines()[-5:]
+        for line in tail:
+            print(f"      {line}")
+        print(f"    The shims and hooks still work without this — pip-install")
+        print(f"    is polish, not blocking. You can retry manually:")
+        print(f"      {conda_py} -m pip install -e {HERE}")
+
+
 CONSULTANTS_ENV_NAME = "claude-hooks-consultants"
 
 
@@ -7352,6 +7457,9 @@ def main() -> int:
     print("==> claude-hooks installer\n")
 
     _check_conda_env(non_interactive=args.non_interactive, dry_run=args.dry_run)
+    _offer_pip_install_editable(
+        non_interactive=args.non_interactive, dry_run=args.dry_run,
+    )
 
     cfg_path = Path(args.config) if args.config else default_config_path()
     print(f"Repo:           {HERE}")
