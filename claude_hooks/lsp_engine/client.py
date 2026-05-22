@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from claude_hooks._popen import windowless_python_executable
 from claude_hooks.lsp_engine.daemon import (
     lock_path_for,
     socket_path_for,
@@ -189,10 +190,13 @@ def _spawn_daemon(
       cascade.
     - Windows: ``DETACHED_PROCESS | CREATE_NO_WINDOW`` flags so the
       daemon doesn't inherit the parent's console (no ``cmd.exe``
-      flash, no shutdown-on-parent-exit).
+      flash, no shutdown-on-parent-exit) **plus** ``pythonw.exe`` so
+      the long-lived child doesn't auto-allocate one at interpreter
+      startup (v1.10.1 fix — see :func:`windowless_python_executable`
+      for the gory details on why the flags alone aren't enough).
     """
     cmd = [
-        sys.executable,
+        windowless_python_executable(),
         "-m",
         "claude_hooks.lsp_engine",
         "daemon",

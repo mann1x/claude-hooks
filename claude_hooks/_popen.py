@@ -21,10 +21,10 @@ should import :func:`detach_kwargs` rather than re-roll the
 
 Example::
 
-    from claude_hooks._popen import detach_kwargs
+    from claude_hooks._popen import detach_kwargs, windowless_python_executable
 
     proc = subprocess.Popen(
-        argv,
+        [windowless_python_executable(), "-m", "claude_hooks.some_daemon"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         **detach_kwargs(),
@@ -34,12 +34,24 @@ Example::
 caller decides what to do with the child's pipes. It also does not
 override ``cwd`` or ``env``; callers compose those as they always
 have.
+
+v1.10.1 adds :func:`windowless_python_executable` — a sibling helper
+that swaps ``python.exe`` (console-subsystem) for ``pythonw.exe``
+(windows-subsystem) when spawning Python children on Windows.
+``detach_kwargs()`` alone is **not enough** for Python children:
+``python.exe`` can force-allocate a console at interpreter startup
+even with ``CREATE_NO_WINDOW | DETACHED_PROCESS`` set. Combining
+both helpers gives the same windowless-spawn guarantee that the
+Windows scheduled tasks (registered via ``install.find_conda_env_
+pythonw``) get for ``claude-hooks-daemon`` / proxy / forwarder.
 """
 
 from __future__ import annotations
 
 import os
 import subprocess
+import sys
+from pathlib import Path
 from typing import Any
 
 
@@ -62,3 +74,56 @@ def detach_kwargs() -> dict[str, Any]:
             ),
         }
     return {"start_new_session": True}
+
+
+def windowless_python_executable() -> str:
+    """Return the windowless Python interpreter path for daemon spawns.
+
+    On Windows, ``sys.executable`` typically points at ``python.exe`` —
+    a **console-subsystem** binary. Even when its child is started with
+    ``CREATE_NO_WINDOW | DETACHED_PROCESS``, the Python interpreter
+    itself can force-allocate a console at startup (Windows allocates a
+    console for console-subsystem applications that touch the standard
+    streams). That console appears as a visible ``cmd.exe`` window on
+    the user's desktop, hosting the daemon's logger output — exactly
+    what the v1.10.0 LSP-engine daemon hit on pandorum 2026-05-22.
+
+    The fix is to swap ``python.exe`` for ``pythonw.exe`` — a
+    **windows-subsystem** binary that has no auto-allocated console. We
+    look for it next to ``sys.executable`` in two layouts:
+
+    1. ``...\\envs\\claude-hooks\\pythonw.exe`` (conda Windows)
+    2. ``...\\envs\\claude-hooks\\Scripts\\pythonw.exe`` (some venvs)
+
+    Mirrors :func:`install.find_conda_env_pythonw` but resolves at
+    runtime against the live interpreter — no need to re-discover the
+    conda env. Falls back to ``sys.executable`` unchanged when:
+
+    - we're on POSIX (``pythonw.exe`` doesn't exist),
+    - we're on Windows but the interpreter is already ``pythonw.exe``,
+    - we're on Windows but no ``pythonw.exe`` sibling exists (stripped
+      Python build, custom embedded interpreter, etc.).
+
+    The ``CREATE_NO_WINDOW | DETACHED_PROCESS`` flags from
+    :func:`detach_kwargs` remain belt-and-braces — they handle the
+    inherit-parent-console path while this helper handles the
+    auto-allocate path.
+    """
+    if os.name != "nt":
+        return sys.executable
+
+    py = Path(sys.executable)
+    name = py.name.lower()
+    if name == "pythonw.exe":
+        return str(py)
+
+    # Layout 1: ``...\envs\<name>\python.exe`` — sibling pythonw.exe.
+    pyw = py.with_name("pythonw.exe")
+    if pyw.is_file():
+        return str(pyw)
+
+    # Layout 2: ``...\envs\<name>\Scripts\python.exe`` — also sibling.
+    # (Handled by the same with_name() call above, but kept explicit
+    # for parity with install.find_conda_env_pythonw's layout 2.)
+
+    return sys.executable
