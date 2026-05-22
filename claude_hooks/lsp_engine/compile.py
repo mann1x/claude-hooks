@@ -222,10 +222,24 @@ class CompileRunner:
     most recent run. Callers read it via ``get_diagnostics(path)``;
     we replace the whole map on each run, matching LSP semantics
     (the latest publish is the truth).
+
+    v1.10.3+: ``toml_path`` (optional) enables hot-reload of the
+    per-language compile command from
+    ``.claude-hooks/lsp-engine.toml``. At the top of every
+    ``_run_once`` the runner stats the toml, and if mtime changed
+    since the previous run, reparses and updates the current command
+    in place. Pre-fix the daemon constructed the command tuple once
+    at startup and never re-read the toml — a hand-edit of the
+    command went un-applied until the daemon was killed, and there
+    was no supported way to bounce the daemon on Windows. Surfaced
+    on pandorum 2026-05-22 where a fixed-up MSBuild path stayed
+    unused across a Claude Code restart because the daemon kept
+    running with the pre-edit (bare ``msbuild``) command.
     """
 
     spec: CompileSpec
     project_root: Path
+    toml_path: Optional[Path] = None  # for hot-reload
 
     _diagnostics: dict[str, list[Diagnostic]] = field(default_factory=dict)
     _diag_lock: threading.Lock = field(default_factory=threading.Lock)
@@ -235,6 +249,20 @@ class CompileRunner:
     _last_run_at: float = 0.0
     _last_returncode: Optional[int] = None
     _last_stderr: str = ""
+    # Current command — initialised from ``spec.command`` and replaced
+    # in place by ``_maybe_reload_command`` when the toml changes. We
+    # keep ``self.spec`` itself frozen for sanity (lots of tests pin
+    # spec identity) but reach for ``self._command`` in the hot path.
+    _command: Optional[tuple[str, ...]] = None
+    _last_toml_mtime: float = 0.0
+
+    def __post_init__(self) -> None:
+        # Seed the mutable current-command from the immutable spec.
+        # Done here so callers that bypass the orchestrator (tests,
+        # direct CompileRunner(...) construction) still get a sane
+        # initial value.
+        if self._command is None:
+            self._command = self.spec.command
 
     def start(self) -> None:
         if self._thread is not None:
@@ -305,31 +333,117 @@ class CompileRunner:
         import time
         return time.monotonic()
 
-    def _run_once(self) -> None:
-        cwd = self.spec.cwd or str(self.project_root)
-        log.info(
-            "compile: running %s for .%s",
-            " ".join(self.spec.command), self.spec.language,
+    def _maybe_reload_command(self) -> None:
+        """Re-read the toml when it changes on disk.
+
+        Returns silently when no toml path is configured (engine-cfg
+        path) or the file is absent. On mtime change, re-parses via
+        :func:`load_engine_config` and replaces ``self._command``
+        with the new command tuple for this language. A parse error
+        is logged but does not abort the run — the previous command
+        keeps working until the toml is fixed.
+        """
+        if self.toml_path is None:
+            return
+        try:
+            mtime = self.toml_path.stat().st_mtime
+        except OSError:
+            # Toml absent or unreadable — fall back to current command.
+            return
+        if mtime <= self._last_toml_mtime:
+            return
+        # Local import to avoid a circular dependency at module-import
+        # time (config → compile → config in tight test contexts).
+        from claude_hooks.lsp_engine.config import (
+            CclspConfigError,
+            load_engine_config,
         )
         try:
+            engine_cfg = load_engine_config(self.toml_path)
+        except CclspConfigError as e:
+            log.warning(
+                "compile: reload failed (toml invalid), keeping current "
+                "command for .%s: %s",
+                self.spec.language, e,
+            )
+            self._last_toml_mtime = mtime  # don't retry until next edit
+            return
+        new_cmd_raw = (engine_cfg.compile_aware.commands or {}).get(
+            self.spec.language
+        )
+        self._last_toml_mtime = mtime
+        if not new_cmd_raw:
+            # User removed this language's command from the toml. Keep
+            # the previous one running rather than going silent — the
+            # user can disable compile-aware in the toml to fully stop.
+            log.info(
+                "compile: toml no longer defines a command for .%s "
+                "(keeping previous one)",
+                self.spec.language,
+            )
+            return
+        new_cmd = tuple(str(p) for p in new_cmd_raw)
+        if new_cmd != self._command:
+            log.info(
+                "compile: reloaded .%s command from %s — argv[0] now %r",
+                self.spec.language, self.toml_path, new_cmd[0],
+            )
+            self._command = new_cmd
+
+    def _run_once(self) -> None:
+        cwd = self.spec.cwd or str(self.project_root)
+        # Refresh from toml first so any hand-edit since the previous
+        # run takes effect on this one.
+        self._maybe_reload_command()
+        if self._command is None:
+            # Should never happen — populated by __post_init__ — but
+            # defend against future refactors that drop the init.
+            self._command = self.spec.command
+        cmd = self._command
+        log.info(
+            "compile: running %s for .%s",
+            " ".join(cmd), self.spec.language,
+        )
+        try:
+            # ``silent_subprocess_kwargs`` adds ``CREATE_NO_WINDOW``
+            # on Windows so the compile child doesn't pop a visible
+            # console in front of the user. The daemon itself runs
+            # windowless (DETACHED_PROCESS at spawn time), so when
+            # the orchestrator subsequently invokes a compile binary
+            # WITHOUT this flag, Windows allocates a fresh console
+            # for the child — visible to the user. Surfaced when
+            # an msbuild window flashed in front of the user on
+            # pandorum 2026-05-22. ``CREATE_NO_WINDOW`` is correct
+            # here; ``DETACHED_PROCESS`` would break the captured
+            # stdout/stderr we need for diagnostics parsing.
+            from claude_hooks._popen import silent_subprocess_kwargs
             proc = subprocess.run(
-                list(self.spec.command),
+                list(cmd),
                 cwd=cwd,
                 capture_output=True,
                 text=True,
                 timeout=self.spec.run_timeout_s,
                 check=False,
+                **silent_subprocess_kwargs(),
             )
         except subprocess.TimeoutExpired:
             log.warning(
                 "compile: %s timed out after %.0fs",
-                self.spec.command[0], self.spec.run_timeout_s,
+                cmd[0], self.spec.run_timeout_s,
             )
             return
         except OSError as e:
+            # WinError 2 / ENOENT carries no filename — log the argv[0]
+            # explicitly so the user can see whether the daemon is
+            # invoking the bare command (PATH lookup) or a full path
+            # (literal file check). The hint nudges them toward editing
+            # ``.claude-hooks/lsp-engine.toml`` to use an absolute path
+            # when the daemon's PATH doesn't include the build tool.
             log.warning(
-                "compile: failed to invoke %s: %s",
-                self.spec.command[0], e,
+                "compile: failed to invoke %r: %s "
+                "(daemon PATH may not include this; consider absolute "
+                "path in .claude-hooks/lsp-engine.toml)",
+                cmd[0], e,
             )
             return
 
@@ -395,13 +509,18 @@ class CompileOrchestrator:
         self,
         project_root: str | os.PathLike,
         specs: list[CompileSpec],
+        *,
+        toml_path: Optional[Path] = None,
     ) -> None:
         self._project_root = Path(project_root).resolve()
+        self._toml_path = toml_path
         self._runners: dict[str, CompileRunner] = {}
         for spec in specs:
             ext = spec.language.lower().lstrip(".")
             self._runners[ext] = CompileRunner(
-                spec=spec, project_root=self._project_root,
+                spec=spec,
+                project_root=self._project_root,
+                toml_path=toml_path,
             )
 
     @classmethod
@@ -411,7 +530,12 @@ class CompileOrchestrator:
         commands: dict[str, tuple[str, ...]],
         *,
         debounce_seconds: float = DEFAULT_DEBOUNCE_S,
+        toml_path: Optional[Path] = None,
     ) -> "CompileOrchestrator":
+        """Build an orchestrator from the already-loaded compile
+        commands. Pass ``toml_path`` to enable hot-reload of the
+        per-language commands on edit; omit to disable.
+        """
         specs = [
             CompileSpec(
                 language=ext,
@@ -420,7 +544,7 @@ class CompileOrchestrator:
             )
             for ext, cmd in commands.items()
         ]
-        return cls(project_root, specs)
+        return cls(project_root, specs, toml_path=toml_path)
 
     def start(self) -> None:
         for runner in self._runners.values():

@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from claude_hooks._popen import windowless_python_executable
+from claude_hooks._popen import popen_detached, windowless_python_executable
 from claude_hooks.lsp_engine.daemon import (
     lock_path_for,
     socket_path_for,
@@ -188,12 +188,17 @@ def _spawn_daemon(
     - POSIX: ``start_new_session=True`` puts the child in its own
       session/process-group so a SIGHUP to the parent doesn't
       cascade.
-    - Windows: ``DETACHED_PROCESS | CREATE_NO_WINDOW`` flags so the
-      daemon doesn't inherit the parent's console (no ``cmd.exe``
-      flash, no shutdown-on-parent-exit) **plus** ``pythonw.exe`` so
-      the long-lived child doesn't auto-allocate one at interpreter
-      startup (v1.10.1 fix — see :func:`windowless_python_executable`
-      for the gory details on why the flags alone aren't enough).
+    - Windows: ``DETACHED_PROCESS | CREATE_NO_WINDOW |
+      CREATE_BREAKAWAY_FROM_JOB`` flags so the daemon doesn't
+      inherit the parent's console (no ``cmd.exe`` flash) and is
+      detached from any job object the parent participates in
+      (the ``BREAKAWAY`` bit, added v1.10.6, is what actually
+      makes "shutdown-on-parent-exit" go away — ``DETACHED_PROCESS``
+      alone only handles console inheritance, not job-cleanup
+      cascades). Plus ``pythonw.exe`` so the long-lived child
+      doesn't auto-allocate a console at interpreter startup
+      (v1.10.1 fix — see :func:`windowless_python_executable` for
+      the gory details on why the flags alone aren't enough).
     """
     cmd = [
         windowless_python_executable(),
@@ -222,20 +227,20 @@ def _spawn_daemon(
         "env": env,
         "close_fds": True,
     }
-    if os.name == "nt":
-        # ``DETACHED_PROCESS`` detaches from the parent's console;
-        # ``CREATE_NO_WINDOW`` suppresses any new one. Constants live
-        # under subprocess on Windows but are guarded by getattr so a
-        # POSIX import path never references them.
-        popen_kwargs["creationflags"] = (
-            getattr(subprocess, "DETACHED_PROCESS", 0)
-            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        )
-    else:
-        popen_kwargs["start_new_session"] = True
-
+    # ``popen_detached`` merges detach_kwargs() into the call —
+    # ``CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB``
+    # on Windows, ``start_new_session=True`` on POSIX. The
+    # ``CREATE_BREAKAWAY_FROM_JOB`` bit (v1.10.6+) keeps the daemon
+    # alive when the parent process is in a job object whose default
+    # behaviour is to terminate children on parent exit — observed on
+    # pandorum 2026-05-22 where an SSH-spawned cmd put the parent
+    # python in such a job and the daemon vanished within 0.5 s of
+    # the parent exiting, despite the DETACHED_PROCESS flag. The
+    # helper also falls back to "no breakaway" when the parent's job
+    # forbids it (rare strict-sandbox case) so the daemon still
+    # spawns — albeit lifetime-bound to the parent there.
     try:
-        subprocess.Popen(cmd, **popen_kwargs)
+        popen_detached(cmd, **popen_kwargs)
     finally:
         # Popen dups the fd into the child; closing here doesn't
         # affect the daemon's open log file.

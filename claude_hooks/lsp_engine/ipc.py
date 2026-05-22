@@ -97,7 +97,14 @@ def windows_pipe_name_for(project_root: str | os.PathLike) -> str:
     # to exercise the dispatch on a Linux host; pathlib then refuses
     # to construct WindowsPath. os.path.abspath has no such guard.
     abs_root = os.path.abspath(os.fspath(project_root))
-    digest = hashlib.sha256(abs_root.encode("utf-8")).hexdigest()[:16]
+    # v1.10.3: case-normalize before hashing. On Windows this lowercases
+    # the drive letter and switches separators so ``c:\\X`` and
+    # ``C:\\X`` produce the same pipe name. Must stay identical to the
+    # normalization in :func:`claude_hooks.lsp_engine.daemon.project_dir`
+    # so hook + CLI invocations resolve to the same pipe (pandorum
+    # 2026-05-22 incident). No-op on POSIX.
+    key = os.path.normcase(abs_root)
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
     return _WINDOWS_PIPE_PREFIX + digest
 
 

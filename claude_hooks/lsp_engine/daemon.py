@@ -77,9 +77,22 @@ def project_dir(project_root: str | os.PathLike, base: Optional[Path] = None) ->
     avoids leaking the full project path through process listings;
     we still write the resolved path inside the dir as ``project``
     for human inspection.
+
+    v1.10.3: case-normalize before hashing via :func:`os.path.normcase`.
+    On Windows that lowercases the drive letter and switches separators
+    so semantically-identical paths from different callers
+    (``c:\\Users\\…`` from the hook, ``C:\\Users\\…`` from a manual
+    ``--project`` flag) produce the same digest. Without this, the hook
+    and CLI never meet — different state dir, different socket, hook
+    sees ``daemon socket did not come up in time`` indefinitely
+    (pandorum 2026-05-22). ``os.path.normcase`` is a no-op on POSIX so
+    Linux behaviour is unchanged. The same normalization must be
+    applied in :func:`claude_hooks.lsp_engine.ipc.windows_pipe_name_for`
+    to keep the pipe name consistent.
     """
     abs_root = Path(project_root).resolve()
-    digest = hashlib.sha256(str(abs_root).encode("utf-8")).hexdigest()[:16]
+    key = os.path.normcase(str(abs_root))
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
     base = base or (Path.home() / ".claude" / "lsp-engine")
     return base / digest
 
@@ -99,6 +112,66 @@ def socket_path_for(project_root: str | os.PathLike, base: Optional[Path] = None
 
 def lock_path_for(project_root: str | os.PathLike, base: Optional[Path] = None) -> Path:
     return project_dir(project_root, base=base) / "daemon.lock"
+
+
+def pid_is_alive(pid: int) -> bool:
+    """Best-effort cross-platform liveness probe for ``pid``.
+
+    Returns True if a process with that PID currently exists, False if
+    not (or if the probe can't determine). Used by the ``status`` CLI
+    to distinguish a live daemon from a stale lock file pointing at a
+    PID that's been reaped, and by ``cleanup`` to know when it's safe
+    to remove the per-project state dir.
+
+    POSIX: ``os.kill(pid, 0)`` raises ``ProcessLookupError`` when the
+    PID doesn't exist, ``PermissionError`` when it exists but we don't
+    own it (still alive — treated as True). Other ``OSError`` ⇒ False.
+
+    Windows: try ``ctypes.windll.kernel32.OpenProcess`` with
+    ``PROCESS_QUERY_LIMITED_INFORMATION`` (0x1000). Non-null handle ⇒
+    process exists; close it and return True. Null handle ⇒ either no
+    such PID or access denied — we can distinguish via
+    ``GetLastError`` (5 = access denied = alive; 87 = invalid param =
+    dead). Failure to load ctypes ⇒ False (conservative).
+
+    PID 0 / negative ⇒ False (no legitimate daemon ever sits there).
+    """
+    if pid is None or pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes  # local import: only on Windows
+            from ctypes import wintypes
+        except ImportError:  # pragma: no cover — ctypes ships with CPython
+            return False
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.argtypes = [
+            wintypes.DWORD, wintypes.BOOL, wintypes.DWORD,
+        ]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        handle = kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, pid,
+        )
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        # NULL handle: distinguish "access denied" (5) from "no such
+        # PID" (87 — ERROR_INVALID_PARAMETER for OpenProcess).
+        err = kernel32.GetLastError()
+        # 5 = ERROR_ACCESS_DENIED → process exists, we just can't open it.
+        return err == 5
+    # POSIX
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but is owned by someone else.
+        return True
+    except OSError:
+        return False
+    return True
 
 
 class DaemonAlreadyRunning(RuntimeError):
@@ -181,9 +254,18 @@ class Daemon:
         # behaviour, not a half-active orchestrator).
         self._compile: Optional[CompileOrchestrator] = None
         if cfg.compile_aware.enabled and cfg.compile_aware.commands:
+            # Pass the toml path so the orchestrator can hot-reload
+            # commands on edit. By convention the daemon looks at
+            # ``<project-root>/.claude-hooks/lsp-engine.toml`` (see
+            # :func:`load_daemon_config`). Pre-v1.10.4 the daemon
+            # held its commands as a frozen snapshot from startup and
+            # never re-read the toml; the user had to kill the
+            # daemon to apply edits — and on Windows there was no
+            # supported way to do that. Hot-reload closes that gap.
             self._compile = CompileOrchestrator.from_engine_config(
                 self._project_root,
                 cfg.compile_aware.commands,
+                toml_path=self._project_root / ".claude-hooks" / "lsp-engine.toml",
             )
 
     # ─── lifecycle ───────────────────────────────────────────────────
@@ -283,17 +365,42 @@ class Daemon:
 
     # ─── lock file (POSIX flock / Windows msvcrt.locking) ────────────
 
+    # Byte offset of the Windows exclusion lock — well past any
+    # plausible PID + timestamp payload so other processes can
+    # ``read_text()`` the lock file without hitting the lock. See
+    # :func:`_acquire_lock_file` for the gory rationale.
+    _WIN_LOCK_OFFSET = 4096
+
     def _acquire_lock_file(self) -> None:
         fd = os.open(str(self._lock_path), os.O_RDWR | os.O_CREAT, 0o600)
         try:
             if os.name == "nt":
-                # ``msvcrt.locking`` locks ``length`` bytes from the
-                # current file pointer. We lock the first byte
-                # (``length=1``) which is enough to mark the file as
-                # held — Windows file locks are advisory across
-                # processes the same way ``flock`` is.
+                # ``msvcrt.locking`` (LK_NBLCK) is exclusive at the
+                # byte-range level — ANY other process trying to
+                # read the locked bytes hits ERROR_LOCK_VIOLATION
+                # ("Device or resource busy"). Pre-v1.10.6 we locked
+                # byte 0, exactly where the PID is written, so the
+                # ``daemon_pid()`` reader (and any operator running
+                # ``type daemon.lock``) saw EBUSY. The fix: lock a
+                # byte FAR past the payload — Windows lets you lock
+                # bytes beyond EOF (the lock is a reservation, no
+                # underlying file growth required). Other processes
+                # reading bytes 0..N where N << ``_WIN_LOCK_OFFSET``
+                # don't conflict with the lock at byte 4096.
+                #
+                # This obsoletes the v1.10.4 workaround of stuffing
+                # ``os.getpid()`` into the daemon's IPC ``status``
+                # response — we keep that workaround for backwards
+                # compatibility (downstream consumers may rely on
+                # it), but the lock file is now the authoritative
+                # PID source again.
+                os.lseek(fd, self._WIN_LOCK_OFFSET, os.SEEK_SET)
                 msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)  # type: ignore[union-attr]
+                os.lseek(fd, 0, os.SEEK_SET)  # reset for the upcoming write
             else:
+                # POSIX ``flock`` is whole-file advisory and doesn't
+                # block reads — ``daemon_pid()`` works without
+                # special handling.
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[union-attr]
         except OSError as e:
             os.close(fd)
@@ -319,10 +426,13 @@ class Daemon:
             return
         try:
             if os.name == "nt":
-                # Seek to 0 — ``msvcrt.locking`` operates from the
-                # current file pointer, and we wrote past it after
-                # acquiring.
-                os.lseek(self._lock_fd, 0, os.SEEK_SET)
+                # Mirror the acquire-time offset: unlock the same
+                # byte we locked. Pre-v1.10.6 we unlocked at 0;
+                # that's the wrong byte now and would leak the
+                # lock until process exit (CRT cleans up on close,
+                # so user-visible behaviour was fine, but explicit
+                # unlock is hygienic).
+                os.lseek(self._lock_fd, self._WIN_LOCK_OFFSET, os.SEEK_SET)
                 msvcrt.locking(self._lock_fd, msvcrt.LK_UNLCK, 1)  # type: ignore[union-attr]
             else:
                 fcntl.flock(self._lock_fd, fcntl.LOCK_UN)  # type: ignore[union-attr]
@@ -545,16 +655,25 @@ class Daemon:
     def _op_status(self, rid) -> dict:
         with self._sessions_lock:
             sessions = list(self._attached_sessions)
+        # v1.10.4+: include the daemon's own PID so the status CLI can
+        # surface ``pid: <n>`` to the user. The lock file holds the same
+        # PID but on Windows ``msvcrt.locking`` blocks reads from other
+        # processes, so the daemon is the only authority that can
+        # report it reliably while the daemon is alive.
         return {
             "id": rid,
             "ok": True,
             "project": str(self._project_root),
+            "pid": os.getpid(),
             "sessions": sessions,
             "open_files": self._engine.open_files(),
             "active_servers": [
                 spec.command[0] for spec in self._engine.active_servers()
             ],
             "held_uris": self._lock_manager.held_uris(),
+            "compile_aware_languages": (
+                sorted(self._compile.runners().keys()) if self._compile else []
+            ),
         }
 
 
