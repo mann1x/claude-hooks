@@ -13,6 +13,21 @@ REM approach is what every other .cmd shim already uses, and it works
 REM without pip-installing the package.
 cd /d "%REPO%"
 
+REM v1.10.3: also export PYTHONPATH so nested Python invocations
+REM (e.g. a daemon spawn from `claude-hooks-lsp status` that triggers
+REM `connect_or_spawn` → Popen with a fresh env, or anything launched
+REM via PowerShell ``Start-Process`` that bypasses the shim's cwd)
+REM still import ``claude_hooks`` cleanly. Without this, downstream
+REM Python invocations from outside the shim's cwd hit
+REM ``ModuleNotFoundError: No module named 'claude_hooks'``. The
+REM ``setlocal`` at the top scopes this export to the shim's lifetime
+REM — the caller's PYTHONPATH is restored on exit.
+if defined PYTHONPATH (
+    set "PYTHONPATH=%REPO%;%PYTHONPATH%"
+) else (
+    set "PYTHONPATH=%REPO%"
+)
+
 if defined CLAUDE_HOOKS_PY if exist "%CLAUDE_HOOKS_PY%" (
     "%CLAUDE_HOOKS_PY%" -m claude_hooks.lsp_engine %*
     exit /b !ERRORLEVEL!

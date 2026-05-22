@@ -77,9 +77,22 @@ def project_dir(project_root: str | os.PathLike, base: Optional[Path] = None) ->
     avoids leaking the full project path through process listings;
     we still write the resolved path inside the dir as ``project``
     for human inspection.
+
+    v1.10.3: case-normalize before hashing via :func:`os.path.normcase`.
+    On Windows that lowercases the drive letter and switches separators
+    so semantically-identical paths from different callers
+    (``c:\\Users\\…`` from the hook, ``C:\\Users\\…`` from a manual
+    ``--project`` flag) produce the same digest. Without this, the hook
+    and CLI never meet — different state dir, different socket, hook
+    sees ``daemon socket did not come up in time`` indefinitely
+    (pandorum 2026-05-22). ``os.path.normcase`` is a no-op on POSIX so
+    Linux behaviour is unchanged. The same normalization must be
+    applied in :func:`claude_hooks.lsp_engine.ipc.windows_pipe_name_for`
+    to keep the pipe name consistent.
     """
     abs_root = Path(project_root).resolve()
-    digest = hashlib.sha256(str(abs_root).encode("utf-8")).hexdigest()[:16]
+    key = os.path.normcase(str(abs_root))
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
     base = base or (Path.home() / ".claude" / "lsp-engine")
     return base / digest
 
@@ -99,6 +112,66 @@ def socket_path_for(project_root: str | os.PathLike, base: Optional[Path] = None
 
 def lock_path_for(project_root: str | os.PathLike, base: Optional[Path] = None) -> Path:
     return project_dir(project_root, base=base) / "daemon.lock"
+
+
+def pid_is_alive(pid: int) -> bool:
+    """Best-effort cross-platform liveness probe for ``pid``.
+
+    Returns True if a process with that PID currently exists, False if
+    not (or if the probe can't determine). Used by the ``status`` CLI
+    to distinguish a live daemon from a stale lock file pointing at a
+    PID that's been reaped, and by ``cleanup`` to know when it's safe
+    to remove the per-project state dir.
+
+    POSIX: ``os.kill(pid, 0)`` raises ``ProcessLookupError`` when the
+    PID doesn't exist, ``PermissionError`` when it exists but we don't
+    own it (still alive — treated as True). Other ``OSError`` ⇒ False.
+
+    Windows: try ``ctypes.windll.kernel32.OpenProcess`` with
+    ``PROCESS_QUERY_LIMITED_INFORMATION`` (0x1000). Non-null handle ⇒
+    process exists; close it and return True. Null handle ⇒ either no
+    such PID or access denied — we can distinguish via
+    ``GetLastError`` (5 = access denied = alive; 87 = invalid param =
+    dead). Failure to load ctypes ⇒ False (conservative).
+
+    PID 0 / negative ⇒ False (no legitimate daemon ever sits there).
+    """
+    if pid is None or pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes  # local import: only on Windows
+            from ctypes import wintypes
+        except ImportError:  # pragma: no cover — ctypes ships with CPython
+            return False
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.argtypes = [
+            wintypes.DWORD, wintypes.BOOL, wintypes.DWORD,
+        ]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        handle = kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, pid,
+        )
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        # NULL handle: distinguish "access denied" (5) from "no such
+        # PID" (87 — ERROR_INVALID_PARAMETER for OpenProcess).
+        err = kernel32.GetLastError()
+        # 5 = ERROR_ACCESS_DENIED → process exists, we just can't open it.
+        return err == 5
+    # POSIX
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but is owned by someone else.
+        return True
+    except OSError:
+        return False
+    return True
 
 
 class DaemonAlreadyRunning(RuntimeError):
