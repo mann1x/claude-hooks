@@ -6,6 +6,16 @@ setlocal enabledelayedexpansion
 set HERE=%~dp0
 set REPO=%HERE%..
 
+REM v1.10.4: capture the caller's cwd BEFORE cd-ing into the repo so
+REM `claude-hooks-lsp <subcmd> --project .` resolves the relative path
+REM against the directory the user was actually in. Pre-fix the shim
+REM cd'd into the repo first, then python ran `Path(args.project)
+REM .resolve()` against the *repo's* cwd — so `--project .` silently
+REM produced a hash for the claude-hooks repo, not the user's project.
+REM `__main__.py` reads this var and resolves a non-absolute --project
+REM against it, falling back to os.getcwd() when unset (POSIX-shim path).
+set "CLAUDE_HOOKS_USER_CWD=%CD%"
+
 REM Switch into the repo root so `python -m claude_hooks.lsp_engine` finds
 REM the package via cwd-on-sys.path. The POSIX shim achieves the same via
 REM PYTHONPATH exported in _resolve_python.sh; on Windows the cd-into-repo

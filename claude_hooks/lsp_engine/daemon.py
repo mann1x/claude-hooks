@@ -254,9 +254,18 @@ class Daemon:
         # behaviour, not a half-active orchestrator).
         self._compile: Optional[CompileOrchestrator] = None
         if cfg.compile_aware.enabled and cfg.compile_aware.commands:
+            # Pass the toml path so the orchestrator can hot-reload
+            # commands on edit. By convention the daemon looks at
+            # ``<project-root>/.claude-hooks/lsp-engine.toml`` (see
+            # :func:`load_daemon_config`). Pre-v1.10.4 the daemon
+            # held its commands as a frozen snapshot from startup and
+            # never re-read the toml; the user had to kill the
+            # daemon to apply edits — and on Windows there was no
+            # supported way to do that. Hot-reload closes that gap.
             self._compile = CompileOrchestrator.from_engine_config(
                 self._project_root,
                 cfg.compile_aware.commands,
+                toml_path=self._project_root / ".claude-hooks" / "lsp-engine.toml",
             )
 
     # ─── lifecycle ───────────────────────────────────────────────────
@@ -618,16 +627,25 @@ class Daemon:
     def _op_status(self, rid) -> dict:
         with self._sessions_lock:
             sessions = list(self._attached_sessions)
+        # v1.10.4+: include the daemon's own PID so the status CLI can
+        # surface ``pid: <n>`` to the user. The lock file holds the same
+        # PID but on Windows ``msvcrt.locking`` blocks reads from other
+        # processes, so the daemon is the only authority that can
+        # report it reliably while the daemon is alive.
         return {
             "id": rid,
             "ok": True,
             "project": str(self._project_root),
+            "pid": os.getpid(),
             "sessions": sessions,
             "open_files": self._engine.open_files(),
             "active_servers": [
                 spec.command[0] for spec in self._engine.active_servers()
             ],
             "held_uris": self._lock_manager.held_uris(),
+            "compile_aware_languages": (
+                sorted(self._compile.runners().keys()) if self._compile else []
+            ),
         }
 
 

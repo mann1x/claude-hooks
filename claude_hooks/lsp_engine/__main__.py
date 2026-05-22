@@ -28,9 +28,34 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import shutil
 import sys
 from pathlib import Path
+
+
+def _resolve_user_project(project: str) -> str:
+    """Resolve a possibly-relative ``--project`` against the user's
+    pre-cd cwd, not the cwd the shim left us in.
+
+    v1.10.4: the Windows ``claude-hooks-lsp.cmd`` shim ``cd`` s into
+    the repo before invoking python (so the package imports without
+    pip-install). If a caller then passed ``--project .``, python's
+    ``Path(".").resolve()`` resolved against the **repo**, producing
+    a hash for the claude-hooks repo and silently pointing the CLI
+    at a different daemon than the hook ever talks to. The shim now
+    exports ``CLAUDE_HOOKS_USER_CWD=%CD%`` *before* cd-ing; we
+    resolve against that here. Absolute paths skip the var entirely
+    so the var being stale or wrong can't break correct callers.
+
+    POSIX is unaffected because the POSIX shim doesn't cd — but the
+    fallback to ``os.getcwd()`` keeps direct ``python -m`` invocations
+    on either OS working without setting the env var.
+    """
+    if os.path.isabs(project):
+        return project
+    base = os.environ.get("CLAUDE_HOOKS_USER_CWD") or os.getcwd()
+    return os.path.normpath(os.path.join(base, project))
 
 from claude_hooks.lsp_engine.client import (
     LspEngineClient,
@@ -119,6 +144,21 @@ def _build_parser() -> argparse.ArgumentParser:
              "lock (kill it first via 'stop'). Use with care.",
     )
 
+    rs = sub.add_parser(
+        "restart",
+        help="Stop the daemon for this project and remove its stale "
+             "state. The next hook invocation will lazy-spawn a "
+             "fresh daemon that re-reads cclsp.json + lsp-engine.toml.",
+    )
+    rs.add_argument(
+        "--project", required=True,
+        help="Absolute path to the project root.",
+    )
+    rs.add_argument(
+        "--state-base", default=None,
+        help="Override base directory for daemon state.",
+    )
+
     return p
 
 
@@ -187,7 +227,14 @@ def _run_status(args: argparse.Namespace) -> int:
         info = client.status()
     finally:
         client.close()
-    info["pid"] = lock_pid
+    # v1.10.4+: prefer the PID the daemon reports in its own status
+    # response over the lock-file PID. On Windows the lock file is
+    # held with ``msvcrt.locking`` so other processes can't read it,
+    # which made the CLI report ``pid: null`` even when the daemon
+    # was clearly alive and serving the IPC request. The daemon
+    # always knows its own PID; fall back to the lock-file PID only
+    # if the daemon response somehow omits it.
+    info.setdefault("pid", lock_pid)
     info["socket"] = str(sock)
     info["running"] = True
     info["stale_lock"] = False
@@ -291,7 +338,20 @@ def _run_cleanup(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        shutil.rmtree(pdir)
+        # ``ignore_errors=True`` under --force lets us tolerate a
+        # benign race where the daemon's own teardown already
+        # unlinked some files (most notably ``daemon.sock`` on
+        # POSIX) between the rmtree walk listing the dir and
+        # rmtree trying to operate on each entry. Without
+        # --force, surface every error — the operator hasn't
+        # opted into destructive behaviour and a missing-file
+        # race likely means we're racing a daemon we shouldn't
+        # be removing.
+        shutil.rmtree(pdir, ignore_errors=bool(args.force))
+        if pdir.exists():
+            # ignore_errors swallowed something we still care about
+            # (e.g. permission denial); fall back to the strict path.
+            shutil.rmtree(pdir)
     except OSError as e:
         print(json.dumps({
             "removed": False,
@@ -308,8 +368,81 @@ def _run_cleanup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_restart(args: argparse.Namespace) -> int:
+    """Stop a running daemon + remove its state dir, so the next hook
+    spawns a fresh one that re-reads cclsp.json + lsp-engine.toml.
+
+    Implemented as ``stop`` (best effort) then ``cleanup`` (with
+    --force so a wedged daemon that's still holding the lock doesn't
+    block the restart). The user's next ``Edit`` / ``Write`` in
+    Claude Code lazy-spawns through ``connect_or_spawn``.
+
+    Exit codes:
+    - 0 = restart sequence completed
+    - 2 = cleanup failed (permission error etc.)
+
+    Note: ``stop`` returning 1 (no daemon to stop) is treated as
+    success — restart-from-not-running is a valid path that yields
+    the same end state as restart-from-running.
+    """
+    state_base = Path(args.state_base) if args.state_base else None
+
+    # 1. Best-effort stop. We don't propagate its exit code — even
+    #    "no daemon was running" leaves us in the right end state.
+    stop_args = argparse.Namespace(
+        project=args.project, state_base=args.state_base,
+    )
+    stop_rc = _run_stop(stop_args)
+    log.debug("restart: stop exited with %d", stop_rc)
+
+    # Wait for the daemon to finish its teardown before cleanup
+    # walks the state dir. ``Daemon.stop`` runs on a background
+    # thread so the IPC ack returns before teardown completes;
+    # it then unlinks ``daemon.sock`` itself, which races
+    # ``shutil.rmtree`` if we don't wait. Poll the socket-alive
+    # probe up to ~2 s — typical teardown is well under 100 ms.
+    import time
+    sock = socket_path_for(args.project, base=state_base)
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if not _is_socket_alive(sock):
+            break
+        time.sleep(0.05)
+    # Small extra grace for the daemon's lock-release + file-unlink
+    # sequence to land. The socket disappears before the lock file
+    # on POSIX (separate close calls); 50 ms covers it.
+    time.sleep(0.05)
+
+    # 2. Cleanup with --force in case ``stop`` couldn't reach the
+    #    daemon or the daemon refused to ack (rare; ipc edge case).
+    cleanup_args = argparse.Namespace(
+        project=args.project,
+        state_base=args.state_base,
+        force=True,
+    )
+    cleanup_rc = _run_cleanup(cleanup_args)
+    if cleanup_rc not in (0,):
+        return 2
+
+    # 3. Tell the user what to do next. The daemon doesn't auto-spawn
+    #    here — that happens on the next hook invocation from Claude
+    #    Code (a Tool Use that triggers PostToolUse or a fresh
+    #    SessionStart). Explicit message avoids the "I restarted, why
+    #    isn't anything happening?" confusion.
+    print(json.dumps({
+        "restarted": True,
+        "next": "the next hook will lazy-spawn a fresh daemon",
+    }))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    # v1.10.4: normalise --project against the user's pre-cd cwd so
+    # relative paths work through the Windows .cmd shim. See
+    # :func:`_resolve_user_project`.
+    if hasattr(args, "project") and args.project:
+        args.project = _resolve_user_project(args.project)
     if args.subcommand == "daemon":
         return _run_daemon(args)
     if args.subcommand == "status":
@@ -318,6 +451,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_stop(args)
     if args.subcommand == "cleanup":
         return _run_cleanup(args)
+    if args.subcommand == "restart":
+        return _run_restart(args)
     return 1  # pragma: no cover — argparse forbids this
 
 
