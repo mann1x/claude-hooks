@@ -286,9 +286,12 @@ via the actual compile pass. Pairing the two gives the hook a
 complete answer: LSP for fast per-file feedback, compile for the
 truth a build would surface.
 
-To configure, see [Compile-aware setup](#compile-aware-setup) below
-or run the `/setup-compile-aware` skill, which detects your
-project's build tools and proposes the TOML block for you.
+To configure, see [LSP engine setup](#lsp-engine-setup) below or
+run the `/setup-compile-aware` skill, which walks your project in
+two phases — (0) audits `cclsp.json` against the languages actually
+present and proposes additive LSP entries, then (1) proposes the
+`[compile_aware.commands]` TOML block based on detected build
+tools. The skill never writes without your explicit confirmation.
 
 ---
 
@@ -382,26 +385,55 @@ It is *not* gitignored by default.
 
 ---
 
-## Compile-aware setup
+## LSP engine setup
 
-If you'd like Claude to propose the `[compile_aware.commands]`
-block based on what's in your project:
+The `/setup-compile-aware` skill (v1.9.3+) is the project-side
+configuration helper. It walks two files in sequence and writes
+only what you explicitly confirm:
 
 ```
 /setup-compile-aware
 ```
 
-The skill:
+### Phase 0 — `cclsp.json` audit (additive)
 
-1. Walks your project for build-tool markers (`Cargo.toml`,
+1. Reads the existing `cclsp.json` (if any).
+2. Walks the project for actual language files (`Glob` for
+   `.py`/`.ts`/`.rs`/`.go`/`.c`/`.cpp`/etc, skipping vendored
+   dirs).
+3. Computes the gap:
+   - **Missing** — languages with ≥ 3 files in the project but no
+     LSP entry yet. These are the additive candidates.
+   - **Covered** — already wired up, preserved verbatim.
+   - **Strangers** — registered LSPs with zero matching files in
+     the project. Surfaced for awareness but **never touched**.
+4. Probes each proposed binary with `command -v` and warns if
+   missing (registering an absent binary isn't destructive — the
+   engine returns `[]` until the binary lands).
+5. Backs up the existing file
+   (`cclsp.json.bak-YYYYMMDD-HHMMSS`) and writes the merged JSON
+   after your `[Y/n/edit]` confirmation.
+
+**Additive-only invariant**: the skill never proposes removing or
+modifying an existing entry. Custom flags (`--strict`,
+`--remote=auto`) and hand-added entries you wrote are preserved
+verbatim. If you want to clean up dead entries, do it manually.
+
+### Phase 1 — `[compile_aware.commands]`
+
+1. Walks the project for build-tool markers (`Cargo.toml`,
    `tsconfig.json`, `pyproject.toml`, `go.mod`, `Makefile`, etc).
 2. Proposes a complete `[compile_aware.commands]` block with
-   `# why:` comments on each entry.
-3. Asks for your confirmation before writing anything.
-4. If `compile_aware.enabled` is currently false, asks whether
-   to flip it.
+   `# why:` comments on each entry, leaving `enabled = false`
+   by default.
+3. Surfaces run-cost / CI-parity trade-offs before writing.
+4. Asks for confirmation before writing
+   `.claude-hooks/lsp-engine.toml`.
 
-Re-run any time you add a new language to the project.
+Re-run any time you add a new language or build tool to the
+project. The skill is idempotent: if Phase 0 finds every project
+language already covered and Phase 1 finds no new build markers,
+it just reports "nothing to propose" and exits.
 
 ---
 

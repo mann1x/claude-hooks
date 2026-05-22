@@ -16,6 +16,102 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [1.9.4] — 2026-05-22
+
+PATCH release shipping a meaningful expansion of the
+`/setup-compile-aware` skill. The skill is now **two-phase**:
+Phase 0 audits `cclsp.json` against the project's actual language
+files and proposes additive-only LSP entries for languages that
+aren't covered yet; Phase 1 keeps the existing
+`[compile_aware.commands]` proposal flow.
+
+Motivation: `cclsp.json` was previously installer-only, init-only —
+written once at `install.py` time with all detected Tier-1 LSes
+wired to all their default extensions, regardless of whether the
+project actually used those languages. A Python-only project got
+`gopls`, `clangd`, `rust-analyzer`, `omnisharp` entries it would
+never use; a project that grew to include TypeScript six months
+later had no skill-driven way to wire up
+`typescript-language-server`. The expanded skill closes that gap.
+
+No Python code changes; no schema or config changes. Pure content
+expansion of `.claude/skills/setup-compile-aware/SKILL.md` (200 →
+477 lines) + corresponding `docs/lsp-engine.md` update.
+
+Test suite: 4015 passed / 136 skipped on Python 3.11 (unchanged
+from v1.9.3 — skills are markdown prompts, the v1.9.3
+manifest-completeness tests already lock the structural
+invariants).
+
+### Added — `/setup-compile-aware` Phase 0: cclsp.json audit
+
+When the skill is triggered, it now walks the project before
+touching any file:
+
+1. **Reads the existing `cclsp.json`** (if any). When the file is
+   missing, Phase 0 is init; when present, Phase 0 is audit. Both
+   paths converge on the same additive-only flow.
+2. **Walks the project for language files** via `Glob` — counts
+   `.py`/`.ts`/`.rs`/`.go`/`.c`/`.cpp`/`.cs`/`.sh`/`.lua`/etc,
+   skipping vendored / generated dirs (`node_modules/`, `.venv/`,
+   `dist/`, `build/`, `target/`, `__pycache__/`, `.git/`). Uses a
+   ≥ 3-file threshold (or a build marker that implies the
+   language, e.g. `Cargo.toml` → Rust regardless of file count)
+   so a stray `.py` file in a Rust project doesn't wire up
+   pyright.
+3. **Computes the gap** as three sets:
+   - **Missing** — languages with files in the project but no
+     LSP entry yet. These are the additive candidates.
+   - **Covered** — already wired up, preserved verbatim.
+   - **Strangers** — registered LSPs with zero matching files
+     in the project. Surfaced for awareness but **never
+     touched** (the file may contain custom flags or
+     deliberate user choices the skill can't infer).
+4. **Probes each proposed binary** with `command -v` and warns if
+   missing. Registering an absent binary is not destructive —
+   the engine returns `[]` until the binary lands — but the
+   skill surfaces the install hint from
+   `claude_hooks/lang_servers.py:SPECS` so the user can decide.
+5. **Asks for confirmation** with `[Y/n/edit]` per proposed
+   merge. The user can drop specific entries.
+6. **Backs up + writes** — timestamped backup
+   (`cclsp.json.bak-YYYYMMDD-HHMMSS`) precedes any write, then
+   the merged JSON (existing entries verbatim, new additions
+   appended) lands at `cclsp.json` with diff-back verification.
+
+### Invariant — additive-only on `cclsp.json`
+
+The skill **never** proposes removing or modifying an existing
+entry. Custom flags (`--strict`, `--remote=auto`), manual entries
+for niche LSes, and deliberate user choices are preserved
+verbatim. Adding new entries to cover languages the user didn't
+have before is safe; touching existing ones is not. Stranger
+entries (registered LSPs with zero matching files in the project)
+are surfaced informationally but left alone — the user can clean
+them up manually if vestigial.
+
+### Changed — `docs/lsp-engine.md`
+
+The `## Compile-aware setup` section is now `## LSP engine setup`
+with a phase-by-phase walkthrough of what the skill does and the
+additive-only invariant spelled out. The brief Phase-3 mention in
+the Compile-aware-diagnostics section now reflects the two-phase
+scope.
+
+### Upgrade notes
+
+Re-run `python install.py` on every host. The installer's
+`_install_skills` does a content-comparison between the in-repo
+SKILL.md and the user-scope copy — if the content differs (it
+will after v1.9.4), it prompts `[Y/n]` to update. Accept to pick
+up the two-phase prompt.
+
+The skill is identical-named (`/setup-compile-aware`); no
+muscle-memory loss. The behavior change is purely additive — if
+your project already has a `cclsp.json` that covers every
+language present, Phase 0 reports "nothing to propose" and the
+skill behaves exactly as in v1.9.3.
+
 ## [1.9.3] — 2026-05-22
 
 Emergency hot-fix for a v1.9.0 release-cut regression: the
@@ -6780,7 +6876,8 @@ prior tag. From any unreleased checkout, just `git pull` on `main`
 once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
-[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.9.3...HEAD
+[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.9.4...HEAD
+[1.9.4]: https://github.com/mann1x/claude-hooks/compare/v1.9.3...v1.9.4
 [1.9.3]: https://github.com/mann1x/claude-hooks/compare/v1.9.2...v1.9.3
 [1.9.2]: https://github.com/mann1x/claude-hooks/compare/v1.9.1...v1.9.2
 [1.9.1]: https://github.com/mann1x/claude-hooks/compare/v1.9.0...v1.9.1
