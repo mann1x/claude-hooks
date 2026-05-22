@@ -8051,6 +8051,14 @@ SKILLS = [
     # which install.py creates on user opt-in via _install_consultants().
     # When the consultants env is missing the skill is skipped silently.
     ("consultants",        "claude-consultants"),
+    # /setup-compile-aware — v1.9+; helps the user populate the
+    # [compile_aware.commands] block of .claude-hooks/lsp-engine.toml
+    # by detecting build-tool markers (Cargo.toml, tsconfig.json,
+    # pyproject.toml, go.mod, Makefile, etc). Pure markdown skill —
+    # always installable; safe to ship even on hosts where the LSP
+    # engine is disabled, because the skill itself only proposes
+    # writes (the user controls whether to apply them).
+    ("setup-compile-aware", None),
 ]
 
 # Legacy per-verb skill dirs from v1.2 and earlier. Removed

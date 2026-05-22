@@ -16,6 +16,70 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [1.9.3] — 2026-05-22
+
+Emergency hot-fix for a v1.9.0 release-cut regression: the
+`setup-compile-aware` skill shipped to the repo at
+`.claude/skills/setup-compile-aware/SKILL.md`, but was never added
+to `install.SKILLS` — so `_install_skills` never copied it, on any
+host. Result: `/setup-compile-aware` returned `Unknown command` on
+every install across v1.9.0 → v1.9.2 despite the LSP-engine docs
+treating it as the canonical setup path.
+
+Surfaced 2026-05-22 when the user tried `/setup-compile-aware` on
+pandorum post-v1.9.2 deploy. Audit confirmed solidpc was equally
+broken — this was never a deploy gap, the skill was orphaned at
+release-cut. PATCH release; bug fix only, no schema or behavior
+changes.
+
+Test suite: 4015 passed / 136 skipped on Python 3.11 (+5 vs v1.9.2
+from the new manifest-completeness regression tests).
+
+### Fixed — install.py: setup-compile-aware skill orphaned at v1.9.0 cut
+
+Added `("setup-compile-aware", None)` to the `SKILLS` tuple in
+`install.py`. The skill is pure markdown (it helps the user write
+`.claude-hooks/lsp-engine.toml` via build-tool detection) so it has
+no binary dependency — installable on every host regardless of
+whether the LSP engine itself is enabled. Re-running `install.py`
+on any v1.9.0 / v1.9.1 / v1.9.2 host now picks the skill up
+through the normal `[Y/n]` prompt.
+
+### Added — `tests/test_install_skills_manifest.py`: durability guarantee
+
+Five tests that lock the invariant *"every skill dir in
+`.claude/skills/` must be enumerated in `install.SKILLS`"*:
+
+- `test_every_repo_skill_is_in_install_manifest` — the forward
+  direction. Adding a skill dir without adding the manifest entry
+  now fails CI immediately.
+- `test_every_manifest_entry_has_on_disk_skill` — the reverse
+  direction. Stale manifest entries that point at deleted skill
+  dirs also fail.
+- `test_setup_compile_aware_present` — explicit regression guard
+  named after the original bug so the next developer reading the
+  test diff sees what it's protecting.
+- `test_skills_manifest_is_a_list_of_pairs` — structural shape
+  guard so `_install_skills`'s `(name, requires_tool)` unpack
+  cannot break silently.
+- `test_skills_manifest_has_no_duplicates` — duplicate entries
+  would inflate the "install N skills" counter and double-copy.
+
+Verified the regression test fails on a synthetic revert of the
+fix before it passes on the real fix, so the test actually
+protects against the exact bug class it claims to.
+
+### Upgrade notes
+
+Re-run `python install.py` on every host. The new `[Y/n]` prompt
+will offer `+ /setup-compile-aware     will install`; accept to
+restore the skill. The fix is also valid on macOS / Linux / Windows
+identically — the skill is platform-neutral markdown.
+
+If you don't use the LSP engine, the skill is harmless to install:
+it's a writing-assistant skill that does nothing unless explicitly
+invoked. There is no reason not to take the update.
+
 ## [1.9.2] — 2026-05-21
 
 Two install.py bugfixes uncovered by the v1.9.1 deploy itself, plus
@@ -6716,7 +6780,8 @@ prior tag. From any unreleased checkout, just `git pull` on `main`
 once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
-[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.9.2...HEAD
+[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.9.3...HEAD
+[1.9.3]: https://github.com/mann1x/claude-hooks/compare/v1.9.2...v1.9.3
 [1.9.2]: https://github.com/mann1x/claude-hooks/compare/v1.9.1...v1.9.2
 [1.9.1]: https://github.com/mann1x/claude-hooks/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/mann1x/claude-hooks/compare/v1.8.4...v1.9.0
