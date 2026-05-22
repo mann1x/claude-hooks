@@ -59,8 +59,32 @@ def detach_kwargs() -> dict[str, Any]:
     """Return the platform-specific ``subprocess.Popen`` kwargs needed
     to spawn a detached, windowless child.
 
-    Windows: ``creationflags = CREATE_NO_WINDOW | DETACHED_PROCESS``.
+    Windows: ``creationflags = CREATE_NO_WINDOW | DETACHED_PROCESS |
+    CREATE_BREAKAWAY_FROM_JOB``.
     POSIX:   ``start_new_session = True``.
+
+    ``CREATE_BREAKAWAY_FROM_JOB`` (v1.10.6+, surfaced on pandorum
+    2026-05-22): ``DETACHED_PROCESS`` alone only detaches a child
+    from its parent's console — it does **not** detach from a job
+    object the parent may be in. SSH / cmd / some sandboxes put
+    transient jobs around the invocation tree; when the parent
+    exits, the OS terminates every member of the job, including
+    the daemon we just spawned. The user observed this as
+    "daemon dies seconds after the spawn script exits" even though
+    the spawn flags were set. ``CREATE_BREAKAWAY_FROM_JOB`` makes
+    the child a sibling of the job rather than a member, so the
+    job's cleanup-on-parent-exit doesn't reach it. The pandorum
+    bench: 75036 alive at t=2s in-script, 4s post-exit, 30s
+    post-exit (status RPC still responds with running:true). Pre-
+    fix the same flow saw the daemon vanish within 0.5 s of parent
+    exit. The flag is harmless when the parent has no job (the
+    common case) — Windows ignores it silently.
+
+    Strict-job environments (``JOB_OBJECT_LIMIT_BREAKAWAY_OK``
+    cleared) refuse the flag with ``ACCESS_DENIED``. Use
+    :func:`popen_detached` rather than raw ``subprocess.Popen``
+    when you want a graceful fallback to "no breakaway" in those
+    contexts.
 
     ``getattr`` shields against build-time absence of the flag
     constants on stripped-down Pythons — they evaluate to ``0`` and
@@ -71,9 +95,60 @@ def detach_kwargs() -> dict[str, Any]:
             "creationflags": (
                 getattr(subprocess, "CREATE_NO_WINDOW", 0)
                 | getattr(subprocess, "DETACHED_PROCESS", 0)
+                | getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
             ),
         }
     return {"start_new_session": True}
+
+
+def popen_detached(cmd, **kwargs) -> "subprocess.Popen":
+    """``subprocess.Popen`` wrapper that applies :func:`detach_kwargs`
+    and gracefully falls back when ``CREATE_BREAKAWAY_FROM_JOB``
+    is refused.
+
+    The fallback covers the rare Windows case where the parent is
+    in a job object whose ``JOB_OBJECT_LIMIT_BREAKAWAY_OK`` bit is
+    cleared (sandboxing / certain containerised environments). In
+    that case ``CreateProcess`` returns ``ERROR_ACCESS_DENIED`` and
+    Popen raises ``OSError`` with ``winerror == 5``. We retry
+    without the breakaway flag — the child won't survive parent
+    exit there, but at least it spawns; otherwise the operator
+    has no daemon at all.
+
+    Callers that need to handle the spawn failure themselves can
+    keep using raw ``subprocess.Popen(**detach_kwargs())`` and
+    react to OSError. Use this helper for the common case where
+    "best effort, fall back to less-detached" is the right move.
+    """
+    merged_kwargs = dict(kwargs)
+    detach = detach_kwargs()
+    # Merge creationflags rather than overwrite — callers may set
+    # additional flags (e.g. CREATE_NEW_CONSOLE for debugging).
+    if "creationflags" in detach:
+        merged_kwargs["creationflags"] = (
+            kwargs.get("creationflags", 0) | detach["creationflags"]
+        )
+    for k, v in detach.items():
+        if k != "creationflags":
+            merged_kwargs.setdefault(k, v)
+
+    try:
+        return subprocess.Popen(cmd, **merged_kwargs)
+    except OSError as e:
+        # winerror == 5 (ERROR_ACCESS_DENIED) when the parent's
+        # job rejects breakaway. Strip the BREAKAWAY bit and
+        # retry; if it still fails the OSError propagates as
+        # before.
+        breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
+        if (
+            os.name != "nt"
+            or not breakaway
+            or getattr(e, "winerror", None) != 5
+            or not (merged_kwargs.get("creationflags", 0) & breakaway)
+        ):
+            raise
+        merged_kwargs["creationflags"] &= ~breakaway
+        return subprocess.Popen(cmd, **merged_kwargs)
 
 
 def silent_subprocess_kwargs() -> dict[str, Any]:
