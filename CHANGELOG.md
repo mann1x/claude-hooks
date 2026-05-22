@@ -16,6 +16,72 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [1.10.1] — 2026-05-22
+
+PATCH release. One-class Windows hot-fix: the v1.10.0 LSP-engine
+daemon (and the `store_async` Stop-hook helper) spawned children
+via `sys.executable` which in a conda env is `python.exe` — a
+**console-subsystem** binary. Even with `CREATE_NO_WINDOW |
+DETACHED_PROCESS` set, the Python interpreter can force-allocate
+a console at startup, popping a visible `cmd.exe` window on the
+user's desktop hosting the daemon's logger output. Surfaced on
+pandorum 2026-05-22 right after the v1.10.0 deploy unblocked the
+Windows engine for the first time. Mirrors the `pythonw.exe` swap
+that `install.find_conda_env_pythonw` already does for the
+scheduled-task–managed services (daemon, proxy, forwarder).
+
+### Fixed
+
+- **LSP engine daemon visible window on Windows** — new
+  `claude_hooks._popen.windowless_python_executable()` helper
+  returns `pythonw.exe` (windows-subsystem, no auto-allocated
+  console) when called on Windows with a sibling `pythonw.exe`,
+  and `sys.executable` unchanged everywhere else.
+  `claude_hooks.lsp_engine.client._spawn_daemon` and
+  `claude_hooks.store_async.spawn` now compose the helper into
+  their argv, joining the existing
+  `CREATE_NO_WINDOW | DETACHED_PROCESS` flags as belt-and-braces.
+  The two helpers together give the same windowless-spawn
+  guarantee the Windows scheduled tasks already get.
+
+### Tests
+
+- `tests/test_popen_helpers.py` — 10 new tests covering POSIX
+  pass-through, Windows pythonw sibling swap, idempotency when
+  `sys.executable` is already `pythonw.exe`, case-insensitive
+  filename match, and **source-inspection regression guards** on
+  both `lsp_engine.client._spawn_daemon` and `store_async.spawn`
+  asserting they compose `windowless_python_executable()` rather
+  than `sys.executable`. The guards survive cross-platform because
+  they inspect the source text rather than spawning live.
+
+### Audit
+
+Audited every long-running Windows subprocess spawn site. Only the
+two Python-spawning sites needed the fix; the rest are correct:
+
+- `claude_hooks/lsp_engine/lsp.py` (pyright / gopls / clangd children)
+  — `CREATE_NO_WINDOW` only, intentionally no `DETACHED_PROCESS`
+  because LSP needs stdio pipes. External binaries, not Python.
+- `claude_hooks/consultants_forwarder.py` — already launches
+  `pythonw.exe` (registered by install.py) + the flag pair.
+- `claude_hooks/chat_model_manager.py` / `embedding_manager.py` —
+  spawn external llamafile binaries, no Python interpreter risk.
+- `claude-hooks-daemon` / `claude-hooks-proxy` Windows scheduled
+  tasks — registered via `find_conda_env_pythonw()` at install
+  time, run via `pythonw.exe`.
+
+### Operational note
+
+Hosts on v1.10.0 with a manually-spawned LSP daemon (e.g.
+`claude-hooks-lsp.cmd status` during the v1.10.0 verification
+walk) will keep the visible window until the daemon process is
+killed (`taskkill /F /IM python.exe` against the matching PID, or
+just reboot). Once the v1.10.1 code is in place, the next spawn
+— hook-triggered or manual — uses `pythonw.exe` and stays hidden.
+
+[Compare changes →][1.10.1]
+
 ## [1.10.0] — 2026-05-22
 
 MINOR release. Four interlocking fixes around the LSP engine + the
@@ -7021,6 +7087,7 @@ once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
 [Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.10.0...HEAD
+[1.10.1]: https://github.com/mann1x/claude-hooks/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/mann1x/claude-hooks/compare/v1.9.4...v1.10.0
 [1.9.4]: https://github.com/mann1x/claude-hooks/compare/v1.9.3...v1.9.4
 [1.9.3]: https://github.com/mann1x/claude-hooks/compare/v1.9.2...v1.9.3

@@ -47,7 +47,7 @@ import subprocess
 import sys
 from typing import Optional
 
-from claude_hooks._popen import detach_kwargs
+from claude_hooks._popen import detach_kwargs, windowless_python_executable
 
 log = logging.getLogger("claude_hooks.store_async")
 
@@ -78,10 +78,15 @@ def spawn(payload: dict) -> bool:
     try:
         # Windows: hook context arrives via .cmd → python.exe with a
         # console attached; without CREATE_NO_WINDOW the detached
-        # store child would inherit / flash that console. POSIX:
-        # start_new_session=True suffices. Helper picks per-platform.
+        # store child would inherit / flash that console. v1.10.1
+        # additionally swaps python.exe → pythonw.exe (windowless
+        # subsystem) via ``windowless_python_executable`` so the
+        # interpreter itself doesn't auto-allocate a console at
+        # startup — same defence the LSP daemon spawn now uses.
+        # POSIX: start_new_session=True suffices.
         proc = subprocess.Popen(
-            [sys.executable, "-m", "claude_hooks.store_async"],
+            [windowless_python_executable(),
+             "-m", "claude_hooks.store_async"],
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
