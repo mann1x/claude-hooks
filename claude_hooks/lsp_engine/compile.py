@@ -405,6 +405,18 @@ class CompileRunner:
             " ".join(cmd), self.spec.language,
         )
         try:
+            # ``silent_subprocess_kwargs`` adds ``CREATE_NO_WINDOW``
+            # on Windows so the compile child doesn't pop a visible
+            # console in front of the user. The daemon itself runs
+            # windowless (DETACHED_PROCESS at spawn time), so when
+            # the orchestrator subsequently invokes a compile binary
+            # WITHOUT this flag, Windows allocates a fresh console
+            # for the child — visible to the user. Surfaced when
+            # an msbuild window flashed in front of the user on
+            # pandorum 2026-05-22. ``CREATE_NO_WINDOW`` is correct
+            # here; ``DETACHED_PROCESS`` would break the captured
+            # stdout/stderr we need for diagnostics parsing.
+            from claude_hooks._popen import silent_subprocess_kwargs
             proc = subprocess.run(
                 list(cmd),
                 cwd=cwd,
@@ -412,6 +424,7 @@ class CompileRunner:
                 text=True,
                 timeout=self.spec.run_timeout_s,
                 check=False,
+                **silent_subprocess_kwargs(),
             )
         except subprocess.TimeoutExpired:
             log.warning(

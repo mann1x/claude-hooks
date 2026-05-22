@@ -76,6 +76,35 @@ def detach_kwargs() -> dict[str, Any]:
     return {"start_new_session": True}
 
 
+def silent_subprocess_kwargs() -> dict[str, Any]:
+    """Return the platform-specific kwargs needed to spawn a
+    **non-detached** child that still has no visible console window.
+
+    Distinct from :func:`detach_kwargs` because callers that
+    ``subprocess.run`` (block on the child + capture output) must NOT
+    set ``DETACHED_PROCESS`` — that flag detaches the child from the
+    parent's stdio, which breaks ``capture_output=True`` /
+    ``stdin=PIPE`` / ``stdout=PIPE``. ``CREATE_NO_WINDOW`` alone is
+    the right move there.
+
+    Why this matters: the LSP-engine daemon itself runs windowless
+    (spawn flags applied at ``client._spawn_daemon``), so it has no
+    console. When it then calls ``subprocess.run`` for a compile
+    command like ``msbuild`` WITHOUT this flag, Windows allocates a
+    fresh console for the child — which pops up on the user's
+    desktop. The daemon should be a framework-level guarantee that
+    every child of every operation it runs is windowless; callers
+    shouldn't have to know to set this. Surfaced when an msbuild
+    window flashed in front of the user on pandorum 2026-05-22.
+
+    Windows: ``creationflags = CREATE_NO_WINDOW``.
+    POSIX:   ``{}`` (empty) — no equivalent needed.
+    """
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+    return {}
+
+
 def windowless_python_executable() -> str:
     """Return the windowless Python interpreter path for daemon spawns.
 

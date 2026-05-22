@@ -32,6 +32,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 def _resolve_user_project(project: str) -> str:
@@ -56,6 +57,62 @@ def _resolve_user_project(project: str) -> str:
         return project
     base = os.environ.get("CLAUDE_HOOKS_USER_CWD") or os.getcwd()
     return os.path.normpath(os.path.join(base, project))
+
+
+def _validate_project_path(project: str) -> Optional[str]:
+    """Return an error string if ``project`` doesn't point at a real
+    directory; ``None`` if it's fine.
+
+    v1.10.5 (Bug G): the CLI used to silently compute a hash for
+    whatever string it received from argv — including shell-mangled
+    inputs (cmd.exe eats backslashes inside quoted ``\\"...\\"``
+    paths, producing strings like ``CUsersmannisourcerepos…`` that
+    ``Path.resolve()`` then lexically-completes from cwd). The
+    resulting hash didn't correspond to any real project, so the CLI
+    operated on a phantom address — ``status`` showed false (no
+    daemon listening at that fictitious address), ``restart``
+    reported ``restarted: true`` without touching the actual daemon.
+    Silent-success-on-mangled-input was the dangerous part.
+
+    Now: if the (post-``_resolve_user_project``) path doesn't exist
+    as a directory, the CLI errors out with a clear message and a
+    suggestion based on a scan of ``~/.claude/lsp-engine/*/project``
+    hint files (which carry the live daemon's resolved path, written
+    when the daemon spawned). Helps the user spot the correct quoting
+    form for their shell when the input got mangled.
+    """
+    if os.path.isdir(project):
+        return None
+    msg_lines = [
+        f"--project does not point to an existing directory: {project!r}",
+        "",
+        "Possible causes:",
+        "  - shell escaping mangled the path "
+        "(cmd.exe eats backslashes inside \\\"...\\\" — use --project . "
+        "after cd-ing into the project, or invoke from PowerShell)",
+        "  - typo in the absolute path",
+        "  - the project moved or was deleted since the daemon spawned",
+    ]
+    # Scan known daemon state dirs for a project hint that might
+    # match — if we find a near-match, point the user at it.
+    state_base = Path.home() / ".claude" / "lsp-engine"
+    if state_base.is_dir():
+        hints: list[str] = []
+        for child in state_base.iterdir():
+            hint_file = child / "project"
+            if not hint_file.is_file():
+                continue
+            try:
+                hint = hint_file.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if hint:
+                hints.append(f"  {child.name}  ->  {hint}")
+        if hints:
+            msg_lines.append("")
+            msg_lines.append("Known daemon state dirs on this host:")
+            msg_lines.extend(hints)
+    return "\n".join(msg_lines)
 
 from claude_hooks.lsp_engine.client import (
     LspEngineClient,
@@ -443,6 +500,19 @@ def main(argv: list[str] | None = None) -> int:
     # :func:`_resolve_user_project`.
     if hasattr(args, "project") and args.project:
         args.project = _resolve_user_project(args.project)
+        # v1.10.5 (Bug G): reject --project that doesn't resolve to a
+        # real directory BEFORE we compute a hash for the phantom
+        # path. The ``daemon`` subcommand is the only one that
+        # legitimately creates the dir; for status/stop/cleanup/
+        # restart, "directory does not exist" means the input is
+        # almost certainly shell-mangled. Bail with a diagnostic
+        # listing all known daemon state dirs so the user can spot
+        # the correct quoting form.
+        if args.subcommand != "daemon":
+            err = _validate_project_path(args.project)
+            if err is not None:
+                print(err, file=sys.stderr)
+                return 2
     if args.subcommand == "daemon":
         return _run_daemon(args)
     if args.subcommand == "status":
