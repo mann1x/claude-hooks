@@ -16,6 +16,72 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [1.10.2] — 2026-05-22
+
+PATCH release. Adds a diagnostic write-audit log to
+:func:`claude_hooks.config.save_config` so the next time the live
+config goes missing — as it did on pandorum on 2026-05-22 between
+the v1.10.0 deploy and the next session — we have positive evidence
+of the last sanctioned write (timestamp, pid, caller frame, size,
+target path, argv). Forensics for v1.10.1's pandorum incident were
+incomplete because no audit trail existed: install.py had clearly
+backed the previous file up as `claude-hooks.json.pre-v1.10.0-
+deploy.bak.json` (13:23) and **no orphaned `.tmp`** was present
+(ruling out the partial-write theory in `save_config`), but the
+live file was gone by the next session. With the audit log in
+place we can distinguish "install.py never wrote it" from "external
+agent (git clean / OneDrive / AV) wiped it after we wrote it" the
+next time it happens.
+
+### Added
+
+- **`claude_hooks/config.py:_audit_log_config_write`** — one line
+  per successful `save_config`, appended to
+  `~/.claude/claude-hooks-config-writes.log`. Format:
+
+  ```
+  2026-05-22T16:12:03+0200	pid=12345	size=8096	path=/path/to/claude-hooks.json	caller=install.py:7600:_main	argv0=python install.py
+  ```
+
+  Tab-delimited so `awk -F$'\t'` parses cleanly; local timezone
+  matches the user's mental model when correlating against shell
+  history. **Never logs config content** — pgvector DSN passwords
+  live in the file and would leak to a less-protected log
+  otherwise.
+- **`claude_hooks/config.py:CONFIG_WRITE_AUDIT_LOG`** — module-level
+  Path constant, patchable in tests to redirect the audit target.
+
+### Behavior
+
+- **Soft-fail**: any error in the audit helper (missing dir,
+  permission denied, full disk, …) is swallowed. The real save has
+  already completed by the time the audit runs — a broken audit
+  log must never surface as a broken `save_config`.
+- **No rotation**: install.py calls `save_config` ~5–10× per
+  deploy; growth is sub-kB per run. Revisit if it ever becomes a
+  problem.
+- **No opt-out**: write-audit is unconditional. It's a diagnostic
+  that costs nothing on the hot path (writes happen only from
+  install.py / explicit user-facing commands).
+
+### Tests
+
+- `tests/test_config.py::TestConfigWriteAuditLog` — 8 new tests:
+  audit-line shape, size field matches on-disk file, caller frame
+  extraction (`inspect.stack()` walks past `save_config` and
+  `_audit` frames), append-only across multiple writes, soft-fail
+  when the audit target is unwritable, **content-leak guard**
+  asserting `pgvector.dsn` passwords never appear in audit lines,
+  default audit-log path resolves under `~/.claude/`, and direct
+  invocation of `_audit_log_config_write`.
+- `TestConfig.setUp` now patches `CONFIG_WRITE_AUDIT_LOG` to a
+  per-test tmp dir so the existing roundtrip test no longer leaks
+  audit entries into the user's real log on every pytest run.
+
+Full sweep: 4089 passed, 136 skipped, 0 failed (+8 vs v1.10.1).
+
+[Compare changes →][1.10.2]
+
 ## [1.10.1] — 2026-05-22
 
 PATCH release. One-class Windows hot-fix: the v1.10.0 LSP-engine
@@ -7087,6 +7153,7 @@ once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
 [Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.10.0...HEAD
+[1.10.2]: https://github.com/mann1x/claude-hooks/compare/v1.10.1...v1.10.2
 [1.10.1]: https://github.com/mann1x/claude-hooks/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/mann1x/claude-hooks/compare/v1.9.4...v1.10.0
 [1.9.4]: https://github.com/mann1x/claude-hooks/compare/v1.9.3...v1.9.4

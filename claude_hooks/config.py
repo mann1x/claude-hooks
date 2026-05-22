@@ -7,8 +7,11 @@ schema is documented in ``config/claude-hooks.example.json``.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
+import sys
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Optional
@@ -610,8 +613,80 @@ def load_config(path: Optional[Path] = None) -> dict:
     return merged
 
 
+CONFIG_WRITE_AUDIT_LOG = Path(
+    os.path.expanduser("~/.claude/claude-hooks-config-writes.log"),
+)
+
+
+def _audit_log_config_write(cfg_path: Path, size: int) -> None:
+    """Append a single audit line to ``CONFIG_WRITE_AUDIT_LOG``.
+
+    Records every successful :func:`save_config` so we can identify the
+    last sanctioned write when the live config goes missing
+    (the pandorum 2026-05-22 incident: ``claude-hooks.json`` vanished
+    between the v1.10.0 deploy and the next session; no orphan
+    ``.tmp`` was found, so the partial-write theory was ruled out, but
+    we had no positive evidence of who *did* write it last).
+
+    Format: one tab-delimited line per write::
+
+        2026-05-22T16:12:03+0200\\tpid=...\\tsize=8096\\tpath=...\\tcaller=install.py:7600:_main\\targv0=python install.py
+
+    **Never logs config content** — DSNs in this file carry the
+    pgvector password (``postgresql://claude:Xct29ER...``); the audit
+    log lives under ``~/.claude/`` which is more loosely protected
+    than ``config/``. Metadata only.
+
+    Soft-fail: any error in this helper (missing dir, permission
+    denied, full disk, ...) is swallowed. The real save has already
+    completed by the time this runs — a broken audit log must never
+    surface as a broken ``save_config``.
+    """
+    try:
+        # Caller frame: stack[0] = this fn, stack[1] = save_config,
+        # stack[2] = the actual caller we want to record.
+        stack = inspect.stack()
+        if len(stack) > 2:
+            f = stack[2]
+            caller = f"{Path(f.filename).name}:{f.lineno}:{f.function}"
+        else:
+            caller = "<unknown>"
+
+        CONFIG_WRITE_AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+
+        # Local time matches the user's mental model when correlating
+        # against shell history / file timestamps on the same box.
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime())
+        pid = os.getpid()
+        # First 3 argv tokens; usually "python install.py [flag]". More
+        # than enough to identify the entry point without bloating the
+        # line for long bench invocations.
+        argv0 = " ".join(sys.argv[:3]) if sys.argv else ""
+        line = (
+            f"{ts}\tpid={pid}\tsize={size}"
+            f"\tpath={cfg_path}\tcaller={caller}\targv0={argv0}\n"
+        )
+
+        # Append-only — never truncate, no rotation. install.py calls
+        # save_config ~5-10× per deploy; growth is sub-kB/run.
+        with open(CONFIG_WRITE_AUDIT_LOG, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        # Swallow EVERYTHING. The actual save already succeeded; we
+        # are not allowed to break it here.
+        pass
+
+
 def save_config(cfg: dict, path: Optional[Path] = None) -> Path:
-    """Atomically write the config to disk and return the path."""
+    """Atomically write the config to disk and return the path.
+
+    Records a one-line audit entry to ``~/.claude/claude-hooks-
+    config-writes.log`` after the atomic ``os.replace`` succeeds. See
+    :func:`_audit_log_config_write` for the rationale (pandorum
+    2026-05-22 disappearance) and format. The audit line never
+    contains config content — pgvector DSN passwords live in the
+    config and would leak otherwise; metadata only.
+    """
     cfg_path = path or default_config_path()
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = cfg_path.with_suffix(cfg_path.suffix + ".tmp")
@@ -619,6 +694,14 @@ def save_config(cfg: dict, path: Optional[Path] = None) -> Path:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
         f.write("\n")
     os.replace(tmp, cfg_path)
+
+    # v1.10.2: write-audit log. Soft-fail — never propagates errors.
+    try:
+        size = cfg_path.stat().st_size
+    except OSError:
+        size = -1
+    _audit_log_config_write(cfg_path, size)
+
     return cfg_path
 
 
