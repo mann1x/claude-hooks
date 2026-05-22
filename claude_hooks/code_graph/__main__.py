@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from claude_hooks._popen import detach_kwargs
+from claude_hooks._popen import detach_kwargs, windowless_python_executable
 
 from claude_hooks.code_graph.builder import build_graph
 from claude_hooks.code_graph.detect import (
@@ -96,11 +96,14 @@ def build_async(
         if not _acquire_lock(out_dir, lock_min_age_seconds):
             return
         # Detached subprocess — don't await. detach_kwargs adds
-        # CREATE_NO_WINDOW | DETACHED_PROCESS on Windows so the
-        # builder doesn't flash a console when triggered from a
-        # python.exe-based hook context.
+        # CREATE_NO_WINDOW | DETACHED_PROCESS on Windows; the
+        # ``windowless_python_executable()`` swap to ``pythonw.exe``
+        # prevents the Python interpreter from self-allocating a
+        # console at startup (which the flags alone cannot
+        # suppress — pandorum 2026-05-22).
         subprocess.Popen(
-            [sys.executable, "-m", "claude_hooks.code_graph", "build",
+            [windowless_python_executable(), "-m",
+             "claude_hooks.code_graph", "build",
              "--root", str(root)],
             cwd=str(root),
             stdin=subprocess.DEVNULL,

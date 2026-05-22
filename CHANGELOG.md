@@ -16,6 +16,98 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [1.10.4] — 2026-05-22
+
+PATCH release. Closes a visible-console-window bug on Windows: the
+consultants smart-start forwarder spawned the engine as a raw
+``python.exe`` child even when ``CREATE_NO_WINDOW | DETACHED_PROCESS``
+were set, because Python's console-subsystem binary self-allocates
+a console at interpreter startup *before* the flags can suppress it.
+The v1.10.1 lesson — ``windowless_python_executable()`` — had been
+codified for the LSP-engine daemon and ``store_async`` but missed
+the consultants forwarder and ``code_graph.__main__``. Surfaced on
+pandorum when the user observed a "consultants" window popping onto
+their desktop. Also bundles a full audit of every production
+``subprocess.Popen`` spawn site confirming no other visible-window
+risks remain.
+
+### Fixed
+
+- **Consultants forwarder spawned a visible Python console window**
+  on Windows whenever it cold-spawned the engine. The smart-start
+  forwarder's ``EngineManager.ensure_running`` passed
+  ``self.cfg.engine_python`` raw to ``subprocess.Popen``; when
+  install.py had registered ``python.exe`` (the console-subsystem
+  binary) — common on pre-v1.8.1 installs — the Python runtime
+  self-allocated a console at interpreter startup, **before**
+  ``CREATE_NO_WINDOW | DETACHED_PROCESS`` could suppress it. The
+  flags only handle inherited consoles, not the auto-allocate path.
+  Fix: route ``engine_python`` through the new
+  ``claude_hooks._popen.windowless_python_path()`` helper, which
+  swaps ``python.exe`` for the ``pythonw.exe`` sibling
+  (windows-subsystem) if one exists. Mirrors the v1.10.1 LSP-engine
+  daemon fix.
+
+- **``claude_hooks.code_graph.__main__.build_async`` spawned with
+  ``sys.executable``** — same root cause as the forwarder. On
+  Windows ``sys.executable`` is ``python.exe``, so the detached
+  code-graph builder could flash a console when triggered from a
+  hook running under ``python.exe``. Fix: swap to
+  ``windowless_python_executable()`` (the v1.10.1 helper for
+  ``sys.executable``-resolved interpreters).
+
+### Audit
+
+Full sweep of every production ``subprocess.Popen`` spawn site to
+confirm no other visible-window risks remain on Windows. Every other
+Python-interpreter spawn (``store_async``, ``lsp_engine.client.
+_spawn_daemon``) already routes through ``windowless_python_
+executable()``; every other site spawns an external (non-Python)
+binary that doesn't self-allocate. The two fixed above were the
+only outstanding offenders. Source-inspection regression tests
+guard against either re-introducing raw ``self.cfg.engine_python``
+or ``sys.executable`` in their Popen ``cmd[0]``.
+
+### Added
+
+- ``claude_hooks._popen.windowless_python_path(python_exe)`` —
+  sibling helper for ``windowless_python_executable()``. Operates
+  on an arbitrary configured interpreter path (the forwarder reads
+  ``engine_python`` from ``config/claude-hooks.json``) rather than
+  ``sys.executable``. POSIX passthrough; Windows ``python.exe`` →
+  ``pythonw.exe`` rewrite if the sibling exists; unknown-name
+  interpreters pass through unchanged. Uses ``os.path`` string ops
+  so the helper is callable from POSIX tests that patch
+  ``os.name = "nt"`` (instantiating ``pathlib.WindowsPath`` on
+  POSIX raises ``NotImplementedError``).
+
+### Changed
+
+- ``EngineManager.ensure_running`` now uses ``popen_detached()``
+  instead of inline ``CREATE_NO_WINDOW | DETACHED_PROCESS``. That
+  also OR's in ``CREATE_BREAKAWAY_FROM_JOB`` (v1.10.3 daemon-
+  survives-parent-exit fix) and handles the rare
+  ``ERROR_ACCESS_DENIED`` fallback. Drops 4 lines of duplicated
+  platform branching; ``stdin=subprocess.DEVNULL`` added to match
+  the pattern in the other detached spawns.
+
+### Tests
+
+- ``tests/test_windowless_python_path.py`` (NEW, 9 tests) — unit
+  coverage of ``windowless_python_path`` (POSIX passthrough,
+  empty input, pythonw passthrough, python→pythonw rewrite when
+  sibling exists, passthrough when sibling missing, unknown-name
+  passthrough) plus source-inspection regression guards for the
+  forwarder and code_graph spawn sites.
+- Full sweep: 4185 passed / 136 skipped (was 4176 — +9).
+- M12 parity green.
+
+### Verified
+
+- Pandorum live smoke: forwarder cold-spawn after restart yields
+  ``pythonw.exe`` engine PID (was ``python.exe`` pre-fix), with
+  ``HasMainWindow=False``. No window flash observed.
+
 ## [1.10.3] — 2026-05-22
 
 PATCH release. Closes ten distinct LSP-engine bugs surfaced by

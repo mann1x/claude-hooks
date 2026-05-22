@@ -140,36 +140,44 @@ class EngineManager:
                 )
 
             port = self._pick_port()
+            # Windows: ``CREATE_NO_WINDOW | DETACHED_PROCESS`` flags
+            # alone are NOT enough when the registered interpreter is
+            # ``python.exe`` (console-subsystem) — the Python runtime
+            # self-allocates a console at interpreter startup, before
+            # the creation flags can suppress it, and the user sees a
+            # visible "consultants" console window on their desktop.
+            # Surfaced on pandorum 2026-05-22.
+            #
+            # ``windowless_python_path`` swaps ``python.exe`` for the
+            # ``pythonw.exe`` sibling (windows-subsystem) if one exists
+            # in the same conda env. This is the same fix v1.10.1
+            # applied to the LSP-engine daemon spawn; the forwarder
+            # was simply missed.
+            #
+            # ``popen_detached`` adds ``CREATE_BREAKAWAY_FROM_JOB``
+            # on top, so the engine survives if the parent
+            # (claude-hooks-daemon) is in a job object — matches the
+            # v1.10.3 daemon-survives-parent-exit fix.
+            from claude_hooks._popen import (
+                popen_detached,
+                windowless_python_path,
+            )
+            engine_python = windowless_python_path(self.cfg.engine_python)
             cmd = [
-                self.cfg.engine_python, "-m", self.cfg.engine_module,
+                engine_python, "-m", self.cfg.engine_module,
                 "--host", self.cfg.engine_host,
                 "--port", str(port),
                 *self.cfg.extra_engine_args,
             ]
             log.info("spawning engine: %s", " ".join(cmd))
-            # Windows: pythonw.exe alone is windowless, but if the
-            # registered --engine-python points at python.exe (e.g.
-            # pre-v1.8.1 install.py where consultants_py was passed
-            # instead of pyw), a visible console pops up on the user's
-            # desktop. CREATE_NO_WINDOW | DETACHED_PROCESS makes the
-            # spawn windowless regardless of which exe is used —
-            # mirroring chat_model_manager / embedding_manager /
-            # lsp_engine.client which already guard their spawns.
-            # POSIX: start_new_session=True suffices.
             popen_kwargs: dict = dict(
                 cwd=self.cfg.repo_root or None,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            if os.name == "nt":
-                popen_kwargs["creationflags"] = (
-                    getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                    | getattr(subprocess, "DETACHED_PROCESS", 0)
-                )
-            else:
-                popen_kwargs["start_new_session"] = True
             try:
-                self.proc = subprocess.Popen(cmd, **popen_kwargs)
+                self.proc = popen_detached(cmd, **popen_kwargs)
             except OSError as e:
                 raise RuntimeError(f"engine spawn failed: {e}") from e
 
