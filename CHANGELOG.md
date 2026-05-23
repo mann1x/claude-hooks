@@ -14,6 +14,35 @@ release with the auto-generated source archive
 (`claude-hooks-X.Y.Z.zip` / `.tar.gz`). See
 [`docs/RELEASING.md`](docs/RELEASING.md) for the cut procedure.
 
+## [1.10.6] — 2026-05-23
+
+PATCH hot-fix. Two pre-existing ``pyproject.toml`` metadata bugs
+surfaced when v1.10.5's ``pip install -e .`` step (run by
+``install.py`` since v1.10.0) hit modern setuptools (≥77 for the
+license enforcement, ≥80 for the flat-layout enforcement). On
+existing v1.10.4 hosts the bugs were silently tolerated by older
+setuptools in the build env; on a fresh deploy they make
+``install.py`` fail.
+
+### Fixed
+
+- **PEP 639 license conflict.** ``license = "MIT"`` SPDX string in
+  ``[project]`` co-existed with the legacy
+  ``"License :: OSI Approved :: MIT License"`` classifier.
+  setuptools 77+ rejects the combination outright. SPDX
+  supersedes; classifier dropped.
+- **Flat-layout package ambiguity.** Repo root has eight
+  non-package top-level directories (``bench/``, ``vendor/``,
+  ``docker/``, ``config/``, ``systemd/``, ``patches/``,
+  ``modelfiles/``, ``episodic_server/``) alongside the two real
+  packages (``claude_hooks``, ``consultants``); setuptools'
+  auto-discovery refuses to disambiguate. New
+  ``[tool.setuptools.packages.find]`` block with
+  ``include = ["claude_hooks*", "consultants*"]`` declares the
+  packages explicitly. Both ``pip install -e .`` (the path
+  ``install.py`` walks on every host) and ``pip install
+  claude-hooks`` from an sdist now resolve cleanly.
+
 ## [1.10.5] — 2026-05-23
 
 PATCH release. Closes the last visible-console-window hole on
