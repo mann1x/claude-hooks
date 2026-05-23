@@ -247,3 +247,77 @@ class TestSpawnSitesUseWindowlessExecutable:
             "windowless_python_executable() into its argv. Same bug "
             "class as the v1.10.1 LSP daemon fix — restore it."
         )
+
+    def test_install_pgvector_setup_uses_pythonw_for_mcp(self):
+        """install.py's pgvector MCP setup must bake the windowless
+        interpreter into the launcher when running on Windows.
+
+        Without this guard, the user-visible pandorum regression of
+        2026-05-23 returns: Claude Code spawns the pgvector MCP child
+        via the ``pgvector-mcp.cmd`` shim, which exec'd ``python.exe``
+        (console-subsystem) and the interpreter auto-allocated a
+        console window even with the parent passing
+        ``windowsHide: true``. Same bug class as v1.10.1 / v1.10.4 —
+        ``find_conda_env_python_for_mcp`` prefers ``pythonw.exe``."""
+        import inspect
+        import install
+        src = inspect.getsource(install._setup_pgvector_mcp)
+        assert "find_conda_env_python_for_mcp(" in src, (
+            "install._setup_pgvector_mcp no longer resolves the "
+            "launcher interpreter via find_conda_env_python_for_mcp — "
+            "the Windows visible-window bug will re-surface on the "
+            "next install. See find_conda_env_python_for_mcp's "
+            "docstring for the rationale."
+        )
+
+    def test_install_sqlite_vec_setup_uses_pythonw_for_mcp(self):
+        """Mirror of the pgvector guard. The sqlite_vec MCP launcher
+        is the same shape (``.cmd`` shim → python.exe → -m
+        claude_hooks.sqlite_vec_mcp) and inherits the same bug class."""
+        import inspect
+        import install
+        src = inspect.getsource(install._setup_sqlite_vec_mcp)
+        assert "find_conda_env_python_for_mcp(" in src, (
+            "install._setup_sqlite_vec_mcp no longer resolves the "
+            "launcher interpreter via find_conda_env_python_for_mcp. "
+            "Restore it."
+        )
+
+    def test_find_conda_env_python_for_mcp_prefers_pythonw_on_windows(self):
+        """Behavioural test for the helper itself: on Windows, when a
+        ``pythonw.exe`` sibling exists, it must be preferred over
+        ``python.exe``. On POSIX or when pythonw is missing, falls back
+        cleanly to the plain interpreter.
+
+        Uses ``PureWindowsPath`` / ``PurePosixPath`` sentinels so the
+        test runs on any host (the real ``Path`` subclass for the other
+        OS can't be instantiated cross-platform)."""
+        import install
+        from unittest.mock import patch
+        from pathlib import PurePosixPath, PureWindowsPath
+
+        sentinel_pyw = PureWindowsPath("C:/x/envs/y/pythonw.exe")
+        sentinel_py_win = PureWindowsPath("C:/x/envs/y/python.exe")
+        sentinel_py_posix = PurePosixPath("/home/u/anaconda3/envs/y/bin/python")
+
+        # Windows + pythonw available -> returns pythonw.
+        with patch.object(install.os, "name", "nt"), \
+             patch.object(install, "find_conda_env_pythonw",
+                          return_value=sentinel_pyw), \
+             patch.object(install, "find_conda_env_python",
+                          return_value=sentinel_py_win):
+            assert install.find_conda_env_python_for_mcp() is sentinel_pyw
+
+        # Windows + pythonw missing -> falls back to python.exe.
+        with patch.object(install.os, "name", "nt"), \
+             patch.object(install, "find_conda_env_pythonw",
+                          return_value=None), \
+             patch.object(install, "find_conda_env_python",
+                          return_value=sentinel_py_win):
+            assert install.find_conda_env_python_for_mcp() is sentinel_py_win
+
+        # POSIX -> never tries pythonw, returns plain interpreter.
+        with patch.object(install.os, "name", "posix"), \
+             patch.object(install, "find_conda_env_python",
+                          return_value=sentinel_py_posix):
+            assert install.find_conda_env_python_for_mcp() is sentinel_py_posix

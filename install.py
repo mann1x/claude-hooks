@@ -100,6 +100,38 @@ def find_conda_env_pythonw(env_name: str = CONDA_ENV_NAME) -> Optional[Path]:
     return None
 
 
+def find_conda_env_python_for_mcp(env_name: str = CONDA_ENV_NAME) -> Path:
+    """Return the interpreter path to bake into stdio-MCP launchers and
+    ``~/.claude.json`` ``mcpServers`` entries.
+
+    On Windows prefer ``pythonw.exe`` (windows-subsystem) over
+    ``python.exe`` (console-subsystem) — when Claude Code spawns the
+    stdio MCP as a child process, ``python.exe`` auto-allocates a
+    console window at interpreter startup even if the parent passes
+    ``windowsHide: true`` to ``CreateProcess``. Same root cause as the
+    v1.10.1 LSP-daemon visible-window bug; the install.py paths that
+    register MCP launchers were the last hole — surfaced on pandorum
+    2026-05-23 (``code_graph.mcp_server`` + ``pgvector-mcp.cmd`` both
+    flashed empty-title python.exe windows on the user's desktop).
+
+    ``pythonw.exe`` keeps stdio redirection intact (the parent passes
+    pipe handles via STARTUPINFO; the windows-subsystem flag only
+    suppresses the auto-allocated console), so JSON-RPC over stdin /
+    stdout works unchanged.
+
+    Falls back to ``find_conda_env_python(env_name)`` when no
+    ``pythonw.exe`` sibling exists (very old Python builds, stripped
+    custom installs) or when the conda env lookup fails entirely —
+    callers can still ``.exists()``-check the returned path. POSIX
+    always returns the plain python (no pythonw.exe equivalent).
+    """
+    if os.name == "nt":
+        pyw = find_conda_env_pythonw(env_name)
+        if pyw is not None:
+            return pyw
+    return find_conda_env_python(env_name)
+
+
 def find_conda_env_python(env_name: str = CONDA_ENV_NAME) -> Path:
     """Locate the Python interpreter inside the named conda env.
 
@@ -3309,7 +3341,10 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
 
     # 3. Drop the launcher script. PYTHONPATH baked in is the repo root
     # (HERE) so the launcher works without a pip install of claude-hooks.
-    py_path = find_conda_env_python()
+    # Use the windowless interpreter on Windows so Claude Code spawning
+    # this MCP child doesn't flash a console — see
+    # ``find_conda_env_python_for_mcp``.
+    py_path = find_conda_env_python_for_mcp()
     py = str(py_path) if py_path.exists() else sys.executable
     launcher_path = _pgvector_launcher_path()
     if dry_run:
@@ -4563,7 +4598,10 @@ def _setup_sqlite_vec_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) ->
     # ``--non-interactive`` always installs (matches the pgvector
     # behavior); skip explicitly with --skip-sqlite-vec-launcher if you
     # ever need to (no flag today; add when there's a use case).
-    py_path = find_conda_env_python()
+    #
+    # Use the windowless interpreter on Windows — see
+    # ``find_conda_env_python_for_mcp`` for the rationale.
+    py_path = find_conda_env_python_for_mcp()
     py = str(py_path) if py_path.exists() else sys.executable
     launcher_path = _sqlite_vec_launcher_path()
     if non_interactive:

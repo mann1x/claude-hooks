@@ -16,6 +16,25 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed
+
+- **Windows visible-console-window bug (last hole).** install.py's
+  stdio-MCP launcher writers (``pgvector-mcp.cmd`` /
+  ``sqlite-vec-mcp.cmd``) and the matching ``~/.claude.json``
+  ``mcpServers`` registrations baked ``python.exe`` (console
+  subsystem) into the launcher script. When Claude Code spawned the
+  MCP child as a stdio JSON-RPC server, ``python.exe`` self-allocated
+  a console window at interpreter startup even with the parent
+  passing ``windowsHide: true`` — same class of bug as the v1.10.1
+  LSP-daemon fix and the v1.10.4 consultants-forwarder fix, but in
+  the last spawn surface that still emitted ``python.exe``. New
+  ``find_conda_env_python_for_mcp()`` helper prefers ``pythonw.exe``
+  on Windows when present; both ``_setup_pgvector_mcp`` and
+  ``_setup_sqlite_vec_mcp`` use it. Falls back to ``python.exe``
+  with the same explicit fallback path that ``find_conda_env_pythonw``
+  uses on stripped Python builds. Source-level regression guards in
+  ``tests/test_popen_helpers.py``.
+
 ## [1.10.4] — 2026-05-22
 
 PATCH release. Closes a visible-console-window bug on Windows: the
