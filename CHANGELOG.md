@@ -14,7 +14,12 @@ release with the auto-generated source archive
 (`claude-hooks-X.Y.Z.zip` / `.tar.gz`). See
 [`docs/RELEASING.md`](docs/RELEASING.md) for the cut procedure.
 
-## [Unreleased]
+## [1.10.5] — 2026-05-23
+
+PATCH release. Closes the last visible-console-window hole on
+Windows — stdio-MCP launchers (``pgvector-mcp`` / ``sqlite-vec-mcp``)
+— and ships a one-time migration scanner so existing installs
+upgrade in place without having to re-run ``install.py``.
 
 ### Fixed
 
@@ -34,6 +39,18 @@ release with the auto-generated source archive
   with the same explicit fallback path that ``find_conda_env_pythonw``
   uses on stripped Python builds. Source-level regression guards in
   ``tests/test_popen_helpers.py``.
+
+### Added
+
+- **One-time ``~/.claude.json`` migration scanner.** New
+  ``_migrate_claude_json_python_to_pythonw()`` runs once per
+  ``install.py`` invocation and rewrites any ``mcpServers`` entry
+  whose ``command`` still points at ``python.exe`` to the matching
+  ``pythonw.exe`` sibling, if one exists. Writes a timestamped
+  backup of ``~/.claude.json`` before mutating, no-ops on POSIX,
+  no-ops when no entries need rewriting. Lets v1.10.4 installs
+  pick up the launcher fix without manually editing
+  ``~/.claude.json`` or wiping their MCP config.
 
 ## [1.10.4] — 2026-05-22
 
