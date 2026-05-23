@@ -14,7 +14,43 @@ release with the auto-generated source archive
 (`claude-hooks-X.Y.Z.zip` / `.tar.gz`). See
 [`docs/RELEASING.md`](docs/RELEASING.md) for the cut procedure.
 
-## [Unreleased]
+## [1.10.5] — 2026-05-23
+
+PATCH release. Closes the last visible-console-window hole on
+Windows — stdio-MCP launchers (``pgvector-mcp`` / ``sqlite-vec-mcp``)
+— and ships a one-time migration scanner so existing installs
+upgrade in place without having to re-run ``install.py``.
+
+### Fixed
+
+- **Windows visible-console-window bug (last hole).** install.py's
+  stdio-MCP launcher writers (``pgvector-mcp.cmd`` /
+  ``sqlite-vec-mcp.cmd``) and the matching ``~/.claude.json``
+  ``mcpServers`` registrations baked ``python.exe`` (console
+  subsystem) into the launcher script. When Claude Code spawned the
+  MCP child as a stdio JSON-RPC server, ``python.exe`` self-allocated
+  a console window at interpreter startup even with the parent
+  passing ``windowsHide: true`` — same class of bug as the v1.10.1
+  LSP-daemon fix and the v1.10.4 consultants-forwarder fix, but in
+  the last spawn surface that still emitted ``python.exe``. New
+  ``find_conda_env_python_for_mcp()`` helper prefers ``pythonw.exe``
+  on Windows when present; both ``_setup_pgvector_mcp`` and
+  ``_setup_sqlite_vec_mcp`` use it. Falls back to ``python.exe``
+  with the same explicit fallback path that ``find_conda_env_pythonw``
+  uses on stripped Python builds. Source-level regression guards in
+  ``tests/test_popen_helpers.py``.
+
+### Added
+
+- **One-time ``~/.claude.json`` migration scanner.** New
+  ``_migrate_claude_json_python_to_pythonw()`` runs once per
+  ``install.py`` invocation and rewrites any ``mcpServers`` entry
+  whose ``command`` still points at ``python.exe`` to the matching
+  ``pythonw.exe`` sibling, if one exists. Writes a timestamped
+  backup of ``~/.claude.json`` before mutating, no-ops on POSIX,
+  no-ops when no entries need rewriting. Lets v1.10.4 installs
+  pick up the launcher fix without manually editing
+  ``~/.claude.json`` or wiping their MCP config.
 
 ## [1.10.4] — 2026-05-22
 

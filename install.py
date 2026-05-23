@@ -100,6 +100,38 @@ def find_conda_env_pythonw(env_name: str = CONDA_ENV_NAME) -> Optional[Path]:
     return None
 
 
+def find_conda_env_python_for_mcp(env_name: str = CONDA_ENV_NAME) -> Path:
+    """Return the interpreter path to bake into stdio-MCP launchers and
+    ``~/.claude.json`` ``mcpServers`` entries.
+
+    On Windows prefer ``pythonw.exe`` (windows-subsystem) over
+    ``python.exe`` (console-subsystem) — when Claude Code spawns the
+    stdio MCP as a child process, ``python.exe`` auto-allocates a
+    console window at interpreter startup even if the parent passes
+    ``windowsHide: true`` to ``CreateProcess``. Same root cause as the
+    v1.10.1 LSP-daemon visible-window bug; the install.py paths that
+    register MCP launchers were the last hole — surfaced on pandorum
+    2026-05-23 (``code_graph.mcp_server`` + ``pgvector-mcp.cmd`` both
+    flashed empty-title python.exe windows on the user's desktop).
+
+    ``pythonw.exe`` keeps stdio redirection intact (the parent passes
+    pipe handles via STARTUPINFO; the windows-subsystem flag only
+    suppresses the auto-allocated console), so JSON-RPC over stdin /
+    stdout works unchanged.
+
+    Falls back to ``find_conda_env_python(env_name)`` when no
+    ``pythonw.exe`` sibling exists (very old Python builds, stripped
+    custom installs) or when the conda env lookup fails entirely —
+    callers can still ``.exists()``-check the returned path. POSIX
+    always returns the plain python (no pythonw.exe equivalent).
+    """
+    if os.name == "nt":
+        pyw = find_conda_env_pythonw(env_name)
+        if pyw is not None:
+            return pyw
+    return find_conda_env_python(env_name)
+
+
 def find_conda_env_python(env_name: str = CONDA_ENV_NAME) -> Path:
     """Locate the Python interpreter inside the named conda env.
 
@@ -3309,7 +3341,10 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
 
     # 3. Drop the launcher script. PYTHONPATH baked in is the repo root
     # (HERE) so the launcher works without a pip install of claude-hooks.
-    py_path = find_conda_env_python()
+    # Use the windowless interpreter on Windows so Claude Code spawning
+    # this MCP child doesn't flash a console — see
+    # ``find_conda_env_python_for_mcp``.
+    py_path = find_conda_env_python_for_mcp()
     py = str(py_path) if py_path.exists() else sys.executable
     launcher_path = _pgvector_launcher_path()
     if dry_run:
@@ -4563,7 +4598,10 @@ def _setup_sqlite_vec_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) ->
     # ``--non-interactive`` always installs (matches the pgvector
     # behavior); skip explicitly with --skip-sqlite-vec-launcher if you
     # ever need to (no flag today; add when there's a use case).
-    py_path = find_conda_env_python()
+    #
+    # Use the windowless interpreter on Windows — see
+    # ``find_conda_env_python_for_mcp`` for the rationale.
+    py_path = find_conda_env_python_for_mcp()
     py = str(py_path) if py_path.exists() else sys.executable
     launcher_path = _sqlite_vec_launcher_path()
     if non_interactive:
@@ -5115,6 +5153,128 @@ def _register_sqlite_vec_mcp_in_claude_json(launcher_path: Path) -> None:
 def _now_ts() -> str:
     import datetime
     return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def _migrate_claude_json_python_to_pythonw(*, non_interactive: bool,
+                                           dry_run: bool) -> None:
+    """Scan ``~/.claude.json`` for ``mcpServers`` entries whose ``command``
+    field points at ``python.exe`` and offer to swap them to the
+    ``pythonw.exe`` sibling when one exists.
+
+    Background: stdio-MCP servers spawned by Claude Code on Windows
+    pop a visible console window if their interpreter is ``python.exe``
+    (console subsystem) — the interpreter self-allocates a console at
+    startup before any ``windowsHide: true`` from the parent can take
+    effect. The fix is to use ``pythonw.exe`` (windows-subsystem) which
+    still inherits the parent's stdio pipes for JSON-RPC but doesn't
+    auto-allocate a console. Future installs will use the helper
+    :func:`find_conda_env_python_for_mcp` to bake the right interpreter
+    in, but **existing** ``~/.claude.json`` entries — including ones the
+    user hand-registered, like ``code_graph.mcp_server`` — need a
+    one-time rewrite.
+
+    Walks both the root ``mcpServers`` map and every per-project
+    ``projects[<path>].mcpServers`` map. Only candidates where:
+
+    1. ``command`` ends in ``\\python.exe`` (case-insensitive), AND
+    2. a ``pythonw.exe`` sibling exists in the same directory
+
+    are surfaced — anything else (custom interpreter, conda env that
+    lacks pythonw, non-Python command) is left untouched. A timestamped
+    backup of the original file is written before any rewrite.
+
+    Honors ``--dry-run`` (print only) and ``--non-interactive`` (print
+    candidates but never rewrite — destructive ops must always be
+    user-confirmed on this code path; the same policy as the rest of
+    install.py per the feedback memory).
+
+    POSIX hosts no-op silently — ``python.exe`` doesn't exist there.
+    """
+    if os.name != "nt":
+        return
+    claude_json = Path(os.path.expanduser("~/.claude.json"))
+    if not claude_json.exists():
+        return
+    try:
+        raw = claude_json.read_text(encoding="utf-8")
+        cfg = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"  [migrate-mcp-pythonw] could not read {claude_json}: {e}")
+        return
+
+    # Collect candidates: (location_label, mcps_dict_ref, server_name,
+    # current_command, proposed_command). Walking both maps in one pass
+    # so we can present a unified prompt at the end.
+    candidates: list[tuple[str, dict, str, str, str]] = []
+
+    def _scan(mcps: dict, location_label: str) -> None:
+        if not isinstance(mcps, dict):
+            return
+        for name, entry in mcps.items():
+            if not isinstance(entry, dict):
+                continue
+            cmd = entry.get("command")
+            if not isinstance(cmd, str) or not cmd:
+                continue
+            # case-insensitive python.exe suffix match
+            low = cmd.lower()
+            if not (low.endswith("\\python.exe") or low.endswith("/python.exe")):
+                continue
+            # sibling pythonw.exe must exist
+            parent = os.path.dirname(cmd)
+            pyw = os.path.join(parent, "pythonw.exe")
+            if not os.path.isfile(pyw):
+                continue
+            candidates.append((location_label, mcps, name, cmd, pyw))
+
+    _scan(cfg.get("mcpServers", {}), "root")
+    projects = cfg.get("projects", {})
+    if isinstance(projects, dict):
+        for proj_path, proj_cfg in projects.items():
+            if not isinstance(proj_cfg, dict):
+                continue
+            _scan(proj_cfg.get("mcpServers", {}),
+                  f"projects[{proj_path}]")
+
+    if not candidates:
+        return
+
+    print()
+    print("==> ~/.claude.json: stdio-MCP python.exe → pythonw.exe migration")
+    print(f"    Found {len(candidates)} mcpServers entry/entries pointing at")
+    print("    python.exe (console subsystem) — these flash a console window")
+    print("    on every Claude Code session spawn. Swapping to pythonw.exe")
+    print("    sibling keeps stdio JSON-RPC working without the console.")
+    print()
+    for loc, _mcps, name, old, new in candidates:
+        print(f"  [{loc}] {name}")
+        print(f"      from: {old}")
+        print(f"      to:   {new}")
+
+    if dry_run:
+        print("\n  [dry-run] no changes written.")
+        return
+    if non_interactive:
+        print("\n  --non-interactive: skipping in-place rewrite. Re-run")
+        print("  interactively (or edit ~/.claude.json by hand) to apply.")
+        return
+
+    ans = input("\n  Apply the migration now? [Y/n]: ").strip().lower()
+    if ans not in ("", "y", "yes"):
+        print("  Skipped — ~/.claude.json untouched.")
+        return
+
+    # Timestamped backup before any write.
+    ts = _now_ts()
+    bak = claude_json.with_suffix(f".json.bak-{ts}-mcp-pythonw")
+    bak.write_text(raw, encoding="utf-8")
+    print(f"  Backup: {bak}")
+
+    for _loc, mcps, name, _old, new in candidates:
+        mcps[name]["command"] = new
+    claude_json.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    print(f"  Rewrote {len(candidates)} mcpServers entry/entries.")
+    print("  Effect lands on next Claude Code session restart.")
 
 
 def _ollama_base_from_embed_url(url: str) -> str:
@@ -7544,6 +7704,18 @@ def main() -> int:
     # (handled inside _setup_embedding_engine's idempotency check).
     _setup_sqlite_vec_mcp(
         cfg,
+        non_interactive=args.non_interactive,
+        dry_run=args.dry_run,
+    )
+
+    # One-time migration: any ``mcpServers`` entry in ~/.claude.json
+    # (root or per-project) whose ``command`` points at ``python.exe``
+    # gets offered a swap to the ``pythonw.exe`` sibling, fixing the
+    # visible-console-window bug on Windows. Covers hand-registered
+    # entries the install.py helpers don't own (e.g.
+    # ``code_graph.mcp_server``) and any older launcher that was
+    # written by a pre-v1.10.5 install.py. POSIX no-op.
+    _migrate_claude_json_python_to_pythonw(
         non_interactive=args.non_interactive,
         dry_run=args.dry_run,
     )
