@@ -62,11 +62,23 @@ from fastapi.responses import StreamingResponse
 
 from consultants.server.control import (
     ControlInputError,
+    INJECT_STATUS_APPLIED,
+    INJECT_STATUS_FAILED,
+    INJECT_STATUS_PENDING,
+    INJECT_STATUS_REJECTED,
+    Injection,
+    PHASE_SYNTHESIS,
+    PHASE_TERMINAL,
+    ROUTED_BEST_EFFORT_CAP_REACHED,
+    ROUTED_IN_PLACE,
+    ROUTED_QUEUED,
     build_cancel_request,
     build_inject_delta,
     build_interrupt_delta,
     build_resume_command,
     build_runtime_control_delta,
+    classify_phase,
+    default_target_for_phase,
     summarize_state_for_get,
 )
 
@@ -153,15 +165,16 @@ def _require_live_session(app, sid: str, *, allow_paused: bool = True):
     return s
 
 
-def _safe_apply_state_delta(
+def _apply_state_delta_core(
     s, delta: dict, *,
     as_node: Optional[str] = None,
-) -> None:
-    """Wrap ``compiled.update_state`` so a LangGraph error becomes
-    a 500 with a structured detail (not a bare stack trace).
+) -> tuple[bool, Optional[str]]:
+    """Apply ``compiled.update_state`` and return ``(ok, error)``.
 
-    Re-raises as ``HTTPException(500, …)`` instead of letting the
-    LangGraph error propagate — keeps the HTTP contract sane.
+    Never raises — the error string is returned so callers can decide
+    how to surface it (a 500 for the legacy verbs, an ``failed``
+    inject status for the M9 inject contract). This is the shared
+    core the inject drain ``apply_fn`` builds on.
     """
     try:
         if as_node is not None:
@@ -169,12 +182,169 @@ def _safe_apply_state_delta(
                                        as_node=as_node)
         else:
             s._compiled.update_state(s._thread_config, delta)
+        return True, None
     except Exception as e:  # pragma: no cover — defensive
         log.exception("update_state raised for sid=%s", s.sid)
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _safe_apply_state_delta(
+    s, delta: dict, *,
+    as_node: Optional[str] = None,
+) -> None:
+    """Wrap :func:`_apply_state_delta_core` so a LangGraph error
+    becomes a 500 with a structured detail (not a bare stack trace).
+
+    Re-raises as ``HTTPException(500, …)`` — keeps the HTTP contract
+    sane for the control / interrupt / resume / cancel verbs. The
+    inject verb uses the non-raising core directly.
+    """
+    ok, err = _apply_state_delta_core(s, delta, as_node=as_node)
+    if not ok:
         raise HTTPException(
             status_code=_HTTP_INTERNAL,
-            detail=f"update_state failed: {type(e).__name__}: {e}",
+            detail=f"update_state failed: {err}",
         )
+
+
+def _new_injection_id() -> str:
+    """Short, sortable inject id like ``inj-1716563820-3f9a``."""
+    import secrets
+    return f"inj-{int(time.time())}-{secrets.token_hex(2)}"
+
+
+def _record_inject_event(s, inj) -> None:
+    """Best-effort: persist the inject lifecycle to the recorder's
+    ``runtime_events`` table as ``kind="inject"`` so it (a) survives a
+    restart for audit, (b) replays over SSE via Last-Event-ID, and
+    (c) shows up live on the /events stream. Never raises — the
+    inject's effect on graph state is the source of truth; the
+    runtime_event row is observability."""
+    recorder = getattr(s, "_recorder", None)
+    if recorder is None or not hasattr(recorder, "record_event"):
+        return
+    try:
+        recorder.record_event(
+            kind="inject",
+            role=inj.target_role or inj.role,
+            payload={"sid": s.sid, **inj.to_public()},
+        )
+    except Exception:  # pragma: no cover — defensive
+        log.exception("record_event(kind=inject) failed for sid=%s", s.sid)
+
+
+def _classify_phase_from_live(s) -> tuple[str, dict]:
+    """Read the live LangGraph snapshot and return ``(phase, values)``.
+
+    Raises on a get_state failure so the caller marks the inject
+    ``failed`` (the graph was supposed to be ready). ``values`` is the
+    snapshot's state dict (unused by the safe layer; the rewind
+    follow-up reads its reroute counters from it).
+    """
+    snapshot = s._compiled.get_state(s._thread_config)
+    next_nodes = list(getattr(snapshot, "next", ()) or ())
+    values = getattr(snapshot, "values", {}) or {}
+    phase = classify_phase(
+        next_nodes=next_nodes,
+        status=getattr(s, "status", ""),
+        closed=bool(getattr(s, "closed", False)),
+    )
+    return phase, values
+
+
+def _make_inject_apply_fn(s):
+    """Build the ``apply_fn(inj)`` the synchronous inject path AND the
+    drain share. Mutates ``inj`` in place to a terminal status,
+    rebuilding the inject Doc delta from the injection record itself so
+    one closure serves both call sites.
+
+    Safe-layer routing (rewind realization is a gated follow-up):
+    classify the council phase from the live snapshot, compute the
+    phase-aware ``target_role`` (the role this inject is *for*), write
+    the inject Doc into ``additional_context`` exactly as
+    :func:`build_inject_delta` produces it (preserving the M5
+    broad-surfacing semantics for ``role="any"``), and record
+    ``routed=in_place``. A synthesis-phase inject is applied in place
+    to the synthesizer and honestly reports ``in_place`` — it is NOT
+    rewound until the follow-up ships.
+    """
+    def apply_fn(inj) -> None:
+        # Re-check terminal at apply time (a drain may run after the
+        # council finished).
+        if (getattr(s, "closed", False)
+                or getattr(s, "status", "") in ("completed", "failed")):
+            inj.status = INJECT_STATUS_REJECTED
+            inj.phase_at_apply = PHASE_TERMINAL
+            inj.error = f"session is {getattr(s, 'status', '')!r}"
+            return
+        if (getattr(s, "_compiled", None) is None
+                or getattr(s, "_thread_config", None) is None):
+            # Still no live graph — leave pending for the next drain.
+            inj.status = INJECT_STATUS_PENDING
+            inj.routed = ROUTED_QUEUED
+            return
+        try:
+            delta = build_inject_delta(
+                role=inj.role, text=inj.text,
+                source=inj.source, ts=inj.ts,
+            )
+        except ControlInputError as e:
+            inj.status = INJECT_STATUS_FAILED
+            inj.error = str(e)
+            return
+        try:
+            phase, _values = _classify_phase_from_live(s)
+        except Exception as e:
+            inj.status = INJECT_STATUS_FAILED
+            inj.error = f"get_state: {type(e).__name__}: {e}"
+            return
+        if phase == PHASE_TERMINAL:
+            inj.status = INJECT_STATUS_REJECTED
+            inj.phase_at_apply = PHASE_TERMINAL
+            inj.error = "council reached terminal phase before apply"
+            return
+        effective_target = (
+            inj.role if inj.role and inj.role != "any"
+            else default_target_for_phase(phase)
+        )
+        # ``as_node="researcher"`` keeps LangGraph's update_state happy
+        # (the node name must be registered in the compiled graph;
+        # "injector" would raise). The Doc's own ``role`` field — not
+        # this as_node — drives which node surfaces the content.
+        ok, err = _apply_state_delta_core(s, delta, as_node="researcher")
+        if not ok:
+            inj.status = INJECT_STATUS_FAILED
+            inj.error = err
+            return
+        inj.phase_at_apply = phase
+        inj.target_role = effective_target
+        inj.routed = ROUTED_IN_PLACE
+        inj.status = INJECT_STATUS_APPLIED
+        inj.applied_at = time.time()
+
+    return apply_fn
+
+
+def _inject_response(s, inj, *, queue_position: Optional[int] = None) -> dict:
+    """Uniform POST /inject body. Always ``ok=True`` (the HTTP status
+    is always 200 — the lifecycle lives in ``status``)."""
+    body: dict = {
+        "ok": True,
+        "status": inj.status,
+        "injection_id": inj.id,
+        "sid": s.sid,
+        "role": inj.role,
+        "target_role": inj.target_role,
+        "phase_at_apply": inj.phase_at_apply,
+        "routed": inj.routed,
+    }
+    if queue_position is not None:
+        body["queue_position"] = queue_position
+    if inj.error:
+        body["error"] = inj.error
+        if inj.status == INJECT_STATUS_REJECTED:
+            body["reason"] = inj.error
+    return body
 
 
 def _snapshot_to_dict(snapshot: Any) -> dict:
@@ -236,7 +406,15 @@ def register_control_routes(app: "FastAPI") -> None:
             payload = summarize_state_for_get(static, sid=sid)
             payload["status"] = getattr(s, "status", "")
             payload["closed"] = bool(getattr(s, "closed", False))
+            payload["injections"] = s.injection_records()
             return payload
+        # Opportunistic drain: a /inject that arrived during the
+        # spin-up race queued as pending; now that the graph is live,
+        # apply anything still waiting before snapshotting.
+        if getattr(s, "_pending_injections", None):
+            drained = s.drain_injections(_make_inject_apply_fn(s))
+            for inj in drained:
+                _record_inject_event(s, inj)
         try:
             snapshot = s._compiled.get_state(s._thread_config)
         except Exception as e:
@@ -250,13 +428,19 @@ def register_control_routes(app: "FastAPI") -> None:
         )
         payload["status"] = getattr(s, "status", "")
         payload["closed"] = bool(getattr(s, "closed", False))
+        payload["injections"] = s.injection_records()
         s.bump_activity()
         return payload
 
     # -------------------- POST /inject ------------------------- #
     @app.post("/v1/consult/{sid}/inject")
     def inject(sid: str, body: dict) -> dict:
-        s = _require_live_session(app, sid)
+        # Uniform contract (2026-05-24): ALWAYS HTTP 200 + a ``status``
+        # in the body (applied|pending|rejected|failed). The one
+        # exception is payload validation → 400, because a malformed
+        # request is the caller's bug, not a council state. The
+        # assistant reads ``status`` to know whether to keep watching.
+        s = _require_session(app, sid)  # 404 if unknown
         try:
             delta = build_inject_delta(
                 role=str(body.get("role") or "any"),
@@ -266,13 +450,62 @@ def register_control_routes(app: "FastAPI") -> None:
             )
         except ControlInputError as e:
             raise HTTPException(_HTTP_BAD_REQUEST, str(e))
-        # ``as_node="researcher"`` matches M5's e2e — using an
-        # existing node name keeps LangGraph's update_state happy
-        # (it requires the node name to be registered in the
-        # compiled graph; "injector" would 500).
-        _safe_apply_state_delta(s, delta, as_node="researcher")
+        doc = delta["additional_context"][0]
+        requested_role = str(body.get("role") or "any")
+        inj = Injection(
+            id=_new_injection_id(),
+            role=requested_role,
+            text=doc.text,
+            source=getattr(doc, "source", "user"),
+            ts=doc.ts,
+            content_hash=doc.content_hash,
+        )
+
+        # Idempotency: a retry of the same (role, text) returns the
+        # original record's status instead of creating a duplicate —
+        # mirrors the Doc reducer's content_hash dedup.
+        if inj.content_hash:
+            with s._inject_lock:
+                for existing in s._injections:
+                    if existing.content_hash == inj.content_hash:
+                        return _inject_response(s, existing)
+
+        # Terminal session → rejected (the council can't act on it).
+        if (getattr(s, "closed", False)
+                or getattr(s, "status", "") in ("completed", "failed")):
+            inj.status = INJECT_STATUS_REJECTED
+            inj.phase_at_apply = PHASE_TERMINAL
+            inj.error = (
+                "session closed" if getattr(s, "closed", False)
+                else f"session is {getattr(s, 'status', '')!r}"
+            )
+            s.register_injection(inj)
+            _record_inject_event(s, inj)
+            return _inject_response(s, inj)
+
+        apply_fn = _make_inject_apply_fn(s)
+
+        # Spin-up race: the runner hasn't attached the live graph yet.
+        # Queue as pending and drain when it does (runner + the next
+        # /state|/inject poll both call drain_injections).
+        if (getattr(s, "_compiled", None) is None
+                or getattr(s, "_thread_config", None) is None):
+            pos = s.enqueue_injection(inj)
+            _record_inject_event(s, inj)
+            return _inject_response(s, inj, queue_position=pos)
+
+        # Live graph ready → apply synchronously.
+        s.register_injection(inj)
+        apply_fn(inj)
+        if inj.status == INJECT_STATUS_PENDING:
+            # Graph vanished between the check and the apply; hand it
+            # to the pending queue for a later drain.
+            with s._inject_lock:
+                inj.routed = ROUTED_QUEUED
+                s._pending_injections.append(inj)
+        _record_inject_event(s, inj)
         s.bump_activity()
-        return {"ok": True, "applied": _serialize_for_json(delta)}
+        return _inject_response(s, inj)
 
     # -------------------- POST /control ------------------------ #
     @app.post("/v1/consult/{sid}/control")
@@ -539,8 +772,27 @@ async def _sse_stream_for_session(
         if (getattr(session, "status", "") in ("completed", "failed")
                 or getattr(session, "closed", False)):
             # One final poll already happened above. If no new rows,
-            # this is the last lap.
+            # this is the last lap — emit an explicit, durable
+            # ``complete`` event so the consumer is NOTIFIED instead of
+            # having to poll /state to discover the council finished.
             if not new_rows:
+                status = (
+                    getattr(session, "status", "")
+                    or ("closed" if getattr(session, "closed", False)
+                        else "unknown")
+                )
+                final_present = bool(
+                    (getattr(session, "final_answer", "") or "").strip()
+                )
+                yield format_sse_event(
+                    event_id=last_id,
+                    event_type="complete",
+                    data={
+                        "sid": getattr(session, "sid", ""),
+                        "status": status,
+                        "final_answer_present": final_present,
+                    },
+                )
                 return
 
         await asyncio.sleep(poll_interval_s)

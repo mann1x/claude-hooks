@@ -860,6 +860,18 @@ def cmd_state(args, base: str) -> int:
     """GET /v1/consult/<sid>/state — the M9 deep-state view (vs
     ``status``, which is the v1 lightweight progress poll)."""
     out = _http("GET", f"{base}/v1/consult/{args.sid}/state")
+    # Human summary of any injections to stderr (stdout stays JSON).
+    injs = out.get("injections") or []
+    if injs:
+        print(f"injections ({len(injs)}):", file=sys.stderr)
+        for inj in injs:
+            print(
+                f"  {inj.get('id')}  status={inj.get('status')}"
+                f"  phase={inj.get('phase_at_apply')}"
+                f"  target={inj.get('target_role')}"
+                f"  routed={inj.get('routed')}",
+                file=sys.stderr,
+            )
     print(json.dumps({"ok": True, **out}, indent=2))
     return 0
 
@@ -882,6 +894,16 @@ def cmd_inject(args, base: str) -> int:
     }
     out = _http("POST",
                 f"{base}/v1/consult/{args.sid}/inject", body=body)
+    # Concise human summary to stderr; full JSON (with the uniform
+    # status contract) stays on stdout for tooling.
+    summary = (
+        f"inject {out.get('status')}: id={out.get('injection_id')}"
+        f" routed={out.get('routed')}"
+    )
+    for extra in ("queue_position", "reason", "error"):
+        if out.get(extra) is not None:
+            summary += f" {extra}={out.get(extra)}"
+    print(summary, file=sys.stderr)
     print(json.dumps({"ok": True, **out}, indent=2))
     return 0
 

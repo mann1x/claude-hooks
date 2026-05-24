@@ -56,7 +56,12 @@ def make_runner(*, ollama_base_url: str):
     try:
         from langgraph.checkpoint.memory import MemorySaver
     except ImportError:  # pragma: no cover — minimal langgraph
-        MemorySaver = None  # type: ignore[assignment]
+        try:
+            from langgraph.checkpoint.memory import (
+                InMemorySaver as MemorySaver,  # type: ignore[assignment]
+            )
+        except ImportError:
+            MemorySaver = None  # type: ignore[assignment]
 
     def run_council(state, runner_input: dict) -> None:
         cfg: cc.ConsultantsConfig = runner_input["config"]
@@ -393,6 +398,9 @@ def make_runner(*, ollama_base_url: str):
             state.status = "failed"
             state.error = f"graph crashed: {e}"
             state.finished_at = time.time()
+            _emit_council_complete(
+                recorder, sid=state.sid, status="failed", final_answer="",
+            )
             _finalize_recorder(recorder, status="failed", error=str(e))
             _write_failed_artifacts(state, cwd, question, e)
             return
@@ -470,6 +478,10 @@ def make_runner(*, ollama_base_url: str):
         if node_failed:
             log.warning("council finished with role failure: %s",
                         node_failed)
+        _emit_council_complete(
+            recorder, sid=state.sid, status=terminal_status,
+            final_answer=getattr(state, "final_answer", "") or "",
+        )
         _finalize_recorder(
             recorder, status=terminal_status, error=node_error,
             finished_at=state.finished_at,
@@ -737,7 +749,28 @@ def make_follow_up_runner(*, ollama_base_url: str):
             coder_routes_by_language=coder_routes_by_language_fu,
             coder_default_route=coder_default_route_fu,
         )
-        compiled = build_follow_up_graph(deps, tracer=tracer)
+        # #214/M9 parity fix: follow-ups MUST attach a checkpointer
+        # too. run_council does (line ~319) but run_follow_up did not,
+        # so LangGraph get_state/update_state raised
+        # ValueError("No checkpointer set") and every M9 endpoint
+        # (/state, /inject, /resume) 500'd on a follow-up sid. Mirror
+        # the council path exactly: in-memory checkpointer for live
+        # introspection (the recorder's transcript.db remains the
+        # durable audit log). Import is local to this runner so the
+        # core stays stdlib-only when langgraph is absent.
+        try:
+            from langgraph.checkpoint.memory import MemorySaver as _MemSaver
+        except ImportError:  # pragma: no cover — minimal langgraph
+            try:
+                from langgraph.checkpoint.memory import (
+                    InMemorySaver as _MemSaver,  # type: ignore[assignment]
+                )
+            except ImportError:
+                _MemSaver = None  # type: ignore[assignment]
+        fu_checkpointer = _MemSaver() if _MemSaver is not None else None
+        compiled = build_follow_up_graph(
+            deps, tracer=tracer, checkpointer=fu_checkpointer,
+        )
         # M9: follow-ups expose their own compiled graph + thread
         # config under the follow-up's own sid (not the parent's).
         # The control routes resolve a session by sid → SessionState;
@@ -820,6 +853,9 @@ def make_follow_up_runner(*, ollama_base_url: str):
             state.status = "failed"
             state.error = f"graph crashed: {e}"
             state.finished_at = time.time()
+            _emit_council_complete(
+                recorder, sid=state.sid, status="failed", final_answer="",
+            )
             _finalize_recorder(recorder, status="failed", error=str(e))
             _write_failed_artifacts(state, cwd, question, e)
             return
@@ -893,6 +929,10 @@ def make_follow_up_runner(*, ollama_base_url: str):
                 "parent=%s)",
                 node_failed, state.sid, state.parent_sid,
             )
+        _emit_council_complete(
+            recorder, sid=state.sid, status=terminal_status,
+            final_answer=getattr(state, "final_answer", "") or "",
+        )
         _finalize_recorder(
             recorder, status=terminal_status, error=node_error,
             finished_at=state.finished_at,
@@ -983,6 +1023,32 @@ def _populate_role_messages(state, recorder) -> None:
             "role-message reconstruction from %s failed: %s; "
             "leaving _role_messages=None",
             getattr(recorder, "db_path", "<unknown>"), exc,
+        )
+
+
+def _emit_council_complete(recorder, *, sid: str, status: str,
+                           final_answer: str = "") -> None:
+    """Persist a durable ``council_complete`` row to runtime_events
+    BEFORE the recorder is finalized/closed. The M9 SSE bridge emits a
+    synthetic ``complete`` frame to live consumers at termination; this
+    row is the replayable record so a consumer reconnecting with
+    Last-Event-ID after the stream closed still learns the council
+    finished (and whether a final answer exists). Best-effort — must
+    never mask the consultation result."""
+    if recorder is None or not hasattr(recorder, "record_event"):
+        return
+    try:
+        recorder.record_event(
+            kind="council_complete",
+            payload={
+                "sid": sid,
+                "status": status,
+                "final_answer_present": bool((final_answer or "").strip()),
+            },
+        )
+    except Exception:  # pragma: no cover — defensive
+        log.exception(
+            "record_event(council_complete) failed for sid=%s", sid,
         )
 
 

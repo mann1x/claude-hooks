@@ -25,7 +25,7 @@ bad shape — the FastAPI layer turns these into 400 responses.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from consultants.engine.state_v2 import Doc
@@ -55,6 +55,158 @@ VALID_INJECT_ROLES: tuple[str, ...] = (
 VALID_TOOL_PERMISSION_VALUES: tuple[str, ...] = ("allow", "deny", "ask")
 
 VALID_STRICTNESS_VALUES: tuple[str, ...] = ("lax", "normal", "strict")
+
+
+# ============================================================== #
+# M9 inject phase classification + routing (pure)
+# ============================================================== #
+# A mid-flight inject is routed to the council phase that can act on
+# it. The phase is derived from the live LangGraph snapshot's ``next``
+# tuple (the nodes pending execution) plus the session's terminal
+# flags — no per-node instrumentation. These are pure functions so the
+# routing contract is tested without spinning up a graph.
+
+PHASE_PLANNING = "planning"
+PHASE_RESEARCH = "research"
+PHASE_CRITIC = "critic"
+PHASE_SYNTHESIS = "synthesis"
+PHASE_TERMINAL = "terminal"
+PHASE_UNKNOWN = "unknown"
+
+
+def classify_phase(
+    *,
+    next_nodes: Optional[list[str]],
+    status: str,
+    closed: bool,
+) -> str:
+    """Map a live snapshot's pending-node set + session flags to a
+    coarse council phase.
+
+    ``next_nodes`` is LangGraph's ``StateSnapshot.next`` (the nodes
+    that will run on resume). The mapping is precedence-ordered so a
+    snapshot that somehow lists multiple pending nodes resolves to the
+    latest phase (synthesis beats critic beats research beats
+    planning) — we route to where the council *is*, not where it was.
+
+    A running session whose ``next`` is empty (between supersteps, or
+    an interrupt just cleared) is ``unknown``; callers treat that as
+    "apply in place, safest default".
+    """
+    if closed or status in ("completed", "failed"):
+        return PHASE_TERMINAL
+    nn = set(next_nodes or [])
+    if "synthesizer" in nn:
+        return PHASE_SYNTHESIS
+    if "critic" in nn:
+        return PHASE_CRITIC
+    if nn & {"researcher", "tool_executor", "coder", "coder_router"}:
+        return PHASE_RESEARCH
+    if "planner" in nn:
+        return PHASE_PLANNING
+    return PHASE_UNKNOWN
+
+
+# Default routing target role per phase when the caller requested the
+# ``"any"`` (phase-default) role. An explicit role on the inject body
+# overrides this.
+_PHASE_DEFAULT_TARGET: dict[str, str] = {
+    PHASE_PLANNING: "planner",
+    PHASE_RESEARCH: "researcher",
+    PHASE_CRITIC: "critic",
+    # Synthesis routes at researcher *semantically* (the inject wants
+    # the council to re-validate) — the actual rewind realization is a
+    # gated follow-up; the safe-layer path applies in place to the
+    # synthesizer and records target_role=researcher so the intent is
+    # visible even before rewind ships.
+    PHASE_SYNTHESIS: "researcher",
+    PHASE_UNKNOWN: "researcher",
+}
+
+
+def default_target_for_phase(phase: str) -> str:
+    """The role a phase-default ("any") inject is routed to."""
+    return _PHASE_DEFAULT_TARGET.get(phase, "researcher")
+
+
+# ============================================================== #
+# M9 inject lifecycle record + status/routing constants
+# ============================================================== #
+# A mid-flight /inject is ALWAYS accepted with a uniform 200 + a
+# status in the body. The four statuses:
+#   applied  — the inject Doc was written into the live graph state.
+#   pending  — the live graph isn't attached yet (spin-up race) or a
+#              rewind couldn't be realized this instant; queued and
+#              drained on the next graph-ready / poll / resume tick.
+#   rejected — the session is terminal (completed/failed/closed); the
+#              council can't act on it.
+#   failed   — the graph was ready but update_state raised.
+INJECT_STATUS_APPLIED = "applied"
+INJECT_STATUS_PENDING = "pending"
+INJECT_STATUS_REJECTED = "rejected"
+INJECT_STATUS_FAILED = "failed"
+
+# ``routed`` records HOW the inject reached the council, derived from
+# the phase the council was in when the inject was applied:
+#   in_place               — surfaced to the node that runs next
+#                            (planning→planner, research→researcher,
+#                            critic→critic), no rewind.
+#   rewound_to_researcher  — council had reached synthesis; the
+#                            revalidation flag loops it back through a
+#                            research round before re-synthesizing.
+#                            (Realized by the gated rewind follow-up;
+#                            the safe-layer path does not emit this.)
+#   best_effort_cap_reached — synthesis-phase inject but the reroute
+#                            budget was exhausted; applied in place to
+#                            the synthesizer instead of rewinding.
+#   queued                 — still pending (not yet routed).
+ROUTED_IN_PLACE = "in_place"
+ROUTED_REWOUND_TO_RESEARCHER = "rewound_to_researcher"
+ROUTED_BEST_EFFORT_CAP_REACHED = "best_effort_cap_reached"
+ROUTED_QUEUED = "queued"
+
+
+@dataclass
+class Injection:
+    """One mid-flight inject's full lifecycle record.
+
+    Distinct from :class:`consultants.engine.state_v2.Doc`: the Doc is
+    the *content* that travels the LangGraph ``additional_context``
+    channel into node prompts; this ``Injection`` is the server-side
+    *control* record tracking status, routing, and timing so the
+    assistant can tell whether its inject landed and how it was
+    handled. The two are linked by ``content_hash`` (same hash the
+    Doc reducer dedups on).
+    """
+    id: str
+    role: str                       # requested target ("any" = phase-default)
+    text: str
+    source: str = "user"
+    ts: float = field(default_factory=time.time)
+    content_hash: str = ""
+    status: str = INJECT_STATUS_PENDING
+    target_role: Optional[str] = None     # resolved routing target role
+    phase_at_apply: Optional[str] = None  # planning|research|critic|synthesis|terminal|unknown
+    routed: Optional[str] = None          # one of ROUTED_*
+    created_at: float = field(default_factory=time.time)
+    applied_at: Optional[float] = None
+    error: Optional[str] = None
+
+    def to_public(self) -> dict:
+        """Compact dict for GET /state's ``injections`` array + the
+        POST /inject response body + the recorder runtime_event."""
+        return {
+            "id": self.id,
+            "status": self.status,
+            "role": self.role,
+            "target_role": self.target_role,
+            "phase_at_apply": self.phase_at_apply,
+            "routed": self.routed,
+            "ts": self.ts,
+            "source": self.source,
+            "applied_at": self.applied_at,
+            "error": self.error,
+        }
 
 
 # ============================================================== #
@@ -456,7 +608,22 @@ def _interrupt_value(interrupt_obj: Any) -> dict[str, Any]:
 __all__ = [
     "CancelRequest",
     "ControlInputError",
+    "INJECT_STATUS_APPLIED",
+    "INJECT_STATUS_FAILED",
+    "INJECT_STATUS_PENDING",
+    "INJECT_STATUS_REJECTED",
+    "Injection",
     "InterruptResume",
+    "ROUTED_BEST_EFFORT_CAP_REACHED",
+    "ROUTED_IN_PLACE",
+    "ROUTED_QUEUED",
+    "ROUTED_REWOUND_TO_RESEARCHER",
+    "PHASE_CRITIC",
+    "PHASE_PLANNING",
+    "PHASE_RESEARCH",
+    "PHASE_SYNTHESIS",
+    "PHASE_TERMINAL",
+    "PHASE_UNKNOWN",
     "VALID_INJECT_ROLES",
     "VALID_STRICTNESS_VALUES",
     "VALID_TOOL_PERMISSION_VALUES",
@@ -465,5 +632,7 @@ __all__ = [
     "build_interrupt_delta",
     "build_resume_command",
     "build_runtime_control_delta",
+    "classify_phase",
+    "default_target_for_phase",
     "summarize_state_for_get",
 ]

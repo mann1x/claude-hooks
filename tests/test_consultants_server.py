@@ -807,7 +807,7 @@ class TestReopen:
 
         captured_deps: dict = {}
 
-        def fake_build_follow_up_graph(deps, *, tracer=None):
+        def fake_build_follow_up_graph(deps, *, tracer=None, checkpointer=None):
             captured_deps["deps"] = deps
             return _FakeCompiled()
 
@@ -903,7 +903,7 @@ class TestReopen:
                 captured_initial.update(initial)
                 yield ("values", dict(initial))
 
-        def fake_build_follow_up_graph(deps, *, tracer=None):
+        def fake_build_follow_up_graph(deps, *, tracer=None, checkpointer=None):
             captured_deps["deps"] = deps
             return _RecordingCompiled()
 
