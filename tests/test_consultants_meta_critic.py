@@ -304,7 +304,7 @@ class TestRunnerXmaxWiring:
                 yield ("values", dict(initial))
 
         def fake_build_council_graph(deps, *, tracer=None,
-                                      checkpointer=None):
+                                      checkpointer=None, interrupt_before=None):
             captured["deps"] = deps
             return _FakeCompiled()
 

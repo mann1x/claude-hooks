@@ -14,6 +14,69 @@ release with the auto-generated source archive
 (`claude-hooks-X.Y.Z.zip` / `.tar.gz`). See
 [`docs/RELEASING.md`](docs/RELEASING.md) for the cut procedure.
 
+## [1.11.0] — 2026-05-24
+
+MINOR. The **consultants M9 control surface** gains reliable
+mid-flight injection. A dispatcher can now inject candidate solutions
+or steering text into a live council (or a follow-up) and get a
+**definitive status back** instead of a fire-and-forget 200, and a
+late inject that lands after the council has already reached
+synthesis is **rewound into one more researcher round** so the
+candidate is actually validated rather than rubber-stamped into
+prose. The default council path (no inject) is byte-equivalent to
+v1.10.6 — the always-on ``interrupt_before=["synthesizer"]`` pause
+auto-resumes when nothing is pending, and M12 parity holds.
+
+Three commits on ``dev`` (`8705c48`, `8ba7049`, `0ee34d7`). Full
+sweep: 4327 passed / 30 skipped (consultants env, 4357 collected).
+
+### Added
+
+- **Uniform ``/inject`` status contract.** ``POST
+  …/{sid}/inject`` always returns HTTP 200 with a
+  ``status ∈ applied | pending | rejected | failed`` plus
+  ``injection_id``, ``target_role``, ``phase_at_apply``, ``routed``.
+  Not-ready (graph still spinning up) → ``pending`` + enqueued with a
+  ``queue_position``; terminal session → ``rejected`` + reason;
+  ``update_state`` error on a ready graph → ``failed`` + error.
+  Idempotent on ``content_hash``. A genuinely unknown sid is still a
+  404. ``GET …/{sid}/state`` gains an ``injections`` array; the CLI
+  ``inject`` / ``state`` verbs surface status + routing.
+- **Synthesis-phase rewind.** An inject that arrives at/after the
+  synthesizer reroutes to a fresh researcher round via
+  ``update_state(cfg, {}, as_node=START)`` (topology-uniform — no
+  flag, no ``route_after_critic`` edit, no graph-shape change),
+  bounded by the existing per-effort round caps. Reports
+  ``routed=rewound_to_researcher`` when the cap allows, or
+  ``best_effort_cap_reached`` (applied in place) when exhausted —
+  low/medium effort (cap 1) degrade after one round, high/max
+  (cap 3/8) get the validated extra round. Issuing a mid-flight
+  inject *is* the consent to rewind.
+- **SSE ``complete`` event.** ``…/{sid}/events`` now emits a durable
+  terminal ``event: complete`` (``{sid, status, final_answer_present}``)
+  before closing, and persists a ``kind="council_complete"`` runtime
+  event, so a client is notified on completion instead of polling
+  ``/state``. Injection lifecycle is persisted as ``kind="inject"``
+  runtime events (replayable over SSE Last-Event-ID).
+
+### Fixed
+
+- **Follow-up consults 500 on ``/inject`` and ``/state``.**
+  ``run_follow_up`` compiled the graph with no checkpointer, so
+  LangGraph ``get_state`` / ``update_state`` raised
+  ``ValueError("No checkpointer set")`` on every follow-up control
+  call. Both runners now attach a ``MemorySaver`` (``InMemorySaver``
+  fallback) with the shared checkpointer serde; ``build_follow_up_graph``
+  accepts ``checkpointer=`` and ``interrupt_before=``.
+- **Silent msgpack type-degradation in the checkpointer.** Under
+  strict msgpack mode LangGraph silently downgraded unregistered
+  custom state dataclasses (``Doc``, ``ToolPlanItem``, ``ToolResult``,
+  ``InterruptState``, ``CoderTaskItem``, ``CoderArtifact``,
+  ``RoleTurn``) to plain dicts with no exception. ``make_checkpointer_serde()``
+  now builds a strict-first ``JsonPlusSerializer`` and registers the
+  seven types via ``with_msgpack_allowlist`` so they round-trip
+  intact across an interrupt/resume.
+
 ## [1.10.6] — 2026-05-23
 
 PATCH hot-fix. Two pre-existing ``pyproject.toml`` metadata bugs
@@ -7481,7 +7544,8 @@ prior tag. From any unreleased checkout, just `git pull` on `main`
 once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
-[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.10.0...HEAD
+[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.11.0...HEAD
+[1.11.0]: https://github.com/mann1x/claude-hooks/compare/v1.10.6...v1.11.0
 [1.10.2]: https://github.com/mann1x/claude-hooks/compare/v1.10.1...v1.10.2
 [1.10.1]: https://github.com/mann1x/claude-hooks/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/mann1x/claude-hooks/compare/v1.9.4...v1.10.0

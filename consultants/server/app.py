@@ -30,6 +30,7 @@ import json
 import logging
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -39,6 +40,23 @@ from consultants import config as cc
 from consultants.engine import sessions_index, storage
 
 log = logging.getLogger("consultants.server")
+
+
+# M9 inject lifecycle records + status/routing constants live in
+# ``control.py`` (the pure control-contract module) so both this
+# module and ``control_routes`` can import them without a cycle
+# (app imports control_routes at app-build time).
+from consultants.server.control import (  # noqa: E402
+    Injection,
+    INJECT_STATUS_APPLIED,
+    INJECT_STATUS_FAILED,
+    INJECT_STATUS_PENDING,
+    INJECT_STATUS_REJECTED,
+    ROUTED_BEST_EFFORT_CAP_REACHED,
+    ROUTED_IN_PLACE,
+    ROUTED_QUEUED,
+    ROUTED_REWOUND_TO_RESEARCHER,
+)
 
 
 # ----------------------- in-memory session state ----------------- #
@@ -151,6 +169,25 @@ class SessionState:
     _compiled: Optional[Any] = field(default=None, repr=False)
     _thread_config: Optional[dict] = field(default=None, repr=False)
     _recorder: Optional[Any] = field(default=None, repr=False)
+    # M9 inject lifecycle (2026-05-24). ``_injections`` is the full
+    # registry (every inject ever received, in arrival order) surfaced
+    # by GET /state and the CLI. ``_pending_injections`` is the subset
+    # not yet successfully routed (spin-up race or deferred rewind);
+    # the runner drains it once the live graph attaches, and the
+    # inject/state handlers drain it opportunistically. Guarded by
+    # ``_inject_lock`` because the HTTP handler thread and the runner
+    # thread both touch it — see [[feedback_psycopg_not_thread_safe]]
+    # for the analogous cross-thread-mutation lesson.
+    _injections: list = field(default_factory=list, repr=False)
+    _pending_injections: "deque" = field(default_factory=deque, repr=False)
+    _inject_lock: Any = field(default_factory=threading.RLock, repr=False)
+    # #314 rewind: a synthesis-phase inject that wants the council to
+    # loop back through a researcher round before re-synthesizing sets
+    # this flag (caps permitting). The runner's stream loop reads it at
+    # the synthesizer interrupt boundary, performs the rewind, and
+    # clears it. Lives on SessionState (not graph state) so the rewind
+    # is driven entirely by the runner without a graph topology change.
+    _revalidation_pending: bool = field(default=False, repr=False)
 
     def public_dict(self) -> dict:
         return {
@@ -179,6 +216,100 @@ class SessionState:
         start, and follow-up completion. Cheap; no lock needed
         (a stale read costs at most one reaper interval)."""
         self.last_activity_at = time.time()
+
+    # ---- M9 inject registry ------------------------------------- #
+
+    def register_injection(self, inj: "Injection") -> None:
+        """Record an injection in the arrival-order registry. Does NOT
+        enqueue it for draining — callers that applied the inject
+        synchronously (graph was ready) register only; callers that
+        need it drained later (spin-up race / deferred rewind) call
+        :meth:`enqueue_injection`."""
+        with self._inject_lock:
+            self._injections.append(inj)
+
+    def enqueue_injection(self, inj: "Injection") -> int:
+        """Register ``inj`` AND mark it pending for the next drain.
+
+        Returns the 1-based queue position so the caller can report it
+        in the inject response body. Idempotent on ``content_hash``:
+        re-enqueuing the same content returns the existing record's
+        position without creating a duplicate.
+        """
+        with self._inject_lock:
+            if inj.content_hash:
+                for existing in self._injections:
+                    if existing.content_hash == inj.content_hash:
+                        # Surface the existing record's queue position
+                        # (or 0 if it already drained).
+                        try:
+                            return list(self._pending_injections).index(
+                                existing) + 1
+                        except ValueError:
+                            return 0
+            self._injections.append(inj)
+            inj.status = INJECT_STATUS_PENDING
+            inj.routed = ROUTED_QUEUED
+            self._pending_injections.append(inj)
+            return len(self._pending_injections)
+
+    def drain_injections(self, apply_fn) -> list["Injection"]:
+        """Apply each pending injection via ``apply_fn(inj)``.
+
+        ``apply_fn`` must mutate ``inj`` in place — set ``inj.status``
+        to one of the terminal statuses (applied/rejected/failed) and
+        fill ``routed`` / ``target_role`` / ``phase_at_apply`` /
+        ``applied_at`` — OR leave ``inj.status`` as ``pending`` to keep
+        it queued for a later drain. If ``apply_fn`` raises, the inject
+        is marked ``failed`` (defensive — a drain must never crash the
+        runner or an HTTP handler).
+
+        Returns the list of injections that left the pending queue this
+        call (their final status is on each record).
+        """
+        drained: list["Injection"] = []
+        with self._inject_lock:
+            remaining: "deque" = deque()
+            while self._pending_injections:
+                inj = self._pending_injections.popleft()
+                try:
+                    apply_fn(inj)
+                except Exception as e:  # pragma: no cover — defensive
+                    inj.status = INJECT_STATUS_FAILED
+                    inj.error = f"{type(e).__name__}: {e}"
+                    log.exception(
+                        "drain_injections apply_fn raised for sid=%s "
+                        "inj=%s", self.sid, inj.id,
+                    )
+                if inj.status == INJECT_STATUS_PENDING:
+                    remaining.append(inj)
+                else:
+                    drained.append(inj)
+            self._pending_injections = remaining
+        return drained
+
+    def injection_records(self) -> list[dict]:
+        """Public snapshot of every injection for GET /state + CLI."""
+        with self._inject_lock:
+            return [inj.to_public() for inj in self._injections]
+
+    # ---- #314 rewind signalling -------------------------------- #
+
+    def request_revalidation(self) -> None:
+        """Mark that a synthesis-phase inject wants the council to
+        rewind to a researcher round before finalizing. Set by the
+        inject handler (HTTP thread); read+cleared by the runner."""
+        with self._inject_lock:
+            self._revalidation_pending = True
+
+    def take_revalidation(self) -> bool:
+        """Atomically read-and-clear the revalidation flag. Returns
+        True if a rewind was requested since the last take. The runner
+        calls this at the synthesizer interrupt boundary."""
+        with self._inject_lock:
+            pending = self._revalidation_pending
+            self._revalidation_pending = False
+            return pending
 
 
 # ----------------------- runner contract ------------------------- #

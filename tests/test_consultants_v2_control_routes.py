@@ -285,7 +285,11 @@ class TestInject(unittest.TestCase):
             json={"role": "researcher", "text": "also check GDPR"},
         )
         self.assertEqual(r.status_code, 200)
-        self.assertTrue(r.json()["ok"])
+        body = r.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["status"], "applied")
+        self.assertEqual(body["routed"], "in_place")
+        self.assertIn("injection_id", body)
         # One update_state call with the inject as_node hint.
         self.assertEqual(len(cg.update_state_calls), 1)
         call = cg.update_state_calls[0]
@@ -321,7 +325,9 @@ class TestInject(unittest.TestCase):
         )
         self.assertEqual(r.status_code, 404)
 
-    def test_409_when_session_completed(self):
+    def test_rejected_when_session_completed(self):
+        # Uniform contract (2026-05-24): terminal sessions no longer
+        # 409 — the inject is accepted (200) with status="rejected".
         c, app = _client()
         cg = _FakeCompiledGraph()
         _install_session(app, "csl-done", status="completed", compiled=cg)
@@ -329,9 +335,15 @@ class TestInject(unittest.TestCase):
             "/v1/consult/csl-done/inject",
             json={"role": "any", "text": "late"},
         )
-        self.assertEqual(r.status_code, 409)
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["status"], "rejected")
+        self.assertEqual(body["phase_at_apply"], "terminal")
+        self.assertIn("reason", body)
+        # A rejected inject never touches graph state.
+        self.assertEqual(cg.update_state_calls, [])
 
-    def test_410_when_session_closed(self):
+    def test_rejected_when_session_closed(self):
         c, app = _client()
         cg = _FakeCompiledGraph()
         _install_session(app, "csl-cl", closed=True, compiled=cg)
@@ -339,18 +351,26 @@ class TestInject(unittest.TestCase):
             "/v1/consult/csl-cl/inject",
             json={"role": "any", "text": "x"},
         )
-        self.assertEqual(r.status_code, 410)
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["status"], "rejected")
+        self.assertEqual(cg.update_state_calls, [])
 
-    def test_503_when_graph_handles_missing(self):
-        # Session is "running" but no _compiled — millisecond
-        # window after executor.submit, before runner attaches.
+    def test_pending_when_graph_handles_missing(self):
+        # Session is "running" but no _compiled — millisecond window
+        # after executor.submit, before the runner attaches. Uniform
+        # contract: queue as pending (200), don't 503.
         c, app = _client()
         _install_session(app, "csl-race")  # no compiled
         r = c.post(
             "/v1/consult/csl-race/inject",
             json={"role": "any", "text": "x"},
         )
-        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["status"], "pending")
+        self.assertEqual(body["queue_position"], 1)
+        self.assertIn("injection_id", body)
 
 
 # ============================================================== #

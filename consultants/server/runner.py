@@ -56,7 +56,12 @@ def make_runner(*, ollama_base_url: str):
     try:
         from langgraph.checkpoint.memory import MemorySaver
     except ImportError:  # pragma: no cover — minimal langgraph
-        MemorySaver = None  # type: ignore[assignment]
+        try:
+            from langgraph.checkpoint.memory import (
+                InMemorySaver as MemorySaver,  # type: ignore[assignment]
+            )
+        except ImportError:
+            MemorySaver = None  # type: ignore[assignment]
 
     def run_council(state, runner_input: dict) -> None:
         cfg: cc.ConsultantsConfig = runner_input["config"]
@@ -293,41 +298,41 @@ def make_runner(*, ollama_base_url: str):
             coder_routes_by_language=coder_routes_by_language,
             coder_default_route=coder_default_route,
         )
-        # M5: static review-before-synthesis interrupt. When the
-        # user opted in via cfg.runtime.review_before_synthesis,
-        # compile with interrupt_before=["synthesizer"] so the
-        # graph pauses just before the final-answer node. The HTTP
-        # /state endpoint exposes the partial research; the human
-        # POSTs /inject + /resume to continue.
-        #
-        # The kwarg is only passed when actually opted in — this
-        # keeps the call signature bit-for-bit identical to v1 for
-        # the default-config path, so test stubs that mock
-        # build_council_graph with a fake `(deps, tracer=...)`
-        # signature don't break.
-        interrupt_before: Optional[list[str]] = None
+        # #314: ALWAYS compile with interrupt_before=["synthesizer"].
+        # The pause before the final-answer node is the window where a
+        # mid-flight inject can rewind the council to a researcher
+        # round (see _drive_council_stream). The default path
+        # auto-resumes past it immediately (byte-identical artifacts —
+        # M12 parity); review_before_synthesis (M5 HITL) parks for an
+        # external /resume; a synthesis-phase inject rewinds.
+        review_before_synthesis = False
         try:
-            if bool(getattr(cfg.runtime, "review_before_synthesis", False)):
-                interrupt_before = ["synthesizer"]
+            review_before_synthesis = bool(
+                getattr(cfg.runtime, "review_before_synthesis", False))
         except AttributeError:
-            interrupt_before = None
+            review_before_synthesis = False
+        interrupt_before: list[str] = ["synthesizer"]
         # #214 Fix B: attach a MemorySaver checkpointer so the M9
         # control surface (state / cancel / inject / pause / resume)
         # works in the standard config. Falls back to None if
         # langgraph's checkpoint.memory module isn't importable
         # (defensive — every langgraph release we depend on ships it).
-        checkpointer = MemorySaver() if MemorySaver is not None else None
-        if interrupt_before:
-            compiled = build_council_graph(
-                deps, tracer=tracer,
-                interrupt_before=interrupt_before,
-                checkpointer=checkpointer,
-            )
-        else:
-            compiled = build_council_graph(
-                deps, tracer=tracer,
-                checkpointer=checkpointer,
-            )
+        # Attach a serde whose msgpack allowlist covers our custom
+        # CouncilState channel types (Doc, ToolPlanItem, …, RoleTurn)
+        # so they survive checkpoint round-trips as real instances
+        # instead of silently degrading to dicts under LangGraph's
+        # coming strict-msgpack mode. See
+        # state_v2.make_checkpointer_serde.
+        from consultants.engine.state_v2 import make_checkpointer_serde
+        checkpointer = (
+            MemorySaver(serde=make_checkpointer_serde())
+            if MemorySaver is not None else None
+        )
+        compiled = build_council_graph(
+            deps, tracer=tracer,
+            interrupt_before=interrupt_before,
+            checkpointer=checkpointer,
+        )
 
         # M9: attach the live graph + thread config + recorder to
         # SessionState so the HTTP control route handlers can read
@@ -369,30 +374,20 @@ def make_runner(*, ollama_base_url: str):
         # is a list.
         final_state: dict = dict(initial)
         try:
-            for mode, payload in compiled.stream(
-                    initial, config=thread_config,
-                    stream_mode=["updates", "values"]):
-                if mode == "values" and isinstance(payload, dict):
-                    final_state = payload
-                    continue
-                if mode != "updates" or not isinstance(payload, dict):
-                    continue
-                for node, partial in payload.items():
-                    if node in state.progress:
-                        state.progress[node] = "done"
-                        try:
-                            idx = enabled.index(node)
-                            for i in range(idx + 1, len(enabled)):
-                                if state.progress.get(enabled[i]) == "pending":
-                                    state.progress[enabled[i]] = "in_progress"
-                                    break
-                        except ValueError:
-                            pass
+            final_state = _drive_council_stream(
+                compiled, initial, thread_config,
+                state=state, enabled=enabled,
+                review_before_synthesis=review_before_synthesis,
+                recorder=recorder, log_label="council",
+            )
         except Exception as e:
             log.exception("council graph invocation failed: %s", e)
             state.status = "failed"
             state.error = f"graph crashed: {e}"
             state.finished_at = time.time()
+            _emit_council_complete(
+                recorder, sid=state.sid, status="failed", final_answer="",
+            )
             _finalize_recorder(recorder, status="failed", error=str(e))
             _write_failed_artifacts(state, cwd, question, e)
             return
@@ -470,6 +465,10 @@ def make_runner(*, ollama_base_url: str):
         if node_failed:
             log.warning("council finished with role failure: %s",
                         node_failed)
+        _emit_council_complete(
+            recorder, sid=state.sid, status=terminal_status,
+            final_answer=getattr(state, "final_answer", "") or "",
+        )
         _finalize_recorder(
             recorder, status=terminal_status, error=node_error,
             finished_at=state.finished_at,
@@ -737,7 +736,43 @@ def make_follow_up_runner(*, ollama_base_url: str):
             coder_routes_by_language=coder_routes_by_language_fu,
             coder_default_route=coder_default_route_fu,
         )
-        compiled = build_follow_up_graph(deps, tracer=tracer)
+        # #214/M9 parity fix: follow-ups MUST attach a checkpointer
+        # too. run_council does (line ~319) but run_follow_up did not,
+        # so LangGraph get_state/update_state raised
+        # ValueError("No checkpointer set") and every M9 endpoint
+        # (/state, /inject, /resume) 500'd on a follow-up sid. Mirror
+        # the council path exactly: in-memory checkpointer for live
+        # introspection (the recorder's transcript.db remains the
+        # durable audit log). Import is local to this runner so the
+        # core stays stdlib-only when langgraph is absent.
+        try:
+            from langgraph.checkpoint.memory import MemorySaver as _MemSaver
+        except ImportError:  # pragma: no cover — minimal langgraph
+            try:
+                from langgraph.checkpoint.memory import (
+                    InMemorySaver as _MemSaver,  # type: ignore[assignment]
+                )
+            except ImportError:
+                _MemSaver = None  # type: ignore[assignment]
+        # Same custom-type serde allowlist as run_council so follow-up
+        # checkpoint round-trips don't degrade Doc/ToolResult/… to dicts.
+        from consultants.engine.state_v2 import make_checkpointer_serde
+        fu_checkpointer = (
+            _MemSaver(serde=make_checkpointer_serde())
+            if _MemSaver is not None else None
+        )
+        # #314: same always-on synthesizer interrupt as the council so
+        # a mid-flight follow-up inject can rewind to a researcher round.
+        compiled = build_follow_up_graph(
+            deps, tracer=tracer, checkpointer=fu_checkpointer,
+            interrupt_before=["synthesizer"],
+        )
+        fu_review_before_synthesis = False
+        try:
+            fu_review_before_synthesis = bool(
+                getattr(cfg.runtime, "review_before_synthesis", False))
+        except AttributeError:
+            fu_review_before_synthesis = False
         # M9: follow-ups expose their own compiled graph + thread
         # config under the follow-up's own sid (not the parent's).
         # The control routes resolve a session by sid → SessionState;
@@ -793,33 +828,24 @@ def make_follow_up_runner(*, ollama_base_url: str):
         if enabled:
             state.progress[enabled[0]] = "in_progress"
 
-        # Same dual-mode streaming pattern as run_council.
+        # Same dual-mode streaming + always-on synthesizer interrupt as
+        # run_council, via the shared driver (auto-resume / rewind / HITL).
         final_state: dict = dict(initial)
         try:
-            for mode, payload in compiled.stream(
-                    initial, config=thread_config,
-                    stream_mode=["updates", "values"]):
-                if mode == "values" and isinstance(payload, dict):
-                    final_state = payload
-                    continue
-                if mode != "updates" or not isinstance(payload, dict):
-                    continue
-                for node, partial in payload.items():
-                    if node in state.progress:
-                        state.progress[node] = "done"
-                        try:
-                            idx = enabled.index(node)
-                            for i in range(idx + 1, len(enabled)):
-                                if state.progress.get(enabled[i]) == "pending":
-                                    state.progress[enabled[i]] = "in_progress"
-                                    break
-                        except ValueError:
-                            pass
+            final_state = _drive_council_stream(
+                compiled, initial, thread_config,
+                state=state, enabled=enabled,
+                review_before_synthesis=fu_review_before_synthesis,
+                recorder=recorder, log_label="follow-up",
+            )
         except Exception as e:
             log.exception("follow-up graph invocation failed: %s", e)
             state.status = "failed"
             state.error = f"graph crashed: {e}"
             state.finished_at = time.time()
+            _emit_council_complete(
+                recorder, sid=state.sid, status="failed", final_answer="",
+            )
             _finalize_recorder(recorder, status="failed", error=str(e))
             _write_failed_artifacts(state, cwd, question, e)
             return
@@ -893,6 +919,10 @@ def make_follow_up_runner(*, ollama_base_url: str):
                 "parent=%s)",
                 node_failed, state.sid, state.parent_sid,
             )
+        _emit_council_complete(
+            recorder, sid=state.sid, status=terminal_status,
+            final_answer=getattr(state, "final_answer", "") or "",
+        )
         _finalize_recorder(
             recorder, status=terminal_status, error=node_error,
             finished_at=state.finished_at,
@@ -984,6 +1014,155 @@ def _populate_role_messages(state, recorder) -> None:
             "leaving _role_messages=None",
             getattr(recorder, "db_path", "<unknown>"), exc,
         )
+
+
+def _emit_council_complete(recorder, *, sid: str, status: str,
+                           final_answer: str = "") -> None:
+    """Persist a durable ``council_complete`` row to runtime_events
+    BEFORE the recorder is finalized/closed. The M9 SSE bridge emits a
+    synthetic ``complete`` frame to live consumers at termination; this
+    row is the replayable record so a consumer reconnecting with
+    Last-Event-ID after the stream closed still learns the council
+    finished (and whether a final answer exists). Best-effort — must
+    never mask the consultation result."""
+    if recorder is None or not hasattr(recorder, "record_event"):
+        return
+    try:
+        recorder.record_event(
+            kind="council_complete",
+            payload={
+                "sid": sid,
+                "status": status,
+                "final_answer_present": bool((final_answer or "").strip()),
+            },
+        )
+    except Exception:  # pragma: no cover — defensive
+        log.exception(
+            "record_event(council_complete) failed for sid=%s", sid,
+        )
+
+
+def _rewind_budget_ok(snap) -> bool:
+    """#314: is there room for one more researcher round? Delegates to
+    the shared pure check in server.control so the inject handler and
+    the runner agree on the bound."""
+    from consultants.server.control import rewind_budget_ok
+    return rewind_budget_ok(getattr(snap, "values", {}) or {})
+
+
+def _rewind_to_researcher(compiled, thread_config, state, recorder,
+                          log_label: str) -> None:
+    """#314: re-enter the graph at the researcher for one more pass.
+
+    ``update_state(as_node=START)`` is the verified topology-uniform
+    rewind: from a state parked before the synthesizer interrupt it
+    sets ``next`` back to the researcher (low/med) or
+    researcher→critic (high/max), re-runs that pass — picking up the
+    injected Doc already written into ``additional_context`` — and
+    re-parks before the synthesizer. Empty values: we only redirect
+    flow; the inject already wrote the content."""
+    from langgraph.graph import START
+    compiled.update_state(thread_config, {}, as_node=START)
+    try:
+        if "researcher" in state.progress:
+            state.progress["researcher"] = "in_progress"
+    except Exception:  # pragma: no cover
+        pass
+    if recorder is not None and hasattr(recorder, "record_event"):
+        try:
+            recorder.record_event(
+                kind="rewind", role="researcher",
+                payload={"sid": state.sid,
+                         "reason": "mid-flight inject revalidation"},
+            )
+        except Exception:  # pragma: no cover
+            log.exception("record_event(rewind) failed sid=%s", state.sid)
+    log.info("%s: rewinding to researcher for revalidation (sid=%s)",
+             log_label, state.sid)
+
+
+def _drive_council_stream(compiled, initial, thread_config, *,
+                          state, enabled, review_before_synthesis: bool,
+                          recorder, log_label: str) -> dict:
+    """Stream the compiled graph to completion through the always-on
+    ``interrupt_before=["synthesizer"]`` pause (#314).
+
+    Three behaviors at the synthesizer interrupt boundary:
+
+    - **rewind** — a synthesis-phase inject set ``_revalidation_pending``
+      and the round budget allows: re-enter the researcher for one more
+      pass (``_rewind_to_researcher``), then loop. Bounded by the round
+      cap; a second pending request after the cap is exhausted falls
+      through to auto-resume (best-effort, the inject's Doc still
+      reaches the synthesizer as text).
+    - **HITL park** — ``review_before_synthesis`` opted in and no
+      rewind pending: leave the graph parked for an external /resume
+      (M5 behavior, unchanged).
+    - **auto-resume** — the default: ``stream(None)`` past the
+      interrupt so the synthesizer runs and the graph reaches END.
+      Artifacts are byte-identical to the pre-#314 single-stream path
+      (M12 parity) — the only difference is the interrupt is realized
+      via a second stream call.
+
+    Stub graphs in tests whose ``stream`` runs to completion and whose
+    ``get_state`` is absent / raises / returns no ``next`` fall through
+    the exception/empty guards and return after one stream — identical
+    to the pre-#314 loop, so existing fakes need no changes.
+
+    Returns the last ``values`` payload (``final_state``).
+    """
+    final_state: dict = dict(initial)
+    stream_input: Any = initial
+    MAX_RESUMES = 64  # safety bound vs. a pathological rewind loop
+    for _ in range(MAX_RESUMES):
+        for mode, payload in compiled.stream(
+                stream_input, config=thread_config,
+                stream_mode=["updates", "values"]):
+            if mode == "values" and isinstance(payload, dict):
+                final_state = payload
+                continue
+            if mode != "updates" or not isinstance(payload, dict):
+                continue
+            for node, partial in payload.items():
+                if node in state.progress:
+                    state.progress[node] = "done"
+                    try:
+                        idx = enabled.index(node)
+                        for i in range(idx + 1, len(enabled)):
+                            if state.progress.get(enabled[i]) == "pending":
+                                state.progress[enabled[i]] = "in_progress"
+                                break
+                    except ValueError:
+                        pass
+        # Stream drained — where did we stop?
+        try:
+            snap = compiled.get_state(thread_config)
+            nxt = tuple(getattr(snap, "next", ()) or ())
+        except Exception:
+            # Stub graph without checkpointer introspection, or no
+            # checkpointer attached — treat the drain as completion
+            # (identical to the pre-#314 single-stream behavior).
+            return final_state
+        if not nxt:
+            return final_state  # reached END
+        if "synthesizer" in nxt:
+            # Parked at the always-on synthesizer interrupt.
+            if state.take_revalidation() and _rewind_budget_ok(snap):
+                _rewind_to_researcher(
+                    compiled, thread_config, state, recorder, log_label,
+                )
+                stream_input = None
+                continue
+            if review_before_synthesis:
+                # M5 HITL: leave parked for an external /resume.
+                return final_state
+            stream_input = None  # auto-resume → synthesizer → END
+            continue
+        # Parked at an unexpected node — resume defensively.
+        stream_input = None
+    log.warning("%s: stream exceeded MAX_RESUMES (sid=%s)",
+                log_label, state.sid)
+    return final_state
 
 
 def _finalize_recorder(recorder, *, status: str,
