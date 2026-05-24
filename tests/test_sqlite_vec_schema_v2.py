@@ -274,5 +274,83 @@ class TestWriteAndReadExpiresAt(unittest.TestCase):
         self.assertEqual(names, {"past"})
 
 
+class TestSecondTableInMigratedDb(unittest.TestCase):
+    """A second provider pointing at the SAME db file with a DIFFERENT
+    ``table`` name must still get its table family created, even though
+    the db-wide schema version is already at LATEST.
+
+    Regression for the bug where ``migrate_schema`` early-returned on
+    ``current >= LATEST_VERSION`` before creating the requested table —
+    so the first table migrated the db to v2 and every later table in
+    the same file silently never got a ``CREATE TABLE`` (surfaced as
+    ``sqlite3.OperationalError: no such table: <name>`` at insert time).
+    This is the sqlite analog of the pgvector "split create from
+    migrate" fix.
+    """
+
+    def setUp(self):
+        _skip_if_no_sqlite_vec()
+        # One shared on-disk db file, mirroring how two providers in the
+        # same process share ``cfg...sqlite_vec_path``. (``:memory:``
+        # would also work, but on-disk matches the real failure mode.)
+        import tempfile, os
+        self._tmp = tempfile.mkdtemp(prefix="ch-schema-test-")
+        self._path = os.path.join(self._tmp, "shared.db")
+        self.conn = _conn(self._path)
+
+    def tearDown(self):
+        self.conn.close()
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_second_table_created_in_already_migrated_db(self):
+        from claude_hooks.providers.sqlite_vec_schema import (
+            migrate_schema, LATEST_VERSION,
+        )
+        # First table takes the db to LATEST.
+        self.assertEqual(
+            migrate_schema(self.conn, embedding_dim=4, table="memory"),
+            LATEST_VERSION,
+        )
+        # Second table on the SAME db — db version is already LATEST.
+        migrate_schema(self.conn, embedding_dim=4, table="other")
+
+        # The base table + its companions must now exist.
+        for name in ("other", "other_vec", "other_fts"):
+            row = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = ?", (name,)
+            ).fetchone()
+            self.assertIsNotNone(row, f"{name} was not created")
+
+        # And it must be at the LATEST shape (v2 = has expires_at) and
+        # actually insertable — the original bug blew up here.
+        cols = _table_columns(self.conn, "other")
+        self.assertIn("content_hash", cols)
+        self.assertIn("expires_at", cols)
+        self.conn.execute(
+            "INSERT INTO other (content, content_hash) VALUES ('x', ?)",
+            (b"c" * 32,),
+        )
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM other").fetchone()[0], 1
+        )
+
+    def test_existing_table_is_not_rebuilt_on_revisit(self):
+        """The fast path must stay fast: re-migrating an existing table
+        at LATEST must not drop/recreate it or lose its rows."""
+        from claude_hooks.providers.sqlite_vec_schema import migrate_schema
+
+        migrate_schema(self.conn, embedding_dim=4, table="memory")
+        self.conn.execute(
+            "INSERT INTO memory (content, content_hash) VALUES ('keep', ?)",
+            (b"d" * 32,),
+        )
+        self.conn.commit()
+        # Revisit the same table — should be a no-op that preserves data.
+        migrate_schema(self.conn, embedding_dim=4, table="memory")
+        rows = self.conn.execute("SELECT content FROM memory").fetchall()
+        self.assertEqual({r[0] for r in rows}, {"keep"})
+
+
 if __name__ == "__main__":
     unittest.main()

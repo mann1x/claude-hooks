@@ -108,6 +108,24 @@ def migrate_schema(conn: sqlite3.Connection, *, embedding_dim: int,
     _ensure_bookkeeping(conn)
     current = _read_version(conn)
     if current >= LATEST_VERSION:
+        # The schema version row is db-wide, but tables are per-name.
+        # A second provider pointing at the SAME db file with a
+        # different ``table`` still needs its own table family — the
+        # version being at LATEST does NOT imply *this* table exists.
+        # Create it (idempotently, at the latest schema) when missing.
+        # Skip entirely when it already exists so the common
+        # single-table case keeps its zero-work fast path: re-running
+        # the v0→v1 migration would re-tokenize the whole FTS index on
+        # every provider construction. The created table is empty, so
+        # the backfill + FTS rebuild inside the migration are trivial.
+        if not _table_exists(conn, table):
+            _migrate_v0_to_v1(conn, embedding_dim=embedding_dim, table=table)
+            _migrate_v1_to_v2(conn, table=table)
+            conn.commit()
+            log.info(
+                "sqlite_vec: created additional table %s at schema v%d "
+                "in an already-migrated db", table, current,
+            )
         return current
 
     # Apply steps in order. Each step is its own savepoint so a crash
@@ -182,6 +200,20 @@ def _read_version(conn: sqlite3.Connection) -> int:
         "SELECT version FROM claude_hooks_schema ORDER BY version DESC LIMIT 1"
     ).fetchone()
     return int(row[0]) if row else 0
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    """True if a base table named ``table`` exists in this DB.
+
+    Used to decide whether an already-at-LATEST db still needs a
+    per-table family created for a provider pointing at a different
+    ``table`` in the same file.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
 
 
 def _write_version(conn: sqlite3.Connection, version: int, metadata: dict) -> None:
