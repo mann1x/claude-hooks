@@ -129,6 +129,28 @@ def default_target_for_phase(phase: str) -> str:
     return _PHASE_DEFAULT_TARGET.get(phase, "researcher")
 
 
+def rewind_budget_ok(values: dict) -> bool:
+    """#314: True if the council has room for one more researcher round
+    — the bound on a synthesis-phase inject rewind. Reads the live
+    snapshot's ``research_rounds_used`` against the effective
+    ``max_rounds`` (runtime_control override, else the effort cap), so
+    a mid-flight /control that tightened the cap is honored. Shared by
+    the inject handler (decide rewound vs best-effort at inject time)
+    and the runner (re-check at the rewind boundary)."""
+    try:
+        from consultants.engine.control import runtime_max_rounds
+        from consultants.engine.council import caps_for
+        v = values or {}
+        effort = str(v.get("effort") or "medium")
+        rounds_used = int(v.get("research_rounds_used") or 0)
+        max_rounds = runtime_max_rounds(
+            v, fallback=caps_for(effort).researcher_rounds_max,
+        )
+        return rounds_used < max_rounds
+    except Exception:  # pragma: no cover — defensive
+        return False
+
+
 # ============================================================== #
 # M9 inject lifecycle record + status/routing constants
 # ============================================================== #

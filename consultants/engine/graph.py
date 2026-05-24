@@ -1484,6 +1484,7 @@ def build_council_graph(deps: GraphDeps,
 
 def build_follow_up_graph(deps: GraphDeps,
                           *, checkpointer: Optional[Any] = None,
+                          interrupt_before: Optional[list[str]] = None,
                           tracer: Optional[Any] = None):
     """Compile the SHORTENED follow-up graph.
 
@@ -1547,4 +1548,16 @@ def build_follow_up_graph(deps: GraphDeps,
     compile_kwargs: dict[str, Any] = {"checkpointer": checkpointer}
     if deps.store is not None:
         compile_kwargs["store"] = deps.store
+    # #314: honor interrupt_before (the runner always passes
+    # ["synthesizer"] so a mid-flight follow-up inject can rewind to a
+    # researcher round). Filter to nodes actually present, mirroring
+    # build_council_graph, so a stripped follow-up topology can't 500
+    # on an unknown interrupt target.
+    if interrupt_before:
+        existing_nodes = {"researcher", "synthesizer"}
+        if "critic" in enabled:
+            existing_nodes.add("critic")
+        valid = [n for n in interrupt_before if n in existing_nodes]
+        if valid:
+            compile_kwargs["interrupt_before"] = valid
     return sg.compile(**compile_kwargs)

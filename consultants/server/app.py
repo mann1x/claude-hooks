@@ -181,6 +181,13 @@ class SessionState:
     _injections: list = field(default_factory=list, repr=False)
     _pending_injections: "deque" = field(default_factory=deque, repr=False)
     _inject_lock: Any = field(default_factory=threading.RLock, repr=False)
+    # #314 rewind: a synthesis-phase inject that wants the council to
+    # loop back through a researcher round before re-synthesizing sets
+    # this flag (caps permitting). The runner's stream loop reads it at
+    # the synthesizer interrupt boundary, performs the rewind, and
+    # clears it. Lives on SessionState (not graph state) so the rewind
+    # is driven entirely by the runner without a graph topology change.
+    _revalidation_pending: bool = field(default=False, repr=False)
 
     def public_dict(self) -> dict:
         return {
@@ -285,6 +292,24 @@ class SessionState:
         """Public snapshot of every injection for GET /state + CLI."""
         with self._inject_lock:
             return [inj.to_public() for inj in self._injections]
+
+    # ---- #314 rewind signalling -------------------------------- #
+
+    def request_revalidation(self) -> None:
+        """Mark that a synthesis-phase inject wants the council to
+        rewind to a researcher round before finalizing. Set by the
+        inject handler (HTTP thread); read+cleared by the runner."""
+        with self._inject_lock:
+            self._revalidation_pending = True
+
+    def take_revalidation(self) -> bool:
+        """Atomically read-and-clear the revalidation flag. Returns
+        True if a rewind was requested since the last take. The runner
+        calls this at the synthesizer interrupt boundary."""
+        with self._inject_lock:
+            pending = self._revalidation_pending
+            self._revalidation_pending = False
+            return pending
 
 
 # ----------------------- runner contract ------------------------- #

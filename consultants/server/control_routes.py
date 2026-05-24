@@ -72,6 +72,7 @@ from consultants.server.control import (
     ROUTED_BEST_EFFORT_CAP_REACHED,
     ROUTED_IN_PLACE,
     ROUTED_QUEUED,
+    ROUTED_REWOUND_TO_RESEARCHER,
     build_cancel_request,
     build_inject_delta,
     build_interrupt_delta,
@@ -79,6 +80,7 @@ from consultants.server.control import (
     build_runtime_control_delta,
     classify_phase,
     default_target_for_phase,
+    rewind_budget_ok,
     summarize_state_for_get,
 )
 
@@ -293,7 +295,7 @@ def _make_inject_apply_fn(s):
             inj.error = str(e)
             return
         try:
-            phase, _values = _classify_phase_from_live(s)
+            phase, values = _classify_phase_from_live(s)
         except Exception as e:
             inj.status = INJECT_STATUS_FAILED
             inj.error = f"get_state: {type(e).__name__}: {e}"
@@ -307,17 +309,47 @@ def _make_inject_apply_fn(s):
             inj.role if inj.role and inj.role != "any"
             else default_target_for_phase(phase)
         )
-        # ``as_node="researcher"`` keeps LangGraph's update_state happy
-        # (the node name must be registered in the compiled graph;
-        # "injector" would raise). The Doc's own ``role`` field — not
-        # this as_node — drives which node surfaces the content.
+        inj.phase_at_apply = phase
+        inj.target_role = effective_target
+
+        if phase == PHASE_SYNTHESIS:
+            # #314: the council is parked at the always-on synthesizer
+            # interrupt. Write the Doc with NO as_node so the parked
+            # ``next`` (=synthesizer) is preserved — the runner, not
+            # this write, drives the rewind/auto-resume. If the inject
+            # targets the researcher (the phase default, or explicit)
+            # AND the round budget allows, request a rewind: the runner
+            # re-runs a researcher pass that picks up this Doc before
+            # re-synthesizing. Otherwise the Doc still reaches the
+            # synthesizer as text (in place / best-effort).
+            ok, err = _apply_state_delta_core(s, delta)
+            if not ok:
+                inj.status = INJECT_STATUS_FAILED
+                inj.error = err
+                return
+            if effective_target == "researcher":
+                if rewind_budget_ok(values):
+                    s.request_revalidation()
+                    inj.routed = ROUTED_REWOUND_TO_RESEARCHER
+                else:
+                    inj.routed = ROUTED_BEST_EFFORT_CAP_REACHED
+            else:
+                # Explicit non-researcher target (e.g. synthesizer): the
+                # synthesizer reads it in place on resume, no rewind.
+                inj.routed = ROUTED_IN_PLACE
+            inj.status = INJECT_STATUS_APPLIED
+            inj.applied_at = time.time()
+            return
+
+        # Non-synthesis phases: the graph is mid-flight (or about to
+        # run the target role). ``as_node="researcher"`` keeps
+        # update_state happy (the node name must be registered); the
+        # Doc's own ``role`` drives which node surfaces it.
         ok, err = _apply_state_delta_core(s, delta, as_node="researcher")
         if not ok:
             inj.status = INJECT_STATUS_FAILED
             inj.error = err
             return
-        inj.phase_at_apply = phase
-        inj.target_role = effective_target
         inj.routed = ROUTED_IN_PLACE
         inj.status = INJECT_STATUS_APPLIED
         inj.applied_at = time.time()

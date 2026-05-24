@@ -23,10 +23,11 @@ source-inspection cohorts run everywhere.
 from __future__ import annotations
 
 import inspect
+import operator
 import re
 import unittest
 from dataclasses import dataclass
-from typing import Optional
+from typing import Annotated, Optional, TypedDict
 
 
 try:
@@ -301,20 +302,48 @@ class TestInjectContract(unittest.TestCase):
         self.assertEqual(b["phase_at_apply"], PHASE_PLANNING)
         self.assertEqual(b["target_role"], "planner")
 
-    def test_synthesis_phase_honest_in_place_not_rewound(self):
-        # Safe-layer: synthesis-phase inject is applied in place and
-        # reports target_role=researcher (intent) but routed=in_place —
-        # NOT rewound_to_researcher (that's the gated follow-up).
+    def test_synthesis_phase_rewinds_to_researcher(self):
+        # #314: a synthesis-phase inject (parked at the synthesizer
+        # interrupt) targeting the researcher, with round budget, sets
+        # the revalidation flag and reports rewound_to_researcher. The
+        # Doc is written with NO as_node so the parked `next` is
+        # preserved for the runner to drive the rewind.
+        from consultants.server.control import ROUTED_REWOUND_TO_RESEARCHER
         c, app = _client()
-        g = _FakeGraph(next_nodes=["synthesizer"])
-        _install(app, "csl-s", graph=g)
+        g = _FakeGraph(next_nodes=["synthesizer"])  # rounds_used=1, max=3
+        s = _install(app, "csl-s", graph=g)
         r = c.post("/v1/consult/csl-s/inject",
                    json={"role": "any", "text": "validate the claim at x:42"})
         b = r.json()
         self.assertEqual(b["status"], INJECT_STATUS_APPLIED)
         self.assertEqual(b["phase_at_apply"], PHASE_SYNTHESIS)
         self.assertEqual(b["target_role"], "researcher")
-        self.assertEqual(b["routed"], ROUTED_IN_PLACE)
+        self.assertEqual(b["routed"], ROUTED_REWOUND_TO_RESEARCHER)
+        # The runner-facing revalidation flag is set (take clears it).
+        self.assertTrue(s.take_revalidation())
+        # Doc written without disturbing the parked `next` (no as_node).
+        self.assertEqual(len(g.update_state_calls), 1)
+        self.assertIsNone(g.update_state_calls[0]["as_node"])
+
+    def test_synthesis_phase_best_effort_when_caps_exhausted(self):
+        # Round budget exhausted (rounds_used >= max_rounds) → no
+        # rewind; the Doc still reaches the synthesizer in place and the
+        # inject reports best_effort_cap_reached.
+        from consultants.server.control import ROUTED_BEST_EFFORT_CAP_REACHED
+        c, app = _client()
+        g = _FakeGraph(next_nodes=["synthesizer"], values={
+            "runtime_control": {"max_rounds": 1},
+            "research_rounds_used": 1, "critic_reroutes_used": 0,
+            "effort": "medium", "additional_context": [], "confidence": [],
+            "final_answer": "", "error": None,
+        })
+        s = _install(app, "csl-cap", graph=g)
+        r = c.post("/v1/consult/csl-cap/inject",
+                   json={"role": "any", "text": "late validate"})
+        b = r.json()
+        self.assertEqual(b["status"], INJECT_STATUS_APPLIED)
+        self.assertEqual(b["routed"], ROUTED_BEST_EFFORT_CAP_REACHED)
+        self.assertFalse(s.take_revalidation())  # no rewind requested
 
     def test_explicit_role_override(self):
         c, app = _client()
@@ -583,6 +612,99 @@ class TestCheckpointerSerdeAllowlist(unittest.TestCase):
                 f"the checkpointer serde allowlist: "
                 f"{sorted(t.__name__ for t in missing)}",
         )
+
+
+# ============================================================== #
+# 7. Runner drive-loop: auto-resume (parity) / rewind / HITL park
+# ============================================================== #
+
+# Module-level so langgraph's get_type_hints resolves the (stringified
+# under `from __future__ import annotations`) channel annotations
+# against this module's globals (Annotated / operator / TypedDict).
+class _DriveSt(TypedDict, total=False):
+    log: Annotated[list, operator.add]
+    research_rounds_used: Annotated[int, operator.add]
+    critic_decision: Optional[str]
+    effort: str
+    runtime_control: dict
+
+
+@unittest.skipUnless(HAVE_LANGGRAPH, "langgraph not installed")
+class TestDriveCouncilStream(unittest.TestCase):
+    """#314: drive _drive_council_stream against a REAL langgraph graph
+    compiled with interrupt_before=[synthesizer], mirroring the council
+    shape. Stub graphs can't exercise the interrupt, so this is the
+    coverage that proves the always-on interrupt + resume loop."""
+
+    def _graph(self):
+        from langgraph.graph import StateGraph, START, END
+        from langgraph.checkpoint.memory import MemorySaver
+
+        St = _DriveSt
+
+        def researcher(s): return {"log": ["R"], "research_rounds_used": 1}
+        def critic(s): return {"log": ["C"], "critic_decision": "ready"}
+        def synthesizer(s): return {"log": ["S"]}
+        def route(s): return "synthesizer"
+
+        g = StateGraph(St)
+        g.add_node("researcher", researcher)
+        g.add_node("critic", critic)
+        g.add_node("synthesizer", synthesizer)
+        g.add_edge(START, "researcher")
+        g.add_edge("researcher", "critic")
+        g.add_conditional_edges("critic", route,
+                                {"researcher": "researcher",
+                                 "synthesizer": "synthesizer"})
+        g.add_edge("synthesizer", END)
+        return g.compile(checkpointer=MemorySaver(),
+                         interrupt_before=["synthesizer"])
+
+    def _state(self):
+        from consultants.server.app import SessionState
+        s = SessionState(sid="drive", cwd="/x", question="q",
+                         effort="medium", topology="council")
+        s.progress = {"researcher": "in_progress", "critic": "pending",
+                      "synthesizer": "pending"}
+        return s
+
+    def _drive(self, *, revalidate=False, review=False):
+        from consultants.server.runner import _drive_council_stream
+        compiled = self._graph()
+        s = self._state()
+        cfg = {"configurable": {"thread_id": s.sid}}
+        # max_rounds=3 gives the rewind budget (medium's effort cap is 1,
+        # under which a synthesis-phase inject would be best-effort).
+        initial = {"log": [], "research_rounds_used": 0, "effort": "medium",
+                   "runtime_control": {"max_rounds": 3}}
+        if revalidate:
+            s.request_revalidation()
+        final = _drive_council_stream(
+            compiled, initial, cfg, state=s, enabled=("researcher",
+            "critic", "synthesizer"), review_before_synthesis=review,
+            recorder=None, log_label="test")
+        return final, compiled, cfg
+
+    def test_auto_resume_runs_synthesizer_parity(self):
+        # Default path: no inject → auto-resume past the interrupt →
+        # synthesizer runs. Byte-identical to a non-interrupt run.
+        final, _c, _cfg = self._drive()
+        self.assertEqual(final.get("log"), ["R", "C", "S"])
+
+    def test_rewind_runs_extra_researcher_round(self):
+        # revalidation pending + budget → one extra researcher(+critic)
+        # pass before the synthesizer. take_revalidation is one-shot so
+        # it does NOT loop forever.
+        final, _c, _cfg = self._drive(revalidate=True)
+        self.assertEqual(final.get("log"), ["R", "C", "R", "C", "S"])
+        self.assertEqual(final.get("research_rounds_used"), 2)
+
+    def test_review_before_synthesis_parks(self):
+        # HITL: parks before the synthesizer (synthesizer does NOT run),
+        # leaving the graph for an external /resume — M5 behavior.
+        final, compiled, cfg = self._drive(review=True)
+        self.assertEqual(final.get("log"), ["R", "C"])
+        self.assertIn("synthesizer", tuple(compiled.get_state(cfg).next or ()))
 
 
 if __name__ == "__main__":
