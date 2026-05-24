@@ -14,6 +14,42 @@ release with the auto-generated source archive
 (`claude-hooks-X.Y.Z.zip` / `.tar.gz`). See
 [`docs/RELEASING.md`](docs/RELEASING.md) for the cut procedure.
 
+## [1.11.1] — 2026-05-24
+
+PATCH. **Version-banner fix.** The Stop hook's update-check on a
+freshly deployed v1.11.0 host reported `update available: v1.11.0
+(current 1.10.6)` even though the repo code was already at v1.11.0.
+
+Root cause: `_resolve_version()` queried
+`importlib.metadata.version("claude-hooks")` first. Since v1.10.0
+`install.py` runs `pip install -e .`, which writes a `.dist-info`
+frozen at the install-time version (1.10.6); a code-only deploy of a
+new release (git checkout without a re-`pip`) then left that stale
+metadata winning over the live `pyproject.toml`. This silently
+defeated the v1.3.2 self-resolving guarantee from the moment the
+editable-install step landed in v1.10.0.
+
+No behavior change for opted-in users beyond a correct version banner.
+
+### Fixed
+
+- **`claude_hooks/__init__.py` — source-tree pyproject now wins over
+  stale editable metadata.** `_resolve_version()` is reordered: the
+  live `pyproject.toml` (an ancestor of `__file__`, present for every
+  editable / git-clone install — the model `bin/claude-hook` is built
+  around) is consulted first; `importlib.metadata` is used only as the
+  fallback for genuine non-editable site-packages installs that have no
+  pyproject ancestor. The hard-coded last-resort fallback is bumped to
+  `1.11.0`. Extracted `_version_from_pyproject()` helper.
+
+### Added
+
+- **Regression guard
+  `test_resolver_prefers_source_tree_pyproject_over_stale_metadata`**
+  (`tests/test_version_no_drift.py`) — simulates a stale
+  `importlib.metadata` value and asserts the resolver still follows the
+  live source-tree pyproject.
+
 ## [1.11.0] — 2026-05-24
 
 MINOR. The **consultants M9 control surface** gains reliable
@@ -7544,7 +7580,8 @@ prior tag. From any unreleased checkout, just `git pull` on `main`
 once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
-[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.11.0...HEAD
+[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.11.1...HEAD
+[1.11.1]: https://github.com/mann1x/claude-hooks/compare/v1.11.0...v1.11.1
 [1.11.0]: https://github.com/mann1x/claude-hooks/compare/v1.10.6...v1.11.0
 [1.10.2]: https://github.com/mann1x/claude-hooks/compare/v1.10.1...v1.10.2
 [1.10.1]: https://github.com/mann1x/claude-hooks/compare/v1.10.0...v1.10.1
