@@ -509,5 +509,81 @@ class TestFollowUpCheckpointerRegression(unittest.TestCase):
         self.assertEqual(len(ac), 1)
 
 
+# ============================================================== #
+# 6. Checkpointer msgpack serde allowlist
+# ============================================================== #
+
+@unittest.skipUnless(HAVE_LANGGRAPH, "langgraph not installed")
+class TestCheckpointerSerdeAllowlist(unittest.TestCase):
+    """The M9 checkpointer round-trips custom CouncilState channel
+    dataclasses through LangGraph's msgpack serde. Under the coming
+    strict mode, unregistered types are SILENTLY degraded back to
+    plain dicts on read — which would make downstream doc.role /
+    doc.text / turn.role accesses AttributeError mid-graph. The serde
+    allowlist (make_checkpointer_serde) must keep every such type a
+    real instance across the round-trip.
+    """
+
+    def _samples(self):
+        from consultants.engine.state_v2 import (
+            Doc, ToolPlanItem, ToolResult, InterruptState,
+            CoderTaskItem, CoderArtifact,
+        )
+        from consultants.engine.storage import RoleTurn
+        return [
+            Doc(role="researcher", text="t"),
+            ToolPlanItem(intent="find X"),
+            ToolResult(intent="find X", content="r"),
+            InterruptState(kind="k", prompt="p", posted_at=1.0),
+            CoderTaskItem(task="write foo"),
+            CoderArtifact(task="write foo", summary="done"),
+            RoleTurn(role="researcher", round=1, content="c"),
+        ]
+
+    def test_all_custom_types_round_trip_under_strict_serde(self):
+        from consultants.engine.state_v2 import make_checkpointer_serde
+        serde = make_checkpointer_serde()
+        self.assertIsNotNone(serde)
+        for obj in self._samples():
+            enc = serde.dumps_typed({"v": [obj]})
+            out = serde.loads_typed(enc)["v"][0]
+            self.assertIs(
+                type(out), type(obj),
+                msg=f"{type(obj).__name__} degraded to {type(out).__name__} "
+                    "across checkpoint round-trip — add it to "
+                    "checkpointer_msgpack_types()",
+            )
+
+    def test_allowlist_covers_graph_schema_dataclass_channels(self):
+        # Drift guard: introspect graph.CouncilState's channel
+        # annotations, collect every dataclass element type, and assert
+        # each is in the serde allowlist. Catches a future engineer
+        # adding a new custom-typed channel without allowlisting it.
+        import dataclasses
+        import typing
+        from consultants.engine import graph as graph_mod
+        from consultants.engine.state_v2 import checkpointer_msgpack_types
+
+        allow = set(checkpointer_msgpack_types())
+
+        def _collect(tp, acc):
+            if dataclasses.is_dataclass(tp) and isinstance(tp, type):
+                acc.add(tp)
+            for arg in typing.get_args(tp):
+                _collect(arg, acc)
+
+        found: set = set()
+        for ann in graph_mod.CouncilState.__annotations__.values():
+            _collect(ann, found)
+
+        missing = found - allow
+        self.assertEqual(
+            missing, set(),
+            msg=f"CouncilState channels reference dataclass types not in "
+                f"the checkpointer serde allowlist: "
+                f"{sorted(t.__name__ for t in missing)}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

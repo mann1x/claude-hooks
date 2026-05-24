@@ -316,6 +316,67 @@ def latest_or_none(left: Optional[list[Any]],
     return list(left or []) + list(right or [])
 
 
+# ---------- checkpointer serde allowlist -------------------------- #
+# The M9 control surface attaches a MemorySaver checkpointer (#214 +
+# the 2026-05-24 follow-up fix), so every get_state/update_state
+# round-trips the CouncilState channels through LangGraph's msgpack
+# serde. LangGraph 1.2 deserializes our custom frozen-dataclass
+# channel values with a deprecation *warning* today, but it is
+# signposting a future "strict" mode where unregistered types are
+# silently downgraded back to plain dicts on read — at which point
+# ``additional_context_for`` / ``_additional_context_block`` (which do
+# ``doc.role`` / ``doc.text`` / ``doc.content_hash``) and the turn /
+# tool / coder readers would AttributeError mid-graph and crash the
+# council. Registering the types in the serde allowlist keeps them as
+# real instances across the round-trip AND silences the warning.
+#
+# This is the exhaustive set of CUSTOM (non-builtin, non-langchain)
+# types that appear in the graph's ``CouncilState`` channels (see
+# ``consultants/engine/graph.py:CouncilState``) plus ``RoleTurn`` from
+# the ``turns`` channel. ``CoderLanguageRoute`` is deliberately absent
+# — it lives only in ``GraphDeps``, never in serialized state.
+# Over-inclusion is harmless (a listed type that never appears costs
+# nothing); under-inclusion is the dangerous direction, so the
+# drift-guard test asserts the graph schema's dataclass channels are
+# all covered.
+
+def checkpointer_msgpack_types() -> tuple[type, ...]:
+    """Custom types that flow through the LangGraph CouncilState
+    channels and so get serialized into the checkpointer. Single
+    source of truth for :func:`make_checkpointer_serde`'s allowlist."""
+    from consultants.engine.storage import RoleTurn
+    return (
+        Doc, ToolPlanItem, ToolResult, InterruptState,
+        CoderTaskItem, CoderArtifact, RoleTurn,
+    )
+
+
+def make_checkpointer_serde():
+    """Return a ``JsonPlusSerializer`` whose msgpack allowlist includes
+    the consultants custom state types, to pass as
+    ``MemorySaver(serde=...)``. Returns ``None`` when langgraph isn't
+    importable (the main ``claude-hooks`` env) — ``MemorySaver`` is
+    never constructed there anyway, and ``serde=None`` is a valid
+    "use the default" sentinel.
+
+    The base serializer is built strict (``allowed_msgpack_modules=
+    None``) and then extended with our types via
+    ``with_msgpack_allowlist`` — the permissive default (``True``)
+    makes ``with_msgpack_allowlist`` a no-op, so a strict base is the
+    only way to actually register the types. Built-in safe types
+    (langchain messages, common stdlib) stay allowed under the strict
+    base; only genuinely-unknown types are blocked, which is the
+    posture we want.
+    """
+    try:
+        from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+    except ImportError:  # pragma: no cover — main env without langgraph
+        return None
+    return JsonPlusSerializer(
+        allowed_msgpack_modules=None,
+    ).with_msgpack_allowlist(list(checkpointer_msgpack_types()))
+
+
 # ---------- the state schema -------------------------------------- #
 # Imports of LangGraph's Annotated reducer machinery happen here. The
 # module imports cleanly without langgraph because Annotated is a

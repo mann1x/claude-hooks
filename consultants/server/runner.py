@@ -321,7 +321,17 @@ def make_runner(*, ollama_base_url: str):
         # works in the standard config. Falls back to None if
         # langgraph's checkpoint.memory module isn't importable
         # (defensive — every langgraph release we depend on ships it).
-        checkpointer = MemorySaver() if MemorySaver is not None else None
+        # Attach a serde whose msgpack allowlist covers our custom
+        # CouncilState channel types (Doc, ToolPlanItem, …, RoleTurn)
+        # so they survive checkpoint round-trips as real instances
+        # instead of silently degrading to dicts under LangGraph's
+        # coming strict-msgpack mode. See
+        # state_v2.make_checkpointer_serde.
+        from consultants.engine.state_v2 import make_checkpointer_serde
+        checkpointer = (
+            MemorySaver(serde=make_checkpointer_serde())
+            if MemorySaver is not None else None
+        )
         if interrupt_before:
             compiled = build_council_graph(
                 deps, tracer=tracer,
@@ -767,7 +777,13 @@ def make_follow_up_runner(*, ollama_base_url: str):
                 )
             except ImportError:
                 _MemSaver = None  # type: ignore[assignment]
-        fu_checkpointer = _MemSaver() if _MemSaver is not None else None
+        # Same custom-type serde allowlist as run_council so follow-up
+        # checkpoint round-trips don't degrade Doc/ToolResult/… to dicts.
+        from consultants.engine.state_v2 import make_checkpointer_serde
+        fu_checkpointer = (
+            _MemSaver(serde=make_checkpointer_serde())
+            if _MemSaver is not None else None
+        )
         compiled = build_follow_up_graph(
             deps, tracer=tracer, checkpointer=fu_checkpointer,
         )
