@@ -56,6 +56,35 @@ def test_module_version_matches_pyproject():
     )
 
 
+def test_resolver_prefers_source_tree_pyproject_over_stale_metadata():
+    """Regression for the v1.11.0 deploy bug: ``pip install -e .`` (run
+    by install.py since v1.10.0) writes a ``.dist-info`` frozen at the
+    install-time version. A later code-only deploy bumps pyproject but
+    not the metadata, so a metadata-first resolver reports the stale
+    version (observed: a v1.11.0 host banner-ing "current 1.10.6").
+
+    The resolver must therefore prefer the live source-tree pyproject
+    over ``importlib.metadata`` whenever a pyproject ancestor exists.
+    We simulate stale metadata and assert the resolver ignores it.
+    """
+    import importlib.metadata as md
+
+    import claude_hooks
+
+    orig = md.version
+    md.version = lambda name: "0.0.1-stale"  # noqa: E731 - test stub
+    try:
+        resolved = claude_hooks._resolve_version()
+    finally:
+        md.version = orig
+
+    assert resolved == _pyproject_version(), (
+        f"_resolve_version() returned {resolved!r} with stale metadata "
+        "present; it must follow the live source-tree pyproject "
+        f"({_pyproject_version()!r}), not the frozen .dist-info."
+    )
+
+
 def test_module_version_is_not_the_legacy_static_string():
     """Belt-and-braces: catch a regression where someone re-hardcodes
     the constant to a stale value (which is exactly the bug v1.3.2
