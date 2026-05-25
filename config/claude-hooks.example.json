@@ -227,7 +227,9 @@
       "skip_meta_context": true,
       "meta_markers": [],
       "skip_on_user_wrap_up": true,
-      "user_wrap_up_markers": []
+      "user_wrap_up_markers": [],
+      "stall_check_enabled": true,
+      "suppress_on_trailing_question": true
     },
     "session_end": {
       "enabled": true

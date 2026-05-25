@@ -103,6 +103,32 @@ def mark_seen(path: Path) -> bool:
         return False
 
 
+def _extract_reconnect_block(text: str) -> str:
+    """Return the fenced reconnect block synthesised into the wrap-up
+    file (between the ``RECONNECT`` sentinels), or ``""`` when absent.
+
+    The sentinels are written by :mod:`claude_hooks.wrapup_synth` ONLY
+    when the session actually made an ssh connection — so a session with
+    no remote work yields ``""`` here and the recovery block stays a bare
+    pointer (zero extra tokens). The returned text already includes the
+    ```` ``` ```` fences, so it renders as a code block when inlined.
+    """
+    try:
+        from claude_hooks.wrapup_synth import (
+            RECONNECT_SENTINEL_BEGIN as _BEGIN,
+            RECONNECT_SENTINEL_END as _END,
+        )
+    except Exception:  # pragma: no cover - import guard
+        _BEGIN, _END = "<!-- RECONNECT:BEGIN -->", "<!-- RECONNECT:END -->"
+    i = text.find(_BEGIN)
+    if i < 0:
+        return ""
+    j = text.find(_END, i + len(_BEGIN))
+    if j < 0:
+        return ""
+    return text[i + len(_BEGIN):j].strip()
+
+
 def get_cfg(config: dict) -> dict:
     raw = (config.get("hooks") or {}).get("wrapup_recovery") or {}
     return {
@@ -134,4 +160,22 @@ def format_recovery_block(cwd: str, config: dict, *,
     # used to be inline but stacked ~100 tokens across every turn for
     # 24h. The shorter form costs ~25 tokens and the file path itself
     # tells the model what to do.
-    return f"## Pre-compact wrap-up\n\nResume state: `{path}` — read first."
+    block = f"## Pre-compact wrap-up\n\nResume state: `{path}` — read first."
+
+    # Inline the reconnect command(s) when the wrap-up captured a remote
+    # connection. A bare file pointer is too easily ignored, and losing
+    # the vast.ai / pod reconnect command (port included!) across a
+    # compact is the exact failure this guards against. Costs nothing
+    # when there are no connections — the sentinels are simply absent.
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        log.debug("wrapup_recovery: read(%s) failed: %s", path, e)
+        text = ""
+    reconnect = _extract_reconnect_block(text) if text else ""
+    if reconnect:
+        block += (
+            "\n\n**Reconnect (initial + last known-good — verify before "
+            "trusting):**\n" + reconnect
+        )
+    return block

@@ -14,6 +14,39 @@ release with the auto-generated source archive
 (`claude-hooks-X.Y.Z.zip` / `.tar.gz`). See
 [`docs/RELEASING.md`](docs/RELEASING.md) for the cut procedure.
 
+## [Unreleased]
+
+### Fixed
+
+- **stop_guard: stall check no longer false-positives on background
+  status prose.** A commitment phrase preceded by a copula
+  ("`CD-IQ4_K_M is building now`") is a third-person status report about
+  a background process, not a first-person commitment to call a tool. A
+  new copula guard (`_commitment_hit` in `claude_hooks/stop_guard.py`)
+  discards copula-preceded matches; a genuine first-person commitment in
+  the same tail still fires.
+
+### Changed
+
+- **stop_guard: a genuine trailing question now backs the guard off.**
+  When the assistant's turn ends with a question (`?`), both the
+  stall-after-commitment check AND the permission-seeking prose patterns
+  ("should I continue?") are suppressed — forcing the model past a real
+  question is the unsafe choice and conflicts with "confirm before
+  destruction". Ownership-dodging / session-quitting nudges are
+  unaffected. New `suppress_on_trailing_question` flag (default true)
+  under `hooks.stop_guard`.
+- **wrap-up / PreCompact: full reconnect commands preserved across a
+  compact.** `wrapup_synth` now captures the **entire** `ssh` invocation
+  (port, user, key, `-L`/`-R` tunnels) and records both the **initial**
+  and **last-known-good** connection (vast.ai / RunPod use case, where
+  the port is mandatory and was previously dropped). The reconnect
+  block is wrapped in machine-extractable sentinels and **inlined** into
+  the post-compact recovery context by `wrapup_recovery` — surviving
+  even if the model never opens the wrap-up file. Costs zero extra
+  tokens when the session touched no remote hosts. The `/wrapup` skill
+  §7 now instructs the model to preserve the same.
+
 ## [1.11.1] — 2026-05-24
 
 PATCH. **Version-banner fix.** The Stop hook's update-check on a

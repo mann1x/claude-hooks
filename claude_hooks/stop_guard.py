@@ -21,6 +21,26 @@ import re
 from typing import Optional
 
 
+# Permission-seeking correction strings, named so they can both live in
+# DEFAULT_PATTERNS below AND be collected into
+# ``_PERMISSION_SEEKING_CORRECTIONS`` for the trailing-question escape
+# (Part B): a genuine question ending the turn should NOT be force-
+# overridden into "just proceed" — waiting for the user is the safer
+# choice, and it respects the standing "confirm before destruction"
+# rule. Ownership-dodging / session-quitting corrections are
+# deliberately NOT in the set, so those still fire even when phrased as
+# a question.
+_PERM_CORRECTION_CONTINUE = (
+    "Do not ask. The task is not done. Continue working. The user will "
+    "interrupt if they want you to stop."
+)
+_PERM_CORRECTION_CONTINUE_OR = "Do not ask. Continue working. The task is not done."
+
+_PERMISSION_SEEKING_CORRECTIONS: frozenset[str] = frozenset(
+    {_PERM_CORRECTION_CONTINUE, _PERM_CORRECTION_CONTINUE_OR}
+)
+
+
 # Each entry: (case-insensitive regex, correction message).
 # Order matters — first match wins, so put severe/specific patterns first.
 DEFAULT_PATTERNS: list[tuple[str, str]] = [
@@ -92,12 +112,11 @@ DEFAULT_PATTERNS: list[tuple[str, str]] = [
         r"(should|shall|would you like (me )?to|want (me )?to)"
         r"( I| we)?( now| next)? "
         r"(continue|keep going|proceed)",
-        "Do not ask. The task is not done. Continue working. The user will "
-        "interrupt if they want you to stop.",
+        _PERM_CORRECTION_CONTINUE,
     ),
     (
         r"want to continue.*or ",
-        "Do not ask. Continue working. The task is not done.",
+        _PERM_CORRECTION_CONTINUE_OR,
     ),
 ]
 
@@ -271,6 +290,39 @@ def _contains_meta_marker(message: str, markers: tuple[str, ...]) -> bool:
     return any(m.lower() in lower for m in markers)
 
 
+# Closing wrappers that can trail a genuine question without changing the
+# fact that it IS a question: markdown emphasis, code spans, and matched
+# quote/paren pairs. Stripped from the right before the final-char test.
+_TRAILING_WRAPPERS = " \t\r\n)]}>\"'`*_”’"
+
+
+def _ends_with_question(text: str) -> bool:
+    """True when the assistant's visible text ends with a genuine question.
+
+    The user's directive: a turn that ends by asking the user something
+    should be treated carefully — the stop guard must not force the
+    assistant past it. We strip trailing whitespace and closing wrappers
+    (quotes, backticks, parens, markdown emphasis) and check whether the
+    last meaningful character is ``?``. Deliberately simple: any trailing
+    ``?`` counts (the user asked for "?" to be weighed, not parsed).
+    """
+    if not text:
+        return False
+    stripped = text.rstrip(_TRAILING_WRAPPERS)
+    return stripped.endswith("?")
+
+
+# A commitment phrase preceded by a copula ("X is building now",
+# "the run was executing now") is a third-person STATUS report about a
+# background/external process, not the assistant committing to call a
+# tool. Detected by a copula token immediately before the match. Each
+# alternative is fixed-width-free because we anchor with ``\s*$`` on the
+# pre-match text rather than using a look-behind.
+_DESCRIPTIVE_COPULA_RX = re.compile(
+    r"(?:\b(?:is|are|was|were|been|being)|'s)\s*$", re.IGNORECASE
+)
+
+
 def check_message(
     message: str,
     patterns: Optional[list[tuple[re.Pattern, str]]] = None,
@@ -280,6 +332,7 @@ def check_message(
     last_user_message: Optional[str] = None,
     skip_on_user_wrap_up: bool = True,
     user_wrap_up_markers: Optional[tuple[str, ...]] = None,
+    suppress_on_trailing_question: bool = True,
 ) -> Optional[str]:
     """Return the correction string for the first matching pattern, or None.
 
@@ -296,6 +349,14 @@ def check_message(
     assistant to stop / summarise / compact, the assistant is complying
     with an instruction, not dodging ownership, and must be allowed to
     finish. Override markers via ``user_wrap_up_markers``.
+
+    If ``suppress_on_trailing_question`` is True (default) AND the matched
+    pattern is a *permission-seeking* one (its correction is in
+    :data:`_PERMISSION_SEEKING_CORRECTIONS`) AND the message ends with a
+    genuine question, the guard is bypassed: the assistant asked the user
+    something, and forcing it to "just proceed" is the unsafe choice.
+    Ownership-dodging and session-quitting patterns are unaffected — they
+    still fire even when phrased as a question.
     """
     if not message:
         return None
@@ -320,6 +381,18 @@ def check_message(
             first_match = (regex, correction)
             break
     if first_match is None:
+        return None
+
+    # Trailing-question escape for permission-seeking matches. A turn that
+    # ends by asking the user ("Should I proceed with X, or Y?") must not
+    # be force-overridden into "just continue" — waiting is safer and
+    # honours "confirm before destruction". Scoped to permission-seeking
+    # corrections so ownership/session-quitting dodges still fire.
+    if (
+        suppress_on_trailing_question
+        and first_match[1] in _PERMISSION_SEEKING_CORRECTIONS
+        and _ends_with_question(message)
+    ):
         return None
 
     if skip_meta_context:
@@ -456,6 +529,24 @@ def reset_commitment_cache() -> None:
     _COMMITMENT_REGEX_CACHE = None
 
 
+def _commitment_hit(tail: str) -> bool:
+    """True if ``tail`` contains a REAL first-person action commitment.
+
+    Scans every commitment match and discards any that is a third-person
+    descriptive status — i.e. the matched phrase is immediately preceded
+    by a copula (``"CD-IQ4_K_M is building now"``, ``"the run was
+    executing now"``). Such phrases report on a background/external
+    process; they are not the assistant committing to call a tool. A turn
+    is a stall candidate only when at least one NON-descriptive match
+    survives.
+    """
+    for m in _commitment_regex().finditer(tail):
+        if _DESCRIPTIVE_COPULA_RX.search(tail[: m.start()]):
+            continue  # "<noun> is/was/… <verb>" → status report, skip
+        return True
+    return False
+
+
 # How much of the message tail to scan for the commitment phrase. 250
 # chars is roughly the last paragraph for typical assistant narration;
 # tightening this further misses commitments wrapped onto an earlier
@@ -478,6 +569,7 @@ def check_stall_after_commitment(
     last_user_message: Optional[str] = None,
     skip_on_user_wrap_up: bool = True,
     user_wrap_up_markers: Optional[tuple[str, ...]] = None,
+    suppress_on_trailing_question: bool = True,
 ) -> Optional[str]:
     """Return :data:`STALL_CORRECTION` if the last assistant turn matches
     the stall-after-commitment pattern, else None.
@@ -492,6 +584,16 @@ def check_stall_after_commitment(
     :func:`check_message` — when the user explicitly asked the
     assistant to wrap up / save state / compact, a closing narration
     is intentional and must not be blocked.
+
+    Two further guards keep this from firing on non-stalls:
+
+    * **Descriptive status** — a commitment phrase preceded by a copula
+      ("X is building now") is a third-person status report, not a
+      commitment (see :func:`_commitment_hit`).
+    * **Trailing question** — when ``suppress_on_trailing_question`` is
+      True (default) and the turn ends with a genuine question, the
+      assistant did exactly what the correction invites ("ask a specific
+      question"), so there is nothing to correct.
     """
     if not last_assistant_msg:
         return None
@@ -543,8 +645,14 @@ def check_stall_after_commitment(
     if not text:
         return None
 
+    # A genuine closing question is not a stall — the assistant asked
+    # rather than committed-then-froze. Honours request to weigh "?" so
+    # the guard doesn't push the model past a point where waiting is safer.
+    if suppress_on_trailing_question and _ends_with_question(text):
+        return None
+
     tail = text[-_TAIL_SCAN_CHARS:] if len(text) > _TAIL_SCAN_CHARS else text
-    if not _commitment_regex().search(tail):
+    if not _commitment_hit(tail):
         return None
 
     return STALL_CORRECTION

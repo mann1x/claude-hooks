@@ -61,6 +61,17 @@ def read_transcript(path: str) -> list[dict]:
         return []
 
 
+# Machine-extractable sentinels around the reconnect command block in
+# section 7. wrapup_recovery lifts the fenced block between these markers
+# verbatim into the post-compact additionalContext. Kept as module
+# constants so both producer (this file) and consumer (wrapup_recovery)
+# agree on the exact bytes. Emitted ONLY when a connection exists.
+RECONNECT_SENTINEL_BEGIN = "<!-- RECONNECT:BEGIN -->"
+RECONNECT_SENTINEL_END = "<!-- RECONNECT:END -->"
+# Backwards-friendly short aliases used in the render code below.
+_RECONNECT_BEGIN = RECONNECT_SENTINEL_BEGIN
+_RECONNECT_END = RECONNECT_SENTINEL_END
+
 _PLAN_RX = re.compile(r"docs/PLAN-[A-Za-z0-9_-]+\.md")
 # Capture http(s) URLs and ws(s) URLs. Stop on whitespace, quotes,
 # closing brackets, and common markdown trailers.
@@ -80,7 +91,10 @@ _IPV4_RX = re.compile(
 # .runpod. / .modal. / .vast. domain. Generic enough to catch most
 # pod-style endpoints without false-matching arbitrary text.
 _POD_ID_RX = re.compile(
-    r"\b([a-z0-9]{8,15})-?\d{0,5}?\.(?:proxy\.)?"
+    # Lower bound is {3,…} so vast.ai's short proxy prefixes ("ssh5.vast.ai")
+    # match, not just RunPod's long hashes. The platform-domain anchor
+    # keeps the loosened prefix from false-matching arbitrary tokens.
+    r"\b([a-z0-9]{3,20})-?\d{0,5}?\.(?:proxy\.)?"
     r"(?:runpod|modal|vast|lambdalabs|paperspace)\.[a-z.]+",
     re.IGNORECASE,
 )
@@ -316,6 +330,67 @@ def collect_ssh_targets(bash_commands: list[str]) -> list[str]:
     return list(out.keys())
 
 
+# An ``ssh`` word that starts an actual invocation (line start or after a
+# shell separator), but NOT the ``ssh-keygen`` / ``ssh-copy-id`` / … family.
+_SSH_INVOKE_RX = re.compile(r"(?:^|[\s;&|(])ssh\b", re.IGNORECASE)
+_SSH_TOOL_RX = re.compile(
+    r"\bssh-(?:keygen|copy-id|add|keyscan|agent)\b", re.IGNORECASE
+)
+# Markers that an ssh command is a real *connection* (not ``ssh --help``):
+# a ``user@host``, an explicit ``-p <port>``, an IPv4 literal, or a known
+# pod-platform domain. Any one is enough.
+_SSH_CONN_MARKER_RX = re.compile(
+    r"@[\w.-]+"
+    r"|(?:^|\s)-p\s*\d{1,5}\b"
+    r"|\b\d{1,3}(?:\.\d{1,3}){3}\b"
+    r"|[\w-]+\.(?:runpod|modal|vast|lambdalabs|paperspace)\.[a-z.]+",
+    re.IGNORECASE,
+)
+
+
+def collect_ssh_invocations(bash_commands: list[str]) -> list[str]:
+    """Return the FULL ``ssh`` command lines that look like real
+    connections, verbatim and dedup-preserving order.
+
+    Unlike :func:`collect_ssh_targets` (which keeps only the bare host
+    token), this preserves the **entire** invocation — ``-p <port>``,
+    ``-i <key>``, ``-L/-R`` tunnels, user, host — because that's exactly
+    what a vast.ai / RunPod pod needs to reconnect (the port is mandatory
+    and was previously dropped). Filters out the ``ssh-keygen`` family
+    and non-connection invocations like ``ssh --help``.
+    """
+    out: dict[str, None] = {}
+    for cmd in bash_commands:
+        c = (cmd or "").strip()
+        if not c or not _SSH_INVOKE_RX.search(c):
+            continue
+        if _SSH_TOOL_RX.search(c):
+            continue
+        if not _SSH_CONN_MARKER_RX.search(c):
+            continue
+        if c not in out:
+            out[c] = None
+    return list(out.keys())
+
+
+def build_reconnect_lines(bash_commands: list[str]) -> list[str]:
+    """Return the reconnect command(s) worth preserving across a compact.
+
+    ``[]`` when no ssh connection was made. Otherwise the **initial**
+    invocation and, when it differs, the **last** one — vast.ai pods
+    often start on a proxy connection and switch to a faster direct
+    connection once ready, and the last command is the best-effort
+    "last known-good" target. (We can't see exit codes in the
+    transcript, so "last seen" is the closest signal.)
+    """
+    inv = collect_ssh_invocations(bash_commands)
+    if not inv:
+        return []
+    if len(inv) == 1:
+        return [inv[0]]
+    return [inv[0], inv[-1]]
+
+
 def collect_endpoints(transcript: list[dict],
                       bash_commands: list[str]) -> dict[str, list[str]]:
     """Extract everything that looks like a remote endpoint or
@@ -494,6 +569,7 @@ def synthesize_markdown(
     modified = collect_modified_files(transcript)
     bash = collect_bash_commands(transcript)
     ssh_hosts = collect_ssh_targets(bash)
+    reconnect = build_reconnect_lines(bash)
     plans = collect_plan_references(transcript)
     bg = collect_background_tasks(transcript)
     endpoints = collect_endpoints(transcript, bash)
@@ -616,8 +692,29 @@ def synthesize_markdown(
     # 7 — Connection state (pods, hosts, URLs, IPs)
     out.append("## 7. Connection state (re-attach targets)")
     out.append("")
-    has_any = bool(ssh_hosts or endpoints["urls"] or endpoints["ips"]
-                   or endpoints["pod_ids"])
+    has_any = bool(reconnect or ssh_hosts or endpoints["urls"]
+                   or endpoints["ips"] or endpoints["pod_ids"])
+    # Reconnect commands first — the load-bearing bit for pods. Wrapped in
+    # HTML-comment sentinels so wrapup_recovery can lift the fenced block
+    # verbatim into the post-compact additionalContext. The sentinels are
+    # emitted ONLY when there's a connection, so a session with no remote
+    # work costs zero extra tokens downstream.
+    if reconnect:
+        out.append("**Reconnect commands** (initial + last known-good — "
+                   "best-effort, verify before trusting):")
+        out.append("")
+        out.append(_RECONNECT_BEGIN)
+        out.append("```")
+        if len(reconnect) == 1:
+            out.append(reconnect[0])
+        else:
+            out.append("# initial")
+            out.append(reconnect[0])
+            out.append("# last known-good")
+            out.append(reconnect[1])
+        out.append("```")
+        out.append(_RECONNECT_END)
+        out.append("")
     if endpoints["pod_ids"]:
         out.append("**Pod / instance hostnames:**")
         out.append("")

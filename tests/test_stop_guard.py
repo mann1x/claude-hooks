@@ -31,6 +31,11 @@ class StopGuardTests(unittest.TestCase):
             )
 
     def test_permission_seeking_triggers(self):
+        # The permission-seeking patterns still match; but since the
+        # trailing-question escape is on by default and these phrasings
+        # are questions, we disable it here to assert the PATTERN fires.
+        # The default-on behaviour is covered by
+        # test_permission_seeking_question_suppressed below.
         patterns = load_patterns([])
         cases = [
             "Should I continue with the next step?",
@@ -39,8 +44,40 @@ class StopGuardTests(unittest.TestCase):
         ]
         for msg in cases:
             self.assertIsNotNone(
-                check_message(msg, patterns), f"expected match on: {msg!r}"
+                check_message(msg, patterns, suppress_on_trailing_question=False),
+                f"expected match on: {msg!r}",
             )
+
+    def test_permission_seeking_question_suppressed(self):
+        """A permission-seeking phrase that ENDS with a genuine question
+        is suppressed by default — forcing the model past a real question
+        is the unsafe choice (honours 'confirm before destruction')."""
+        patterns = load_patterns([])
+        cases = [
+            "Should I continue with the next step?",
+            "Would you like me to keep going?",
+            "Shall I proceed with the migration, or wait for your review?",
+        ]
+        for msg in cases:
+            self.assertIsNone(
+                check_message(msg, patterns),  # default suppress_on_trailing_question=True
+                f"expected suppression on trailing question: {msg!r}",
+            )
+
+    def test_permission_seeking_without_question_still_fires(self):
+        """The same intent stated WITHOUT a trailing '?' still fires —
+        the escape is keyed on the question mark, not the topic."""
+        patterns = load_patterns([])
+        msg = "I think I should proceed now and keep going with the migration."
+        self.assertIsNotNone(check_message(msg, patterns))
+
+    def test_ownership_dodge_as_question_still_fires(self):
+        """The trailing-question escape is scoped to permission-seeking
+        corrections; an ownership dodge phrased as a question still fires."""
+        patterns = load_patterns([])
+        self.assertIsNotNone(
+            check_message("Isn't that failure pre-existing?", patterns)
+        )
 
     def test_safe_messages_pass_through(self):
         patterns = load_patterns([])
@@ -358,6 +395,73 @@ class StallAfterCommitmentTests(unittest.TestCase):
             "deployment is up. Let me know if you want any changes."
         )
         self.assertIsNone(check_stall_after_commitment(msg))
+
+    # --- Negative: descriptive third-person status (copula guard) ---
+    def test_descriptive_status_is_building_now_does_not_fire(self):
+        """Regression for the reported false positive: a background-build
+        status report ("X is building now") matched the 'building now'
+        arm but is NOT a first-person commitment to call a tool."""
+        from claude_hooks.stop_guard import check_stall_after_commitment
+        msg = _assistant_msg(
+            "Build-time provenance confirms the fix is in: CD-Q6_K rebuilt "
+            "with the corrected v6 map. CD-IQ4_K_M is building now; HE+ "
+            "evals of both follow.\n\nThe monitor will surface the scores."
+        )
+        self.assertIsNone(check_stall_after_commitment(msg))
+
+    def test_descriptive_status_variants_do_not_fire(self):
+        from claude_hooks.stop_guard import check_stall_after_commitment
+        for text in (
+            "The sweep is running now in the background.",
+            "The quant was building now when I last checked.",
+            "The job's running now on the GPU box.",
+        ):
+            self.assertIsNone(
+                check_stall_after_commitment(_assistant_msg(text)),
+                f"descriptive status should not fire: {text!r}",
+            )
+
+    def test_first_person_commitment_after_status_still_fires(self):
+        """The copula guard must not over-suppress: a genuine first-person
+        commitment in the tail still fires even if an earlier clause was a
+        descriptive 'is building' status."""
+        from claude_hooks.stop_guard import check_stall_after_commitment
+        msg = _assistant_msg(
+            "CD-IQ4_K_M is building now. Writing the eval script now."
+        )
+        self.assertIsNotNone(check_stall_after_commitment(msg))
+
+    # --- Negative: genuine trailing question ---
+    def test_trailing_question_suppresses_stall(self):
+        """A commitment followed by a genuine question is the assistant
+        asking, not stalling — exactly what STALL_CORRECTION invites."""
+        from claude_hooks.stop_guard import check_stall_after_commitment
+        msg = _assistant_msg(
+            "I'll write the migration script now — but should I target "
+            "the dev database or production first?"
+        )
+        self.assertIsNone(check_stall_after_commitment(msg))
+
+    def test_trailing_question_with_markdown_wrapper_suppresses(self):
+        from claude_hooks.stop_guard import check_stall_after_commitment
+        msg = _assistant_msg(
+            "Diving in now. *Should I delete the old checkpoints first?*"
+        )
+        self.assertIsNone(check_stall_after_commitment(msg))
+
+    def test_trailing_question_escape_can_be_disabled(self):
+        """suppress_on_trailing_question=False restores the always-fire
+        behaviour for callers that want it."""
+        from claude_hooks.stop_guard import check_stall_after_commitment
+        msg = _assistant_msg("Writing the script now. Ready?")
+        self.assertIsNotNone(
+            check_stall_after_commitment(msg, suppress_on_trailing_question=False)
+        )
+
+    def test_commitment_without_question_still_fires(self):
+        from claude_hooks.stop_guard import check_stall_after_commitment
+        msg = _assistant_msg("Writing the script now.")
+        self.assertIsNotNone(check_stall_after_commitment(msg))
 
 
 # --------------------------------------------------------------------------- #

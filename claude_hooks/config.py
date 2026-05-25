@@ -193,6 +193,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
             # suppress just this sub-check while keeping the prose
             # pattern guard active.
             "stall_check_enabled": True,
+            # Trailing-question escape: when the assistant's turn ends
+            # with a genuine question ("Should I proceed with X, or Y?"),
+            # suppress BOTH the stall-after-commitment check AND the
+            # permission-seeking prose patterns. A genuine question must
+            # not be force-overridden into "just continue" — waiting for
+            # the user is the safer choice and honours "confirm before
+            # destruction". Ownership-dodging / session-quitting nudges
+            # are unaffected (they still fire even when phrased as a
+            # question). Set false to restore the always-push behaviour.
+            "suppress_on_trailing_question": True,
         },
         "session_end": {
             "enabled": True,

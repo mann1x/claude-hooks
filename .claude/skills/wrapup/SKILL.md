@@ -99,10 +99,29 @@ Anything the assistant was watching that needs to restart on resume:
 ### 7. Pods / remote hosts status (if actively engaged)
 
 For every remote host the session actively touched:
-- Host name + user + key path
+- **The full reconnect command, verbatim** — not just the hostname. Copy
+  the exact `ssh` invocation including the port (`-p <port>`), user
+  (`user@host`), key (`-i <path>`), and any tunnels (`-L`/`-R`). For
+  vast.ai / RunPod / Lambda pods the **port is mandatory** and a bare
+  hostname is useless without it.
+- **Both the initial and the last-known-good connection.** Pods often
+  start on a slower proxy connection and switch to a faster direct one
+  once ready — record both, and mark which one was last working. If a
+  direct SSH connection became available, that direct command is the
+  last-known-good and must be preserved explicitly.
 - What state we left it in (services running, files modified, env
   changes applied)
 - Any cleanup the next session should do first
+
+Put the reconnect command(s) in a fenced code block so they survive
+copy-paste intact, e.g.:
+
+```
+# initial (proxy)
+ssh -p 41022 root@ssh5.vast.ai
+# last known-good (direct)
+ssh -p 41022 root@123.45.67.89 -L 8080:localhost:8080
+```
 
 ### 8. Restore checklist
 
