@@ -227,6 +227,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "enabled": True,
             "save_to_file": True,
             "wrapup_skill_path": None,  # null = default ~/.claude/skills/wrapup/SKILL.md
+            # Cap (in MB) of the trailing transcript read during synthesis.
+            # Long-lived sessions grow enormous .jsonl transcripts (the
+            # backup_models case hit 581 MB); reading the whole file under
+            # load blew past the 20 s PreCompact timeout so the hook was
+            # killed before the wrap-up was written — and the post-compact
+            # recovery had nothing to surface. The transcript is
+            # append-only, so a bounded tail still covers the recent
+            # working window. Set 0 to read the whole transcript.
+            "max_transcript_mb": 24,
         },
         "wrapup_recovery": {
             # On every UserPromptSubmit, scan the wrap-up output dirs

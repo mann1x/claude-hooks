@@ -80,13 +80,30 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
             synthesize_markdown,
             resolve_output_path,
             write_to_disk,
+            DEFAULT_MAX_TRANSCRIPT_BYTES,
         )
     except Exception as e:
         log.warning("pre_compact: synth import failed: %s", e)
         return None
 
+    # Bound the transcript read so a huge long-lived transcript can't
+    # blow the PreCompact hook's wall-clock budget (the 581 MB
+    # backup_models case: the read timed out, the wrap-up was never
+    # written, and the post-compact recovery had nothing to surface).
+    # ``max_transcript_mb`` of 0 (or negative) disables the cap.
+    max_mb = hook_cfg.get("max_transcript_mb", 24)
     try:
-        transcript = read_transcript(transcript_path) if transcript_path else []
+        max_bytes = int(max_mb) * 1024 * 1024
+    except (TypeError, ValueError):
+        max_bytes = DEFAULT_MAX_TRANSCRIPT_BYTES
+    if max_bytes < 0:
+        max_bytes = 0
+
+    try:
+        transcript = (
+            read_transcript(transcript_path, max_bytes=max_bytes)
+            if transcript_path else []
+        )
     except Exception as e:
         log.debug("pre_compact: transcript read failed: %s", e)
         transcript = []

@@ -103,6 +103,26 @@ def mark_seen(path: Path) -> bool:
         return False
 
 
+# Max active-monitoring lines to inline into the recovery block. The
+# wrap-up file can list dozens of background jobs; inlining all of them
+# every recovery is wasteful. The recovery block is one-shot per file
+# (``.seen`` marker), so a moderate cap keeps the running-items reminder
+# useful without bloating the post-compact context.
+_MONITORS_INLINE_CAP = 10
+
+
+def _extract_between(text: str, begin: str, end: str) -> str:
+    """Return the inner text between the first ``begin`` and the next
+    ``end`` sentinel, stripped, or ``""`` when either is absent."""
+    i = text.find(begin)
+    if i < 0:
+        return ""
+    j = text.find(end, i + len(begin))
+    if j < 0:
+        return ""
+    return text[i + len(begin):j].strip()
+
+
 def _extract_reconnect_block(text: str) -> str:
     """Return the fenced reconnect block synthesised into the wrap-up
     file (between the ``RECONNECT`` sentinels), or ``""`` when absent.
@@ -120,13 +140,38 @@ def _extract_reconnect_block(text: str) -> str:
         )
     except Exception:  # pragma: no cover - import guard
         _BEGIN, _END = "<!-- RECONNECT:BEGIN -->", "<!-- RECONNECT:END -->"
-    i = text.find(_BEGIN)
-    if i < 0:
+    return _extract_between(text, _BEGIN, _END)
+
+
+def _extract_monitors_block(text: str) -> str:
+    """Return the active-monitoring bullet list between the ``MONITORS``
+    sentinels (capped to :data:`_MONITORS_INLINE_CAP` lines), or ``""``
+    when the session left no background tasks.
+
+    Like the reconnect block, the sentinels are written ONLY when at
+    least one background task / Monitor / ScheduleWakeup / CronCreate was
+    detected — so a session with no running work costs zero extra tokens
+    here. Capping keeps the inlined reminder short; the full list lives
+    in the wrap-up file the pointer already names.
+    """
+    try:
+        from claude_hooks.wrapup_synth import (
+            MONITORS_SENTINEL_BEGIN as _BEGIN,
+            MONITORS_SENTINEL_END as _END,
+        )
+    except Exception:  # pragma: no cover - import guard
+        _BEGIN, _END = "<!-- MONITORS:BEGIN -->", "<!-- MONITORS:END -->"
+    inner = _extract_between(text, _BEGIN, _END)
+    if not inner:
         return ""
-    j = text.find(_END, i + len(_BEGIN))
-    if j < 0:
+    lines = [ln for ln in inner.splitlines() if ln.strip()]
+    if not lines:
         return ""
-    return text[i + len(_BEGIN):j].strip()
+    shown = lines[:_MONITORS_INLINE_CAP]
+    extra = len(lines) - len(shown)
+    if extra > 0:
+        shown.append(f"- _… and {extra} more — see wrap-up file._")
+    return "\n".join(shown)
 
 
 def get_cfg(config: dict) -> dict:
@@ -177,5 +222,17 @@ def format_recovery_block(cwd: str, config: dict, *,
         block += (
             "\n\n**Reconnect (initial + last known-good — verify before "
             "trusting):**\n" + reconnect
+        )
+
+    # Inline the active-monitoring list too. A long-lived session that
+    # gets compacted mid-run loses track of its background jobs across
+    # the boundary (the reported "forgot the running items" failure); a
+    # bare file pointer is too easily ignored. Capped + sentinel-gated,
+    # so zero extra tokens when no background work was running.
+    monitors = _extract_monitors_block(text) if text else ""
+    if monitors:
+        block += (
+            "\n\n**Running / background items left active "
+            "(verify still running):**\n" + monitors
         )
     return block

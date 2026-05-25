@@ -288,5 +288,70 @@ class ReconnectPreservationTests(unittest.TestCase):
             self.assertLess(len(block), 200)
 
 
+def _assistant_bg_bash(desc: str) -> dict:
+    return {
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "name": "Bash",
+                         "input": {"command": "x", "run_in_background": True,
+                                   "description": desc}}],
+        }
+    }
+
+
+class MonitorsPreservationTests(unittest.TestCase):
+    """bug-625: running / background items must survive a compact even
+    when the model never opens the wrap-up file — inlined into the
+    recovery block, sentinel-gated so zero tokens when nothing ran."""
+
+    def test_extract_monitors_block_roundtrip(self):
+        t = [_assistant_bg_bash("QLoRA fine-tune"),
+             _assistant_bg_bash("Download weights")]
+        md = ws.synthesize_markdown(t, cwd="", session_id="s")
+        inner = wr._extract_monitors_block(md)
+        self.assertIn("QLoRA fine-tune", inner)
+        self.assertIn("Download weights", inner)
+        # No sentinels → empty.
+        self.assertEqual(wr._extract_monitors_block("# heading only"), "")
+
+    def test_recovery_block_inlines_running_items(self):
+        with tempfile.TemporaryDirectory() as td:
+            wolf = Path(td) / ".wolf"
+            wolf.mkdir()
+            t = [_assistant_bg_bash("LaCo surgery on Gemma 4 31B")]
+            md = ws.synthesize_markdown(t, cwd=td, session_id="s")
+            (wolf / "wrapup-pre-compact-run.md").write_text(md, encoding="utf-8")
+            cfg = {"hooks": {"wrapup_recovery": {"enabled": True}}}
+            block = wr.format_recovery_block(td, cfg, mark=False)
+            self.assertIn("Running / background items", block)
+            self.assertIn("LaCo surgery on Gemma 4 31B", block)
+
+    def test_recovery_block_no_running_items_when_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            wolf = Path(td) / ".wolf"
+            wolf.mkdir()
+            md = ws.synthesize_markdown([_assistant_text("hi")], cwd=td, session_id="s")
+            (wolf / "wrapup-pre-compact-none.md").write_text(md, encoding="utf-8")
+            cfg = {"hooks": {"wrapup_recovery": {"enabled": True}}}
+            block = wr.format_recovery_block(td, cfg, mark=False)
+            self.assertNotIn("Running / background items", block)
+
+    def test_recovery_caps_inlined_monitors(self):
+        with tempfile.TemporaryDirectory() as td:
+            wolf = Path(td) / ".wolf"
+            wolf.mkdir()
+            # 25 distinct background jobs → inlined list must be capped.
+            t = [_assistant_bg_bash(f"job-{i:02d}") for i in range(25)]
+            md = ws.synthesize_markdown(t, cwd=td, session_id="s")
+            (wolf / "wrapup-pre-compact-many.md").write_text(md, encoding="utf-8")
+            cfg = {"hooks": {"wrapup_recovery": {"enabled": True}}}
+            block = wr.format_recovery_block(td, cfg, mark=False)
+            self.assertIn("and ", block)
+            self.assertIn("more — see wrap-up file", block)
+            # Cap honoured: no more than the cap (+1 "… and N more") job lines.
+            job_lines = [ln for ln in block.splitlines() if ln.strip().startswith("- job-")]
+            self.assertLessEqual(len(job_lines), wr._MONITORS_INLINE_CAP)
+
+
 if __name__ == "__main__":
     unittest.main()

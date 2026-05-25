@@ -18,6 +18,20 @@ release with the auto-generated source archive
 
 ### Fixed
 
+- **PreCompact: the wrap-up summary was never written for long-lived
+  sessions, losing open + running items across a compact.**
+  `wrapup_synth.read_transcript()` loaded the **entire** transcript into
+  memory on every compaction. A multi-day session's transcript grew to
+  581 MB / 184 k messages; under that session's heavy load the read +
+  synthesis exceeded the 20 s PreCompact hook timeout, so Claude Code
+  killed the hook before `write_to_disk` ran — no wrap-up file existed
+  and the post-compact recovery had nothing to surface (the reported
+  "forgot the open and running items after context compact"). The read
+  is now bounded to a trailing window (default 24 MB, configurable via
+  `hooks.pre_compact.max_transcript_mb`; `0` disables the cap). The
+  transcript is append-only, so the tail holds the recent working
+  window; synthesis now completes in ~0.3 s on the 581 MB case instead
+  of timing out. (`bug-625`)
 - **stop_guard: stall check no longer false-positives on background
   status prose.** A commitment phrase preceded by a copula
   ("`CD-IQ4_K_M is building now`") is a third-person status report about
@@ -46,6 +60,15 @@ release with the auto-generated source archive
   even if the model never opens the wrap-up file. Costs zero extra
   tokens when the session touched no remote hosts. The `/wrapup` skill
   §7 now instructs the model to preserve the same.
+- **wrap-up / PreCompact: active background jobs now survive a compact
+  inline too.** Section 6's running-items list (Monitor / ScheduleWakeup
+  / CronCreate / background Bash) is wrapped in machine-extractable
+  sentinels and **inlined** into the post-compact recovery block by
+  `wrapup_recovery` (capped at 10 lines, `+N more` pointer for the
+  rest), mirroring the reconnect-command preservation above. Losing
+  "you left N background jobs running" across a compaction boundary was
+  half the `bug-625` failure. Sentinel-gated, so zero extra tokens when
+  no background work was running.
 
 ## [1.11.1] — 2026-05-24
 

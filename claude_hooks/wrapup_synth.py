@@ -38,18 +38,54 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+# Cap how much of the transcript we read on PreCompact. Long-lived
+# sessions accumulate enormous .jsonl transcripts — the backup_models
+# session hit 581 MB / 184 k messages over days of work. Reading the
+# whole file into memory under that session's heavy ML load blew past
+# the 20 s PreCompact hook timeout, so Claude Code killed the hook
+# before ``write_to_disk`` ran: no wrap-up file was written and the
+# post-compact recovery had nothing to surface (open + running items
+# lost). A resumable summary only needs the recent working window, and
+# the transcript is append-only JSONL, so we read a bounded tail. 24 MB
+# ≈ tens of thousands of messages — far more than one compaction window
+# — yet reads in well under a second even under contention. Set the
+# ``pre_compact.max_transcript_mb`` config to 0 to disable the cap.
+DEFAULT_MAX_TRANSCRIPT_BYTES = 24 * 1024 * 1024
+
+
 # A small, dependency-free transcript reader so this module can be
 # imported without dragging the Stop hook's helpers along.
-def read_transcript(path: str) -> list[dict]:
-    """Load a JSONL transcript file. Returns ``[]`` on any error."""
+def read_transcript(
+    path: str, *, max_bytes: int = DEFAULT_MAX_TRANSCRIPT_BYTES,
+) -> list[dict]:
+    """Load a JSONL transcript file. Returns ``[]`` on any error.
+
+    When the file is larger than ``max_bytes`` (and ``max_bytes`` > 0),
+    only the trailing ``max_bytes`` are read — the transcript is
+    append-only, so the tail holds the most-recent turns. The first
+    (partial) record after a byte-offset seek is discarded since the
+    seek lands mid-line. This keeps synthesis bounded in time no matter
+    how large a long-lived session's transcript grows; pass
+    ``max_bytes=0`` to read the whole file.
+    """
     try:
         p = Path(os.path.expanduser(path))
         if not p.exists():
             return []
+        try:
+            size = p.stat().st_size
+        except OSError:
+            size = 0
+        truncated = bool(max_bytes) and size > max_bytes
         out: list[dict] = []
-        with open(p, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
+        # Binary mode so we can seek by byte offset; decode permissively
+        # because a tail seek can split a multibyte character at the cut.
+        with open(p, "rb") as f:
+            if truncated:
+                f.seek(size - max_bytes)
+                f.readline()  # discard the partial record at the seek point
+            for raw in f:
+                line = raw.decode("utf-8", "replace").strip()
                 if not line:
                     continue
                 try:
@@ -71,6 +107,17 @@ RECONNECT_SENTINEL_END = "<!-- RECONNECT:END -->"
 # Backwards-friendly short aliases used in the render code below.
 _RECONNECT_BEGIN = RECONNECT_SENTINEL_BEGIN
 _RECONNECT_END = RECONNECT_SENTINEL_END
+
+# Same machine-extractable sentinel idea for section 6's active-monitoring
+# list. wrapup_recovery lifts the bullet lines between these markers into
+# the post-compact recovery block so "you left N background jobs running"
+# survives even when the model never opens the wrap-up file — the exact
+# "forgot the running items" failure this guards against. Emitted ONLY
+# when at least one background task was detected (zero tokens otherwise).
+MONITORS_SENTINEL_BEGIN = "<!-- MONITORS:BEGIN -->"
+MONITORS_SENTINEL_END = "<!-- MONITORS:END -->"
+_MONITORS_BEGIN = MONITORS_SENTINEL_BEGIN
+_MONITORS_END = MONITORS_SENTINEL_END
 
 _PLAN_RX = re.compile(r"docs/PLAN-[A-Za-z0-9_-]+\.md")
 # Capture http(s) URLs and ws(s) URLs. Stop on whitespace, quotes,
@@ -678,12 +725,18 @@ def synthesize_markdown(
         out.append("_(no `docs/PLAN-*.md` references seen this session)_")
         out.append("")
 
-    # 6 — Active monitorings
+    # 6 — Active monitorings. Wrapped in MONITORS sentinels (HTML
+    # comments, invisible when rendered) so wrapup_recovery can inline the
+    # running-items list into the post-compact recovery block — losing
+    # "you left N background jobs running" across a compact is half the
+    # reported failure. Sentinels emitted only when bg is non-empty.
     out.append("## 6. Active monitorings to re-establish")
     out.append("")
     if bg:
+        out.append(_MONITORS_BEGIN)
         for x in bg:
             out.append(f"- {x}")
+        out.append(_MONITORS_END)
         out.append("")
     else:
         out.append("_(no Monitor / ScheduleWakeup / CronCreate / background Bash detected)_")
