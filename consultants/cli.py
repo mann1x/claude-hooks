@@ -35,6 +35,11 @@ from consultants import config as cc
 DEFAULT_ENGINE_URL = "http://127.0.0.1:38095"
 DEFAULT_FORWARDER_URL = "http://127.0.0.1:38096"
 
+# Sentinel for a bare ``--allow-extra`` (flag present, no value) — the
+# CLI resolves it to the configured ``allow_extra`` default. argparse
+# uses this as the ``const`` for the nargs='?' option.
+_ALLOW_EXTRA_BARE = -1
+
 
 def _read_claude_hooks_consultants_block() -> dict:
     """Load the ``hooks.consultants`` block from
@@ -187,15 +192,62 @@ def cmd_follow_up(args, base: str) -> int:
     # Always include cwd so cold-path follow-ups (parent evicted /
     # service restarted) can reopen from disk without a separate
     # reopen call.
-    body["cwd"] = str(Path(args.cwd or os.getcwd()).resolve())
+    cwd = str(Path(args.cwd or os.getcwd()).resolve())
+    body["cwd"] = cwd
     if getattr(args, "add_dir", None):
         # v1.8+: extends the parent's extra_roots with this follow-up's
         # entries. The engine merges the two lists (parent first, then
         # this turn's, dedup'd) before running the executor.
         body["extra_roots"] = list(args.add_dir)
+    # Consultancy review loop: ``--allow-extra [N]`` / ``--force`` is
+    # the over-cap approval carrier. In the Claude Code harness the
+    # skill re-issues the followup with this flag after the user
+    # approves; a bare flag resolves to the configured ``allow_extra``
+    # default, an explicit N overrides. The engine raises the cap by
+    # this many rounds for THIS consultancy only (never config).
+    allow_extra = _resolve_allow_extra(args, cwd)
+    if allow_extra is not None:
+        body["allow_extra"] = allow_extra
     out = _http("POST",
                 f"{base}/v1/consult/{args.parent_sid}/follow-up",
                 body=body)
+    # The engine returns ``ok: false`` + ``reason: followup_limit_reached``
+    # (HTTP 200) when the cap is hit without an override — pass that
+    # structured refusal through verbatim so the skill keys on it.
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
+
+
+def _resolve_allow_extra(args, cwd: str) -> Optional[int]:
+    """Resolve the ``--allow-extra`` / ``--force`` flag to the integer
+    sent to the engine, or ``None`` when neither was passed.
+
+    - ``--allow-extra`` bare (sentinel -1) or ``--force`` → the
+      configured ``allow_extra`` default (read from the merged config).
+    - ``--allow-extra N`` (N >= 1) → N verbatim.
+    """
+    raw = getattr(args, "allow_extra", None)
+    force = bool(getattr(args, "force", False))
+    if raw is None and not force:
+        return None
+    if raw is not None and raw != _ALLOW_EXTRA_BARE and raw >= 1:
+        return int(raw)
+    # Bare flag or --force → configured default.
+    try:
+        cfg = cc.load_config(Path(cwd))
+        return max(1, int(cfg.allow_extra))
+    except Exception:
+        return 1
+
+
+def cmd_accept(args, base: str) -> int:
+    """Consultancy review loop: mark the consultancy ACCEPTED
+    (terminal) once Claude is satisfied with the council's answer.
+    Resolves any sid to its consultancy root. Idempotent."""
+    body = {"cwd": str(Path(args.cwd or os.getcwd()).resolve())}
+    if getattr(args, "note", None):
+        body["note"] = args.note
+    out = _http("POST", f"{base}/v1/consult/{args.sid}/accept", body=body)
     print(json.dumps({"ok": True, **out}, indent=2))
     return 0
 
@@ -382,6 +434,11 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
         "topology": cfg.topology,
         "effort": cfg.effort,
         "effort_budget": cfg.effort_budget,
+        # Consultancy review loop: the followup cap + per-approval
+        # grant size. The skill renders these and the auto-followup
+        # loop respects max_followups before stopping to ask the user.
+        "max_followups": cfg.max_followups,
+        "allow_extra": cfg.allow_extra,
         "service": {
             "mode": cfg.service.mode,
             "http_port": cfg.service.http_port,
@@ -518,6 +575,30 @@ def cmd_config_set_role(args, base: str) -> int:
 def cmd_config_set_effort(args, base: str) -> int:
     try:
         cfg = cc.set_effort(args.tier)
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    block = _read_claude_hooks_consultants_block()
+    smart = block.get("smart_start") or {}
+    print(json.dumps({"ok": True, **_config_dump(cfg, smart_block=smart)},
+                     indent=2))
+    return 0
+
+
+def cmd_config_set_max_followups(args, base: str) -> int:
+    try:
+        cfg = cc.set_max_followups(args.value)
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    block = _read_claude_hooks_consultants_block()
+    smart = block.get("smart_start") or {}
+    print(json.dumps({"ok": True, **_config_dump(cfg, smart_block=smart)},
+                     indent=2))
+    return 0
+
+
+def cmd_config_set_allow_extra(args, base: str) -> int:
+    try:
+        cfg = cc.set_allow_extra(args.value)
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
     block = _read_claude_hooks_consultants_block()
@@ -1288,7 +1369,36 @@ def build_parser() -> argparse.ArgumentParser:
             "executor runs."
         ),
     )
+    fu.add_argument(
+        "--allow-extra", dest="allow_extra", nargs="?", type=int,
+        const=_ALLOW_EXTRA_BARE, default=None, metavar="N",
+        help=(
+            "Consultancy review loop: authorize follow-ups past the "
+            "max_followups cap for THIS consultancy only (one-off, no "
+            "config change). Bare `--allow-extra` grants the configured "
+            "allow_extra default; `--allow-extra N` grants N. In the "
+            "Claude Code harness the skill adds this after you approve "
+            "in chat; it's also the escape hatch for scripted callers."
+        ),
+    )
+    fu.add_argument(
+        "--force", action="store_true", default=False,
+        help="Alias for a bare --allow-extra (grant the configured "
+             "default number of extra rounds for this consultancy).",
+    )
     fu.set_defaults(fn=cmd_follow_up)
+
+    # accept — consultancy review loop: mark the consultancy ACCEPTED.
+    ac = sub.add_parser(
+        "accept",
+        help="Mark a consultancy ACCEPTED (terminal) once you're "
+             "satisfied with the council's answer. Accepts any sid in "
+             "the chain; resolves to the consultancy root.")
+    ac.add_argument("sid")
+    ac.add_argument("--cwd", help="Project root (default: cwd).")
+    ac.add_argument("--note", help="Optional note recorded with the "
+                                   "acceptance.")
+    ac.set_defaults(fn=cmd_accept)
 
     # reopen — disk-fallback to restore a closed / evicted session.
     ro = sub.add_parser(
@@ -1518,6 +1628,21 @@ def build_parser() -> argparse.ArgumentParser:
     ce = cfg_sub.add_parser("set-effort", help="Set effort tier.")
     ce.add_argument("tier", choices=tuple(cc.EFFORT_BUDGETS))
     ce.set_defaults(fn=cmd_config_set_effort)
+
+    cmf = cfg_sub.add_parser(
+        "set-max-followups",
+        help="Set the consultancy followup cap (>= 0). Auto-issued "
+             "followups stop at this many before the skill asks you "
+             "to allow more.")
+    cmf.add_argument("value", type=int)
+    cmf.set_defaults(fn=cmd_config_set_max_followups)
+
+    cae = cfg_sub.add_parser(
+        "set-allow-extra",
+        help="Set the per-approval grant size (>= 1) — how many extra "
+             "followups each over-cap approval adds for a consultancy.")
+    cae.add_argument("value", type=int)
+    cae.set_defaults(fn=cmd_config_set_allow_extra)
 
     csm = cfg_sub.add_parser("set-service-mode",
                              help="Set service mode "

@@ -90,6 +90,30 @@ class SessionState:
     # children. The chain is reconstructable in either direction.
     parent_sid: Optional[str] = None
     follow_up_sids: list[str] = field(default_factory=list)
+    # ---- consultancy review loop (engine-owned status machine) -----
+    # A *consultancy* is the chain of sessions rooted at the first
+    # ``ask`` (``root_sid``); followups are children. These five fields
+    # are authoritative ONLY on the root session — children carry
+    # ``root_sid`` (inherited from their parent) so any sid resolves to
+    # its root in O(1) via ``_resolve_consultancy_root``. The status
+    # advances: in_progress -> ready_to_review (council done) ->
+    # accepted (terminal) | awaiting_approval (cap hit, needs user OK).
+    # ``followup_count`` counts followups issued in this consultancy;
+    # ``max_followups`` is resolved from config at creation and stored
+    # so it's stable for the chain's life; ``extra_granted`` accumulates
+    # one-off ``--allow-extra`` grants (never persisted to config).
+    # Mirrored to ``consultancy.json`` in the root session dir on every
+    # transition so the status survives idle reap / restart / compaction.
+    root_sid: Optional[str] = None
+    consultancy_status: str = "in_progress"
+    followup_count: int = 0
+    max_followups: int = 0
+    extra_granted: int = 0
+    # Consultancy membership (root only): every followup sid in the
+    # chain, newest last. Distinct from ``follow_up_sids`` (direct
+    # children of THIS node) — this is the flat union for the whole
+    # consultancy, used for reconstruction / debugging.
+    consultancy_children: list[str] = field(default_factory=list)
     # v1.8+: extra allowed directories for the tool sandbox. Set on
     # creation from the request body's ``extra_roots`` field (already
     # auto-unioned with settings-file discovery by the HTTP layer).
@@ -544,8 +568,15 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             extra_roots=session_extra_roots,
             extra_roots_display=session_extra_roots_display,
         )
+        # Consultancy review loop: a fresh ask is its own root. Seed the
+        # cap from config (stable for the chain) and persist the sidecar
+        # up front so the status survives even an immediate reap.
+        state.root_sid = sid
+        state.max_followups = cfg.max_followups
+        state.consultancy_status = CONSULTANCY_IN_PROGRESS
         with app.state.sessions_lock:
             app.state.sessions[sid] = state
+        _persist_consultancy(state)
 
         # Append to the per-project sessions index up front so
         # /v1/sessions surfaces in-progress runs too.
@@ -587,7 +618,8 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         # Hand off to the executor. The runner mutates ``state`` and
         # writes the on-disk artifacts; we just track completion.
         future = app.state.executor.submit(
-            _run_with_state, app.state.run_council, state, runner_input,
+            _run_with_state, app, app.state.run_council, state,
+            runner_input,
         )
         # Don't block on future; CLI polls.
         del future
@@ -607,7 +639,7 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             # The skill polls every ~10s; a stuck Claude session
             # therefore can't accidentally time out under us.
             state.bump_activity()
-            return state.public_dict()
+            return _attach_consultancy(app, sid, state.public_dict())
         # Fall back to disk: maybe the service restarted.
         disk = _load_session_from_disk(sid)
         if disk is None:
@@ -657,6 +689,40 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
                         f"valid: {sorted(cc.EFFORT_BUDGETS)}"),
             )
         cfg.effort = effort_override
+
+        # ---- consultancy review-loop cap enforcement --------------- #
+        # Resolve the consultancy root (the chain anchor), then enforce
+        # the followup cap. A legacy / pre-review-loop consultancy
+        # (no consultancy.json yet) is initialized from the current
+        # config cap on first touch so it isn't accidentally capped at
+        # 0. ``allow_extra`` (resolved by the CLI to the configured
+        # default when the flag was bare) raises the cap one-off for
+        # THIS consultancy only — it never touches persisted config.
+        croot = _resolve_consultancy_root(app, sid, cwd_hint) or parent
+        if storage.read_consultancy(Path(croot.cwd), croot.sid) is None:
+            croot.max_followups = cfg.max_followups
+            if croot.consultancy_status == CONSULTANCY_IN_PROGRESS \
+                    and croot.status == "completed":
+                croot.consultancy_status = CONSULTANCY_READY
+            _persist_consultancy(croot)
+        allow_extra = 0
+        ae_raw = body.get("allow_extra")
+        if ae_raw is not None:
+            try:
+                allow_extra = max(0, int(ae_raw))
+            except (TypeError, ValueError):
+                allow_extra = 0
+        effective_cap = croot.max_followups + croot.extra_granted
+        if croot.followup_count >= effective_cap and allow_extra <= 0:
+            croot.consultancy_status = CONSULTANCY_AWAITING
+            _persist_consultancy(croot)
+            return {
+                "ok": False,
+                "reason": FOLLOWUP_LIMIT_REACHED,
+                "sid": None,
+                "parent_sid": sid,
+                "consultancy": _consultancy_dict(croot),
+            }
 
         trace_flag = body.get("trace")
         if trace_flag is not None and not isinstance(trace_flag, bool):
@@ -723,6 +789,9 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             topology=parent.topology,
             progress=child_progress,
             parent_sid=sid,
+            # Consultancy anchor — every followup in the chain carries
+            # the root sid so any sid resolves to its consultancy root.
+            root_sid=croot.sid,
             # Stored extra_roots = parent's + this follow-up's, merged
             # in order with dedup. The runner does the same merge for
             # the in-flight executor; we persist it so disk-reopen of
@@ -734,6 +803,17 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             app.state.sessions[child_sid] = child
             parent.follow_up_sids.append(child_sid)
         parent.bump_activity()  # iterating; defer reaper
+        # Commit the followup against the consultancy: bank any one-off
+        # override grant, count this round, record membership, and flip
+        # the root back to in_progress (the auto-flip to ready_to_review
+        # happens when this run completes). Persist the sidecar.
+        if allow_extra > 0:
+            croot.extra_granted += allow_extra
+        croot.followup_count += 1
+        croot.consultancy_children.append(child_sid)
+        croot.consultancy_status = CONSULTANCY_IN_PROGRESS
+        croot.bump_activity()
+        _persist_consultancy(croot)
 
         # Index entry for the follow-up so /v1/sessions surfaces it.
         sessions_index.append(
@@ -766,15 +846,51 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             "extra_roots_display": list(followup_body_extras),
         }
         future = app.state.executor.submit(
-            _run_with_state, app.state.run_follow_up, child, runner_input,
+            _run_with_state, app, app.state.run_follow_up, child,
+            runner_input,
         )
         del future
 
         return {
+            "ok": True,
             "sid": child_sid,
             "parent_sid": sid,
             "status": "running",
             "status_url": f"/v1/consult/{child_sid}",
+            "consultancy": _consultancy_dict(croot),
+        }
+
+    # ----------------------- accept ------------------------------ #
+    # Consultancy review loop: mark the consultancy ACCEPTED (terminal)
+    # once Claude is satisfied with the council's answer. Resolves to
+    # the chain root and persists. Idempotent — accepting an already-
+    # accepted consultancy is a no-op success.
+    @app.post("/v1/consult/{sid}/accept")
+    def accept(sid: str, body: Optional[dict] = None) -> dict:
+        body = body or {}
+        cwd_hint = body.get("cwd")
+        root = _resolve_consultancy_root(app, sid, cwd_hint)
+        if root is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"consultancy not found for sid {sid}; provide "
+                       "cwd to load it from disk artifacts.",
+            )
+        note = body.get("note")
+        if note is not None and not isinstance(note, str):
+            raise HTTPException(
+                status_code=400, detail="note must be a string",
+            )
+        already = root.consultancy_status == CONSULTANCY_ACCEPTED
+        root.consultancy_status = CONSULTANCY_ACCEPTED
+        root.bump_activity()
+        _persist_consultancy(root)
+        return {
+            "ok": True,
+            "sid": sid,
+            "root_sid": root.sid,
+            "already_accepted": already,
+            "consultancy": _consultancy_dict(root),
         }
 
     # ----------------------- close ------------------------------- #
@@ -931,11 +1047,11 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
                 status_code=404,
                 detail=f"artifacts missing for sid {sid}",
             )
-        return {
+        return _attach_consultancy(app, sid, {
             "sid": sid,
             "summary_markdown": summary_path.read_text(encoding="utf-8"),
             "metadata": json.loads(metadata_path.read_text(encoding="utf-8")),
-        }
+        }, cwd_hint=str(cwd))
 
     # ----------------------- list -------------------------------- #
     @app.get("/v1/sessions")
@@ -969,7 +1085,8 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
 
 # ----------------------- helpers --------------------------------- #
 
-def _run_with_state(run_council: RunCouncilFn,
+def _run_with_state(app,
+                    run_council: RunCouncilFn,
                     state: SessionState,
                     runner_input: dict) -> None:
     """Bridge into the runner so we can update SessionState on
@@ -981,6 +1098,23 @@ def _run_with_state(run_council: RunCouncilFn,
         state.status = "failed"
         state.error = f"runner crashed: {e}"
         state.finished_at = time.time()
+    else:
+        # Consultancy review loop: a successful council run flips the
+        # consultancy root to ready_to_review so the skill knows there's
+        # an answer to review. A failed run leaves the status untouched
+        # (the skill reads the per-run status and handles it). Never
+        # overrides a terminal (accepted) consultancy.
+        if state.status == "completed":
+            try:
+                root = app.state.sessions.get(_consultancy_root_sid(state))
+                if root is not None and \
+                        root.consultancy_status not in _CONSULTANCY_TERMINAL:
+                    root.consultancy_status = CONSULTANCY_READY
+                    _persist_consultancy(root)
+            except Exception:  # pragma: no cover — defensive
+                log.exception(
+                    "consultancy ready-flip failed for sid=%s", state.sid,
+                )
     finally:
         # Best-effort: refresh the index entry's status + duration so
         # /v1/sessions reflects terminal state without re-reading the
@@ -1125,6 +1259,11 @@ def _load_session_from_artifacts(sid: str,
         final_answer=meta.get("final_answer") or "",
         models=dict(models),
         parent_sid=meta.get("parent_sid"),
+        # Consultancy anchor recovered from metadata (None on pre-
+        # review-loop sessions → resolver treats the sid as its own
+        # root). Lets a disk-reopened followup resolve to the root
+        # whose dir holds consultancy.json.
+        root_sid=meta.get("root_sid"),
         follow_up_sids=[],   # NOT recoverable; lossy on reopen
         closed=False,
         closed_at=None,
@@ -1133,6 +1272,12 @@ def _load_session_from_artifacts(sid: str,
         _role_messages=role_messages,
         _role_lane_messages=role_lane_messages,
     )
+    # If this session is its own consultancy root, hydrate the review-
+    # loop status from consultancy.json (lives in the root's dir).
+    # Children resolve their root separately; their own fields stay at
+    # defaults (never authoritative).
+    if (state.root_sid or state.sid) == state.sid:
+        _hydrate_consultancy(state)
     log.info(
         "reopened session %s from disk (cwd=%s, %d research turns, "
         "%s)",
@@ -1205,6 +1350,127 @@ def _resolve_parent_for_follow_up(
     with app.state.sessions_lock:
         app.state.sessions[sid] = reopened
     return reopened
+
+
+# ----------------------- consultancy review loop ---------------- #
+# Engine-owned status machine layered ABOVE the per-run status. A
+# consultancy is the chain rooted at the first ``ask`` (root_sid);
+# these helpers read/advance/persist the root's status. See
+# SessionState's consultancy fields + storage.consultancy.json.
+
+CONSULTANCY_IN_PROGRESS = "in_progress"
+CONSULTANCY_READY = "ready_to_review"
+CONSULTANCY_ACCEPTED = "accepted"
+CONSULTANCY_AWAITING = "awaiting_approval"
+_CONSULTANCY_TERMINAL = frozenset({CONSULTANCY_ACCEPTED})
+# Structured reason the follow-up route returns when the cap is hit
+# without an override — the skill keys on this to stop and ask the user.
+FOLLOWUP_LIMIT_REACHED = "followup_limit_reached"
+
+
+def _consultancy_root_sid(state: "SessionState") -> str:
+    """The consultancy anchor for a session: its ``root_sid`` if set
+    (warm sessions + followups + disk-recovered children), else the
+    session's own sid (a fresh ask is its own root)."""
+    return state.root_sid or state.sid
+
+
+def _consultancy_dict(root: "SessionState") -> dict:
+    """Serialisable snapshot of a root session's consultancy state —
+    persisted to consultancy.json and surfaced by the read routes."""
+    return {
+        "root_sid": root.sid,
+        "status": root.consultancy_status,
+        "followup_count": root.followup_count,
+        "max_followups": root.max_followups,
+        "extra_granted": root.extra_granted,
+        "effective_cap": root.max_followups + root.extra_granted,
+        "child_sids": list(root.consultancy_children),
+        "updated_at": time.time(),
+    }
+
+
+def _persist_consultancy(root: "SessionState") -> None:
+    """Write-through the root's consultancy state to consultancy.json.
+    Soft-fail: a sidecar write must never break a request."""
+    try:
+        storage.write_consultancy(
+            Path(root.cwd), root.sid, _consultancy_dict(root),
+        )
+    except Exception:  # pragma: no cover — defensive
+        log.exception("write_consultancy failed for root=%s", root.sid)
+
+
+def _hydrate_consultancy(root: "SessionState") -> None:
+    """Populate a (disk-reopened) root's consultancy fields from
+    consultancy.json. No-op when the sidecar is absent — the caller's
+    defaults stand. Idempotent."""
+    disk = storage.read_consultancy(Path(root.cwd), root.sid)
+    if not disk:
+        return
+    root.consultancy_status = disk.get("status") or root.consultancy_status
+    try:
+        root.followup_count = int(disk.get("followup_count") or 0)
+        root.max_followups = int(disk.get("max_followups") or 0)
+        root.extra_granted = int(disk.get("extra_granted") or 0)
+    except (TypeError, ValueError):
+        pass
+    children = disk.get("child_sids")
+    if isinstance(children, list):
+        root.consultancy_children = [str(c) for c in children]
+
+
+def _resolve_consultancy_root(
+    app, sid: str, cwd_hint: Optional[str] = None,
+) -> Optional["SessionState"]:
+    """Return the live ROOT SessionState for the consultancy ``sid``
+    belongs to, reopening it from disk when necessary.
+
+    Find ``sid`` (in memory, or via disk reopen using ``cwd_hint``);
+    the root is ``state.root_sid`` (or the sid itself when unset). A
+    warm root is authoritative and returned as-is. A cold root is
+    reopened from disk and its consultancy fields hydrated. Returns
+    None when neither the session nor its root can be located.
+    """
+    state = app.state.sessions.get(sid)
+    if state is None and cwd_hint:
+        cwd_path = Path(cwd_hint).resolve()
+        if cwd_path.is_dir():
+            state = _load_session_from_artifacts(sid, cwd_path)
+            if state is not None:
+                with app.state.sessions_lock:
+                    app.state.sessions.setdefault(sid, state)
+    if state is None:
+        return None
+    root_sid = _consultancy_root_sid(state)
+    root = app.state.sessions.get(root_sid)
+    if root is not None:
+        return root
+    # Root not warm. If sid IS its own root, reuse the (already disk-
+    # hydrated) state; else reopen the root from disk and hydrate.
+    if root_sid == state.sid:
+        return state
+    root = _load_session_from_artifacts(root_sid, Path(state.cwd))
+    if root is None:
+        return None
+    _hydrate_consultancy(root)
+    with app.state.sessions_lock:
+        app.state.sessions.setdefault(root_sid, root)
+    return root
+
+
+def _attach_consultancy(app, sid: str, payload: dict,
+                        cwd_hint: Optional[str] = None) -> dict:
+    """Attach the consultancy snapshot to a response payload under the
+    ``consultancy`` key (resolving the root). Tolerant: leaves the
+    payload unchanged when the root can't be located."""
+    try:
+        root = _resolve_consultancy_root(app, sid, cwd_hint)
+        if root is not None:
+            payload["consultancy"] = _consultancy_dict(root)
+    except Exception:  # pragma: no cover — defensive
+        log.exception("_attach_consultancy failed for sid=%s", sid)
+    return payload
 
 
 def _close_session(app, sid: str, *, reason: str) -> None:
@@ -1427,6 +1693,8 @@ def _config_snapshot(cfg: cc.ConsultantsConfig) -> dict:
         "topology": cfg.topology,
         "effort": cfg.effort,
         "effort_budget": cfg.effort_budget,
+        "max_followups": cfg.max_followups,
+        "allow_extra": cfg.allow_extra,
         "service": {
             "mode": cfg.service.mode,
             "http_port": cfg.service.http_port,

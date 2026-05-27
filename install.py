@@ -6096,6 +6096,21 @@ def _install_consultants(cfg: dict, cfg_path: Path, *,
               f"without an embedder — store calls will fail until "
               f"you hand-edit ~/.claude/consultants-config.toml.")
 
+    # Consultancy review loop (mirrors /get-advice): optionally tune
+    # the followup cap + per-approval grant size at install time. The
+    # defaults (max_followups=4, allow_extra=1) are sensible, so this
+    # is a no-op on non-interactive runs and on a plain Enter.
+    try:
+        _setup_consultants_review_loop(
+            consultants_py=consultants_py,
+            non_interactive=non_interactive, dry_run=dry_run,
+        )
+    except Exception as e:
+        print(f"    [warn] consultants review-loop config setup "
+              f"failed: {e}; defaults (max_followups=4, "
+              f"allow_extra=1) stand. Tune later with "
+              f"`claude-consultants config set-max-followups`.")
+
     # Platform autostart.
     if platform.system() == "Linux":
         if service_mode == "always-on":
@@ -7200,6 +7215,84 @@ def _setup_consultants_store(cfg: dict, *, consultants_py: Path,
     else:
         print(f"      db_path  = {sqlite_vec_path}")
     print(f"      written  -> {path}")
+
+
+def _setup_consultants_review_loop(*, consultants_py: Path,
+                                   non_interactive: bool,
+                                   dry_run: bool) -> None:
+    """Optionally tune the consultancy review-loop knobs at install
+    time: ``max_followups`` (the auto-followup cap) and ``allow_extra``
+    (per-approval grant size). Defaults (4 / 1) are sensible, so a
+    non-interactive run is a no-op and a plain Enter keeps the current
+    value. Prompt defaults are read from the live config so a scripted
+    re-run never silently flips them.
+    """
+    if non_interactive:
+        return
+    # Read current values via the consultants-env python so the prompt
+    # defaults reflect the actual merged config (not hardcoded).
+    cur_max, cur_extra = 4, 1
+    try:
+        proc = subprocess.run(
+            [str(consultants_py), "-c",
+             "from consultants import config as cc; "
+             "c = cc.load_config(); "
+             "print(c.max_followups, c.allow_extra)"],
+            capture_output=True, text=True,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            parts = proc.stdout.split()
+            cur_max, cur_extra = int(parts[0]), int(parts[1])
+    except Exception:
+        pass  # fall back to the documented defaults
+
+    ans = input(
+        "    Tune the consultancy review-loop cap now? "
+        "(defaults are sensible; say n to skip) [y/N]: "
+    ).strip().lower()
+    if ans not in ("y", "yes"):
+        return
+
+    new_max, new_extra = cur_max, cur_extra
+    changed_max, val = _ask_optional_int(
+        "Max auto-followups before asking you (>=0)", default=cur_max)
+    if changed_max and val is not None and val >= 0:
+        new_max = int(val)
+    elif changed_max:
+        print("    [warn] max_followups must be >= 0 — kept current")
+    changed_extra, val = _ask_optional_int(
+        "Extra followups granted per approval (>=1)", default=cur_extra)
+    if changed_extra and val is not None and val >= 1:
+        new_extra = int(val)
+    elif changed_extra:
+        print("    [warn] allow_extra must be >= 1 — kept current")
+
+    if new_max == cur_max and new_extra == cur_extra:
+        return  # nothing to write
+    if dry_run:
+        print(f"    [dry-run] Would set max_followups={new_max}, "
+              f"allow_extra={new_extra}")
+        return
+    payload = {"max_followups": new_max, "allow_extra": new_extra}
+    helper = (
+        "import json, sys\n"
+        "p = json.loads(sys.stdin.read())\n"
+        "from consultants import config as cc\n"
+        "cc.set_max_followups(int(p['max_followups']))\n"
+        "path = cc.set_allow_extra(int(p['allow_extra']))\n"
+        "from consultants.config import user_config_path\n"
+        "print(str(user_config_path()))\n"
+    )
+    proc = subprocess.run(
+        [str(consultants_py), "-c", helper],
+        input=json.dumps(payload), capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        print("    [warn] consultants review-loop config write failed:")
+        print(f"           {proc.stderr.strip()[-300:]}")
+        return
+    print(f"    Consultancy review loop: max_followups={new_max}, "
+          f"allow_extra={new_extra}")
 
 
 def _wait_for_consultants_health(port: int, *,

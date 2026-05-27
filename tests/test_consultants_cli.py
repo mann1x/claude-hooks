@@ -544,6 +544,137 @@ class TestConfigSetStoreDistillation:
         assert rc == 2
 
 
+# ----------------------- review loop: config -------------------- #
+
+class TestConfigSetMaxFollowups:
+    @pytest.mark.parametrize("n", [0, 4, 10])
+    def test_valid(self, isolated_home, patched_http, n):
+        rc, payload, _ = _run(["config", "set-max-followups", str(n)])
+        assert rc == 0
+        assert payload["max_followups"] == n
+
+    def test_negative_rejected(self, isolated_home, patched_http):
+        rc, _, err = _run(["config", "set-max-followups", "-1"])
+        assert rc == 2
+
+
+class TestConfigSetAllowExtra:
+    @pytest.mark.parametrize("n", [1, 3])
+    def test_valid(self, isolated_home, patched_http, n):
+        rc, payload, _ = _run(["config", "set-allow-extra", str(n)])
+        assert rc == 0
+        assert payload["allow_extra"] == n
+
+    def test_zero_rejected(self, isolated_home, patched_http):
+        rc, _, err = _run(["config", "set-allow-extra", "0"])
+        assert rc == 2
+
+
+class TestConfigShowReviewLoop:
+    def test_defaults_present(self, isolated_home, patched_http):
+        rc, payload, _ = _run(["config", "show"])
+        assert rc == 0
+        assert payload["max_followups"] == 4
+        assert payload["allow_extra"] == 1
+
+
+# ----------------------- review loop: accept + override --------- #
+
+def _stub_follow_up_runner():
+    import time as _time
+    from consultants.engine import storage
+
+    def run(state, runner_input):
+        cwd = Path(runner_input["cwd"])
+        result = storage.ConsultationResult(
+            session_id=state.sid,
+            created=_time.strftime("%Y-%m-%dT%H:%M:%S",
+                                   _time.localtime(state.started_at)),
+            question=runner_input["question"],
+            models={"synthesizer": "stub"},
+            topology=state.topology, effort=state.effort,
+            final_answer="**stub child**: ok",
+            turns=[storage.RoleTurn(role="synthesizer", round=1,
+                                    content="ok")],
+            duration_seconds=_time.time() - state.started_at,
+            status="completed", cwd=str(cwd),
+            parent_sid=state.parent_sid,
+            root_sid=getattr(state, "root_sid", None) or state.sid,
+        )
+        storage.write_consultation(result, cwd=cwd)
+        for r in state.progress:
+            state.progress[r] = "done"
+        state.status = "completed"
+        state.finished_at = _time.time()
+    return run
+
+
+@pytest.fixture
+def patched_http_fu(monkeypatch):
+    """Like patched_http but wires the follow-up runner too."""
+    app = create_app(run_council=_stub_runner(),
+                     run_follow_up=_stub_follow_up_runner(),
+                     start_reaper=False)
+    client = TestClient(app)
+    client.__enter__()
+    base = "http://test"
+    monkeypatch.setattr(cli, "_http", _TestClientHttp(client, base))
+    yield base
+    client.__exit__(None, None, None)
+
+
+def _consult_and_wait(project_dir: Path) -> str:
+    rc, payload, _ = _run(["consult", "--message", "q",
+                           "--cwd", str(project_dir)])
+    sid = payload["sid"]
+    for _ in range(50):
+        _, p, _ = _run(["status", sid])
+        if p.get("status") == "completed":
+            break
+        time.sleep(0.02)
+    return sid
+
+
+class TestAcceptVerb:
+    def test_accept_marks_terminal(self, isolated_home, project_dir,
+                                   patched_http_fu):
+        sid = _consult_and_wait(project_dir)
+        rc, payload, _ = _run(["accept", sid, "--cwd", str(project_dir)])
+        assert rc == 0
+        assert payload["ok"] is True
+        assert payload["consultancy"]["status"] == "accepted"
+
+
+class TestFollowupAllowExtra:
+    def test_cap_refusal_then_allow_extra(self, isolated_home, project_dir,
+                                          patched_http_fu):
+        cc.set_max_followups(0)  # first followup needs approval
+        sid = _consult_and_wait(project_dir)
+        # No override → structured refusal (rc still 0; ok:false).
+        rc, refused, _ = _run(["follow-up", sid, "--message", "more",
+                               "--cwd", str(project_dir)])
+        assert rc == 0
+        assert refused["ok"] is False
+        assert refused["reason"] == "followup_limit_reached"
+        # --allow-extra bare → resolves to the configured default (1).
+        rc, ok, _ = _run(["follow-up", sid, "--message", "more",
+                          "--cwd", str(project_dir), "--allow-extra"])
+        assert rc == 0
+        assert ok["ok"] is True
+        assert ok["consultancy"]["extra_granted"] == 1
+
+    def test_force_alias(self, isolated_home, project_dir, patched_http_fu):
+        cc.set_max_followups(0)
+        cc.set_allow_extra(2)
+        sid = _consult_and_wait(project_dir)
+        rc, ok, _ = _run(["follow-up", sid, "--message", "more",
+                          "--cwd", str(project_dir), "--force"])
+        assert rc == 0
+        assert ok["ok"] is True
+        # --force resolves to the configured allow_extra default (2).
+        assert ok["consultancy"]["extra_granted"] == 2
+
+
 # ----------------------- top-level errors ---------------------- #
 
 class TestTopLevelErrors:

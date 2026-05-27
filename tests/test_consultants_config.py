@@ -518,3 +518,43 @@ class TestTomlEmit:
         assert r'"weird\\tag"' in text
         cfg = cc.load_config()
         assert cfg.roles["planner"].model == "weird\\tag"
+
+
+# ----------------------- review-loop knobs --------------------- #
+
+class TestReviewLoopKnobs:
+    def test_defaults(self):
+        cfg = cc.ConsultantsConfig()
+        assert cfg.max_followups == 4
+        assert cfg.allow_extra == 1
+
+    def test_set_round_trip(self, isolated_home):
+        cc.set_max_followups(6)
+        cc.set_allow_extra(3)
+        cfg = cc.load_config()
+        assert cfg.max_followups == 6
+        assert cfg.allow_extra == 3
+        text = cc.user_config_path().read_text()
+        assert "max_followups = 6" in text
+        assert "allow_extra = 3" in text
+
+    def test_max_followups_zero_allowed(self, isolated_home):
+        cc.set_max_followups(0)
+        assert cc.load_config().max_followups == 0
+
+    def test_max_followups_negative_rejected(self, isolated_home):
+        with pytest.raises(ValueError):
+            cc.set_max_followups(-1)
+
+    def test_allow_extra_below_one_rejected(self, isolated_home):
+        with pytest.raises(ValueError):
+            cc.set_allow_extra(0)
+
+    def test_merge_clamps_bad_types(self, isolated_home):
+        # Hand-written TOML with bad values is ignored (defaults stand).
+        cc.user_config_path().parent.mkdir(parents=True, exist_ok=True)
+        cc.user_config_path().write_text(
+            'max_followups = -5\nallow_extra = 0\n', encoding="utf-8")
+        cfg = cc.load_config()
+        assert cfg.max_followups == 4   # -5 rejected → default
+        assert cfg.allow_extra == 1     # 0 rejected → default

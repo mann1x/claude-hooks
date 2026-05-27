@@ -39,6 +39,14 @@ METADATA_FILENAME = "metadata.json"
 # v1.0 sessions will never have one and the reopen path falls back
 # cleanly to turn-content reconstruction.
 TRANSCRIPT_DB_FILENAME = "transcript.db"
+# Consultancy review-loop state. A *consultancy* is the chain of
+# sessions rooted at the first ``ask`` (``root_sid``); this file lives
+# in the ROOT session's dir and holds the engine-owned status machine
+# (status, followup_count, max_followups, extra_granted, child_sids).
+# It is updated on every transition so the status survives idle reap,
+# daemon restart, and context compaction. Absent on pre-review-loop
+# sessions (the resolver falls back to defaults then).
+CONSULTANCY_FILENAME = "consultancy.json"
 
 
 # ----------------------- types -------------------------------------- #
@@ -82,6 +90,13 @@ class ConsultationResult:
     # ChatClients. The chain is reconstructable by walking
     # parent_sid pointers.
     parent_sid: Optional[str] = None
+    # Consultancy review loop: the root session id of the consultancy
+    # this run belongs to (a fresh ask's own sid; inherited by every
+    # followup). Persisted so a disk-reopened followup resolves to its
+    # consultancy root (whose dir holds consultancy.json) in O(1)
+    # instead of walking parent_sid pointers. ``None`` on pre-review-
+    # loop sessions; the resolver falls back to the sid itself then.
+    root_sid: Optional[str] = None
 
 
 # ----------------------- YAML front-matter writer -------------------- #
@@ -209,6 +224,30 @@ def _atomic_write_text(path: Path, content: str) -> None:
 def session_dir(cwd: Path, session_id: str) -> Path:
     """Return the session directory under .claude-hooks/consultants/."""
     return cwd / ".claude-hooks" / "consultants" / session_id
+
+
+def read_consultancy(cwd: Path, root_sid: str) -> Optional[dict]:
+    """Read the consultancy state from the root session's
+    ``consultancy.json``. Returns the parsed dict, or ``None`` when the
+    file is absent / unreadable / not valid JSON (caller falls back to
+    defaults). Never raises — a corrupt sidecar must not break a poll."""
+    path = session_dir(cwd, root_sid) / CONSULTANCY_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_consultancy(cwd: Path, root_sid: str, state: dict) -> Path:
+    """Atomically write the consultancy state sidecar under the root
+    session's dir. Returns the file path. Idempotent — re-writing
+    overwrites in place."""
+    path = session_dir(cwd, root_sid) / CONSULTANCY_FILENAME
+    _atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True))
+    return path
 
 
 def write_consultation(result: ConsultationResult, cwd: Path) -> Path:

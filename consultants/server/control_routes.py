@@ -439,6 +439,10 @@ def register_control_routes(app: "FastAPI") -> None:
             payload["status"] = getattr(s, "status", "")
             payload["closed"] = bool(getattr(s, "closed", False))
             payload["injections"] = s.injection_records()
+            # Consultancy review-loop status (engine-owned, above the
+            # per-run status). Lazy import avoids the app<->routes cycle.
+            from consultants.server.app import _attach_consultancy
+            _attach_consultancy(app, sid, payload)
             return payload
         # Opportunistic drain: a /inject that arrived during the
         # spin-up race queued as pending; now that the graph is live,
@@ -461,6 +465,8 @@ def register_control_routes(app: "FastAPI") -> None:
         payload["status"] = getattr(s, "status", "")
         payload["closed"] = bool(getattr(s, "closed", False))
         payload["injections"] = s.injection_records()
+        from consultants.server.app import _attach_consultancy
+        _attach_consultancy(app, sid, payload)
         s.bump_activity()
         return payload
 

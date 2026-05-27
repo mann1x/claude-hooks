@@ -18,6 +18,40 @@ release with the auto-generated source archive
 
 ### Added
 
+- **`/consultants` review loop — Claude now critiques a council answer
+  and iterates, mirroring `/get-advice`'s discuss-until-satisfied flow.**
+  Previously the skill accepted the first council result and moved on
+  unless the user explicitly typed `followup`. A new engine-owned
+  *consultancy* status machine sits above the per-run status
+  (`running|completed|failed`): a fresh `ask` opens a consultancy
+  (`in_progress`), a completed run flips it to `ready_to_review`, and
+  the skill either marks it `accepted` (new `claude-consultants accept
+  <sid>` verb + `POST /v1/consult/{sid}/accept`) or auto-issues a
+  focused follow-up and loops. The loop is bounded by a flat,
+  effort-independent **`max_followups`** cap (default **4**, enforced
+  server-side); a follow-up past the cap is refused with a structured
+  `{"ok": false, "reason": "followup_limit_reached"}` and the
+  consultancy enters `awaiting_approval`. The skill then asks the user,
+  who approves conversationally; Claude re-issues the follow-up with the
+  approval carrier `--allow-extra N` (`--force` = the configured
+  default), which raises the cap by `N` for that consultancy only — no
+  persisted config change. `--allow-extra` is also the escape hatch for
+  non-Claude-Code/scripted callers. Two new config knobs, settable from
+  both the `/consultants config` menu (**Followup limit**) and the CLI
+  (`config set-max-followups`, `config set-allow-extra`): `max_followups`
+  (cap, ≥ 0) and `allow_extra` (per-approval grant size, ≥ 1).
+  Consultancy state is persisted to `consultancy.json` in the root
+  session dir (and `root_sid` to `metadata.json`) so the status is
+  queryable (it rides every `status`/`result`/`state`/`follow-up`
+  response under a `consultancy` block) and survives idle reap, daemon
+  restart, and context compaction — the skill resumes the loop by
+  reading the persisted status. The council graph is unchanged; this is
+  a layer above it. The default cap of 4 is a deliberate default-behavior
+  change (followups were previously unbounded) — the M12 parity baseline
+  records the new default and `tests/test_consultants_review_loop.py`
+  gates the end-to-end behavior. `install.py` gains an optional prompt to
+  tune `max_followups` / `allow_extra` at install time.
+
 - **install.py allow-lists the memory/KG MCP servers so memory writes
   stop being blocked by the auto-mode permission classifier.** In
   `auto` permission-mode Claude Code routes any tool not matched by a
