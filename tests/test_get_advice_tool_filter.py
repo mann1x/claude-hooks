@@ -16,8 +16,9 @@ from claude_hooks.get_advice import cli
 
 
 @pytest.fixture(autouse=True)
-def _isolated_home(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+def _isolated_home(isolated_home, tmp_path: Path, monkeypatch):
+    # ``isolated_home`` (conftest) redirects Path.home() cross-platform
+    # (POSIX $HOME + Windows %USERPROFILE%) — bug-635.
     monkeypatch.setenv("CLAUDE_ADVISOR_CACHE_DIR",
                        str(tmp_path / "cache"))
     monkeypatch.setenv("CALIBER_GROUNDING_UPSTREAM", "http://test.invalid")

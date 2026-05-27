@@ -212,19 +212,55 @@ def transcript_file(tmp_path, fake_transcript):
 
 
 # --------------------------------------------------------------------- #
+# Home-directory isolation (cross-platform). bug-635.
+# --------------------------------------------------------------------- #
+def redirect_home(monkeypatch, target) -> Path:
+    """Point ``Path.home()`` / ``os.path.expanduser('~')`` at *target* on
+    BOTH POSIX and Windows.
+
+    POSIX ``expanduser`` reads ``$HOME``. Windows ``ntpath.expanduser`` never
+    consults ``$HOME`` — it uses ``%USERPROFILE%`` first, then
+    ``%HOMEDRIVE%%HOMEPATH%``. A ``HOME``-only override is therefore a *silent
+    no-op on Windows*: ``user_config_path()`` keeps resolving to the real
+    ``C:\\Users\\<you>\\.claude`` and tests both contaminate each other and
+    clobber the developer's live config (bug-635, observed on the pandorum
+    Windows bench). Set all four env vars so the redirect holds everywhere.
+    """
+    target = Path(target)
+    monkeypatch.setenv("HOME", str(target))            # POSIX expanduser
+    monkeypatch.setenv("USERPROFILE", str(target))     # Windows primary
+    drive, tail = os.path.splitdrive(str(target))      # Windows fallback
+    monkeypatch.setenv("HOMEDRIVE", drive)
+    monkeypatch.setenv("HOMEPATH", tail or os.sep)
+    return target
+
+
+@pytest.fixture
+def isolated_home(tmp_path, monkeypatch):
+    """Redirect ``Path.home()`` to a tmp dir so user-global writes can't touch
+    the real home — cross-platform (see :func:`redirect_home`).
+
+    Shared by the consultants config / server / cli / review-loop suites,
+    replacing the per-file ``HOME``-only copies that no-op'd on Windows
+    (bug-635).
+    """
+    return redirect_home(monkeypatch, tmp_path)
+
+
+# --------------------------------------------------------------------- #
 # tmp_claude_home — redirects ``expand_user_path("~/...")`` under tmp.
 # --------------------------------------------------------------------- #
 @pytest.fixture
 def tmp_claude_home(tmp_path, monkeypatch):
     """Force ``~`` expansion to a tmpdir so state files can't escape.
 
-    Patches ``os.path.expanduser`` AND ``HOME`` so both ``expand_user_path``
-    (used by config.py) and downstream library code land under tmp.
+    Redirects ``Path.home()`` / ``os.path.expanduser`` cross-platform via
+    :func:`redirect_home` (POSIX ``$HOME`` + Windows
+    ``%USERPROFILE%``/``%HOMEDRIVE%%HOMEPATH%``) so ``expand_user_path``
+    (used by config.py) and downstream library code land under tmp on every
+    platform.
     """
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
-    # expand_user_path uses os.path.expanduser; the HOME override above
-    # covers Linux. On Windows os.path.expanduser uses %USERPROFILE%
-    # which isn't relevant in this Linux-only CI.
+    redirect_home(monkeypatch, fake_home)
     return fake_home

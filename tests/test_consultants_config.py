@@ -12,12 +12,9 @@ from consultants import config as cc
 
 # ----------------------- fixtures ---------------------------------- #
 
-@pytest.fixture
-def isolated_home(tmp_path: Path, monkeypatch):
-    """Redirect Path.home() to a tmp dir so user-global writes don't
-    touch the real $HOME."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    yield tmp_path
+# ``isolated_home`` is provided by tests/conftest.py (cross-platform: POSIX
+# $HOME + Windows %USERPROFILE%/%HOMEDRIVE%%HOMEPATH%). The per-file HOME-only
+# copy was a silent no-op on Windows — bug-635.
 
 
 # ----------------------- defaults --------------------------------- #

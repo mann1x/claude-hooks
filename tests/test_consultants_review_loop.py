@@ -93,10 +93,7 @@ def _wait_completed(client, sid: str, iters: int = 100) -> dict:
     raise AssertionError(f"sid {sid} never completed")
 
 
-@pytest.fixture
-def isolated_home(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    yield tmp_path
+# ``isolated_home`` comes from tests/conftest.py (cross-platform; bug-635).
 
 
 @pytest.fixture

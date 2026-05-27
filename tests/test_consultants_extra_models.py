@@ -37,6 +37,17 @@ from consultants.engine import graph as graph_mod
 from consultants.server import runner as prod_runner
 
 
+@pytest.fixture(autouse=True)
+def _isolated_home(isolated_home):
+    """bug-635: tests in this module write user-global config via
+    ``cc.save_config(scope="user")``. Depend on the cross-platform
+    ``isolated_home`` (conftest) so ``Path.home()`` is redirected on Windows
+    too (``%USERPROFILE%``), not just POSIX ``$HOME``. The inline
+    ``setenv("HOME", ...)`` calls in individual tests are now redundant but
+    harmless (same value)."""
+    return isolated_home
+
+
 # ----------------------- effort-tier helpers --------------------- #
 
 class TestEffortTierHelpers:

@@ -19,8 +19,10 @@ from claude_hooks.get_advice import cli, config as ac, state as ast
 
 
 @pytest.fixture(autouse=True)
-def _isolated_home(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+def _isolated_home(isolated_home, tmp_path: Path, monkeypatch):
+    # ``isolated_home`` (conftest) redirects Path.home() cross-platform
+    # (POSIX $HOME + Windows %USERPROFILE%) — bug-635. HOME-only here used to
+    # no-op on Windows and leak user-global advisor config.
     # Force base url to a sentinel so probe attempts in tests can be
     # mocked without leaking env.
     monkeypatch.setenv("CALIBER_GROUNDING_UPSTREAM", "http://test.invalid")

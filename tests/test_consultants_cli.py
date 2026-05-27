@@ -106,10 +106,7 @@ def patched_http(monkeypatch):
     client.__exit__(None, None, None)
 
 
-@pytest.fixture
-def isolated_home(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    yield tmp_path
+# ``isolated_home`` comes from tests/conftest.py (cross-platform; bug-635).
 
 
 @pytest.fixture
