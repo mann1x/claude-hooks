@@ -16,6 +16,30 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added
+
+- **install.py allow-lists the memory/KG MCP servers so memory writes
+  stop being blocked by the auto-mode permission classifier.** In
+  `auto` permission-mode Claude Code routes any tool not matched by a
+  static `permissions.allow` rule through a safety classifier (an LLM
+  call to api.anthropic.com); the memory/KG tools are *writes*, so the
+  classifier gated every store/KG mutation — and blocked them outright
+  (`"temporarily unavailable, auto mode cannot determine safety"`)
+  whenever that upstream was flapping. The installer now adds wildcard
+  allow-rules for all memory backends —
+  `mcp__pgvector__*`, `mcp__sqlite_vec__*`, `mcp__qdrant__*`,
+  `mcp__memory_kg__*`, `mcp__memory__*` — to `~/.claude/settings.json`
+  `permissions.allow` during a normal install, making recall/store
+  auto-approve deterministically (rule precedence is deny → ask →
+  allow) without the classifier. Injection is additive, idempotent and
+  backed-up (`_ensure_memory_allow_rules`); `uninstall` removes exactly
+  those wildcard rules and leaves any hand-added entries alone. New
+  `install.py --sync-permissions` flag (re)applies only these rules and
+  exits — no provider probing, hook rewrite, or dialog — so an
+  already-installed host can be brought up to date safely. The
+  `memory_kg` provider is covered under both its canonical key and the
+  `memory` key `mcp-server-memory` conventionally registers under.
+
 ### Fixed
 
 - **PreCompact: the wrap-up summary was never written for long-lived

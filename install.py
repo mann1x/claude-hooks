@@ -7583,6 +7583,16 @@ def main() -> int:
     )
     ap.add_argument("--uninstall", action="store_true", help="remove claude-hooks from settings.json")
     ap.add_argument(
+        "--sync-permissions", action="store_true",
+        help="only (re)apply the memory/KG MCP allow-rules "
+             "(mcp__pgvector__* / mcp__sqlite_vec__* / mcp__qdrant__* / "
+             "mcp__memory_kg__* / mcp__memory__*) to settings.json "
+             "permissions.allow, then exit. Additive, idempotent, "
+             "backed-up -- no provider probing, no hook rewrite, no "
+             "dialog. Grants memory recall/store classifier-free on an "
+             "already-installed host.",
+    )
+    ap.add_argument(
         "--rewire", action="store_true",
         help="override hook-path drift detection (v1.5.1+) and rewrite "
              "existing hook entries to this install.py's repo path. Without "
@@ -7614,6 +7624,15 @@ def main() -> int:
 
     if args.uninstall:
         return uninstall(dry_run=args.dry_run)
+
+    if args.sync_permissions:
+        settings_path = user_settings_path()
+        print(f"==> Syncing memory/KG MCP allow-rules in {settings_path}")
+        added = _ensure_memory_allow_rules(settings_path, dry_run=args.dry_run)
+        verb = "would add" if args.dry_run else "added"
+        print(f"  {verb} {len(added)} rule(s); "
+              f"{len(MEMORY_ALLOW_RULES)} total in the memory allow-set.")
+        return 0
 
     print("==> claude-hooks installer\n")
 
@@ -7880,6 +7899,11 @@ def main() -> int:
         rewire=bool(getattr(args, "rewire", False)),
     )
 
+    # Memory/KG MCP allow-rules: keep memory recall/store out of the
+    # auto-mode safety classifier so writes never block (see
+    # _ensure_memory_allow_rules). Additive + idempotent + backed-up.
+    _ensure_memory_allow_rules(settings_path, dry_run=args.dry_run)
+
     # PATH-friendly wrappers for every bin/* shim. Required so skills
     # that invoke the CLIs by bare name (claude-consultants,
     # claude-advisor, ...) resolve from Claude Code's bash subprocess
@@ -8014,6 +8038,83 @@ def user_settings_path() -> Path:
     return Path(os.path.expanduser("~/.claude/settings.json"))
 
 
+# --------------------------------------------------------------------- #
+# Memory/KG MCP allow-rules (v1.11.2+)
+# --------------------------------------------------------------------- #
+#
+# In `auto` permission-mode, Claude Code routes any tool call NOT matched
+# by a static `permissions.allow` rule through a safety classifier -- an
+# LLM call to api.anthropic.com. The memory/KG MCP tools are *writes*, so
+# the classifier gates every store/KG mutation; worse, when that same
+# upstream is flapping the classifier can't render a verdict and the write
+# is blocked outright ("temporarily unavailable, auto mode cannot
+# determine safety"). Allow-listing the memory servers makes recall/store
+# auto-approve deterministically (rule precedence is deny -> ask -> allow),
+# bypassing the classifier entirely. The `mcp__<server>__*` wildcard covers
+# every current and future tool on each store.
+#
+# Keys are the `~/.claude.json` mcpServers keys claude-hooks uses per
+# backend: `pgvector` + `sqlite_vec` are registered by the installer under
+# exactly those keys; `qdrant` + `memory_kg` are the canonical provider
+# server_keys (see `_validate_qdrant_embedding` /
+# `_validate_memory_kg_embedding`). `memory` is also covered because
+# `mcp-server-memory` conventionally registers under that key -- which is
+# precisely why the memory_kg provider's own NAME_KEYWORDS match "memory".
+MEMORY_MCP_SERVER_KEYS = (
+    "pgvector", "sqlite_vec", "qdrant", "memory_kg", "memory",
+)
+MEMORY_ALLOW_RULES = tuple(f"mcp__{k}__*" for k in MEMORY_MCP_SERVER_KEYS)
+
+
+def _ensure_memory_allow_rules(
+    settings_path: Path, *, dry_run: bool = False, _print: bool = True,
+) -> list[str]:
+    """Idempotently add the memory/KG MCP allow-rules to
+    ``permissions.allow`` in ``settings.json``.
+
+    Auto permission-mode sends any tool not matched by a static allow
+    rule to the safety classifier; memory writes get blocked there (and
+    stall entirely when the api.anthropic.com upstream the classifier
+    itself rides is flapping). Allow-listing ``mcp__<server>__*`` for
+    each memory backend (:data:`MEMORY_ALLOW_RULES`) makes recall/store
+    auto-approve without the classifier.
+
+    Additive only -- never removes or reorders existing entries, backs
+    the file up first (via :func:`_backed_up_save_json`), and is a no-op
+    when every rule is already present. Returns the list of rules
+    actually added (empty when none / dry-run preview).
+    """
+    settings = _load_json(settings_path) if settings_path.exists() else {}
+    perms = settings.setdefault("permissions", {})
+    if not isinstance(perms, dict):
+        settings["permissions"] = perms = {}
+    allow = perms.setdefault("allow", [])
+    if not isinstance(allow, list):
+        perms["allow"] = allow = []
+
+    existing = set(allow)
+    missing = [r for r in MEMORY_ALLOW_RULES if r not in existing]
+    if not missing:
+        if _print:
+            print(f"  · {settings_path}: memory allow-rules already present, no change")
+        return []
+    if dry_run:
+        if _print:
+            print(f"  [dry-run] would add to {settings_path} permissions.allow:")
+            for r in missing:
+                print(f"    {r}")
+        return missing
+
+    allow.extend(missing)
+    bak = _backed_up_save_json(settings_path, settings, reason="memory-allowlist")
+    if _print:
+        print(f"  + {settings_path}: added {len(missing)} memory allow-rule(s): "
+              + ", ".join(missing))
+        if bak is not None:
+            print(f"    backup: {bak}")
+    return missing
+
+
 def install_hooks(
     settings_path: Path,
     *,
@@ -8139,6 +8240,17 @@ def uninstall(*, dry_run: bool) -> int:
         else:
             del hooks[event]
     print(f"  Removed {removed} claude-hooks entries from {settings_path}")
+    # Drop the memory/KG MCP allow-rules we added (v1.11.2+). Only our
+    # exact wildcard entries are removed; any hand-added memory rules
+    # (e.g. per-tool grants) are left untouched.
+    perms = settings.get("permissions")
+    if isinstance(perms, dict) and isinstance(perms.get("allow"), list):
+        ours = set(MEMORY_ALLOW_RULES)
+        kept = [r for r in perms["allow"] if r not in ours]
+        dropped = len(perms["allow"]) - len(kept)
+        if dropped:
+            perms["allow"] = kept
+            print(f"  Removed {dropped} memory allow-rule(s) from {settings_path}")
     # Remove any bin/* wrappers we previously installed. Tagged-only --
     # hand-rolled wrappers under the same name are left alone.
     wrappers_removed = _remove_bin_shim_wrappers(dry_run=dry_run)
