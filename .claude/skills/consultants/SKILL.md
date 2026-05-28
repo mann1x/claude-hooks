@@ -83,6 +83,55 @@ Examples:
 
 ---
 
+## How a consultation works
+
+Each `consult` starts a **council run** — one LangGraph invocation whose
+per-run `status` goes `running → completed | failed`. The chain rooted at
+the first `ask` (the `ask` itself + every `follow-up` chained on it) is
+the **consultancy**, with its own engine-owned, persisted lifecycle:
+
+> `in_progress` → *(council done)* `ready_to_review` → `accepted`
+> *(terminal)*. An auto-issued `follow-up` under the cap bounces back to
+> `in_progress`; hitting the cap (`max_followups`, default **4**) flips to
+> `awaiting_approval` until the user approves more rounds. The grant size
+> per approval is `allow_extra` (default **1**); both knobs are
+> configurable via `/consultants config` and the CLI.
+
+Every `status` / `result` / `follow-up` / `state` response carries the
+authoritative `consultancy` block — read this, don't infer:
+
+```json
+"consultancy": {"root_sid": "csl-…", "status": "ready_to_review",
+  "followup_count": 1, "max_followups": 4, "extra_granted": 0,
+  "effective_cap": 4}
+```
+
+**While the run is `running`, monitor progress on one of two channels**
+(step 4 of the [ask flow](#ask--run-a-fresh-council-consultation) shows
+both, with examples):
+
+- **`claude-consultants events <sid>`** — live **SSE stream** over the
+  engine's `GET /v1/consult/{sid}/events` endpoint. One JSON event per
+  role transition (`node_enter` / `node_exit`), LLM call (`llm_call`), or
+  tool call (`tool_call`) as it happens, ending with a **`complete`**
+  event carrying `{sid, status, final_answer_present}` — that's your
+  canonical "council is done" signal. Preferred for real-time visibility.
+  See the [events subsection](#events--live-monitor-sse-stream).
+- **`claude-consultants status <sid>`** — coarse poll (~10 s cadence).
+  Returns `{status, progress, consultancy, ...}`. Use when a periodic
+  "is it done yet?" check is all you need.
+
+**When the council finishes**, do NOT silently present the answer — the
+consultancy is in `ready_to_review`. Enter the [Review
+loop](#review-loop--mirror-get-advices-discuss-until-satisfied-flow):
+critique → `accept` (terminal) **or** auto-`follow-up`. At the cap
+(`awaiting_approval`) stop and ask the user; on "yes" re-issue the same
+follow-up with `--allow-extra 1` (the user never types the flag, the
+skill carries their approval). The lifecycle survives compaction —
+trust `consultancy.status` over your own memory of where you were.
+
+---
+
 ## ask — run a fresh council consultation
 
 A consultation typically takes 1–5 minutes (longer for `high` or
@@ -151,22 +200,43 @@ Returns:
 Save the `sid`. Tell the user briefly you've kicked off the council
 and will surface progress.
 
-### 4. Poll status
+### 4. Monitor progress
+
+Two channels are available — pick one; the consultancy lifecycle is in
+the [overview](#how-a-consultation-works).
+
+**Live SSE stream — preferred for real-time visibility:**
+
+```
+claude-consultants events <sid>
+```
+
+Wraps `GET /v1/consult/{sid}/events`. Each role transition
+(`node_enter` / `node_exit`), LLM call (`llm_call`), and tool call
+(`tool_call`) lands as one JSON event as it happens, with a heartbeat
+every 15 s through quiet research rounds. The stream ends with a
+**`complete`** event carrying `{sid, status, final_answer_present}` —
+that's your trigger to move to step 5. Use `--since <event_id>` to
+resume from a known point (e.g. after a network blip or across a
+compaction boundary). The events subsection below has the wire format.
+
+**Coarse status poll — use when a periodic check is enough:**
 
 ```
 claude-consultants status <sid>
 ```
 
-Returns `{status, progress, duration_seconds, ...}`. States:
+Returns `{status, progress, consultancy, duration_seconds, ...}`.
+Cadence: **~10 s between polls**, no faster. States:
 
 - `running` — `progress` shows per-role state. Continue answering
   the user; the consultation runs in the background.
 - `completed` — move to step 5.
 - `failed` — `error` carries the detail; jump to failure handling.
 
-Cadence: ~10s between polls. Surface role transitions in plain
-language ("Planner done; researcher mid-investigation, 3 tool calls
-so far"). One update per visible transition, no spam.
+Either way, surface role transitions in plain language ("Planner done;
+researcher mid-investigation, 3 tool calls so far") — one line per
+visible transition, no spam.
 
 ### 5. Fetch the result
 
@@ -724,13 +794,20 @@ per role via the same dialog.
 
 ## Autonomous control (in-flight consultation)
 
-The v2 engine exposes seven HTTP routes + matching CLI subcommands
-for **mid-flight** session control. Use these when the user wants
-to nudge a running consultation rather than start over. All seven
-verbs operate on the session's ``sid`` and return JSON. The CLI
-calls are thin wrappers around the HTTP endpoints — choose
-whichever fits the surrounding context. Defaults to silent — do
-NOT poll-spam these; use only when the user's request implies it.
+The v2 engine exposes seven HTTP routes + matching CLI subcommands.
+All seven operate on the session's ``sid`` and return JSON. The CLI
+calls are thin wrappers around the HTTP endpoints — choose whichever
+fits the surrounding context. The verbs split into two buckets:
+
+- **Monitor channels** (free to use while a consultation is running):
+  ``events`` (live SSE stream — preferred for real-time visibility,
+  detailed below), ``status`` (coarse poll, covered in the ask flow),
+  ``state`` (one-shot structured snapshot, below).
+- **Intervention verbs** (use only when the user's current turn
+  implies a mid-flight nudge): ``inject`` / ``control`` / ``pause`` /
+  ``resume`` / ``cancel``. Defaults to silent — do NOT call these to
+  "check in" on a running session; that's what the monitor channels
+  are for.
 
 ### state — peek live state
 
@@ -803,18 +880,40 @@ Cooperative drain. ``--discard-partial`` also deletes the
 checkpointer file. Use when the user has changed their mind about
 the question. Idempotent on completed sessions (200, no-op).
 
-### events — tail the SSE stream
+### events — live monitor (SSE stream)
+
+This is the **engine's real-time monitor channel** — the canonical way
+to watch a running consultation. CLI wrapper for the engine's
+``GET /v1/consult/{sid}/events`` endpoint:
 
 ```
 claude-consultants events <sid>
 claude-consultants events <sid> --since 47
 ```
 
-Tail the recorder's ``runtime_events`` table as Server-Sent
-Events. ``--since`` replays from a known event_id (useful when
-reconnecting after a network blip). Each event lands as one JSON
-line on stdout. Heartbeats every 15 s keep the connection alive
-through quiet research rounds.
+Each event is one SSE block on stdout:
+
+```
+id: 12
+event: node_enter
+data: {"kind":"node_enter","role":"researcher","round":1,"lane_idx":0}
+```
+
+Event types: ``node_enter`` / ``node_exit`` (role transitions),
+``llm_call`` (each model call, with ``duration_ms``), ``tool_call``
+(each tool invocation, with ``duration_ms``), heartbeat (emitted every
+15 s through quiet rounds so the connection stays alive), and finally
+**``complete``** at session end with
+``{"sid": "...", "status": "completed|failed|...", "final_answer_present":
+true|false}`` — that's the canonical "council is done" signal, so the
+consumer is notified without having to ``/state``-poll.
+
+``--since <event_id>`` (sent as ``Last-Event-ID``) replays the stream
+from a known point — useful when reconnecting after a network blip or
+across a compaction boundary. The CLI prints one block per event; you
+can also hit the HTTP endpoint directly (``curl -N
+$endpoint/v1/consult/<sid>/events``) when you want to consume it
+without the CLI wrapper.
 
 ### When to autonomously call these
 
@@ -830,8 +929,9 @@ mid-flight intervention.** Examples:
 - User says "show me what the council has so far" → ``state``;
   pretty-print the partial_synthesis + research[].
 
-Don't call these to "check in" on a running session — the
-``ask``-flow's normal status poll already does that.
+Routine progress monitoring is the monitor channels' job (``events``
+stream from the ask flow above, or ``status`` poll, or ``state``
+snapshot) — not these intervention verbs.
 
 ---
 
