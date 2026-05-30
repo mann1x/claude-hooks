@@ -16,6 +16,8 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-05-30
+
 ### Added
 
 - **`/consultants` review loop — Claude now critiques a council answer
@@ -7733,7 +7735,8 @@ prior tag. From any unreleased checkout, just `git pull` on `main`
 once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
-[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.11.1...HEAD
+[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.12.0...HEAD
+[1.12.0]: https://github.com/mann1x/claude-hooks/compare/v1.11.1...v1.12.0
 [1.11.1]: https://github.com/mann1x/claude-hooks/compare/v1.11.0...v1.11.1
 [1.11.0]: https://github.com/mann1x/claude-hooks/compare/v1.10.6...v1.11.0
 [1.10.2]: https://github.com/mann1x/claude-hooks/compare/v1.10.1...v1.10.2

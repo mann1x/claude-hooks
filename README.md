@@ -106,7 +106,7 @@ wiring, monitoring, uninstall — see [`docs/deployment.md`](docs/deployment.md)
 
 ### Releases & versioning
 
-- Current version: **v1.7.0** — see [CHANGELOG.md](CHANGELOG.md) for the full history,
+- Current version: **v1.12.0** — see [CHANGELOG.md](CHANGELOG.md) for the full history,
   or [`docs/whats-new.md`](docs/whats-new.md) for the human-readable
   v1.7 highlights (older releases archived alongside:
   [v1.4](docs/whats-new-v1.4.md),

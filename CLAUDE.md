@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.11.1** — ~4.3k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.12.0** — ~4.3k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -169,6 +169,30 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > [`docs/lsp-engine.md`](docs/lsp-engine.md) for the runbook and
 > [`docs/lsp-mcp.md`](docs/lsp-mcp.md) for the "when to use the
 > built-in engine vs the external cclsp MCP" guidance.
+>
+> v1.12 adds the **`/consultants` auto-followup review loop**: after a
+> council answers, Claude critiques the result and either marks the
+> consultancy `accepted` (new `claude-consultants accept` verb +
+> `POST /v1/consult/{sid}/accept`) or auto-issues a focused follow-up and
+> loops — mirroring `/get-advice`'s discuss-until-satisfied flow. An
+> engine-owned consultancy status machine
+> (`in_progress → ready_to_review → accepted`, or `awaiting_approval` at
+> the cap) sits above the per-run status, persisted to `consultancy.json`
+> so it survives idle reap, daemon restart, and compaction. The loop is
+> bounded by a flat, effort-independent **`max_followups`** cap (default
+> **4**, enforced server-side); past the cap the engine refuses with
+> `followup_limit_reached` and the skill asks the user, who approves
+> conversationally (carried as `--allow-extra N`, one-off, no persisted
+> config change). Two config knobs (`max_followups`, `allow_extra`) are
+> settable from both the `/consultants config` menu and
+> `claude-consultants config`. v1.12 also allow-lists the memory/KG MCP
+> servers in `install.py` so memory writes stop being gated by the
+> auto-mode permission classifier, and raises the HyDE recall hook caps
+> (`UserPromptSubmit`/`SessionStart` → 65 s) so the local fallback gets
+> its full cold-start window when the cloud primary stalls. See
+> [`docs/consultants.md`](docs/consultants.md) "Review loop" for the
+> runbook and [`docs/hyde.md`](docs/hyde.md) "Hook cap must cover the
+> whole chain".
 
 ---
 
