@@ -76,6 +76,34 @@ release with the auto-generated source archive
 
 ### Fixed
 
+- **Test isolation: config tests could write to the real `~/.claude` on
+  Windows, contaminating each other and clobbering the dev's live config
+  on the Windows bench.** The home-isolation pytest fixtures
+  (`isolated_home` / `tmp_claude_home`) set only `$HOME`, which is a
+  silent no-op on Windows — `pathlib.Path.home()` / `ntpath.expanduser`
+  consult `%USERPROFILE%` (then `%HOMEDRIVE%%HOMEPATH%`), never `$HOME`.
+  So `consultants.config.save_config(scope="user")` wrote to the real
+  home, producing deterministic within-class contamination
+  (`TestSetStoreDistillation::test_fallback_chain_add_remove_clear`).
+  Centralized into one cross-platform helper,
+  `tests/conftest.redirect_home`, which sets `HOME` + `USERPROFILE` +
+  `HOMEDRIVE` + `HOMEPATH` together; the per-file HOME-only copies were
+  removed in favor of the shared conftest fixtures. Proof: the bench's
+  real config is SHA256 byte-identical before/after running the config
+  suite. (`bug-635`)
+- **sqlite_vec: a second table on a db already migrated to the latest
+  schema was never created → `no such table` at insert.**
+  `migrate_schema()` gated all work behind a db-**wide** schema version
+  (`if current >= LATEST_VERSION: return`), but tables are per-name. Once
+  the first table carried a db file to LATEST, any later provider opening
+  the same file with a different `table` early-returned before its
+  `CREATE TABLE` ran. Latent in production (one table per db) but real,
+  and it broke the sqlite_vec integration tests whenever Ollama was
+  reachable (they share one db across tables). Now, at LATEST, the
+  requested table family is still ensured idempotently (new
+  `_table_exists` guard) while the common single-table case keeps its
+  zero-work fast return — the sqlite analog of the pgvector
+  "split create from migrate" fix.
 - **PreCompact: the wrap-up summary was never written for long-lived
   sessions, losing open + running items across a compact.**
   `wrapup_synth.read_transcript()` loaded the **entire** transcript into
