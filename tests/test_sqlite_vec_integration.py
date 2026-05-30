@@ -58,6 +58,20 @@ class TestSqliteVecIntegration(unittest.TestCase):
         cls._tmpdir = tempfile.mkdtemp(prefix="claude-hooks-test-")
         cls._db_path = os.path.join(cls._tmpdir, "test_memory.db")
 
+    # Shared fixture corpus. Every recall test seeds its OWN table with
+    # this (store is idempotent on content_hash, so re-seeding a table is
+    # a no-op) — tests must not depend on another test having populated a
+    # table first. They share one db file (``cls._db_path``) but each
+    # uses a distinct table, and table creation in a pre-migrated db is
+    # exercised by that very sharing.
+    MEMORIES = [
+        "bcache fix: rebuild superblock with make-bcache --wipe-bcache",
+        "nginx proxy config: upstream with fail_timeout=3s for Ollama failover",
+        "Docker compose uses network_mode: host to avoid port mapping issues",
+        "Python 3.9+ required for dict[str, Any] type hints",
+        "Qdrant MCP server runs on port 32775 with streamable HTTP",
+    ]
+
     def _make_provider(self, table: str = "test_mem"):
         from claude_hooks.providers.base import ServerCandidate
         from claude_hooks.providers.sqlite_vec import SqliteVecProvider
@@ -79,6 +93,15 @@ class TestSqliteVecIntegration(unittest.TestCase):
         }
         return SqliteVecProvider(server, options)
 
+    def _seed(self, table: str):
+        """Create a provider on ``table`` and populate it with the shared
+        corpus. Returns the provider. Self-contained: no test relies on
+        another test's stores."""
+        prov = self._make_provider(table)
+        for m in self.MEMORIES:
+            prov.store(m)
+        return prov
+
     def test_01_auto_create_tables(self):
         """First access should create tables automatically."""
         prov = self._make_provider("autocreate")
@@ -87,17 +110,7 @@ class TestSqliteVecIntegration(unittest.TestCase):
 
     def test_02_store_and_recall(self):
         """Store several memories, recall the most relevant."""
-        prov = self._make_provider("recall_test")
-
-        memories = [
-            "bcache fix: rebuild superblock with make-bcache --wipe-bcache",
-            "nginx proxy config: upstream with fail_timeout=3s for Ollama failover",
-            "Docker compose uses network_mode: host to avoid port mapping issues",
-            "Python 3.9+ required for dict[str, Any] type hints",
-            "Qdrant MCP server runs on port 32775 with streamable HTTP",
-        ]
-        for m in memories:
-            prov.store(m)
+        prov = self._seed("recall_test")
         self.assertEqual(prov.count(), 5)
 
         # Recall should find bcache-related content first.
@@ -107,7 +120,7 @@ class TestSqliteVecIntegration(unittest.TestCase):
 
     def test_03_recall_returns_distance(self):
         """Recall should include distance in metadata."""
-        prov = self._make_provider("recall_test")
+        prov = self._seed("recall_test")
         results = prov.recall("nginx proxy", k=2)
         self.assertGreater(len(results), 0)
         self.assertIn("_distance", results[0].metadata)
@@ -117,7 +130,7 @@ class TestSqliteVecIntegration(unittest.TestCase):
         formatter renders ``[<table> dist=X]`` instead of ``[? dist=X]``.
         Regression guard for the cosmetic v1.6.0 ship.
         """
-        prov = self._make_provider("table_meta_test")
+        prov = self._seed("table_meta_test")
         results = prov.recall("nginx proxy", k=2)
         self.assertGreater(len(results), 0)
         self.assertEqual(results[0].metadata.get("_table"), "table_meta_test")

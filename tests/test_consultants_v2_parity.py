@@ -233,6 +233,20 @@ class TestOptInsOffByDefault(unittest.TestCase):
         self.assertEqual(self.cfg.checkpointer.backend, "sqlite")
         self.assertIsNone(self.cfg.checkpointer.url)
 
+    # ----- review loop (consultancy followup cap) --------------- #
+
+    def test_review_loop_default_baseline(self):
+        # The review loop is ON by default (unlike the opt-ins above):
+        # a fresh consultancy caps auto-followups at ``max_followups``
+        # and grants ``allow_extra`` per over-cap approval. This is a
+        # DELIBERATE default-behavior change vs the pre-review-loop
+        # engine (which allowed unlimited followups). Lock the baseline
+        # values here so an accidental flip is caught — a 5th followup
+        # past the default cap is refused server-side (see
+        # tests/test_consultants_review_loop.py for the E2E gate).
+        self.assertEqual(self.cfg.max_followups, 4)
+        self.assertEqual(self.cfg.allow_extra, 1)
+
     # ----- M4 (event taxonomy) — meta-assertion ----------------- #
 
     def test_v2_optin_event_kinds_set_is_complete(self):

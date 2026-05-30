@@ -148,10 +148,7 @@ def make_stub_follow_up_runner(*, fail: bool = False):
     return run_follow_up
 
 
-@pytest.fixture
-def isolated_home(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    yield tmp_path
+# ``isolated_home`` comes from tests/conftest.py (cross-platform; bug-635).
 
 
 @pytest.fixture

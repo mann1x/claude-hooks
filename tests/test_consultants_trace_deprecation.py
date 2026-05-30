@@ -47,10 +47,12 @@ class TestTracerNoOp:
         assert t.current_role() is None
 
     def test_does_not_create_legacy_directory(
-            self, fresh_trace_module, monkeypatch, tmp_path):
+            self, fresh_trace_module, monkeypatch, tmp_path, isolated_home):
         # Even with CONSULTANTS_TRACE on and a fake home,
         # for_session must not create ~/.claude/consultants-traces.
-        monkeypatch.setenv("HOME", str(tmp_path))
+        # ``isolated_home`` redirects Path.home() to tmp_path cross-platform
+        # (bug-635: HOME-only no-op'd on Windows, so this asserted against the
+        # wrong dir and could touch the real ~/.claude).
         monkeypatch.setenv("CONSULTANTS_TRACE", "1")
         fresh_trace_module.Tracer.for_session("csl-x")
         legacy = tmp_path / ".claude" / "consultants-traces"

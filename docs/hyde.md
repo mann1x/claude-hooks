@@ -162,11 +162,33 @@ Under `hooks.user_prompt_submit` in `config/claude-hooks.json`:
 | `hyde_model` | `gemma4:e2b` | Primary Ollama model |
 | `hyde_fallback_model` | `gemma4:31b-cloud` | Tried if primary fails. Cloud model on Ollama's free tier so no quota cost; strict capability bump from the local primary |
 | `hyde_url` | `http://localhost:11434/api/generate` | Ollama generate endpoint |
-| `hyde_timeout` | `30.0` | Per-call timeout in seconds |
+| `hyde_timeout` | `30.0` | **Per-model** timeout in seconds — applied independently to the primary and the fallback call (see hook-cap note below) |
 | `hyde_max_tokens` | `150` | Cap on expansion length (`num_predict`) |
 | `hyde_keep_alive` | `"15m"` | How long Ollama keeps the model resident after the call. `"-1"` = never unload |
 | `hyde_cache_enabled` | `true` | Set `false` to disable cache (e.g. when comparing expansions) |
 | `hyde_cache_ttl_seconds` | `86400` | TTL for cached expansions |
+
+### Hook cap must cover the whole chain
+
+`hyde_timeout` is **per model**, but the expansion runs the primary and the
+fallback *sequentially* inside one synchronous hook. The hook's wall-clock cap
+(`timeout` on the `UserPromptSubmit` / `SessionStart` entries in
+`~/.claude/settings.json`) is what bounds the *total*, and Claude Code SIGTERMs
+the hook the moment it elapses. So the cap must satisfy:
+
+```
+hook timeout  >=  hyde_timeout * 2  +  recall overhead (~3-5 s)
+```
+
+With the default `hyde_timeout = 30`, both recall events therefore ship a
+**65 s** cap (`install.py` `HOOK_TEMPLATE`). A tighter cap silently strangles
+the fallback: the primary eats the budget, the fallback gets near-zero, and you
+see `hyde (grounded): all models failed` even though the local model was healthy
+and would have answered given its own window (notably on a cold start, which
+needs well over 10 s). The warm/cache path is unaffected — the hook returns as
+soon as the primary answers (~0-4 s); the long cap only bites when the cloud
+primary actually stalls. If you lower `hyde_timeout`, you can lower the caps to
+match; if you raise it, raise the caps too.
 
 ## Failure modes
 

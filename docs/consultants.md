@@ -468,6 +468,70 @@ same role thread.
 
 ---
 
+## Review loop — consultancy status + bounded auto-followup
+
+Mirroring `/get-advice`'s discuss-until-satisfied flow, after a council
+answer the skill **reviews** it rather than accepting the first result
+blindly. The mechanism is an engine-owned status machine layered above
+the per-run `status` (`running | completed | failed`):
+
+- A *council run* is one LangGraph invocation (one sid).
+- A *consultancy* is the whole chain rooted at the first `ask`
+  (`root_sid`); followups are children. Its **`consultancy_status`**
+  advances:
+
+  ```
+  in_progress ──(council done)──► ready_to_review ──accept──► accepted (terminal)
+       ▲                                │
+       └──── followup (under cap) ──────┤
+                                        └── followup at cap ──► awaiting_approval
+                                               (user yes + --allow-extra) ──► in_progress
+  ```
+
+The status is persisted to `consultancy.json` in the **root** session
+dir (`.claude-hooks/consultants/<root_sid>/consultancy.json`):
+
+```json
+{"root_sid": "csl-…", "status": "ready_to_review", "followup_count": 1,
+ "max_followups": 4, "extra_granted": 0, "effective_cap": 4,
+ "child_sids": ["csl-…"], "updated_at": 1748352000.0}
+```
+
+It is engine-owned, queryable (the `consultancy` block rides every
+`status` / `result` / `state` / `follow-up` response), and survives idle
+reap, daemon restart, and context compaction — so the skill resumes the
+loop correctly after a compact by reading `status <root_sid>` first.
+
+**The loop** (driven by the skill, like `/get-advice`): when the council
+finishes (`ready_to_review`), Claude critiques the answer and either
+
+- **accepts** it — `claude-consultants accept <sid>` → `accepted`
+  (terminal); or
+- **auto-issues a focused follow-up** (with a one-line rationale) and
+  loops, **up to `max_followups`** (default 4).
+
+**The cap.** The engine enforces `max_followups` server-side: a follow-up
+past the cap is refused with a structured
+`{"ok": false, "reason": "followup_limit_reached", …}` (HTTP 200) and the
+consultancy flips to `awaiting_approval`. The skill then stops and asks
+the user, presenting the remaining concern + why another round helps. On
+approval the skill re-issues the follow-up with `--allow-extra N`
+(`--force` = the configured default), which raises the cap by `N` for
+**this consultancy only** — no persisted config change. `--allow-extra`
+is also the escape hatch for non-Claude-Code/scripted callers.
+
+**Configuration** (both flat / effort-independent; skill menu + CLI):
+
+```
+claude-consultants config set-max-followups 4   # auto-followup cap (>= 0)
+claude-consultants config set-allow-extra 1      # per-approval grant (>= 1)
+```
+
+or via `/consultants config` → **Followup limit**. Both surface in
+`config show` (`max_followups`, `allow_extra`).
+
+---
+
 ## Recovery from cloud flaps
 
 Three layers of recovery, all v1.1, all automatic:
@@ -604,6 +668,10 @@ claude-consultants config set-role synthesizer --add-model glm-5.1:cloud  # fail
 claude-consultants config set-effort xhigh
 claude-consultants config set-service-mode always-on
 claude-consultants config set-idle-timeout 1800
+
+# Review loop (consultancy followup cap + per-approval grant size)
+claude-consultants config set-max-followups 4   # auto-followup cap (>= 0)
+claude-consultants config set-allow-extra 1      # grant per approval (>= 1)
 
 # Cross-session memory store (M8 + M14)
 claude-consultants config set-store --enabled true --backend sqlite_vec

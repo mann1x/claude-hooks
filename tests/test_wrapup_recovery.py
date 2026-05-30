@@ -188,5 +188,170 @@ class WrapupRecoveryTests(unittest.TestCase):
             self.assertIsNone(found)
 
 
+def _assistant_bash(cmd: str) -> dict:
+    return {
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "name": "Bash",
+                         "input": {"command": cmd}}],
+        }
+    }
+
+
+class ReconnectPreservationTests(unittest.TestCase):
+    """Initial + last-known-good reconnect command preservation across a
+    compact (vast.ai / pod use case)."""
+
+    def test_collect_ssh_invocations_keeps_full_command(self):
+        ip = FIXTURE_REGEX_IP_PRIMARY
+        cmds = [
+            f"ssh -p 41022 root@{ip} -L 8080:localhost:8080 -i ~/.ssh/id_rsa",
+            "nvidia-smi",
+        ]
+        inv = ws.collect_ssh_invocations(cmds)
+        self.assertEqual(len(inv), 1)
+        # The whole command survives — port, tunnel, and key included.
+        self.assertIn("-p 41022", inv[0])
+        self.assertIn("-L 8080:localhost:8080", inv[0])
+        self.assertIn("-i ~/.ssh/id_rsa", inv[0])
+
+    def test_collect_ssh_invocations_excludes_keygen_and_help(self):
+        cmds = ["ssh-keygen -t ed25519", "ssh --help", "ssh -V"]
+        self.assertEqual(ws.collect_ssh_invocations(cmds), [])
+
+    def test_build_reconnect_lines_initial_and_last(self):
+        cmds = [
+            "ssh -p 41022 root@ssh5.vast.ai",          # initial (proxy)
+            "ls",
+            f"ssh -p 41022 root@{FIXTURE_REGEX_IP_PRIMARY} -L 9000:localhost:9000",  # direct
+        ]
+        lines = ws.build_reconnect_lines(cmds)
+        self.assertEqual(len(lines), 2)
+        self.assertIn("ssh5.vast.ai", lines[0])
+        self.assertIn(FIXTURE_REGEX_IP_PRIMARY, lines[1])
+
+    def test_build_reconnect_lines_single(self):
+        lines = ws.build_reconnect_lines(["ssh -p 22 root@ssh5.vast.ai"])
+        self.assertEqual(len(lines), 1)
+
+    def test_build_reconnect_lines_empty_when_no_ssh(self):
+        self.assertEqual(ws.build_reconnect_lines(["ls", "git status"]), [])
+
+    def test_vast_ai_pod_host_detected(self):
+        out = ws.collect_endpoints(
+            [_assistant_text("Pod is at ssh5.vast.ai now.")], [])
+        self.assertIn("ssh5.vast.ai", out["pod_ids"])
+
+    def test_synth_emits_sentinels_only_with_connection(self):
+        t = [_assistant_bash("ssh -p 41022 root@ssh5.vast.ai")]
+        md = ws.synthesize_markdown(t, cwd="", session_id="s")
+        self.assertIn(ws.RECONNECT_SENTINEL_BEGIN, md)
+        self.assertIn("-p 41022", md)
+        # No connection → no sentinels at all (zero-token contract).
+        md2 = ws.synthesize_markdown([_assistant_bash("ls")], cwd="", session_id="s")
+        self.assertNotIn(ws.RECONNECT_SENTINEL_BEGIN, md2)
+
+    def test_extract_reconnect_block_roundtrip(self):
+        t = [
+            _assistant_bash("ssh -p 41022 root@ssh5.vast.ai"),
+            _assistant_bash(f"ssh -p 41022 root@{FIXTURE_REGEX_IP_PRIMARY}"),
+        ]
+        md = ws.synthesize_markdown(t, cwd="", session_id="s")
+        inner = wr._extract_reconnect_block(md)
+        self.assertIn("ssh -p 41022 root@ssh5.vast.ai", inner)
+        self.assertIn(FIXTURE_REGEX_IP_PRIMARY, inner)
+        # No sentinels → empty.
+        self.assertEqual(wr._extract_reconnect_block("# just a heading"), "")
+
+    def test_recovery_block_inlines_reconnect_commands(self):
+        with tempfile.TemporaryDirectory() as td:
+            wolf = Path(td) / ".wolf"
+            wolf.mkdir()
+            t = [_assistant_bash("ssh -p 41022 root@ssh5.vast.ai")]
+            md = ws.synthesize_markdown(t, cwd=td, session_id="s")
+            (wolf / "wrapup-pre-compact-conn.md").write_text(md, encoding="utf-8")
+            cfg = {"hooks": {"wrapup_recovery": {"enabled": True}}}
+            block = wr.format_recovery_block(td, cfg, mark=False)
+            self.assertIn("Reconnect", block)
+            self.assertIn("ssh -p 41022 root@ssh5.vast.ai", block)
+
+    def test_recovery_block_stays_bare_pointer_without_connection(self):
+        with tempfile.TemporaryDirectory() as td:
+            wolf = Path(td) / ".wolf"
+            wolf.mkdir()
+            md = ws.synthesize_markdown([_assistant_bash("ls")], cwd=td, session_id="s")
+            (wolf / "wrapup-pre-compact-noconn.md").write_text(md, encoding="utf-8")
+            cfg = {"hooks": {"wrapup_recovery": {"enabled": True}}}
+            block = wr.format_recovery_block(td, cfg, mark=False)
+            self.assertNotIn("Reconnect", block)
+            # Bare pointer stays compact — no token bloat when nothing to reconnect.
+            self.assertLess(len(block), 200)
+
+
+def _assistant_bg_bash(desc: str) -> dict:
+    return {
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "name": "Bash",
+                         "input": {"command": "x", "run_in_background": True,
+                                   "description": desc}}],
+        }
+    }
+
+
+class MonitorsPreservationTests(unittest.TestCase):
+    """bug-625: running / background items must survive a compact even
+    when the model never opens the wrap-up file — inlined into the
+    recovery block, sentinel-gated so zero tokens when nothing ran."""
+
+    def test_extract_monitors_block_roundtrip(self):
+        t = [_assistant_bg_bash("QLoRA fine-tune"),
+             _assistant_bg_bash("Download weights")]
+        md = ws.synthesize_markdown(t, cwd="", session_id="s")
+        inner = wr._extract_monitors_block(md)
+        self.assertIn("QLoRA fine-tune", inner)
+        self.assertIn("Download weights", inner)
+        # No sentinels → empty.
+        self.assertEqual(wr._extract_monitors_block("# heading only"), "")
+
+    def test_recovery_block_inlines_running_items(self):
+        with tempfile.TemporaryDirectory() as td:
+            wolf = Path(td) / ".wolf"
+            wolf.mkdir()
+            t = [_assistant_bg_bash("LaCo surgery on Gemma 4 31B")]
+            md = ws.synthesize_markdown(t, cwd=td, session_id="s")
+            (wolf / "wrapup-pre-compact-run.md").write_text(md, encoding="utf-8")
+            cfg = {"hooks": {"wrapup_recovery": {"enabled": True}}}
+            block = wr.format_recovery_block(td, cfg, mark=False)
+            self.assertIn("Running / background items", block)
+            self.assertIn("LaCo surgery on Gemma 4 31B", block)
+
+    def test_recovery_block_no_running_items_when_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            wolf = Path(td) / ".wolf"
+            wolf.mkdir()
+            md = ws.synthesize_markdown([_assistant_text("hi")], cwd=td, session_id="s")
+            (wolf / "wrapup-pre-compact-none.md").write_text(md, encoding="utf-8")
+            cfg = {"hooks": {"wrapup_recovery": {"enabled": True}}}
+            block = wr.format_recovery_block(td, cfg, mark=False)
+            self.assertNotIn("Running / background items", block)
+
+    def test_recovery_caps_inlined_monitors(self):
+        with tempfile.TemporaryDirectory() as td:
+            wolf = Path(td) / ".wolf"
+            wolf.mkdir()
+            # 25 distinct background jobs → inlined list must be capped.
+            t = [_assistant_bg_bash(f"job-{i:02d}") for i in range(25)]
+            md = ws.synthesize_markdown(t, cwd=td, session_id="s")
+            (wolf / "wrapup-pre-compact-many.md").write_text(md, encoding="utf-8")
+            cfg = {"hooks": {"wrapup_recovery": {"enabled": True}}}
+            block = wr.format_recovery_block(td, cfg, mark=False)
+            self.assertIn("and ", block)
+            self.assertIn("more — see wrap-up file", block)
+            # Cap honoured: no more than the cap (+1 "… and N more") job lines.
+            job_lines = [ln for ln in block.splitlines() if ln.strip().startswith("- job-")]
+            self.assertLessEqual(len(job_lines), wr._MONITORS_INLINE_CAP)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1025,6 +1025,7 @@ def _run_stop_guard(
         skip_wrapup = bool(guard_cfg.get("skip_on_user_wrap_up", True))
         wrapup_cfg = guard_cfg.get("user_wrap_up_markers") or []
         wrapup_markers = tuple(str(m) for m in wrapup_cfg) or None
+        suppress_q = bool(guard_cfg.get("suppress_on_trailing_question", True))
         # First: the prose-pattern guard.
         correction = check_message(
             last_text,
@@ -1034,6 +1035,7 @@ def _run_stop_guard(
             last_user_message=last_user_text,
             skip_on_user_wrap_up=skip_wrapup,
             user_wrap_up_markers=wrapup_markers,
+            suppress_on_trailing_question=suppress_q,
         )
         if correction:
             return correction
@@ -1048,6 +1050,7 @@ def _run_stop_guard(
                 last_user_message=last_user_text,
                 skip_on_user_wrap_up=skip_wrapup,
                 user_wrap_up_markers=wrapup_markers,
+                suppress_on_trailing_question=suppress_q,
             )
         return None
     except Exception as e:

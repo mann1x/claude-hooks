@@ -38,18 +38,54 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+# Cap how much of the transcript we read on PreCompact. Long-lived
+# sessions accumulate enormous .jsonl transcripts — the backup_models
+# session hit 581 MB / 184 k messages over days of work. Reading the
+# whole file into memory under that session's heavy ML load blew past
+# the 20 s PreCompact hook timeout, so Claude Code killed the hook
+# before ``write_to_disk`` ran: no wrap-up file was written and the
+# post-compact recovery had nothing to surface (open + running items
+# lost). A resumable summary only needs the recent working window, and
+# the transcript is append-only JSONL, so we read a bounded tail. 24 MB
+# ≈ tens of thousands of messages — far more than one compaction window
+# — yet reads in well under a second even under contention. Set the
+# ``pre_compact.max_transcript_mb`` config to 0 to disable the cap.
+DEFAULT_MAX_TRANSCRIPT_BYTES = 24 * 1024 * 1024
+
+
 # A small, dependency-free transcript reader so this module can be
 # imported without dragging the Stop hook's helpers along.
-def read_transcript(path: str) -> list[dict]:
-    """Load a JSONL transcript file. Returns ``[]`` on any error."""
+def read_transcript(
+    path: str, *, max_bytes: int = DEFAULT_MAX_TRANSCRIPT_BYTES,
+) -> list[dict]:
+    """Load a JSONL transcript file. Returns ``[]`` on any error.
+
+    When the file is larger than ``max_bytes`` (and ``max_bytes`` > 0),
+    only the trailing ``max_bytes`` are read — the transcript is
+    append-only, so the tail holds the most-recent turns. The first
+    (partial) record after a byte-offset seek is discarded since the
+    seek lands mid-line. This keeps synthesis bounded in time no matter
+    how large a long-lived session's transcript grows; pass
+    ``max_bytes=0`` to read the whole file.
+    """
     try:
         p = Path(os.path.expanduser(path))
         if not p.exists():
             return []
+        try:
+            size = p.stat().st_size
+        except OSError:
+            size = 0
+        truncated = bool(max_bytes) and size > max_bytes
         out: list[dict] = []
-        with open(p, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
+        # Binary mode so we can seek by byte offset; decode permissively
+        # because a tail seek can split a multibyte character at the cut.
+        with open(p, "rb") as f:
+            if truncated:
+                f.seek(size - max_bytes)
+                f.readline()  # discard the partial record at the seek point
+            for raw in f:
+                line = raw.decode("utf-8", "replace").strip()
                 if not line:
                     continue
                 try:
@@ -60,6 +96,28 @@ def read_transcript(path: str) -> list[dict]:
     except OSError:
         return []
 
+
+# Machine-extractable sentinels around the reconnect command block in
+# section 7. wrapup_recovery lifts the fenced block between these markers
+# verbatim into the post-compact additionalContext. Kept as module
+# constants so both producer (this file) and consumer (wrapup_recovery)
+# agree on the exact bytes. Emitted ONLY when a connection exists.
+RECONNECT_SENTINEL_BEGIN = "<!-- RECONNECT:BEGIN -->"
+RECONNECT_SENTINEL_END = "<!-- RECONNECT:END -->"
+# Backwards-friendly short aliases used in the render code below.
+_RECONNECT_BEGIN = RECONNECT_SENTINEL_BEGIN
+_RECONNECT_END = RECONNECT_SENTINEL_END
+
+# Same machine-extractable sentinel idea for section 6's active-monitoring
+# list. wrapup_recovery lifts the bullet lines between these markers into
+# the post-compact recovery block so "you left N background jobs running"
+# survives even when the model never opens the wrap-up file — the exact
+# "forgot the running items" failure this guards against. Emitted ONLY
+# when at least one background task was detected (zero tokens otherwise).
+MONITORS_SENTINEL_BEGIN = "<!-- MONITORS:BEGIN -->"
+MONITORS_SENTINEL_END = "<!-- MONITORS:END -->"
+_MONITORS_BEGIN = MONITORS_SENTINEL_BEGIN
+_MONITORS_END = MONITORS_SENTINEL_END
 
 _PLAN_RX = re.compile(r"docs/PLAN-[A-Za-z0-9_-]+\.md")
 # Capture http(s) URLs and ws(s) URLs. Stop on whitespace, quotes,
@@ -80,7 +138,10 @@ _IPV4_RX = re.compile(
 # .runpod. / .modal. / .vast. domain. Generic enough to catch most
 # pod-style endpoints without false-matching arbitrary text.
 _POD_ID_RX = re.compile(
-    r"\b([a-z0-9]{8,15})-?\d{0,5}?\.(?:proxy\.)?"
+    # Lower bound is {3,…} so vast.ai's short proxy prefixes ("ssh5.vast.ai")
+    # match, not just RunPod's long hashes. The platform-domain anchor
+    # keeps the loosened prefix from false-matching arbitrary tokens.
+    r"\b([a-z0-9]{3,20})-?\d{0,5}?\.(?:proxy\.)?"
     r"(?:runpod|modal|vast|lambdalabs|paperspace)\.[a-z.]+",
     re.IGNORECASE,
 )
@@ -316,6 +377,67 @@ def collect_ssh_targets(bash_commands: list[str]) -> list[str]:
     return list(out.keys())
 
 
+# An ``ssh`` word that starts an actual invocation (line start or after a
+# shell separator), but NOT the ``ssh-keygen`` / ``ssh-copy-id`` / … family.
+_SSH_INVOKE_RX = re.compile(r"(?:^|[\s;&|(])ssh\b", re.IGNORECASE)
+_SSH_TOOL_RX = re.compile(
+    r"\bssh-(?:keygen|copy-id|add|keyscan|agent)\b", re.IGNORECASE
+)
+# Markers that an ssh command is a real *connection* (not ``ssh --help``):
+# a ``user@host``, an explicit ``-p <port>``, an IPv4 literal, or a known
+# pod-platform domain. Any one is enough.
+_SSH_CONN_MARKER_RX = re.compile(
+    r"@[\w.-]+"
+    r"|(?:^|\s)-p\s*\d{1,5}\b"
+    r"|\b\d{1,3}(?:\.\d{1,3}){3}\b"
+    r"|[\w-]+\.(?:runpod|modal|vast|lambdalabs|paperspace)\.[a-z.]+",
+    re.IGNORECASE,
+)
+
+
+def collect_ssh_invocations(bash_commands: list[str]) -> list[str]:
+    """Return the FULL ``ssh`` command lines that look like real
+    connections, verbatim and dedup-preserving order.
+
+    Unlike :func:`collect_ssh_targets` (which keeps only the bare host
+    token), this preserves the **entire** invocation — ``-p <port>``,
+    ``-i <key>``, ``-L/-R`` tunnels, user, host — because that's exactly
+    what a vast.ai / RunPod pod needs to reconnect (the port is mandatory
+    and was previously dropped). Filters out the ``ssh-keygen`` family
+    and non-connection invocations like ``ssh --help``.
+    """
+    out: dict[str, None] = {}
+    for cmd in bash_commands:
+        c = (cmd or "").strip()
+        if not c or not _SSH_INVOKE_RX.search(c):
+            continue
+        if _SSH_TOOL_RX.search(c):
+            continue
+        if not _SSH_CONN_MARKER_RX.search(c):
+            continue
+        if c not in out:
+            out[c] = None
+    return list(out.keys())
+
+
+def build_reconnect_lines(bash_commands: list[str]) -> list[str]:
+    """Return the reconnect command(s) worth preserving across a compact.
+
+    ``[]`` when no ssh connection was made. Otherwise the **initial**
+    invocation and, when it differs, the **last** one — vast.ai pods
+    often start on a proxy connection and switch to a faster direct
+    connection once ready, and the last command is the best-effort
+    "last known-good" target. (We can't see exit codes in the
+    transcript, so "last seen" is the closest signal.)
+    """
+    inv = collect_ssh_invocations(bash_commands)
+    if not inv:
+        return []
+    if len(inv) == 1:
+        return [inv[0]]
+    return [inv[0], inv[-1]]
+
+
 def collect_endpoints(transcript: list[dict],
                       bash_commands: list[str]) -> dict[str, list[str]]:
     """Extract everything that looks like a remote endpoint or
@@ -494,6 +616,7 @@ def synthesize_markdown(
     modified = collect_modified_files(transcript)
     bash = collect_bash_commands(transcript)
     ssh_hosts = collect_ssh_targets(bash)
+    reconnect = build_reconnect_lines(bash)
     plans = collect_plan_references(transcript)
     bg = collect_background_tasks(transcript)
     endpoints = collect_endpoints(transcript, bash)
@@ -602,12 +725,18 @@ def synthesize_markdown(
         out.append("_(no `docs/PLAN-*.md` references seen this session)_")
         out.append("")
 
-    # 6 — Active monitorings
+    # 6 — Active monitorings. Wrapped in MONITORS sentinels (HTML
+    # comments, invisible when rendered) so wrapup_recovery can inline the
+    # running-items list into the post-compact recovery block — losing
+    # "you left N background jobs running" across a compact is half the
+    # reported failure. Sentinels emitted only when bg is non-empty.
     out.append("## 6. Active monitorings to re-establish")
     out.append("")
     if bg:
+        out.append(_MONITORS_BEGIN)
         for x in bg:
             out.append(f"- {x}")
+        out.append(_MONITORS_END)
         out.append("")
     else:
         out.append("_(no Monitor / ScheduleWakeup / CronCreate / background Bash detected)_")
@@ -616,8 +745,29 @@ def synthesize_markdown(
     # 7 — Connection state (pods, hosts, URLs, IPs)
     out.append("## 7. Connection state (re-attach targets)")
     out.append("")
-    has_any = bool(ssh_hosts or endpoints["urls"] or endpoints["ips"]
-                   or endpoints["pod_ids"])
+    has_any = bool(reconnect or ssh_hosts or endpoints["urls"]
+                   or endpoints["ips"] or endpoints["pod_ids"])
+    # Reconnect commands first — the load-bearing bit for pods. Wrapped in
+    # HTML-comment sentinels so wrapup_recovery can lift the fenced block
+    # verbatim into the post-compact additionalContext. The sentinels are
+    # emitted ONLY when there's a connection, so a session with no remote
+    # work costs zero extra tokens downstream.
+    if reconnect:
+        out.append("**Reconnect commands** (initial + last known-good — "
+                   "best-effort, verify before trusting):")
+        out.append("")
+        out.append(_RECONNECT_BEGIN)
+        out.append("```")
+        if len(reconnect) == 1:
+            out.append(reconnect[0])
+        else:
+            out.append("# initial")
+            out.append(reconnect[0])
+            out.append("# last known-good")
+            out.append(reconnect[1])
+        out.append("```")
+        out.append(_RECONNECT_END)
+        out.append("")
     if endpoints["pod_ids"]:
         out.append("**Pod / instance hostnames:**")
         out.append("")

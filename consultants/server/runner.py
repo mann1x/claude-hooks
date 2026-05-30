@@ -427,6 +427,7 @@ def make_runner(*, ollama_base_url: str):
                 "total_completion_tokens") or 0),
             retries_by_role=dict(final_state.get(
                 "retries_by_role") or {}),
+            root_sid=getattr(state, "root_sid", None) or state.sid,
         )
         storage.write_consultation(result, cwd=Path(cwd))
 
@@ -883,6 +884,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
             retries_by_role=dict(final_state.get(
                 "retries_by_role") or {}),
             parent_sid=state.parent_sid,
+            root_sid=getattr(state, "root_sid", None) or state.sid,
         )
         storage.write_consultation(result, cwd=Path(cwd))
 
@@ -1207,6 +1209,7 @@ def _write_failed_artifacts(state, cwd: str, question: str,
         total_prompt_tokens=0,
         total_completion_tokens=0,
         retries_by_role={},
+        root_sid=getattr(state, "root_sid", None) or state.sid,
     )
     try:
         storage.write_consultation(result, cwd=Path(cwd))

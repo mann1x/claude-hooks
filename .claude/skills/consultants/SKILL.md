@@ -1,6 +1,6 @@
 ---
 name: consultants
-description: Multi-agent council engine (v2: planner → researcher → critic → synthesizer, plus opt-in tool_executor + coder; CitationLinter verifies every path:line). Default verb is `ask <question>` (also implicit — `/consultants <question>` works). Subcommands — `ask` runs a fresh council on a question; `followup [sid] <question>` iterates on a prior consult (warm reuse of plan/research/critic); `list` shows past sessions; `show <sid>` re-reads a stored summary; `config [args...]` walks the role/model/effort/service-mode dialog. Use when a question benefits from independent specialist agents working in parallel — design audits, release-notes validation, complex bug triage, refactor risk analysis. For single-shot questions use /get-advice instead.
+description: Multi-agent council engine (v2: planner → researcher → critic → synthesizer, plus opt-in tool_executor + coder; CitationLinter verifies every path:line). Default verb is `ask <question>` (also implicit — `/consultants <question>` works). Subcommands — `ask` runs a fresh council on a question; `followup [sid] <question>` iterates on a prior consult (warm reuse of plan/research/critic); `list` shows past sessions; `show <sid>` re-reads a stored summary; `accept <sid>` marks a consultancy reviewed/done; `config [args...]` walks the role/model/effort/service-mode/followup-limit dialog. After every council answer Claude runs a review loop (mirroring /get-advice): it critiques the result and either accepts it or auto-issues a bounded follow-up (capped by `max_followups`, default 4; asks you to allow more past the cap). Use when a question benefits from independent specialist agents working in parallel — design audits, release-notes validation, complex bug triage, refactor risk analysis. For single-shot questions use /get-advice instead.
 ---
 
 # /consultants — multi-agent council dispatcher
@@ -66,6 +66,7 @@ after `/consultants`:
 | `followup`   | followup   | Drop the verb; run **followup** flow on the rest.              |
 | `list`       | list       | Run **list** flow.                                             |
 | `show`       | show       | Drop the verb; the rest is the sid.                            |
+| `accept`     | accept     | Drop the verb; mark the consultancy (rest = sid) ACCEPTED.     |
 | `config`     | config     | Drop the verb; run **config** flow with the rest as sub-args.  |
 | anything else (incl. empty) | ask | Implicit ask: treat the **entire** arg as the question. |
 
@@ -79,6 +80,55 @@ Examples:
 - `/consultants show csl-2026-05-06-1730-3f9a` → **show**
 - `/consultants config` → **config** (no sub-args → walk the dialog)
 - `/consultants config set-effort high` → **config** with passthrough args
+
+---
+
+## How a consultation works
+
+Each `consult` starts a **council run** — one LangGraph invocation whose
+per-run `status` goes `running → completed | failed`. The chain rooted at
+the first `ask` (the `ask` itself + every `follow-up` chained on it) is
+the **consultancy**, with its own engine-owned, persisted lifecycle:
+
+> `in_progress` → *(council done)* `ready_to_review` → `accepted`
+> *(terminal)*. An auto-issued `follow-up` under the cap bounces back to
+> `in_progress`; hitting the cap (`max_followups`, default **4**) flips to
+> `awaiting_approval` until the user approves more rounds. The grant size
+> per approval is `allow_extra` (default **1**); both knobs are
+> configurable via `/consultants config` and the CLI.
+
+Every `status` / `result` / `follow-up` / `state` response carries the
+authoritative `consultancy` block — read this, don't infer:
+
+```json
+"consultancy": {"root_sid": "csl-…", "status": "ready_to_review",
+  "followup_count": 1, "max_followups": 4, "extra_granted": 0,
+  "effective_cap": 4}
+```
+
+**While the run is `running`, monitor progress on one of two channels**
+(step 4 of the [ask flow](#ask--run-a-fresh-council-consultation) shows
+both, with examples):
+
+- **`claude-consultants events <sid>`** — live **SSE stream** over the
+  engine's `GET /v1/consult/{sid}/events` endpoint. One JSON event per
+  role transition (`node_enter` / `node_exit`), LLM call (`llm_call`), or
+  tool call (`tool_call`) as it happens, ending with a **`complete`**
+  event carrying `{sid, status, final_answer_present}` — that's your
+  canonical "council is done" signal. Preferred for real-time visibility.
+  See the [events subsection](#events--live-monitor-sse-stream).
+- **`claude-consultants status <sid>`** — coarse poll (~10 s cadence).
+  Returns `{status, progress, consultancy, ...}`. Use when a periodic
+  "is it done yet?" check is all you need.
+
+**When the council finishes**, do NOT silently present the answer — the
+consultancy is in `ready_to_review`. Enter the [Review
+loop](#review-loop--mirror-get-advices-discuss-until-satisfied-flow):
+critique → `accept` (terminal) **or** auto-`follow-up`. At the cap
+(`awaiting_approval`) stop and ask the user; on "yes" re-issue the same
+follow-up with `--allow-extra 1` (the user never types the flag, the
+skill carries their approval). The lifecycle survives compaction —
+trust `consultancy.status` over your own memory of where you were.
 
 ---
 
@@ -150,22 +200,43 @@ Returns:
 Save the `sid`. Tell the user briefly you've kicked off the council
 and will surface progress.
 
-### 4. Poll status
+### 4. Monitor progress
+
+Two channels are available — pick one; the consultancy lifecycle is in
+the [overview](#how-a-consultation-works).
+
+**Live SSE stream — preferred for real-time visibility:**
+
+```
+claude-consultants events <sid>
+```
+
+Wraps `GET /v1/consult/{sid}/events`. Each role transition
+(`node_enter` / `node_exit`), LLM call (`llm_call`), and tool call
+(`tool_call`) lands as one JSON event as it happens, with a heartbeat
+every 15 s through quiet research rounds. The stream ends with a
+**`complete`** event carrying `{sid, status, final_answer_present}` —
+that's your trigger to move to step 5. Use `--since <event_id>` to
+resume from a known point (e.g. after a network blip or across a
+compaction boundary). The events subsection below has the wire format.
+
+**Coarse status poll — use when a periodic check is enough:**
 
 ```
 claude-consultants status <sid>
 ```
 
-Returns `{status, progress, duration_seconds, ...}`. States:
+Returns `{status, progress, consultancy, duration_seconds, ...}`.
+Cadence: **~10 s between polls**, no faster. States:
 
 - `running` — `progress` shows per-role state. Continue answering
   the user; the consultation runs in the background.
 - `completed` — move to step 5.
 - `failed` — `error` carries the detail; jump to failure handling.
 
-Cadence: ~10s between polls. Surface role transitions in plain
-language ("Planner done; researcher mid-investigation, 3 tool calls
-so far"). One update per visible transition, no spam.
+Either way, surface role transitions in plain language ("Planner done;
+researcher mid-investigation, 3 tool calls so far") — one line per
+visible transition, no spam.
 
 ### 5. Fetch the result
 
@@ -185,6 +256,13 @@ critic=kimi-k2.6:cloud synthesizer=kimi-k2.6:cloud
 The session is permanent at
 `.claude-hooks/consultants/<sid>/{summary,transcript,metadata}.*`
 and can be re-read via `/consultants show <sid>`.
+
+### 6. Review the answer — DON'T just move on
+
+When the council finishes, the consultancy enters **`ready_to_review`**
+and the answer is yours to judge — exactly like the back-and-forth you
+hold with the advisor in `/get-advice`. **Enter the [Review loop](#review-loop--mirror-get-advices-discuss-until-satisfied-flow)
+below** rather than silently accepting the first answer.
 
 ---
 
@@ -270,7 +348,128 @@ synthesizer=...
 
 Each follow-up is itself a permanent session and can be the parent
 of further follow-ups. Chains are intended for iterative refinement
-on a single deep topic.
+on a single deep topic. After printing a follow-up's answer, **re-enter
+the [Review loop](#review-loop--mirror-get-advices-discuss-until-satisfied-flow)** —
+a follow-up answer is reviewed exactly like a fresh one.
+
+---
+
+## Review loop — mirror /get-advice's discuss-until-satisfied flow
+
+This is the heart of the skill, and the part most easily skipped. In
+`/get-advice` you keep talking to the advisor until satisfied; do the
+same with the council. The **council** runs (its per-run `status` goes
+`running → completed`); the **consultancy** is the whole engagement and
+has its own status (`consultancy.status` in the `status` / `result` /
+`state` JSON): `in_progress → ready_to_review → accepted`, or
+`awaiting_approval` when the followup cap is hit.
+
+Every `status` / `result` / `follow-up` response now carries a
+`consultancy` block:
+
+```json
+"consultancy": {"root_sid": "csl-…", "status": "ready_to_review",
+  "followup_count": 1, "max_followups": 4, "extra_granted": 0,
+  "effective_cap": 4}
+```
+
+When a council answer arrives (`consultancy.status == "ready_to_review"`):
+
+### 1. Review the answer critically
+
+Read it as a skeptical engineer, not a stenographer. Look for:
+
+- **Wrong assumptions** about the project (it claims a file/flag/API that
+  doesn't exist, or contradicts how the repo actually works).
+- **Gaps** — an important sub-question went unanswered, or a
+  recommendation has no concrete "how".
+- **Important advice worth verifying** — a `path:line` claim you can
+  cheaply check, a risky suggestion that needs a second pass.
+
+If you have no material concern, the answer is good enough → **accept**.
+
+### 2. Decide: accept or follow up
+
+**Satisfied →** mark it accepted (terminal) and report:
+
+```
+claude-consultants accept <sid>
+```
+
+Then present `summary_markdown` to the user as the final answer.
+
+**Not satisfied, and `followup_count < effective_cap` →** post a
+**one-line rationale** (so the user can interrupt), then auto-issue a
+focused follow-up and loop back to step 1:
+
+> Council assumes the daemon reads `~/.claude.json`, but this repo uses
+> `config/claude-hooks.json` → follow-up 2/4 to re-ground that claim.
+
+```
+claude-consultants follow-up <sid> --message "<specific clarifying question>" --cwd "$(pwd)"
+```
+
+Poll `status <new_sid>` to `completed`, fetch `result <new_sid>`, and
+**return to step 1** on the new answer. Do this WITHOUT asking the user
+each round — that's the whole point of the bounded auto-loop.
+
+**Not satisfied, and the cap is reached →** the follow-up call returns
+`{"ok": false, "reason": "followup_limit_reached", ...}` (and
+`consultancy.status` is `awaiting_approval`). **STOP the auto-loop and
+ask the user.** Present:
+
+- the remaining concern(s), concretely;
+- why another round is warranted (what you expect it to resolve);
+- the count so far (e.g. "4/4 followups used").
+
+If the user approves, re-issue the same follow-up with the approval
+carrier — you never need the user to type a flag; their "yes" is the
+trigger:
+
+```
+claude-consultants follow-up <sid> --message "<question>" --cwd "$(pwd)" --allow-extra 1
+```
+
+(`--allow-extra N` raises the cap by N for THIS consultancy only — no
+config change. Bare `--allow-extra` / `--force` uses the configured
+`allow_extra` default.) Then continue the loop. If the user declines,
+`accept` the best answer so far and report.
+
+### 3. Stop conditions (mirror /get-advice)
+
+Stop the loop when **any** of:
+
+- You accepted (`accept` succeeded) — the answer is good enough.
+- The cap was reached and the user declined more rounds.
+- **Diminishing returns** — two consecutive follow-ups produced no
+  material improvement. Accept the best answer and note the plateau.
+
+### 4. Compaction survival
+
+If your context was compacted mid-loop, on re-entry **read
+`claude-consultants status <root_sid>` first** and branch on
+`consultancy.status`:
+
+- `accepted` → already done; don't re-run.
+- `ready_to_review` / `in_progress` → resume the loop from step 1 on the
+  latest session.
+- `awaiting_approval` → you were waiting on the user; re-present the
+  concern and ask.
+
+The status is engine-owned and persisted, so it's authoritative across
+the compaction boundary — trust it over your own memory of where you were.
+
+---
+
+## accept — mark a consultancy accepted
+
+```
+claude-consultants accept <sid> [--note "..."] --cwd "$(pwd)"
+```
+
+Sets the consultancy (resolved to its root) to the terminal `accepted`
+state. Normally the Review loop calls this for you; a user can also
+invoke it directly to close out a consultancy. Idempotent.
 
 ---
 
@@ -348,6 +547,7 @@ Service mode: smart-start (idle 30 min)   |   always-on
 Endpoint: http://127.0.0.1:38096
 Effort: xhigh (budget 5, multi-model active)
 Topology: council
+Review loop: max_followups=4, allow_extra=1
 
 Roles:
   planner       ENABLED   model=kimi-k2.6:cloud         ctx=auto
@@ -376,7 +576,9 @@ per-language entry the same way. The routes only matter when
 
 ### 2. Top-level menu (loop until Done)
 
-AskUserQuestion (single-select, max 4):
+The menu has five areas; AskUserQuestion caps at 4 options, so present
+it in two rounds — round 1 offers the first three plus **More…**, and
+**More…** opens round 2 with the rest plus **Done**:
 
 1. **Edit a role** — toggle on/off, model, ctx, extras
 2. **Change service mode** — always-on or smart-start
@@ -384,10 +586,10 @@ AskUserQuestion (single-select, max 4):
    variants for multi-model fan-out
 4. **Coder routing** — per-language model selection (primary +
    fallback) for the optional coder role
+5. **Followup limit** — the review-loop cap (`max_followups`) and the
+   per-approval grant size (`allow_extra`) — see Subflow F
 
-(Loop until the user picks **Done** — offer that as a 4th option
-in a follow-up question after each round if the menu hits the 4-
-option cap.) Loop back to step 1 after each successful change.
+Loop back to step 1 after each successful change; exit on **Done**.
 
 ### Subflow A — Edit a role
 
@@ -512,6 +714,24 @@ When the user picks **"4. Coder routing"** from the top-level menu:
 > retry — it only fills in when a language has no per-language
 > entry.
 
+### Subflow F — Followup limit (review loop)
+
+When the user picks **"5. Followup limit"**:
+
+1. Show the current values from `config show` (`max_followups`,
+   `allow_extra`).
+2. AskUserQuestion which to change: **Max followups** / **Allow-extra
+   grant** / **Back**.
+   - **Max followups** — the cap on auto-issued followups before the
+     skill must stop and ask you (default 4; 0 means the first followup
+     already needs approval). Ask for the integer, then forward:
+     `claude-consultants config set-max-followups <N>`.
+   - **Allow-extra grant** — how many extra followups each over-cap
+     approval adds for a consultancy (default 1, must be ≥ 1). Ask for
+     the integer, then forward:
+     `claude-consultants config set-allow-extra <N>`.
+3. Loop back to step 1 after a successful change.
+
 ### After every change
 
 Re-run `config show` and re-render the status block. Return to
@@ -574,13 +794,20 @@ per role via the same dialog.
 
 ## Autonomous control (in-flight consultation)
 
-The v2 engine exposes seven HTTP routes + matching CLI subcommands
-for **mid-flight** session control. Use these when the user wants
-to nudge a running consultation rather than start over. All seven
-verbs operate on the session's ``sid`` and return JSON. The CLI
-calls are thin wrappers around the HTTP endpoints — choose
-whichever fits the surrounding context. Defaults to silent — do
-NOT poll-spam these; use only when the user's request implies it.
+The v2 engine exposes seven HTTP routes + matching CLI subcommands.
+All seven operate on the session's ``sid`` and return JSON. The CLI
+calls are thin wrappers around the HTTP endpoints — choose whichever
+fits the surrounding context. The verbs split into two buckets:
+
+- **Monitor channels** (free to use while a consultation is running):
+  ``events`` (live SSE stream — preferred for real-time visibility,
+  detailed below), ``status`` (coarse poll, covered in the ask flow),
+  ``state`` (one-shot structured snapshot, below).
+- **Intervention verbs** (use only when the user's current turn
+  implies a mid-flight nudge): ``inject`` / ``control`` / ``pause`` /
+  ``resume`` / ``cancel``. Defaults to silent — do NOT call these to
+  "check in" on a running session; that's what the monitor channels
+  are for.
 
 ### state — peek live state
 
@@ -653,18 +880,40 @@ Cooperative drain. ``--discard-partial`` also deletes the
 checkpointer file. Use when the user has changed their mind about
 the question. Idempotent on completed sessions (200, no-op).
 
-### events — tail the SSE stream
+### events — live monitor (SSE stream)
+
+This is the **engine's real-time monitor channel** — the canonical way
+to watch a running consultation. CLI wrapper for the engine's
+``GET /v1/consult/{sid}/events`` endpoint:
 
 ```
 claude-consultants events <sid>
 claude-consultants events <sid> --since 47
 ```
 
-Tail the recorder's ``runtime_events`` table as Server-Sent
-Events. ``--since`` replays from a known event_id (useful when
-reconnecting after a network blip). Each event lands as one JSON
-line on stdout. Heartbeats every 15 s keep the connection alive
-through quiet research rounds.
+Each event is one SSE block on stdout:
+
+```
+id: 12
+event: node_enter
+data: {"kind":"node_enter","role":"researcher","round":1,"lane_idx":0}
+```
+
+Event types: ``node_enter`` / ``node_exit`` (role transitions),
+``llm_call`` (each model call, with ``duration_ms``), ``tool_call``
+(each tool invocation, with ``duration_ms``), heartbeat (emitted every
+15 s through quiet rounds so the connection stays alive), and finally
+**``complete``** at session end with
+``{"sid": "...", "status": "completed|failed|...", "final_answer_present":
+true|false}`` — that's the canonical "council is done" signal, so the
+consumer is notified without having to ``/state``-poll.
+
+``--since <event_id>`` (sent as ``Last-Event-ID``) replays the stream
+from a known point — useful when reconnecting after a network blip or
+across a compaction boundary. The CLI prints one block per event; you
+can also hit the HTTP endpoint directly (``curl -N
+$endpoint/v1/consult/<sid>/events``) when you want to consume it
+without the CLI wrapper.
 
 ### When to autonomously call these
 
@@ -680,8 +929,9 @@ mid-flight intervention.** Examples:
 - User says "show me what the council has so far" → ``state``;
   pretty-print the partial_synthesis + research[].
 
-Don't call these to "check in" on a running session — the
-``ask``-flow's normal status poll already does that.
+Routine progress monitoring is the monitor channels' job (``events``
+stream from the ask flow above, or ``status`` poll, or ``state``
+snapshot) — not these intervention verbs.
 
 ---
 

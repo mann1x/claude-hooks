@@ -14,6 +14,159 @@ release with the auto-generated source archive
 (`claude-hooks-X.Y.Z.zip` / `.tar.gz`). See
 [`docs/RELEASING.md`](docs/RELEASING.md) for the cut procedure.
 
+## [Unreleased]
+
+### Added
+
+- **`/consultants` review loop — Claude now critiques a council answer
+  and iterates, mirroring `/get-advice`'s discuss-until-satisfied flow.**
+  Previously the skill accepted the first council result and moved on
+  unless the user explicitly typed `followup`. A new engine-owned
+  *consultancy* status machine sits above the per-run status
+  (`running|completed|failed`): a fresh `ask` opens a consultancy
+  (`in_progress`), a completed run flips it to `ready_to_review`, and
+  the skill either marks it `accepted` (new `claude-consultants accept
+  <sid>` verb + `POST /v1/consult/{sid}/accept`) or auto-issues a
+  focused follow-up and loops. The loop is bounded by a flat,
+  effort-independent **`max_followups`** cap (default **4**, enforced
+  server-side); a follow-up past the cap is refused with a structured
+  `{"ok": false, "reason": "followup_limit_reached"}` and the
+  consultancy enters `awaiting_approval`. The skill then asks the user,
+  who approves conversationally; Claude re-issues the follow-up with the
+  approval carrier `--allow-extra N` (`--force` = the configured
+  default), which raises the cap by `N` for that consultancy only — no
+  persisted config change. `--allow-extra` is also the escape hatch for
+  non-Claude-Code/scripted callers. Two new config knobs, settable from
+  both the `/consultants config` menu (**Followup limit**) and the CLI
+  (`config set-max-followups`, `config set-allow-extra`): `max_followups`
+  (cap, ≥ 0) and `allow_extra` (per-approval grant size, ≥ 1).
+  Consultancy state is persisted to `consultancy.json` in the root
+  session dir (and `root_sid` to `metadata.json`) so the status is
+  queryable (it rides every `status`/`result`/`state`/`follow-up`
+  response under a `consultancy` block) and survives idle reap, daemon
+  restart, and context compaction — the skill resumes the loop by
+  reading the persisted status. The council graph is unchanged; this is
+  a layer above it. The default cap of 4 is a deliberate default-behavior
+  change (followups were previously unbounded) — the M12 parity baseline
+  records the new default and `tests/test_consultants_review_loop.py`
+  gates the end-to-end behavior. `install.py` gains an optional prompt to
+  tune `max_followups` / `allow_extra` at install time.
+
+- **install.py allow-lists the memory/KG MCP servers so memory writes
+  stop being blocked by the auto-mode permission classifier.** In
+  `auto` permission-mode Claude Code routes any tool not matched by a
+  static `permissions.allow` rule through a safety classifier (an LLM
+  call to api.anthropic.com); the memory/KG tools are *writes*, so the
+  classifier gated every store/KG mutation — and blocked them outright
+  (`"temporarily unavailable, auto mode cannot determine safety"`)
+  whenever that upstream was flapping. The installer now adds wildcard
+  allow-rules for all memory backends —
+  `mcp__pgvector__*`, `mcp__sqlite_vec__*`, `mcp__qdrant__*`,
+  `mcp__memory_kg__*`, `mcp__memory__*` — to `~/.claude/settings.json`
+  `permissions.allow` during a normal install, making recall/store
+  auto-approve deterministically (rule precedence is deny → ask →
+  allow) without the classifier. Injection is additive, idempotent and
+  backed-up (`_ensure_memory_allow_rules`); `uninstall` removes exactly
+  those wildcard rules and leaves any hand-added entries alone. New
+  `install.py --sync-permissions` flag (re)applies only these rules and
+  exits — no provider probing, hook rewrite, or dialog — so an
+  already-installed host can be brought up to date safely. The
+  `memory_kg` provider is covered under both its canonical key and the
+  `memory` key `mcp-server-memory` conventionally registers under.
+
+### Fixed
+
+- **Test isolation: config tests could write to the real `~/.claude` on
+  Windows, contaminating each other and clobbering the dev's live config
+  on the Windows bench.** The home-isolation pytest fixtures
+  (`isolated_home` / `tmp_claude_home`) set only `$HOME`, which is a
+  silent no-op on Windows — `pathlib.Path.home()` / `ntpath.expanduser`
+  consult `%USERPROFILE%` (then `%HOMEDRIVE%%HOMEPATH%`), never `$HOME`.
+  So `consultants.config.save_config(scope="user")` wrote to the real
+  home, producing deterministic within-class contamination
+  (`TestSetStoreDistillation::test_fallback_chain_add_remove_clear`).
+  Centralized into one cross-platform helper,
+  `tests/conftest.redirect_home`, which sets `HOME` + `USERPROFILE` +
+  `HOMEDRIVE` + `HOMEPATH` together; the per-file HOME-only copies were
+  removed in favor of the shared conftest fixtures. Proof: the bench's
+  real config is SHA256 byte-identical before/after running the config
+  suite. (`bug-635`)
+- **sqlite_vec: a second table on a db already migrated to the latest
+  schema was never created → `no such table` at insert.**
+  `migrate_schema()` gated all work behind a db-**wide** schema version
+  (`if current >= LATEST_VERSION: return`), but tables are per-name. Once
+  the first table carried a db file to LATEST, any later provider opening
+  the same file with a different `table` early-returned before its
+  `CREATE TABLE` ran. Latent in production (one table per db) but real,
+  and it broke the sqlite_vec integration tests whenever Ollama was
+  reachable (they share one db across tables). Now, at LATEST, the
+  requested table family is still ensured idempotently (new
+  `_table_exists` guard) while the common single-table case keeps its
+  zero-work fast return — the sqlite analog of the pgvector
+  "split create from migrate" fix.
+- **PreCompact: the wrap-up summary was never written for long-lived
+  sessions, losing open + running items across a compact.**
+  `wrapup_synth.read_transcript()` loaded the **entire** transcript into
+  memory on every compaction. A multi-day session's transcript grew to
+  581 MB / 184 k messages; under that session's heavy load the read +
+  synthesis exceeded the 20 s PreCompact hook timeout, so Claude Code
+  killed the hook before `write_to_disk` ran — no wrap-up file existed
+  and the post-compact recovery had nothing to surface (the reported
+  "forgot the open and running items after context compact"). The read
+  is now bounded to a trailing window (default 24 MB, configurable via
+  `hooks.pre_compact.max_transcript_mb`; `0` disables the cap). The
+  transcript is append-only, so the tail holds the recent working
+  window; synthesis now completes in ~0.3 s on the 581 MB case instead
+  of timing out. (`bug-625`)
+- **stop_guard: stall check no longer false-positives on background
+  status prose.** A commitment phrase preceded by a copula
+  ("`CD-IQ4_K_M is building now`") is a third-person status report about
+  a background process, not a first-person commitment to call a tool. A
+  new copula guard (`_commitment_hit` in `claude_hooks/stop_guard.py`)
+  discards copula-preceded matches; a genuine first-person commitment in
+  the same tail still fires.
+
+### Changed
+
+- **HyDE: raised the recall hook caps so the local fallback gets its full
+  cold-start window when the cloud primary stalls.** The expansion runs a
+  sequential primary→fallback chain (`gemma4:31b-cloud` then a local model),
+  each call getting the full per-model `hyde_timeout` (30 s) — but the
+  `UserPromptSubmit` (15 s) and `SessionStart` (5 s) hook caps were SIGTERMing
+  the hook before the fallback could run, yielding `all models failed` even when
+  the local model was healthy (a cold start needs well over 10 s). Both caps are
+  now **65 s** (`= hyde_timeout × 2 + recall overhead`) in `install.py`'s
+  `HOOK_TEMPLATE`; the warm/cache path is unchanged (returns in ~0–4 s, the long
+  cap only bites on a genuine cloud stall). See
+  [`docs/hyde.md`](docs/hyde.md) "Hook cap must cover the whole chain".
+- **stop_guard: a genuine trailing question now backs the guard off.**
+  When the assistant's turn ends with a question (`?`), both the
+  stall-after-commitment check AND the permission-seeking prose patterns
+  ("should I continue?") are suppressed — forcing the model past a real
+  question is the unsafe choice and conflicts with "confirm before
+  destruction". Ownership-dodging / session-quitting nudges are
+  unaffected. New `suppress_on_trailing_question` flag (default true)
+  under `hooks.stop_guard`.
+- **wrap-up / PreCompact: full reconnect commands preserved across a
+  compact.** `wrapup_synth` now captures the **entire** `ssh` invocation
+  (port, user, key, `-L`/`-R` tunnels) and records both the **initial**
+  and **last-known-good** connection (vast.ai / RunPod use case, where
+  the port is mandatory and was previously dropped). The reconnect
+  block is wrapped in machine-extractable sentinels and **inlined** into
+  the post-compact recovery context by `wrapup_recovery` — surviving
+  even if the model never opens the wrap-up file. Costs zero extra
+  tokens when the session touched no remote hosts. The `/wrapup` skill
+  §7 now instructs the model to preserve the same.
+- **wrap-up / PreCompact: active background jobs now survive a compact
+  inline too.** Section 6's running-items list (Monitor / ScheduleWakeup
+  / CronCreate / background Bash) is wrapped in machine-extractable
+  sentinels and **inlined** into the post-compact recovery block by
+  `wrapup_recovery` (capped at 10 lines, `+N more` pointer for the
+  rest), mirroring the reconnect-command preservation above. Losing
+  "you left N background jobs running" across a compaction boundary was
+  half the `bug-625` failure. Sentinel-gated, so zero extra tokens when
+  no background work was running.
+
 ## [1.11.1] — 2026-05-24
 
 PATCH. **Version-banner fix.** The Stop hook's update-check on a

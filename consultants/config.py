@@ -126,6 +126,12 @@ def extras_active(effort: str) -> bool:
         "low", "medium", "high", "max"
     )
 
+# Consultancy review-loop knobs (flat, effort-independent). The cap
+# is enforced server-side; ``allow_extra`` is the grant size each user
+# approval adds when the cap is reached.
+DEFAULT_MAX_FOLLOWUPS = 4
+DEFAULT_ALLOW_EXTRA = 1
+
 DEFAULT_HTTP_PORT = 38095
 DEFAULT_MODEL = "kimi-k2.6:cloud"
 
@@ -626,6 +632,15 @@ class CoderLimitsConfig:
 class ConsultantsConfig:
     topology: str = DEFAULT_TOPOLOGY
     effort: str = DEFAULT_EFFORT
+    # Consultancy review loop (mirrors /get-advice's discuss-until-
+    # satisfied flow). ``max_followups`` caps how many followups Claude
+    # may auto-issue to the council within one consultancy before it
+    # must stop and ask the user; ``allow_extra`` is how many additional
+    # followups each user approval grants (the per-call ``--allow-extra``
+    # flag overrides this). Both are flat (effort-independent) and the
+    # cap is enforced server-side.
+    max_followups: int = DEFAULT_MAX_FOLLOWUPS
+    allow_extra: int = DEFAULT_ALLOW_EXTRA
     service: ServiceConfig = field(default_factory=ServiceConfig)
     checkpointer: CheckpointerConfig = field(default_factory=CheckpointerConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
@@ -791,6 +806,17 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
         base.topology = raw["topology"]
     if isinstance(raw.get("effort"), str) and raw["effort"] in EFFORT_BUDGETS:
         base.effort = raw["effort"]
+    # Consultancy review-loop knobs. ``max_followups`` accepts >= 0
+    # (0 = the very first followup needs approval); ``allow_extra``
+    # accepts >= 1 (granting 0 extra rounds would make approval inert).
+    if "max_followups" in raw:
+        v = raw["max_followups"]
+        if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+            base.max_followups = v
+    if "allow_extra" in raw:
+        v = raw["allow_extra"]
+        if isinstance(v, int) and not isinstance(v, bool) and v >= 1:
+            base.allow_extra = v
 
     # service
     svc = raw.get("service") or {}
@@ -1025,6 +1051,11 @@ def _render(cfg: ConsultantsConfig) -> str:
     L.append("")
     L.append(f"topology = {_toml_str(cfg.topology)}")
     L.append(f"effort = {_toml_str(cfg.effort)}")
+    L.append("# Consultancy review loop: max_followups caps auto-issued "
+             "followups before Claude must ask the user; allow_extra is "
+             "the grant size per approval.")
+    L.append(f"max_followups = {cfg.max_followups}")
+    L.append(f"allow_extra = {cfg.allow_extra}")
     L.append("")
     L.append("[service]")
     L.append(f"mode = {_toml_str(cfg.service.mode)}")
@@ -1560,6 +1591,28 @@ def set_topology(topology: str, *, scope: str = "user",
         )
     cfg = load_config(cwd if scope != "user" else None)
     cfg.topology = topology
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_max_followups(value: int, *, scope: str = "user",
+                      cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set the consultancy followup cap (>= 0). 0 means the first
+    followup already needs user approval."""
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError("max_followups must be an integer >= 0")
+    cfg = load_config(cwd if scope != "user" else None)
+    cfg.max_followups = value
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_allow_extra(value: int, *, scope: str = "user",
+                    cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set the per-approval grant size (>= 1) — how many extra
+    followups each user approval adds to the cap for that consultancy."""
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError("allow_extra must be an integer >= 1")
+    cfg = load_config(cwd if scope != "user" else None)
+    cfg.allow_extra = value
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 

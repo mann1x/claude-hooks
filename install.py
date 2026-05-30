@@ -240,7 +240,13 @@ HOOK_TEMPLATE = {
                 {
                     "type": "command",
                     "command": "{cmd} UserPromptSubmit",
-                    "timeout": 15,
+                    # Cap must be >= hyde_timeout * 2 + recall overhead so the
+                    # sequential HyDE primary->fallback chain (gemma4:31b-cloud
+                    # then a local cold-start) each get their full ~30 s window.
+                    # A tighter cap (was 15 s) SIGTERMs the hook before the
+                    # fallback can run, yielding "all models failed". See
+                    # claude_hooks/hyde.py + hooks.user_prompt_submit.hyde_timeout.
+                    "timeout": 65,
                     "_managedBy": MANAGED_BY,
                 }
             ],
@@ -253,7 +259,11 @@ HOOK_TEMPLATE = {
                 {
                     "type": "command",
                     "command": "{cmd} SessionStart",
-                    "timeout": 5,
+                    # source=="compact" runs the same run_recall -> HyDE chain
+                    # (claude_hooks/hooks/session_start.py), so it needs the same
+                    # primary 30 s + fallback 30 s + overhead budget as
+                    # UserPromptSubmit. Was 5 s, which strangled the fallback.
+                    "timeout": 65,
                     "_managedBy": MANAGED_BY,
                 }
             ],
@@ -6096,6 +6106,21 @@ def _install_consultants(cfg: dict, cfg_path: Path, *,
               f"without an embedder — store calls will fail until "
               f"you hand-edit ~/.claude/consultants-config.toml.")
 
+    # Consultancy review loop (mirrors /get-advice): optionally tune
+    # the followup cap + per-approval grant size at install time. The
+    # defaults (max_followups=4, allow_extra=1) are sensible, so this
+    # is a no-op on non-interactive runs and on a plain Enter.
+    try:
+        _setup_consultants_review_loop(
+            consultants_py=consultants_py,
+            non_interactive=non_interactive, dry_run=dry_run,
+        )
+    except Exception as e:
+        print(f"    [warn] consultants review-loop config setup "
+              f"failed: {e}; defaults (max_followups=4, "
+              f"allow_extra=1) stand. Tune later with "
+              f"`claude-consultants config set-max-followups`.")
+
     # Platform autostart.
     if platform.system() == "Linux":
         if service_mode == "always-on":
@@ -7202,6 +7227,84 @@ def _setup_consultants_store(cfg: dict, *, consultants_py: Path,
     print(f"      written  -> {path}")
 
 
+def _setup_consultants_review_loop(*, consultants_py: Path,
+                                   non_interactive: bool,
+                                   dry_run: bool) -> None:
+    """Optionally tune the consultancy review-loop knobs at install
+    time: ``max_followups`` (the auto-followup cap) and ``allow_extra``
+    (per-approval grant size). Defaults (4 / 1) are sensible, so a
+    non-interactive run is a no-op and a plain Enter keeps the current
+    value. Prompt defaults are read from the live config so a scripted
+    re-run never silently flips them.
+    """
+    if non_interactive:
+        return
+    # Read current values via the consultants-env python so the prompt
+    # defaults reflect the actual merged config (not hardcoded).
+    cur_max, cur_extra = 4, 1
+    try:
+        proc = subprocess.run(
+            [str(consultants_py), "-c",
+             "from consultants import config as cc; "
+             "c = cc.load_config(); "
+             "print(c.max_followups, c.allow_extra)"],
+            capture_output=True, text=True,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            parts = proc.stdout.split()
+            cur_max, cur_extra = int(parts[0]), int(parts[1])
+    except Exception:
+        pass  # fall back to the documented defaults
+
+    ans = input(
+        "    Tune the consultancy review-loop cap now? "
+        "(defaults are sensible; say n to skip) [y/N]: "
+    ).strip().lower()
+    if ans not in ("y", "yes"):
+        return
+
+    new_max, new_extra = cur_max, cur_extra
+    changed_max, val = _ask_optional_int(
+        "Max auto-followups before asking you (>=0)", default=cur_max)
+    if changed_max and val is not None and val >= 0:
+        new_max = int(val)
+    elif changed_max:
+        print("    [warn] max_followups must be >= 0 — kept current")
+    changed_extra, val = _ask_optional_int(
+        "Extra followups granted per approval (>=1)", default=cur_extra)
+    if changed_extra and val is not None and val >= 1:
+        new_extra = int(val)
+    elif changed_extra:
+        print("    [warn] allow_extra must be >= 1 — kept current")
+
+    if new_max == cur_max and new_extra == cur_extra:
+        return  # nothing to write
+    if dry_run:
+        print(f"    [dry-run] Would set max_followups={new_max}, "
+              f"allow_extra={new_extra}")
+        return
+    payload = {"max_followups": new_max, "allow_extra": new_extra}
+    helper = (
+        "import json, sys\n"
+        "p = json.loads(sys.stdin.read())\n"
+        "from consultants import config as cc\n"
+        "cc.set_max_followups(int(p['max_followups']))\n"
+        "path = cc.set_allow_extra(int(p['allow_extra']))\n"
+        "from consultants.config import user_config_path\n"
+        "print(str(user_config_path()))\n"
+    )
+    proc = subprocess.run(
+        [str(consultants_py), "-c", helper],
+        input=json.dumps(payload), capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        print("    [warn] consultants review-loop config write failed:")
+        print(f"           {proc.stderr.strip()[-300:]}")
+        return
+    print(f"    Consultancy review loop: max_followups={new_max}, "
+          f"allow_extra={new_extra}")
+
+
 def _wait_for_consultants_health(port: int, *,
                                  timeout: float = 30.0) -> bool:
     """Poll ``http://127.0.0.1:<port>/v1/health`` until it returns
@@ -7583,6 +7686,16 @@ def main() -> int:
     )
     ap.add_argument("--uninstall", action="store_true", help="remove claude-hooks from settings.json")
     ap.add_argument(
+        "--sync-permissions", action="store_true",
+        help="only (re)apply the memory/KG MCP allow-rules "
+             "(mcp__pgvector__* / mcp__sqlite_vec__* / mcp__qdrant__* / "
+             "mcp__memory_kg__* / mcp__memory__*) to settings.json "
+             "permissions.allow, then exit. Additive, idempotent, "
+             "backed-up -- no provider probing, no hook rewrite, no "
+             "dialog. Grants memory recall/store classifier-free on an "
+             "already-installed host.",
+    )
+    ap.add_argument(
         "--rewire", action="store_true",
         help="override hook-path drift detection (v1.5.1+) and rewrite "
              "existing hook entries to this install.py's repo path. Without "
@@ -7614,6 +7727,15 @@ def main() -> int:
 
     if args.uninstall:
         return uninstall(dry_run=args.dry_run)
+
+    if args.sync_permissions:
+        settings_path = user_settings_path()
+        print(f"==> Syncing memory/KG MCP allow-rules in {settings_path}")
+        added = _ensure_memory_allow_rules(settings_path, dry_run=args.dry_run)
+        verb = "would add" if args.dry_run else "added"
+        print(f"  {verb} {len(added)} rule(s); "
+              f"{len(MEMORY_ALLOW_RULES)} total in the memory allow-set.")
+        return 0
 
     print("==> claude-hooks installer\n")
 
@@ -7880,6 +8002,11 @@ def main() -> int:
         rewire=bool(getattr(args, "rewire", False)),
     )
 
+    # Memory/KG MCP allow-rules: keep memory recall/store out of the
+    # auto-mode safety classifier so writes never block (see
+    # _ensure_memory_allow_rules). Additive + idempotent + backed-up.
+    _ensure_memory_allow_rules(settings_path, dry_run=args.dry_run)
+
     # PATH-friendly wrappers for every bin/* shim. Required so skills
     # that invoke the CLIs by bare name (claude-consultants,
     # claude-advisor, ...) resolve from Claude Code's bash subprocess
@@ -8014,6 +8141,83 @@ def user_settings_path() -> Path:
     return Path(os.path.expanduser("~/.claude/settings.json"))
 
 
+# --------------------------------------------------------------------- #
+# Memory/KG MCP allow-rules (v1.11.2+)
+# --------------------------------------------------------------------- #
+#
+# In `auto` permission-mode, Claude Code routes any tool call NOT matched
+# by a static `permissions.allow` rule through a safety classifier -- an
+# LLM call to api.anthropic.com. The memory/KG MCP tools are *writes*, so
+# the classifier gates every store/KG mutation; worse, when that same
+# upstream is flapping the classifier can't render a verdict and the write
+# is blocked outright ("temporarily unavailable, auto mode cannot
+# determine safety"). Allow-listing the memory servers makes recall/store
+# auto-approve deterministically (rule precedence is deny -> ask -> allow),
+# bypassing the classifier entirely. The `mcp__<server>__*` wildcard covers
+# every current and future tool on each store.
+#
+# Keys are the `~/.claude.json` mcpServers keys claude-hooks uses per
+# backend: `pgvector` + `sqlite_vec` are registered by the installer under
+# exactly those keys; `qdrant` + `memory_kg` are the canonical provider
+# server_keys (see `_validate_qdrant_embedding` /
+# `_validate_memory_kg_embedding`). `memory` is also covered because
+# `mcp-server-memory` conventionally registers under that key -- which is
+# precisely why the memory_kg provider's own NAME_KEYWORDS match "memory".
+MEMORY_MCP_SERVER_KEYS = (
+    "pgvector", "sqlite_vec", "qdrant", "memory_kg", "memory",
+)
+MEMORY_ALLOW_RULES = tuple(f"mcp__{k}__*" for k in MEMORY_MCP_SERVER_KEYS)
+
+
+def _ensure_memory_allow_rules(
+    settings_path: Path, *, dry_run: bool = False, _print: bool = True,
+) -> list[str]:
+    """Idempotently add the memory/KG MCP allow-rules to
+    ``permissions.allow`` in ``settings.json``.
+
+    Auto permission-mode sends any tool not matched by a static allow
+    rule to the safety classifier; memory writes get blocked there (and
+    stall entirely when the api.anthropic.com upstream the classifier
+    itself rides is flapping). Allow-listing ``mcp__<server>__*`` for
+    each memory backend (:data:`MEMORY_ALLOW_RULES`) makes recall/store
+    auto-approve without the classifier.
+
+    Additive only -- never removes or reorders existing entries, backs
+    the file up first (via :func:`_backed_up_save_json`), and is a no-op
+    when every rule is already present. Returns the list of rules
+    actually added (empty when none / dry-run preview).
+    """
+    settings = _load_json(settings_path) if settings_path.exists() else {}
+    perms = settings.setdefault("permissions", {})
+    if not isinstance(perms, dict):
+        settings["permissions"] = perms = {}
+    allow = perms.setdefault("allow", [])
+    if not isinstance(allow, list):
+        perms["allow"] = allow = []
+
+    existing = set(allow)
+    missing = [r for r in MEMORY_ALLOW_RULES if r not in existing]
+    if not missing:
+        if _print:
+            print(f"  · {settings_path}: memory allow-rules already present, no change")
+        return []
+    if dry_run:
+        if _print:
+            print(f"  [dry-run] would add to {settings_path} permissions.allow:")
+            for r in missing:
+                print(f"    {r}")
+        return missing
+
+    allow.extend(missing)
+    bak = _backed_up_save_json(settings_path, settings, reason="memory-allowlist")
+    if _print:
+        print(f"  + {settings_path}: added {len(missing)} memory allow-rule(s): "
+              + ", ".join(missing))
+        if bak is not None:
+            print(f"    backup: {bak}")
+    return missing
+
+
 def install_hooks(
     settings_path: Path,
     *,
@@ -8139,6 +8343,17 @@ def uninstall(*, dry_run: bool) -> int:
         else:
             del hooks[event]
     print(f"  Removed {removed} claude-hooks entries from {settings_path}")
+    # Drop the memory/KG MCP allow-rules we added (v1.11.2+). Only our
+    # exact wildcard entries are removed; any hand-added memory rules
+    # (e.g. per-tool grants) are left untouched.
+    perms = settings.get("permissions")
+    if isinstance(perms, dict) and isinstance(perms.get("allow"), list):
+        ours = set(MEMORY_ALLOW_RULES)
+        kept = [r for r in perms["allow"] if r not in ours]
+        dropped = len(perms["allow"]) - len(kept)
+        if dropped:
+            perms["allow"] = kept
+            print(f"  Removed {dropped} memory allow-rule(s) from {settings_path}")
     # Remove any bin/* wrappers we previously installed. Tagged-only --
     # hand-rolled wrappers under the same name are left alone.
     wrappers_removed = _remove_bin_shim_wrappers(dry_run=dry_run)

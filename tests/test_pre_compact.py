@@ -562,5 +562,102 @@ class ResilienceTests(unittest.TestCase):
             self.assertIsNone(out)
 
 
+class BoundedTranscriptReadTests(unittest.TestCase):
+    """bug-625: read_transcript must bound how much of a huge transcript
+    it loads, so PreCompact synthesis can't blow the hook timeout on a
+    long-lived session (the 581 MB backup_models case)."""
+
+    def _make_big_jsonl(self, path: Path, n: int) -> None:
+        # Each record is a distinct, identifiable user message so we can
+        # assert exactly which ones survived a tail read.
+        with open(path, "w", encoding="utf-8") as f:
+            for i in range(n):
+                rec = _user_msg(f"line-{i:06d}-" + "x" * 200)
+                f.write(json.dumps(rec) + "\n")
+
+    def test_small_file_reads_whole(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tp = Path(tmp) / "t.jsonl"
+            self._make_big_jsonl(tp, 50)
+            msgs = ws.read_transcript(str(tp))  # default 24MB cap
+            self.assertEqual(len(msgs), 50)
+
+    def test_large_file_reads_only_tail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tp = Path(tmp) / "big.jsonl"
+            # ~250 bytes/line; 20000 lines ≈ 5 MB. Cap at 1 MB → tail only.
+            self._make_big_jsonl(tp, 20000)
+            cap = 1 * 1024 * 1024
+            msgs = ws.read_transcript(str(tp), max_bytes=cap)
+            # Far fewer than all 20000, and the LAST line must be present
+            # (tail), while the FIRST must be gone (truncated head).
+            self.assertGreater(len(msgs), 0)
+            self.assertLess(len(msgs), 20000)
+            texts = [m["message"]["content"][0]["text"] for m in msgs]
+            self.assertTrue(texts[-1].startswith("line-019999-"))
+            self.assertFalse(any(t.startswith("line-000000-") for t in texts))
+
+    def test_partial_first_record_is_dropped(self):
+        # A tail seek lands mid-line; that partial record must not produce
+        # a garbage/half-parsed entry. Every surviving record parses clean.
+        with tempfile.TemporaryDirectory() as tmp:
+            tp = Path(tmp) / "big.jsonl"
+            self._make_big_jsonl(tp, 5000)
+            msgs = ws.read_transcript(str(tp), max_bytes=64 * 1024)
+            for m in msgs:
+                self.assertIn("message", m)
+                self.assertIn("content", m["message"])
+
+    def test_max_bytes_zero_disables_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tp = Path(tmp) / "big.jsonl"
+            self._make_big_jsonl(tp, 8000)
+            msgs = ws.read_transcript(str(tp), max_bytes=0)
+            self.assertEqual(len(msgs), 8000)
+
+    def test_handler_threads_max_transcript_mb(self):
+        # max_transcript_mb in config must reach read_transcript as bytes.
+        with tempfile.TemporaryDirectory() as tmp:
+            skill = Path(tmp) / "SKILL.md"
+            skill.write_text("x", encoding="utf-8")
+            tp = Path(tmp) / "t.jsonl"
+            self._make_big_jsonl(tp, 100)
+            cfg = {"hooks": {"pre_compact": {
+                "enabled": True,
+                "wrapup_skill_path": str(skill),
+                "save_to_file": False,
+                "max_transcript_mb": 7,
+            }}}
+            event = {"transcript_path": str(tp), "cwd": tmp, "session_id": "s"}
+            with patch.object(ws, "read_transcript",
+                              wraps=ws.read_transcript) as spy:
+                pc.handle(event=event, config=cfg, providers=[])
+            self.assertTrue(spy.called)
+            _, kwargs = spy.call_args
+            self.assertEqual(kwargs.get("max_bytes"), 7 * 1024 * 1024)
+
+
+class MonitorsSentinelTests(unittest.TestCase):
+    """Section 6 must wrap the running-items list in MONITORS sentinels
+    when background work exists, and omit them entirely otherwise."""
+
+    def test_sentinels_present_when_background_tasks_exist(self):
+        t = [_assistant_with_tool(
+            "Bash", {"command": "train.py", "run_in_background": True,
+                     "description": "QLoRA fine-tune"})]
+        md = ws.synthesize_markdown(t, cwd="", session_id="s")
+        self.assertIn(ws.MONITORS_SENTINEL_BEGIN, md)
+        self.assertIn(ws.MONITORS_SENTINEL_END, md)
+        self.assertIn("QLoRA fine-tune", md)
+
+    def test_no_sentinels_when_no_background_tasks(self):
+        md = ws.synthesize_markdown([_assistant_text("just chatting")],
+                                    cwd="", session_id="s")
+        self.assertNotIn(ws.MONITORS_SENTINEL_BEGIN, md)
+        self.assertNotIn(ws.MONITORS_SENTINEL_END, md)
+        # Section 6 still renders its empty-state line.
+        self.assertIn("no Monitor / ScheduleWakeup", md)
+
+
 if __name__ == "__main__":
     unittest.main()
