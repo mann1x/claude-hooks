@@ -335,5 +335,33 @@ class TestInstallHooksDrift(unittest.TestCase):
         self.assertIn(self.path_a, old_cmd)
 
 
+class TestRecallHookCapBudget(unittest.TestCase):
+    """The two recall-running hooks must keep a wall-clock cap large enough
+    for the sequential HyDE primary->fallback chain (each model gets the full
+    ``hyde_timeout``, default 30 s). A cap below ~60 s SIGTERMs the hook before
+    the local fallback can cold-start, producing ``all models failed``. Guard
+    against a silent regression of these caps."""
+
+    # primary 30 s + fallback 30 s, ignoring the few seconds of recall overhead.
+    MIN_CAP = 60
+
+    def _cap(self, event: str) -> int:
+        return install.HOOK_TEMPLATE[event][0]["hooks"][0]["timeout"]
+
+    def test_user_prompt_submit_cap_fits_two_models(self):
+        self.assertGreaterEqual(
+            self._cap("UserPromptSubmit"), self.MIN_CAP,
+            "UserPromptSubmit cap must cover hyde_timeout*2 (primary+fallback)",
+        )
+
+    def test_session_start_cap_fits_two_models(self):
+        # source=="compact" runs the same HyDE chain, so SessionStart needs
+        # the same budget as UserPromptSubmit.
+        self.assertGreaterEqual(
+            self._cap("SessionStart"), self.MIN_CAP,
+            "SessionStart (compact recall) cap must cover hyde_timeout*2",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

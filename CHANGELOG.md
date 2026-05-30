@@ -100,6 +100,17 @@ release with the auto-generated source archive
 
 ### Changed
 
+- **HyDE: raised the recall hook caps so the local fallback gets its full
+  cold-start window when the cloud primary stalls.** The expansion runs a
+  sequential primary→fallback chain (`gemma4:31b-cloud` then a local model),
+  each call getting the full per-model `hyde_timeout` (30 s) — but the
+  `UserPromptSubmit` (15 s) and `SessionStart` (5 s) hook caps were SIGTERMing
+  the hook before the fallback could run, yielding `all models failed` even when
+  the local model was healthy (a cold start needs well over 10 s). Both caps are
+  now **65 s** (`= hyde_timeout × 2 + recall overhead`) in `install.py`'s
+  `HOOK_TEMPLATE`; the warm/cache path is unchanged (returns in ~0–4 s, the long
+  cap only bites on a genuine cloud stall). See
+  [`docs/hyde.md`](docs/hyde.md) "Hook cap must cover the whole chain".
 - **stop_guard: a genuine trailing question now backs the guard off.**
   When the assistant's turn ends with a question (`?`), both the
   stall-after-commitment check AND the permission-seeking prose patterns

@@ -240,7 +240,13 @@ HOOK_TEMPLATE = {
                 {
                     "type": "command",
                     "command": "{cmd} UserPromptSubmit",
-                    "timeout": 15,
+                    # Cap must be >= hyde_timeout * 2 + recall overhead so the
+                    # sequential HyDE primary->fallback chain (gemma4:31b-cloud
+                    # then a local cold-start) each get their full ~30 s window.
+                    # A tighter cap (was 15 s) SIGTERMs the hook before the
+                    # fallback can run, yielding "all models failed". See
+                    # claude_hooks/hyde.py + hooks.user_prompt_submit.hyde_timeout.
+                    "timeout": 65,
                     "_managedBy": MANAGED_BY,
                 }
             ],
@@ -253,7 +259,11 @@ HOOK_TEMPLATE = {
                 {
                     "type": "command",
                     "command": "{cmd} SessionStart",
-                    "timeout": 5,
+                    # source=="compact" runs the same run_recall -> HyDE chain
+                    # (claude_hooks/hooks/session_start.py), so it needs the same
+                    # primary 30 s + fallback 30 s + overhead budget as
+                    # UserPromptSubmit. Was 5 s, which strangled the fallback.
+                    "timeout": 65,
                     "_managedBy": MANAGED_BY,
                 }
             ],
