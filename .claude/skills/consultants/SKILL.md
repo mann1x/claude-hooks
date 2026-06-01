@@ -164,6 +164,20 @@ Include:
 
 Keep framing under ~1 KB.
 
+**Compose an adversarial focus when the stakes warrant it.** If a
+*wrong-but-plausible* answer would be costly — an architecture call, a
+security or correctness claim, a "is X safe to do" question — name, in
+one or two sentences, the specific way the answer is most likely to be
+wrong (the unstated assumption, the edge case, the claim that's true in
+general but false here). You have two places to put it, depending on
+timing: as a one-line "adversarial focus" note inside the framing so the
+critic carries it from the start, or — for a live nudge mid-flight — via
+`control --strictness adversarial --adversarial-focus "<brief>"` (see
+the **Dynamic adversary** subsection of the review loop). **Skip this
+entirely for list / lookup / "what does X do" questions** — there's no
+plausible-but-wrong trap to set against them, and the directive only
+adds noise.
+
 ### 3. Start the consultation
 
 ```
@@ -458,6 +472,51 @@ If your context was compacted mid-loop, on re-entry **read
 
 The status is engine-owned and persisted, so it's authoritative across
 the compaction boundary — trust it over your own memory of where you were.
+
+### 5. Dynamic adversary — author the challenge, react to the checkpoint
+
+The review loop above is *post-hoc* skepticism — you challenge the answer
+after it lands. The **dynamic adversary** is the same instinct moved
+*earlier*: you compose a bespoke challenge and feed it into the council
+while it runs, so the critic is already hunting for the weakness before
+synthesis. Two mechanisms, both opt-in (Subflow G):
+
+**Authoring template (the brief).** When you decide a question warrants
+an adversary (the framing-step rule: costly if wrong, not a lookup),
+write a 2–4 line brief that:
+
+1. **Names 2–3 specific claims to attack** — the load-bearing assertions
+   whose failure would sink the answer ("it assumes the daemon reads
+   `~/.claude.json`"; "it treats the cache as write-through").
+2. **Sets the refutation bar** — what counts as a real refutation vs.
+   nitpicking ("only flag a claim if you can point at the file that
+   contradicts it").
+
+Deliver it as `control --strictness adversarial --adversarial-focus
+"<brief>"` (re-shapes the next critic + meta-critic call), or — for the
+strongest form — via the **adversary checkpoint**.
+
+**Reacting to `awaiting_adversary` (the checkpoint).** When
+`adversary_checkpoint` is ON, the council pauses just before synthesis
+and emits an `awaiting_adversary` event carrying a `deadline_ts` and the
+synthesizer's `self_confidence`. React like this:
+
+1. **Subscribe** to the stream — `claude-consultants events <sid>` (or
+   `--since <id>` to replay across a reconnect / compaction). The
+   `awaiting_adversary` block is durable, so a missed SSE is recoverable.
+2. **Author + inject** the brief at the role the critique should re-run
+   through: `inject <sid> --role critic -m "<brief>"` to re-run the
+   fanned critics against it, or `--role synthesizer` to just sharpen the
+   final write-up. Thread `--cwd "$(pwd)"`.
+3. **Ack to resume** — `claude-consultants adversary-ack <sid>` (or
+   `resume <sid>` during the checkpoint window, which delegates to the
+   ack). The council resumes immediately with your brief in the prompt.
+4. **Or do nothing** — the checkpoint **auto-proceeds at the deadline**
+   (default 10 min) so a lost SSE / missed poll never hangs the run. If
+   you have no challenge worth making, just let it lapse.
+
+Don't open a checkpoint you won't staff: the pause is wall-clock the user
+waits through. Author the brief *first*, then ack — not the reverse.
 
 ---
 
@@ -897,7 +956,8 @@ default if you don't know which role should see it.
 ```
 claude-consultants control <sid> --time +30m
 claude-consultants control <sid> --max-rounds 5 --confidence 0.7
-claude-consultants control <sid> --strictness strict
+claude-consultants control <sid> --strictness adversarial \
+  --adversarial-focus "attack the claim that the cache is write-through"
 claude-consultants control <sid> --disable critic
 ```
 
@@ -908,6 +968,18 @@ now"). ``--enable`` and ``--disable`` mutate ``enabled_roles`` via
 a snapshot-then-subtract (the CLI reads ``GET /state`` first to
 build the diff). Use to grow / shrink the budget after seeing the
 plan or first researcher round.
+
+``--strictness`` is the **critic dial** (M4), not an adversary-role
+toggle: it threads ``lax`` / ``normal`` / ``strict`` / ``adversarial``
+into the next critic + meta-critic prompt, so the change actually
+re-shapes the next critique. ``adversarial`` is the live-only level —
+it makes the critic actively hunt to *break* the evidence — and pairs
+with ``--adversarial-focus "<brief>"`` to point that hunt at a specific
+claim (see the **Dynamic adversary** subsection). The static
+``adversary_strictness`` config (Subflow G) seeds the boot-time dial
+(soft→lax / normal→normal / strict→strict); ``adversarial`` is reachable
+only here, mid-flight. Pass ``--adversarial-focus ""`` to clear a brief
+you set earlier.
 
 ### pause + resume — HITL approval flow
 

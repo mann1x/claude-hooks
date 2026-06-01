@@ -86,5 +86,37 @@ class TestSkillLink(unittest.TestCase):
         self.assertIn("Four mandatory disciplines", skill)
 
 
+class TestDynamicAdversaryDoc(unittest.TestCase):
+    """M7: the dynamic-adversary SKILL surface. These guard the
+    cross-reference integrity — Subflow G, the framing step, and the
+    control section all point at the 'Dynamic adversary' subsection and
+    the awaiting_adversary reaction, so a missing anchor breaks live
+    guidance, not just prose."""
+
+    def setUp(self):
+        self.skill = SKILL.read_text(encoding="utf-8")
+
+    def test_dynamic_adversary_subsection_anchor_exists(self):
+        # Referenced by name from Subflow G + the framing step + control.
+        self.assertIn("Dynamic adversary", self.skill)
+
+    def test_awaiting_adversary_reaction_documented(self):
+        self.assertIn("awaiting_adversary", self.skill)
+        self.assertIn("adversary-ack", self.skill)
+        # the deadline auto-proceed safety net must be called out.
+        self.assertIn("auto-proceed", self.skill)
+
+    def test_control_section_corrects_strictness_to_critic_dial(self):
+        # M4 correction: --strictness is the critic dial w/ the
+        # live-only adversarial level + --adversarial-focus.
+        self.assertIn("--adversarial-focus", self.skill)
+        self.assertIn("critic dial", self.skill)
+
+    def test_framing_step_has_adversarial_focus_rule(self):
+        # The "compose an adversarial focus when stakes warrant it"
+        # rule + the skip-for-lookup carve-out.
+        self.assertIn("adversarial focus", self.skill.lower())
+
+
 if __name__ == "__main__":
     unittest.main()
