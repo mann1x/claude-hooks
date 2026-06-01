@@ -81,6 +81,71 @@ def _emit_finished(role: str, *,
         log.exception("emit NodeFinished raised; ignored")
 
 
+# ---------- M0: self-confidence extraction ------------------------ #
+# The synthesizer and critic each end their output with a
+# ``CONFIDENCE: <0.0-1.0>`` self-rating line. We pull it out of the
+# raw text (so it never leaks into the user-facing answer or the
+# critique the synthesizer reads), append it to the ``confidence``
+# state channel, and emit a ConfidenceUpdate event. This is what makes
+# ``interrupt_on_low_confidence`` + the xauto escalator + the M2
+# adversary-checkpoint gate actually fire — before this the channel
+# was fully plumbed but never written.
+
+_CONFIDENCE_RX = re.compile(
+    r"(?im)^[ \t>*-]*CONFIDENCE[ \t]*[:=][ \t]*([01](?:\.\d+)?|0?\.\d+)\b[ \t]*$",
+)
+
+
+def _extract_confidence(text: str) -> tuple[str, Optional[float]]:
+    """Pull a trailing ``CONFIDENCE: <0.0-1.0>`` self-rating out of a
+    node's output.
+
+    Returns ``(text_without_the_line, score)`` or ``(text, None)`` when
+    the line is absent or malformed. The score is clamped to ``[0, 1]``.
+    The matched line is stripped so the rating never reaches the user.
+    The LAST match wins (the rating is emitted at the very end).
+    """
+    if not text:
+        return text, None
+    last: Optional[re.Match] = None
+    for last in _CONFIDENCE_RX.finditer(text):
+        pass
+    if last is None:
+        return text, None
+    try:
+        score = float(last.group(1))
+    except (TypeError, ValueError):  # pragma: no cover - regex guards this
+        return text, None
+    score = max(0.0, min(1.0, score))
+    stripped = (text[: last.start()] + text[last.end():]).rstrip()
+    return stripped, score
+
+
+def _emit_confidence(score: Optional[float], *, source: str,
+                     state: dict) -> None:
+    """Best-effort emit of a :class:`ConfidenceUpdate`. No-op on None.
+
+    Never raises — telemetry must not break a node. The ``target`` is
+    the live ``runtime_control.confidence_target`` so a consumer can
+    render "0.62 / 0.70 — below threshold".
+    """
+    if score is None:
+        return
+    try:
+        from consultants.engine.events import ConfidenceUpdate, emit
+        from consultants.engine.control import (
+            runtime_get, DEFAULT_CONFIDENCE_TARGET,
+        )
+        target = runtime_get(state, "confidence_target",
+                             DEFAULT_CONFIDENCE_TARGET)
+        emit(ConfidenceUpdate(
+            score=float(score), source=source,
+            target=float(target) if target is not None else None,
+        ))
+    except Exception:  # pragma: no cover - telemetry must never raise
+        log.debug("emit ConfidenceUpdate raised; ignored", exc_info=True)
+
+
 # ---------- v2 additional_context channel (M5) -------------------- #
 # The v2 state schema adds an ``additional_context`` channel — an
 # append-only list of ``Doc`` records the HTTP ``/inject`` endpoint
@@ -250,7 +315,12 @@ CRITIC_SYSTEM = _role_prompt(
     "symbol pointers.\n\n"
     "Default to ready unless you can name a concrete missing fact. "
     "Do not request research for theoretical completeness — each "
-    "extra round costs another full agent loop."
+    "extra round costs another full agent loop.\n\n"
+    "FINAL LINE (load-bearing). End your output with a line "
+    "`CONFIDENCE: <0.0-1.0>` — your confidence that the assembled "
+    "evidence is sufficient AND correct for the synthesizer (1.0 = "
+    "certain; <0.7 = shaky / contested / thin). The engine consumes "
+    "this line and strips it; it is not shown to the user."
 )
 
 # Phase 10: meta-critic synthesizes the C parallel-critic verdicts
@@ -274,7 +344,12 @@ META_CRITIC_SYSTEM = _role_prompt(
     "concrete missing fact AND that fact is plausibly load-bearing "
     "for the synthesizer's answer. A critic raising a theoretical "
     "concern that another critic credibly dismisses is NOT grounds "
-    "for more research."
+    "for more research.\n\n"
+    "FINAL LINE (load-bearing). End your output with a line "
+    "`CONFIDENCE: <0.0-1.0>` — the consolidated confidence that the "
+    "evidence is sufficient AND correct (factor in critic "
+    "disagreement: wide disagreement lowers it). The engine consumes "
+    "this line and strips it; it is not shown to the user."
 )
 
 
@@ -349,7 +424,12 @@ SYNTHESIZER_SYSTEM = _role_prompt(
     "`path` for a sibling that sounds related; do NOT 'sharpen' a "
     "line number — relay the exact cite or omit the line. If "
     "researchers disagree, name both as `path:lineA / lineB "
-    "(researchers disagree)`."
+    "(researchers disagree)`.\n\n"
+    "FINAL LINE (load-bearing). After the answer, output a line "
+    "`CONFIDENCE: <0.0-1.0>` — your own confidence that the answer is "
+    "correct and complete (1.0 = certain; lower it for thin evidence, "
+    "unresolved disagreement, or a failed lane). The engine strips "
+    "this line; the user never sees it."
 )
 
 # Self-critic variant — used at effort=low/medium when the critic
@@ -394,7 +474,11 @@ SYNTHESIZER_SELF_CRITIC_SYSTEM = _role_prompt(
     "filesystem and will mark every fabrication inline. Do NOT "
     "swap a researcher's `path` for a sibling 'sounds-related' "
     "filename. Do NOT replace a researcher's line number with one "
-    "that 'looks more precise'. Relay exactly, or omit the line."
+    "that 'looks more precise'. Relay exactly, or omit the line.\n\n"
+    "FINAL LINE (load-bearing). After the answer, output a line "
+    "`CONFIDENCE: <0.0-1.0>` — your own confidence that the answer is "
+    "correct and complete, after the self-critique above (1.0 = "
+    "certain). The engine strips this line; the user never sees it."
 )
 
 
@@ -1829,6 +1913,11 @@ def critic_node(state: dict, *, chat_client, model: str,
         }
     dt = time.monotonic() - t0
     decision = parse_critic_decision(text)
+    # M0: strip the critic's CONFIDENCE line out of ``text`` so it's
+    # absent from the critique the synthesizer reads + the turn
+    # transcript. Emit + append only on the single-critic path below;
+    # in fanned mode the meta-critic owns the consolidated value.
+    text, _critic_conf = _extract_confidence(text)
     # critic_reroutes_used uses the additive reducer; we contribute
     # +1 for a re-route or 0 for ready, and the merge concatenates.
     rerouted_delta = 1 if decision == "needs_more_research" else 0
@@ -1871,7 +1960,8 @@ def critic_node(state: dict, *, chat_client, model: str,
         }
     # Single-critic path (every base tier + xmedium/xhigh + xmax
     # without critic extras): emit the full delta as before.
-    return {
+    _emit_confidence(_critic_conf, source="critic", state=state)
+    out = {
         "critique": text,
         "critic_decision": decision,
         "critic_reroutes_used": rerouted_delta,
@@ -1879,6 +1969,9 @@ def critic_node(state: dict, *, chat_client, model: str,
         "total_prompt_tokens": pt,
         "total_completion_tokens": ct,
     }
+    if _critic_conf is not None:
+        out["confidence"] = [_critic_conf]
+    return out
 
 
 def meta_critic_node(state: dict, *, chat_client, model: str,
@@ -1960,6 +2053,9 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
         }
     dt = time.monotonic() - t0
     decision = parse_critic_decision(text)
+    # M0: strip + emit the consolidated confidence (fanned-critic path).
+    text, _meta_conf = _extract_confidence(text)
+    _emit_confidence(_meta_conf, source="critic", state=state)
     # Meta-critic owns the single critic_reroutes_used increment in
     # multi-critic mode (the C parallel critics suppress their own
     # delta — see critic_node). Adds 1 if the consolidated decision
@@ -1981,7 +2077,7 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
             log.exception("recorder.record_node raised; ignored")
     _emit_finished("meta_critic", round=this_round,
                     duration_ms=int(dt * 1000), ok=True)
-    return {
+    out = {
         # Synthesizer reads ``critique`` + ``critic_decision``. In
         # multi-critic mode the C parallel critics deliberately don't
         # write these; meta-critic is the sole writer.
@@ -1992,6 +2088,9 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
         "total_prompt_tokens": pt,
         "total_completion_tokens": ct,
     }
+    if _meta_conf is not None:
+        out["confidence"] = [_meta_conf]
+    return out
 
 
 def synthesizer_node(state: dict, *, chat_client, model: str,
@@ -2128,6 +2227,11 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
             )],
         }
     dt = time.monotonic() - t0
+    # M0: pull the synthesizer's self-confidence out of ``text`` BEFORE
+    # the citation lint reassigns it and before the user-facing return,
+    # so the CONFIDENCE line never reaches the answer.
+    text, _self_conf = _extract_confidence(text)
+    _emit_confidence(_self_conf, source="synthesizer", state=state)
     # 2026-05-18: post-synthesis citation lint. The 2026-05-18 first
     # M14 consult caught two fabrication classes in the synthesizer's
     # output — an entirely fake filename relayed forward from a
@@ -2178,12 +2282,15 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
             log.exception("recorder.record_node raised; ignored")
     _emit_finished("synthesizer", round=1,
                     duration_ms=int(dt * 1000), ok=True)
-    return {
+    out = {
         "final_answer": text,
         "turns": [turn],
         "total_prompt_tokens": pt,
         "total_completion_tokens": ct,
     }
+    if _self_conf is not None:
+        out["confidence"] = [_self_conf]
+    return out
 
 
 # ----------------------- initial state ---------------------------- #
