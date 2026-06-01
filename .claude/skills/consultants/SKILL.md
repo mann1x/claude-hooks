@@ -576,7 +576,7 @@ per-language entry the same way. The routes only matter when
 
 ### 2. Top-level menu (loop until Done)
 
-The menu has five areas; AskUserQuestion caps at 4 options, so present
+The menu has six areas; AskUserQuestion caps at 4 options, so present
 it in two rounds — round 1 offers the first three plus **More…**, and
 **More…** opens round 2 with the rest plus **Done**:
 
@@ -588,6 +588,9 @@ it in two rounds — round 1 offers the first three plus **More…**, and
    fallback) for the optional coder role
 5. **Followup limit** — the review-loop cap (`max_followups`) and the
    per-approval grant size (`allow_extra`) — see Subflow F
+6. **Adversary / verify budget** — the optional `adversary` role, its
+   strictness, the engine-initiated adversary checkpoint, and the
+   skeptic-panel `verify_budget` — see Subflow G
 
 Loop back to step 1 after each successful change; exit on **Done**.
 
@@ -730,6 +733,53 @@ When the user picks **"5. Followup limit"**:
      approval adds for a consultancy (default 1, must be ≥ 1). Ask for
      the integer, then forward:
      `claude-consultants config set-allow-extra <N>`.
+3. Loop back to step 1 after a successful change.
+
+### Subflow G — Adversary / verify budget
+
+When the user picks **"6. Adversary / verify budget"**. These four
+knobs all default OFF / bounded and are **effort-gated** — they only
+change behavior at high/max (and the x-prefixed) tiers. Surface that
+once if the current effort is low/medium:
+
+> Note: the adversary role and checkpoint only fire at high/max (and
+> xhigh/xmax). At low/medium they stay inert even when enabled.
+
+1. Show current values from `config show`: `roles.adversary.enabled`,
+   `adversary_strictness`, `adversary_checkpoint` (+ its timeout), and
+   `verify_budget`.
+2. AskUserQuestion which to change: **Adversary role** / **Adversary
+   checkpoint** / **Verify budget** / **Back** (strictness is reached
+   under "Adversary role").
+   - **Adversary role** — a sub-question:
+     - *Toggle on/off* — forward
+       `claude-consultants config set-role adversary --enabled <true|false>`.
+       The adversary is a post-synthesis refuter: it runs once after
+       the synthesizer and annotates the answer with a `REFUTATION:`
+       block (or `REFUTATION: none`). It never asks for more research.
+     - *Change strictness* — AskUserQuestion `soft` / `normal` /
+       `strict`, then
+       `claude-consultants config set-adversary-strictness <level>`.
+       `soft` flags only clear hallucinations; `strict` challenges
+       every unsupported claim.
+     - *Change model* — same as Subflow A's model picker, forwarding
+       `set-role adversary --model <chosen>`.
+   - **Adversary checkpoint** — the engine-initiated pause. When ON,
+     the council pauses just before synthesis, emits an
+     `awaiting_adversary` SSE event, and waits for the assistant to
+     inject a bespoke adversarial brief before resuming — auto-proceeds
+     after the timeout if no answer arrives (covers a lost SSE / missed
+     poll). AskUserQuestion `on` / `off`; if `on`, offer the timeout
+     (`5min` / `10min (default)` / `Other`). Forward:
+     `claude-consultants config set-adversary-checkpoint <on|off> [--timeout <seconds>]`.
+     See the **Dynamic adversary** subsection of the review loop for
+     how to react to `awaiting_adversary`.
+   - **Verify budget** — caps the skeptic panel the Workflow driver
+     (and the review loop) runs against surviving claims.
+     AskUserQuestion `minimal` (2 claims / 1 round) / `bounded`
+     (3 claims, default) / `generous` (5 claims, up to the followup
+     cap). Forward:
+     `claude-consultants config set-verify-budget <tier>`.
 3. Loop back to step 1 after a successful change.
 
 ### After every change

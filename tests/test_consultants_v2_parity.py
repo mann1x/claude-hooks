@@ -216,11 +216,45 @@ class TestOptInsOffByDefault(unittest.TestCase):
         # roles must not have them populated. Catches a regression
         # where the seeded factory leaks into non-coder roles.
         for role in ("planner", "researcher", "critic", "synthesizer",
-                     "tool_executor"):
+                     "tool_executor", "adversary"):
             with self.subTest(role=role):
                 rc = self.cfg.roles[role]
                 self.assertEqual(rc.routes_by_language, {})
                 self.assertIsNone(rc.default_route)
+
+    # ----- M3 / M1 (dynamic adversary role + checkpoint) -------- #
+
+    def test_adversary_role_disabled_by_default(self):
+        # M3: the post-synthesis refuter. Off by default — when off,
+        # the council topology must stay synthesizer → END (the
+        # adversary singleton node is never registered), so the
+        # default answer surface is byte-identical to v1.
+        self.assertFalse(self.cfg.roles["adversary"].enabled)
+
+    def test_adversary_role_excluded_from_enabled_roles_by_default(self):
+        # enabled_roles() drives graph construction; adversary must
+        # not appear in the default list or _wrap_adversary would be
+        # registered + the synthesizer → END edge rerouted.
+        from consultants.config import enabled_roles
+        self.assertNotIn("adversary", enabled_roles(self.cfg))
+
+    def test_verify_budget_default_is_bounded(self):
+        # M1: the Workflow skeptic-panel budget. ``bounded`` (3 claims)
+        # is the shipped default; the knob only affects the M6 driver
+        # script, never the bare council, but pin it so a default flip
+        # is loud.
+        self.assertEqual(self.cfg.verify_budget, "bounded")
+
+    def test_adversary_strictness_default_is_normal(self):
+        self.assertEqual(self.cfg.adversary_strictness, "normal")
+
+    def test_adversary_checkpoint_off_by_default(self):
+        # M2: the engine-initiated pause-before-synthesis. Off by
+        # default → _drive_council_stream never enters the
+        # awaiting_adversary park branch, so the synthesizer interrupt
+        # boundary resumes immediately as it does today.
+        self.assertFalse(self.cfg.adversary_checkpoint)
+        self.assertEqual(self.cfg.adversary_checkpoint_timeout_s, 600)
 
     # ----- M1 (checkpointer) ------------------------------------ #
 

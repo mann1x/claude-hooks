@@ -25,9 +25,12 @@ class TestDefaults:
         # M10: coder joins too, inserted between critic and synthesizer
         # so the graph topology fans out coder lanes AFTER the critic
         # round (when critic enabled) but BEFORE the synthesizer.
+        # M3 (dynamic-adversary): the opt-in ``adversary`` post-synthesis
+        # refuter joins last so its singleton node hangs off
+        # synthesizer → adversary → END (no per-lane Send; x-tier safe).
         assert cc.ROLES == (
             "planner", "researcher", "tool_executor",
-            "critic", "coder", "synthesizer",
+            "critic", "coder", "synthesizer", "adversary",
         )
 
     def test_synthesizer_mandatory(self):
@@ -51,11 +54,14 @@ class TestDefaults:
         #   questions don't look like that bench corpus.
         # coder remains disabled-by-default (operator opts in to
         # sandboxed file writes). Every other role stays enabled.
+        # adversary (M3) is the third opt-in role — default OFF so the
+        # default council stays synthesizer → END (cohort-2 parity).
         cfg = cc.ConsultantsConfig()
         assert cfg.roles["tool_executor"].enabled is False
         assert cfg.roles["coder"].enabled is False
+        assert cfg.roles["adversary"].enabled is False
         for r in cc.ROLES:
-            if r in ("tool_executor", "coder"):
+            if r in ("tool_executor", "coder", "adversary"):
                 continue
             assert cfg.roles[r].enabled is True
 
@@ -106,6 +112,12 @@ class TestDefaults:
             elif r == "coder":
                 assert cfg.roles[r].enabled is False
                 assert cfg.roles[r].model == RECOMMENDED_CODER_MODEL
+            elif r == "adversary":
+                # M3: opt-in post-synthesis refuter, off by default,
+                # tracks the global DEFAULT_MODEL until the operator
+                # pins one via Subflow G.
+                assert cfg.roles[r].enabled is False
+                assert cfg.roles[r].model == cc.DEFAULT_MODEL
             else:
                 assert cfg.roles[r].enabled is True
                 assert cfg.roles[r].model == cc.DEFAULT_MODEL
@@ -555,3 +567,93 @@ class TestReviewLoopKnobs:
         cfg = cc.load_config()
         assert cfg.max_followups == 4   # -5 rejected → default
         assert cfg.allow_extra == 1     # 0 rejected → default
+
+
+# ----------------------- adversary / verify budget (M1) ---------- #
+
+class TestAdversaryKnobs:
+    """M1 — the dynamic-adversary config surface: verify_budget,
+    adversary_strictness, adversary_checkpoint (+ timeout). All
+    default-OFF / bounded so the council stays byte-identical until an
+    operator opts in (cohort-2 parity is asserted in
+    test_consultants_v2_parity.py)."""
+
+    def test_defaults(self):
+        cfg = cc.ConsultantsConfig()
+        assert cfg.verify_budget == cc.DEFAULT_VERIFY_BUDGET == "bounded"
+        assert cfg.adversary_strictness == \
+            cc.DEFAULT_ADVERSARY_STRICTNESS == "normal"
+        assert cfg.adversary_checkpoint is False
+        assert cfg.adversary_checkpoint_timeout_s == 600
+
+    def test_set_verify_budget_round_trip(self, isolated_home):
+        cc.set_verify_budget("generous")
+        cfg = cc.load_config()
+        assert cfg.verify_budget == "generous"
+        assert 'verify_budget = "generous"' in \
+            cc.user_config_path().read_text()
+
+    def test_set_verify_budget_rejects_unknown(self, isolated_home):
+        with pytest.raises(ValueError) as ei:
+            cc.set_verify_budget("unlimited")
+        assert "verify_budget must be one of" in str(ei.value)
+
+    def test_set_adversary_strictness_round_trip(self, isolated_home):
+        cc.set_adversary_strictness("strict")
+        cfg = cc.load_config()
+        assert cfg.adversary_strictness == "strict"
+        assert 'adversary_strictness = "strict"' in \
+            cc.user_config_path().read_text()
+
+    def test_set_adversary_strictness_rejects_unknown(self, isolated_home):
+        with pytest.raises(ValueError) as ei:
+            cc.set_adversary_strictness("brutal")
+        assert "adversary_strictness must be one of" in str(ei.value)
+
+    def test_set_adversary_checkpoint_round_trip(self, isolated_home):
+        cc.set_adversary_checkpoint(True, timeout_s=300)
+        cfg = cc.load_config()
+        assert cfg.adversary_checkpoint is True
+        assert cfg.adversary_checkpoint_timeout_s == 300
+        text = cc.user_config_path().read_text()
+        assert "adversary_checkpoint = true" in text
+        assert "adversary_checkpoint_timeout_s = 300" in text
+
+    def test_set_adversary_checkpoint_timeout_optional(self, isolated_home):
+        # Enabling without a timeout keeps the default; a later toggle-off
+        # leaves the timeout untouched.
+        cc.set_adversary_checkpoint(True)
+        cfg = cc.load_config()
+        assert cfg.adversary_checkpoint is True
+        assert cfg.adversary_checkpoint_timeout_s == 600
+        cc.set_adversary_checkpoint(False)
+        cfg = cc.load_config()
+        assert cfg.adversary_checkpoint is False
+        assert cfg.adversary_checkpoint_timeout_s == 600
+
+    def test_set_adversary_checkpoint_rejects_bad_timeout(self, isolated_home):
+        with pytest.raises(ValueError):
+            cc.set_adversary_checkpoint(True, timeout_s=0)
+
+    def test_merge_ignores_bad_values(self, isolated_home):
+        # Out-of-vocab strings / wrong-typed knobs fall back to defaults.
+        cc.user_config_path().parent.mkdir(parents=True, exist_ok=True)
+        cc.user_config_path().write_text(
+            'verify_budget = "huge"\n'
+            'adversary_strictness = "savage"\n'
+            'adversary_checkpoint = "yes"\n'
+            'adversary_checkpoint_timeout_s = 0\n',
+            encoding="utf-8")
+        cfg = cc.load_config()
+        assert cfg.verify_budget == "bounded"
+        assert cfg.adversary_strictness == "normal"
+        assert cfg.adversary_checkpoint is False
+        assert cfg.adversary_checkpoint_timeout_s == 600
+
+    def test_adversary_role_toggle_round_trip(self, isolated_home):
+        # The role itself is reached via the shared set_role mutator.
+        cc.set_role("adversary", enabled=True)
+        cfg = cc.load_config()
+        assert cfg.roles["adversary"].enabled is True
+        cc.set_role("adversary", enabled=False)
+        assert cc.load_config().roles["adversary"].enabled is False

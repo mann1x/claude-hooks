@@ -439,6 +439,12 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
         # loop respects max_followups before stopping to ask the user.
         "max_followups": cfg.max_followups,
         "allow_extra": cfg.allow_extra,
+        # Adversary / verify budget (M1). adversary role enablement is
+        # surfaced via the per-role block; these are the flat knobs.
+        "verify_budget": cfg.verify_budget,
+        "adversary_strictness": cfg.adversary_strictness,
+        "adversary_checkpoint": cfg.adversary_checkpoint,
+        "adversary_checkpoint_timeout_s": cfg.adversary_checkpoint_timeout_s,
         "service": {
             "mode": cfg.service.mode,
             "http_port": cfg.service.http_port,
@@ -505,6 +511,8 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
         "valid_efforts": sorted(cc.EFFORT_BUDGETS),
         "valid_service_modes": sorted(cc.VALID_SERVICE_MODES),
         "valid_store_backends": list(cc.VALID_STORE_BACKENDS),
+        "valid_verify_budgets": list(cc.VERIFY_BUDGET_TIERS),
+        "valid_adversary_strictness": list(cc.ADVERSARY_STRICTNESS_LEVELS),
     }
 
 
@@ -606,6 +614,41 @@ def cmd_config_set_allow_extra(args, base: str) -> int:
     print(json.dumps({"ok": True, **_config_dump(cfg, smart_block=smart)},
                      indent=2))
     return 0
+
+
+def _print_config(cfg) -> int:
+    block = _read_claude_hooks_consultants_block()
+    smart = block.get("smart_start") or {}
+    print(json.dumps({"ok": True, **_config_dump(cfg, smart_block=smart)},
+                     indent=2))
+    return 0
+
+
+def cmd_config_set_verify_budget(args, base: str) -> int:
+    try:
+        cfg = cc.set_verify_budget(args.tier)
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _print_config(cfg)
+
+
+def cmd_config_set_adversary_strictness(args, base: str) -> int:
+    try:
+        cfg = cc.set_adversary_strictness(args.level)
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _print_config(cfg)
+
+
+def cmd_config_set_adversary_checkpoint(args, base: str) -> int:
+    enabled = str(args.state).lower() in ("on", "true", "1", "yes", "enable")
+    try:
+        cfg = cc.set_adversary_checkpoint(
+            enabled, timeout_s=getattr(args, "timeout", None),
+        )
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _print_config(cfg)
 
 
 def cmd_config_set_service_mode(args, base: str) -> int:
@@ -1643,6 +1686,29 @@ def build_parser() -> argparse.ArgumentParser:
              "followups each over-cap approval adds for a consultancy.")
     cae.add_argument("value", type=int)
     cae.set_defaults(fn=cmd_config_set_allow_extra)
+
+    cvb = cfg_sub.add_parser(
+        "set-verify-budget",
+        help="Set the Workflow skeptic-panel budget "
+             "(minimal | bounded | generous).")
+    cvb.add_argument("tier", choices=cc.VERIFY_BUDGET_TIERS)
+    cvb.set_defaults(fn=cmd_config_set_verify_budget)
+
+    cas = cfg_sub.add_parser(
+        "set-adversary-strictness",
+        help="Set adversary / critic-dial strictness "
+             "(soft | normal | strict).")
+    cas.add_argument("level", choices=cc.ADVERSARY_STRICTNESS_LEVELS)
+    cas.set_defaults(fn=cmd_config_set_adversary_strictness)
+
+    cac = cfg_sub.add_parser(
+        "set-adversary-checkpoint",
+        help="Enable/disable the engine adversary checkpoint "
+             "(pause-for-red-team before synthesis); optional --timeout.")
+    cac.add_argument("state", choices=("on", "off"))
+    cac.add_argument("--timeout", type=int, default=None,
+                     help="Auto-resume timeout in seconds (>= 1).")
+    cac.set_defaults(fn=cmd_config_set_adversary_checkpoint)
 
     csm = cfg_sub.add_parser("set-service-mode",
                              help="Set service mode "

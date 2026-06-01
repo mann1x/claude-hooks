@@ -59,10 +59,14 @@ from .engine.state_v2 import CoderLanguageRoute
 # so existing sessions are unaffected.
 ROLES: tuple[str, ...] = (
     "planner", "researcher", "tool_executor", "critic", "coder",
-    "synthesizer",
+    "synthesizer", "adversary",
 )
 # Synthesizer alone is mandatory — every other role is opt-out (or in
-# tool_executor's case opt-in via cfg.roles.tool_executor.enabled).
+# tool_executor's / coder's / adversary's case opt-in via
+# cfg.roles.<role>.enabled). The ``adversary`` role (M3) is a
+# post-synthesis refuter that runs once after the synthesizer to attack
+# unsupported claims; default-OFF, wired non-re-entrantly so x-tier
+# fanout upstream is untouched.
 MANDATORY_ROLES: frozenset[str] = frozenset({"synthesizer"})
 
 DEFAULT_TOPOLOGY = "council"
@@ -131,6 +135,29 @@ def extras_active(effort: str) -> bool:
 # approval adds when the cap is reached.
 DEFAULT_MAX_FOLLOWUPS = 4
 DEFAULT_ALLOW_EXTRA = 1
+
+# Adversary + verify-budget knobs (M1). All conservative / OFF by
+# default so a plain consult is byte-identical (M12 parity).
+#
+# verify_budget sizes the Workflow-driver skeptic panel (M6): how many
+# of the answer's riskiest claims get an independent Anthropic refuter,
+# and how many verification rounds. minimal=2 claims/1 round,
+# bounded=3 (default), generous=5/up-to-cap.
+VERIFY_BUDGET_TIERS: tuple[str, ...] = ("minimal", "bounded", "generous")
+DEFAULT_VERIFY_BUDGET = "bounded"
+
+# adversary_strictness tunes BOTH the dynamic critic dial (M4) and the
+# post-synthesis adversary role (M3): how hard they push to refute.
+ADVERSARY_STRICTNESS_LEVELS: tuple[str, ...] = ("soft", "normal", "strict")
+DEFAULT_ADVERSARY_STRICTNESS = "normal"
+
+# Adversary checkpoint (M2): an engine-initiated pause before synthesis
+# that emits an SSE ``awaiting_adversary`` event and waits up to
+# ``adversary_checkpoint_timeout_s`` for the assistant to inject a
+# bespoke red-team brief, then auto-proceeds (covers lost SSE / missed
+# polls). Default OFF; 10-minute timeout.
+DEFAULT_ADVERSARY_CHECKPOINT = False
+DEFAULT_ADVERSARY_CHECKPOINT_TIMEOUT_S = 600
 
 DEFAULT_HTTP_PORT = 38095
 DEFAULT_MODEL = "kimi-k2.6:cloud"
@@ -267,6 +294,7 @@ DEFAULT_MODEL_BY_ROLE: dict[str, str] = {
 DEFAULT_ENABLED_BY_ROLE: dict[str, bool] = {
     "tool_executor": False,
     "coder": False,
+    "adversary": False,
 }
 
 
@@ -641,6 +669,14 @@ class ConsultantsConfig:
     # cap is enforced server-side.
     max_followups: int = DEFAULT_MAX_FOLLOWUPS
     allow_extra: int = DEFAULT_ALLOW_EXTRA
+    # Adversary / verify-budget (M1). All conservative so a plain
+    # consult is unchanged (M12 parity). ``adversary_checkpoint`` gates
+    # the engine pause (M2); the ``adversary`` ROLE is gated separately
+    # by ``roles["adversary"].enabled`` (M3).
+    verify_budget: str = DEFAULT_VERIFY_BUDGET
+    adversary_strictness: str = DEFAULT_ADVERSARY_STRICTNESS
+    adversary_checkpoint: bool = DEFAULT_ADVERSARY_CHECKPOINT
+    adversary_checkpoint_timeout_s: int = DEFAULT_ADVERSARY_CHECKPOINT_TIMEOUT_S
     service: ServiceConfig = field(default_factory=ServiceConfig)
     checkpointer: CheckpointerConfig = field(default_factory=CheckpointerConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
@@ -817,6 +853,21 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
         v = raw["allow_extra"]
         if isinstance(v, int) and not isinstance(v, bool) and v >= 1:
             base.allow_extra = v
+
+    # Adversary / verify-budget knobs (M1). Unknown values are ignored
+    # so a typo never silently flips behavior to an invalid state.
+    if isinstance(raw.get("verify_budget"), str) and \
+            raw["verify_budget"] in VERIFY_BUDGET_TIERS:
+        base.verify_budget = raw["verify_budget"]
+    if isinstance(raw.get("adversary_strictness"), str) and \
+            raw["adversary_strictness"] in ADVERSARY_STRICTNESS_LEVELS:
+        base.adversary_strictness = raw["adversary_strictness"]
+    if isinstance(raw.get("adversary_checkpoint"), bool):
+        base.adversary_checkpoint = raw["adversary_checkpoint"]
+    if "adversary_checkpoint_timeout_s" in raw:
+        v = raw["adversary_checkpoint_timeout_s"]
+        if isinstance(v, int) and not isinstance(v, bool) and v >= 1:
+            base.adversary_checkpoint_timeout_s = v
 
     # service
     svc = raw.get("service") or {}
@@ -1056,6 +1107,18 @@ def _render(cfg: ConsultantsConfig) -> str:
              "the grant size per approval.")
     L.append(f"max_followups = {cfg.max_followups}")
     L.append(f"allow_extra = {cfg.allow_extra}")
+    L.append("")
+    L.append("# Adversary / verify budget (M1+). verify_budget sizes the "
+             "Workflow skeptic panel (minimal|bounded|generous); "
+             "adversary_strictness tunes the critic dial + adversary role "
+             "(soft|normal|strict); adversary_checkpoint enables the "
+             "engine pause-for-red-team before synthesis.")
+    L.append(f"verify_budget = {_toml_str(cfg.verify_budget)}")
+    L.append(f"adversary_strictness = {_toml_str(cfg.adversary_strictness)}")
+    L.append(f"adversary_checkpoint = {str(cfg.adversary_checkpoint).lower()}")
+    L.append(
+        f"adversary_checkpoint_timeout_s = {cfg.adversary_checkpoint_timeout_s}"
+    )
     L.append("")
     L.append("[service]")
     L.append(f"mode = {_toml_str(cfg.service.mode)}")
@@ -1613,6 +1676,57 @@ def set_allow_extra(value: int, *, scope: str = "user",
         raise ValueError("allow_extra must be an integer >= 1")
     cfg = load_config(cwd if scope != "user" else None)
     cfg.allow_extra = value
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+# --------------------------------------------------------------------- #
+# Adversary / verify-budget mutators (M1)
+# --------------------------------------------------------------------- #
+
+def set_verify_budget(tier: str, *, scope: str = "user",
+                      cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set the Workflow skeptic-panel budget tier
+    (``minimal`` | ``bounded`` | ``generous``)."""
+    if tier not in VERIFY_BUDGET_TIERS:
+        raise ValueError(
+            f"verify_budget must be one of {', '.join(VERIFY_BUDGET_TIERS)}"
+        )
+    cfg = load_config(cwd if scope != "user" else None)
+    cfg.verify_budget = tier
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_adversary_strictness(level: str, *, scope: str = "user",
+                             cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Set the adversary/critic-dial strictness
+    (``soft`` | ``normal`` | ``strict``)."""
+    if level not in ADVERSARY_STRICTNESS_LEVELS:
+        raise ValueError(
+            "adversary_strictness must be one of "
+            f"{', '.join(ADVERSARY_STRICTNESS_LEVELS)}"
+        )
+    cfg = load_config(cwd if scope != "user" else None)
+    cfg.adversary_strictness = level
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_adversary_checkpoint(enabled: bool, *,
+                             timeout_s: Optional[int] = None,
+                             scope: str = "user",
+                             cwd: Optional[Path] = None) -> ConsultantsConfig:
+    """Enable/disable the engine adversary checkpoint (pause-for-red-team
+    before synthesis). Optionally set the auto-resume timeout (>= 1 s)."""
+    if not isinstance(enabled, bool):
+        raise ValueError("adversary_checkpoint must be a bool")
+    if timeout_s is not None and (
+        not isinstance(timeout_s, int) or isinstance(timeout_s, bool)
+        or timeout_s < 1
+    ):
+        raise ValueError("timeout_s must be an integer >= 1")
+    cfg = load_config(cwd if scope != "user" else None)
+    cfg.adversary_checkpoint = enabled
+    if timeout_s is not None:
+        cfg.adversary_checkpoint_timeout_s = timeout_s
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 

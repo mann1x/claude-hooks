@@ -575,6 +575,78 @@ class TestConfigShowReviewLoop:
         assert payload["allow_extra"] == 1
 
 
+# ----------------------- adversary / verify budget (M1) --------- #
+
+class TestConfigSetVerifyBudget:
+    @pytest.mark.parametrize("tier", ["minimal", "bounded", "generous"])
+    def test_valid(self, isolated_home, patched_http, tier):
+        rc, payload, _ = _run(["config", "set-verify-budget", tier])
+        assert rc == 0
+        assert payload["verify_budget"] == tier
+
+    def test_unknown_rejected(self, isolated_home, patched_http):
+        # argparse choices reject before the handler runs → SystemExit(2),
+        # which propagates out of cli.main (unlike a handler CLIError that
+        # returns rc==2).
+        with pytest.raises(SystemExit) as ei:
+            _run(["config", "set-verify-budget", "unlimited"])
+        assert ei.value.code == 2
+
+
+class TestConfigSetAdversaryStrictness:
+    @pytest.mark.parametrize("level", ["soft", "normal", "strict"])
+    def test_valid(self, isolated_home, patched_http, level):
+        rc, payload, _ = _run(["config", "set-adversary-strictness", level])
+        assert rc == 0
+        assert payload["adversary_strictness"] == level
+
+    def test_unknown_rejected(self, isolated_home, patched_http):
+        with pytest.raises(SystemExit) as ei:
+            _run(["config", "set-adversary-strictness", "savage"])
+        assert ei.value.code == 2
+
+
+class TestConfigSetAdversaryCheckpoint:
+    def test_on_with_timeout(self, isolated_home, patched_http):
+        rc, payload, _ = _run(
+            ["config", "set-adversary-checkpoint", "on", "--timeout", "300"])
+        assert rc == 0
+        assert payload["adversary_checkpoint"] is True
+        assert payload["adversary_checkpoint_timeout_s"] == 300
+
+    def test_off(self, isolated_home, patched_http):
+        rc, payload, _ = _run(["config", "set-adversary-checkpoint", "off"])
+        assert rc == 0
+        assert payload["adversary_checkpoint"] is False
+
+    def test_bad_timeout_rejected(self, isolated_home, patched_http):
+        rc, _, _ = _run(
+            ["config", "set-adversary-checkpoint", "on", "--timeout", "0"])
+        assert rc == 2
+
+    def test_bad_state_rejected(self, isolated_home, patched_http):
+        # argparse choices=("on","off") rejects anything else → SystemExit(2).
+        with pytest.raises(SystemExit) as ei:
+            _run(["config", "set-adversary-checkpoint", "maybe"])
+        assert ei.value.code == 2
+
+
+class TestConfigShowAdversaryDefaults:
+    def test_defaults_and_valid_lists_present(self, isolated_home,
+                                              patched_http):
+        rc, payload, _ = _run(["config", "show"])
+        assert rc == 0
+        assert payload["verify_budget"] == "bounded"
+        assert payload["adversary_strictness"] == "normal"
+        assert payload["adversary_checkpoint"] is False
+        assert payload["adversary_checkpoint_timeout_s"] == 600
+        assert payload["roles"]["adversary"]["enabled"] is False
+        assert payload["valid_verify_budgets"] == \
+            ["minimal", "bounded", "generous"]
+        assert payload["valid_adversary_strictness"] == \
+            ["soft", "normal", "strict"]
+
+
 # ----------------------- review loop: accept + override --------- #
 
 def _stub_follow_up_runner():
