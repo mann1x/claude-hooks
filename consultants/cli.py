@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -166,8 +167,83 @@ def cmd_consult(args, base: str) -> int:
     if args.trace is True or args.trace is False:
         _warn_trace_deprecated()
     out = _http("POST", f"{base}/v1/consult", body=body)
+    # M5: --wait → block until terminal, then print the result.
+    if getattr(args, "wait", False):
+        return _consult_wait(args, base, out)
     print(json.dumps({"ok": True, **out}, indent=2))
     return 0
+
+
+# M5: per-run terminal statuses. Anything that is NOT "running" ends
+# the poll loop; "completed" is the only one that yields a result.
+_RUN_TERMINAL_OK = "completed"
+
+
+def _wait_for_terminal(base: str, sid: str, *,
+                       interval: float, timeout: float,
+                       sleep_fn=time.sleep,
+                       now_fn=time.monotonic) -> dict:
+    """Poll ``GET /v1/consult/{sid}`` until ``status != "running"``.
+
+    Returns the final status record. Raises ``CLIError`` if a positive
+    ``timeout`` elapses while the run is still going (the run is NOT
+    cancelled — it keeps executing server-side). ``sleep_fn`` / ``now_fn``
+    are injectable for deterministic tests.
+    """
+    deadline = (now_fn() + timeout) if timeout and timeout > 0 else None
+    while True:
+        rec = _http("GET", f"{base}/v1/consult/{sid}")
+        if str(rec.get("status") or "") != "running":
+            return rec
+        if deadline is not None and now_fn() >= deadline:
+            raise CLIError(
+                f"--wait timed out after {timeout:.0f}s; session {sid} "
+                f"is still running (it keeps going server-side). Poll "
+                f"it with `status {sid}` / `result {sid}`.",
+                exit_code=1,
+            )
+        sleep_fn(interval)
+
+
+def _fetch_result(base: str, sid: str, *,
+                  attempts: int = 4, sleep_fn=time.sleep) -> dict:
+    """GET the result, retrying a brief window. There's a small race
+    where ``status`` flips to ``completed`` a beat before summary.md +
+    metadata.json land on disk; the result route 404/409s in that gap.
+    Retry a few times rather than surface the transient error."""
+    last: Optional[Exception] = None
+    for i in range(max(1, attempts)):
+        try:
+            return _http("GET", f"{base}/v1/consult/{sid}/result")
+        except CLIError as e:
+            last = e
+            if i < attempts - 1:
+                sleep_fn(0.5)
+    assert last is not None
+    raise last
+
+
+def _consult_wait(args, base: str, run_record: dict) -> int:
+    """M5 blocking path: poll the freshly-started run to a terminal
+    status, then print the result (``completed``) or the failure record.
+    Output shape mirrors ``result`` / ``status`` so a Workflow can parse
+    ``.ok`` uniformly."""
+    sid = run_record.get("sid")
+    if not sid:
+        # Nothing to wait on (shouldn't happen) — emit the run record.
+        print(json.dumps({"ok": True, **run_record}, indent=2))
+        return 0
+    interval = max(0.2, float(getattr(args, "poll_interval", 2.0) or 2.0))
+    timeout = float(getattr(args, "wait_timeout", 0.0) or 0.0)
+    rec = _wait_for_terminal(base, sid, interval=interval, timeout=timeout)
+    if str(rec.get("status") or "") == _RUN_TERMINAL_OK:
+        result = _fetch_result(base, sid)
+        print(json.dumps({"ok": True, **result}, indent=2))
+        return 0
+    # Terminal but not completed (failed / cancelled). Surface the run
+    # record with ok=False so callers key on JSON, not just the rc.
+    print(json.dumps({"ok": False, **rec}, indent=2))
+    return 1
 
 
 def cmd_status(args, base: str) -> int:
@@ -1383,6 +1459,31 @@ def build_parser() -> argparse.ArgumentParser:
             ".claude/settings*.json. Persisted on the session record so "
             "follow-ups inherit."
         ),
+    )
+    # M5: --wait turns the otherwise-async consult into a blocking call —
+    # POST, then poll until terminal, then print the RESULT (same shape
+    # as `result`) instead of the initial run record. Removes the
+    # Workflow-authoring footgun of hand-rolling a poll loop. The bare
+    # (no --wait) path is byte-identical to before.
+    c.add_argument(
+        "--wait", action="store_true", default=False,
+        help="Block until the consultation finishes, then print the "
+             "final result (poll loop). Without it, returns the run "
+             "record immediately and you poll `status`/`result`.",
+    )
+    c.add_argument(
+        "--poll-interval", dest="poll_interval", type=float, default=2.0,
+        metavar="SECONDS",
+        help="Seconds between status polls when --wait is set "
+             "(default 2.0; floored at 0.2).",
+    )
+    c.add_argument(
+        "--wait-timeout", dest="wait_timeout", type=float, default=0.0,
+        metavar="SECONDS",
+        help="Client-side ceiling for --wait, in seconds. 0 (default) "
+             "waits indefinitely — the engine has its own deadline. A "
+             "positive value aborts the wait (the run keeps going "
+             "server-side; poll it later).",
     )
     c.set_defaults(fn=cmd_consult)
 
