@@ -238,6 +238,16 @@ class TestOptInsOffByDefault(unittest.TestCase):
         from consultants.config import enabled_roles
         self.assertNotIn("adversary", enabled_roles(self.cfg))
 
+    def test_default_topology_tail_is_synthesizer_end(self):
+        # M3: with the adversary role off (default), plan_topology must
+        # emit the v1 synthesizer → END tail — NOT synthesizer →
+        # adversary → END. This is the edge-level parity guard.
+        from consultants.engine.graph import plan_topology
+        from consultants.config import enabled_roles
+        edges = plan_topology(tuple(enabled_roles(self.cfg)))
+        self.assertIn(("synthesizer", "END"), edges)
+        self.assertNotIn(("synthesizer", "adversary"), edges)
+
     def test_verify_budget_default_is_bounded(self):
         # M1: the Workflow skeptic-panel budget. ``bounded`` (3 claims)
         # is the shipped default; the knob only affects the M6 driver

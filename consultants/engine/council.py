@@ -482,6 +482,101 @@ SYNTHESIZER_SELF_CRITIC_SYSTEM = _role_prompt(
 )
 
 
+# ----------------------- adversary (M3) --------------------------- #
+# Opt-in post-synthesis refuter. A SINGLETON node that runs once after
+# the synthesizer (synthesizer → adversary → END) — no per-lane Send,
+# so Phase 9/10 x-tier fanout upstream is untouched. Default OFF.
+
+ADVERSARY_SYSTEM = _role_prompt(
+    "ROLE: adversary. You are the council's red team. A final answer "
+    "has ALREADY been written by the synthesizer. Your ONLY job is to "
+    "REFUTE it — surface claims the evidence does not support: "
+    "hallucinated facts, fabricated or mis-attributed `path:line` "
+    "citations, overstated certainty, logical leaps, and edge cases "
+    "the answer glosses over.\n\n"
+    "You do NOT rewrite the answer. You do NOT ask for more research "
+    "(the research phase is over). You do NOT praise or summarize. You "
+    "surface ONLY what is wrong, unsupported, or overclaimed.\n\n"
+    "OUTPUT (load-bearing). Emit EXACTLY one block, nothing else:\n"
+    "  REFUTATION: none\n"
+    "when every material claim is backed by a researcher report or "
+    "tool result, OR\n"
+    "  REFUTATION:\n"
+    "  - <the claim, quoted briefly> — <why the evidence doesn't "
+    "support it>\n"
+    "  - <next issue>\n"
+    "one bullet per real problem. Quote the claim and name the gap. "
+    "If you genuinely cannot find a real problem, emit "
+    "`REFUTATION: none` — do NOT invent issues to look busy, and do "
+    "NOT flag a claim merely because it lacks a citation when the "
+    "evidence plainly supports it (unless STRICTNESS says otherwise)."
+)
+
+# M1 ``adversary_strictness`` tunes how aggressively the refuter fires.
+_ADVERSARY_STRICTNESS_DIRECTIVE = {
+    "soft": (
+        "STRICTNESS: soft. Flag ONLY clear hallucinations and "
+        "fabricated / mis-attributed facts and citations. Let "
+        "reasonable inferences and minor hedging pass."
+    ),
+    "normal": (
+        "STRICTNESS: normal. Flag hallucinations and fabricated "
+        "citations, AND any materially unsupported claim or "
+        "overstated certainty."
+    ),
+    "strict": (
+        "STRICTNESS: strict. Challenge EVERY factual assertion not "
+        "directly backed by a researcher report or tool result. Demand "
+        "a citation for each; treat an uncited factual claim as "
+        "unsupported until the evidence shows otherwise."
+    ),
+}
+
+
+def build_adversary_messages(question: str, final_answer: str, plan: str,
+                             research_rounds: list[str], *,
+                             strictness: str = "normal") -> list[dict]:
+    parts = [
+        f"USER QUESTION:\n{question.strip()}",
+        f"\nPLANNER'S PLAN:\n{(plan or '').strip()}",
+    ]
+    for i, r in enumerate(research_rounds, start=1):
+        if isinstance(r, str) and r.strip():
+            parts.append(f"\nRESEARCHER REPORT (round {i}):\n{r.strip()}")
+    parts.append(f"\nFINAL ANSWER TO REFUTE:\n{final_answer.strip()}")
+    parts.append(
+        "\n" + _ADVERSARY_STRICTNESS_DIRECTIVE.get(
+            strictness, _ADVERSARY_STRICTNESS_DIRECTIVE["normal"]))
+    parts.append("\nNow emit your REFUTATION block — nothing else.")
+    return [
+        {"role": "system", "content": ADVERSARY_SYSTEM},
+        {"role": "user", "content": "\n".join(parts)},
+    ]
+
+
+_REFUTATION_RX = re.compile(r"(?is)\bREFUTATION\s*[:=]\s*(.*)$")
+
+
+def parse_adversary_refutation(text: str) -> tuple[str, str]:
+    """Parse the adversary's output into ``(decision, body)``.
+
+    ``decision`` is ``"none"`` when the refuter cleared the answer,
+    ``"issues"`` when it raised problems. ``body`` is the refutation
+    text (empty for ``none``). Tolerant: a ``REFUTATION:`` header is
+    preferred; absent one, a non-trivial reply is treated as issues."""
+    m = _REFUTATION_RX.search(text or "")
+    if not m:
+        body = (text or "").strip()
+        return ("issues", body) if body else ("none", "")
+    body = m.group(1).strip()
+    low = body.lower()
+    if (not body
+            or low.startswith("none")
+            or low in ("no issues", "no refutation", "n/a", "-")):
+        return "none", ""
+    return "issues", body
+
+
 def _additional_context_block(additional_context) -> str:
     """Render the v2 ``additional_context`` channel as a tail block
     on the user message.
@@ -2290,6 +2385,94 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
     }
     if _self_conf is not None:
         out["confidence"] = [_self_conf]
+    return out
+
+
+def adversary_node(state: dict, *, chat_client, model: str,
+                   think: Any = True, strictness: str = "normal",
+                   recorder=None) -> dict:
+    """M3: post-synthesis red team. Reads the synthesizer's
+    ``final_answer`` and the upstream evidence, emits a ``REFUTATION``
+    block, and — when it finds real problems — annotates the
+    user-facing answer inline AND records the raw refutation in
+    ``final_answer_refutation`` / ``adversary_decision``. A singleton
+    node (runs once, no Send), so x-tier fanout upstream is untouched.
+
+    Non-fatal everywhere: an empty / failed synthesis is skipped
+    (nothing to refute), and an adversary LLM failure leaves the
+    synthesizer's answer standing unrefuted (``adversary_decision`` =
+    ``error``)."""
+    final_answer = (state.get("final_answer") or "").strip()
+    # Nothing to refute: the synthesizer produced no answer or failed
+    # (degraded path). Leave the degraded answer untouched.
+    if not final_answer or state.get("_role_failed") == "synthesizer":
+        return {}
+    _emit_started("adversary", round=1, model=model)
+    if recorder is not None:
+        try:
+            recorder.record_node(role="adversary", kind="node_enter")
+        except Exception:  # pragma: no cover
+            log.exception("recorder.record_node raised; ignored")
+    msgs = build_adversary_messages(
+        state.get("question") or "", final_answer,
+        state.get("plan", ""), state.get("research") or [],
+        strictness=strictness,
+    )
+    t0 = time.monotonic()
+    try:
+        text, pt, ct = _single_shot(
+            chat_client, model, msgs, think=think,
+            recorder=recorder, role="adversary", round=1,
+        )
+    except Exception as e:
+        log.exception("adversary_node failed: %s", e)
+        _emit_finished(
+            "adversary", round=1,
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            ok=False, error=f"{type(e).__name__}: {e}",
+        )
+        # Adversary failure is non-fatal — the answer stands unrefuted.
+        return {
+            "adversary_decision": "error",
+            "turns": [RoleTurn(
+                role="adversary", round=1,
+                content=f"(adversary failed: {e})",
+                prompt_tokens=0, completion_tokens=0,
+                duration_seconds=0.0,
+            )],
+        }
+    dt = time.monotonic() - t0
+    decision, body = parse_adversary_refutation(text)
+    turn = RoleTurn(
+        role="adversary", round=1, content=text,
+        prompt_tokens=pt, completion_tokens=ct, duration_seconds=dt,
+    )
+    if recorder is not None:
+        try:
+            recorder.record_node(
+                role="adversary", kind="node_exit",
+                duration_ms=int(dt * 1000),
+            )
+        except Exception:  # pragma: no cover
+            log.exception("recorder.record_node raised; ignored")
+    _emit_finished("adversary", round=1,
+                    duration_ms=int(dt * 1000), ok=True)
+    out: dict = {
+        "adversary_decision": decision,
+        "turns": [turn],
+        "total_prompt_tokens": pt,
+        "total_completion_tokens": ct,
+    }
+    if decision == "issues" and body:
+        # Surface the red team's findings to the user inline AND keep
+        # the raw refutation for the transcript / the skill's review
+        # loop. The synthesizer's mechanical citation-linter annotations
+        # (path:line checks) compose with this semantic pass.
+        out["final_answer_refutation"] = body
+        out["final_answer"] = (
+            final_answer
+            + "\n\n---\n**⚠️ Adversarial review:**\n" + body
+        )
     return out
 
 

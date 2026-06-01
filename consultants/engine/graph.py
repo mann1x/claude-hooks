@@ -65,6 +65,13 @@ class CouncilState(TypedDict, total=False):
     critique: Optional[str]
     critic_decision: Optional[str]
     final_answer: str
+    # M3: the opt-in post-synthesis adversary refuter writes its raw
+    # REFUTATION block here and a ``none``/``issues`` verdict in
+    # ``adversary_decision``. Both non-additive (the adversary is a
+    # singleton node that runs once after the synthesizer). Absent on
+    # every default run (role off) — cohort-2 parity.
+    final_answer_refutation: Optional[str]
+    adversary_decision: Optional[str]
     turns: Annotated[list, operator.add]
     research_rounds_used: Annotated[int, operator.add]
     critic_reroutes_used: Annotated[int, operator.add]
@@ -267,6 +274,12 @@ class GraphDeps:
     # ⇒ fall through to the legacy ``chat_clients["coder"]`` +
     # ``models["coder"]``.
     coder_default_route: Optional[Any] = None
+    # M3: strictness dial for the opt-in adversary refuter
+    # (soft|normal|strict). Set by the runner from
+    # ``cfg.adversary_strictness``. Consulted only when ``adversary``
+    # is in ``enabled_roles``; ``normal`` is inert (the default-shape
+    # prompt) so a build without the role is unaffected.
+    adversary_strictness: str = "normal"
 
 
 # ----------------------- node wrappers --------------------------- #
@@ -546,6 +559,22 @@ def _wrap_synthesizer(deps: GraphDeps):
     return _node
 
 
+def _wrap_adversary(deps: GraphDeps):
+    """M3: post-synthesis adversary refuter wrapper. Uses the
+    ``adversary`` role's own model + think level + the cfg strictness
+    dial. Only instantiated when ``adversary`` is in enabled_roles."""
+    def _node(state: dict) -> dict:
+        return council.adversary_node(
+            state,
+            chat_client=deps.chat_clients["adversary"],
+            model=deps.models["adversary"],
+            think=_think_for(deps, "adversary"),
+            strictness=deps.adversary_strictness,
+            recorder=deps.recorder,
+        )
+    return _node
+
+
 def _wrap_meta_critic(deps: GraphDeps):
     """Phase 10: meta-critic wrapper. Uses the primary critic model
     (deps.models['critic']) and the critic role's think value. Only
@@ -586,6 +615,19 @@ def plan_topology(enabled: tuple[str, ...]) -> list[tuple[str, str]]:
     if "synthesizer" not in enabled_set:
         raise ValueError("synthesizer is mandatory")
 
+    # M3: the opt-in adversary refuter is a singleton that runs once
+    # after the synthesizer. When enabled, the synthesizer's terminal
+    # edge becomes synthesizer → adversary → END (no Send → x-tier
+    # untouched). Off by default → synthesizer → END (v1 shape).
+    adversary_on = "adversary" in enabled_set
+
+    def _append_synth_tail(es: list[tuple[str, str]]) -> None:
+        if adversary_on:
+            es.append(("synthesizer", "adversary"))
+            es.append(("adversary", "END"))
+        else:
+            es.append(("synthesizer", "END"))
+
     edges: list[tuple[str, str]] = []
     # Find pipeline order through enabled roles excluding synthesizer
     pipeline = [r for r in ("planner", "researcher", "critic")
@@ -595,7 +637,7 @@ def plan_topology(enabled: tuple[str, ...]) -> list[tuple[str, str]]:
         # Pathological: only synthesizer enabled. validate_pipeline
         # rejects this, but be defensive.
         edges.append(("START", "synthesizer"))
-        edges.append(("synthesizer", "END"))
+        _append_synth_tail(edges)
         return edges
 
     edges.append(("START", pipeline[0]))
@@ -606,7 +648,7 @@ def plan_topology(enabled: tuple[str, ...]) -> list[tuple[str, str]]:
     last = pipeline[-1]
     if last != "critic":
         edges.append((last, "synthesizer"))
-    edges.append(("synthesizer", "END"))
+    _append_synth_tail(edges)
     return edges
 
 
@@ -785,6 +827,12 @@ def build_council_graph(deps: GraphDeps,
         _wrap("synthesizer", _wrap_synthesizer(deps)),
         cache_policy_synthesizer,
     )
+    # M3: register the opt-in adversary refuter. plan_topology emits
+    # synthesizer → adversary → END when the role is enabled, so the
+    # node must exist before the edge loop below wires it. Singleton
+    # (no Send) → the per-lane x-tier fanout is untouched.
+    if "adversary" in enabled:
+        sg.add_node("adversary", _wrap("adversary", _wrap_adversary(deps)))
 
     # Researcher fan-out: when the planner produced
     # ``len(plan_items) >= FANOUT_MIN_ITEMS`` independent steps,
@@ -1528,6 +1576,11 @@ def build_follow_up_graph(deps: GraphDeps,
     if "critic" in enabled:
         sg.add_node("critic", _wrap("critic", _wrap_critic(deps)))
     sg.add_node("synthesizer", _wrap("synthesizer", _wrap_synthesizer(deps)))
+    # M3: the adversary refuter composes with follow-ups too — same
+    # singleton synthesizer → adversary → END tail as the main council.
+    adversary_on = "adversary" in enabled
+    if adversary_on:
+        sg.add_node("adversary", _wrap("adversary", _wrap_adversary(deps)))
 
     sg.add_edge(START, "researcher")
     if "critic" in enabled:
@@ -1542,7 +1595,11 @@ def build_follow_up_graph(deps: GraphDeps,
         )
     else:
         sg.add_edge("researcher", "synthesizer")
-    sg.add_edge("synthesizer", END)
+    if adversary_on:
+        sg.add_edge("synthesizer", "adversary")
+        sg.add_edge("adversary", END)
+    else:
+        sg.add_edge("synthesizer", END)
 
     # M8: follow-up graphs share the same store as the parent.
     compile_kwargs: dict[str, Any] = {"checkpointer": checkpointer}

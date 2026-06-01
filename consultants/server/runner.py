@@ -297,6 +297,9 @@ def make_runner(*, ollama_base_url: str):
             coder_chat_clients_by_model=coder_clients_by_model,
             coder_routes_by_language=coder_routes_by_language,
             coder_default_route=coder_default_route,
+            # M3: strictness dial for the opt-in adversary refuter.
+            adversary_strictness=getattr(cfg, "adversary_strictness",
+                                         "normal"),
         )
         # #314: ALWAYS compile with interrupt_before=["synthesizer"].
         # The pause before the final-answer node is the window where a
@@ -739,6 +742,8 @@ def make_follow_up_runner(*, ollama_base_url: str):
             coder_chat_clients_by_model=coder_clients_by_model_fu,
             coder_routes_by_language=coder_routes_by_language_fu,
             coder_default_route=coder_default_route_fu,
+            adversary_strictness=getattr(cfg, "adversary_strictness",
+                                         "normal"),
         )
         # #214/M9 parity fix: follow-ups MUST attach a checkpointer
         # too. run_council does (line ~319) but run_follow_up did not,

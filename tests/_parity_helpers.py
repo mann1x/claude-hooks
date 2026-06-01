@@ -143,6 +143,9 @@ def make_default_stubs() -> dict[str, Any]:
         # can flip them on without re-plumbing the dict.
         "tool_executor": StableChat(STUB_FINAL_ANSWER),
         "coder":         StableChat(STUB_FINAL_ANSWER),
+        # M3 adversary refuter: default stub clears the answer
+        # (REFUTATION: none) so an enabled-but-unperturbed run is inert.
+        "adversary":     StableChat("REFUTATION: none"),
     }
 
 
