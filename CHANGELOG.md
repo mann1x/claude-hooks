@@ -16,6 +16,61 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added
+
+- **`/consultants` dynamic adversarial review — bring the council's
+  "challenge before you trust it" instinct home from the ultracode
+  tier.** Four independent, **default-OFF**, effort-tolerant mechanisms,
+  each with an M12 cohort-2 parity guard so the default council is
+  byte-identical to before:
+  - **Adversary checkpoint** (`adversary_checkpoint`, default off;
+    timeout default 600 s) — the council pauses just before synthesis,
+    emits an `awaiting_adversary` SSE event (durable + Last-Event-ID
+    replayable), and waits for the assistant to inject a bespoke
+    red-team brief before resuming; **auto-proceeds at the deadline** so
+    a lost SSE never hangs the run. The runner is the sole resumer (a
+    deadline-bounded park-poll), avoiding a double-resume race with
+    `POST /resume`. New `adversary-ack` CLI verb +
+    `POST /v1/consult/{sid}/adversary-ack`.
+  - **Adversary role** (`roles.adversary`, default off) — a singleton
+    post-synthesis refuter (`synthesizer → adversary → END`) that
+    annotates the answer with a `REFUTATION:` block or clears it. A
+    post-barrier singleton with no per-lane `Send`, so Phase 9/10
+    x-tier fan-out is untouched.
+  - **Critic dial** (M4) — revived the dead
+    `runtime_control.critic_strictness` (`lax` / `normal` / `strict` /
+    `adversarial`) and threaded it into **both** the critic and
+    meta-critic prompts, plus a new free-text `adversarial_focus` attack
+    brief. Settable live via `control --strictness adversarial
+    --adversarial-focus "<brief>"`; seeded boot-time from
+    `adversary_strictness`.
+  - **Verify budget** (`verify_budget` ∈ `minimal` / `bounded` /
+    `generous`, default `bounded`) — sizes the skeptic panel the
+    Workflow driver runs against surviving claims.
+- **`consult --wait`** — a blocking convenience path that polls a fresh
+  run to terminal and prints the final result (`--poll-interval`,
+  `--wait-timeout`). Removes the Workflow-authoring footgun of
+  hand-rolling a poll loop; the bare path is unchanged.
+- **Committed Workflow driver**
+  `.claude/workflows/consult-with-adversarial-review.mjs` — pipelines
+  `ask → review → skeptic-panel → accept|followup`, where
+  `composeChallenge()` turns surviving refutations into a focused
+  follow-up. SKILL gains **Driving the council from a Workflow** (the
+  recipe + four mandatory disciplines) and a **Dynamic adversary**
+  subsection (authoring template + the `awaiting_adversary` reaction
+  flow).
+- Config + CLI dual-surface for every new knob: `config
+  set-verify-budget` / `set-adversary-strictness` /
+  `set-adversary-checkpoint`, plus `/consultants config` → **Adversary /
+  verify budget** (Subflow G).
+
+### Fixed
+
+- **`latest_confidence`** — the fully-plumbed-but-never-emitted
+  synthesizer/critic self-rating channel now emits a `ConfidenceUpdate`
+  event, unblocking the low-confidence interrupt + xauto escalation
+  consumers that were already reading it.
+
 ## [1.12.0] — 2026-05-30
 
 ### Added

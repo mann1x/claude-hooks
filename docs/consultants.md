@@ -413,6 +413,24 @@ a particularly cross-cutting question without changing the default):
 /consultants --effort xhigh <your question>
 ```
 
+**Blocking mode (`--wait`).** The CLI is async by default — `consult`
+returns a `sid` you poll. For scripts and Workflows that just want the
+final answer in one call, pass `--wait`:
+
+```
+claude-consultants consult --message "<framing>" --cwd "$(pwd)" --wait
+```
+
+`--wait` polls the run to a terminal status and then prints the
+**result** (same JSON shape as `result <sid>`) instead of the initial
+run record — `{"ok": true, "summary_markdown": "...", ...}` on success,
+`{"ok": false, "status": "failed", ...}` (exit 1) otherwise. Tune the
+cadence with `--poll-interval <s>` (default 2.0) and bound the client
+wait with `--wait-timeout <s>` (default 0 = wait indefinitely; a
+positive cap aborts the *wait* only — the run keeps going server-side).
+This is the verb the Workflow driver builds on (see **Adversarial
+review** below).
+
 ---
 
 ## Follow-ups — the v1.1 headline feature
@@ -529,6 +547,113 @@ claude-consultants config set-allow-extra 1      # per-approval grant (>= 1)
 
 or via `/consultants config` → **Followup limit**. Both surface in
 `config show` (`max_followups`, `allow_extra`).
+
+---
+
+## Adversarial review (checkpoint · role · critic dial · verify budget)
+
+Four independent, **default-OFF** mechanisms for hardening a council
+answer against the *wrong-but-plausible* failure mode. Each pays off on
+high-stakes questions (architecture calls, correctness/security claims)
+and adds noise on lookups — so they ship off and you opt in per project
+via `/consultants config` → **Adversary / verify budget** (or the
+`claude-consultants config set-*` verbs). All four preserve M12 cohort-2
+parity when off, and none of them touch the Phase 9/10 researcher
+fan-out.
+
+### Adversary checkpoint — an engine pause for an assistant-authored challenge
+
+When `adversary_checkpoint` is ON, the council **pauses just before
+synthesis**, emits an `awaiting_adversary` SSE event, and waits for the
+assistant to inject a bespoke red-team brief — then resumes. It
+auto-proceeds after a timeout (default **600 s**) so a lost SSE / missed
+poll never hangs the run.
+
+```
+                      ┌───────────── adversary_checkpoint = ON ─────────────┐
+   …critic ──► (pre-synthesis boundary)                                     │
+                      │  emit awaiting_adversary{deadline_ts, self_confidence}
+                      │  record to runtime_events (Last-Event-ID replayable)│
+                      ▼                                                      │
+              ┌── wait for EITHER ──┐                                        │
+              │                     │                                        │
+   adversary-ack / resume      deadline passes (≤ timeout)                   │
+   (+ optional inject brief)         │                                       │
+              │                     │                                        │
+              ▼                     ▼                                        │
+        resume with brief     auto-resume (today's default behavior)        │
+              └─────────► synthesizer ◄──────────┘                          │
+                      └──────────────────────────────────────────────────────┘
+```
+
+The runner is the **sole resumer** (a deadline-bounded park-poll), so
+there's no double-resume race with `POST /resume`. The assistant reacts
+by subscribing to `events`, `inject`-ing the brief at the `critic` (re-run
+the fanned critics) or `synthesizer` (just sharpen) role, and
+`adversary-ack`-ing — see the SKILL's **Dynamic adversary** subsection.
+Toggle + timeout:
+
+```
+claude-consultants config set-adversary-checkpoint on --timeout 600
+```
+
+### Adversary role — an automated post-synthesis refuter
+
+When `roles.adversary.enabled`, a singleton node runs **once after the
+synthesizer** (`synthesizer → adversary → END`) and tries to refute the
+answer's load-bearing claims, emitting `REFUTATION: none` (answer stands)
+or a `REFUTATION:` block the engine appends inline as `⚠️ Adversarial
+review:`. It never asks for more research. As a post-barrier singleton
+with no per-lane `Send`, it leaves x-tier fan-out untouched. Full
+contract in [`docs/consultants-roles.md`](consultants-roles.md#adversary).
+
+```
+claude-consultants config set-role adversary --enabled true
+claude-consultants config set-adversary-strictness strict   # soft|normal|strict
+```
+
+`adversary_strictness` is shared: it tunes the role **and** seeds the M4
+critic dial below.
+
+### Critic dial — a live strictness knob (M4)
+
+`runtime_control.critic_strictness` (`lax` / `normal` / `strict` /
+`adversarial`) threads a directive into the next **critic and
+meta-critic** prompt; `adversarial` makes the critic hunt to break the
+evidence and pairs with a free-text `adversarial_focus` attack brief.
+Live, mid-flight:
+
+```
+claude-consultants control <sid> --strictness adversarial \
+  --adversarial-focus "attack the claim that the cache is write-through"
+```
+
+Boot-time it's seeded from `adversary_strictness`; `adversarial` is
+reachable only via `POST /control`. Default `normal` + empty focus
+appends nothing (byte-identical to the pre-M4 critic).
+
+### Verify budget — the skeptic-panel cap
+
+`verify_budget` (`minimal` = 2 claims / 1 round, `bounded` = 3 default,
+`generous` = 5 up to the followup cap) sizes the skeptic panel the
+**Workflow driver** runs against surviving claims. It only affects the
+driver / review loop, never the bare council.
+
+```
+claude-consultants config set-verify-budget bounded
+```
+
+### Driving it from a Workflow
+
+The committed
+[`.claude/workflows/consult-with-adversarial-review.mjs`](../.claude/workflows/consult-with-adversarial-review.mjs)
+pipelines the whole loop — `consult --wait` → review agent → a `parallel`
+skeptic panel (sized by `verify_budget`) → `accept` or a `composeChallenge`
+follow-up. Run it (when you've opted into orchestration) with the
+Workflow tool: `Workflow(name="consult-with-adversarial-review",
+args={question, cwd, effort, verifyBudget, maxRounds})`. The SKILL's
+**Driving the council from a Workflow** section has the recipe + the
+four mandatory disciplines.
 
 ---
 
