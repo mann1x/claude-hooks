@@ -991,6 +991,74 @@ snapshot) — not these intervention verbs.
 
 ---
 
+## Driving the council from a Workflow
+
+The whole engagement — `ask → review → verify → accept|followup` — is a
+deterministic loop, which makes it a natural fit for a Claude Code
+**Workflow** when the user has opted into multi-agent orchestration (the
+"workflow" keyword, ultracode, or an explicit "fan this out" ask). A
+committed, ready-to-run script lives at
+`.claude/workflows/consult-with-adversarial-review.mjs`; invoke it with
+the Workflow tool by name:
+
+```
+Workflow(name="consult-with-adversarial-review",
+         args={ question: "<the question>",
+                cwd: "<absolute project root>",
+                effort: "high",            // optional
+                verifyBudget: "bounded",   // minimal|bounded|generous
+                maxRounds: 4 })            // optional client-side cap
+```
+
+It pipelines: a **consult** agent runs `claude-consultants consult …
+--wait` and returns the answer; a **review** agent triages it for wrong
+assumptions + gaps; a **skeptic panel** (`parallel`, one agent per
+load-bearing claim) tries to *refute* each claim against the real repo;
+then the script either **accepts** (reviewer satisfied AND nothing
+survived refutation) or calls `composeChallenge()` — the surviving
+refutations + open concerns become a single focused **follow-up** — and
+loops. `composeChallenge()` is where Q1 (a bespoke adversarial brief)
+meets Q2 (the programmatic driver).
+
+### The consultancy.status branch table
+
+The driver (and any hand-rolled loop) keys on the same engine-owned
+status carried in every `status` / `result` / `follow-up` JSON:
+
+| `consultancy.status` | meaning | driver action |
+|----------------------|---------|---------------|
+| `in_progress` | council still working / mid-chain | keep polling (or `--wait`) |
+| `ready_to_review` | an answer is on the table | run the review + skeptic panel |
+| `accepted` | terminal — you (or a prior run) accepted | stop; present the answer |
+| `awaiting_approval` | followup cap hit without an override | stop the auto-loop; surface to the user |
+
+### Four mandatory disciplines
+
+These are baked into the committed script; preserve them in any variant:
+
+1. **Thread `--cwd` on every call.** A Workflow agent starts in its own
+   cwd; without `--cwd "<root>"` the engine resolves the wrong project
+   (or none). Every prompt in the script restates this.
+2. **Detect the cap on JSON `ok == false`, never `$?`.** A followup
+   refusal is an HTTP 200 with `{"ok": false, "reason":
+   "followup_limit_reached"}` — the shell exit code is 0. Branch on the
+   parsed JSON, then stop and ask the user (don't auto-retry past the
+   cap).
+3. **Gate on a complete answer before trusting `consultancy.status`.**
+   `--wait` only prints the result once the per-run `status` reaches
+   `completed`, so the wait *is* the gate; a hand-rolled poll must check
+   per-run `status == "completed"` before reading `consultancy.status`.
+4. **Cap the skeptic panel by `verify_budget`.** `minimal` = 2 claims /
+   1 round, `bounded` = 3 (default), `generous` = 5 up to the followup
+   cap. The script maps the tier to the panel size; the N-council
+   breadth variant is worth gating to high/max only.
+
+When the user has NOT opted into orchestration, don't reach for the
+Workflow — run the same loop inline via the **Review loop** section
+above. The Workflow is the same recipe, parallelized.
+
+---
+
 ## Skill-eval — pick the right model for a role
 
 When the user asks "is X a good model for the coder role?" or
