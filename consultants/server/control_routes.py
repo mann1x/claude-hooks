@@ -590,6 +590,33 @@ def register_control_routes(app: "FastAPI") -> None:
         # gets queued on the executor and the handler returns 202.
         s = _require_live_session(app, sid)
         body = body or {}
+
+        # M2: while the runner owns the graph for an adversary checkpoint
+        # — the pause AND the rewind / auto-resume re-stream the ack
+        # kicks off — the runner is the SOLE resumer. A /resume here must
+        # NOT submit an executor invoke (that would double-resume against
+        # the live, mid-stream runner). Delegate to the ack path: flip the
+        # flag the runner's poll reads and return. ``_adversary_checkpoint_active``
+        # spans the whole runner-owned window (set before the pause,
+        # cleared when the drive loop returns), unlike ``_checkpoint_deadline_ts``
+        # which is set only during the blocking wait — the broader flag is
+        # what closes the post-ack re-stream double-resume window. Read
+        # under the lock so the check races neither the runner's set nor
+        # its clear.
+        with s._inject_lock:
+            checkpoint_active = bool(
+                getattr(s, "_adversary_checkpoint_active", False))
+        if checkpoint_active:
+            s.ack_adversary()
+            s.bump_activity()
+            return {
+                "ok": True,
+                "mode": "adversary_ack",
+                "acked": True,
+                "checkpoint_open": getattr(
+                    s, "_checkpoint_deadline_ts", None) is not None,
+            }
+
         value = body.get("value")
         decision = str(body.get("decision") or "")
         resume_cmd = build_resume_command(value, decision=decision)
@@ -640,6 +667,38 @@ def register_control_routes(app: "FastAPI") -> None:
             "future_id": id(fut),
         }
 
+    # -------------------- POST /adversary-ack ------------------ #
+    @app.post("/v1/consult/{sid}/adversary-ack")
+    def adversary_ack(sid: str, body: Optional[dict] = None) -> dict:
+        """M2: release the engine adversary checkpoint early.
+
+        Unlike /resume, this does NOT re-invoke the graph — it only
+        flips a flag the runner's checkpoint poll-loop reads. The runner
+        is the sole resumer (it never returned at the checkpoint), so an
+        executor re-invoke here would double-resume the graph. The body
+        is ignored except for an optional ``reason`` recorded for
+        post-mortem.
+
+        Returns ``acked: true`` whenever the session is live, whether or
+        not a checkpoint is currently open. The flag is read-and-cleared
+        by the runner, so an ack that lands BEFORE the checkpoint opens
+        (a consumer that pre-decides "proceed, no challenge") is honored:
+        the first poll of the wait loop consumes it and releases
+        immediately — the runner does NOT clear it on entry. A duplicate
+        ack after release is a harmless no-op. ``checkpoint_open`` echoes
+        whether a wait is currently blocking so the caller can tell
+        whether the ack landed on an active pause."""
+        s = _require_live_session(app, sid)
+        s.ack_adversary()
+        s.bump_activity()
+        deadline = getattr(s, "_checkpoint_deadline_ts", None)
+        return {
+            "ok": True,
+            "acked": True,
+            "checkpoint_open": deadline is not None,
+            "deadline_ts": deadline,
+        }
+
     # -------------------- POST /cancel ------------------------- #
     @app.post("/v1/consult/{sid}/cancel")
     def cancel(sid: str, body: Optional[dict] = None) -> dict:
@@ -667,6 +726,14 @@ def register_control_routes(app: "FastAPI") -> None:
                 and getattr(s, "_compiled", None) is not None
                 and getattr(s, "_thread_config", None) is not None):
             _safe_apply_state_delta(s, req.state_delta)
+        # M2: release the adversary checkpoint so the runner thread isn't
+        # blocked for up to the full timeout on a session being
+        # cancelled. The wait loop breaks on this ack (and on ``closed``
+        # for the discard path below); the runner then re-streams to
+        # completion — consistent with cancel-during-stream, which is
+        # also cooperative (cancel_requested is advisory).
+        if hasattr(s, "ack_adversary"):
+            s.ack_adversary()
         # Discard the checkpoint file if asked. The checkpointer
         # factory uses per-session SQLite under the session dir; a
         # naive unlink is correct but only safe AFTER the runner

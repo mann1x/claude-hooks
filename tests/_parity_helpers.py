@@ -197,6 +197,7 @@ V2_OPT_IN_EVENT_KINDS: tuple[str, ...] = (
     "interrupt",          # M5 (HITL)
     "resumed",            # M5 (HITL)
     "deadline_warning",   # M3 (soft deadlines)
+    "awaiting_adversary", # M2 (adversary checkpoint — default OFF)
     # Note: "node_started" / "node_finished" / "tool_call" /
     # "partial_synthesis" / "confidence_update" are emitted on
     # every run, default or not, so they're NOT in the opt-in set.

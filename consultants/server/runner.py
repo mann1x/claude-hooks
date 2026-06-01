@@ -373,12 +373,15 @@ def make_runner(*, ollama_base_url: str):
         # LangGraph yields (mode, payload) tuples when stream_mode
         # is a list.
         final_state: dict = dict(initial)
+        adv_checkpoint, adv_timeout_s = _read_adversary_checkpoint_cfg(cfg)
         try:
             final_state = _drive_council_stream(
                 compiled, initial, thread_config,
                 state=state, enabled=enabled,
                 review_before_synthesis=review_before_synthesis,
                 recorder=recorder, log_label="council",
+                adversary_checkpoint=adv_checkpoint,
+                adversary_checkpoint_timeout_s=adv_timeout_s,
             )
         except Exception as e:
             log.exception("council graph invocation failed: %s", e)
@@ -832,12 +835,15 @@ def make_follow_up_runner(*, ollama_base_url: str):
         # Same dual-mode streaming + always-on synthesizer interrupt as
         # run_council, via the shared driver (auto-resume / rewind / HITL).
         final_state: dict = dict(initial)
+        fu_adv_checkpoint, fu_adv_timeout_s = _read_adversary_checkpoint_cfg(cfg)
         try:
             final_state = _drive_council_stream(
                 compiled, initial, thread_config,
                 state=state, enabled=enabled,
                 review_before_synthesis=fu_review_before_synthesis,
                 recorder=recorder, log_label="follow-up",
+                adversary_checkpoint=fu_adv_checkpoint,
+                adversary_checkpoint_timeout_s=fu_adv_timeout_s,
             )
         except Exception as e:
             log.exception("follow-up graph invocation failed: %s", e)
@@ -1052,6 +1058,24 @@ def _rewind_budget_ok(snap) -> bool:
     return rewind_budget_ok(getattr(snap, "values", {}) or {})
 
 
+def _read_adversary_checkpoint_cfg(cfg) -> tuple[bool, float]:
+    """M2: pull the opt-in adversary-checkpoint knobs off ``cfg`` with a
+    defensive fallback to OFF / 600 s. Returns ``(enabled, timeout_s)``.
+    No effort gate — a pause the operator turned on fires on any tier
+    (default OFF keeps cohort-2 parity)."""
+    try:
+        enabled = bool(getattr(cfg, "adversary_checkpoint", False))
+    except Exception:  # pragma: no cover — defensive
+        enabled = False
+    try:
+        timeout_s = float(getattr(cfg, "adversary_checkpoint_timeout_s", 600))
+        if timeout_s < 1.0:
+            timeout_s = 600.0
+    except Exception:  # pragma: no cover — defensive
+        timeout_s = 600.0
+    return enabled, timeout_s
+
+
 def _rewind_to_researcher(compiled, thread_config, state, recorder,
                           log_label: str) -> None:
     """#314: re-enter the graph at the researcher for one more pass.
@@ -1083,13 +1107,115 @@ def _rewind_to_researcher(compiled, thread_config, state, recorder,
              log_label, state.sid)
 
 
+def _record_awaiting_adversary(recorder, *, state, deadline_ts, timeout_s,
+                               self_confidence, log_label: str) -> None:
+    """Emit (best-effort) + record the M2 ``awaiting_adversary`` event.
+
+    The recorder write is the load-bearing path: here the runner sits
+    *between* graph streams, NOT inside a runnable node, so
+    ``events.emit`` finds no dispatch context and no-ops. The SSE
+    ``GET /events`` endpoint replays the recorder row instead (and a
+    reconnecting consumer picks it up via ``Last-Event-ID``), so a lost
+    live frame never strands the consumer — the runner owns the
+    deadline regardless."""
+    payload = {
+        "sid": state.sid,
+        "deadline_ts": deadline_ts,
+        "timeout_s": timeout_s,
+        "self_confidence": self_confidence,
+        "reason": "adversary_checkpoint",
+        "kind": "awaiting_adversary",
+        "ts": time.time(),
+    }
+    try:
+        from consultants.engine.events import AwaitingAdversary, emit
+        emit(AwaitingAdversary(
+            sid=state.sid, deadline_ts=deadline_ts, timeout_s=timeout_s,
+            self_confidence=self_confidence,
+        ))
+    except Exception:  # pragma: no cover — emit is best-effort
+        pass
+    if recorder is not None and hasattr(recorder, "record_event"):
+        try:
+            recorder.record_event(kind="awaiting_adversary", payload=payload)
+        except Exception:  # pragma: no cover
+            log.exception("record_event(awaiting_adversary) failed sid=%s",
+                          state.sid)
+
+
+def _await_adversary_checkpoint(*, state, final_state, recorder, timeout_s,
+                                log_label: str, now_fn=time.time,
+                                sleep_fn=time.sleep,
+                                poll_interval: float = 0.5) -> bool:
+    """Park at the synthesizer interrupt for an assistant-authored
+    adversarial challenge. Block until the consumer acks (early release)
+    or the deadline passes (auto-resume). Returns True if acked.
+
+    The runner is the **sole resumer** — it never hands control to
+    ``POST /resume``'s executor here — so there is no double-resume
+    race (the caller's ``_adversary_checkpoint_active`` flag keeps the
+    /resume guard armed across the whole runner-owned span). Injections
+    that arrive during the wait are applied synchronously by the
+    live-graph ``POST /inject`` handler (the graph is parked, not
+    streaming), so by the time this returns ``state.take_revalidation()``
+    already reflects any brief the consumer pushed (``role=researcher``
+    → a rewind request; ``role=synthesizer`` → in-place text the
+    synthesizer reads on resume). ``now_fn`` / ``sleep_fn`` are
+    injectable so tests drive a mocked clock without real sleeping.
+
+    A ``POST /adversary-ack`` that arrives BEFORE this opens (a consumer
+    that pre-decides "proceed, no challenge") is honored: the ack flag is
+    NOT cleared on entry, so the first poll consumes it and releases
+    immediately. Fire-once means there is no prior checkpoint whose stale
+    ack could leak in."""
+    deadline = now_fn() + max(1.0, float(timeout_s))
+    self_conf = None
+    try:
+        from consultants.engine.state_v2 import latest_confidence
+        self_conf = latest_confidence(final_state)
+    except Exception:  # pragma: no cover — confidence is optional
+        self_conf = None
+    with state._inject_lock:
+        state._checkpoint_deadline_ts = deadline
+    _record_awaiting_adversary(
+        recorder, state=state, deadline_ts=deadline, timeout_s=timeout_s,
+        self_confidence=self_conf, log_label=log_label,
+    )
+    log.info("%s: adversary checkpoint open (sid=%s deadline=%.0f timeout=%ss)",
+             log_label, state.sid, deadline, timeout_s)
+    acked = False
+    while now_fn() < deadline:
+        if state.take_adversary_ack():
+            acked = True
+            break
+        # Break promptly if the session is cancelled / closed (explicit
+        # /cancel sets the ack; discard-cancel and the idle reaper set
+        # ``closed``). Without this the runner thread would block for the
+        # full timeout on a session that's already gone — the park does
+        # not bump activity, so a long pause is itself idle-reapable.
+        if getattr(state, "closed", False):
+            break
+        remaining = deadline - now_fn()
+        if remaining <= 0:
+            break
+        sleep_fn(min(poll_interval, remaining))
+    with state._inject_lock:
+        state._checkpoint_deadline_ts = None
+    log.info("%s: adversary checkpoint closed (sid=%s acked=%s)",
+             log_label, state.sid, acked)
+    return acked
+
+
 def _drive_council_stream(compiled, initial, thread_config, *,
                           state, enabled, review_before_synthesis: bool,
-                          recorder, log_label: str) -> dict:
+                          recorder, log_label: str,
+                          adversary_checkpoint: bool = False,
+                          adversary_checkpoint_timeout_s: float = 600.0,
+                          now_fn=time.time, sleep_fn=time.sleep) -> dict:
     """Stream the compiled graph to completion through the always-on
     ``interrupt_before=["synthesizer"]`` pause (#314).
 
-    Three behaviors at the synthesizer interrupt boundary:
+    Behaviors at the synthesizer interrupt boundary, in priority order:
 
     - **rewind** — a synthesis-phase inject set ``_revalidation_pending``
       and the round budget allows: re-enter the researcher for one more
@@ -1097,6 +1223,13 @@ def _drive_council_stream(compiled, initial, thread_config, *,
       cap; a second pending request after the cap is exhausted falls
       through to auto-resume (best-effort, the inject's Doc still
       reaches the synthesizer as text).
+    - **adversary checkpoint** (M2, opt-in) — when
+      ``adversary_checkpoint`` is enabled, pause ONCE per consultation
+      and block in ``_await_adversary_checkpoint`` until the consumer
+      acks or the deadline passes. A brief injected during the pause is
+      honored via the rewind path on the way out (preserving x-tier:
+      the fanned researcher+critics re-run with the brief). Default OFF
+      → this branch is never entered → byte-identical to today.
     - **HITL park** — ``review_before_synthesis`` opted in and no
       rewind pending: leave the graph parked for an external /resume
       (M5 behavior, unchanged).
@@ -1115,56 +1248,104 @@ def _drive_council_stream(compiled, initial, thread_config, *,
     """
     final_state: dict = dict(initial)
     stream_input: Any = initial
+    checkpoint_fired = False  # M2: fire the adversary checkpoint once
     MAX_RESUMES = 64  # safety bound vs. a pathological rewind loop
-    for _ in range(MAX_RESUMES):
-        for mode, payload in compiled.stream(
-                stream_input, config=thread_config,
-                stream_mode=["updates", "values"]):
-            if mode == "values" and isinstance(payload, dict):
-                final_state = payload
-                continue
-            if mode != "updates" or not isinstance(payload, dict):
-                continue
-            for node, partial in payload.items():
-                if node in state.progress:
-                    state.progress[node] = "done"
-                    try:
-                        idx = enabled.index(node)
-                        for i in range(idx + 1, len(enabled)):
-                            if state.progress.get(enabled[i]) == "pending":
-                                state.progress[enabled[i]] = "in_progress"
-                                break
-                    except ValueError:
-                        pass
-        # Stream drained — where did we stop?
-        try:
-            snap = compiled.get_state(thread_config)
-            nxt = tuple(getattr(snap, "next", ()) or ())
-        except Exception:
-            # Stub graph without checkpointer introspection, or no
-            # checkpointer attached — treat the drain as completion
-            # (identical to the pre-#314 single-stream behavior).
-            return final_state
-        if not nxt:
-            return final_state  # reached END
-        if "synthesizer" in nxt:
-            # Parked at the always-on synthesizer interrupt.
-            if state.take_revalidation() and _rewind_budget_ok(snap):
-                _rewind_to_researcher(
-                    compiled, thread_config, state, recorder, log_label,
-                )
-                stream_input = None
-                continue
-            if review_before_synthesis:
-                # M5 HITL: leave parked for an external /resume.
+    try:
+        for _ in range(MAX_RESUMES):
+            for mode, payload in compiled.stream(
+                    stream_input, config=thread_config,
+                    stream_mode=["updates", "values"]):
+                if mode == "values" and isinstance(payload, dict):
+                    final_state = payload
+                    continue
+                if mode != "updates" or not isinstance(payload, dict):
+                    continue
+                for node, partial in payload.items():
+                    if node in state.progress:
+                        state.progress[node] = "done"
+                        try:
+                            idx = enabled.index(node)
+                            for i in range(idx + 1, len(enabled)):
+                                if state.progress.get(enabled[i]) == "pending":
+                                    state.progress[enabled[i]] = "in_progress"
+                                    break
+                        except ValueError:
+                            pass
+            # Stream drained — where did we stop?
+            try:
+                snap = compiled.get_state(thread_config)
+                nxt = tuple(getattr(snap, "next", ()) or ())
+            except Exception:
+                # Stub graph without checkpointer introspection, or no
+                # checkpointer attached — treat the drain as completion
+                # (identical to the pre-#314 single-stream behavior).
                 return final_state
-            stream_input = None  # auto-resume → synthesizer → END
-            continue
-        # Parked at an unexpected node — resume defensively.
-        stream_input = None
-    log.warning("%s: stream exceeded MAX_RESUMES (sid=%s)",
-                log_label, state.sid)
-    return final_state
+            if not nxt:
+                return final_state  # reached END
+            if "synthesizer" in nxt:
+                # Parked at the always-on synthesizer interrupt.
+                if state.take_revalidation() and _rewind_budget_ok(snap):
+                    _rewind_to_researcher(
+                        compiled, thread_config, state, recorder, log_label,
+                    )
+                    stream_input = None
+                    continue
+                if adversary_checkpoint and not checkpoint_fired:
+                    # M2: pause ONCE for an assistant-authored adversarial
+                    # challenge. The runner blocks here (sole resumer) until
+                    # the consumer acks or the deadline passes.
+                    #
+                    # Arm the sole-resumer guard BEFORE the pause and keep
+                    # it armed across the post-pause rewind / auto-resume
+                    # re-stream (cleared in the finally). The deadline_ts
+                    # alone is too narrow — it goes None the instant the
+                    # wait ends, leaving the re-stream window where a
+                    # concurrent /resume would double-resume the live
+                    # runner (the adversarial-review BLOCKER).
+                    checkpoint_fired = True
+                    with state._inject_lock:
+                        state._adversary_checkpoint_active = True
+                    _await_adversary_checkpoint(
+                        state=state, final_state=final_state,
+                        recorder=recorder,
+                        timeout_s=adversary_checkpoint_timeout_s,
+                        log_label=log_label, now_fn=now_fn, sleep_fn=sleep_fn,
+                    )
+                    if getattr(state, "closed", False):
+                        # /cancel --discard or the idle reaper closed the
+                        # session during the park — don't re-stream a
+                        # discarded checkpoint.
+                        return final_state
+                    # A brief injected during the pause may have requested
+                    # a rewind (role=researcher). Honor it via the existing
+                    # path so the fanned researcher+critics re-run with the
+                    # brief (x-tier preserved); else fall through to resume,
+                    # where a role=synthesizer brief is read in place.
+                    if state.take_revalidation() and _rewind_budget_ok(snap):
+                        _rewind_to_researcher(
+                            compiled, thread_config, state, recorder,
+                            log_label,
+                        )
+                    stream_input = None
+                    continue
+                if review_before_synthesis:
+                    # M5 HITL: leave parked for an external /resume.
+                    return final_state
+                stream_input = None  # auto-resume → synthesizer → END
+                continue
+            # Parked at an unexpected node — resume defensively.
+            stream_input = None
+        log.warning("%s: stream exceeded MAX_RESUMES (sid=%s)",
+                    log_label, state.sid)
+        return final_state
+    finally:
+        # M2: disarm the sole-resumer guard the moment the runner stops
+        # owning the graph — END, HITL park, MAX_RESUMES, or a crash. Past
+        # this point /resume is the legitimate resumer again (or the
+        # session is terminal and /resume 409s).
+        if checkpoint_fired:
+            with state._inject_lock:
+                state._adversary_checkpoint_active = False
 
 
 def _finalize_recorder(recorder, *, status: str,

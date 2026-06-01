@@ -1107,6 +1107,18 @@ def cmd_resume(args, base: str) -> int:
     return 0
 
 
+def cmd_adversary_ack(args, base: str) -> int:
+    """POST /v1/consult/<sid>/adversary-ack — release the M2 adversary
+    checkpoint early. Sets a flag the runner's checkpoint poll reads; it
+    does NOT re-invoke the graph (the runner is the sole resumer). Safe
+    to call when no checkpoint is open — a harmless no-op."""
+    body = {"reason": args.reason or "adversary-ready"}
+    out = _http("POST",
+                f"{base}/v1/consult/{args.sid}/adversary-ack", body=body)
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
+
+
 def cmd_cancel(args, base: str) -> int:
     """POST /v1/consult/<sid>/cancel — flip cancel_requested.
     ``--keep-partial`` is the default; pass ``--discard-partial`` to
@@ -1602,6 +1614,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional human-readable decision label.",
     )
     res.set_defaults(fn=cmd_resume)
+
+    # adversary-ack — release the M2 adversary checkpoint early.
+    ack = sub.add_parser(
+        "adversary-ack",
+        help="Release the engine adversary checkpoint early (after "
+             "injecting your red-team brief). No-op if no checkpoint is "
+             "open; the council auto-resumes at its deadline regardless.",
+    )
+    ack.add_argument("sid")
+    ack.add_argument("--reason", default="adversary-ready",
+                     help="Human-readable ack reason (logged).")
+    ack.set_defaults(fn=cmd_adversary_ack)
 
     # cancel — flip cancel_requested.
     can = sub.add_parser(

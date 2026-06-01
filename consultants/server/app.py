@@ -212,9 +212,34 @@ class SessionState:
     # clears it. Lives on SessionState (not graph state) so the rewind
     # is driven entirely by the runner without a graph topology change.
     _revalidation_pending: bool = field(default=False, repr=False)
+    # M2 adversary checkpoint: when ``adversary_checkpoint`` is enabled,
+    # the runner parks at the synthesizer interrupt, emits an
+    # ``awaiting_adversary`` event, and polls these two fields. The
+    # assistant (or a Workflow driver) sets ``_adversary_ack`` via
+    # POST /adversary-ack to release the pause early; the runner stamps
+    # ``_checkpoint_deadline_ts`` so GET /state surfaces the auto-resume
+    # wall-clock (belt-and-braces vs. the SSE event payload). Both are
+    # guarded by ``_inject_lock`` — the HTTP ack handler and the runner
+    # poll-loop touch them from different threads
+    # (see [[feedback_psycopg_not_thread_safe]] for the cross-thread
+    # mutation lesson).
+    _adversary_ack: bool = field(default=False, repr=False)
+    _checkpoint_deadline_ts: Optional[float] = field(default=None, repr=False)
+    # M2 sole-resumer guard. ``_checkpoint_deadline_ts`` is only set while
+    # the runner is *blocked in the wait loop*; it goes None the instant
+    # the wait ends, BEFORE the runner does its rewind / auto-resume
+    # re-stream. A /resume arriving during that re-stream would otherwise
+    # see None, miss the deadline guard, and submit an executor invoke —
+    # double-resuming the graph the live runner is actively streaming.
+    # ``_adversary_checkpoint_active`` is the broader span: True from the
+    # moment the runner enters the checkpoint branch until the drive loop
+    # returns (END / HITL park / crash), so /resume delegates to the ack
+    # path for the WHOLE time the runner owns the graph. Set + cleared by
+    # the runner under ``_inject_lock``.
+    _adversary_checkpoint_active: bool = field(default=False, repr=False)
 
     def public_dict(self) -> dict:
-        return {
+        out = {
             "sid": self.sid,
             "status": self.status,
             "started_at": self.started_at,
@@ -234,6 +259,14 @@ class SessionState:
             "last_activity_at": self.last_activity_at,
             "models": dict(self.models),
         }
+        # M2: surface the auto-resume wall-clock ONLY while a checkpoint is
+        # actually open. Omitting it on the default path keeps the GET
+        # /state response byte-identical to pre-M2 (parity) — the key
+        # appears exclusively during an active adversary pause.
+        if self._checkpoint_deadline_ts is not None:
+            out["adversary_checkpoint_deadline_ts"] = \
+                self._checkpoint_deadline_ts
+        return out
 
     def bump_activity(self) -> None:
         """Defer the idle reaper. Called on every poll, follow-up
@@ -334,6 +367,25 @@ class SessionState:
             pending = self._revalidation_pending
             self._revalidation_pending = False
             return pending
+
+    # ---- M2 adversary-checkpoint signalling -------------------- #
+
+    def ack_adversary(self) -> None:
+        """Release the adversary checkpoint early. Set by the
+        POST /adversary-ack handler (HTTP thread); read+cleared by the
+        runner's checkpoint poll-loop. Idempotent — a duplicate ack is
+        a harmless no-op (the runner already resumed)."""
+        with self._inject_lock:
+            self._adversary_ack = True
+
+    def take_adversary_ack(self) -> bool:
+        """Atomically read-and-clear the adversary-ack flag. Returns
+        True if the consumer acked since the last take. The runner polls
+        this inside the checkpoint wait loop."""
+        with self._inject_lock:
+            acked = self._adversary_ack
+            self._adversary_ack = False
+            return acked
 
 
 # ----------------------- runner contract ------------------------- #

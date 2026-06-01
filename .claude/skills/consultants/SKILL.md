@@ -738,12 +738,18 @@ When the user picks **"5. Followup limit"**:
 ### Subflow G — Adversary / verify budget
 
 When the user picks **"6. Adversary / verify budget"**. These four
-knobs all default OFF / bounded and are **effort-gated** — they only
-change behavior at high/max (and the x-prefixed) tiers. Surface that
-once if the current effort is low/medium:
+knobs all default OFF / bounded. They fire **whenever enabled**, on
+any effort tier — there is no silent effort gate (a pause the operator
+turned on should pause). Because the checkpoint can add up to its
+timeout in latency and the council answers strongest with the fanned
+critics behind it, surface this guidance once when the current effort
+is low/medium:
 
-> Note: the adversary role and checkpoint only fire at high/max (and
-> xhigh/xmax). At low/medium they stay inert even when enabled.
+> Note: the adversary checkpoint pauses for an external red-team brief
+> (up to its timeout) and the post-synthesis adversary role adds a
+> refutation pass. Both fire on any tier once enabled, but they pay
+> off most at high/max (and xhigh/xmax) on high-stakes questions where
+> a wrong-but-plausible answer is costly.
 
 1. Show current values from `config show`: `roles.adversary.enabled`,
    `adversary_strictness`, `adversary_checkpoint` (+ its timeout), and
