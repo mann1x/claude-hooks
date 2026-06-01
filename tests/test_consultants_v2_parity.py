@@ -266,6 +266,36 @@ class TestOptInsOffByDefault(unittest.TestCase):
         self.assertFalse(self.cfg.adversary_checkpoint)
         self.assertEqual(self.cfg.adversary_checkpoint_timeout_s, 600)
 
+    # ----- M4 (dynamic critic dial) ----------------------------- #
+
+    def test_critic_dial_seeds_to_normal_by_default(self):
+        # M4: the boot-time RuntimeControl seeds ``critic_strictness``
+        # from ``adversary_strictness`` (default normal → normal) and
+        # never seeds an ``adversarial_focus``. A default flip here
+        # would silently re-shape every critic prompt.
+        from consultants.engine import control
+        rc = control.runtime_control_defaults(self.cfg, effort="medium")
+        self.assertEqual(rc["critic_strictness"], "normal")
+        self.assertNotIn("adversarial_focus", rc)
+
+    def test_default_critic_prompt_is_byte_identical(self):
+        # M4: with the dial at its default (normal, no focus) the critic
+        # AND meta-critic prompts must be byte-identical to the
+        # no-dial-argument call — i.e. the M4 threading appends nothing.
+        from consultants.engine import council
+        self.assertEqual(
+            council.build_critic_messages("q?", "1. p", ["r"]),
+            council.build_critic_messages(
+                "q?", "1. p", ["r"],
+                strictness="normal", adversarial_focus=""),
+        )
+        self.assertEqual(
+            council.build_meta_critic_messages("q?", "p", ["r"], ["v"]),
+            council.build_meta_critic_messages(
+                "q?", "p", ["r"], ["v"],
+                strictness="normal", adversarial_focus=""),
+        )
+
     # ----- M1 (checkpointer) ------------------------------------ #
 
     def test_checkpointer_backend_is_sqlite_by_default(self):

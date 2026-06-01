@@ -352,11 +352,69 @@ META_CRITIC_SYSTEM = _role_prompt(
     "this line and strips it; it is not shown to the user."
 )
 
+# M4: the dynamic critic dial. ``runtime_critic_strictness`` selects a
+# directive appended to the critic / meta-critic user message.
+# ``normal`` is ABSENT on purpose — it contributes nothing, so the
+# default-config prompt is byte-identical to v1 (cohort-2 parity).
+_CRITIC_STRICTNESS_DIRECTIVE: dict[str, str] = {
+    "lax": (
+        "STRICTNESS: lax. Bias hard toward `ready`. Request another "
+        "research round ONLY for a missing fact that would change the "
+        "answer's bottom line; tolerate thin-but-sufficient evidence."
+    ),
+    "strict": (
+        "STRICTNESS: strict. Hold the evidence to a high bar: demand a "
+        "`path:line` or named source for every load-bearing claim. If a "
+        "key fact rests on a single unverified assertion, that is a "
+        "concrete gap worth another round."
+    ),
+    "adversarial": (
+        "STRICTNESS: adversarial. Actively try to BREAK the evidence — "
+        "hunt for the unstated assumption, the edge case the research "
+        "skipped, the citation that doesn't actually say what it's "
+        "used for, the claim that's true in general but false here. "
+        "Still request research only for a concrete, nameable gap, but "
+        "look harder than usual for one."
+    ),
+}
+
+
+def _append_critic_dial(parts: list[str], *, strictness: str,
+                        adversarial_focus: str) -> None:
+    """Append the M4 strictness directive + any injected adversarial
+    focus to a critic / meta-critic message body. No-op for the default
+    (``normal`` strictness, empty focus) so the v1 prompt is preserved."""
+    directive = _CRITIC_STRICTNESS_DIRECTIVE.get(strictness)
+    if directive:
+        parts.append("\n" + directive)
+    if adversarial_focus and adversarial_focus.strip():
+        parts.append(
+            "\nADVERSARIAL FOCUS (attack this specifically):\n"
+            + adversarial_focus.strip())
+
+
+def _read_critic_dial(state: dict) -> tuple[str, str]:
+    """Read the live critic dial — ``(strictness, adversarial_focus)`` —
+    from ``state['runtime_control']`` for the critic / meta-critic
+    nodes. Lazy-imports ``control`` (langgraph-free) so the parser-only
+    import surface of this module stays clean. Defaults to
+    ``("normal", "")`` when runtime_control is absent (legacy v1 path)
+    so the prompt is byte-identical (cohort-2 parity)."""
+    try:
+        from consultants.engine import control
+        return (control.runtime_critic_strictness(state),
+                control.runtime_adversarial_focus(state))
+    except Exception:  # pragma: no cover — defensive
+        return ("normal", "")
+
 
 def build_meta_critic_messages(
     question: str, plan: str,
     research_rounds: list[str],
     critic_verdicts: list[str],
+    *,
+    strictness: str = "normal",
+    adversarial_focus: str = "",
 ) -> list[dict]:
     """Build the meta-critic's prompt. Critics are anonymized as
     ``Critic 1``, ``Critic 2``, ... in the order ``critic_verdicts``
@@ -366,6 +424,12 @@ def build_meta_critic_messages(
     Identity is anonymized to avoid biasing the meta-critic toward
     a model it 'knows' performs better. The recorder is the source
     of truth for who-said-what.
+
+    ``strictness`` + ``adversarial_focus`` (M4) thread the same dynamic
+    critic dial used by ``build_critic_messages`` so the x-tier
+    meta-critic doesn't silently degrade to the default when an
+    operator sharpens the live dial. Default (normal, no focus) →
+    byte-identical to v1 (cohort-2 parity).
     """
     parts = [
         f"USER QUESTION:\n{question.strip()}",
@@ -382,6 +446,11 @@ def build_meta_critic_messages(
     else:
         for i, v in enumerate(critic_verdicts, start=1):
             parts.append(f"\nCRITIC {i} VERDICT:\n{v.strip()}")
+    # M4: dynamic critic dial — appended before the closing
+    # instruction so the directive reads as additional guidance, not a
+    # trailing afterthought. No-op for the default (parity).
+    _append_critic_dial(parts, strictness=strictness,
+                        adversarial_focus=adversarial_focus)
     parts.append(
         "\nSynthesize. Emit the final DECISION line and a single "
         "consolidated critique paragraph."
@@ -681,7 +750,9 @@ def build_researcher_messages(question: str, plan: str,
 def build_critic_messages(question: str, plan: str,
                           research_rounds: list[str],
                           *,
-                          additional_context=None) -> list[dict]:
+                          additional_context=None,
+                          strictness: str = "normal",
+                          adversarial_focus: str = "") -> list[dict]:
     parts = [
         f"USER QUESTION:\n{question.strip()}",
         f"\nPLANNER'S PLAN:\n{plan.strip()}",
@@ -691,6 +762,10 @@ def build_critic_messages(question: str, plan: str,
     extra = _additional_context_block(additional_context)
     if extra:
         parts.append("\n" + extra)
+    # M4: dynamic critic dial. No-op for the default (normal, no focus)
+    # so the prompt is byte-identical to v1 (cohort-2 parity).
+    _append_critic_dial(parts, strictness=strictness,
+                        adversarial_focus=adversarial_focus)
     return [
         {"role": "system", "content": CRITIC_SYSTEM},
         {"role": "user", "content": "\n".join(parts)},
@@ -1969,9 +2044,12 @@ def critic_node(state: dict, *, chat_client, model: str,
     # mostly "any" docs naming a quality bar like "must cite path:line
     # for every claim"). Same defensive helper as the other roles.
     extra_ctx_critic = _additional_context_for(state, "critic")
+    # M4: live critic dial (strictness + injected adversarial focus).
+    _crit_strict, _crit_focus = _read_critic_dial(state)
     msgs = build_critic_messages(
         state["question"], state["plan"], state.get("research") or [],
         additional_context=extra_ctx_critic,
+        strictness=_crit_strict, adversarial_focus=_crit_focus,
     )
     t0 = time.monotonic()
     try:
@@ -2108,10 +2186,14 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
         and (getattr(t, "content", "") or "").strip()
     ]
 
+    # M4: thread the same live critic dial into the meta-critic so the
+    # x-tier consolidation honors a sharpened strictness / focus too.
+    _mc_strict, _mc_focus = _read_critic_dial(state)
     msgs = build_meta_critic_messages(
         state["question"], state.get("plan", ""),
         state.get("research") or [],
         critic_verdicts,
+        strictness=_mc_strict, adversarial_focus=_mc_focus,
     )
     t0 = time.monotonic()
     try:

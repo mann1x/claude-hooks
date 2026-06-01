@@ -252,7 +252,12 @@ class RuntimeControl(TypedDict, total=False):
     enabled_roles: list[str]    # subset of the project's roles
     # ---- quality thresholds ----
     confidence_target: float    # synthesizer self-rating cutoff
-    critic_strictness: Literal["lax", "normal", "strict"]
+    # M4 dynamic critic dial. ``adversarial`` is reachable only via a
+    # live POST /control mutation; the boot-time seed maps the static
+    # ``adversary_strictness`` config (soft|normal|strict) into the
+    # lax|normal|strict subset.
+    critic_strictness: Literal["lax", "normal", "strict", "adversarial"]
+    adversarial_focus: str      # M4 free-text attack brief ('' = none)
     # ---- stall + retry policy ----
     stall_threshold_s: float    # M3
     stall_retries: int          # M3

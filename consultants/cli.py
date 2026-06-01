@@ -1049,6 +1049,10 @@ def cmd_control(args, base: str) -> int:
         rc["confidence_target"] = float(args.confidence)
     if args.strictness:
         rc["critic_strictness"] = args.strictness
+    # M4: ``--adversarial-focus ""`` is a meaningful "clear it" signal,
+    # so test against None (flag omitted) not falsiness.
+    if getattr(args, "adversarial_focus", None) is not None:
+        rc["adversarial_focus"] = args.adversarial_focus
     if args.enable:
         rc["enabled_roles"] = sorted({r.strip() for r in args.enable})
     if args.disable:
@@ -1067,7 +1071,8 @@ def cmd_control(args, base: str) -> int:
         raise CLIError(
             "control requires at least one knob: "
             "--time / --soft-target / --max-rounds / --max-reroutes / "
-            "--confidence / --strictness / --enable / --disable",
+            "--confidence / --strictness / --adversarial-focus / "
+            "--enable / --disable",
         )
     out = _http(
         "POST", f"{base}/v1/consult/{args.sid}/control",
@@ -1573,8 +1578,15 @@ def build_parser() -> argparse.ArgumentParser:
                      help="confidence_target in [0, 1].")
     ctl.add_argument(
         "--strictness",
-        choices=("lax", "normal", "strict"),
-        help="Critic strictness preset.",
+        choices=("lax", "normal", "strict", "adversarial"),
+        help="Critic strictness preset. 'adversarial' is the live-only "
+             "M4 dial — actively hunt to break the evidence.",
+    )
+    ctl.add_argument(
+        "--adversarial-focus",
+        dest="adversarial_focus", default=None,
+        help="Free-text attack brief threaded into the next critic + "
+             "meta-critic prompt (M4). Pass '' to clear it.",
     )
     ctl.add_argument(
         "--enable", action="append", default=[],
