@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -111,10 +112,16 @@ class TestHandlers(unittest.TestCase):
 
     def test_list_pretty_prints_block(self):
         captured = io.StringIO()
-        rc = self._run(
-            cmd_config_coder_list,
-            {"cwd": None}, captured,
-        )
+        # Isolate cwd + user config so the handler resolves to the
+        # seeded defaults, not whatever per-project ``.claude-hooks/
+        # consultants.toml`` happens to sit at the runner's cwd
+        # (bug-664: an ``override_user_global=on`` project file leaks
+        # in and flips both the values and the write scope).
+        with self._isolated_config():
+            rc = self._run(
+                cmd_config_coder_list,
+                {"cwd": None}, captured,
+            )
         self.assertEqual(rc, 0)
         body = json.loads(captured.getvalue())
         self.assertTrue(body["ok"])
@@ -217,8 +224,26 @@ class TestHandlers(unittest.TestCase):
 
 
 class _IsolatedConfig:
+    """Redirect *both* config-resolution inputs to a throwaway dir:
+
+    1. ``user_config_path`` → a temp file (so user-scope writes never
+       touch the real home dir), and
+    2. **the process cwd** → the same empty temp dir, so the
+       per-project lookup finds no ``.claude-hooks/consultants.toml``.
+
+    Without (2) a real per-project config sitting at the runner's cwd
+    (e.g. this repo's own ``.claude-hooks/consultants.toml`` with
+    ``override_user_global = true``) leaks into the handler: it flips
+    the auto write-scope from ``user`` to ``project`` *and* the
+    ``wraps=``-real mutator tests then clobber that live file
+    (bug-664). Isolating cwd makes the tests host-independent and
+    side-effect-free.
+    """
+
     def __enter__(self):
         self._tmp = tempfile.TemporaryDirectory()
+        self._old_cwd = os.getcwd()
+        os.chdir(self._tmp.name)
         self._patcher = mock.patch.object(
             cc, "user_config_path",
             return_value=Path(self._tmp.name) / "consultants.toml",
@@ -228,6 +253,7 @@ class _IsolatedConfig:
 
     def __exit__(self, exc_type, exc, tb):
         self._patcher.stop()
+        os.chdir(self._old_cwd)
         self._tmp.cleanup()
         return False
 

@@ -14,7 +14,7 @@ release with the auto-generated source archive
 (`claude-hooks-X.Y.Z.zip` / `.tar.gz`). See
 [`docs/RELEASING.md`](docs/RELEASING.md) for the cut procedure.
 
-## [Unreleased]
+## [1.13.0] — 2026-06-02
 
 ### Added
 
@@ -137,6 +137,22 @@ release with the auto-generated source archive
 - **`docs/consultants.md`** — corrected the false "every `set-*` accepts
   `--project`" claim (only 8 of 15 did) and a stale `config coder
   set-route` example (the verb is `config coder set`).
+- **Workflow driver `meta`** — flattened `meta.description` /
+  `meta.whenToUse` from string concatenation to single literals. The
+  Workflow tool requires a pure-literal `meta` (it rejects
+  `BinaryExpression`), so the committed
+  `consult-with-adversarial-review.mjs` could not be launched via
+  `scriptPath` until this fix.
+- **`config coder` test isolation (bug-664 class)** —
+  `tests/test_cli_config_coder.py::TestHandlers` isolated only the
+  *user* config path, not cwd, so a per-project
+  `.claude-hooks/consultants.toml` with `override_user_global = true`
+  at the runner's cwd leaked in: it flipped the asserted write-scope
+  from `user` to `project` (host-dependent failures) **and** the
+  `wraps=`-real mutator tests clobbered that live file. `_IsolatedConfig`
+  now also `chdir`s to its throwaway temp dir, and the previously
+  un-isolated `test_list` is wrapped — the tests are now
+  host-independent and side-effect-free.
 
 ## [1.12.0] — 2026-05-30
 
