@@ -185,11 +185,12 @@ def forward(
     The caller is responsible for consuming ``body_iter`` completely so the
     underlying stream is released back to the pool.
 
-    Transparently retries on ``httpx.RemoteProtocolError`` ("Server
-    disconnected") — upstream sometimes drops pooled connections
-    before we notice, and the failure is safe to retry as long as no
-    bytes have reached our client yet (the retry happens strictly
-    *before* ``UpstreamResult`` is returned).
+    Transparently retries (spaced, deadline-bounded — see
+    ``claude_hooks.proxy.retry``) on transport-level failures
+    (``httpx.TimeoutException`` / ``httpx.NetworkError`` /
+    ``httpx.RemoteProtocolError``) and on retryable upstream statuses.
+    All are safe to retry because no byte has reached our client yet —
+    the retry happens strictly *before* ``UpstreamResult`` is returned.
     """
     u = urlparse(upstream_url)
     if not u.scheme or not u.hostname:
@@ -245,12 +246,19 @@ def forward(
                 retry_after_honored, retry.throttle().is_open(now), "ok",
             )
             return result
-        except (httpx.RemoteProtocolError, httpx.ConnectError) as e:
-            # Connection drop: httpx has already evicted the dead
-            # connection, so the next attempt on the shared client gets
-            # a fresh one — no whole-pool nuke (which would kill sibling
-            # sessions and re-trip the edge-429 gate). hdrs is empty;
-            # there's no upstream response to read Retry-After from.
+        except (httpx.TimeoutException, httpx.NetworkError,
+                httpx.RemoteProtocolError) as e:
+            # Transport-level failure — the throttle's other faces:
+            # connect/read/write/pool *timeouts* (``TimeoutException``),
+            # connect/read/write *errors* (``NetworkError``, incl.
+            # ``ConnectError``), and mid-stream server disconnects
+            # (``RemoteProtocolError``). All are safe to retry here
+            # because no byte has reached the client yet. httpx has
+            # already evicted the dead connection, so the next attempt
+            # on the shared client gets a fresh one — no whole-pool nuke
+            # (which would kill sibling sessions and re-trip the edge-429
+            # gate). hdrs is empty; there's no upstream response to read
+            # Retry-After from.
             last_exc = e
             now = time.monotonic()
             hdrs: dict = {}

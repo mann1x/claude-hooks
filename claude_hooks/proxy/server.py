@@ -148,11 +148,16 @@ class _Handler(BaseHTTPRequestHandler):
                 timeout=timeout,
             )
         except Exception as e:
+            # Include the exception TYPE — a bare ``str(e)`` can be
+            # uninformative (e.g. ``17``) and leaves a 502 undiagnosable.
             log.warning(
-                "upstream call failed: %s %s -> %s",
-                self.command, self.path, e,
+                "upstream call failed: %s %s -> %s: %s",
+                self.command, self.path, type(e).__name__, e,
             )
-            self._send_bad_gateway(str(e), started, req_meta, len(body))
+            log.debug("upstream failure traceback", exc_info=True)
+            self._send_bad_gateway(
+                f"{type(e).__name__}: {e}", started, req_meta, len(body),
+            )
             return
 
         resp_meta = extract_response_info(result.headers, result.first_chunk)

@@ -252,6 +252,25 @@ class TestForwardRetryIntegration:
         assert calls["n"] == 2
         assert rt.counters().snapshot()["upstream_conn_error_total"] == 1
 
+    @pytest.mark.parametrize("exc", [
+        httpx.ReadTimeout("read timed out"),
+        httpx.ConnectTimeout("connect timed out"),
+        httpx.PoolTimeout("pool timed out"),
+        httpx.ConnectError("connection refused"),
+        httpx.ReadError("read error"),
+    ])
+    def test_transport_failures_are_retried(self, monkeypatch, captured_sleeps, exc):
+        """The broadened catch net: timeouts + read/write/connect errors
+        (the throttle's other faces) must be retried, not 502'd on the
+        first attempt. Regression guard for the live `17` 502."""
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_BASE_DELAY_S", "0")
+        rt.reset_state()
+        calls = _seq_attempt(monkeypatch, [exc, 200])
+        result = _fwd()
+        assert result.status == 200
+        assert calls["n"] == 2
+        assert rt.counters().snapshot()["upstream_conn_error_total"] == 1
+
     def test_no_pool_nuke_on_retry_path(self, monkeypatch, captured_sleeps):
         """The retry loop must NEVER call the whole-pool ``_reset_client``
         — that closed sibling sessions' connections + re-tripped the edge
