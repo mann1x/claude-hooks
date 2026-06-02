@@ -593,13 +593,13 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
 
 
 def cmd_config_show(args, base: str) -> int:
-    cwd = Path(args.cwd).resolve() if args.cwd else None
-    cfg = cc.load_config(cwd)
-    block = _read_claude_hooks_consultants_block()
-    smart = block.get("smart_start") or {}
-    print(json.dumps({"ok": True, **_config_dump(cfg, smart_block=smart)},
-                     indent=2))
-    return 0
+    if getattr(args, "user", False):
+        cfg = cc.load_config(None)            # forced user-global view
+    else:
+        # Default to the cwd so `config show` reflects the ACTIVE scope
+        # (per-project when its override flag is on) without needing --cwd.
+        cfg = cc.load_config(Path(args.cwd or os.getcwd()).resolve())
+    return _emit_config(cfg, args)
 
 
 def cmd_config_set_role(args, base: str) -> int:
@@ -643,77 +643,52 @@ def cmd_config_set_role(args, base: str) -> int:
             add_extra_model=add_extra,
             remove_extra_model=remove_extra,
             clear_extras=clear_extras,
-            scope="project" if args.project else "user",
-            cwd=Path(args.cwd or os.getcwd()).resolve()
-            if args.project else None,
+            **_resolve_active_scope(args),
         )
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
-    block = _read_claude_hooks_consultants_block()
-    smart = block.get("smart_start") or {}
-    print(json.dumps({"ok": True, **_config_dump(cfg, smart_block=smart)},
-                     indent=2))
-    return 0
+    return _emit_config(cfg, args)
 
 
 def cmd_config_set_effort(args, base: str) -> int:
     try:
-        cfg = cc.set_effort(args.tier)
+        cfg = cc.set_effort(args.tier, **_resolve_active_scope(args))
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
-    block = _read_claude_hooks_consultants_block()
-    smart = block.get("smart_start") or {}
-    print(json.dumps({"ok": True, **_config_dump(cfg, smart_block=smart)},
-                     indent=2))
-    return 0
+    return _emit_config(cfg, args)
 
 
 def cmd_config_set_max_followups(args, base: str) -> int:
     try:
-        cfg = cc.set_max_followups(args.value)
+        cfg = cc.set_max_followups(args.value, **_resolve_active_scope(args))
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
-    block = _read_claude_hooks_consultants_block()
-    smart = block.get("smart_start") or {}
-    print(json.dumps({"ok": True, **_config_dump(cfg, smart_block=smart)},
-                     indent=2))
-    return 0
+    return _emit_config(cfg, args)
 
 
 def cmd_config_set_allow_extra(args, base: str) -> int:
     try:
-        cfg = cc.set_allow_extra(args.value)
+        cfg = cc.set_allow_extra(args.value, **_resolve_active_scope(args))
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
-    block = _read_claude_hooks_consultants_block()
-    smart = block.get("smart_start") or {}
-    print(json.dumps({"ok": True, **_config_dump(cfg, smart_block=smart)},
-                     indent=2))
-    return 0
-
-
-def _print_config(cfg) -> int:
-    block = _read_claude_hooks_consultants_block()
-    smart = block.get("smart_start") or {}
-    print(json.dumps({"ok": True, **_config_dump(cfg, smart_block=smart)},
-                     indent=2))
-    return 0
+    return _emit_config(cfg, args)
 
 
 def cmd_config_set_verify_budget(args, base: str) -> int:
     try:
-        cfg = cc.set_verify_budget(args.tier)
+        cfg = cc.set_verify_budget(args.tier, **_resolve_active_scope(args))
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
-    return _print_config(cfg)
+    return _emit_config(cfg, args)
 
 
 def cmd_config_set_adversary_strictness(args, base: str) -> int:
     try:
-        cfg = cc.set_adversary_strictness(args.level)
+        cfg = cc.set_adversary_strictness(
+            args.level, **_resolve_active_scope(args))
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
-    return _print_config(cfg)
+    return _emit_config(cfg, args)
 
 
 def cmd_config_set_adversary_checkpoint(args, base: str) -> int:
@@ -721,26 +696,46 @@ def cmd_config_set_adversary_checkpoint(args, base: str) -> int:
     try:
         cfg = cc.set_adversary_checkpoint(
             enabled, timeout_s=getattr(args, "timeout", None),
+            **_resolve_active_scope(args),
         )
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
-    return _print_config(cfg)
+    return _emit_config(cfg, args)
 
 
 def cmd_config_set_service_mode(args, base: str) -> int:
     try:
-        cfg = cc.set_service_mode(args.mode)
+        cfg = cc.set_service_mode(args.mode, **_resolve_active_scope(args))
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
-    block = _read_claude_hooks_consultants_block()
-    smart = block.get("smart_start") or {}
-    out = _config_dump(cfg, smart_block=smart)
-    out["follow_up"] = (
+    return _emit_config(cfg, args, follow_up=(
         "Run `python install.py` to install/uninstall the systemd "
-        "unit, then restart `claude-hooks-daemon`."
-    )
-    print(json.dumps({"ok": True, **out}, indent=2))
-    return 0
+        "unit, then restart `claude-hooks-daemon`."))
+
+
+def cmd_config_set_override_user_global(args, base: str) -> int:
+    """``config set-override-user-global on|off`` — flip the per-project
+    file's ``override_user_global`` directive.
+
+    Inherently project-scoped: the flag lives ONLY in
+    ``<cwd>/.claude-hooks/consultants.toml`` and is read/written only
+    there (no ``--user``/``--project``). The file is created as a full
+    snapshot if absent. With the flag OFF the per-project file is
+    ignored everywhere — engine and every ``config`` command read
+    user-global. The emitted config + ``active_config`` reflect the
+    EFFECTIVE post-flip view (``load_config`` honors the new flag)."""
+    enabled = str(args.state).lower() in ("on", "true", "1", "yes", "enable")
+    cwd = Path(args.cwd or os.getcwd()).resolve()
+    try:
+        cc.set_override_user_global(enabled, cwd=cwd)
+    except (ValueError, OSError) as e:
+        raise CLIError(str(e), exit_code=2) from None
+    # Pin cwd so the active_config probe + post-flip load_config both
+    # resolve the project file we just wrote, regardless of how --cwd
+    # was (or wasn't) passed.
+    args.cwd = str(cwd)
+    cfg = cc.load_config(cwd)
+    return _emit_config(cfg, args)
 
 
 def cmd_config_set_idle_timeout(args, base: str) -> int:
@@ -814,17 +809,11 @@ def cmd_config_set_store(args, base: str) -> int:
             add_enable_at_effort=args.add_effort,
             remove_enable_at_effort=args.remove_effort,
             clear_enable_at_efforts=bool(args.clear_efforts),
-            scope="project" if args.project else "user",
-            cwd=Path(args.cwd or os.getcwd()).resolve()
-            if args.project else None,
+            **_resolve_active_scope(args),
         )
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
-    block = _read_claude_hooks_consultants_block()
-    smart = block.get("smart_start") or {}
-    print(json.dumps({"ok": True, **_config_dump(cfg, smart_block=smart)},
-                     indent=2))
-    return 0
+    return _emit_config(cfg, args)
 
 
 def cmd_config_set_store_ttl(args, base: str) -> int:
@@ -841,17 +830,11 @@ def cmd_config_set_store_ttl(args, base: str) -> int:
             user_days=args.user_days,
             refresh_on_read=refresh,
             jitter_pct=args.jitter_pct,
-            scope="project" if args.project else "user",
-            cwd=Path(args.cwd or os.getcwd()).resolve()
-            if args.project else None,
+            **_resolve_active_scope(args),
         )
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
-    block = _read_claude_hooks_consultants_block()
-    smart = block.get("smart_start") or {}
-    print(json.dumps({"ok": True, **_config_dump(cfg, smart_block=smart)},
-                     indent=2))
-    return 0
+    return _emit_config(cfg, args)
 
 
 def cmd_config_set_store_distillation(args, base: str) -> int:
@@ -871,17 +854,11 @@ def cmd_config_set_store_distillation(args, base: str) -> int:
             pace_seconds_between_distillations=(
                 args.pace_seconds_between_distillations
             ),
-            scope="project" if args.project else "user",
-            cwd=Path(args.cwd or os.getcwd()).resolve()
-            if args.project else None,
+            **_resolve_active_scope(args),
         )
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
-    block = _read_claude_hooks_consultants_block()
-    smart = block.get("smart_start") or {}
-    print(json.dumps({"ok": True, **_config_dump(cfg, smart_block=smart)},
-                     indent=2))
-    return 0
+    return _emit_config(cfg, args)
 
 
 def cmd_config_list_models(args, base: str) -> int:
@@ -953,24 +930,136 @@ def _coder_route_block(cfg) -> dict:
     }
 
 
-def cmd_config_coder_list(args, base: str) -> int:
-    cwd = Path(args.cwd).resolve() if args.cwd else None
-    cfg = cc.load_config(cwd)
-    print(json.dumps({"ok": True, "coder": _coder_route_block(cfg)},
-                     indent=2))
+def _emit_coder(cfg, args) -> int:
+    """Coder-route command output: JSON (coder block + active_config) on
+    stdout, scope warn on stderr. Mirrors ``_emit_config`` but carries
+    the trimmed ``coder`` view the routing dialog renders."""
+    active = _active_config_block(args)
+    print(json.dumps(
+        {"ok": True, "coder": _coder_route_block(cfg),
+         "active_config": active}, indent=2))
+    _warn_active_config(active)
     return 0
 
 
-def _scope_kwargs(args) -> dict:
-    """Translate ``args.project`` + ``args.cwd`` into the kwargs the
-    config-mutator functions expect. Mirrors ``cmd_config_set_role``."""
+def cmd_config_coder_list(args, base: str) -> int:
+    # ``list`` is read-only: reflect the ACTIVE scope by default (cwd),
+    # matching ``config show``. ``--user`` forces the user-global view.
+    if getattr(args, "user", False):
+        cfg = cc.load_config(None)
+    else:
+        cfg = cc.load_config(Path(args.cwd or os.getcwd()).resolve())
+    return _emit_coder(cfg, args)
+
+
+def _resolve_active_scope(args) -> dict:
+    """Resolve where a ``config set-*`` reads + writes.
+
+    ``--user`` forces user-global; ``--project`` forces the per-project
+    file (created if absent); otherwise AUTO — the per-project file iff
+    it exists AND its ``override_user_global`` directive is on. ``cwd``
+    defaults to the current working directory. Returns the
+    ``{scope, cwd}`` kwargs the config mutators expect."""
+    cwd = Path(getattr(args, "cwd", None) or os.getcwd()).resolve()
+    if getattr(args, "user", False):
+        return {"scope": "user", "cwd": None}
+    if getattr(args, "project", False):
+        return {"scope": "project", "cwd": cwd}
+    if cc.project_override_active(cwd):
+        return {"scope": "project", "cwd": cwd}
+    return {"scope": "user", "cwd": None}
+
+
+def _active_config_block(args) -> dict:
+    """Describe which config scope is active for ``args`` (cwd default =
+    current dir). Surfaced as the ``active_config`` field on every config
+    command so the skill + direct callers see the effective scope.
+
+    Honors the explicit ``--user`` / ``--project`` overrides so the
+    reported scope matches what the command actually read/wrote; in
+    AUTO it is project iff the per-project file exists AND its
+    ``override_user_global`` directive is on (the ``project_override_active``
+    rule)."""
+    probe = Path(getattr(args, "cwd", None) or os.getcwd()).resolve()
+    proj_path = cc.project_config_path(probe)
+    raw = cc._read_toml(proj_path)
+    exists = proj_path.exists()
+    if getattr(args, "user", False):
+        scope = "user"
+    elif getattr(args, "project", False):
+        scope = "project"
+    elif cc.project_override_active(probe):
+        scope = "project"
+    else:
+        scope = "user"
     return {
-        "scope": "project" if getattr(args, "project", False) else "user",
-        "cwd": (
-            Path(args.cwd or os.getcwd()).resolve()
-            if getattr(args, "project", False) else None
+        "scope": scope,
+        # Report the file's own directive only when the file has parseable
+        # content. An empty / comments-only / corrupt file parses to {} —
+        # `project_override_active` keys "active" on `bool(raw)`, so we
+        # mirror that here (None, not the _override_flag({})→True default)
+        # to keep the block and the warn from disagreeing.
+        "override_user_global": (
+            cc._override_flag(raw) if raw else None
         ),
+        "project_config_path": str(proj_path),
+        "project_file_exists": exists,
+        "user_config_path": str(cc.user_config_path()),
     }
+
+
+def _warn_active_config(block: dict) -> None:
+    """One stderr line so direct-CLI users (and logs) always see which
+    scope a config command acted on. stdout stays pure JSON. Silent only
+    for plain user-global with no per-project file in play (nothing
+    surprising to surface)."""
+    scope = block.get("scope")
+    path = block.get("project_config_path")
+    exists = block.get("project_file_exists")
+    flag = block.get("override_user_global")
+    if scope == "project":
+        # ``--project`` can force project scope onto a flag-off file, so
+        # render the file's actual directive, not a hardcoded "on".
+        print(f"[consultants] active config: PER-PROJECT "
+              f"({path}; override_user_global={'on' if flag else 'off'}) — "
+              f"reads/writes land here. Use --user for user-global.",
+              file=sys.stderr)
+    elif exists and flag:
+        # Scope is user-global but an active per-project file exists — the
+        # only way to get here is an explicit --user override (AUTO would
+        # have picked the project). Make the override visible.
+        print(f"[consultants] active config: user-global (forced via "
+              f"--user) — a per-project file is present and normally "
+              f"active ({path}).", file=sys.stderr)
+    elif exists:
+        print(f"[consultants] active config: user-global — a per-project "
+              f"file exists but override_user_global=off ({path}).",
+              file=sys.stderr)
+
+
+def _emit_config(cfg, args, **extra) -> int:
+    """Shared config-command output: JSON (config dump + active_config)
+    on stdout, plus the scope warn on stderr. Replaces the per-handler
+    print boilerplate."""
+    smart = _read_claude_hooks_consultants_block().get("smart_start") or {}
+    active = _active_config_block(args)
+    print(json.dumps(
+        {"ok": True, **_config_dump(cfg, smart_block=smart),
+         "active_config": active, **extra}, indent=2))
+    _warn_active_config(active)
+    return 0
+
+
+def _add_scope_args(p) -> None:
+    """Add the standard ``--project/--user/--cwd`` scope flags to a
+    ``config set-*`` subparser."""
+    p.add_argument("--project", action="store_true",
+                   help="Force the per-project .claude-hooks/"
+                        "consultants.toml (created if absent).")
+    p.add_argument("--user", action="store_true",
+                   help="Force the user-global config, ignoring any active "
+                        "per-project file.")
+    p.add_argument("--cwd", help="Project root (default: current dir).")
 
 
 def cmd_config_coder_set(args, base: str) -> int:
@@ -983,23 +1072,20 @@ def cmd_config_coder_set(args, base: str) -> int:
             args.language,
             primary=args.primary,
             fallback=args.fallback,
-            **_scope_kwargs(args),
+            **_resolve_active_scope(args),
         )
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
-    print(json.dumps({"ok": True, "coder": _coder_route_block(cfg)},
-                     indent=2))
-    return 0
+    return _emit_coder(cfg, args)
 
 
 def cmd_config_coder_unset(args, base: str) -> int:
     try:
-        cfg = cc.unset_coder_route(args.language, **_scope_kwargs(args))
+        cfg = cc.unset_coder_route(
+            args.language, **_resolve_active_scope(args))
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
-    print(json.dumps({"ok": True, "coder": _coder_route_block(cfg)},
-                     indent=2))
-    return 0
+    return _emit_coder(cfg, args)
 
 
 def cmd_config_coder_set_default(args, base: str) -> int:
@@ -1007,13 +1093,11 @@ def cmd_config_coder_set_default(args, base: str) -> int:
         cfg = cc.set_coder_default_route(
             primary=args.primary,
             fallback=args.fallback,
-            **_scope_kwargs(args),
+            **_resolve_active_scope(args),
         )
     except ValueError as e:
         raise CLIError(str(e), exit_code=2) from None
-    print(json.dumps({"ok": True, "coder": _coder_route_block(cfg)},
-                     indent=2))
-    return 0
+    return _emit_coder(cfg, args)
 
 
 # ----------------------- M9 control verbs ----------------------- #
@@ -1772,7 +1856,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     cs = cfg_sub.add_parser("show", help="Print full config snapshot.")
     cs.add_argument("--cwd",
-                    help="Project root (loads project overrides too).")
+                    help="Project root (loads project overrides too; "
+                         "default: current dir → shows the ACTIVE scope).")
+    cs.add_argument("--user", action="store_true",
+                    help="Force the user-global view, ignoring any active "
+                         "per-project file.")
     cs.set_defaults(fn=cmd_config_show)
 
     cr = cfg_sub.add_parser("set-role", help="Configure one role.")
@@ -1782,11 +1870,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Pin a context length (or 'auto' / 0 to clear).")
     cr.add_argument("--enabled",
                     help="true|false — toggle the role on/off.")
-    cr.add_argument("--project", action="store_true",
-                    help="Save under per-project scope (.claude-hooks/) "
-                         "instead of user-global.")
-    cr.add_argument("--cwd",
-                    help="Project root (only used with --project).")
+    _add_scope_args(cr)
     # Phase 9 — multi-model fan-out at x-prefixed effort tiers.
     # extra_models is silently ignored at base tiers (low/medium/
     # high/max) so a benchmark labeled `high` is never accidentally
@@ -1807,6 +1891,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ce = cfg_sub.add_parser("set-effort", help="Set effort tier.")
     ce.add_argument("tier", choices=tuple(cc.EFFORT_BUDGETS))
+    _add_scope_args(ce)
     ce.set_defaults(fn=cmd_config_set_effort)
 
     cmf = cfg_sub.add_parser(
@@ -1815,6 +1900,7 @@ def build_parser() -> argparse.ArgumentParser:
              "followups stop at this many before the skill asks you "
              "to allow more.")
     cmf.add_argument("value", type=int)
+    _add_scope_args(cmf)
     cmf.set_defaults(fn=cmd_config_set_max_followups)
 
     cae = cfg_sub.add_parser(
@@ -1822,6 +1908,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Set the per-approval grant size (>= 1) — how many extra "
              "followups each over-cap approval adds for a consultancy.")
     cae.add_argument("value", type=int)
+    _add_scope_args(cae)
     cae.set_defaults(fn=cmd_config_set_allow_extra)
 
     cvb = cfg_sub.add_parser(
@@ -1829,6 +1916,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Set the Workflow skeptic-panel budget "
              "(minimal | bounded | generous).")
     cvb.add_argument("tier", choices=cc.VERIFY_BUDGET_TIERS)
+    _add_scope_args(cvb)
     cvb.set_defaults(fn=cmd_config_set_verify_budget)
 
     cas = cfg_sub.add_parser(
@@ -1836,6 +1924,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Set adversary / critic-dial strictness "
              "(soft | normal | strict).")
     cas.add_argument("level", choices=cc.ADVERSARY_STRICTNESS_LEVELS)
+    _add_scope_args(cas)
     cas.set_defaults(fn=cmd_config_set_adversary_strictness)
 
     cac = cfg_sub.add_parser(
@@ -1845,12 +1934,24 @@ def build_parser() -> argparse.ArgumentParser:
     cac.add_argument("state", choices=("on", "off"))
     cac.add_argument("--timeout", type=int, default=None,
                      help="Auto-resume timeout in seconds (>= 1).")
+    _add_scope_args(cac)
     cac.set_defaults(fn=cmd_config_set_adversary_checkpoint)
+
+    cog = cfg_sub.add_parser(
+        "set-override-user-global",
+        help="Flip the per-project override_user_global directive on|off. "
+             "Project-scoped only: lives in <cwd>/.claude-hooks/"
+             "consultants.toml (created if absent). OFF makes the engine "
+             "and every config command ignore the per-project file.")
+    cog.add_argument("state", choices=("on", "off"))
+    cog.add_argument("--cwd", help="Project root (default: current dir).")
+    cog.set_defaults(fn=cmd_config_set_override_user_global)
 
     csm = cfg_sub.add_parser("set-service-mode",
                              help="Set service mode "
                              "(always-on | smart-start).")
     csm.add_argument("mode", choices=cc.VALID_SERVICE_MODES)
+    _add_scope_args(csm)
     csm.set_defaults(fn=cmd_config_set_service_mode)
 
     cit = cfg_sub.add_parser("set-idle-timeout",
@@ -1895,11 +1996,7 @@ def build_parser() -> argparse.ArgumentParser:
                      action="store_true",
                      help="Empty enable_at_efforts (store becomes "
                           "inert at every tier).")
-    css.add_argument("--project", action="store_true",
-                     help="Save under per-project scope "
-                          "(.claude-hooks/consultants.toml).")
-    css.add_argument("--cwd",
-                     help="Project root (only used with --project).")
+    _add_scope_args(css)
     css.set_defaults(fn=cmd_config_set_store)
 
     cst = cfg_sub.add_parser(
@@ -1930,9 +2027,7 @@ def build_parser() -> argparse.ArgumentParser:
                           "writes across ±jitter of the nominal TTL so "
                           "the reaper doesn't see N sessions expire on "
                           "one tick. Default 0.1 (=±10%%).")
-    cst.add_argument("--project", action="store_true",
-                     help="Save under per-project scope.")
-    cst.add_argument("--cwd", help="Project root.")
+    _add_scope_args(cst)
     cst.set_defaults(fn=cmd_config_set_store_ttl)
 
     csd = cfg_sub.add_parser(
@@ -1978,9 +2073,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="#215 — sleep N seconds between consecutive "
                           "distillations within one sweep. Default 5.0; "
                           "0.0 disables. Sliced 0.5 s for shutdown.")
-    csd.add_argument("--project", action="store_true",
-                     help="Save under per-project scope.")
-    csd.add_argument("--cwd", help="Project root.")
+    _add_scope_args(csd)
     csd.set_defaults(fn=cmd_config_set_store_distillation)
 
     clm = cfg_sub.add_parser("list-models",
@@ -2007,7 +2100,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the resolved coder routing table.",
     )
     cl.add_argument("--cwd",
-                    help="Project root (loads project overrides too).")
+                    help="Project root (loads project overrides too; "
+                         "default: current dir → ACTIVE scope).")
+    cl.add_argument("--user", action="store_true",
+                    help="Force the user-global view.")
     cl.set_defaults(fn=cmd_config_coder_list)
 
     cset = coder_sub.add_parser(
@@ -2023,11 +2119,7 @@ def build_parser() -> argparse.ArgumentParser:
     cset.add_argument("--fallback", default=None,
                       help="Fallback model tag. Empty string clears "
                            "the failover model on an existing entry.")
-    cset.add_argument("--project", action="store_true",
-                      help="Save under per-project scope "
-                           "(.claude-hooks/) instead of user-global.")
-    cset.add_argument("--cwd",
-                      help="Project root (only used with --project).")
+    _add_scope_args(cset)
     cset.set_defaults(fn=cmd_config_coder_set)
 
     cunset = coder_sub.add_parser(
@@ -2037,10 +2129,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cunset.add_argument("language",
                         help="Language id to remove.")
-    cunset.add_argument("--project", action="store_true",
-                        help="Save under per-project scope.")
-    cunset.add_argument("--cwd",
-                        help="Project root (only used with --project).")
+    _add_scope_args(cunset)
     cunset.set_defaults(fn=cmd_config_coder_unset)
 
     csd = coder_sub.add_parser(
@@ -2053,10 +2142,7 @@ def build_parser() -> argparse.ArgumentParser:
     csd.add_argument("--fallback", default=None,
                      help="Fallback model tag. Empty string clears "
                           "the failover model on an existing default.")
-    csd.add_argument("--project", action="store_true",
-                     help="Save under per-project scope.")
-    csd.add_argument("--cwd",
-                     help="Project root (only used with --project).")
+    _add_scope_args(csd)
     csd.set_defaults(fn=cmd_config_coder_set_default)
 
     # ----- skill-eval (M11) — wraps benchmarks/consultants/*.py ----
@@ -2285,6 +2371,15 @@ def main(argv: list[str] | None = None) -> int:
     except CLIError as e:
         print(json.dumps({"ok": False, "error": str(e)}), file=sys.stderr)
         return e.exit_code
+    except OSError as e:
+        # Safety net for config-write failures (read-only FS, permission
+        # denied, unwritable .claude-hooks dir) from the project-scope
+        # set-* handlers, which catch only ValueError. Emit the same
+        # structured shape every CLIError path guarantees instead of a
+        # raw traceback.
+        print(json.dumps({"ok": False, "error": f"filesystem error: {e}"}),
+              file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

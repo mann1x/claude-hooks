@@ -63,6 +63,36 @@ release with the auto-generated source archive
   set-verify-budget` / `set-adversary-strictness` /
   `set-adversary-checkpoint`, plus `/consultants config` → **Adversary /
   verify budget** (Subflow G).
+- **Per-project config is now a first-class, consistently-applied
+  scope across all `config` commands — governed by a per-project
+  `override_user_global` directive.** Previously a per-project
+  `.claude-hooks/consultants.toml` silently shadowed user-global for the
+  engine, yet 7 of the 15 `config set-*` verbs lacked `--project`/`--cwd`
+  and could *only* write user-global (where the engine then ignored
+  them), and `config show` never revealed which scope was active.
+  - **`override_user_global`** — a per-project-file-only directive (read
+    only from the raw project TOML *before* the layer merge, never a
+    `ConsultantsConfig` field; absent/non-bool → on). On → the project
+    file is the active config (merged over user-global, read+written by
+    every command and the engine). Off → ignored everywhere; both the CLI
+    and engine fall back to user-global. Default on for a new file.
+  - **Auto write-scope** — with no flags, a `config set-*` writes the
+    per-project file when one exists *and* its flag is on, else
+    user-global. `--user` forces user-global; `--project`/`--cwd` forces
+    (and creates) the per-project file. `config show` / `config coder
+    list` default to the active scope at the cwd, with `--user` to force
+    the user-global view. All 7 previously-bare verbs gained the scope
+    flags; the 8 already-scoped verbs gained `--user`.
+  - **`config set-override-user-global on|off`** — the dedicated,
+    inherently project-scoped verb to flip the directive (creates the
+    file as a full snapshot if absent; preserves its content when turned
+    off so flipping back on restores it).
+  - **`active_config` visibility** — every config command emits an
+    `active_config` block (`scope`, `override_user_global`,
+    `project_config_path`, `project_file_exists`) and prints a one-line
+    scope notice on stderr whenever a per-project file is in play.
+    `/consultants config` gains **Subflow H — Config scope** and a
+    `Config scope:` banner in the status render.
 
 ### Fixed
 
@@ -70,6 +100,9 @@ release with the auto-generated source archive
   synthesizer/critic self-rating channel now emits a `ConfidenceUpdate`
   event, unblocking the low-confidence interrupt + xauto escalation
   consumers that were already reading it.
+- **`docs/consultants.md`** — corrected the false "every `set-*` accepts
+  `--project`" claim (only 8 of 15 did) and a stale `config coder
+  set-route` example (the verb is `config coder set`).
 
 ## [1.12.0] — 2026-05-30
 

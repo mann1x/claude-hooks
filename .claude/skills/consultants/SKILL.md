@@ -600,8 +600,18 @@ researcher + critic (with `(none)` when empty); hide for planner +
 synthesizer (engine doesn't fan those out). ctx_max is `auto` when
 null, `<N>` when set.
 
+**Scope banner.** Read the `active_config` block in the JSON and put
+a `Config scope:` line at the top of the render. When
+`active_config.scope` is `project`, say **PER-PROJECT** and show the
+path — every change you make in this dialog lands in that file, not
+user-global. When it's `user` but `project_file_exists` is `true`,
+note the per-project file is present but dormant
+(`override_user_global=off`). The CLI also prints this on stderr;
+relay that one-liner verbatim if the user is scripting.
+
 ```
 === /consultants config ===
+Config scope: PER-PROJECT (.claude-hooks/consultants.toml, override_user_global=on)
 Service mode: smart-start (idle 30 min)   |   always-on
 Endpoint: http://127.0.0.1:38096
 Effort: xhigh (budget 5, multi-model active)
@@ -635,9 +645,9 @@ per-language entry the same way. The routes only matter when
 
 ### 2. Top-level menu (loop until Done)
 
-The menu has six areas; AskUserQuestion caps at 4 options, so present
-it in two rounds — round 1 offers the first three plus **More…**, and
-**More…** opens round 2 with the rest plus **Done**:
+The menu has seven areas; AskUserQuestion caps at 4 options, so
+present it in rounds — round 1 offers the first three plus **More…**,
+and **More…** opens the next batch (ending with **Done**):
 
 1. **Edit a role** — toggle on/off, model, ctx, extras
 2. **Change service mode** — always-on or smart-start
@@ -650,6 +660,8 @@ it in two rounds — round 1 offers the first three plus **More…**, and
 6. **Adversary / verify budget** — the optional `adversary` role, its
    strictness, the engine-initiated adversary checkpoint, and the
    skeptic-panel `verify_budget` — see Subflow G
+7. **Config scope** — choose user-global vs per-project and flip the
+   per-project `override_user_global` directive — see Subflow H
 
 Loop back to step 1 after each successful change; exit on **Done**.
 
@@ -847,17 +859,55 @@ is low/medium:
      `claude-consultants config set-verify-budget <tier>`.
 3. Loop back to step 1 after a successful change.
 
+### Subflow H — Config scope (user-global vs per-project)
+
+A per-project file (`<cwd>/.claude-hooks/consultants.toml`) is the
+active config when its `override_user_global` directive is on (default
+on for a new file). When active, every `config set-*` and this dialog
+write that file by default; `--user` forces user-global. Read
+`active_config` from `config show` for the current state, then
+AskUserQuestion:
+
+- **Activate per-project** — make `.claude-hooks/consultants.toml` the
+  active config, creating it as a full snapshot if absent. Forward:
+  `claude-consultants config set-override-user-global on --cwd "$(pwd)"`.
+- **Deactivate per-project** — engine + every config command fall back
+  to user-global; the file is preserved (flip back on to restore it).
+  Forward:
+  `claude-consultants config set-override-user-global off --cwd "$(pwd)"`.
+- **Show user-global** — re-render the status block from
+  `config show --user` so the user can compare scopes.
+- **Back**.
+
+Relay once: a per-project file is a **full snapshot**, so the first
+project-scoped write captures the entire effective config —
+user-global stops "showing through" for those keys until the flag is
+turned off again.
+
+3. Loop back to step 1 after a successful change.
+
 ### After every change
 
 Re-run `config show` and re-render the status block. Return to
 step 2's menu unless the user picked Done.
 
-### Per-project overrides
+### Per-project overrides — first-class scope
 
-Mention only when the user asks: `set-role ... --project --cwd "$(pwd)"`
-edits the per-project TOML (`<project>/.claude-hooks/consultants.toml`)
-instead of the user-global (`~/.claude/consultants-config.toml`).
-Skill defaults to user-global.
+Per-project config is a first-class concept, not an afterthought. The
+config layers defaults < user-global < per-project; a per-project file
+(`<cwd>/.claude-hooks/consultants.toml`) shadows user-global key-by-key
+and the engine reads it on every consult **when its
+`override_user_global` directive is on** (a per-project-file-only flag,
+default on for a new file).
+
+When the active scope is per-project, `config show` and every `set-*`
+already act on that file by default — you do **not** need `--project`.
+Use the explicit flags only to override: `--user` acts on user-global;
+`--project` / `--cwd "$(pwd)"` forces the per-project file (e.g. to
+create one). Flip the directive with
+`config set-override-user-global on|off --cwd "$(pwd)"` (Subflow H).
+Always surface which scope a change landed in — read
+`active_config.scope` from the JSON and relay the CLI's stderr notice.
 
 ---
 

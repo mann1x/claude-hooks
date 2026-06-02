@@ -820,7 +820,7 @@ claude-consultants config set-store-distillation --max-groups-per-sweep 3 \
     --pace-seconds-between-distillations 10
 
 # Coder language routes (opt-in coder role; M11b skill-eval)
-claude-consultants config coder set-route python --primary glm-5.1:cloud \
+claude-consultants config coder set python --primary glm-5.1:cloud \
     --fallback kimi-k2.6:cloud
 claude-consultants config coder set-default --primary glm-5.1:cloud
 
@@ -828,15 +828,77 @@ claude-consultants config coder set-default --primary glm-5.1:cloud
 claude-consultants config list-models
 ```
 
-Every `set-*` accepts `--project` + `--cwd` to write a per-project
-override file (`.claude-hooks/consultants.toml`) instead of the
-user-global `~/.claude/consultants-config.toml`. Both files are
-hand-editable if you prefer; the CLI is a typed wrapper around the
-same dataclass + TOML round-trip.
-
 `config list-models` calls Ollama's `/api/tags` and filters to
 tools-capable models — what the council can actually use as a role
 model.
+
+### Config scope — user-global vs per-project
+
+Two on-disk files back the config, layered defaults < user-global <
+per-project:
+
+- **user-global** — `~/.claude/consultants-config.toml`.
+- **per-project override** — `<cwd>/.claude-hooks/consultants.toml`.
+  When present and active it shadows user-global key-by-key (deep
+  merge), and the **engine reads it on every consult** from that cwd.
+
+Whether the per-project file is active is governed by a per-project-
+scoped directive that lives *only in that file*:
+
+```toml
+# .claude-hooks/consultants.toml
+override_user_global = true   # this file is the active config (default)
+                              # false → ignored everywhere; fall back to user-global
+```
+
+The flag is **on** by default when a new per-project file is created,
+and a legacy file missing the key is treated as on (preserves the
+historical "project wins" behavior). It is **not** a user-global
+setting — it has no meaning outside a per-project file.
+
+**Write scope is automatic.** With no flags, a `config set-*` writes:
+
+- the **per-project** file when one exists *and* its flag is on
+  (the active scope), else
+- **user-global**.
+
+Override the auto-resolution explicitly:
+
+| Flag | Effect |
+|---|---|
+| `--project` | Force the per-project file (created as a full snapshot if absent). |
+| `--user` | Force user-global, ignoring any active per-project file. |
+| `--cwd <dir>` | Project root to resolve against (default: current directory). |
+
+`config show` (and `config coder list`) default to the active scope at
+the current directory; pass `--user` to force the user-global view.
+Every config command emits an `active_config` block in its JSON
+(`scope`, `override_user_global`, `project_config_path`,
+`project_file_exists`) and prints a one-line scope notice on **stderr**
+whenever a per-project file is in play, so you always know which file a
+write landed in.
+
+Flip the directive with the dedicated verb (inherently project-scoped —
+no `--user`/`--project`):
+
+```bash
+# Make the per-project file the active config (creates it if absent)
+claude-consultants config set-override-user-global on  --cwd "$(pwd)"
+
+# Dormant: engine + every config command ignore the file, use user-global.
+# The file's own content is preserved, so flipping back on restores it.
+claude-consultants config set-override-user-global off --cwd "$(pwd)"
+```
+
+Per-project files are **full snapshots** (not sparse diffs): the first
+project-scoped write captures the entire effective config, so
+user-global no longer "shows through" for those keys afterward — the
+stderr notice makes this visible. `set-idle-timeout` is the one
+exception — it writes `config/claude-hooks.json`, not the consultants
+TOML, so it has no scope flags.
+
+Both files are hand-editable if you prefer; the CLI is a typed wrapper
+around the same dataclass + TOML round-trip.
 
 ### Interactive installer
 

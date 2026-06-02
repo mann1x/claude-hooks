@@ -1067,13 +1067,63 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
     return base
 
 
+def _override_flag(raw: dict) -> bool:
+    """Per-project ``override_user_global`` directive: when a per-project
+    file sets it false, the file is ignored (engine + every ``config``
+    command fall back to user-global). Absent / non-bool → True, so a
+    legacy per-project file (written before this directive existed) keeps
+    today's "per-project is merged over user-global" behavior, and a
+    brand-new per-project file is active by default.
+
+    This is a per-project-FILE directive, NOT a ``ConsultantsConfig``
+    field: it must be read from the raw TOML *before* the merge decision,
+    and it never appears in the user-global file."""
+    flag = raw.get("override_user_global")
+    return flag if isinstance(flag, bool) else True
+
+
+def project_override_active(cwd: Path) -> bool:
+    """True iff a per-project config file exists at ``cwd`` AND its
+    ``override_user_global`` directive is on (the default). False when no
+    per-project file exists. Single source of truth shared by
+    ``load_config``'s merge gate and the CLI's active-scope resolver."""
+    raw = _read_toml(project_config_path(cwd))
+    return bool(raw) and _override_flag(raw)
+
+
 def load_config(cwd: Optional[Path] = None) -> ConsultantsConfig:
     """Load merged config: defaults < user-global < per-project.
     ``cwd=None`` skips the project layer (useful for daemon contexts
-    that don't have a project root)."""
+    that don't have a project root). The per-project layer is merged
+    only when the project file's ``override_user_global`` directive is
+    on (absent → on); when off, the project file is ignored entirely and
+    the result is pure user-global."""
     cfg = ConsultantsConfig()
     cfg = _merge_layer(cfg, _read_toml(user_config_path()))
     if cwd is not None:
+        proj_raw = _read_toml(project_config_path(cwd))
+        if proj_raw and _override_flag(proj_raw):
+            cfg = _merge_layer(cfg, proj_raw)
+    return cfg
+
+
+def _load_for_edit(scope: str, cwd: Optional[Path]) -> ConsultantsConfig:
+    """Base config for an in-place mutation, selected by *write* scope.
+
+    For ``scope == "project"`` the per-project layer is merged
+    **unconditionally** — bypassing ``load_config``'s
+    ``override_user_global`` gate — so editing a *dormant* (flag-off)
+    project file preserves the file's own content instead of
+    re-snapshotting pure user-global over it. Without this, a
+    ``set-* --project`` against a flag-off file would silently revert
+    every other project override to the user-global default, breaking the
+    "flipping OFF preserves content so flipping back ON restores it"
+    invariant. For any other scope the project layer is skipped
+    (user-global only). Mirrors :func:`set_override_user_global`'s
+    unconditional merge."""
+    cfg = ConsultantsConfig()
+    cfg = _merge_layer(cfg, _read_toml(user_config_path()))
+    if scope == "project" and cwd is not None:
         cfg = _merge_layer(cfg, _read_toml(project_config_path(cwd)))
     return cfg
 
@@ -1094,7 +1144,8 @@ def _toml_str(value: str) -> str:
     return '"' + "".join(parts) + '"'
 
 
-def _render(cfg: ConsultantsConfig) -> str:
+def _render(cfg: ConsultantsConfig, *,
+            override_flag: Optional[bool] = None) -> str:
     L: list[str] = []
     L.append("# claude-hooks /consultants engine config.")
     L.append("# This file is managed by `claude-consultants config set-*`")
@@ -1119,6 +1170,14 @@ def _render(cfg: ConsultantsConfig) -> str:
     L.append(
         f"adversary_checkpoint_timeout_s = {cfg.adversary_checkpoint_timeout_s}"
     )
+    # Per-project-file directive (emitted only for project-scope writes;
+    # ``override_flag is None`` for user-global → byte-identical to pre-fix).
+    if override_flag is not None:
+        L.append("# override_user_global (per-project files only): true => "
+                 "this file is the active config — merged over user-global "
+                 "and read+written by every `config` command; false => the "
+                 "file is ignored everywhere (fall back to user-global).")
+        L.append(f"override_user_global = {str(override_flag).lower()}")
     L.append("")
     L.append("[service]")
     L.append(f"mode = {_toml_str(cfg.service.mode)}")
@@ -1407,17 +1466,30 @@ def coder_unique_models(cfg: ConsultantsConfig) -> list[str]:
 
 
 def save_config(cfg: ConsultantsConfig, *, scope: str = "user",
-                cwd: Optional[Path] = None) -> Path:
+                cwd: Optional[Path] = None,
+                override_flag: Optional[bool] = None) -> Path:
     """Save the config. ``scope='user'`` writes to ~/.claude/...; any
-    other value writes to the per-project file under cwd."""
+    other value writes to the per-project file under cwd.
+
+    ``override_user_global`` is a per-project-FILE directive, never
+    written to user-global. For a project-scope write we emit it so the
+    file is self-describing: an explicit ``override_flag`` (set by
+    ``set_override_user_global``) wins; otherwise we PRESERVE the existing
+    file's flag (default True for a brand-new file) so an ordinary
+    ``set-*`` never silently flips the active-scope directive."""
     if scope == "user":
         path = user_config_path()
+        emit_flag: Optional[bool] = None  # never pollute user-global
     else:
         if cwd is None:
             raise ValueError("project scope requires cwd")
         path = project_config_path(cwd)
+        emit_flag = (
+            override_flag if override_flag is not None
+            else _override_flag(_read_toml(path))  # preserve; {} → True
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = _render(cfg)
+    text = _render(cfg, override_flag=emit_flag)
     path.write_text(text, encoding="utf-8", newline="\n")
     return path
 
@@ -1471,7 +1543,7 @@ def set_role(role: str, *, model: Optional[str] = None,
         raise ValueError(
             f"role {role!r} is mandatory and cannot be disabled"
         )
-    cfg = load_config(cwd if scope != "user" else None)
+    cfg = _load_for_edit(scope, cwd)
     rc = cfg.roles[role]
     if model is not None:
         if not model.strip():
@@ -1545,7 +1617,7 @@ def set_coder_route(language: str, *, primary: Optional[str] = None,
     to per-project (matches ``set_role``).
     """
     lang = _validate_lang_id(language)
-    cfg = load_config(cwd if scope != "user" else None)
+    cfg = _load_for_edit(scope, cwd)
     rc = cfg.roles["coder"]
     existing = rc.routes_by_language.get(lang)
     if existing is None:
@@ -1581,7 +1653,7 @@ def unset_coder_route(language: str, *, scope: str = "user",
     time.
     """
     lang = _validate_lang_id(language)
-    cfg = load_config(cwd if scope != "user" else None)
+    cfg = _load_for_edit(scope, cwd)
     rc = cfg.roles["coder"]
     rc.routes_by_language.pop(lang, None)
     return _save_after_change(cfg, scope=scope, cwd=cwd)
@@ -1598,7 +1670,7 @@ def set_coder_default_route(*, primary: Optional[str] = None,
     a field keeps the current value; ``""`` for ``fallback``
     explicitly clears it.
     """
-    cfg = load_config(cwd if scope != "user" else None)
+    cfg = _load_for_edit(scope, cwd)
     rc = cfg.roles["coder"]
     existing = rc.default_route
     if existing is None:
@@ -1630,7 +1702,7 @@ def set_effort(effort: str, *, scope: str = "user",
         raise ValueError(
             f"effort must be one of: {', '.join(sorted(EFFORT_BUDGETS))}"
         )
-    cfg = load_config(cwd if scope != "user" else None)
+    cfg = _load_for_edit(scope, cwd)
     cfg.effort = effort
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
@@ -1641,7 +1713,7 @@ def set_service_mode(mode: str, *, scope: str = "user",
         raise ValueError(
             f"mode must be one of: {', '.join(VALID_SERVICE_MODES)}"
         )
-    cfg = load_config(cwd if scope != "user" else None)
+    cfg = _load_for_edit(scope, cwd)
     cfg.service.mode = mode
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
@@ -1652,7 +1724,7 @@ def set_topology(topology: str, *, scope: str = "user",
         raise ValueError(
             f"topology must be one of: {', '.join(VALID_TOPOLOGIES)}"
         )
-    cfg = load_config(cwd if scope != "user" else None)
+    cfg = _load_for_edit(scope, cwd)
     cfg.topology = topology
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
@@ -1663,7 +1735,7 @@ def set_max_followups(value: int, *, scope: str = "user",
     followup already needs user approval."""
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError("max_followups must be an integer >= 0")
-    cfg = load_config(cwd if scope != "user" else None)
+    cfg = _load_for_edit(scope, cwd)
     cfg.max_followups = value
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
@@ -1674,7 +1746,7 @@ def set_allow_extra(value: int, *, scope: str = "user",
     followups each user approval adds to the cap for that consultancy."""
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise ValueError("allow_extra must be an integer >= 1")
-    cfg = load_config(cwd if scope != "user" else None)
+    cfg = _load_for_edit(scope, cwd)
     cfg.allow_extra = value
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
@@ -1691,7 +1763,7 @@ def set_verify_budget(tier: str, *, scope: str = "user",
         raise ValueError(
             f"verify_budget must be one of {', '.join(VERIFY_BUDGET_TIERS)}"
         )
-    cfg = load_config(cwd if scope != "user" else None)
+    cfg = _load_for_edit(scope, cwd)
     cfg.verify_budget = tier
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
@@ -1705,7 +1777,7 @@ def set_adversary_strictness(level: str, *, scope: str = "user",
             "adversary_strictness must be one of "
             f"{', '.join(ADVERSARY_STRICTNESS_LEVELS)}"
         )
-    cfg = load_config(cwd if scope != "user" else None)
+    cfg = _load_for_edit(scope, cwd)
     cfg.adversary_strictness = level
     return _save_after_change(cfg, scope=scope, cwd=cwd)
 
@@ -1723,11 +1795,36 @@ def set_adversary_checkpoint(enabled: bool, *,
         or timeout_s < 1
     ):
         raise ValueError("timeout_s must be an integer >= 1")
-    cfg = load_config(cwd if scope != "user" else None)
+    cfg = _load_for_edit(scope, cwd)
     cfg.adversary_checkpoint = enabled
     if timeout_s is not None:
         cfg.adversary_checkpoint_timeout_s = timeout_s
     return _save_after_change(cfg, scope=scope, cwd=cwd)
+
+
+def set_override_user_global(enabled: bool, *,
+                             cwd: Path) -> ConsultantsConfig:
+    """Flip the per-project ``override_user_global`` directive — the only
+    explicit writer of the flag. Always project-scoped: the flag lives
+    solely in ``<cwd>/.claude-hooks/consultants.toml``.
+
+    on  -> the per-project file is the active config (merged over
+           user-global; read + written by every ``config`` command and
+           the engine). off -> the file is ignored everywhere and both
+           the CLI and the engine fall back to user-global.
+
+    Preserves the project file's own content by merging user-global THEN
+    the project raw dict *unconditionally* (bypassing ``load_config``'s
+    gate, which for a currently-off file would drop its content and
+    re-snapshot user-global). Creates the file (a full snapshot seeded
+    from the current effective config) if it does not exist yet."""
+    if not isinstance(enabled, bool):
+        raise ValueError("override_user_global must be a bool")
+    # Unconditional project merge (preserve a dormant file's content) —
+    # the same base every project-scoped mutator now uses.
+    cfg = _load_for_edit("project", cwd)
+    save_config(cfg, scope="project", cwd=cwd, override_flag=enabled)
+    return cfg
 
 
 # --------------------------------------------------------------------- #
@@ -1776,7 +1873,7 @@ def set_store(
     present / absent). The full list of toggleable tiers is the
     same as :data:`EFFORT_BUDGETS`.
     """
-    cfg = load_config(cwd if scope != "user" else None)
+    cfg = _load_for_edit(scope, cwd)
     s = cfg.store
     if enabled is not None:
         s.enabled = bool(enabled)
@@ -1847,7 +1944,7 @@ def set_store_ttl(
     ``jitter_pct`` is clamped to ``[0.0, 1.0]`` — 0.0 disables the
     cohort-spread mechanic from #215.
     """
-    cfg = load_config(cwd if scope != "user" else None)
+    cfg = _load_for_edit(scope, cwd)
     t = cfg.store.ttl
     if enabled is not None:
         t.enabled = bool(enabled)
@@ -1891,7 +1988,7 @@ def set_store_distillation(
     ``clear_fallback_models`` empties the chain. Numeric caps are
     range-checked.
     """
-    cfg = load_config(cwd if scope != "user" else None)
+    cfg = _load_for_edit(scope, cwd)
     d = cfg.store.distillation
     if enabled is not None:
         d.enabled = bool(enabled)
