@@ -546,7 +546,7 @@ unit-tested module); `forwarder.py` owns only the HTTP loop +
 | `CLAUDE_HOOKS_PROXY_RETRY_DEADLINE_S` | `90` | wall-clock retry window |
 | `CLAUDE_HOOKS_PROXY_RETRY_BASE_DELAY_S` | `1.0` | backoff base |
 | `CLAUDE_HOOKS_PROXY_RETRY_MAX_DELAY_S` | `20.0` | backoff cap |
-| `CLAUDE_HOOKS_PROXY_RETRY_MAX_ATTEMPTS` | `8` | attempt safety cap (`1` = pass-through; legacy `CLAUDE_HOOKS_PROXY_RETRIES` honored as fallback) |
+| `CLAUDE_HOOKS_PROXY_RETRY_MAX_ATTEMPTS` | `15` | attempt safety cap, sized high so the **deadline** is the real bound (`1` = pass-through; legacy `CLAUDE_HOOKS_PROXY_RETRIES` honored as fallback) |
 | `CLAUDE_HOOKS_PROXY_RETRY_AFTER_CAP_S` | `30.0` | max honored `Retry-After` |
 | `CLAUDE_HOOKS_PROXY_RETRY_JITTER` | `true` | full-jitter on/off |
 | `CLAUDE_HOOKS_PROXY_HONOR_RETRY_AFTER` | `true` | honor the header |

@@ -150,8 +150,9 @@ class TestNextDelay:
 
 
 class TestShouldRetry:
-    def test_attempt_cap(self):
-        cfg = rt.ApiProxyRetryConfig()  # max_attempts 8
+    def test_attempt_cap(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_MAX_ATTEMPTS", "8")
+        cfg = rt.ApiProxyRetryConfig()
         assert rt.should_retry(6, 0.0, 0.1, cfg) is True   # 7th allowed
         assert rt.should_retry(7, 0.0, 0.1, cfg) is False  # 8th is the last
 
@@ -377,6 +378,26 @@ class TestForwardRetryIntegration:
         result = _fwd()
         assert result.status == 503            # no retry → synthesized 503
         assert calls["n"] == 1
+
+    def test_exhausted_conn_error_carries_retry_stats(self, monkeypatch, captured_sleeps):
+        """A transport-error exhaustion (→ 502) carries retry telemetry on
+        the raised exception so the server's 502 log line records it —
+        otherwise it's indistinguishable from a never-retried 502 (the
+        live 2026-06-02 gap)."""
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_JITTER", "0")
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_BASE_DELAY_S", "0")
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_MAX_ATTEMPTS", "3")
+        rt.reset_state()
+        _seq_attempt(monkeypatch, [
+            httpx.RemoteProtocolError("Server disconnected") for _ in range(10)
+        ])
+        with pytest.raises(httpx.RemoteProtocolError) as ei:
+            _fwd()
+        stats = getattr(ei.value, "_proxy_retry_stats", None)
+        assert stats is not None
+        assert stats["retry_outcome"] == "exhausted"
+        assert stats["retry_count"] == 2          # 3 attempts → index 2 at stop
+        assert rt.counters().snapshot()["retry_exhausted_total"] == 1
 
     def test_snapshot_shape_stable(self):
         snap = rt.snapshot(0.0)

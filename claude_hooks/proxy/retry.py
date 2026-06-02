@@ -53,8 +53,13 @@ DEFAULT_RETRY_DEADLINE_S = 90.0
 # Exponential backoff base + cap. base * 2**attempt, full-jittered.
 DEFAULT_RETRY_BASE_DELAY_S = 1.0
 DEFAULT_RETRY_MAX_DELAY_S = 20.0
-# Attempt-count safety net; the deadline normally bites first.
-DEFAULT_RETRY_MAX_ATTEMPTS = 8
+# Attempt-count safety net. Sized HIGH on purpose: the wall-clock
+# deadline is meant to be the real bound, and a low cap undercuts it —
+# live 2026-06-02 throttle data showed an 8-cap giving up at 45-60s
+# (well under the 90s deadline) and wasting ride-out time. With
+# 20s-capped jittered backoff you physically can't fit more than ~10-12
+# attempts into the deadline anyway, so this just lets the deadline win.
+DEFAULT_RETRY_MAX_ATTEMPTS = 15
 # A hostile / buggy ``Retry-After`` can't park a session for minutes.
 DEFAULT_RETRY_AFTER_CAP_S = 30.0
 DEFAULT_JITTER = True

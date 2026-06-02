@@ -157,6 +157,7 @@ class _Handler(BaseHTTPRequestHandler):
             log.debug("upstream failure traceback", exc_info=True)
             self._send_bad_gateway(
                 f"{type(e).__name__}: {e}", started, req_meta, len(body),
+                retry_stats=getattr(e, "_proxy_retry_stats", None),
             )
             return
 
@@ -259,6 +260,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _send_bad_gateway(
         self, msg: str, started: float, req_meta: dict, req_bytes: int,
+        retry_stats: Optional[dict] = None,
     ) -> None:
         body = f'{{"error":{{"type":"proxy_error","message":"{msg}"}}}}'.encode("utf-8")
         try:
@@ -269,12 +271,17 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         except Exception:
             pass
+        extra = {"error": "upstream_failure", "detail": msg}
+        if retry_stats:
+            # An exhausted-after-N-retries 502 carries its retry telemetry
+            # so the JSONL line distinguishes it from a never-retried one.
+            extra.update(retry_stats)
         self._log_line(
             started, req_meta,
             {"model_delivered": None, "usage": None, "rate_limit": None,
              "synthetic": False},
             None, req_bytes=req_bytes, resp_bytes=len(body),
-            extra={"error": "upstream_failure", "detail": msg},
+            extra=extra,
         )
 
     def _log_line(

@@ -304,6 +304,19 @@ def forward(
             retry_after_honored, False, "exhausted",
         )
         return result
+    # Transport-error exhaustion → the caller turns this into a 502.
+    # Carry the retry telemetry ON the exception so the 502 log line can
+    # record it: the re-raise path has no ``UpstreamResult`` to stamp, so
+    # without this an exhausted-after-N-retries 502 is indistinguishable
+    # in the JSONL from a never-retried one (both ``retry_count`` null).
+    try:
+        last_exc._proxy_retry_stats = {  # type: ignore[attr-defined]
+            "retry_count": attempt,
+            "backoff_total_ms": int(backoff_total * 1000),
+            "retry_outcome": "exhausted",
+        }
+    except Exception:
+        pass
     raise last_exc
 
 

@@ -429,11 +429,11 @@ class TestForwarderStatusRetry:
             srv.shutdown(); srv.server_close()
             fwd._reset_client()
 
-    def test_default_max_attempts_is_eight(self):
-        """The default retry budget is the new ``max_attempts`` cap (8),
-        bounded primarily by the wall-clock deadline."""
+    def test_default_max_attempts(self):
+        """The attempt cap is sized high so the wall-clock deadline is the
+        real bound (live throttle data showed an 8-cap giving up early)."""
         from claude_hooks.proxy import retry as rt
-        assert rt.ApiProxyRetryConfig().max_attempts == 8
+        assert rt.ApiProxyRetryConfig().max_attempts == 15
 
     def test_many_502s_then_success(self, monkeypatch):
         """Ten consecutive 502s must not surface to the client when the
