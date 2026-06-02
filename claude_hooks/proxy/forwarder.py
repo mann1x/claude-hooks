@@ -32,6 +32,8 @@ from dataclasses import dataclass, field
 from typing import Iterable, Optional
 from urllib.parse import urlparse
 
+from claude_hooks.proxy import retry
+
 try:
     import httpx
 except ImportError as e:  # pragma: no cover - guarded at install time
@@ -73,77 +75,24 @@ _CLIENT: Optional[httpx.Client] = None
 _CLIENT_TIMEOUT: Optional[float] = None
 
 
-# Upstream (Anthropic / other Claude endpoints) can silently drop
-# idle HTTP/2 connections well before our pool's keepalive_expiry
-# would have retired them, surfacing as ``httpx.RemoteProtocolError``
-# ("Server disconnected"). Shorter keepalive + in-forwarder retry
-# papers over those drops without asking Claude Code to redo the
-# whole request. We also retry a short list of upstream 5xx status
-# codes that Anthropic's edge emits on transient overload or
-# connection recycling, so the client never sees a spurious 502 the
-# way it did when we only retried connection-level exceptions.
+# Upstream (Anthropic / other Claude endpoints) can silently drop idle
+# HTTP/2 connections well before our pool's keepalive_expiry would have
+# retired them, surfacing as ``httpx.RemoteProtocolError`` ("Server
+# disconnected"). A short keepalive retires stale connections ahead of
+# upstream's silent idle-drop; httpx evicts a connection that *raised*
+# on its own, so a retry on the shared client transparently lands on a
+# fresh connection without disturbing sibling sessions.
+#
+# The retry *policy* (jittered backoff, Retry-After honoring, the
+# wall-clock deadline, the cross-session circuit breaker) lives in
+# ``claude_hooks.proxy.retry`` — a pure, unit-testable module. This
+# file owns only the HTTP loop + ``time.sleep``. The old whole-pool
+# ``_reset_client()`` nuke on the retry path is gone: it closed sibling
+# sessions' live connections (collective storm) *and* recreated the
+# per-request fresh-connection profile the HTTP/2 pool exists to avoid
+# (which itself tripped Anthropic's edge-429 gate). See docs/proxy.md
+# "Retry / throttle resilience".
 _KEEPALIVE_EXPIRY = float(os.environ.get("CLAUDE_HOOKS_PROXY_KEEPALIVE_SEC", "60"))
-_UPSTREAM_RETRIES = int(os.environ.get("CLAUDE_HOOKS_PROXY_RETRIES", "10"))
-_RETRY_BACKOFF_BASE = float(os.environ.get("CLAUDE_HOOKS_PROXY_RETRY_BACKOFF", "0.15"))
-_RETRY_BACKOFF_MAX = float(os.environ.get("CLAUDE_HOOKS_PROXY_RETRY_BACKOFF_MAX", "0.5"))
-
-# Pool-reset triggers for "sticky bad connection" scenarios. When a
-# kept-alive HTTP/2 connection is pinned to a degraded upstream edge
-# node, every retry on that connection sees the same 5xx — and the
-# whole forward() call balloons to 30-120s while sibling connections
-# in the pool serve other sessions fine. Two heuristics decide when
-# to drop the pool so the next attempt opens a fresh connection
-# (which the edge LB usually routes to a different node):
-#
-#  - SLOW_5XX_RESET_SEC: a retryable-5xx attempt that took at least
-#    this long is almost certainly sticky, not just edge overload.
-#  - 5XX_RESET_AFTER: this many consecutive retryable 5xx in one
-#    forward() call regardless of duration — catches fast-502 floods
-#    where the connection is sick but each attempt rejects quickly.
-#  - PROTO_RESET_AFTER: this many consecutive RemoteProtocolError /
-#    ConnectError in one forward() call. Connection-level failures
-#    are stronger evidence of stickiness than 5xx (a healthy edge
-#    node returns *something*, even an error), so the threshold is
-#    lower. Production logs (2026-04-27) show every "Server
-#    disconnected" cluster repeats across all retries on the same
-#    pooled connection — httpx doesn't reliably evict the dead conn
-#    on its own, so we nudge it.
-#
-# All three default to values that fire only when something is
-# genuinely wrong; healthy retries (sub-second blips) keep reusing
-# the pool.
-_SLOW_5XX_RESET_SEC = float(
-    os.environ.get("CLAUDE_HOOKS_PROXY_SLOW_5XX_RESET_SEC", "5.0")
-)
-_5XX_RESET_AFTER = int(
-    os.environ.get("CLAUDE_HOOKS_PROXY_5XX_RESET_AFTER", "3")
-)
-_PROTO_RESET_AFTER = int(
-    os.environ.get("CLAUDE_HOOKS_PROXY_PROTO_RESET_AFTER", "2")
-)
-
-# Default 5xx codes we treat as retryable. Excludes 501 (Not Implemented)
-# and 505-511 (protocol / semantic errors that won't change on retry).
-_DEFAULT_RETRY_STATUS = frozenset({
-    500, 502, 503, 504,
-    520, 521, 522, 523, 524, 525, 526, 527, 529,
-})
-
-
-def _parse_status_set(raw: Optional[str]) -> frozenset:
-    if not raw:
-        return _DEFAULT_RETRY_STATUS
-    out = set()
-    for tok in raw.split(","):
-        tok = tok.strip()
-        if tok.isdigit():
-            out.add(int(tok))
-    return frozenset(out) if out else _DEFAULT_RETRY_STATUS
-
-
-_RETRY_ON_STATUS = _parse_status_set(
-    os.environ.get("CLAUDE_HOOKS_PROXY_RETRY_STATUS")
-)
 
 
 class _RetryableStatus(Exception):
@@ -260,71 +209,110 @@ def forward(
     # httpx sets Host / :authority from URL automatically; no need
     # to pass it explicitly and it can confuse HTTP/2 negotiation.
 
+    cfg = retry.ApiProxyRetryConfig()
     client = _get_client(timeout)
 
     last_exc: Optional[Exception] = None
-    consecutive_5xx = 0
-    consecutive_proto = 0
-    for attempt in range(_UPSTREAM_RETRIES + 1):
-        attempt_started = time.monotonic()
+    attempt = 0                       # 0-indexed; 0 = first attempt
+    backoff_total = 0.0               # cumulative sleep, seconds
+    retry_after_honored = False
+    start = time.monotonic()
+
+    # Cross-session circuit breaker: when upstream is in an overload
+    # window, every session sharing this one proxy pool adds a
+    # coordinated delay *before its first attempt* so a second session
+    # can't pile on and turn a transient overload into a collective
+    # storm. 0 when the breaker is closed.
+    pre = retry.pre_attempt_delay(start)
+    if pre > 0:
+        time.sleep(pre)
+        backoff_total += pre
+
+    while True:
         try:
-            return _forward_attempt(client, method, url, out_headers, body)
-        except (httpx.RemoteProtocolError, httpx.ConnectError,
-                _RetryableStatus) as e:
+            result = _forward_attempt(
+                client, method, url, out_headers, body,
+                retry_status=cfg.retry_status,
+            )
+            now = time.monotonic()
+            # 429 is the client's own quota, not an overload — it passes
+            # straight through (never retried). Count it for visibility.
+            if result.status == 429:
+                retry.record_429_passthrough()
+            retry.record_success(now, retried=attempt > 0)
+            _stamp_retry_stats(
+                result.stats, attempt, backoff_total,
+                retry_after_honored, retry.throttle().is_open(now), "ok",
+            )
+            return result
+        except (httpx.RemoteProtocolError, httpx.ConnectError) as e:
+            # Connection drop: httpx has already evicted the dead
+            # connection, so the next attempt on the shared client gets
+            # a fresh one — no whole-pool nuke (which would kill sibling
+            # sessions and re-trip the edge-429 gate). hdrs is empty;
+            # there's no upstream response to read Retry-After from.
             last_exc = e
-            if attempt >= _UPSTREAM_RETRIES:
-                break
-            # Back off briefly so we don't hammer a server that's
-            # actively closing connections or overloaded.
-            wait = min(_RETRY_BACKOFF_BASE * (attempt + 1),
-                       _RETRY_BACKOFF_MAX)
-            time.sleep(wait)
-            # If the failure looks like a sticky-bad-connection symptom,
-            # drop the pool so the next attempt opens a fresh upstream
-            # connection (different edge LB hop).
-            elapsed = time.monotonic() - attempt_started
-            if isinstance(e, _RetryableStatus):
-                consecutive_proto = 0
-                consecutive_5xx += 1
-                if (elapsed >= _SLOW_5XX_RESET_SEC
-                        or consecutive_5xx >= _5XX_RESET_AFTER):
-                    log.info(
-                        "draining pool after retryable %d "
-                        "(elapsed=%.2fs, consecutive=%d): "
-                        "next retry will open a fresh upstream connection",
-                        e.status, elapsed, consecutive_5xx,
-                    )
-                    _reset_client()
-                    client = _get_client(timeout)
-                    consecutive_5xx = 0
-            else:
-                consecutive_5xx = 0
-                consecutive_proto += 1
-                # Connection-level failures: each retry that reuses the
-                # pooled connection sees the same dead socket. Drain the
-                # pool after PROTO_RESET_AFTER consecutive failures so
-                # the next attempt forces a brand-new TCP/TLS/h2 setup
-                # (which the edge LB usually steers to a healthier node).
-                if consecutive_proto >= _PROTO_RESET_AFTER:
-                    log.info(
-                        "draining pool after %d consecutive %s: "
-                        "next retry will open a fresh upstream connection",
-                        consecutive_proto, type(e).__name__,
-                    )
-                    _reset_client()
-                    client = _get_client(timeout)
-                    consecutive_proto = 0
-            log.debug("retry %d after %s: %s",
-                      attempt + 1, type(e).__name__, e)
+            now = time.monotonic()
+            hdrs: dict = {}
+            ra: Optional[float] = None
+            retry.record_overload(now, conn_error=True)
+        except _RetryableStatus as e:
+            last_exc = e
+            now = time.monotonic()
+            hdrs = e.headers
+            ra = (retry.parse_retry_after(hdrs, time.time(),
+                                          cfg.retry_after_cap_s)
+                  if cfg.honor_retry_after else None)
+            retry.record_overload(now, status=e.status, retry_after=ra)
+
+        elapsed = now - start
+        wait = retry.next_delay(attempt, hdrs, cfg, time.time())
+        if ra is not None:
+            retry_after_honored = True
+        # While the breaker is open, use its coordinated delay as a floor.
+        floor = retry.pre_attempt_delay(now)
+        if floor > wait:
+            wait = floor
+        if not retry.should_retry(attempt, elapsed, wait, cfg):
+            break
+        log.debug(
+            "proxy retry %d after %s (wait %.2fs, elapsed %.1fs)",
+            attempt + 1, type(last_exc).__name__, wait, elapsed,
+        )
+        time.sleep(wait)
+        backoff_total += wait
+        attempt += 1
 
     assert last_exc is not None  # loop only exits via return or break
+    retry.record_exhausted()
     # If the last failure was a retryable upstream status, hand the
     # authentic upstream response through to the client rather than
     # masking it with our own ``proxy_error`` 502. Connection-level
     # exceptions still propagate — the caller turns those into 502.
     if isinstance(last_exc, _RetryableStatus):
-        return _synthesize_result(last_exc)
+        result = _synthesize_result(last_exc)
+        _stamp_retry_stats(
+            result.stats, attempt, backoff_total,
+            retry_after_honored, False, "exhausted",
+        )
+        return result
     raise last_exc
+
+
+def _stamp_retry_stats(stats: dict, retries: int, backoff_total_s: float,
+                       retry_after_honored: bool, breaker_open: bool,
+                       outcome: str) -> None:
+    """Record per-request retry telemetry onto the ``UpstreamResult``
+    stats dict — but only when something noteworthy happened, so the
+    common zero-retry success path keeps the JSONL line slim (the
+    server omits null keys)."""
+    if (retries or retry_after_honored or breaker_open
+            or outcome != "ok"):
+        stats["retry_count"] = retries
+        stats["backoff_total_ms"] = int(backoff_total_s * 1000)
+        stats["retry_after_honored"] = retry_after_honored
+        stats["breaker_open"] = breaker_open
+        stats["retry_outcome"] = outcome
 
 
 def _synthesize_result(exc: _RetryableStatus) -> "UpstreamResult":
@@ -352,12 +340,12 @@ def _forward_attempt(
     url: str,
     out_headers: dict[str, str],
     body: bytes,
+    retry_status: frozenset = retry.DEFAULT_RETRY_STATUS,
 ) -> UpstreamResult:
     """One upstream attempt. Raises ``httpx.RemoteProtocolError`` /
     ``httpx.ConnectError`` on connection-level failures, or
-    ``_RetryableStatus`` on upstream HTTP 5xx codes in
-    ``_RETRY_ON_STATUS``, so ``forward`` can retry. Other exceptions
-    propagate unchanged.
+    ``_RetryableStatus`` on upstream HTTP codes in ``retry_status``, so
+    ``forward`` can retry. Other exceptions propagate unchanged.
     """
     req = client.build_request(
         method, url, headers=out_headers, content=body if body else None,
@@ -368,7 +356,7 @@ def _forward_attempt(
     # and release the connection before raising so the retry lands on
     # a fresh stream. We keep the original headers + body so the caller
     # can mirror them verbatim if retries are exhausted.
-    if resp.status_code in _RETRY_ON_STATUS:
+    if resp.status_code in retry_status:
         try:
             body_bytes = resp.read()
         except Exception:

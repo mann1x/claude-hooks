@@ -273,22 +273,33 @@ class TestHttpxForwarder:
 # --------------------------------------------------------------- #
 # Retry on RemoteProtocolError ("Server disconnected")
 # --------------------------------------------------------------- #
+def _fast_retry_env(monkeypatch):
+    """Collapse backoff to ~0 and reset the process-global throttle so
+    these adapted integration tests don't sleep and don't inherit a
+    breaker opened by an earlier test."""
+    from claude_hooks.proxy import retry as rt
+    monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_BASE_DELAY_S", "0")
+    monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_MAX_DELAY_S", "0")
+    monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_JITTER", "0")
+    rt.reset_state()
+
+
 class TestForwarderRetry:
     def test_remote_protocol_error_triggers_retry_then_succeeds(self, monkeypatch):
         """First attempt raises RemoteProtocolError, second returns 200.
 
         Simulates Anthropic's edge dropping a stale HTTP/2 connection —
-        the retry lands on a fresh one and the caller never sees the
-        failure.
+        httpx evicts the dead connection, the retry lands on a fresh
+        one, and the caller never sees the failure.
         """
         import httpx
         from claude_hooks.proxy import forwarder as fwd
 
+        _fast_retry_env(monkeypatch)
         fwd._reset_client()
 
         calls = {"n": 0}
         real_client = fwd._get_client(timeout=5.0)
-
         original_send = real_client.send
 
         def fake_send(req, *args, **kwargs):
@@ -299,7 +310,6 @@ class TestForwarderRetry:
 
         monkeypatch.setattr(real_client, "send", fake_send)
 
-        # Use a real local server so the second (real) attempt works.
         from http.server import BaseHTTPRequestHandler, HTTPServer
 
         class OK(BaseHTTPRequestHandler):
@@ -331,24 +341,24 @@ class TestForwarderRetry:
             fwd._reset_client()
 
     def test_retries_exhausted_reraises(self, monkeypatch):
-        """If every attempt raises, the last exception propagates."""
+        """If every attempt raises a connection error, the last
+        exception propagates (the server-level handler turns it into a
+        502). Bounded by ``max_attempts`` — the deadline gate is moot
+        because backoff is collapsed to 0."""
         import httpx
         from claude_hooks.proxy import forwarder as fwd
 
+        _fast_retry_env(monkeypatch)
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_MAX_ATTEMPTS", "4")
         fwd._reset_client()
 
         calls = {"n": 0}
 
-        def always_fail(client, method, url, headers, body):
+        def always_fail(client, method, url, headers, body, retry_status=None):
             calls["n"] += 1
             raise httpx.RemoteProtocolError("Server disconnected")
 
-        # Patch _forward_attempt directly so the test is independent of
-        # pool-drain plumbing (which rebuilds the client mid-loop).
         monkeypatch.setattr(fwd, "_forward_attempt", always_fail)
-        # Collapse backoff for speed.
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
 
         with pytest.raises(httpx.RemoteProtocolError):
             forward(
@@ -356,27 +366,18 @@ class TestForwarderRetry:
                 {"Content-Type": "application/json"},
                 b'{"x":1}', timeout=5.0,
             )
-        # 1 initial + _UPSTREAM_RETRIES retries
-        assert calls["n"] == fwd._UPSTREAM_RETRIES + 1
+        # max_attempts=4 → 4 attempts total (no extra "+1").
+        assert calls["n"] == 4
         fwd._reset_client()
 
 
-# --------------------------------------------------------------- #
-# Retry on upstream HTTP 5xx — the proxy masks transient Anthropic
-# edge errors so Claude Code doesn't see a spurious 502 for every
-# blip.
-# --------------------------------------------------------------- #
 class TestForwarderStatusRetry:
-    """Upstream 5xx responses in ``_RETRY_ON_STATUS`` must be retried
-    transparently. The client sees either the eventual success or the
-    authentic upstream error after all retries are exhausted — never
-    our own ``proxy_error`` wrapper."""
+    """Upstream retryable codes must be retried transparently. The
+    client sees either the eventual success or the authentic upstream
+    error after the budget is spent — never our ``proxy_error`` wrapper.
+    """
 
     def _build_flaky_server(self, responses):
-        """Start a local HTTPServer that returns each ``(status, body)``
-        tuple in ``responses`` in order, then 200 ``{"ok":true}`` for
-        any request beyond the list.
-        """
         from http.server import BaseHTTPRequestHandler, HTTPServer
 
         calls = {"n": 0}
@@ -407,13 +408,9 @@ class TestForwarderStatusRetry:
         return srv, port, calls
 
     def test_502_then_200_retries_transparently(self, monkeypatch):
-        """Upstream returns 502 once, then 200. Forwarder should retry
-        and the caller receives the 200 — never sees the transient 502.
-        """
         from claude_hooks.proxy import forwarder as fwd
+        _fast_retry_env(monkeypatch)
         fwd._reset_client()
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
 
         srv, port, calls = self._build_flaky_server([
             (502, b'{"error":{"type":"overloaded_error"}}'),
@@ -432,19 +429,19 @@ class TestForwarderStatusRetry:
             srv.shutdown(); srv.server_close()
             fwd._reset_client()
 
-    def test_default_retry_count_is_ten(self):
-        """The default retry count documented for the 'quick 10 retries'
-        behaviour must actually be 10 unless overridden via env."""
-        from claude_hooks.proxy import forwarder as fwd
-        assert fwd._UPSTREAM_RETRIES == 10
+    def test_default_max_attempts_is_eight(self):
+        """The default retry budget is the new ``max_attempts`` cap (8),
+        bounded primarily by the wall-clock deadline."""
+        from claude_hooks.proxy import retry as rt
+        assert rt.ApiProxyRetryConfig().max_attempts == 8
 
-    def test_ten_502s_then_success(self, monkeypatch):
-        """Ten consecutive 502 responses must not surface to the
-        client: the 11th attempt (1 initial + 10 retries) succeeds."""
+    def test_many_502s_then_success(self, monkeypatch):
+        """Ten consecutive 502s must not surface to the client when the
+        attempt budget allows the 11th to succeed."""
         from claude_hooks.proxy import forwarder as fwd
+        _fast_retry_env(monkeypatch)
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_MAX_ATTEMPTS", "12")
         fwd._reset_client()
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
 
         flakes = [(502, b'{"err":"overloaded"}')] * 10
         srv, port, calls = self._build_flaky_server(flakes)
@@ -459,27 +456,20 @@ class TestForwarderStatusRetry:
                 f"expected 200 after 10 flakes, got {result.status}"
             )
             assert b'{"ok":true}' in body
-            # 10 failing + 1 successful = 11 total requests.
-            assert calls["n"] == 11
+            assert calls["n"] == 11         # 10 failing + 1 success
         finally:
             srv.shutdown(); srv.server_close()
             fwd._reset_client()
 
     def test_retries_exhausted_returns_upstream_response(self, monkeypatch):
-        """If every attempt returns 502, the caller receives the
-        *authentic* upstream 502 response (not our proxy-synthesized
-        bad-gateway wrapper). The server-level handler mirrors this
-        verbatim to Claude Code.
-        """
+        """When every attempt returns 502, the caller receives the
+        *authentic* upstream 502 (not our synthesized bad-gateway)."""
         from claude_hooks.proxy import forwarder as fwd
+        _fast_retry_env(monkeypatch)
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_MAX_ATTEMPTS", "4")
         fwd._reset_client()
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
-        # Shrink retry budget so the test doesn't fight the default.
-        monkeypatch.setattr(fwd, "_UPSTREAM_RETRIES", 3)
 
         upstream_body = b'{"error":{"type":"overloaded_error","message":"try later"}}'
-        # N+1 flaky responses so even the final attempt fails.
         flakes = [(502, upstream_body)] * 20
         srv, port, calls = self._build_flaky_server(flakes)
         try:
@@ -489,22 +479,18 @@ class TestForwarderStatusRetry:
                 b'{"x":1}', timeout=5.0,
             )
             body = result.first_chunk + b"".join(result.body_iter)
-            # Authentic upstream response passed through.
             assert result.status == 502
             assert body == upstream_body
-            # 1 initial + 3 retries = 4 attempts total.
-            assert calls["n"] == 4
+            assert calls["n"] == 4          # max_attempts=4
         finally:
             srv.shutdown(); srv.server_close()
             fwd._reset_client()
 
     def test_non_retryable_4xx_not_retried(self, monkeypatch):
-        """A 400 (client error) must flow through untouched — no retry
-        loop, since retrying a bad request won't help."""
+        """A 400 (client error) flows through untouched — no retry."""
         from claude_hooks.proxy import forwarder as fwd
+        _fast_retry_env(monkeypatch)
         fwd._reset_client()
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
 
         srv, port, calls = self._build_flaky_server([
             (400, b'{"error":"bad_request"}'),
@@ -524,14 +510,13 @@ class TestForwarderStatusRetry:
             fwd._reset_client()
 
     def test_retry_status_env_override(self, monkeypatch):
-        """Overriding ``_RETRY_ON_STATUS`` (what the env var drives)
-        lets callers include / exclude codes. Verify a non-default
-        code (418) becomes retryable when added to the set."""
+        """``CLAUDE_HOOKS_PROXY_RETRY_STATUS`` lets callers include /
+        exclude codes. A non-default code (418) becomes retryable when
+        it's the only member of the set."""
         from claude_hooks.proxy import forwarder as fwd
+        _fast_retry_env(monkeypatch)
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_STATUS", "418")
         fwd._reset_client()
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
-        monkeypatch.setattr(fwd, "_RETRY_ON_STATUS", frozenset({418}))
 
         srv, port, calls = self._build_flaky_server([
             (418, b'{"error":"teapot"}'),
@@ -551,367 +536,11 @@ class TestForwarderStatusRetry:
             fwd._reset_client()
 
     def test_parse_status_set_from_env_string(self):
-        """``_parse_status_set`` must honour a comma-separated list and
-        gracefully fall back to the default on empty / malformed input."""
-        from claude_hooks.proxy import forwarder as fwd
-        assert fwd._parse_status_set("502,503,529") == frozenset(
-            {502, 503, 529}
-        )
-        assert fwd._parse_status_set("") == fwd._DEFAULT_RETRY_STATUS
-        assert fwd._parse_status_set(None) == fwd._DEFAULT_RETRY_STATUS
-        # Garbage tokens ignored; if nothing parses, default wins.
-        assert fwd._parse_status_set("abc,,xyz") == fwd._DEFAULT_RETRY_STATUS
-        # Mixed — valid tokens extracted.
-        assert fwd._parse_status_set("502, foo, 504") == frozenset(
-            {502, 504}
-        )
-
-
-# --------------------------------------------------------------- #
-# Sticky-bad-connection mitigation: reset the httpx pool when a
-# retryable 5xx looks like it's coming from a stuck kept-alive
-# connection (slow attempt or N consecutive 5xx in one forward()
-# call). Without this, all retries land on the same sick conn and
-# the whole call balloons to 30-120s while sibling connections in
-# the pool serve other sessions fine.
-# --------------------------------------------------------------- #
-class TestForwarderPoolResetOn5xx:
-    def _build_flaky_server(self, responses, slow_secs=0.0):
-        """Like the sibling helper but optionally sleeps for ``slow_secs``
-        BEFORE writing the response, to simulate an upstream backend
-        that's slow to fail."""
-        from http.server import BaseHTTPRequestHandler, HTTPServer
-
-        calls = {"n": 0}
-        state = {"i": 0}
-        responses = list(responses)
-
-        class Flaky(BaseHTTPRequestHandler):
-            def log_message(self, *a, **k): pass
-
-            def do_POST(self):
-                calls["n"] += 1
-                if state["i"] < len(responses):
-                    status, body = responses[state["i"]]
-                    state["i"] += 1
-                else:
-                    status, body = 200, b'{"ok":true}'
-                if slow_secs > 0 and status >= 500:
-                    time.sleep(slow_secs)
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-        s = socket.socket(); s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]; s.close()
-        srv = HTTPServer(("127.0.0.1", port), Flaky)
-        t = threading.Thread(target=srv.serve_forever, daemon=True)
-        t.start()
-        return srv, port, calls
-
-    def test_slow_5xx_drains_pool_before_next_retry(self, monkeypatch):
-        """A retryable 5xx that took >= _SLOW_5XX_RESET_SEC must drain
-        the pool so the next attempt opens a fresh connection. We don't
-        instrument the socket itself; we instrument _reset_client() and
-        verify it was called between the slow 502 and the recovery 200.
-        """
-        from claude_hooks.proxy import forwarder as fwd
-        fwd._reset_client()
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
-        # Threshold low enough that a 0.1s "slow" 5xx trips it.
-        monkeypatch.setattr(fwd, "_SLOW_5XX_RESET_SEC", 0.05)
-        # Disable the consecutive-count branch so this test isolates
-        # the slow-elapsed branch.
-        monkeypatch.setattr(fwd, "_5XX_RESET_AFTER", 999)
-
-        resets = {"n": 0}
-        real_reset = fwd._reset_client
-
-        def counting_reset():
-            resets["n"] += 1
-            real_reset()
-
-        monkeypatch.setattr(fwd, "_reset_client", counting_reset)
-
-        srv, port, calls = self._build_flaky_server(
-            [(502, b'{"err":"overloaded"}')], slow_secs=0.15
-        )
-        try:
-            result = forward(
-                f"http://127.0.0.1:{port}", "POST", "/v1/messages",
-                {"Content-Type": "application/json"},
-                b'{"x":1}', timeout=5.0,
-            )
-            body = result.first_chunk + b"".join(result.body_iter)
-            assert result.status == 200
-            assert b'{"ok":true}' in body
-            assert calls["n"] == 2
-            assert resets["n"] >= 1, "slow 5xx should have drained the pool"
-        finally:
-            srv.shutdown(); srv.server_close()
-            fwd._reset_client()
-
-    def test_consecutive_5xx_drains_pool(self, monkeypatch):
-        """N consecutive fast 5xx in one forward() call must drain
-        the pool. Catches the case where each individual 502 is fast
-        but the underlying connection is sick across retries."""
-        from claude_hooks.proxy import forwarder as fwd
-        fwd._reset_client()
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
-        # Make the slow path unreachable so we test the count branch.
-        monkeypatch.setattr(fwd, "_SLOW_5XX_RESET_SEC", 999.0)
-        monkeypatch.setattr(fwd, "_5XX_RESET_AFTER", 3)
-
-        resets = {"n": 0}
-        real_reset = fwd._reset_client
-
-        def counting_reset():
-            resets["n"] += 1
-            real_reset()
-
-        monkeypatch.setattr(fwd, "_reset_client", counting_reset)
-
-        # 5 consecutive 502s, then 200. The 3rd 5xx should reset.
-        srv, port, calls = self._build_flaky_server(
-            [(502, b'{"err":"x"}')] * 5
-        )
-        try:
-            result = forward(
-                f"http://127.0.0.1:{port}", "POST", "/v1/messages",
-                {"Content-Type": "application/json"},
-                b'{"x":1}', timeout=5.0,
-            )
-            assert result.status == 200
-            # 5 502s + 1 success
-            assert calls["n"] == 6
-            assert resets["n"] >= 1, (
-                "expected at least one reset after 3 consecutive 5xx"
-            )
-        finally:
-            srv.shutdown(); srv.server_close()
-            fwd._reset_client()
-
-    def test_single_fast_5xx_does_not_drain_pool(self, monkeypatch):
-        """A single fast 5xx (the common transient blip) must NOT
-        drain the pool — that would add reconnect cost to every blip
-        without helping. Pool drains only kick in on slow or persistent
-        failures."""
-        from claude_hooks.proxy import forwarder as fwd
-        fwd._reset_client()
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
-        monkeypatch.setattr(fwd, "_SLOW_5XX_RESET_SEC", 999.0)
-        monkeypatch.setattr(fwd, "_5XX_RESET_AFTER", 999)
-
-        resets = {"n": 0}
-        real_reset = fwd._reset_client
-
-        def counting_reset():
-            resets["n"] += 1
-            real_reset()
-
-        monkeypatch.setattr(fwd, "_reset_client", counting_reset)
-
-        srv, port, calls = self._build_flaky_server(
-            [(502, b'{"err":"x"}')]
-        )
-        try:
-            result = forward(
-                f"http://127.0.0.1:{port}", "POST", "/v1/messages",
-                {"Content-Type": "application/json"},
-                b'{"x":1}', timeout=5.0,
-            )
-            assert result.status == 200
-            assert calls["n"] == 2
-            assert resets["n"] == 0, "fast single 5xx must not drain pool"
-        finally:
-            srv.shutdown(); srv.server_close()
-            fwd._reset_client()
-
-
-# --------------------------------------------------------------- #
-# Sticky-bad-connection mitigation, connection-level edition. The
-# 5xx drain logic above only catches authentic upstream HTTP errors;
-# in practice (2026-04-27 production logs) most "stuck" pools surface
-# as consecutive RemoteProtocolError ("Server disconnected") on every
-# retry. httpx doesn't reliably evict the dead pooled connection on
-# its own, so we drain after a low number of repeats.
-# --------------------------------------------------------------- #
-class TestForwarderPoolResetOnProtocolError:
-    def test_consecutive_protocol_errors_drain_pool(self, monkeypatch):
-        """N consecutive RemoteProtocolError in one forward() must drain
-        the pool so the next attempt opens a fresh connection."""
-        import httpx
-        from claude_hooks.proxy import forwarder as fwd
-
-        fwd._reset_client()
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
-        monkeypatch.setattr(fwd, "_PROTO_RESET_AFTER", 2)
-
-        resets = {"n": 0}
-        real_reset = fwd._reset_client
-
-        def counting_reset():
-            resets["n"] += 1
-            real_reset()
-
-        monkeypatch.setattr(fwd, "_reset_client", counting_reset)
-
-        # Patch _forward_attempt directly: first 3 calls raise, 4th
-        # returns a real UpstreamResult so the call eventually succeeds.
-        # Going through the real client.send is brittle here because
-        # _reset_client() rebuilds the client mid-loop and any pinned
-        # send-monkeypatch would survive into the new client.
-        from claude_hooks.proxy.forwarder import UpstreamResult
-        attempts = {"n": 0}
-
-        def fake_attempt(client, method, url, headers, body):
-            attempts["n"] += 1
-            if attempts["n"] <= 3:
-                raise httpx.RemoteProtocolError("Server disconnected")
-            return UpstreamResult(
-                status=200, reason="OK",
-                headers={"content-type": "application/json"},
-                first_chunk=b'{"ok":true}',
-                body_iter=iter([]),
-                stats={"bytes_read": 11, "http_version": "HTTP/2"},
-                sse_tail=None,
-            )
-
-        monkeypatch.setattr(fwd, "_forward_attempt", fake_attempt)
-
-        result = forward(
-            "http://127.0.0.1:1", "POST", "/v1/messages",
-            {"Content-Type": "application/json"},
-            b'{"x":1}', timeout=5.0,
-        )
-        assert result.status == 200
-        assert attempts["n"] == 4
-        # 3 errors → drain after #2 and again after a 4th would-be
-        # repeat; the 4th attempt succeeded so only one drain fired.
-        assert resets["n"] >= 1, (
-            "expected pool drain after 2+ consecutive protocol errors"
-        )
-        fwd._reset_client()
-
-    def test_single_protocol_error_does_not_drain_pool(self, monkeypatch):
-        """One isolated protocol error followed by success must NOT
-        drain the pool — connection blips happen and reopening the pool
-        on every blip would add reconnect cost without benefit."""
-        import httpx
-        from claude_hooks.proxy import forwarder as fwd
-
-        fwd._reset_client()
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
-        monkeypatch.setattr(fwd, "_PROTO_RESET_AFTER", 2)
-
-        resets = {"n": 0}
-        real_reset = fwd._reset_client
-
-        def counting_reset():
-            resets["n"] += 1
-            real_reset()
-
-        monkeypatch.setattr(fwd, "_reset_client", counting_reset)
-
-        from claude_hooks.proxy.forwarder import UpstreamResult
-        attempts = {"n": 0}
-
-        def fake_attempt(client, method, url, headers, body):
-            attempts["n"] += 1
-            if attempts["n"] == 1:
-                raise httpx.RemoteProtocolError("Server disconnected")
-            return UpstreamResult(
-                status=200, reason="OK",
-                headers={"content-type": "application/json"},
-                first_chunk=b'{"ok":true}',
-                body_iter=iter([]),
-                stats={"bytes_read": 11, "http_version": "HTTP/2"},
-                sse_tail=None,
-            )
-
-        monkeypatch.setattr(fwd, "_forward_attempt", fake_attempt)
-
-        result = forward(
-            "http://127.0.0.1:1", "POST", "/v1/messages",
-            {"Content-Type": "application/json"},
-            b'{"x":1}', timeout=5.0,
-        )
-        assert result.status == 200
-        assert attempts["n"] == 2
-        assert resets["n"] == 0, (
-            "single protocol-error blip must not drain the pool"
-        )
-        fwd._reset_client()
-
-    def test_5xx_then_protocol_error_resets_5xx_counter(self, monkeypatch):
-        """A protocol error after a 5xx must reset the 5xx counter (and
-        vice-versa) so each error class is judged on its own consecutive
-        run, not interleaved noise."""
-        import httpx
-        from claude_hooks.proxy import forwarder as fwd
-
-        fwd._reset_client()
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
-        monkeypatch.setattr(fwd, "_SLOW_5XX_RESET_SEC", 999.0)
-        monkeypatch.setattr(fwd, "_5XX_RESET_AFTER", 3)
-        monkeypatch.setattr(fwd, "_PROTO_RESET_AFTER", 3)
-
-        resets = {"n": 0}
-        real_reset = fwd._reset_client
-
-        def counting_reset():
-            resets["n"] += 1
-            real_reset()
-
-        monkeypatch.setattr(fwd, "_reset_client", counting_reset)
-
-        from claude_hooks.proxy.forwarder import (
-            UpstreamResult, _RetryableStatus,
-        )
-        attempts = {"n": 0}
-
-        def fake_attempt(client, method, url, headers, body):
-            attempts["n"] += 1
-            # 5xx, proto, 5xx, success — neither counter ever hits 3.
-            if attempts["n"] == 1:
-                raise _RetryableStatus(
-                    status=502, reason="Bad Gateway",
-                    body=b'{"err":"x"}', headers={},
-                )
-            if attempts["n"] == 2:
-                raise httpx.RemoteProtocolError("Server disconnected")
-            if attempts["n"] == 3:
-                raise _RetryableStatus(
-                    status=502, reason="Bad Gateway",
-                    body=b'{"err":"x"}', headers={},
-                )
-            return UpstreamResult(
-                status=200, reason="OK",
-                headers={"content-type": "application/json"},
-                first_chunk=b'{"ok":true}',
-                body_iter=iter([]),
-                stats={"bytes_read": 11, "http_version": "HTTP/2"},
-                sse_tail=None,
-            )
-
-        monkeypatch.setattr(fwd, "_forward_attempt", fake_attempt)
-
-        result = forward(
-            "http://127.0.0.1:1", "POST", "/v1/messages",
-            {"Content-Type": "application/json"},
-            b'{"x":1}', timeout=5.0,
-        )
-        assert result.status == 200
-        assert attempts["n"] == 4
-        assert resets["n"] == 0, (
-            "interleaved error classes must not trip either drain"
-        )
-        fwd._reset_client()
+        """``retry._parse_status_set`` honours a comma-separated list and
+        falls back to the default on empty / malformed input."""
+        from claude_hooks.proxy import retry as rt
+        assert rt._parse_status_set("502,503,529") == frozenset({502, 503, 529})
+        assert rt._parse_status_set("") == rt.DEFAULT_RETRY_STATUS
+        assert rt._parse_status_set(None) == rt.DEFAULT_RETRY_STATUS
+        assert rt._parse_status_set("abc,,xyz") == rt.DEFAULT_RETRY_STATUS
+        assert rt._parse_status_set("502, foo, 504") == frozenset({502, 504})

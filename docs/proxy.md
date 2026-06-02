@@ -14,8 +14,13 @@
 > `pip install 'httpx[http2]>=0.27'`).
 
 Opt-in local HTTP proxy in front of `api.anthropic.com`. Hooks can't
-see the raw HTTPS traffic; the proxy can. P0 is **observability
-only** — pure pass-through, one JSONL record per upstream request.
+see the raw HTTPS traffic; the proxy can. It logs one JSONL record per
+upstream request and rides out upstream overload/throttle with a
+spaced, deadline-bounded retry layer (see
+[Retry / throttle resilience](#retry--throttle-resilience) below).
+Response bodies always stream through **unmodified** — the proxy only
+retries *before* any byte reaches Claude Code, so it never alters what
+the client receives.
 
 Design + phased roadmap: [PLAN-proxy-hook.md](./PLAN-proxy-hook.md).
 
@@ -463,12 +468,95 @@ pointer to this section.
 
 ### Tuning
 
-Defaults in `forwarder.py`:
+Pool defaults in `forwarder.py`:
 
 - `max_keepalive_connections=10`, `max_connections=20`
-- `keepalive_expiry=300.0` s (5 min idle before the pool drops a conn)
+- `keepalive_expiry=60.0` s idle before the pool retires a conn
+  (`CLAUDE_HOOKS_PROXY_KEEPALIVE_SEC`). Short so stale connections
+  retire ahead of upstream's silent idle-drop.
 - `connect=10.0` s, `timeout=<proxy.timeout>` s for read/write
 - `trust_env=False` — we ignore `HTTPS_PROXY` / `NO_PROXY` from the
   environment because the host may have those set pointing *at us*
 
-Tighten only if upstream changes its keep-alive window.
+The **retry** behaviour (backoff, deadline, circuit breaker) is tuned
+separately — see the next section.
+
+## Retry / throttle resilience
+
+Anthropic's edge throttles connections under load (it bites hardest
+once a second session is active). The proxy absorbs that turbulence so
+Claude Code's own client never exhausts *its* retry budget — but it
+does so **politely**, with proper spacing, rather than hammering an
+already-overloaded backend.
+
+The retry *policy* lives in `claude_hooks/proxy/retry.py` (a pure,
+unit-tested module); `forwarder.py` owns only the HTTP loop +
+`time.sleep`.
+
+**What it does**
+
+- **Jittered exponential backoff.** Each retry waits a full-jittered
+  `uniform(0, min(base·2^attempt, max))` — spaced like a well-behaved
+  client, not the old sub-second fixed step.
+- **Honors `Retry-After`.** When upstream sends `Retry-After` (integer
+  seconds *or* HTTP-date) the proxy waits exactly that long (clamped to
+  a cap), instead of its own backoff.
+- **Wall-clock deadline is the primary bound.** Retries continue —
+  spaced — until a deadline (default 90 s, comfortably under the 120 s
+  read `timeout`), then the **authentic** upstream error (e.g. a 529
+  body + headers) is passed through verbatim. The attempt count is only
+  a safety cap. This is what keeps the *client* from giving up: the
+  proxy holds the request and keeps trying in the background.
+- **No whole-pool nuke.** Earlier versions drained the entire shared
+  HTTP/2 pool on a sticky failure. That closed sibling sessions' live
+  connections (turning one session's overload into a collective storm)
+  *and* recreated the per-request fresh-connection profile the pool
+  exists to avoid — which itself tripped the edge **429** gate (see
+  [Forwarder: httpx + HTTP/2](#forwarder-httpx--http2)). The rewrite
+  removes it: httpx already evicts a connection that *raised*, so the
+  next attempt on the shared client lands on a fresh connection without
+  disturbing other sessions.
+- **Cross-session circuit breaker.** The proxy is one process with one
+  shared pool; every session's request flows through it. When a burst
+  of overloads (529 + connection drops) crosses a threshold, the
+  breaker opens and *every* session adds a coordinated delay before its
+  next first-attempt — so a second session can't pile on. This is the
+  direct counter to "the throttle engages as soon as a 2nd session
+  runs".
+- **429 passes straight through.** A 429 is the account's own quota,
+  not an overload; the proxy never retries it (Claude Code + its
+  `Retry-After` handle it). It's counted for visibility only.
+
+**Observability**
+
+- `GET http://127.0.0.1:38080/health` returns a live snapshot:
+  cumulative flap counters (`upstream_529_total`,
+  `upstream_conn_error_total`, `upstream_429_passthrough_total`,
+  `retry_succeeded_total`, `retry_exhausted_total`, `breaker_open_total`)
+  and the current breaker state (`open`, `open_remaining_s`,
+  `recent_overloads`, `last_retry_after_s`).
+- JSONL request lines gain `retry_count` / `backoff_total_ms` /
+  `retry_outcome` (null on the common no-retry path); the same three
+  land in the `requests` table (stats schema v6).
+
+**Env knobs** (all optional; safe defaults):
+
+| Env var | Default | Controls |
+|---|---|---|
+| `CLAUDE_HOOKS_PROXY_RETRY_DEADLINE_S` | `90` | wall-clock retry window |
+| `CLAUDE_HOOKS_PROXY_RETRY_BASE_DELAY_S` | `1.0` | backoff base |
+| `CLAUDE_HOOKS_PROXY_RETRY_MAX_DELAY_S` | `20.0` | backoff cap |
+| `CLAUDE_HOOKS_PROXY_RETRY_MAX_ATTEMPTS` | `8` | attempt safety cap (`1` = pass-through; legacy `CLAUDE_HOOKS_PROXY_RETRIES` honored as fallback) |
+| `CLAUDE_HOOKS_PROXY_RETRY_AFTER_CAP_S` | `30.0` | max honored `Retry-After` |
+| `CLAUDE_HOOKS_PROXY_RETRY_JITTER` | `true` | full-jitter on/off |
+| `CLAUDE_HOOKS_PROXY_HONOR_RETRY_AFTER` | `true` | honor the header |
+| `CLAUDE_HOOKS_PROXY_RETRY_STATUS` | `500,502,503,504,520-527,529` | retryable status set (CSV) |
+| `CLAUDE_HOOKS_PROXY_BREAKER_WINDOW_S` | `30` | overload sliding window |
+| `CLAUDE_HOOKS_PROXY_BREAKER_THRESHOLD` | `4` | overloads to open |
+| `CLAUDE_HOOKS_PROXY_BREAKER_OPEN_S` | `10` | open duration |
+| `CLAUDE_HOOKS_PROXY_BREAKER_EXTRA_DELAY_S` | `2.0` | coordinated pre-attempt delay while open |
+
+Retired (ignored, with a one-time warning): `…_RETRY_BACKOFF`,
+`…_RETRY_BACKOFF_MAX`, `…_SLOW_5XX_RESET_SEC`, `…_5XX_RESET_AFTER`,
+`…_PROTO_RESET_AFTER` — their semantics (sub-second fixed backoff +
+whole-pool nuke) were exactly what amplified the throttle.

@@ -18,6 +18,40 @@ release with the auto-generated source archive
 
 ### Added
 
+- **API proxy: throttle-aware retry layer — stop *amplifying*
+  Anthropic's connection throttle.** Anthropic's edge throttling (which
+  bites hardest once a 2nd session runs) was being made *worse* by the
+  proxy, not mitigated: the old `forward()` loop fired up to 10 retries
+  in ~5 s with no jitter, ignored `Retry-After`, and — the real
+  amplifier — drained the **entire shared HTTP/2 pool** on a sticky
+  failure, which closed sibling sessions' live connections (collective
+  storm) *and* recreated the per-request fresh-connection profile the
+  pool exists to avoid (re-tripping the edge **429** gate). The retry
+  policy is now a pure, unit-tested module (`claude_hooks/proxy/retry.py`)
+  driving a rewritten loop:
+  - **Jittered exponential backoff** + **`Retry-After` honoring**
+    (integer-seconds and HTTP-date, clamped) — proper spacing, not a
+    sub-second hammer.
+  - **Wall-clock deadline** (default 90 s, under the 120 s read timeout)
+    as the primary bound, attempt-count only a safety cap; on exhaustion
+    the authentic upstream error (529 body + headers) passes through
+    verbatim. The proxy keeps retrying in the background so Claude
+    Code's own client never exhausts *its* budget.
+  - **No whole-pool nuke** on the retry path — httpx already evicts a
+    connection that raised, so a retry lands on a fresh connection
+    without disturbing sibling sessions.
+  - **Cross-session circuit breaker** — a burst of overloads opens a
+    process-global breaker so every session adds a coordinated
+    pre-attempt delay; the direct counter to the "2nd session" trigger.
+  - **429 passes straight through** (account quota, never retried).
+  - **Observability**: new `GET /health` snapshot (flap counters +
+    breaker state), `retry_count`/`backoff_total_ms`/`retry_outcome` on
+    JSONL request lines and in the `requests` table (stats schema **v6**,
+    additive/idempotent). New `CLAUDE_HOOKS_PROXY_RETRY_*` /
+    `…_BREAKER_*` env knobs; legacy `…_RETRIES` honored as a fallback,
+    the sub-second-backoff + pool-nuke knobs retired with a one-time
+    warning. See [`docs/proxy.md`](docs/proxy.md) "Retry / throttle
+    resilience".
 - **`/consultants` dynamic adversarial review — bring the council's
   "challenge before you trust it" instinct home from the ultracode
   tier.** Four independent, **default-OFF**, effort-tolerant mechanisms,
