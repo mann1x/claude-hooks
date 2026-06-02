@@ -507,7 +507,10 @@ synthesizer's `self_confidence`. React like this:
 2. **Author + inject** the brief at the role the critique should re-run
    through: `inject <sid> --role critic -m "<brief>"` to re-run the
    fanned critics against it, or `--role synthesizer` to just sharpen the
-   final write-up. Thread `--cwd "$(pwd)"`.
+   final write-up. These checkpoint/control verbs (`events`, `inject`,
+   `adversary-ack`, `resume`) address the run by **`sid`** through the
+   engine — they take **no `--cwd`** (unlike `consult` / `follow-up` /
+   `config`).
 3. **Ack to resume** — `claude-consultants adversary-ack <sid>` (or
    `resume <sid>` during the checkpoint window, which delegates to the
    ack). The council resumes immediately with your brief in the prompt.
