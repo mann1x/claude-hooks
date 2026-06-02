@@ -1,12 +1,7 @@
 export const meta = {
   name: 'consult-with-adversarial-review',
-  description:
-    'Run a /consultants council, adversarially verify its answer with a ' +
-    'skeptic panel, then accept or compose a focused follow-up and loop',
-  whenToUse:
-    'When a wrong-but-plausible council answer would be costly and you ' +
-    'want the answer refuted before you trust it. Pass args.question + ' +
-    'args.cwd (absolute). Optional: effort, verifyBudget, maxRounds.',
+  description: 'Run a /consultants council, adversarially verify its answer with a skeptic panel, then accept or compose a focused follow-up and loop',
+  whenToUse: 'When a wrong-but-plausible council answer would be costly and you want the answer refuted before you trust it. Pass args.question + args.cwd (absolute). Optional: effort, verifyBudget, maxRounds.',
   phases: [
     { title: 'Consult', detail: 'start the council, wait for the answer' },
     { title: 'Review', detail: 'critique for wrong assumptions + gaps' },
