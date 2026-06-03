@@ -35,6 +35,13 @@ def _state(**kw):
 
 
 class TestFormatSegment:
+    @pytest.fixture(autouse=True)
+    def _no_win_downgrade(self, mod, monkeypatch):
+        # Glyph rendering is host-independent; neutralize the Windows
+        # emoji->ascii console downgrade so fmt="emoji" yields emoji on any OS
+        # (the downgrade itself is covered by TestEffectiveFormatRuntimeDowngrade).
+        monkeypatch.setattr(mod, "_is_windows_console", lambda: False)
+
     def test_both_windows(self, mod):
         s = _state(
             five_hour_utilization=0.42,
@@ -118,6 +125,12 @@ class TestPeakMarker:
     # 2026-04-27 was a Monday (weekday); 2026-05-02 was a Saturday.
     _MONDAY = _dt.datetime(2026, 4, 27)
     _SATURDAY = _dt.datetime(2026, 5, 2)
+
+    @pytest.fixture(autouse=True)
+    def _no_win_downgrade(self, mod, monkeypatch):
+        # Peak glyphs are host-independent; neutralize the Windows emoji->ascii
+        # console downgrade so fmt="emoji" yields emoji on any OS.
+        monkeypatch.setattr(mod, "_is_windows_console", lambda: False)
 
     def test_off_peak_weekday_morning(self, mod):
         # 06:00 UTC Monday — well before US shoulder.
@@ -233,11 +246,13 @@ class TestDefaultFormat:
     def test_linux_default_is_emoji(self, mod, monkeypatch):
         monkeypatch.delenv("CLAUDE_HOOKS_STATUSLINE_FORMAT", raising=False)
         monkeypatch.setattr(mod.sys, "platform", "linux")
+        monkeypatch.setattr(mod.os, "name", "posix")  # else os.name=="nt" leaks on a Windows host
         assert mod.default_format() == "emoji"
 
     def test_darwin_default_is_emoji(self, mod, monkeypatch):
         monkeypatch.delenv("CLAUDE_HOOKS_STATUSLINE_FORMAT", raising=False)
         monkeypatch.setattr(mod.sys, "platform", "darwin")
+        monkeypatch.setattr(mod.os, "name", "posix")  # else os.name=="nt" leaks on a Windows host
         assert mod.default_format() == "emoji"
 
     def test_windows_default_is_ascii(self, mod, monkeypatch):

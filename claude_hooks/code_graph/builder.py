@@ -382,7 +382,12 @@ def build_graph(
     for file in _iter_source_files(root, max_files=max_files):
         ext = file.suffix.lower()
         by_lang[ext] += 1
-        rel = str(file.resolve().relative_to(root.resolve()))
+        # ``.as_posix()`` (not ``str()``) so the file-path keys are forward-slash
+        # on every OS — these flow into node ``file`` attributes and must match
+        # git-diff paths and cross-platform graph consumers (Windows would
+        # otherwise emit ``pkg\core.py`` and break lookups). See builder.py:78,
+        # which is already separator-safe (dotted module name via ``.parts``).
+        rel = file.resolve().relative_to(root.resolve()).as_posix()
 
         if ext not in extractable:
             continue  # supported (counted) but no parser available
