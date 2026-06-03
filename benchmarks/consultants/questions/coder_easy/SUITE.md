@@ -1,0 +1,205 @@
+---
+suite: coder_easy
+suite_version: "1.0"
+released: 2026-06-03
+suite_hash: 0e7f88a603f1
+manifest:
+  - python-easy-01-sum-list
+  - rust-easy-01-sum-list
+  - go-easy-01-sum-list
+  - c-easy-01-sum-list
+  - cpp-easy-01-sum-list
+  - csharp-easy-01-sum-list
+  - python-easy-02-reverse-string
+  - rust-easy-02-reverse-string
+  - go-easy-02-reverse-string
+  - c-easy-02-reverse-string
+  - cpp-easy-02-reverse-string
+  - csharp-easy-02-reverse-string
+  - python-easy-03-count-vowels
+  - rust-easy-03-count-vowels
+  - go-easy-03-count-vowels
+  - c-easy-03-count-vowels
+  - cpp-easy-03-count-vowels
+  - csharp-easy-03-count-vowels
+  - python-easy-04-max-of-list
+  - rust-easy-04-max-of-list
+  - go-easy-04-max-of-list
+  - c-easy-04-max-of-list
+  - cpp-easy-04-max-of-list
+  - csharp-easy-04-max-of-list
+  - python-easy-05-min-of-list
+  - rust-easy-05-min-of-list
+  - go-easy-05-min-of-list
+  - c-easy-05-min-of-list
+  - cpp-easy-05-min-of-list
+  - csharp-easy-05-min-of-list
+  - python-easy-06-factorial
+  - rust-easy-06-factorial
+  - go-easy-06-factorial
+  - c-easy-06-factorial
+  - cpp-easy-06-factorial
+  - csharp-easy-06-factorial
+  - python-easy-07-is-palindrome
+  - rust-easy-07-is-palindrome
+  - go-easy-07-is-palindrome
+  - c-easy-07-is-palindrome
+  - cpp-easy-07-is-palindrome
+  - csharp-easy-07-is-palindrome
+  - python-easy-08-fizzbuzz
+  - rust-easy-08-fizzbuzz
+  - go-easy-08-fizzbuzz
+  - c-easy-08-fizzbuzz
+  - cpp-easy-08-fizzbuzz
+  - csharp-easy-08-fizzbuzz
+  - python-easy-09-gcd
+  - rust-easy-09-gcd
+  - go-easy-09-gcd
+  - c-easy-09-gcd
+  - cpp-easy-09-gcd
+  - csharp-easy-09-gcd
+  - python-easy-10-nth-fibonacci
+  - rust-easy-10-nth-fibonacci
+  - go-easy-10-nth-fibonacci
+  - c-easy-10-nth-fibonacci
+  - cpp-easy-10-nth-fibonacci
+  - csharp-easy-10-nth-fibonacci
+  - python-easy-11-count-words
+  - rust-easy-11-count-words
+  - go-easy-11-count-words
+  - c-easy-11-count-words
+  - cpp-easy-11-count-words
+  - csharp-easy-11-count-words
+  - python-easy-12-sum-digits
+  - rust-easy-12-sum-digits
+  - go-easy-12-sum-digits
+  - c-easy-12-sum-digits
+  - cpp-easy-12-sum-digits
+  - csharp-easy-12-sum-digits
+  - python-easy-13-celsius-to-fahrenheit
+  - rust-easy-13-celsius-to-fahrenheit
+  - go-easy-13-celsius-to-fahrenheit
+  - c-easy-13-celsius-to-fahrenheit
+  - cpp-easy-13-celsius-to-fahrenheit
+  - csharp-easy-13-celsius-to-fahrenheit
+  - python-easy-14-average
+  - rust-easy-14-average
+  - go-easy-14-average
+  - c-easy-14-average
+  - cpp-easy-14-average
+  - csharp-easy-14-average
+  - python-easy-15-is-prime
+  - rust-easy-15-is-prime
+  - go-easy-15-is-prime
+  - c-easy-15-is-prime
+  - cpp-easy-15-is-prime
+  - csharp-easy-15-is-prime
+  - python-easy-16-to-uppercase
+  - rust-easy-16-to-uppercase
+  - go-easy-16-to-uppercase
+  - c-easy-16-to-uppercase
+  - cpp-easy-16-to-uppercase
+  - csharp-easy-16-to-uppercase
+  - python-easy-17-second-largest
+  - rust-easy-17-second-largest
+  - go-easy-17-second-largest
+  - c-easy-17-second-largest
+  - cpp-easy-17-second-largest
+  - csharp-easy-17-second-largest
+  - python-easy-18-sort-ascending
+  - rust-easy-18-sort-ascending
+  - go-easy-18-sort-ascending
+  - c-easy-18-sort-ascending
+  - cpp-easy-18-sort-ascending
+  - csharp-easy-18-sort-ascending
+  - python-easy-19-dedupe-order
+  - rust-easy-19-dedupe-order
+  - go-easy-19-dedupe-order
+  - c-easy-19-dedupe-order
+  - cpp-easy-19-dedupe-order
+  - csharp-easy-19-dedupe-order
+  - python-easy-20-binary-to-decimal
+  - rust-easy-20-binary-to-decimal
+  - go-easy-20-binary-to-decimal
+  - c-easy-20-binary-to-decimal
+  - cpp-easy-20-binary-to-decimal
+  - csharp-easy-20-binary-to-decimal
+  - python-easy-21-decimal-to-binary
+  - rust-easy-21-decimal-to-binary
+  - go-easy-21-decimal-to-binary
+  - c-easy-21-decimal-to-binary
+  - cpp-easy-21-decimal-to-binary
+  - csharp-easy-21-decimal-to-binary
+  - python-easy-22-power
+  - rust-easy-22-power
+  - go-easy-22-power
+  - c-easy-22-power
+  - cpp-easy-22-power
+  - csharp-easy-22-power
+  - python-easy-23-sum-even
+  - rust-easy-23-sum-even
+  - go-easy-23-sum-even
+  - c-easy-23-sum-even
+  - cpp-easy-23-sum-even
+  - csharp-easy-23-sum-even
+  - python-easy-24-longest-word
+  - rust-easy-24-longest-word
+  - go-easy-24-longest-word
+  - c-easy-24-longest-word
+  - cpp-easy-24-longest-word
+  - csharp-easy-24-longest-word
+  - python-easy-25-title-case
+  - rust-easy-25-title-case
+  - go-easy-25-title-case
+  - c-easy-25-title-case
+  - cpp-easy-25-title-case
+  - csharp-easy-25-title-case
+  - python-easy-26-count-evens
+  - rust-easy-26-count-evens
+  - go-easy-26-count-evens
+  - c-easy-26-count-evens
+  - cpp-easy-26-count-evens
+  - csharp-easy-26-count-evens
+  - python-easy-27-prefix-sums
+  - rust-easy-27-prefix-sums
+  - go-easy-27-prefix-sums
+  - c-easy-27-prefix-sums
+  - cpp-easy-27-prefix-sums
+  - csharp-easy-27-prefix-sums
+  - python-easy-28-is-anagram
+  - rust-easy-28-is-anagram
+  - go-easy-28-is-anagram
+  - c-easy-28-is-anagram
+  - cpp-easy-28-is-anagram
+  - csharp-easy-28-is-anagram
+  - python-easy-29-median-odd
+  - rust-easy-29-median-odd
+  - go-easy-29-median-odd
+  - c-easy-29-median-odd
+  - cpp-easy-29-median-odd
+  - csharp-easy-29-median-odd
+  - python-easy-30-sum-of-squares
+  - rust-easy-30-sum-of-squares
+  - go-easy-30-sum-of-squares
+  - c-easy-30-sum-of-squares
+  - cpp-easy-30-sum-of-squares
+  - csharp-easy-30-sum-of-squares
+rubric:
+  pass_rate_floor: 0.70
+  quality_score_floor: 3.5
+  tie_breaker: median_tokens
+---
+
+# Coder Easy Skill-Eval Suite v1.0
+
+Multi-language **easy** coder suite — the discriminating-at-the-easy-tier counterpart to `coder_mlang` (which saturated at *too hard*). 30 problems × 6 languages = **180 questions**, one uniform contract: read stdin, write stdout.
+
+AUTO-GENERATED by `benchmarks/consultants/gen_coder_easy.py` — edit the spec there and regenerate; do not hand-edit question files.
+
+## Rubric
+
+A model **qualifies** iff `pass_rate ≥ 0.70` AND `avg_quality ≥ 3.5`. Among qualifying models the recommended default is the highest pass-rate; ties break on `median_tokens`. Per-language winners are derived the same way over each language's 30 questions.
+
+## Languages
+
+Python, Rust, Go, C, C++, C# — toolchains pinned in run metadata via `oracles_mlang.probe_toolchain_versions()`.

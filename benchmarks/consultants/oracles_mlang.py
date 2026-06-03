@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import tempfile
 from functools import lru_cache
 from pathlib import Path
@@ -364,12 +365,64 @@ def compile_and_run(*,
         return r.returncode, r.stdout, r.stderr
 
 
+def run_program(*,
+                lang: str,
+                source: Path,
+                stdin_input: str = "",
+                argv: Optional[list[str]] = None,
+                timeout_s: int = 10) -> tuple[int, str, str]:
+    """Uniform ``(rc, stdout, stderr)`` runner across **all six**
+    languages, including Python — the piece ``compile_and_run``
+    deliberately omits.
+
+    Used by stdin/stdout-contract suites (e.g. ``coder_easy``) where
+    every question, regardless of language, is "read stdin → print
+    stdout". For the five compiled languages this delegates to
+    ``compile_and_run`` (compile in a temp dir, run the binary). For
+    Python it skips compilation and runs ``solution.py`` directly with
+    the current interpreter, so a Python question uses the same oracle
+    shape as a Rust one.
+
+    Raises ``CompileError`` for the compiled languages when the
+    toolchain rejects the source (oracles catch + surface to pytest).
+    A runtime timeout returns ``rc=124`` with a diagnostic stderr,
+    matching ``compile_and_run``.
+    """
+    if lang == "python":
+        if not source.is_file():
+            sibling = []
+            try:
+                sibling = sorted(p.name for p in source.parent.iterdir())
+            except OSError:
+                pass
+            raise AssertionError(
+                f"missing source {source.name}; sandbox contains: {sibling}"
+            )
+        try:
+            r = subprocess.run(
+                [sys.executable, str(source), *(argv or [])],
+                input=stdin_input, capture_output=True, text=True,
+                timeout=timeout_s,
+            )
+        except subprocess.TimeoutExpired as e:
+            return 124, e.stdout or "", (
+                f"timeout after {timeout_s}s\n"
+                f"partial stdout: {(e.stdout or '')[:200]!r}"
+            )
+        return r.returncode, r.stdout, r.stderr
+    return compile_and_run(
+        lang=lang, source=source,
+        stdin_input=stdin_input, argv=argv, timeout_s=timeout_s,
+    )
+
+
 __all__ = [
     "CompileError",
     "SOURCE_EXT_BY_LANG",
     "SUPPORTED_LANGUAGES",
     "compile_and_run",
     "probe_toolchain_versions",
+    "run_program",
     "toolchain_functional",
     "toolchain_required",
 ]
