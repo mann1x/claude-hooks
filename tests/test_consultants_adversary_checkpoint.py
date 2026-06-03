@@ -32,7 +32,10 @@ from tempfile import TemporaryDirectory
 from typing import Annotated, Optional, TypedDict
 
 try:
-    import langgraph  # noqa: F401
+    # Concrete-leaf probe — a bare ``import langgraph`` is fooled by the empty
+    # ghost namespace dirs a pip-uninstall leaves behind. See the note in
+    # test_consultants_adversary_role.py.
+    from langgraph.graph import StateGraph  # noqa: F401
     HAVE_LANGGRAPH = True
 except ImportError:
     HAVE_LANGGRAPH = False

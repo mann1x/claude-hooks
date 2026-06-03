@@ -36,7 +36,13 @@ from consultants.engine import council  # noqa: E402
 from consultants.engine.graph import plan_topology  # noqa: E402
 
 try:
-    import langgraph  # noqa: F401
+    # Probe a concrete leaf, not a bare ``import langgraph``: a pip-uninstall
+    # leaves empty ``langgraph/{cache,checkpoint,store}`` namespace dirs that
+    # satisfy the bare import while lacking every real submodule, which fools
+    # the guard into running tests that then fail at runtime instead of
+    # skipping (pandorum 2026-06-03). ``langgraph.graph`` only resolves in a
+    # real, complete install.
+    from langgraph.graph import StateGraph  # noqa: F401
     HAVE_LANGGRAPH = True
 except ImportError:
     HAVE_LANGGRAPH = False
