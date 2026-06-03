@@ -14,7 +14,7 @@ release with the auto-generated source archive
 (`claude-hooks-X.Y.Z.zip` / `.tar.gz`). See
 [`docs/RELEASING.md`](docs/RELEASING.md) for the cut procedure.
 
-## [1.13.0] — 2026-06-02
+## [1.13.0] — 2026-06-03
 
 ### Added
 
@@ -153,6 +153,29 @@ release with the auto-generated source archive
   now also `chdir`s to its throwaway temp dir, and the previously
   un-isolated `test_list` is wrapped — the tests are now
   host-independent and side-effect-free.
+- **Windows suite parity — 95 pre-existing pandorum failures → 0.** A
+  pre-tag Windows smoke surfaced 95 failures, none in v1.13.0 code; all
+  predated this release. A few were real Windows product bugs, now
+  fixed: `post_tool_use._shorten_path` and the caliber grounding prompt's
+  extended-source headers emitted backslash paths (`pkg\m.py`) on Windows
+  — both now forward-slash, keeping `path:line` citations consistent with
+  the code-graph / CitationLinter; the `pgvector-mcp` / `sqlite-vec-mcp`
+  HTTP servers reset the connection (TCP RST → `WinError 10054`) instead
+  of returning `404` when a Windows client POSTed a body to an unknown
+  path, because the handler closed without draining the request body; the
+  consultants benchmark harness ran oracle pytest with
+  `--timeout-method=signal` unconditionally (SIGALRM is POSIX-only and the
+  `pytest-timeout` plugin may be absent), and two coder oracles wrapped
+  timing tests in a SIGALRM `_timeout` — all now gate on the plugin +
+  platform and fall back to `thread` / a post-hoc elapsed check on
+  Windows. The remainder were test-harness portability gaps (loopback
+  `HTTPServer` fixtures not draining request bodies; sqlite handles left
+  open across `TemporaryDirectory` cleanup → `WinError 32`; `os.name`
+  flips that poisoned `pathlib`'s flavour selector into instantiating
+  `PosixPath` on Windows; `#!/bin/sh` probe binaries; `HOME`-only home
+  isolation that ignored `USERPROFILE`; host-coupled port / case /
+  separator assertions). POSIX behaviour is unchanged throughout; the
+  full suite is now green on both Linux (solidpc) and Windows (pandorum).
 
 ## [1.12.0] — 2026-05-30
 
