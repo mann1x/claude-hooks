@@ -29,6 +29,37 @@ from claude_hooks.config import DEFAULT_CONFIG
 from claude_hooks.providers.base import Memory, Provider, ServerCandidate
 
 
+# --------------------------------------------------------------------------- #
+# os.name simulation safety net (pytest makereport hookwrapper)
+# --------------------------------------------------------------------------- #
+# Several platform tests pin ``os.name`` to the *other* platform — e.g.
+# ``monkeypatch.setattr(mod.os, "name", "posix")`` to exercise a POSIX codepath
+# on Windows (or vice-versa). ``mod.os`` is the shared global ``os`` module, so
+# the flip is process-wide. ``monkeypatch`` restores it in a finalizer that runs
+# *after* report construction, so if such a test fails, pytest's own
+# ``_repr_failure_py`` runs ``Path(os.getcwd())`` while ``os.name`` is still
+# flipped — instantiating a ``PosixPath`` on Windows (or ``WindowsPath`` on
+# POSIX), which raises ``NotImplementedError`` and aborts the entire session
+# with an ``INTERNALERROR`` (observed on pandorum, Windows, 2026-06-03).
+#
+# Pin the real ``os.name`` back for the duration of report construction so one
+# failing platform test yields a clean FAILED/ERROR instead of a session-fatal
+# crash. No-op for normal tests (``os.name`` already equals the real value).
+_REAL_OS_NAME = os.name
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_makereport(item, call):
+    saved = os.name
+    if saved != _REAL_OS_NAME:
+        os.name = _REAL_OS_NAME
+    try:
+        return (yield)
+    finally:
+        if os.name != saved:
+            os.name = saved
+
+
 def pytest_configure(config):
     """Loud warning if the test runner isn't the claude-hooks conda env.
 
