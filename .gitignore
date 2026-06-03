@@ -101,6 +101,7 @@ vendor/llamafile/dist/*.llamafile
 benchmarks/consultants/results/**/*
 !benchmarks/consultants/results/**/
 !benchmarks/consultants/results/**/report.md
+!benchmarks/consultants/results/**/report-by-language.md
 !benchmarks/consultants/results/**/smoke-report.md
 !benchmarks/consultants/results/**/quota.md
 !benchmarks/consultants/results/**/metadata.json

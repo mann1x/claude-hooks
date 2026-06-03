@@ -40,10 +40,12 @@ single pass/fail axis is used throughout.
 
 **Provenance:** `coder_mlang` v1.0.1, suite hash `ddef8095`, judge
 `kimi-k2.6:cloud`, git `07ff79c`, host solidpc, 2026-05-17. 13 questions × 5
-models = 65 trials. Source of truth:
-[`trials.jsonl`](../../benchmarks/consultants/results/2026-05-17/coder_mlang-v1.0.1/)
-(git-present). Numbers below are recomputed directly from it — see
-[Reproduce](#reproduce).
+models = 65 trials. Committed artifacts: the run's
+[`report.md` + `metadata.json`](../../benchmarks/consultants/results/2026-05-17/coder_mlang-v1.0.1/);
+the raw `trials.jsonl` is **gitignored** per the
+[results convention](../../benchmarks/consultants/README.md#where-the-results-live)
+(regenerable payload). The numbers below are recomputed from that local
+`trials.jsonl` — see [Reproduce](#reproduce).
 
 ---
 
@@ -147,9 +149,39 @@ message.
 
 ---
 
+## 2026-06-03 addendum — two new candidates
+
+`minimax-m3:cloud` and `nemotron-3-super:cloud` were re-scored on the **same 13
+questions** (via `--id`; recorded suite hash `ddef8095`, **identical to the
+baseline**, so directly comparable) with the same judge panel (`kimi-k2.6` +
+audit `glm-5.1` + meta `gemma4:31b-cloud`). Both **beat the entire 2026-05-17
+cohort** on the strict full-oracle axis:
+
+| Model | full pass (n=13) | baseline-discriminating (n=3) | also cracked | avgQ |
+|---|---|---|---|---|
+| `minimax-m3:cloud` 🆕 | **31% (4/13)** | **3/3** | **`rust-hard-01-iter-window-pairs`** — all-fail in the baseline | 3.40 |
+| `nemotron-3-super:cloud` 🆕 | 23% (3/13) | 3/3 | — | 2.55 |
+| _baseline best (`kimi` / `minimax-m2.7`)_ | 15% (2/13) | 2/3 | — | 3.69 / 2.15 |
+
+**`minimax-m3` is the strongest model on this suite to date** — it cleared all
+three previously-discriminating questions *and* `rust-hard-01-iter-window-pairs`,
+which had defeated all five baseline models, expanding the discriminating set to
+**4/13**. Paired with its 98% on the [easy suite](coder-easy-results.md), it is
+the most consistent multi-language coder in the pool. `nemotron-3-super` matches
+the discriminating set but trails on quality (2.55) and cracks nothing new.
+
+Four passing trials is still thin to rewrite per-language routes, but it is a
+strong signal to **re-baseline the full cohort on the now-18-question manifest**
+(5 medium questions were added after 2026-05-17) and to reconsider `minimax-m3`
+for the global default. Results:
+[`results/2026-06-03/coder_mlang-2new/`](../../benchmarks/consultants/results/2026-06-03/coder_mlang-2new/).
+
+---
+
 ## Reproduce
 
-Recompute every number on this page from the committed trials:
+Recompute every number on this page from the run's local `trials.jsonl`
+(gitignored — re-run the bench below to regenerate it):
 
 ```bash
 python3 - benchmarks/consultants/results/2026-05-17/coder_mlang-v1.0.1/trials.jsonl <<'PY'
@@ -181,6 +213,10 @@ python benchmarks/consultants/coder_bench.py --live --accept-cost \
 ## Related
 
 - [Benchmark index](index.md) — all benchmark families.
+- [Coder per-language (easy tier)](coder-easy-results.md) — the floor-fixing
+  sibling. It **resolves the `go` and `rust` inconclusives above** with
+  test-based winners (`deepseek-v4-flash` for go, `minimax-m2.7` for rust), and
+  scores the two newer candidates (`minimax-m3`, `nemotron-3-super`).
 - [Coder (Python) suite](../consultants-skill-eval-baselines.md#coder) — the
   single-language sibling that anchors the global default.
 - [mlang suite design](../consultants-skill-eval-mlang-suite.md) — manifest,

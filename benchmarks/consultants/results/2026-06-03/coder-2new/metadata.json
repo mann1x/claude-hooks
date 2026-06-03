@@ -1,0 +1,63 @@
+{
+  "harness_version": "1.0",
+  "suite": "coder",
+  "suite_version": "1.0",
+  "suite_hash": "2103e6cc4cf3c63583c062abf7e583cb901049f9f4f4d991a2d30b3e485d1e92",
+  "suite_released": "2026-05-16",
+  "manifest": [
+    "trivial-01-truncate",
+    "trivial-02-strlen",
+    "easy-01-dedupe",
+    "easy-02-fib",
+    "medium-01-balance",
+    "medium-02-prime-length",
+    "hard-01-matrix-path",
+    "hard-02-digit-filter"
+  ],
+  "rubric": {
+    "pass_rate_floor": 0.7,
+    "quality_score_floor": 3.5,
+    "tie_breaker": "median_tokens"
+  },
+  "models": [
+    "minimax-m3:cloud",
+    "nemotron-3-super:cloud"
+  ],
+  "mode": "live",
+  "ollama_base": "http://192.168.178.2:11433",
+  "judge_model": "kimi-k2.6:cloud",
+  "git_commit": "d0fc724",
+  "host": "solidpc",
+  "run_started_at": "2026-06-03T22:25:31.577190Z",
+  "questions": [
+    "easy-01-dedupe",
+    "easy-02-fib",
+    "hard-01-matrix-path",
+    "hard-02-digit-filter",
+    "medium-01-balance",
+    "medium-02-prime-length",
+    "trivial-01-truncate",
+    "trivial-02-strlen"
+  ],
+  "estimate": {
+    "trials": 16,
+    "by_model": {
+      "minimax-m3:cloud": {
+        "iterations": 40,
+        "prompt_tokens": 320000,
+        "completion_tokens": 60000,
+        "total_tokens": 380000
+      },
+      "nemotron-3-super:cloud": {
+        "iterations": 40,
+        "prompt_tokens": 320000,
+        "completion_tokens": 60000,
+        "total_tokens": 380000
+      }
+    },
+    "judge_model": "kimi-k2.6:cloud",
+    "judge_tokens": 19800,
+    "total_tokens": 779800,
+    "summary_line": "2 models \u00d7 8 questions = 16 trials. ~0.78M tokens estimated (+~20K for the kimi-k2.6:cloud judge)."
+  }
+}

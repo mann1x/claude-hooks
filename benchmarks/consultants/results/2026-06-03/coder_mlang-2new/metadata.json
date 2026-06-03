@@ -1,0 +1,80 @@
+{
+  "harness_version": "1.0",
+  "suite": "coder_mlang",
+  "suite_version": "1.0.1",
+  "suite_hash": "ddef8095311c258d80261dc7e539082898210bf32d64703f650097fa14ae9cf8",
+  "suite_released": "2026-05-17",
+  "manifest": [
+    "python-medium-01-meeting-rooms",
+    "rust-medium-01-search-rotated",
+    "go-medium-01-koko-bananas",
+    "c-medium-01-longest-valid-parens",
+    "cpp-medium-01-cycle-list",
+    "csharp-medium-01-trapped-rainwater",
+    "python-hard-01-lru-cache",
+    "rust-hard-01-iter-window-pairs",
+    "go-hard-01-shortest-path-k-stops",
+    "c-hard-01-quicksort-3way",
+    "cpp-hard-01-expr-eval",
+    "csharp-hard-01-async-debounce",
+    "python-very_hard-01-parser-combinator",
+    "rust-very_hard-01-bank-transfer",
+    "go-very_hard-01-spsc-queue",
+    "c-very_hard-01-rbtree-insert",
+    "cpp-very_hard-01-small-vector",
+    "csharp-very_hard-01-di-container"
+  ],
+  "rubric": {
+    "pass_rate_floor": 0.7,
+    "quality_score_floor": 3.5,
+    "tie_breaker": "median_tokens"
+  },
+  "models": [
+    "minimax-m3:cloud",
+    "nemotron-3-super:cloud"
+  ],
+  "mode": "live",
+  "ollama_base": "http://192.168.178.2:11433",
+  "judge_model": "kimi-k2.6:cloud",
+  "git_commit": "d0fc724",
+  "host": "solidpc",
+  "run_started_at": "2026-06-03T22:25:31.584410Z",
+  "audit_judge_model": "glm-5.1:cloud",
+  "meta_judge_model": "gemma4:31b-cloud",
+  "questions": [
+    "c-hard-01-quicksort-3way",
+    "c-very_hard-01-rbtree-insert",
+    "cpp-hard-01-expr-eval",
+    "cpp-medium-01-cycle-list",
+    "cpp-very_hard-01-small-vector",
+    "csharp-hard-01-async-debounce",
+    "csharp-medium-01-trapped-rainwater",
+    "csharp-very_hard-01-di-container",
+    "go-very_hard-01-spsc-queue",
+    "python-hard-01-lru-cache",
+    "python-very_hard-01-parser-combinator",
+    "rust-hard-01-iter-window-pairs",
+    "rust-very_hard-01-bank-transfer"
+  ],
+  "estimate": {
+    "trials": 26,
+    "by_model": {
+      "minimax-m3:cloud": {
+        "iterations": 65,
+        "prompt_tokens": 520000,
+        "completion_tokens": 97500,
+        "total_tokens": 617500
+      },
+      "nemotron-3-super:cloud": {
+        "iterations": 65,
+        "prompt_tokens": 520000,
+        "completion_tokens": 97500,
+        "total_tokens": 617500
+      }
+    },
+    "judge_model": "kimi-k2.6:cloud",
+    "judge_tokens": 33000,
+    "total_tokens": 1268000,
+    "summary_line": "2 models \u00d7 13 questions = 26 trials. ~1.27M tokens estimated (+~33K for the kimi-k2.6:cloud judge)."
+  }
+}

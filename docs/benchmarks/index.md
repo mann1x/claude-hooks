@@ -14,10 +14,11 @@ up-link.
 |---|---|---|---|---|
 | 1 | **Council-role sweeps** | Which cloud model to pin per council role (planner / researcher / critic / synthesizer), as whole-model sweeps + heterogeneous mixes | [`council-role-sweeps.md`](council-role-sweeps.md) | [`EVALUATION.md`](EVALUATION.md) |
 | 2 | **Coder — Python** | Best default for `cfg.roles.coder.model` (Python HumanEval-style) | [baselines → Coder](../consultants-skill-eval-baselines.md#coder) · [report](../../benchmarks/consultants/results/2026-05-16/coder/report.md) | [skill-eval protocol](../consultants-skill-eval-protocol.md#coder-sub-protocol-v10) |
-| 3 | **Coder — per-language** | Best coder per language (C / C++ / C# / Go / Python / Rust) + global fallback | [`coder-mlang-results.md`](coder-mlang-results.md) | [mlang suite](../consultants-skill-eval-mlang-suite.md) |
-| 4 | **Tool executor** | Best default for `cfg.roles.tool_executor.model` + the default-on bit | [baselines → Tool executor](../consultants-skill-eval-baselines.md#tool-executor) · [report](../../benchmarks/consultants/results/2026-05-17/tool_executor/report.md) | [skill-eval protocol](../consultants-skill-eval-protocol.md#tool_executor-sub-protocol-v10) |
-| 5 | **Stall thresholds** | Per-model `(stall_threshold_s, hard_cap_s)` for the M3 stall detector | [baselines → Stall](../consultants-skill-eval-baselines.md#stall-thresholds) · [report](../../benchmarks/consultants/results/2026-05-17/stall-tier1/report.md) | [skill-eval protocol](../consultants-skill-eval-protocol.md#stall-sub-protocol-v10) |
-| 6 | **Caliber-eval (grounding)** | Which model to use for `caliber init` agent-config generation | [`caliber-eval-results/`](../caliber-eval-results/README.md) | [`caliber-eval.md`](../caliber-eval.md) |
+| 3 | **Coder — per-language (hard)** | Best coder per language (C / C++ / C# / Go / Python / Rust) + global fallback, on a deliberately-brutal suite | [`coder-mlang-results.md`](coder-mlang-results.md) | [mlang suite](../consultants-skill-eval-mlang-suite.md) |
+| 4 | **Coder — per-language (easy)** | Per-language *reliability floor* (30 easy problems × 6 langs) + how the new `minimax-m3` / `nemotron-3-super` candidates rank | [`coder-easy-results.md`](coder-easy-results.md) | [skill-eval protocol](../consultants-skill-eval-protocol.md) |
+| 5 | **Tool executor** | Best default for `cfg.roles.tool_executor.model` + the default-on bit | [baselines → Tool executor](../consultants-skill-eval-baselines.md#tool-executor) · [report](../../benchmarks/consultants/results/2026-05-17/tool_executor/report.md) | [skill-eval protocol](../consultants-skill-eval-protocol.md#tool_executor-sub-protocol-v10) |
+| 6 | **Stall thresholds** | Per-model `(stall_threshold_s, hard_cap_s)` for the M3 stall detector | [baselines → Stall](../consultants-skill-eval-baselines.md#stall-thresholds) · [report](../../benchmarks/consultants/results/2026-05-17/stall-tier1/report.md) | [skill-eval protocol](../consultants-skill-eval-protocol.md#stall-sub-protocol-v10) |
+| 7 | **Caliber-eval (grounding)** | Which model to use for `caliber init` agent-config generation | [`caliber-eval-results/`](../caliber-eval-results/README.md) | [`caliber-eval.md`](../caliber-eval.md) |
 
 **Protocols & specs:** council-role grading →
 [`EVALUATION.md`](EVALUATION.md) · skill-eval suites (coder / mlang / stall /
@@ -37,11 +38,17 @@ canonical council query set →
   composed. The output is the default council config.
 - **Coder (Python)** — drives the sandboxed `coder` role node on HumanEval-style
   problems with pytest oracles + an LLM judge; picks the best Python coder.
-- **Coder (per-language)** — the deliberately-harder multi-language sibling
+- **Coder (per-language, hard)** — the deliberately-harder multi-language sibling
   (medium / hard / very_hard tiers, no easy questions) that picks a coder per
   language. **Read the [normalization note](coder-mlang-results.md) before
   trusting the per-language picks** — the very_hard tier defeats every model, so
   the classification is computed over the questions models could actually answer.
+- **Coder (per-language, easy)** — the floor-fixing counterpart (30 easy
+  problems × 6 languages, uniform stdin→stdout). Every question discriminates,
+  but the top *saturates*: only **go** and **rust** separate on pass-rate;
+  c/cpp/csharp/python are competence-floor + quality/cost calls. See
+  [`coder-easy-results.md`](coder-easy-results.md) — also where the two new
+  candidates (`minimax-m3`, `nemotron-3-super`) are scored.
 - **Tool executor** — measures *reading + reasoning over a codebase via tool
   calls* (grep/read/glob/survey), not code writing; picks the tool_executor
   default.
@@ -77,7 +84,7 @@ authoritative definitions live in each family's protocol.
 | **pass_rate** | Fraction of trials whose pytest oracle passed (strict, full-oracle). Qualifying gate: `≥ 70%`. |
 | **alg / `passes_algorithm`** | Looser axis — core algorithm correct even if a constraint/edge test failed. |
 | **avg_quality** | Mean of the judge LLM's 1–5 score. Qualifying gate: `≥ 3.5`. |
-| **normalized** | (mlang only) pass_rate/quality recomputed over only the questions ≥1 model could answer — questions that defeated *every* model are excluded from the classification. See [coder-mlang-results](coder-mlang-results.md). |
+| **normalized** | (per-language suites) pass_rate/quality recomputed over only the questions ≥1 model could answer — questions that defeated *every* model are excluded from the classification. On [mlang](coder-mlang-results.md) this drops 10/13; on [easy](coder-easy-results.md) nothing is dropped (full == normalized), and the saturation moves to the *top* instead. |
 | **median tokens / wall** | Tie-breakers (cheaper / faster wins). |
 
 **Stall suite** ([rubric](../consultants-skill-eval-protocol.md#stall-sub-protocol-v10)):

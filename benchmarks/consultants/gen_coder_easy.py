@@ -32,8 +32,19 @@ Then: python benchmarks/consultants/coder_bench.py --dry-run \
 """
 from __future__ import annotations
 
-import hashlib
+import sys
 from pathlib import Path
+
+# Repo-root-aware import so the recorded SUITE.md hash is computed by the
+# SAME function the runtime uses (`harness._hash_for_suite`), instead of a
+# divergent ids-only digest. Otherwise SUITE.md's `suite_hash` field would
+# never match the hash `load_suite_manifest` recomputes at run time, and the
+# drift-detection provenance check is meaningless.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from benchmarks.consultants.harness import _hash_for_suite  # noqa: E402
 
 # --------------------------------------------------------------------- #
 # Language config
@@ -2624,15 +2635,17 @@ def pytest_configure(config):
 
 def _suite_md(ids: list[str]) -> str:
     manifest = "\n".join(f"  - {i}" for i in ids)
-    body_hash = hashlib.sha256(
-        "\n".join(ids).encode("utf-8")
-    ).hexdigest()[:12]
+    # Hash over (sorted ids + each question's .md + -oracle.py bytes), exactly
+    # as harness._hash_for_suite does at load time — so this recorded value
+    # matches the hash stamped into every run's metadata.json. Requires the
+    # question files to already be on disk (main() writes them first).
+    suite_hash = _hash_for_suite(SUITE_DIR, ids)
     return (
         "---\n"
         "suite: coder_easy\n"
         f'suite_version: "{SUITE_VERSION}"\n'
         "released: 2026-06-03\n"
-        f"suite_hash: {body_hash}\n"
+        f"suite_hash: {suite_hash}\n"
         "manifest:\n"
         f"{manifest}\n"
         "rubric:\n"
