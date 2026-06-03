@@ -11,13 +11,10 @@ same shape of bug before live spend).
 
 from __future__ import annotations
 
-import os
-import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 # Repo root must be on sys.path for the harness imports.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +27,7 @@ from benchmarks.consultants.oracles_mlang import (  # noqa: E402
     SUPPORTED_LANGUAGES,
     compile_and_run,
     probe_toolchain_versions,
+    toolchain_functional,
     toolchain_required,
 )
 
@@ -116,8 +114,8 @@ class TestCompileAndRunErrorPaths(unittest.TestCase):
     def test_compile_error_carries_stderr(self):
         # Rust source that won't compile — missing semicolon /
         # unknown identifier. CompileError must expose stderr.
-        if shutil.which("rustc") is None:
-            self.skipTest("rustc not on PATH")
+        if not toolchain_functional("rust"):
+            self.skipTest("rust toolchain not functional in this env")
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "broken.rs"
             src.write_text("fn main() { let x = ; }\n")
@@ -134,8 +132,8 @@ class TestCompileAndRunErrorPaths(unittest.TestCase):
 class TestCompileAndRunHappyPaths(unittest.TestCase):
 
     def test_rust_hello_world(self):
-        if shutil.which("rustc") is None:
-            self.skipTest("rustc not on PATH")
+        if not toolchain_functional("rust"):
+            self.skipTest("rust toolchain not functional in this env")
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "hello.rs"
             src.write_text(
@@ -146,8 +144,8 @@ class TestCompileAndRunHappyPaths(unittest.TestCase):
             self.assertEqual(out.strip(), "hello mlang")
 
     def test_rust_reads_stdin(self):
-        if shutil.which("rustc") is None:
-            self.skipTest("rustc not on PATH")
+        if not toolchain_functional("rust"):
+            self.skipTest("rust toolchain not functional in this env")
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "echo.rs"
             src.write_text(
@@ -165,8 +163,8 @@ class TestCompileAndRunHappyPaths(unittest.TestCase):
             self.assertEqual(out.strip(), "got: abc")
 
     def test_c_hello_world(self):
-        if shutil.which("gcc") is None:
-            self.skipTest("gcc not on PATH")
+        if not toolchain_functional("c"):
+            self.skipTest("c toolchain not functional in this env")
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "h.c"
             src.write_text(
@@ -178,8 +176,8 @@ class TestCompileAndRunHappyPaths(unittest.TestCase):
             self.assertEqual(out.strip(), "c says hi")
 
     def test_cpp_hello_world(self):
-        if shutil.which("g++") is None:
-            self.skipTest("g++ not on PATH")
+        if not toolchain_functional("cpp"):
+            self.skipTest("cpp toolchain not functional in this env")
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "h.cpp"
             src.write_text(
@@ -191,8 +189,8 @@ class TestCompileAndRunHappyPaths(unittest.TestCase):
             self.assertEqual(out.strip(), "cpp here")
 
     def test_go_hello_world(self):
-        if shutil.which("go") is None:
-            self.skipTest("go not on PATH")
+        if not toolchain_functional("go"):
+            self.skipTest("go toolchain not functional in this env")
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "h.go"
             src.write_text(
@@ -205,8 +203,8 @@ class TestCompileAndRunHappyPaths(unittest.TestCase):
             self.assertEqual(out.strip(), "go online")
 
     def test_runtime_timeout_returns_124(self):
-        if shutil.which("rustc") is None:
-            self.skipTest("rustc not on PATH")
+        if not toolchain_functional("rust"):
+            self.skipTest("rust toolchain not functional in this env")
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "spin.rs"
             src.write_text(

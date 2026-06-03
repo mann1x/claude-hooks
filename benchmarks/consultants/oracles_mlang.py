@@ -19,10 +19,10 @@ harness calls it once per run and writes the result into
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import tempfile
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
@@ -238,6 +238,64 @@ _COMPILE_BY_LANG = {
 
 
 # ============================================================== #
+# Functionality probe
+# ============================================================== #
+#
+# A bare ``shutil.which(tool)`` only proves the compiler *driver*
+# exists on PATH. It does NOT prove the driver can run its own
+# sub-tools (assembler, linker). On Windows an active conda env
+# prepends its ``Library\bin`` to PATH, whose zlib/zstd/etc. DLLs
+# shadow the ones an MSYS2 ``as.exe``/``ld.exe`` was built against —
+# so ``gcc --version`` succeeds while every real compile dies
+# ``rc=1`` with empty stderr (the assembler aborts on a bad DLL
+# before emitting a diagnostic). Observed on pandorum 2026-06-03.
+#
+# Probing with an actual trivial compile is the only reliable
+# present-AND-working signal. Both the live bench (so a broken
+# toolchain yields a clean skip instead of spurious "model failed"
+# trials) and the oracle smoke tests gate on this.
+# ============================================================== #
+
+# Minimal "does the toolchain produce a binary at all" sources —
+# deliberately separate from the oracle questions.
+_SMOKE_SOURCE = {
+    "rust":   "fn main() {}\n",
+    "go":     "package main\nfunc main() {}\n",
+    "c":      "int main(void){return 0;}\n",
+    "cpp":    "int main(){return 0;}\n",
+    "csharp": "class P{static void Main(){}}\n",
+}
+
+
+@lru_cache(maxsize=None)
+def toolchain_functional(lang: str) -> bool:
+    """True iff ``lang``'s toolchain is present *and* can compile a
+    trivial program in the current process environment.
+
+    Result is cached per-process (one probe compile, then free).
+    Returns False for an unknown ``lang``, a missing driver, a
+    ``CompileError``, or any unexpected toolchain breakage — callers
+    treat all of those identically: skip the language.
+    """
+    if lang not in _COMPILE_BY_LANG:
+        return False
+    tool = toolchain_required(lang)
+    # ``toolchain_required`` maps python→"python"; the probe table is
+    # compile-only, so a stray "python" (not in _COMPILE_BY_LANG) is
+    # already filtered above. Guard the which() lookup defensively.
+    if shutil.which(tool) is None and shutil.which(lang) is None:
+        return False
+    try:
+        with tempfile.TemporaryDirectory(prefix="mlang_probe_") as td:
+            probe = Path(td) / f"probe{SOURCE_EXT_BY_LANG[lang]}"
+            probe.write_text(_SMOKE_SOURCE[lang], encoding="utf-8")
+            _COMPILE_BY_LANG[lang](probe, Path(td))
+    except Exception:
+        return False
+    return True
+
+
+# ============================================================== #
 # Public API
 # ============================================================== #
 
@@ -312,5 +370,6 @@ __all__ = [
     "SUPPORTED_LANGUAGES",
     "compile_and_run",
     "probe_toolchain_versions",
+    "toolchain_functional",
     "toolchain_required",
 ]

@@ -15,7 +15,6 @@ deterministic.
 from __future__ import annotations
 
 import os
-import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -24,6 +23,19 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HELPER = REPO_ROOT / "bin" / "_resolve_python.sh"
+
+# The harness sources the POSIX resolver by shelling out to ``/bin/sh`` and
+# plants ``#!/bin/sh`` fake interpreters probed with ``[ -x ]``. On native
+# Windows ``/bin/sh`` resolves to ``C:\bin\sh`` (absent → WinError 2) and the
+# shebang/executable-bit mechanics are POSIX-only. The resolver *logic* these
+# tests assert — including the three Windows venv layouts — is identical under
+# any POSIX shell and runs green on Linux, so skipping on Windows loses no
+# coverage. The .sh helper's actual Windows home is /usr/bin/bash at hook
+# runtime (covered by the live shim path), not this unit harness.
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX-shell resolver harness; resolver logic is covered on Linux",
+)
 
 
 def _make_fake_python(path: Path) -> None:
