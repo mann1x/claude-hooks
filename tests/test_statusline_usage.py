@@ -246,13 +246,17 @@ class TestDefaultFormat:
     def test_linux_default_is_emoji(self, mod, monkeypatch):
         monkeypatch.delenv("CLAUDE_HOOKS_STATUSLINE_FORMAT", raising=False)
         monkeypatch.setattr(mod.sys, "platform", "linux")
-        monkeypatch.setattr(mod.os, "name", "posix")  # else os.name=="nt" leaks on a Windows host
+        # Neutralize every host signal _is_windows_console() reads (os.name plus
+        # the OS=Windows_NT / MSYSTEM env vars a real Windows host exports).
+        monkeypatch.setattr(mod, "_is_windows_console", lambda: False)
         assert mod.default_format() == "emoji"
 
     def test_darwin_default_is_emoji(self, mod, monkeypatch):
         monkeypatch.delenv("CLAUDE_HOOKS_STATUSLINE_FORMAT", raising=False)
         monkeypatch.setattr(mod.sys, "platform", "darwin")
-        monkeypatch.setattr(mod.os, "name", "posix")  # else os.name=="nt" leaks on a Windows host
+        # Neutralize every host signal _is_windows_console() reads (os.name plus
+        # the OS=Windows_NT / MSYSTEM env vars a real Windows host exports).
+        monkeypatch.setattr(mod, "_is_windows_console", lambda: False)
         assert mod.default_format() == "emoji"
 
     def test_windows_default_is_ascii(self, mod, monkeypatch):
