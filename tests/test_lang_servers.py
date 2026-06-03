@@ -14,7 +14,6 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
@@ -267,7 +266,10 @@ class TestInstall:
         run.assert_not_called()
         assert ok is True
         assert "[dry-run]" in msg
-        assert "npm install -g pyright" in msg
+        # Match the args, not the resolved executable: shutil.which("npm")
+        # returns the bare ``npm`` on POSIX but ``...\npm.CMD`` (full path)
+        # on Windows, which breaks a literal ``npm install`` substring.
+        assert "install -g pyright" in msg
 
     def test_success_returns_true_and_stdout_tail(self):
         class _Proc:

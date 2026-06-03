@@ -4,7 +4,6 @@ the agent loop (with a mocked Ollama)."""
 from __future__ import annotations
 
 import json
-import os
 import socket
 import threading
 import time
@@ -354,8 +353,12 @@ class TestPromptBuilder:
         # files > max/4" gate (=1000), each file clears the gate but
         # cumulative content exceeds the budget — the last file picked
         # gets truncated mid-way.
+        # newline="\n" pins the on-disk size: without it Windows translates
+        # \n -> \r\n, inflating each file to ~1050 bytes, which trips the
+        # 1000-byte skip-gate so nothing is included and the block vanishes.
         for letter in "abcde":
-            (tmp_path / f"{letter}.py").write_text(f"{letter} = 1\n" * 150)
+            (tmp_path / f"{letter}.py").write_text(
+                f"{letter} = 1\n" * 150, newline="\n")
         msgs = prompt.build_grounding_messages(
             str(tmp_path), extended_sources=True, max_extended_bytes=4_000,
         )

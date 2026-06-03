@@ -17,7 +17,6 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -106,6 +105,13 @@ class TestGuardPaths:
         assert mute_subprocess == []
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="systemd unit install is Linux-only; the product no-ops on "
+           "Windows (covered by test_noop_on_windows). Forcing os.name='posix' "
+           "here would poison pathlib's flavour selector through the fake_etc "
+           "redirect. The install behaviour is fully exercised on Linux.",
+)
 class TestInstallFlow:
     def test_all_four_units_installed(self, fake_etc, mute_subprocess, capsys):
         install._install_proxy_stack_systemd(

@@ -175,7 +175,12 @@ class TestFindConda:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         with patch.object(install.shutil, "which", return_value=None):
             out = install._find_conda()
-        assert out == str(target)
+        # Compare as Path, not str: on case-insensitive NTFS the product's
+        # lowercase ``miniconda3`` candidate matches the on-disk
+        # ``Miniconda3`` and it returns that lowercase string — same file.
+        # WindowsPath equality is case-insensitive; PosixPath stays
+        # case-sensitive, so this is exact on Linux and tolerant on Windows.
+        assert Path(out) == target
 
     def test_finds_lowercase_anaconda3_layout(self, tmp_path, monkeypatch):
         cb = tmp_path / "anaconda3" / "condabin"
