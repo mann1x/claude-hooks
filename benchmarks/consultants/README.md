@@ -7,7 +7,9 @@ when-to-re-run rules, read
 FIRST.
 
 This directory is the implementation; the protocol document is
-the contract.
+the contract. For where to find **results** (and all other benchmark
+families), start at the
+[benchmark index](../../docs/benchmarks/index.md).
 
 ## Layout
 
@@ -94,11 +96,32 @@ Per the protocol document — short version:
 4. Re-baseline every previously-scored model on the new suite
    version. The dry-run should still pass.
 
-## Status (2026-05-16)
+## Status
 
-- ✅ **coder** suite v1.0 (M11b): 8 questions, 4 candidate models,
-  pipeline validated end-to-end on dry-run.
-- ⏳ **stall** suite (M11a): not yet shipped. Will measure
-  inter-token cadence on hard GPQA-style questions.
-- ⏳ **tool_executor** suite (M11c): not yet shipped. Will measure
-  multi-tool research task success rate.
+All four sub-protocols have shipped and have a live baseline:
+
+- ✅ **coder** v1.0 (M11b, 2026-05-16) — 8 Python questions × 4 models.
+  Winner: `glm-5.1:cloud`.
+- ✅ **coder_mlang** v1.0.1 (M11b-mlang, 2026-05-17) — 13 questions × 6
+  languages × 5 models. Per-language routing; **no model qualifies on the
+  strict axis** (very_hard tier), so picks are normalized over the answerable
+  questions — see
+  [`docs/benchmarks/coder-mlang-results.md`](../../docs/benchmarks/coder-mlang-results.md).
+- ✅ **stall** v1.0 (M11a, 2026-05-17) — Tier-1, 7 models × 4 questions × 3
+  trials. Derives per-model `(stall_threshold_s, hard_cap_s)`.
+- ✅ **tool_executor** v1.0 (M11c, 2026-05-17) — 8 questions × 6 models.
+  Winner: `gemma4:31b-cloud` (role still default-off pending task #103).
+
+## Where the results live
+
+- **Summary ledger** (one row per run, every suite):
+  [`docs/consultants-skill-eval-baselines.md`](../../docs/consultants-skill-eval-baselines.md).
+- **Per-run detailed reports** (gitignored `trials.jsonl` + committed
+  `report.md`): `results/<date>/<suite>/report.md`, e.g.
+  [`results/2026-05-17/tool_executor/report.md`](results/2026-05-17/tool_executor/report.md).
+- **Per-language coder deep-dive** (full + normalized):
+  [`docs/benchmarks/coder-mlang-results.md`](../../docs/benchmarks/coder-mlang-results.md).
+- **Adopted defaults in code:**
+  [`coder_defaults.py`](../../consultants/engine/coder_defaults.py),
+  [`stall_defaults.py`](../../consultants/engine/stall_defaults.py),
+  [`tool_executor_defaults.py`](../../consultants/engine/tool_executor_defaults.py).

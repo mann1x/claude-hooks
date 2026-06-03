@@ -35,9 +35,10 @@ forgetting. Beyond the core:
     [`docs/consultants-roles.md`](docs/consultants-roles.md) for the
     role-by-role reference (all 6 active roles, including the
     opt-in `tool_executor` + `coder`), and
-    [`docs/benchmarks/EVALUATION.md`](docs/benchmarks/EVALUATION.md)
-    + [`docs/benchmarks/`](docs/benchmarks/) for the cloud-model
-    evaluation suite.
+    the [benchmark index](docs/benchmarks/index.md) for the cloud-model
+    evaluation suite (council-role sweeps, coder, per-language,
+    tool-executor, stall, and caliber-eval — each with its grading
+    protocol).
 - **v1.2** — caliber-grounding-proxy cloud-resilience port +
   in-repo caliber-eval cohort at
   [`docs/caliber-eval-results/`](docs/caliber-eval-results/). Verdict:

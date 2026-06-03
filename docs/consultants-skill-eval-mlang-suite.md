@@ -1,5 +1,11 @@
 # Consultancy Skill-Eval — Multi-Language Coder Suite (`coder_mlang`)
 
+> ↟ [Benchmark index](benchmarks/index.md). **This is the suite *design* doc.**
+> For the actual run **results** (per-model + per-language, full + normalized
+> scores), see **[`benchmarks/coder-mlang-results.md`](benchmarks/coder-mlang-results.md)**;
+> for the one-line ledger row see
+> [`consultants-skill-eval-baselines.md`](consultants-skill-eval-baselines.md#v101-mlang-baseline-2026-05-17--per-language-winners).
+
 A sibling of the `coder` suite (v1.0, Python-only HumanEval-style)
 that stresses code generation across the languages the user
 actually writes: **Python, Rust, Go, C, C++, C#**. Questions are

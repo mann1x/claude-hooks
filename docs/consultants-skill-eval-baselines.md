@@ -6,6 +6,11 @@ scored through the Consultancy Skill-Eval Protocol. This file is
 note rather than overwriting history, so we can spot upstream drift
 across time.
 
+> ↟ Part of the [benchmark suite](benchmarks/index.md) — this is the
+> running **ledger** (one summary row per run). For the *detailed* per-model
+> per-language coder results (full + normalized), see
+> [`benchmarks/coder-mlang-results.md`](benchmarks/coder-mlang-results.md).
+
 For methodology, decision rubric, and how to re-run a suite, see
 [`consultants-skill-eval-protocol.md`](consultants-skill-eval-protocol.md).
 
@@ -43,6 +48,22 @@ row. Results dir:
 [`benchmarks/consultants/results/2026-05-16/coder/`](../benchmarks/consultants/results/2026-05-16/coder/).
 
 ### v1.0.1-mlang baseline (2026-05-17) — per-language winners
+
+> **How to read this table — scores are normalized.** The suite is
+> deliberately brutal (medium / hard / very_hard, no easy tier). On the strict
+> full-oracle axis **no model qualifies** (8–15% pass). **10 of 13 questions
+> defeat every model**, so the per-language picks are computed over the **3
+> discriminating questions** (≥1 model passed) — questions all models fail are
+> excluded from classification. Two consequences: (1) **`go`, `python`, `rust`
+> have no discriminating question at all** — their picks below are
+> **quality-judge-only / inconclusive**, not test-validated; (2) the `c` pick
+> (`glm-5.1`) **diverges from the data** — glm failed the only discriminating C
+> question (kimi + minimax passed it); it was chosen for speed/consistency. Full
+> per-model + per-language breakdown with both full and normalized scores:
+> [`benchmarks/coder-mlang-results.md`](benchmarks/coder-mlang-results.md).
+> The `alg%` column below is the *winning model's* pass-fraction over **all**
+> that language's questions (incl. the all-fail ones), which is why it differs
+> from the normalized view.
 
 The mlang v1.0.1 delta fixed the `pytest -x` algorithm-axis bug
 (see commit `bench(coder_mlang): v1.0.1 two-axis oracle scoring`)

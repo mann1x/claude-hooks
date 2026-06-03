@@ -534,6 +534,11 @@ The summary:
 
 ## Related reading
 
+- [`docs/benchmarks/index.md`](benchmarks/index.md) — the **benchmark index**:
+  entry point to every benchmark family (council-role sweeps, coder, per-language,
+  tool-executor, stall, caliber-eval) and the metric glossary.
+- [`docs/consultants-skill-eval-baselines.md`](consultants-skill-eval-baselines.md)
+  — the running ledger of every skill-eval score.
 - [`docs/RELEASING.md`](RELEASING.md) — release-cut procedure
   (skill-eval results are referenced from CHANGELOG entries that
   adopt new defaults).
