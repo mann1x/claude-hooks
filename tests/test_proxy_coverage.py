@@ -6,21 +6,13 @@ after P0/P1/P3 integration tests.
 from __future__ import annotations
 
 import json
-import os
-import signal
 import socket
-import subprocess
-import sys
 import threading
-import time
-import urllib.request
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 from claude_hooks.proxy import server as server_mod
-from claude_hooks.proxy.forwarder import forward, UpstreamResult
+from claude_hooks.proxy.forwarder import forward
 from claude_hooks.proxy.metadata import (
     extract_request_info, extract_response_info,
 )
@@ -85,6 +77,12 @@ class TestForwarderHttp:
         class Echo(BaseHTTPRequestHandler):
             def log_message(self, *a, **k): pass
             def do_POST(self):
+                # Drain the request body before replying — on Windows a
+                # server that closes with unread bytes still in the socket
+                # buffer triggers a TCP RST, so the client read fails with
+                # WinError 10054 rather than seeing the response (POSIX
+                # discards the unread bytes silently on FIN).
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 body = b'{"ok":true}'
@@ -235,6 +233,8 @@ class TestHttpxForwarder:
         class Echo(BaseHTTPRequestHandler):
             def log_message(self, *a, **k): pass
             def do_POST(self):
+                # Drain request body before replying (Windows RST → 10054).
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
                 body = b'{"ok":true}'
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -315,6 +315,8 @@ class TestForwarderRetry:
         class OK(BaseHTTPRequestHandler):
             def log_message(self, *a, **k): pass
             def do_POST(self):
+                # Drain request body before replying (Windows RST → 10054).
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
                 body = b'{"ok":true}'
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -388,6 +390,8 @@ class TestForwarderStatusRetry:
             def log_message(self, *a, **k): pass
 
             def do_POST(self):
+                # Drain request body before replying (Windows RST → 10054).
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
                 calls["n"] += 1
                 if state["i"] < len(responses):
                     status, body = responses[state["i"]]
