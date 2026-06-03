@@ -54,6 +54,25 @@ def _weak_langgraph_guards() -> list[str]:
     return offenders
 
 
+_BARE_IMPORTORSKIP = re.compile(r"""importorskip\(\s*["']langgraph["']\s*\)""")
+
+
+def _bare_importorskip_langgraph() -> list[str]:
+    """Return ``file:line`` for every ``pytest.importorskip("langgraph")``. The
+    bare form is satisfied by an empty ghost namespace dir, so it fails to skip
+    and the test then dies on the real submodule import. Use a concrete leaf,
+    e.g. ``pytest.importorskip("langgraph.graph")``."""
+    offenders: list[str] = []
+    self_name = pathlib.Path(__file__).name
+    for path in sorted(_TESTS_DIR.glob("test_*.py")):
+        if path.name == self_name:
+            continue
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
+            if _BARE_IMPORTORSKIP.search(line):
+                offenders.append(f"{path.name}:{i + 1}")
+    return offenders
+
+
 class TestLanggraphGuardsAreGhostProof(unittest.TestCase):
     def test_no_guard_probes_a_bare_langgraph_namespace(self):
         offenders = _weak_langgraph_guards()
@@ -63,6 +82,16 @@ class TestLanggraphGuardsAreGhostProof(unittest.TestCase):
             "would be fooled by the empty ghost namespace dirs a pip-uninstall "
             "leaves behind. Probe a concrete leaf instead, e.g. "
             "`from langgraph.graph import StateGraph`:\n  " + "\n  ".join(offenders),
+        )
+
+    def test_no_bare_importorskip_langgraph(self):
+        offenders = _bare_importorskip_langgraph()
+        self.assertEqual(
+            offenders, [],
+            "`pytest.importorskip('langgraph')` is fooled by empty ghost namespace "
+            "dirs (the bare package imports, then the test dies on the real "
+            "submodule). Use a concrete leaf, `pytest.importorskip('langgraph.graph')`"
+            ":\n  " + "\n  ".join(offenders),
         )
 
     def test_probe_at_least_one_guard_exists(self):
