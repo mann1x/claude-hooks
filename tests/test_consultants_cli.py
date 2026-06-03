@@ -116,6 +116,23 @@ def project_dir(tmp_path: Path) -> Path:
     return p
 
 
+@pytest.fixture(autouse=True)
+def _neutral_cwd(tmp_path, monkeypatch):
+    """Run every CLI test from a project-file-free directory.
+
+    The config auto-scope resolver (``_resolve_active_scope`` /
+    ``cmd_config_show``) defaults cwd to ``os.getcwd()`` when no
+    ``--cwd`` is given. Pytest runs from the repo root, which carries a
+    real ``.claude-hooks/consultants.toml`` — so without this, an
+    un-scoped ``config set-*`` would read/WRITE the live repo file.
+    Tests that target a project file pass an explicit absolute ``--cwd``
+    and are unaffected by the chdir."""
+    neutral = tmp_path / "_cwd"
+    neutral.mkdir()
+    monkeypatch.chdir(neutral)
+    yield neutral
+
+
 def _run(argv: list[str], endpoint: str = "http://test") -> tuple[int, dict, str]:
     """Invoke the CLI and capture stdout JSON + stderr text."""
     out = io.StringIO()
@@ -569,10 +586,87 @@ class TestConfigSetAllowExtra:
 
 class TestConfigShowReviewLoop:
     def test_defaults_present(self, isolated_home, patched_http):
-        rc, payload, _ = _run(["config", "show"])
+        # --user forces the user-global view: `config show` now defaults
+        # cwd to os.getcwd() (the repo root, which carries a real
+        # per-project file), so a default-asserting test must opt out.
+        rc, payload, _ = _run(["config", "show", "--user"])
         assert rc == 0
         assert payload["max_followups"] == 4
         assert payload["allow_extra"] == 1
+
+
+# ----------------------- adversary / verify budget (M1) --------- #
+
+class TestConfigSetVerifyBudget:
+    @pytest.mark.parametrize("tier", ["minimal", "bounded", "generous"])
+    def test_valid(self, isolated_home, patched_http, tier):
+        rc, payload, _ = _run(["config", "set-verify-budget", tier])
+        assert rc == 0
+        assert payload["verify_budget"] == tier
+
+    def test_unknown_rejected(self, isolated_home, patched_http):
+        # argparse choices reject before the handler runs → SystemExit(2),
+        # which propagates out of cli.main (unlike a handler CLIError that
+        # returns rc==2).
+        with pytest.raises(SystemExit) as ei:
+            _run(["config", "set-verify-budget", "unlimited"])
+        assert ei.value.code == 2
+
+
+class TestConfigSetAdversaryStrictness:
+    @pytest.mark.parametrize("level", ["soft", "normal", "strict"])
+    def test_valid(self, isolated_home, patched_http, level):
+        rc, payload, _ = _run(["config", "set-adversary-strictness", level])
+        assert rc == 0
+        assert payload["adversary_strictness"] == level
+
+    def test_unknown_rejected(self, isolated_home, patched_http):
+        with pytest.raises(SystemExit) as ei:
+            _run(["config", "set-adversary-strictness", "savage"])
+        assert ei.value.code == 2
+
+
+class TestConfigSetAdversaryCheckpoint:
+    def test_on_with_timeout(self, isolated_home, patched_http):
+        rc, payload, _ = _run(
+            ["config", "set-adversary-checkpoint", "on", "--timeout", "300"])
+        assert rc == 0
+        assert payload["adversary_checkpoint"] is True
+        assert payload["adversary_checkpoint_timeout_s"] == 300
+
+    def test_off(self, isolated_home, patched_http):
+        rc, payload, _ = _run(["config", "set-adversary-checkpoint", "off"])
+        assert rc == 0
+        assert payload["adversary_checkpoint"] is False
+
+    def test_bad_timeout_rejected(self, isolated_home, patched_http):
+        rc, _, _ = _run(
+            ["config", "set-adversary-checkpoint", "on", "--timeout", "0"])
+        assert rc == 2
+
+    def test_bad_state_rejected(self, isolated_home, patched_http):
+        # argparse choices=("on","off") rejects anything else → SystemExit(2).
+        with pytest.raises(SystemExit) as ei:
+            _run(["config", "set-adversary-checkpoint", "maybe"])
+        assert ei.value.code == 2
+
+
+class TestConfigShowAdversaryDefaults:
+    def test_defaults_and_valid_lists_present(self, isolated_home,
+                                              patched_http):
+        # --user → user-global default view (see note in
+        # TestConfigShowReviewLoop.test_defaults_present).
+        rc, payload, _ = _run(["config", "show", "--user"])
+        assert rc == 0
+        assert payload["verify_budget"] == "bounded"
+        assert payload["adversary_strictness"] == "normal"
+        assert payload["adversary_checkpoint"] is False
+        assert payload["adversary_checkpoint_timeout_s"] == 600
+        assert payload["roles"]["adversary"]["enabled"] is False
+        assert payload["valid_verify_budgets"] == \
+            ["minimal", "bounded", "generous"]
+        assert payload["valid_adversary_strictness"] == \
+            ["soft", "normal", "strict"]
 
 
 # ----------------------- review loop: accept + override --------- #
@@ -670,6 +764,154 @@ class TestFollowupAllowExtra:
         assert ok["ok"] is True
         # --force resolves to the configured allow_extra default (2).
         assert ok["consultancy"]["extra_granted"] == 2
+
+
+# ----------------- per-project override scope ------------------ #
+# Every config test below passes an explicit --cwd into an isolated
+# tmp project dir: ``config show`` now defaults cwd to os.getcwd()
+# (the repo root, which carries a real .claude-hooks/consultants.toml),
+# so an un-scoped command would read the live repo file and pollute
+# the assertion.
+
+class TestConfigOverrideScope:
+    def test_show_no_project_file_is_user(self, isolated_home, project_dir,
+                                          patched_http):
+        rc, payload, err = _run(["config", "show", "--cwd", str(project_dir)])
+        assert rc == 0
+        ac = payload["active_config"]
+        assert ac["scope"] == "user"
+        assert ac["project_file_exists"] is False
+        assert ac["override_user_global"] is None
+        assert err.strip() == ""        # no warn for plain user-global
+
+    def test_auto_scope_writes_project_when_active(self, isolated_home,
+                                                   project_dir, patched_http):
+        # Create the project file (flag on by default) ...
+        _run(["config", "set-effort", "high", "--project",
+              "--cwd", str(project_dir)])
+        # ... then an un-flagged set-* must AUTO-land in the project file.
+        rc, payload, err = _run(["config", "set-effort", "low",
+                                 "--cwd", str(project_dir)])
+        assert rc == 0
+        assert payload["active_config"]["scope"] == "project"
+        assert payload["effort"] == "low"
+        assert "PER-PROJECT" in err
+        # The engine view honors it.
+        assert cc.load_config(cwd=project_dir).effort == "low"
+        # User-global is untouched (still the default).
+        assert cc.load_config().effort == cc.DEFAULT_EFFORT
+
+    def test_user_flag_forces_global_when_project_active(self, isolated_home,
+                                                         project_dir,
+                                                         patched_http):
+        _run(["config", "set-effort", "high", "--project",
+              "--cwd", str(project_dir)])
+        rc, payload, err = _run(["config", "set-effort", "max", "--user",
+                                 "--cwd", str(project_dir)])
+        assert rc == 0
+        assert payload["active_config"]["scope"] == "user"
+        assert "forced via --user" in err
+        # Project file unchanged; user-global got the write.
+        assert cc.load_config(cwd=project_dir).effort == "high"
+        assert cc.load_config().effort == "max"
+
+    def test_set_override_off_then_auto_writes_user(self, isolated_home,
+                                                    project_dir, patched_http):
+        _run(["config", "set-effort", "high", "--project",
+              "--cwd", str(project_dir)])
+        rc, payload, err = _run(["config", "set-override-user-global", "off",
+                                 "--cwd", str(project_dir)])
+        assert rc == 0
+        assert payload["active_config"]["scope"] == "user"
+        assert payload["active_config"]["override_user_global"] is False
+        assert "override_user_global=off" in err
+        # With the flag off, an auto set-* lands in user-global, and the
+        # dormant project file keeps its own value. Capture stderr to
+        # cover the `elif exists:` warn branch in the ordinary-mutation
+        # (non-flip) path.
+        _, _, err2 = _run(["config", "set-effort", "max",
+                           "--cwd", str(project_dir)])
+        assert "override_user_global=off" in err2
+        assert cc.load_config().effort == "max"
+        assert cc.load_config(cwd=project_dir).effort == "max"  # flag off
+        proj_raw = cc._read_toml(cc.project_config_path(project_dir))
+        assert cc._override_flag(proj_raw) is False
+        # The dormant project file must still hold its OWN effort (high),
+        # not the user-global 'max' the auto write just stored.
+        assert proj_raw["effort"] == "high"
+
+    def test_show_active_project_file_reports_overrides(self, isolated_home,
+                                                        project_dir,
+                                                        patched_http):
+        # The headline behavior: `config show --cwd <project>` against an
+        # ACTIVE per-project file returns the project-overridden values
+        # AND active_config.scope == project (asserted at the CLI surface,
+        # not just via cc.load_config).
+        _run(["config", "set-effort", "high", "--project",
+              "--cwd", str(project_dir)])
+        rc, payload, err = _run(["config", "show", "--cwd", str(project_dir)])
+        assert rc == 0
+        assert payload["effort"] == "high"
+        assert payload["active_config"]["scope"] == "project"
+        assert payload["active_config"]["override_user_global"] is True
+        assert "PER-PROJECT" in err
+
+    def test_override_verb_rejects_scope_flags(self, isolated_home,
+                                               project_dir, patched_http):
+        # set-override-user-global is inherently project-scoped — it must
+        # NOT accept --user/--project (argparse rejects → SystemExit(2),
+        # which propagates before main's try/except, like test_no_subcommand).
+        for bad in ("--user", "--project"):
+            with pytest.raises(SystemExit):
+                cli.main(["config", "set-override-user-global", "on", bad,
+                          "--cwd", str(project_dir)])
+
+    def test_project_set_on_dormant_file_preserves_content(
+            self, isolated_home, project_dir, patched_http):
+        # Explicit --project set-* on a flag-OFF file must preserve the
+        # file's other content (BUG from the M4 adversarial review). Set
+        # two project values, flip off, edit ONE via --project, flip on →
+        # both survive.
+        _run(["config", "set-effort", "high", "--project",
+              "--cwd", str(project_dir)])
+        _run(["config", "set-role", "planner", "--model", "proj-pl",
+              "--project", "--cwd", str(project_dir)])
+        _run(["config", "set-override-user-global", "off",
+              "--cwd", str(project_dir)])
+        _run(["config", "set-verify-budget", "generous", "--project",
+              "--cwd", str(project_dir)])
+        _run(["config", "set-override-user-global", "on",
+              "--cwd", str(project_dir)])
+        cfg = cc.load_config(cwd=project_dir)
+        assert cfg.effort == "high"                  # not reverted to default
+        assert cfg.roles["planner"].model == "proj-pl"
+        assert cfg.verify_budget == "generous"       # the dormant-path edit
+
+    def test_set_override_round_trip_via_cli(self, isolated_home,
+                                             project_dir, patched_http):
+        _run(["config", "set-effort", "high", "--project",
+              "--cwd", str(project_dir)])
+        _run(["config", "set-override-user-global", "off",
+              "--cwd", str(project_dir)])
+        assert cc.project_override_active(project_dir) is False
+        rc, payload, err = _run(["config", "set-override-user-global", "on",
+                                 "--cwd", str(project_dir)])
+        assert rc == 0
+        assert payload["active_config"]["scope"] == "project"
+        assert cc.project_override_active(project_dir) is True
+        # Re-activated → engine sees the project value again.
+        assert cc.load_config(cwd=project_dir).effort == "high"
+
+    def test_coder_list_reports_active_config(self, isolated_home,
+                                              project_dir, patched_http):
+        _run(["config", "set-effort", "high", "--project",
+              "--cwd", str(project_dir)])
+        rc, payload, err = _run(["config", "coder", "list",
+                                 "--cwd", str(project_dir)])
+        assert rc == 0
+        assert "coder" in payload
+        assert payload["active_config"]["scope"] == "project"
+        assert "PER-PROJECT" in err
 
 
 # ----------------------- top-level errors ---------------------- #

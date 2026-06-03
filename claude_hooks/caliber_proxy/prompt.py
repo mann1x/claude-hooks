@@ -412,7 +412,11 @@ def _walk_source_files(cwd: str, patterns: tuple[str, ...]) -> list[tuple[str, i
                 sz = os.path.getsize(full)
             except OSError:
                 continue
-            rel = os.path.relpath(full, cwd_real)
+            # Forward slashes so the `### {rel}` headers and the
+            # `path:line` citations they invite stay consistent with the
+            # code-graph / CitationLinter (both POSIX-style) — and so a
+            # Windows host doesn't emit ``pkg\m.py`` into the prompt.
+            rel = os.path.relpath(full, cwd_real).replace(os.sep, "/")
             hits.append((rel, sz))
     hits.sort(key=lambda x: x[1])
     return hits
@@ -436,7 +440,9 @@ def read_extended_sources(cwd: str,
         # Skip huge files entirely — they blow the budget alone.
         if sz > max_bytes // 4:
             continue
-        abs_path = os.path.join(cwd, rel)
+        # rel is POSIX-style (normalized in _walk_source_files); rebuild
+        # the native path so open() works on Windows too.
+        abs_path = os.path.join(cwd, *rel.split("/"))
         try:
             with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()

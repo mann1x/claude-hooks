@@ -167,12 +167,13 @@ class TestProxyPassthrough:
 
     def test_upstream_failure_yields_502(self, tmp_path, monkeypatch):
         # Point proxy at a TCP port nobody is listening on.
-        # Shrink the forwarder retry budget so the 11-attempt default
-        # doesn't exceed the client-side urllib timeout.
+        # Disable retries (max_attempts=1 → single attempt) so the
+        # ConnectError surfaces immediately without burning the retry
+        # budget against the client-side urllib timeout.
         from claude_hooks.proxy import forwarder as fwd
-        monkeypatch.setattr(fwd, "_UPSTREAM_RETRIES", 1)
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_BASE", 0.0)
-        monkeypatch.setattr(fwd, "_RETRY_BACKOFF_MAX", 0.0)
+        from claude_hooks.proxy import retry as rt
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_MAX_ATTEMPTS", "1")
+        rt.reset_state()
         fwd._reset_client()
         dead_port = _find_free_port()
         cfg = {

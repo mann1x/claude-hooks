@@ -74,6 +74,16 @@ DEFAULT_STALL_RETRIES: int = 1
 # triggers the next tier (M7).
 DEFAULT_CONFIDENCE_TARGET: float = 0.7
 
+# M4: map the static config ``adversary_strictness`` (soft|normal|strict)
+# into the runtime critic-dial vocab (lax|normal|strict|adversarial) for
+# the boot-time seed. ``adversarial`` is reachable only via a live
+# POST /control mutation, never from the static seed.
+_ADVERSARY_TO_CRITIC_STRICTNESS: dict[str, str] = {
+    "soft": "lax",
+    "normal": "normal",
+    "strict": "strict",
+}
+
 # Effort -> (max_rounds, max_reroutes). Mirrors council.EFFORT_CAPS
 # but normalized for x-tier inheritance. xauto starts modest and
 # lets the escalator bump.
@@ -150,6 +160,17 @@ def runtime_control_defaults(
         # sentinel value the escalator ignores.
         starting_tier = "xmedium"
 
+    # M4: the boot-time critic dial is seeded from the static config
+    # ``adversary_strictness`` (M1), mapped into the critic vocab:
+    # soft→lax, normal→normal, strict→strict. The default
+    # ``normal``→``normal`` keeps cohort-2 parity; an operator who sets
+    # adversary_strictness=soft|strict shifts the boot-time critic dial
+    # too (the M1 "tunes both the critic dial and the adversary role"
+    # contract). POST /control can override ``critic_strictness`` live
+    # — including to the runtime-only ``adversarial`` level.
+    seed_strictness = _ADVERSARY_TO_CRITIC_STRICTNESS.get(
+        getattr(cfg, "adversary_strictness", "normal"), "normal")
+
     rc: RuntimeControl = {
         "deadline_ts": now_ts + hard,
         "soft_target_ts": now_ts + soft,
@@ -158,7 +179,7 @@ def runtime_control_defaults(
         "max_reroutes": max_reroutes,
         "enabled_roles": enabled,
         "confidence_target": DEFAULT_CONFIDENCE_TARGET,
-        "critic_strictness": "normal",
+        "critic_strictness": seed_strictness,
         "stall_threshold_s": DEFAULT_STALL_THRESHOLD_S,
         "stall_retries": DEFAULT_STALL_RETRIES,
         "tool_permissions": {},
@@ -238,10 +259,22 @@ def runtime_enabled_roles(state: dict, *,
 
 def runtime_critic_strictness(state: dict, *,
                               fallback: str = "normal") -> str:
-    """Critic-strictness mode: 'lax' | 'normal' | 'strict'.
+    """Critic-strictness mode: 'lax' | 'normal' | 'strict' |
+    'adversarial' (M4).
 
-    The critic node interpolates this into its system prompt so a
-    live mutation actually changes the next critic call's behavior.
+    The critic + meta-critic nodes interpolate this into their system
+    prompt so a live POST /control mutation actually changes the next
+    critic call's behavior. 'normal' is the default and contributes NO
+    directive — the prompt is byte-identical to v1 (cohort-2 parity).
     """
     return str(runtime_get(state, "critic_strictness",
                            default=fallback))
+
+
+def runtime_adversarial_focus(state: dict, *, fallback: str = "") -> str:
+    """M4: an optional free-text attack brief the assistant injects via
+    POST /control (``adversarial_focus``) to direct the critic/meta-
+    critic at a specific weakness this question is vulnerable to. Empty
+    by default → no focus block in the prompt (parity)."""
+    val = runtime_get(state, "adversarial_focus", default=fallback)
+    return str(val) if val is not None else ""

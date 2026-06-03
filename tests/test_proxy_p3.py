@@ -74,6 +74,11 @@ class _CountingUpstream(BaseHTTPRequestHandler):
     def log_message(self, *a, **kw): pass
 
     def do_POST(self):
+        # Drain the request body before replying — a Windows server that
+        # closes with unread bytes in the socket buffer triggers a TCP RST,
+        # so the client read fails with WinError 10054 instead of seeing
+        # the response (POSIX discards the unread bytes silently on FIN).
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
         _CountingUpstream.call_count += 1
         body = b'{"model":"x","stop_reason":"end_turn","usage":{"input_tokens":0}}'
         self.send_response(200)

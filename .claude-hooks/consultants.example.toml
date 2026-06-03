@@ -1,0 +1,163 @@
+# EXAMPLE /consultants per-project config — copy to
+# `<project>/.claude-hooks/consultants.toml` to use. THAT file is
+# gitignored (it carries host-specific secrets like the pgvector DSN);
+# this committed template never does — keep it placeholder-only.
+#
+# A per-project file shadows ~/.claude/consultants-config.toml
+# key-by-key. Whether it is the active config is governed by the
+# `override_user_global` directive below (on by default). Managed by
+# `claude-consultants config set-*` once copied; also safe to hand-edit.
+
+topology = "council"
+effort = "medium"
+# Consultancy review loop: max_followups caps auto-issued followups before Claude must ask the user; allow_extra is the grant size per approval.
+max_followups = 4
+allow_extra = 1
+
+# Adversary / verify budget (M1+). verify_budget sizes the Workflow skeptic panel (minimal|bounded|generous); adversary_strictness tunes the critic dial + adversary role (soft|normal|strict); adversary_checkpoint enables the engine pause-for-red-team before synthesis.
+verify_budget = "bounded"
+adversary_strictness = "normal"
+adversary_checkpoint = false
+adversary_checkpoint_timeout_s = 600
+# override_user_global (per-project files only): true => this file is the active config — merged over user-global and read+written by every `config` command; false => the file is ignored everywhere (fall back to user-global).
+override_user_global = true
+
+[service]
+mode = "always-on"
+http_port = 38095
+
+[checkpointer]
+backend = "sqlite"
+# url = "postgresql://user:pass@host:5432/db"  # required when backend = "postgres"
+postgres_pool_min = 1
+postgres_pool_max = 10
+postgres_pool_timeout_s = 30.0
+
+[runtime]
+# review_before_synthesis: pause before the final answer to approve / inject
+review_before_synthesis = false
+# interrupt_on_low_confidence: opt-in HITL when synthesizer self-rates below confidence_target
+interrupt_on_low_confidence = false
+
+[store]
+# Long-term memory BaseStore for cross-lane / cross-session recall.
+# M14 default: enabled = true, backend = sqlite_vec ->
+#   ~/.claude/consultants-store.db with TTL + distillation on.
+# Set enabled = false for zero-cost (no store wired).
+# backend choices: memory | pgvector | sqlite_vec
+enabled = true
+backend = "sqlite_vec"
+enable_at_efforts = ["high", "max", "xmedium", "xhigh", "xmax", "xauto"]
+recall_limit = 5
+# pgvector_dsn = "postgresql://user:pass@host:5432/db"
+sqlite_vec_path = "~/.claude/consultants-store.db"
+# embedder = "llamafile"   # or "ollama" — borrow from providers.<name>.embedder
+# [store.embedder_options]
+# url = "http://127.0.0.1:38092/embedding"
+# model = "qwen3-embedding:0.6b"
+# timeout = 30.0
+# num_ctx = 16384
+# daemon_ensure = true
+
+[store.ttl]
+# Per-namespace TTL on store entries. M14 default = true so research findings age out at research_days (30d) and tool_results at tool_results_hours (24h); project / user namespaces stay forever (null = never).
+enabled = true
+research_days = 30.0
+tool_results_hours = 24.0
+# project_days = 365   # never by default (cross-session memory)
+project_days = 0  # 0 / negative = never
+# user_days = 365      # never by default (cross-project memory)
+user_days = 0  # 0 / negative = never
+# refresh_on_read: bump expires_at forward on every successful recall hit (the 'if it's still useful, keep it' heuristic).
+refresh_on_read = true
+# jitter_pct (#215): spread aligned cohorts at write time so the reaper doesn't see N sessions all expire on the same tick. ttl * (1 + uniform(-jitter, +jitter)). 0.0 = disabled; 0.1 = ±10% (recommended default).
+jitter_pct = 0.1
+
+[store.distillation]
+# Caliber-style summary written into the durable ('project', pid) namespace before expiring research entries get deleted. Episodic short-term → semantic long-term.
+enabled = true
+model = "gemma4:31b-cloud"
+fallback_models = ["glm-5.1:cloud"]
+sweep_interval_seconds = 3600.0
+min_entries_per_distillation = 3
+max_session_entries = 50
+# max_groups_per_sweep (#215): cap distillations per sweep tick. Bounds per-hour embedder + cloud LLM load. 5 means ≤5 × (~60 s LLM + ~5 s embed) ≈ 5 min wall per tick worst case. 0 = uncapped (pre-#215 behavior).
+max_groups_per_sweep = 5
+# pace_seconds_between_distillations (#215): sleep between consecutive distillations within a single sweep. Gives the embedder breathing room. 0.0 = no extra delay.
+pace_seconds_between_distillations = 5.0
+
+[coder_limits]
+# Sandbox caps for the coder role (M10). Only consulted when [role.coder] enabled = true.
+max_file_bytes = 51200
+max_total_bytes = 1048576
+max_files = 16
+
+[role.planner]
+enabled = true
+model = "kimi-k2.6:cloud"
+ctx_max_explicit = false
+extra_models = []
+
+[role.researcher]
+enabled = true
+model = "kimi-k2.6:cloud"
+ctx_max_explicit = false
+extra_models = []
+
+[role.tool_executor]
+enabled = false
+model = "gemma4:31b-cloud"
+ctx_max_explicit = false
+extra_models = []
+
+[role.critic]
+enabled = true
+model = "kimi-k2.6:cloud"
+ctx_max_explicit = false
+extra_models = []
+
+[role.coder]
+enabled = false
+model = "glm-5.1:cloud"
+ctx_max_explicit = false
+extra_models = []
+
+[role.coder.default_route]
+primary = "glm-5.1:cloud"
+fallback = "kimi-k2.6:cloud"
+
+[role.coder.routes.c]
+primary = "glm-5.1:cloud"
+fallback = "deepseek-v4-pro:cloud"
+
+[role.coder.routes.cpp]
+primary = "deepseek-v4-flash:cloud"
+fallback = "kimi-k2.6:cloud"
+
+[role.coder.routes.csharp]
+primary = "deepseek-v4-pro:cloud"
+fallback = "kimi-k2.6:cloud"
+
+[role.coder.routes.go]
+primary = "kimi-k2.6:cloud"
+fallback = "deepseek-v4-pro:cloud"
+
+[role.coder.routes.python]
+primary = "glm-5.1:cloud"
+fallback = "kimi-k2.6:cloud"
+
+[role.coder.routes.rust]
+primary = "deepseek-v4-flash:cloud"
+fallback = "deepseek-v4-pro:cloud"
+
+[role.synthesizer]
+enabled = true
+model = "kimi-k2.6:cloud"
+ctx_max_explicit = false
+extra_models = []
+
+[role.adversary]
+enabled = false
+model = "kimi-k2.6:cloud"
+ctx_max_explicit = false
+extra_models = []

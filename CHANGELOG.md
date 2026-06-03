@@ -14,7 +14,168 @@ release with the auto-generated source archive
 (`claude-hooks-X.Y.Z.zip` / `.tar.gz`). See
 [`docs/RELEASING.md`](docs/RELEASING.md) for the cut procedure.
 
-## [Unreleased]
+## [1.13.0] — 2026-06-03
+
+### Added
+
+- **API proxy: throttle-aware retry layer — stop *amplifying*
+  Anthropic's connection throttle.** Anthropic's edge throttling (which
+  bites hardest once a 2nd session runs) was being made *worse* by the
+  proxy, not mitigated: the old `forward()` loop fired up to 10 retries
+  in ~5 s with no jitter, ignored `Retry-After`, and — the real
+  amplifier — drained the **entire shared HTTP/2 pool** on a sticky
+  failure, which closed sibling sessions' live connections (collective
+  storm) *and* recreated the per-request fresh-connection profile the
+  pool exists to avoid (re-tripping the edge **429** gate). The retry
+  policy is now a pure, unit-tested module (`claude_hooks/proxy/retry.py`)
+  driving a rewritten loop:
+  - **Jittered exponential backoff** + **`Retry-After` honoring**
+    (integer-seconds and HTTP-date, clamped) — proper spacing, not a
+    sub-second hammer.
+  - **Wall-clock deadline** (default 90 s, under the 120 s read timeout)
+    as the primary bound, attempt-count only a safety cap; on exhaustion
+    the authentic upstream error (529 body + headers) passes through
+    verbatim. The proxy keeps retrying in the background so Claude
+    Code's own client never exhausts *its* budget.
+  - **No whole-pool nuke** on the retry path — httpx already evicts a
+    connection that raised, so a retry lands on a fresh connection
+    without disturbing sibling sessions.
+  - **Cross-session circuit breaker** — a burst of overloads opens a
+    process-global breaker so every session adds a coordinated
+    pre-attempt delay; the direct counter to the "2nd session" trigger.
+  - **429 passes straight through** (account quota, never retried).
+  - **Observability**: new `GET /health` snapshot (flap counters +
+    breaker state), `retry_count`/`backoff_total_ms`/`retry_outcome` on
+    JSONL request lines and in the `requests` table (stats schema **v6**,
+    additive/idempotent). New `CLAUDE_HOOKS_PROXY_RETRY_*` /
+    `…_BREAKER_*` env knobs; legacy `…_RETRIES` honored as a fallback,
+    the sub-second-backoff + pool-nuke knobs retired with a one-time
+    warning. See [`docs/proxy.md`](docs/proxy.md) "Retry / throttle
+    resilience".
+- **`/consultants` dynamic adversarial review — bring the council's
+  "challenge before you trust it" instinct home from the ultracode
+  tier.** Four independent, **default-OFF**, effort-tolerant mechanisms,
+  each with an M12 cohort-2 parity guard so the default council is
+  byte-identical to before:
+  - **Adversary checkpoint** (`adversary_checkpoint`, default off;
+    timeout default 600 s) — the council pauses just before synthesis,
+    emits an `awaiting_adversary` SSE event (durable + Last-Event-ID
+    replayable), and waits for the assistant to inject a bespoke
+    red-team brief before resuming; **auto-proceeds at the deadline** so
+    a lost SSE never hangs the run. The runner is the sole resumer (a
+    deadline-bounded park-poll), avoiding a double-resume race with
+    `POST /resume`. New `adversary-ack` CLI verb +
+    `POST /v1/consult/{sid}/adversary-ack`.
+  - **Adversary role** (`roles.adversary`, default off) — a singleton
+    post-synthesis refuter (`synthesizer → adversary → END`) that
+    annotates the answer with a `REFUTATION:` block or clears it. A
+    post-barrier singleton with no per-lane `Send`, so Phase 9/10
+    x-tier fan-out is untouched.
+  - **Critic dial** (M4) — revived the dead
+    `runtime_control.critic_strictness` (`lax` / `normal` / `strict` /
+    `adversarial`) and threaded it into **both** the critic and
+    meta-critic prompts, plus a new free-text `adversarial_focus` attack
+    brief. Settable live via `control --strictness adversarial
+    --adversarial-focus "<brief>"`; seeded boot-time from
+    `adversary_strictness`.
+  - **Verify budget** (`verify_budget` ∈ `minimal` / `bounded` /
+    `generous`, default `bounded`) — sizes the skeptic panel the
+    Workflow driver runs against surviving claims.
+- **`consult --wait`** — a blocking convenience path that polls a fresh
+  run to terminal and prints the final result (`--poll-interval`,
+  `--wait-timeout`). Removes the Workflow-authoring footgun of
+  hand-rolling a poll loop; the bare path is unchanged.
+- **Committed Workflow driver**
+  `.claude/workflows/consult-with-adversarial-review.mjs` — pipelines
+  `ask → review → skeptic-panel → accept|followup`, where
+  `composeChallenge()` turns surviving refutations into a focused
+  follow-up. SKILL gains **Driving the council from a Workflow** (the
+  recipe + four mandatory disciplines) and a **Dynamic adversary**
+  subsection (authoring template + the `awaiting_adversary` reaction
+  flow).
+- Config + CLI dual-surface for every new knob: `config
+  set-verify-budget` / `set-adversary-strictness` /
+  `set-adversary-checkpoint`, plus `/consultants config` → **Adversary /
+  verify budget** (Subflow G).
+- **Per-project config is now a first-class, consistently-applied
+  scope across all `config` commands — governed by a per-project
+  `override_user_global` directive.** Previously a per-project
+  `.claude-hooks/consultants.toml` silently shadowed user-global for the
+  engine, yet 7 of the 15 `config set-*` verbs lacked `--project`/`--cwd`
+  and could *only* write user-global (where the engine then ignored
+  them), and `config show` never revealed which scope was active.
+  - **`override_user_global`** — a per-project-file-only directive (read
+    only from the raw project TOML *before* the layer merge, never a
+    `ConsultantsConfig` field; absent/non-bool → on). On → the project
+    file is the active config (merged over user-global, read+written by
+    every command and the engine). Off → ignored everywhere; both the CLI
+    and engine fall back to user-global. Default on for a new file.
+  - **Auto write-scope** — with no flags, a `config set-*` writes the
+    per-project file when one exists *and* its flag is on, else
+    user-global. `--user` forces user-global; `--project`/`--cwd` forces
+    (and creates) the per-project file. `config show` / `config coder
+    list` default to the active scope at the cwd, with `--user` to force
+    the user-global view. All 7 previously-bare verbs gained the scope
+    flags; the 8 already-scoped verbs gained `--user`.
+  - **`config set-override-user-global on|off`** — the dedicated,
+    inherently project-scoped verb to flip the directive (creates the
+    file as a full snapshot if absent; preserves its content when turned
+    off so flipping back on restores it).
+  - **`active_config` visibility** — every config command emits an
+    `active_config` block (`scope`, `override_user_global`,
+    `project_config_path`, `project_file_exists`) and prints a one-line
+    scope notice on stderr whenever a per-project file is in play.
+    `/consultants config` gains **Subflow H — Config scope** and a
+    `Config scope:` banner in the status render.
+
+### Fixed
+
+- **`latest_confidence`** — the fully-plumbed-but-never-emitted
+  synthesizer/critic self-rating channel now emits a `ConfidenceUpdate`
+  event, unblocking the low-confidence interrupt + xauto escalation
+  consumers that were already reading it.
+- **`docs/consultants.md`** — corrected the false "every `set-*` accepts
+  `--project`" claim (only 8 of 15 did) and a stale `config coder
+  set-route` example (the verb is `config coder set`).
+- **Workflow driver `meta`** — flattened `meta.description` /
+  `meta.whenToUse` from string concatenation to single literals. The
+  Workflow tool requires a pure-literal `meta` (it rejects
+  `BinaryExpression`), so the committed
+  `consult-with-adversarial-review.mjs` could not be launched via
+  `scriptPath` until this fix.
+- **`config coder` test isolation (bug-664 class)** —
+  `tests/test_cli_config_coder.py::TestHandlers` isolated only the
+  *user* config path, not cwd, so a per-project
+  `.claude-hooks/consultants.toml` with `override_user_global = true`
+  at the runner's cwd leaked in: it flipped the asserted write-scope
+  from `user` to `project` (host-dependent failures) **and** the
+  `wraps=`-real mutator tests clobbered that live file. `_IsolatedConfig`
+  now also `chdir`s to its throwaway temp dir, and the previously
+  un-isolated `test_list` is wrapped — the tests are now
+  host-independent and side-effect-free.
+- **Windows suite parity — 95 pre-existing pandorum failures → 0.** A
+  pre-tag Windows smoke surfaced 95 failures, none in v1.13.0 code; all
+  predated this release. A few were real Windows product bugs, now
+  fixed: `post_tool_use._shorten_path` and the caliber grounding prompt's
+  extended-source headers emitted backslash paths (`pkg\m.py`) on Windows
+  — both now forward-slash, keeping `path:line` citations consistent with
+  the code-graph / CitationLinter; the `pgvector-mcp` / `sqlite-vec-mcp`
+  HTTP servers reset the connection (TCP RST → `WinError 10054`) instead
+  of returning `404` when a Windows client POSTed a body to an unknown
+  path, because the handler closed without draining the request body; the
+  consultants benchmark harness ran oracle pytest with
+  `--timeout-method=signal` unconditionally (SIGALRM is POSIX-only and the
+  `pytest-timeout` plugin may be absent), and two coder oracles wrapped
+  timing tests in a SIGALRM `_timeout` — all now gate on the plugin +
+  platform and fall back to `thread` / a post-hoc elapsed check on
+  Windows. The remainder were test-harness portability gaps (loopback
+  `HTTPServer` fixtures not draining request bodies; sqlite handles left
+  open across `TemporaryDirectory` cleanup → `WinError 32`; `os.name`
+  flips that poisoned `pathlib`'s flavour selector into instantiating
+  `PosixPath` on Windows; `#!/bin/sh` probe binaries; `HOME`-only home
+  isolation that ignored `USERPROFILE`; host-coupled port / case /
+  separator assertions). POSIX behaviour is unchanged throughout; the
+  full suite is now green on both Linux (solidpc) and Windows (pandorum).
 
 ## [1.12.0] — 2026-05-30
 

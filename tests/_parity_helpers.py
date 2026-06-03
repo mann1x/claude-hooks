@@ -143,6 +143,9 @@ def make_default_stubs() -> dict[str, Any]:
         # can flip them on without re-plumbing the dict.
         "tool_executor": StableChat(STUB_FINAL_ANSWER),
         "coder":         StableChat(STUB_FINAL_ANSWER),
+        # M3 adversary refuter: default stub clears the answer
+        # (REFUTATION: none) so an enabled-but-unperturbed run is inert.
+        "adversary":     StableChat("REFUTATION: none"),
     }
 
 
@@ -197,6 +200,7 @@ V2_OPT_IN_EVENT_KINDS: tuple[str, ...] = (
     "interrupt",          # M5 (HITL)
     "resumed",            # M5 (HITL)
     "deadline_warning",   # M3 (soft deadlines)
+    "awaiting_adversary", # M2 (adversary checkpoint — default OFF)
     # Note: "node_started" / "node_finished" / "tool_call" /
     # "partial_synthesis" / "confidence_update" are emitted on
     # every run, default or not, so they're NOT in the opt-in set.

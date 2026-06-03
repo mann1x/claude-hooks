@@ -24,6 +24,7 @@ Covers:
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -78,6 +79,18 @@ def _stub_follow_up(state: SessionState, runner_input: dict) -> None:
     _write_result(state, runner_input, final="**Verdict**: child answer.")
 
 
+def _gated_stub_runner(gate: threading.Event):
+    """A stub runner that blocks until ``gate`` is set. Lets a test
+    observe the ``in_progress`` consultancy window deterministically:
+    without the gate the instantaneous stub races to completion (and
+    flips the sidecar to ``ready_to_review``) before the test can read
+    it — a thread-scheduling flake under load, not a logic bug."""
+    def run(state: SessionState, runner_input: dict) -> None:
+        gate.wait(timeout=5.0)
+        _write_result(state, runner_input, final="**Verdict**: root answer.")
+    return run
+
+
 def _make_app():
     return create_app(run_council=_stub_runner,
                       run_follow_up=_stub_follow_up,
@@ -114,16 +127,25 @@ def _ask(client, project_dir: Path) -> str:
 class TestFreshAsk:
     def test_seeds_in_progress_and_sidecar(self, isolated_home, project_dir):
         cc.set_max_followups(4)
-        app = _make_app()
+        # Gate the runner so the in_progress window is deterministic: the
+        # sidecar is seeded synchronously in the POST /consult route, but
+        # the instantaneous default stub would otherwise flip it to
+        # ready_to_review (in the executor thread) before this read.
+        gate = threading.Event()
+        app = create_app(run_council=_gated_stub_runner(gate),
+                         run_follow_up=_stub_follow_up, start_reaper=False)
         with TestClient(app) as client:
             sid = _ask(client, project_dir)
-            # Sidecar written up front, before completion.
-            disk = storage.read_consultancy(project_dir, sid)
-            assert disk is not None
-            assert disk["root_sid"] == sid
-            assert disk["status"] == "in_progress"
-            assert disk["followup_count"] == 0
-            assert disk["max_followups"] == 4
+            try:
+                # Sidecar written up front, before completion.
+                disk = storage.read_consultancy(project_dir, sid)
+                assert disk is not None
+                assert disk["root_sid"] == sid
+                assert disk["status"] == "in_progress"
+                assert disk["followup_count"] == 0
+                assert disk["max_followups"] == 4
+            finally:
+                gate.set()  # release the runner so teardown is clean
 
     def test_completion_flips_to_ready_to_review(self, isolated_home,
                                                  project_dir):

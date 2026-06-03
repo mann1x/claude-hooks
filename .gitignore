@@ -50,6 +50,11 @@ Thumbs.db
 # under docs/benchmarks/<host>/ are committed deliberately as audit
 # data; the per-session live artifacts under .claude-hooks/ are not.
 .claude-hooks/consultants/
+# The active per-project /consultants config carries host-specific
+# secrets (e.g. the pgvector DSN), so it stays local. The committed
+# `.claude-hooks/consultants.example.toml` template is the shareable
+# placeholder-only copy — copy it to consultants.toml to use.
+.claude-hooks/consultants.toml
 .claude-hooks-disable
 
 # Claude Code project hooks (installed per-machine)

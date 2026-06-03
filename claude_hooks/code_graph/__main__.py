@@ -132,6 +132,10 @@ def _self_pythonpath() -> str:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    # Reports contain "→" / box glyphs; a legacy Windows console (cp1252) would
+    # otherwise crash these with UnicodeEncodeError on print().
+    from claude_hooks._io_utf8 import force_utf8_streams
+    force_utf8_streams()
     ap = argparse.ArgumentParser(prog="python -m claude_hooks.code_graph")
     sub = ap.add_subparsers(dest="cmd", required=True)
 

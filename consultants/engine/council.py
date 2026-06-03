@@ -81,6 +81,71 @@ def _emit_finished(role: str, *,
         log.exception("emit NodeFinished raised; ignored")
 
 
+# ---------- M0: self-confidence extraction ------------------------ #
+# The synthesizer and critic each end their output with a
+# ``CONFIDENCE: <0.0-1.0>`` self-rating line. We pull it out of the
+# raw text (so it never leaks into the user-facing answer or the
+# critique the synthesizer reads), append it to the ``confidence``
+# state channel, and emit a ConfidenceUpdate event. This is what makes
+# ``interrupt_on_low_confidence`` + the xauto escalator + the M2
+# adversary-checkpoint gate actually fire — before this the channel
+# was fully plumbed but never written.
+
+_CONFIDENCE_RX = re.compile(
+    r"(?im)^[ \t>*-]*CONFIDENCE[ \t]*[:=][ \t]*([01](?:\.\d+)?|0?\.\d+)\b[ \t]*$",
+)
+
+
+def _extract_confidence(text: str) -> tuple[str, Optional[float]]:
+    """Pull a trailing ``CONFIDENCE: <0.0-1.0>`` self-rating out of a
+    node's output.
+
+    Returns ``(text_without_the_line, score)`` or ``(text, None)`` when
+    the line is absent or malformed. The score is clamped to ``[0, 1]``.
+    The matched line is stripped so the rating never reaches the user.
+    The LAST match wins (the rating is emitted at the very end).
+    """
+    if not text:
+        return text, None
+    last: Optional[re.Match] = None
+    for last in _CONFIDENCE_RX.finditer(text):
+        pass
+    if last is None:
+        return text, None
+    try:
+        score = float(last.group(1))
+    except (TypeError, ValueError):  # pragma: no cover - regex guards this
+        return text, None
+    score = max(0.0, min(1.0, score))
+    stripped = (text[: last.start()] + text[last.end():]).rstrip()
+    return stripped, score
+
+
+def _emit_confidence(score: Optional[float], *, source: str,
+                     state: dict) -> None:
+    """Best-effort emit of a :class:`ConfidenceUpdate`. No-op on None.
+
+    Never raises — telemetry must not break a node. The ``target`` is
+    the live ``runtime_control.confidence_target`` so a consumer can
+    render "0.62 / 0.70 — below threshold".
+    """
+    if score is None:
+        return
+    try:
+        from consultants.engine.events import ConfidenceUpdate, emit
+        from consultants.engine.control import (
+            runtime_get, DEFAULT_CONFIDENCE_TARGET,
+        )
+        target = runtime_get(state, "confidence_target",
+                             DEFAULT_CONFIDENCE_TARGET)
+        emit(ConfidenceUpdate(
+            score=float(score), source=source,
+            target=float(target) if target is not None else None,
+        ))
+    except Exception:  # pragma: no cover - telemetry must never raise
+        log.debug("emit ConfidenceUpdate raised; ignored", exc_info=True)
+
+
 # ---------- v2 additional_context channel (M5) -------------------- #
 # The v2 state schema adds an ``additional_context`` channel — an
 # append-only list of ``Doc`` records the HTTP ``/inject`` endpoint
@@ -250,7 +315,12 @@ CRITIC_SYSTEM = _role_prompt(
     "symbol pointers.\n\n"
     "Default to ready unless you can name a concrete missing fact. "
     "Do not request research for theoretical completeness — each "
-    "extra round costs another full agent loop."
+    "extra round costs another full agent loop.\n\n"
+    "FINAL LINE (load-bearing). End your output with a line "
+    "`CONFIDENCE: <0.0-1.0>` — your confidence that the assembled "
+    "evidence is sufficient AND correct for the synthesizer (1.0 = "
+    "certain; <0.7 = shaky / contested / thin). The engine consumes "
+    "this line and strips it; it is not shown to the user."
 )
 
 # Phase 10: meta-critic synthesizes the C parallel-critic verdicts
@@ -274,14 +344,77 @@ META_CRITIC_SYSTEM = _role_prompt(
     "concrete missing fact AND that fact is plausibly load-bearing "
     "for the synthesizer's answer. A critic raising a theoretical "
     "concern that another critic credibly dismisses is NOT grounds "
-    "for more research."
+    "for more research.\n\n"
+    "FINAL LINE (load-bearing). End your output with a line "
+    "`CONFIDENCE: <0.0-1.0>` — the consolidated confidence that the "
+    "evidence is sufficient AND correct (factor in critic "
+    "disagreement: wide disagreement lowers it). The engine consumes "
+    "this line and strips it; it is not shown to the user."
 )
+
+# M4: the dynamic critic dial. ``runtime_critic_strictness`` selects a
+# directive appended to the critic / meta-critic user message.
+# ``normal`` is ABSENT on purpose — it contributes nothing, so the
+# default-config prompt is byte-identical to v1 (cohort-2 parity).
+_CRITIC_STRICTNESS_DIRECTIVE: dict[str, str] = {
+    "lax": (
+        "STRICTNESS: lax. Bias hard toward `ready`. Request another "
+        "research round ONLY for a missing fact that would change the "
+        "answer's bottom line; tolerate thin-but-sufficient evidence."
+    ),
+    "strict": (
+        "STRICTNESS: strict. Hold the evidence to a high bar: demand a "
+        "`path:line` or named source for every load-bearing claim. If a "
+        "key fact rests on a single unverified assertion, that is a "
+        "concrete gap worth another round."
+    ),
+    "adversarial": (
+        "STRICTNESS: adversarial. Actively try to BREAK the evidence — "
+        "hunt for the unstated assumption, the edge case the research "
+        "skipped, the citation that doesn't actually say what it's "
+        "used for, the claim that's true in general but false here. "
+        "Still request research only for a concrete, nameable gap, but "
+        "look harder than usual for one."
+    ),
+}
+
+
+def _append_critic_dial(parts: list[str], *, strictness: str,
+                        adversarial_focus: str) -> None:
+    """Append the M4 strictness directive + any injected adversarial
+    focus to a critic / meta-critic message body. No-op for the default
+    (``normal`` strictness, empty focus) so the v1 prompt is preserved."""
+    directive = _CRITIC_STRICTNESS_DIRECTIVE.get(strictness)
+    if directive:
+        parts.append("\n" + directive)
+    if adversarial_focus and adversarial_focus.strip():
+        parts.append(
+            "\nADVERSARIAL FOCUS (attack this specifically):\n"
+            + adversarial_focus.strip())
+
+
+def _read_critic_dial(state: dict) -> tuple[str, str]:
+    """Read the live critic dial — ``(strictness, adversarial_focus)`` —
+    from ``state['runtime_control']`` for the critic / meta-critic
+    nodes. Lazy-imports ``control`` (langgraph-free) so the parser-only
+    import surface of this module stays clean. Defaults to
+    ``("normal", "")`` when runtime_control is absent (legacy v1 path)
+    so the prompt is byte-identical (cohort-2 parity)."""
+    try:
+        from consultants.engine import control
+        return (control.runtime_critic_strictness(state),
+                control.runtime_adversarial_focus(state))
+    except Exception:  # pragma: no cover — defensive
+        return ("normal", "")
 
 
 def build_meta_critic_messages(
     question: str, plan: str,
     research_rounds: list[str],
     critic_verdicts: list[str],
+    *,
+    strictness: str = "normal",
+    adversarial_focus: str = "",
 ) -> list[dict]:
     """Build the meta-critic's prompt. Critics are anonymized as
     ``Critic 1``, ``Critic 2``, ... in the order ``critic_verdicts``
@@ -291,6 +424,12 @@ def build_meta_critic_messages(
     Identity is anonymized to avoid biasing the meta-critic toward
     a model it 'knows' performs better. The recorder is the source
     of truth for who-said-what.
+
+    ``strictness`` + ``adversarial_focus`` (M4) thread the same dynamic
+    critic dial used by ``build_critic_messages`` so the x-tier
+    meta-critic doesn't silently degrade to the default when an
+    operator sharpens the live dial. Default (normal, no focus) →
+    byte-identical to v1 (cohort-2 parity).
     """
     parts = [
         f"USER QUESTION:\n{question.strip()}",
@@ -307,6 +446,11 @@ def build_meta_critic_messages(
     else:
         for i, v in enumerate(critic_verdicts, start=1):
             parts.append(f"\nCRITIC {i} VERDICT:\n{v.strip()}")
+    # M4: dynamic critic dial — appended before the closing
+    # instruction so the directive reads as additional guidance, not a
+    # trailing afterthought. No-op for the default (parity).
+    _append_critic_dial(parts, strictness=strictness,
+                        adversarial_focus=adversarial_focus)
     parts.append(
         "\nSynthesize. Emit the final DECISION line and a single "
         "consolidated critique paragraph."
@@ -349,7 +493,12 @@ SYNTHESIZER_SYSTEM = _role_prompt(
     "`path` for a sibling that sounds related; do NOT 'sharpen' a "
     "line number — relay the exact cite or omit the line. If "
     "researchers disagree, name both as `path:lineA / lineB "
-    "(researchers disagree)`."
+    "(researchers disagree)`.\n\n"
+    "FINAL LINE (load-bearing). After the answer, output a line "
+    "`CONFIDENCE: <0.0-1.0>` — your own confidence that the answer is "
+    "correct and complete (1.0 = certain; lower it for thin evidence, "
+    "unresolved disagreement, or a failed lane). The engine strips "
+    "this line; the user never sees it."
 )
 
 # Self-critic variant — used at effort=low/medium when the critic
@@ -394,8 +543,107 @@ SYNTHESIZER_SELF_CRITIC_SYSTEM = _role_prompt(
     "filesystem and will mark every fabrication inline. Do NOT "
     "swap a researcher's `path` for a sibling 'sounds-related' "
     "filename. Do NOT replace a researcher's line number with one "
-    "that 'looks more precise'. Relay exactly, or omit the line."
+    "that 'looks more precise'. Relay exactly, or omit the line.\n\n"
+    "FINAL LINE (load-bearing). After the answer, output a line "
+    "`CONFIDENCE: <0.0-1.0>` — your own confidence that the answer is "
+    "correct and complete, after the self-critique above (1.0 = "
+    "certain). The engine strips this line; the user never sees it."
 )
+
+
+# ----------------------- adversary (M3) --------------------------- #
+# Opt-in post-synthesis refuter. A SINGLETON node that runs once after
+# the synthesizer (synthesizer → adversary → END) — no per-lane Send,
+# so Phase 9/10 x-tier fanout upstream is untouched. Default OFF.
+
+ADVERSARY_SYSTEM = _role_prompt(
+    "ROLE: adversary. You are the council's red team. A final answer "
+    "has ALREADY been written by the synthesizer. Your ONLY job is to "
+    "REFUTE it — surface claims the evidence does not support: "
+    "hallucinated facts, fabricated or mis-attributed `path:line` "
+    "citations, overstated certainty, logical leaps, and edge cases "
+    "the answer glosses over.\n\n"
+    "You do NOT rewrite the answer. You do NOT ask for more research "
+    "(the research phase is over). You do NOT praise or summarize. You "
+    "surface ONLY what is wrong, unsupported, or overclaimed.\n\n"
+    "OUTPUT (load-bearing). Emit EXACTLY one block, nothing else:\n"
+    "  REFUTATION: none\n"
+    "when every material claim is backed by a researcher report or "
+    "tool result, OR\n"
+    "  REFUTATION:\n"
+    "  - <the claim, quoted briefly> — <why the evidence doesn't "
+    "support it>\n"
+    "  - <next issue>\n"
+    "one bullet per real problem. Quote the claim and name the gap. "
+    "If you genuinely cannot find a real problem, emit "
+    "`REFUTATION: none` — do NOT invent issues to look busy, and do "
+    "NOT flag a claim merely because it lacks a citation when the "
+    "evidence plainly supports it (unless STRICTNESS says otherwise)."
+)
+
+# M1 ``adversary_strictness`` tunes how aggressively the refuter fires.
+_ADVERSARY_STRICTNESS_DIRECTIVE = {
+    "soft": (
+        "STRICTNESS: soft. Flag ONLY clear hallucinations and "
+        "fabricated / mis-attributed facts and citations. Let "
+        "reasonable inferences and minor hedging pass."
+    ),
+    "normal": (
+        "STRICTNESS: normal. Flag hallucinations and fabricated "
+        "citations, AND any materially unsupported claim or "
+        "overstated certainty."
+    ),
+    "strict": (
+        "STRICTNESS: strict. Challenge EVERY factual assertion not "
+        "directly backed by a researcher report or tool result. Demand "
+        "a citation for each; treat an uncited factual claim as "
+        "unsupported until the evidence shows otherwise."
+    ),
+}
+
+
+def build_adversary_messages(question: str, final_answer: str, plan: str,
+                             research_rounds: list[str], *,
+                             strictness: str = "normal") -> list[dict]:
+    parts = [
+        f"USER QUESTION:\n{question.strip()}",
+        f"\nPLANNER'S PLAN:\n{(plan or '').strip()}",
+    ]
+    for i, r in enumerate(research_rounds, start=1):
+        if isinstance(r, str) and r.strip():
+            parts.append(f"\nRESEARCHER REPORT (round {i}):\n{r.strip()}")
+    parts.append(f"\nFINAL ANSWER TO REFUTE:\n{final_answer.strip()}")
+    parts.append(
+        "\n" + _ADVERSARY_STRICTNESS_DIRECTIVE.get(
+            strictness, _ADVERSARY_STRICTNESS_DIRECTIVE["normal"]))
+    parts.append("\nNow emit your REFUTATION block — nothing else.")
+    return [
+        {"role": "system", "content": ADVERSARY_SYSTEM},
+        {"role": "user", "content": "\n".join(parts)},
+    ]
+
+
+_REFUTATION_RX = re.compile(r"(?is)\bREFUTATION\s*[:=]\s*(.*)$")
+
+
+def parse_adversary_refutation(text: str) -> tuple[str, str]:
+    """Parse the adversary's output into ``(decision, body)``.
+
+    ``decision`` is ``"none"`` when the refuter cleared the answer,
+    ``"issues"`` when it raised problems. ``body`` is the refutation
+    text (empty for ``none``). Tolerant: a ``REFUTATION:`` header is
+    preferred; absent one, a non-trivial reply is treated as issues."""
+    m = _REFUTATION_RX.search(text or "")
+    if not m:
+        body = (text or "").strip()
+        return ("issues", body) if body else ("none", "")
+    body = m.group(1).strip()
+    low = body.lower()
+    if (not body
+            or low.startswith("none")
+            or low in ("no issues", "no refutation", "n/a", "-")):
+        return "none", ""
+    return "issues", body
 
 
 def _additional_context_block(additional_context) -> str:
@@ -502,7 +750,9 @@ def build_researcher_messages(question: str, plan: str,
 def build_critic_messages(question: str, plan: str,
                           research_rounds: list[str],
                           *,
-                          additional_context=None) -> list[dict]:
+                          additional_context=None,
+                          strictness: str = "normal",
+                          adversarial_focus: str = "") -> list[dict]:
     parts = [
         f"USER QUESTION:\n{question.strip()}",
         f"\nPLANNER'S PLAN:\n{plan.strip()}",
@@ -512,6 +762,10 @@ def build_critic_messages(question: str, plan: str,
     extra = _additional_context_block(additional_context)
     if extra:
         parts.append("\n" + extra)
+    # M4: dynamic critic dial. No-op for the default (normal, no focus)
+    # so the prompt is byte-identical to v1 (cohort-2 parity).
+    _append_critic_dial(parts, strictness=strictness,
+                        adversarial_focus=adversarial_focus)
     return [
         {"role": "system", "content": CRITIC_SYSTEM},
         {"role": "user", "content": "\n".join(parts)},
@@ -1790,9 +2044,12 @@ def critic_node(state: dict, *, chat_client, model: str,
     # mostly "any" docs naming a quality bar like "must cite path:line
     # for every claim"). Same defensive helper as the other roles.
     extra_ctx_critic = _additional_context_for(state, "critic")
+    # M4: live critic dial (strictness + injected adversarial focus).
+    _crit_strict, _crit_focus = _read_critic_dial(state)
     msgs = build_critic_messages(
         state["question"], state["plan"], state.get("research") or [],
         additional_context=extra_ctx_critic,
+        strictness=_crit_strict, adversarial_focus=_crit_focus,
     )
     t0 = time.monotonic()
     try:
@@ -1829,6 +2086,11 @@ def critic_node(state: dict, *, chat_client, model: str,
         }
     dt = time.monotonic() - t0
     decision = parse_critic_decision(text)
+    # M0: strip the critic's CONFIDENCE line out of ``text`` so it's
+    # absent from the critique the synthesizer reads + the turn
+    # transcript. Emit + append only on the single-critic path below;
+    # in fanned mode the meta-critic owns the consolidated value.
+    text, _critic_conf = _extract_confidence(text)
     # critic_reroutes_used uses the additive reducer; we contribute
     # +1 for a re-route or 0 for ready, and the merge concatenates.
     rerouted_delta = 1 if decision == "needs_more_research" else 0
@@ -1871,7 +2133,8 @@ def critic_node(state: dict, *, chat_client, model: str,
         }
     # Single-critic path (every base tier + xmedium/xhigh + xmax
     # without critic extras): emit the full delta as before.
-    return {
+    _emit_confidence(_critic_conf, source="critic", state=state)
+    out = {
         "critique": text,
         "critic_decision": decision,
         "critic_reroutes_used": rerouted_delta,
@@ -1879,6 +2142,9 @@ def critic_node(state: dict, *, chat_client, model: str,
         "total_prompt_tokens": pt,
         "total_completion_tokens": ct,
     }
+    if _critic_conf is not None:
+        out["confidence"] = [_critic_conf]
+    return out
 
 
 def meta_critic_node(state: dict, *, chat_client, model: str,
@@ -1920,10 +2186,14 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
         and (getattr(t, "content", "") or "").strip()
     ]
 
+    # M4: thread the same live critic dial into the meta-critic so the
+    # x-tier consolidation honors a sharpened strictness / focus too.
+    _mc_strict, _mc_focus = _read_critic_dial(state)
     msgs = build_meta_critic_messages(
         state["question"], state.get("plan", ""),
         state.get("research") or [],
         critic_verdicts,
+        strictness=_mc_strict, adversarial_focus=_mc_focus,
     )
     t0 = time.monotonic()
     try:
@@ -1960,6 +2230,9 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
         }
     dt = time.monotonic() - t0
     decision = parse_critic_decision(text)
+    # M0: strip + emit the consolidated confidence (fanned-critic path).
+    text, _meta_conf = _extract_confidence(text)
+    _emit_confidence(_meta_conf, source="critic", state=state)
     # Meta-critic owns the single critic_reroutes_used increment in
     # multi-critic mode (the C parallel critics suppress their own
     # delta — see critic_node). Adds 1 if the consolidated decision
@@ -1981,7 +2254,7 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
             log.exception("recorder.record_node raised; ignored")
     _emit_finished("meta_critic", round=this_round,
                     duration_ms=int(dt * 1000), ok=True)
-    return {
+    out = {
         # Synthesizer reads ``critique`` + ``critic_decision``. In
         # multi-critic mode the C parallel critics deliberately don't
         # write these; meta-critic is the sole writer.
@@ -1992,6 +2265,9 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
         "total_prompt_tokens": pt,
         "total_completion_tokens": ct,
     }
+    if _meta_conf is not None:
+        out["confidence"] = [_meta_conf]
+    return out
 
 
 def synthesizer_node(state: dict, *, chat_client, model: str,
@@ -2128,6 +2404,11 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
             )],
         }
     dt = time.monotonic() - t0
+    # M0: pull the synthesizer's self-confidence out of ``text`` BEFORE
+    # the citation lint reassigns it and before the user-facing return,
+    # so the CONFIDENCE line never reaches the answer.
+    text, _self_conf = _extract_confidence(text)
+    _emit_confidence(_self_conf, source="synthesizer", state=state)
     # 2026-05-18: post-synthesis citation lint. The 2026-05-18 first
     # M14 consult caught two fabrication classes in the synthesizer's
     # output — an entirely fake filename relayed forward from a
@@ -2178,12 +2459,103 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
             log.exception("recorder.record_node raised; ignored")
     _emit_finished("synthesizer", round=1,
                     duration_ms=int(dt * 1000), ok=True)
-    return {
+    out = {
         "final_answer": text,
         "turns": [turn],
         "total_prompt_tokens": pt,
         "total_completion_tokens": ct,
     }
+    if _self_conf is not None:
+        out["confidence"] = [_self_conf]
+    return out
+
+
+def adversary_node(state: dict, *, chat_client, model: str,
+                   think: Any = True, strictness: str = "normal",
+                   recorder=None) -> dict:
+    """M3: post-synthesis red team. Reads the synthesizer's
+    ``final_answer`` and the upstream evidence, emits a ``REFUTATION``
+    block, and — when it finds real problems — annotates the
+    user-facing answer inline AND records the raw refutation in
+    ``final_answer_refutation`` / ``adversary_decision``. A singleton
+    node (runs once, no Send), so x-tier fanout upstream is untouched.
+
+    Non-fatal everywhere: an empty / failed synthesis is skipped
+    (nothing to refute), and an adversary LLM failure leaves the
+    synthesizer's answer standing unrefuted (``adversary_decision`` =
+    ``error``)."""
+    final_answer = (state.get("final_answer") or "").strip()
+    # Nothing to refute: the synthesizer produced no answer or failed
+    # (degraded path). Leave the degraded answer untouched.
+    if not final_answer or state.get("_role_failed") == "synthesizer":
+        return {}
+    _emit_started("adversary", round=1, model=model)
+    if recorder is not None:
+        try:
+            recorder.record_node(role="adversary", kind="node_enter")
+        except Exception:  # pragma: no cover
+            log.exception("recorder.record_node raised; ignored")
+    msgs = build_adversary_messages(
+        state.get("question") or "", final_answer,
+        state.get("plan", ""), state.get("research") or [],
+        strictness=strictness,
+    )
+    t0 = time.monotonic()
+    try:
+        text, pt, ct = _single_shot(
+            chat_client, model, msgs, think=think,
+            recorder=recorder, role="adversary", round=1,
+        )
+    except Exception as e:
+        log.exception("adversary_node failed: %s", e)
+        _emit_finished(
+            "adversary", round=1,
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            ok=False, error=f"{type(e).__name__}: {e}",
+        )
+        # Adversary failure is non-fatal — the answer stands unrefuted.
+        return {
+            "adversary_decision": "error",
+            "turns": [RoleTurn(
+                role="adversary", round=1,
+                content=f"(adversary failed: {e})",
+                prompt_tokens=0, completion_tokens=0,
+                duration_seconds=0.0,
+            )],
+        }
+    dt = time.monotonic() - t0
+    decision, body = parse_adversary_refutation(text)
+    turn = RoleTurn(
+        role="adversary", round=1, content=text,
+        prompt_tokens=pt, completion_tokens=ct, duration_seconds=dt,
+    )
+    if recorder is not None:
+        try:
+            recorder.record_node(
+                role="adversary", kind="node_exit",
+                duration_ms=int(dt * 1000),
+            )
+        except Exception:  # pragma: no cover
+            log.exception("recorder.record_node raised; ignored")
+    _emit_finished("adversary", round=1,
+                    duration_ms=int(dt * 1000), ok=True)
+    out: dict = {
+        "adversary_decision": decision,
+        "turns": [turn],
+        "total_prompt_tokens": pt,
+        "total_completion_tokens": ct,
+    }
+    if decision == "issues" and body:
+        # Surface the red team's findings to the user inline AND keep
+        # the raw refutation for the transcript / the skill's review
+        # loop. The synthesizer's mechanical citation-linter annotations
+        # (path:line checks) compose with this semantic pass.
+        out["final_answer_refutation"] = body
+        out["final_answer"] = (
+            final_answer
+            + "\n\n---\n**⚠️ Adversarial review:**\n" + body
+        )
+    return out
 
 
 # ----------------------- initial state ---------------------------- #

@@ -428,7 +428,7 @@ class TestGraphTopologyMultiCritic:
         """Build a real council graph (langgraph required). Skip if
         not available — these tests are integration with the
         consultants conda env."""
-        pytest.importorskip("langgraph")
+        pytest.importorskip("langgraph.graph")  # concrete leaf — ghost-dir proof
         from consultants.engine.graph import (
             GraphDeps, build_council_graph,
         )
@@ -504,7 +504,7 @@ class TestGraphTopologyMultiCritic:
         # 1 + len(critic_extras) times. Caught on the first live
         # xmax smoke (csl-...-2a8f) where 6 researcher lanes
         # produced 18 critic invocations instead of 3.
-        pytest.importorskip("langgraph")
+        pytest.importorskip("langgraph.graph")  # concrete leaf — ghost-dir proof
         from consultants.engine.graph import (
             GraphDeps, build_council_graph,
         )

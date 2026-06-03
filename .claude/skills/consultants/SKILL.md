@@ -164,6 +164,20 @@ Include:
 
 Keep framing under ~1 KB.
 
+**Compose an adversarial focus when the stakes warrant it.** If a
+*wrong-but-plausible* answer would be costly — an architecture call, a
+security or correctness claim, a "is X safe to do" question — name, in
+one or two sentences, the specific way the answer is most likely to be
+wrong (the unstated assumption, the edge case, the claim that's true in
+general but false here). You have two places to put it, depending on
+timing: as a one-line "adversarial focus" note inside the framing so the
+critic carries it from the start, or — for a live nudge mid-flight — via
+`control --strictness adversarial --adversarial-focus "<brief>"` (see
+the **Dynamic adversary** subsection of the review loop). **Skip this
+entirely for list / lookup / "what does X do" questions** — there's no
+plausible-but-wrong trap to set against them, and the directive only
+adds noise.
+
 ### 3. Start the consultation
 
 ```
@@ -459,6 +473,54 @@ If your context was compacted mid-loop, on re-entry **read
 The status is engine-owned and persisted, so it's authoritative across
 the compaction boundary — trust it over your own memory of where you were.
 
+### 5. Dynamic adversary — author the challenge, react to the checkpoint
+
+The review loop above is *post-hoc* skepticism — you challenge the answer
+after it lands. The **dynamic adversary** is the same instinct moved
+*earlier*: you compose a bespoke challenge and feed it into the council
+while it runs, so the critic is already hunting for the weakness before
+synthesis. Two mechanisms, both opt-in (Subflow G):
+
+**Authoring template (the brief).** When you decide a question warrants
+an adversary (the framing-step rule: costly if wrong, not a lookup),
+write a 2–4 line brief that:
+
+1. **Names 2–3 specific claims to attack** — the load-bearing assertions
+   whose failure would sink the answer ("it assumes the daemon reads
+   `~/.claude.json`"; "it treats the cache as write-through").
+2. **Sets the refutation bar** — what counts as a real refutation vs.
+   nitpicking ("only flag a claim if you can point at the file that
+   contradicts it").
+
+Deliver it as `control --strictness adversarial --adversarial-focus
+"<brief>"` (re-shapes the next critic + meta-critic call), or — for the
+strongest form — via the **adversary checkpoint**.
+
+**Reacting to `awaiting_adversary` (the checkpoint).** When
+`adversary_checkpoint` is ON, the council pauses just before synthesis
+and emits an `awaiting_adversary` event carrying a `deadline_ts` and the
+synthesizer's `self_confidence`. React like this:
+
+1. **Subscribe** to the stream — `claude-consultants events <sid>` (or
+   `--since <id>` to replay across a reconnect / compaction). The
+   `awaiting_adversary` block is durable, so a missed SSE is recoverable.
+2. **Author + inject** the brief at the role the critique should re-run
+   through: `inject <sid> --role critic -m "<brief>"` to re-run the
+   fanned critics against it, or `--role synthesizer` to just sharpen the
+   final write-up. These checkpoint/control verbs (`events`, `inject`,
+   `adversary-ack`, `resume`) address the run by **`sid`** through the
+   engine — they take **no `--cwd`** (unlike `consult` / `follow-up` /
+   `config`).
+3. **Ack to resume** — `claude-consultants adversary-ack <sid>` (or
+   `resume <sid>` during the checkpoint window, which delegates to the
+   ack). The council resumes immediately with your brief in the prompt.
+4. **Or do nothing** — the checkpoint **auto-proceeds at the deadline**
+   (default 10 min) so a lost SSE / missed poll never hangs the run. If
+   you have no challenge worth making, just let it lapse.
+
+Don't open a checkpoint you won't staff: the pause is wall-clock the user
+waits through. Author the brief *first*, then ack — not the reverse.
+
 ---
 
 ## accept — mark a consultancy accepted
@@ -541,8 +603,18 @@ researcher + critic (with `(none)` when empty); hide for planner +
 synthesizer (engine doesn't fan those out). ctx_max is `auto` when
 null, `<N>` when set.
 
+**Scope banner.** Read the `active_config` block in the JSON and put
+a `Config scope:` line at the top of the render. When
+`active_config.scope` is `project`, say **PER-PROJECT** and show the
+path — every change you make in this dialog lands in that file, not
+user-global. When it's `user` but `project_file_exists` is `true`,
+note the per-project file is present but dormant
+(`override_user_global=off`). The CLI also prints this on stderr;
+relay that one-liner verbatim if the user is scripting.
+
 ```
 === /consultants config ===
+Config scope: PER-PROJECT (.claude-hooks/consultants.toml, override_user_global=on)
 Service mode: smart-start (idle 30 min)   |   always-on
 Endpoint: http://127.0.0.1:38096
 Effort: xhigh (budget 5, multi-model active)
@@ -576,9 +648,9 @@ per-language entry the same way. The routes only matter when
 
 ### 2. Top-level menu (loop until Done)
 
-The menu has five areas; AskUserQuestion caps at 4 options, so present
-it in two rounds — round 1 offers the first three plus **More…**, and
-**More…** opens round 2 with the rest plus **Done**:
+The menu has seven areas; AskUserQuestion caps at 4 options, so
+present it in rounds — round 1 offers the first three plus **More…**,
+and **More…** opens the next batch (ending with **Done**):
 
 1. **Edit a role** — toggle on/off, model, ctx, extras
 2. **Change service mode** — always-on or smart-start
@@ -588,6 +660,11 @@ it in two rounds — round 1 offers the first three plus **More…**, and
    fallback) for the optional coder role
 5. **Followup limit** — the review-loop cap (`max_followups`) and the
    per-approval grant size (`allow_extra`) — see Subflow F
+6. **Adversary / verify budget** — the optional `adversary` role, its
+   strictness, the engine-initiated adversary checkpoint, and the
+   skeptic-panel `verify_budget` — see Subflow G
+7. **Config scope** — choose user-global vs per-project and flip the
+   per-project `override_user_global` directive — see Subflow H
 
 Loop back to step 1 after each successful change; exit on **Done**.
 
@@ -732,17 +809,108 @@ When the user picks **"5. Followup limit"**:
      `claude-consultants config set-allow-extra <N>`.
 3. Loop back to step 1 after a successful change.
 
+### Subflow G — Adversary / verify budget
+
+When the user picks **"6. Adversary / verify budget"**. These four
+knobs all default OFF / bounded. They fire **whenever enabled**, on
+any effort tier — there is no silent effort gate (a pause the operator
+turned on should pause). Because the checkpoint can add up to its
+timeout in latency and the council answers strongest with the fanned
+critics behind it, surface this guidance once when the current effort
+is low/medium:
+
+> Note: the adversary checkpoint pauses for an external red-team brief
+> (up to its timeout) and the post-synthesis adversary role adds a
+> refutation pass. Both fire on any tier once enabled, but they pay
+> off most at high/max (and xhigh/xmax) on high-stakes questions where
+> a wrong-but-plausible answer is costly.
+
+1. Show current values from `config show`: `roles.adversary.enabled`,
+   `adversary_strictness`, `adversary_checkpoint` (+ its timeout), and
+   `verify_budget`.
+2. AskUserQuestion which to change: **Adversary role** / **Adversary
+   checkpoint** / **Verify budget** / **Back** (strictness is reached
+   under "Adversary role").
+   - **Adversary role** — a sub-question:
+     - *Toggle on/off* — forward
+       `claude-consultants config set-role adversary --enabled <true|false>`.
+       The adversary is a post-synthesis refuter: it runs once after
+       the synthesizer and annotates the answer with a `REFUTATION:`
+       block (or `REFUTATION: none`). It never asks for more research.
+     - *Change strictness* — AskUserQuestion `soft` / `normal` /
+       `strict`, then
+       `claude-consultants config set-adversary-strictness <level>`.
+       `soft` flags only clear hallucinations; `strict` challenges
+       every unsupported claim.
+     - *Change model* — same as Subflow A's model picker, forwarding
+       `set-role adversary --model <chosen>`.
+   - **Adversary checkpoint** — the engine-initiated pause. When ON,
+     the council pauses just before synthesis, emits an
+     `awaiting_adversary` SSE event, and waits for the assistant to
+     inject a bespoke adversarial brief before resuming — auto-proceeds
+     after the timeout if no answer arrives (covers a lost SSE / missed
+     poll). AskUserQuestion `on` / `off`; if `on`, offer the timeout
+     (`5min` / `10min (default)` / `Other`). Forward:
+     `claude-consultants config set-adversary-checkpoint <on|off> [--timeout <seconds>]`.
+     See the **Dynamic adversary** subsection of the review loop for
+     how to react to `awaiting_adversary`.
+   - **Verify budget** — caps the skeptic panel the Workflow driver
+     (and the review loop) runs against surviving claims.
+     AskUserQuestion `minimal` (2 claims / 1 round) / `bounded`
+     (3 claims, default) / `generous` (5 claims, up to the followup
+     cap). Forward:
+     `claude-consultants config set-verify-budget <tier>`.
+3. Loop back to step 1 after a successful change.
+
+### Subflow H — Config scope (user-global vs per-project)
+
+A per-project file (`<cwd>/.claude-hooks/consultants.toml`) is the
+active config when its `override_user_global` directive is on (default
+on for a new file). When active, every `config set-*` and this dialog
+write that file by default; `--user` forces user-global. Read
+`active_config` from `config show` for the current state, then
+AskUserQuestion:
+
+- **Activate per-project** — make `.claude-hooks/consultants.toml` the
+  active config, creating it as a full snapshot if absent. Forward:
+  `claude-consultants config set-override-user-global on --cwd "$(pwd)"`.
+- **Deactivate per-project** — engine + every config command fall back
+  to user-global; the file is preserved (flip back on to restore it).
+  Forward:
+  `claude-consultants config set-override-user-global off --cwd "$(pwd)"`.
+- **Show user-global** — re-render the status block from
+  `config show --user` so the user can compare scopes.
+- **Back**.
+
+Relay once: a per-project file is a **full snapshot**, so the first
+project-scoped write captures the entire effective config —
+user-global stops "showing through" for those keys until the flag is
+turned off again.
+
+3. Loop back to step 1 after a successful change.
+
 ### After every change
 
 Re-run `config show` and re-render the status block. Return to
 step 2's menu unless the user picked Done.
 
-### Per-project overrides
+### Per-project overrides — first-class scope
 
-Mention only when the user asks: `set-role ... --project --cwd "$(pwd)"`
-edits the per-project TOML (`<project>/.claude-hooks/consultants.toml`)
-instead of the user-global (`~/.claude/consultants-config.toml`).
-Skill defaults to user-global.
+Per-project config is a first-class concept, not an afterthought. The
+config layers defaults < user-global < per-project; a per-project file
+(`<cwd>/.claude-hooks/consultants.toml`) shadows user-global key-by-key
+and the engine reads it on every consult **when its
+`override_user_global` directive is on** (a per-project-file-only flag,
+default on for a new file).
+
+When the active scope is per-project, `config show` and every `set-*`
+already act on that file by default — you do **not** need `--project`.
+Use the explicit flags only to override: `--user` acts on user-global;
+`--project` / `--cwd "$(pwd)"` forces the per-project file (e.g. to
+create one). Flip the directive with
+`config set-override-user-global on|off --cwd "$(pwd)"` (Subflow H).
+Always surface which scope a change landed in — read
+`active_config.scope` from the JSON and relay the CLI's stderr notice.
 
 ---
 
@@ -841,7 +1009,8 @@ default if you don't know which role should see it.
 ```
 claude-consultants control <sid> --time +30m
 claude-consultants control <sid> --max-rounds 5 --confidence 0.7
-claude-consultants control <sid> --strictness strict
+claude-consultants control <sid> --strictness adversarial \
+  --adversarial-focus "attack the claim that the cache is write-through"
 claude-consultants control <sid> --disable critic
 ```
 
@@ -852,6 +1021,18 @@ now"). ``--enable`` and ``--disable`` mutate ``enabled_roles`` via
 a snapshot-then-subtract (the CLI reads ``GET /state`` first to
 build the diff). Use to grow / shrink the budget after seeing the
 plan or first researcher round.
+
+``--strictness`` is the **critic dial** (M4), not an adversary-role
+toggle: it threads ``lax`` / ``normal`` / ``strict`` / ``adversarial``
+into the next critic + meta-critic prompt, so the change actually
+re-shapes the next critique. ``adversarial`` is the live-only level —
+it makes the critic actively hunt to *break* the evidence — and pairs
+with ``--adversarial-focus "<brief>"`` to point that hunt at a specific
+claim (see the **Dynamic adversary** subsection). The static
+``adversary_strictness`` config (Subflow G) seeds the boot-time dial
+(soft→lax / normal→normal / strict→strict); ``adversarial`` is reachable
+only here, mid-flight. Pass ``--adversarial-focus ""`` to clear a brief
+you set earlier.
 
 ### pause + resume — HITL approval flow
 
@@ -932,6 +1113,74 @@ mid-flight intervention.** Examples:
 Routine progress monitoring is the monitor channels' job (``events``
 stream from the ask flow above, or ``status`` poll, or ``state``
 snapshot) — not these intervention verbs.
+
+---
+
+## Driving the council from a Workflow
+
+The whole engagement — `ask → review → verify → accept|followup` — is a
+deterministic loop, which makes it a natural fit for a Claude Code
+**Workflow** when the user has opted into multi-agent orchestration (the
+"workflow" keyword, ultracode, or an explicit "fan this out" ask). A
+committed, ready-to-run script lives at
+`.claude/workflows/consult-with-adversarial-review.mjs`; invoke it with
+the Workflow tool by name:
+
+```
+Workflow(name="consult-with-adversarial-review",
+         args={ question: "<the question>",
+                cwd: "<absolute project root>",
+                effort: "high",            // optional
+                verifyBudget: "bounded",   // minimal|bounded|generous
+                maxRounds: 4 })            // optional client-side cap
+```
+
+It pipelines: a **consult** agent runs `claude-consultants consult …
+--wait` and returns the answer; a **review** agent triages it for wrong
+assumptions + gaps; a **skeptic panel** (`parallel`, one agent per
+load-bearing claim) tries to *refute* each claim against the real repo;
+then the script either **accepts** (reviewer satisfied AND nothing
+survived refutation) or calls `composeChallenge()` — the surviving
+refutations + open concerns become a single focused **follow-up** — and
+loops. `composeChallenge()` is where Q1 (a bespoke adversarial brief)
+meets Q2 (the programmatic driver).
+
+### The consultancy.status branch table
+
+The driver (and any hand-rolled loop) keys on the same engine-owned
+status carried in every `status` / `result` / `follow-up` JSON:
+
+| `consultancy.status` | meaning | driver action |
+|----------------------|---------|---------------|
+| `in_progress` | council still working / mid-chain | keep polling (or `--wait`) |
+| `ready_to_review` | an answer is on the table | run the review + skeptic panel |
+| `accepted` | terminal — you (or a prior run) accepted | stop; present the answer |
+| `awaiting_approval` | followup cap hit without an override | stop the auto-loop; surface to the user |
+
+### Four mandatory disciplines
+
+These are baked into the committed script; preserve them in any variant:
+
+1. **Thread `--cwd` on every call.** A Workflow agent starts in its own
+   cwd; without `--cwd "<root>"` the engine resolves the wrong project
+   (or none). Every prompt in the script restates this.
+2. **Detect the cap on JSON `ok == false`, never `$?`.** A followup
+   refusal is an HTTP 200 with `{"ok": false, "reason":
+   "followup_limit_reached"}` — the shell exit code is 0. Branch on the
+   parsed JSON, then stop and ask the user (don't auto-retry past the
+   cap).
+3. **Gate on a complete answer before trusting `consultancy.status`.**
+   `--wait` only prints the result once the per-run `status` reaches
+   `completed`, so the wait *is* the gate; a hand-rolled poll must check
+   per-run `status == "completed"` before reading `consultancy.status`.
+4. **Cap the skeptic panel by `verify_budget`.** `minimal` = 2 claims /
+   1 round, `bounded` = 3 (default), `generous` = 5 up to the followup
+   cap. The script maps the tier to the panel size; the N-council
+   breadth variant is worth gating to high/max only.
+
+When the user has NOT opted into orchestration, don't reach for the
+Workflow — run the same loop inline via the **Review loop** section
+above. The Workflow is the same recipe, parallelized.
 
 ---
 

@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
-from io import BytesIO
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from claude_hooks import store_async
 
@@ -37,13 +36,22 @@ class TestSpawn:
         popen.assert_called_once()
         args, kwargs = popen.call_args
         cmdline = args[0]
-        assert cmdline[0] == sys.executable
+        # Platform-independent: the module-runner invocation + DEVNULL stdio.
         assert cmdline[1] == "-m"
         assert cmdline[2] == "claude_hooks.store_async"
-        # Detached: new session + DEVNULL stdio.
-        assert kwargs["start_new_session"] is True
         assert kwargs["stdout"] == store_async.subprocess.DEVNULL
         assert kwargs["stderr"] == store_async.subprocess.DEVNULL
+        # cmd[0] + detach kwargs are platform-specific: POSIX uses
+        # sys.executable + start_new_session; Windows swaps in the
+        # windowless interpreter (pythonw) and uses creationflags
+        # (CREATE_NO_WINDOW | DETACHED_PROCESS | BREAKAWAY), so it is
+        # NOT sys.executable and has no start_new_session.
+        if os.name == "nt":
+            assert "creationflags" in kwargs
+            assert "start_new_session" not in kwargs
+        else:
+            assert cmdline[0] == sys.executable
+            assert kwargs["start_new_session"] is True
 
     def test_spawn_writes_payload_to_stdin(self):
         fake_proc = MagicMock()

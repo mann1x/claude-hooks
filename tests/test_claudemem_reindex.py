@@ -1,7 +1,6 @@
 """Tests for the claudemem auto-reindex helpers."""
 
 import os
-import subprocess
 import tempfile
 import time
 import unittest
@@ -273,10 +272,15 @@ class SpawnReindexTests(unittest.TestCase):
         """On POSIX, the helper must pass ``start_new_session=True`` so
         the child detaches from our process group — otherwise SIGINT to
         the daemon would also kill the child reindex."""
+        # Pre-construct the Path BEFORE patching os.name — pathlib's
+        # Path() picks Posix vs Windows at instantiation, so a flip to
+        # "posix" makes Path("/tmp") raise NotImplementedError on Windows.
+        # (Mirrors the windows sibling test below.)
+        root = Path("/tmp")
         with patch("claude_hooks.claudemem_reindex.os.name", "posix"), \
              patch("claude_hooks.claudemem_reindex.subprocess.Popen") as Popen:
             Popen.return_value = MagicMock(pid=1)
-            claudemem_reindex._spawn_reindex("/usr/bin/claudemem", Path("/tmp"))
+            claudemem_reindex._spawn_reindex("/usr/bin/claudemem", root)
             kwargs = Popen.call_args.kwargs
             self.assertTrue(kwargs.get("start_new_session"))
             self.assertNotIn("creationflags", kwargs)

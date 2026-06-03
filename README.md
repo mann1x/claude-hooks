@@ -82,6 +82,31 @@ forgetting. Beyond the core:
   (#204 / #205 / #207). Default-off opt-ins: see
   [`docs/consultants-roles.md`](docs/consultants-roles.md) for
   what to enable per question shape.
+- **Next cut (on `dev`, tentatively ~v1.13.0 — release trigger
+  pending)** — two additive, **default-OFF** feature lines on top of the
+  v2 engine, each M12 cohort-2 parity-guarded:
+  - **`/consultants` dynamic adversarial review** — harden a council
+    answer against the *wrong-but-plausible* failure mode: an engine
+    **adversary checkpoint** (pause before synthesis for an
+    assistant-authored red-team brief; auto-resumes on timeout), an
+    automated post-synthesis **adversary role**, a live **critic dial**
+    (`lax`/`normal`/`strict`/`adversarial` + a free-text attack focus),
+    and a skeptic-panel **`verify_budget`** — plus a committed
+    **Workflow-driven council**
+    ([`.claude/workflows/consult-with-adversarial-review.mjs`](.claude/workflows/consult-with-adversarial-review.mjs))
+    that pipelines *ask → review → skeptic-panel → accept|follow-up*.
+    Runbook + worked configure/invoke recipes in
+    [`docs/consultants.md`](docs/consultants.md).
+  - **Per-project `/consultants` config scope** — a
+    `<project>/.claude-hooks/consultants.toml` is now the consistently
+    applied **active config** across every `config` command *and* the
+    engine, governed by a per-project-only **`override_user_global`**
+    directive (auto write-scope, with `--user`/`--project`/`--cwd` to
+    override on any `config set-*`, plus a new project-scoped
+    `config set-override-user-global on|off` verb). The real file is
+    gitignored (it carries host-specific secrets); a placeholder-only
+    [`.claude-hooks/consultants.example.toml`](.claude-hooks/consultants.example.toml)
+    template is committed.
 
 ---
 
@@ -112,7 +137,11 @@ wiring, monitoring, uninstall — see [`docs/deployment.md`](docs/deployment.md)
   [v1.4](docs/whats-new-v1.4.md),
   [v1.1](docs/whats-new-v1.1.md)). Significant unreleased work
   on `dev` since v1.7.0: `/consultants` v2 (M8 store, M11c-3
-  proper composition, M14 TTL+distillation, CitationLinter).
+  proper composition, M14 TTL+distillation, CitationLinter) and the
+  next-cut feature lines above — dynamic adversarial review
+  (checkpoint / role / critic dial / verify budget + Workflow-driven
+  council) and per-project config scope (`override_user_global`). The
+  cut (tentatively ~v1.13.0) is triggered manually when ready.
 - Tagged releases live on [GitHub Releases](https://github.com/mann1x/claude-hooks/releases) with auto-generated `Source code (zip / tar.gz)` archives.
 - Branch model: `main` is the release branch (every commit shippable, tags live here); `dev` is the working branch (feature work + fixes land here first). See [`docs/RELEASING.md`](docs/RELEASING.md) for the cut procedure.
 - To track unreleased work: `git log v1.7.0..origin/dev` after fetching.

@@ -29,15 +29,27 @@ def _fn():
 
 @contextmanager
 def _timeout(seconds: float):
-    def _handler(signum, frame):
-        raise TimeoutError(f"exceeded {seconds}s")
-    old = signal.signal(signal.SIGALRM, _handler)
-    signal.setitimer(signal.ITIMER_REAL, seconds)
-    try:
+    """Wall-clock timeout. POSIX uses SIGALRM to interrupt the block
+    mid-run; Windows (no SIGALRM) falls back to a post-hoc elapsed check
+    — sufficient here because the canonical submission completes well
+    within budget, and a runaway one is still bounded by the harness's
+    outer pytest/subprocess timeout."""
+    if hasattr(signal, "SIGALRM"):
+        def _handler(signum, frame):
+            raise TimeoutError(f"exceeded {seconds}s")
+        old = signal.signal(signal.SIGALRM, _handler)
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+        try:
+            yield
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, old)
+    else:
+        import time as _time
+        start = _time.monotonic()
         yield
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, old)
+        if _time.monotonic() - start > seconds:
+            raise TimeoutError(f"exceeded {seconds}s")
 
 
 def test_single_cell():

@@ -413,6 +413,24 @@ a particularly cross-cutting question without changing the default):
 /consultants --effort xhigh <your question>
 ```
 
+**Blocking mode (`--wait`).** The CLI is async by default — `consult`
+returns a `sid` you poll. For scripts and Workflows that just want the
+final answer in one call, pass `--wait`:
+
+```
+claude-consultants consult --message "<framing>" --cwd "$(pwd)" --wait
+```
+
+`--wait` polls the run to a terminal status and then prints the
+**result** (same JSON shape as `result <sid>`) instead of the initial
+run record — `{"ok": true, "summary_markdown": "...", ...}` on success,
+`{"ok": false, "status": "failed", ...}` (exit 1) otherwise. Tune the
+cadence with `--poll-interval <s>` (default 2.0) and bound the client
+wait with `--wait-timeout <s>` (default 0 = wait indefinitely; a
+positive cap aborts the *wait* only — the run keeps going server-side).
+This is the verb the Workflow driver builds on (see **Adversarial
+review** below).
+
 ---
 
 ## Follow-ups — the v1.1 headline feature
@@ -529,6 +547,198 @@ claude-consultants config set-allow-extra 1      # per-approval grant (>= 1)
 
 or via `/consultants config` → **Followup limit**. Both surface in
 `config show` (`max_followups`, `allow_extra`).
+
+---
+
+## Adversarial review (checkpoint · role · critic dial · verify budget)
+
+Four independent, **default-OFF** mechanisms for hardening a council
+answer against the *wrong-but-plausible* failure mode. Each pays off on
+high-stakes questions (architecture calls, correctness/security claims)
+and adds noise on lookups — so they ship off and you opt in per project
+via `/consultants config` → **Adversary / verify budget** (or the
+`claude-consultants config set-*` verbs). All four preserve M12 cohort-2
+parity when off, and none of them touch the Phase 9/10 researcher
+fan-out.
+
+### Adversary checkpoint — an engine pause for an assistant-authored challenge
+
+When `adversary_checkpoint` is ON, the council **pauses just before
+synthesis**, emits an `awaiting_adversary` SSE event, and waits for the
+assistant to inject a bespoke red-team brief — then resumes. It
+auto-proceeds after a timeout (default **600 s**) so a lost SSE / missed
+poll never hangs the run.
+
+```
+                      ┌───────────── adversary_checkpoint = ON ─────────────┐
+   …critic ──► (pre-synthesis boundary)                                     │
+                      │  emit awaiting_adversary{deadline_ts, self_confidence}
+                      │  record to runtime_events (Last-Event-ID replayable)│
+                      ▼                                                      │
+              ┌── wait for EITHER ──┐                                        │
+              │                     │                                        │
+   adversary-ack / resume      deadline passes (≤ timeout)                   │
+   (+ optional inject brief)         │                                       │
+              │                     │                                        │
+              ▼                     ▼                                        │
+        resume with brief     auto-resume (today's default behavior)        │
+              └─────────► synthesizer ◄──────────┘                          │
+                      └──────────────────────────────────────────────────────┘
+```
+
+The runner is the **sole resumer** (a deadline-bounded park-poll), so
+there's no double-resume race with `POST /resume`. The assistant reacts
+by subscribing to `events`, `inject`-ing the brief at the `critic` (re-run
+the fanned critics) or `synthesizer` (just sharpen) role, and
+`adversary-ack`-ing — see the SKILL's **Dynamic adversary** subsection.
+Toggle + timeout:
+
+```
+claude-consultants config set-adversary-checkpoint on --timeout 600
+```
+
+### Adversary role — an automated post-synthesis refuter
+
+When `roles.adversary.enabled`, a singleton node runs **once after the
+synthesizer** (`synthesizer → adversary → END`) and tries to refute the
+answer's load-bearing claims, emitting `REFUTATION: none` (answer stands)
+or a `REFUTATION:` block the engine appends inline as `⚠️ Adversarial
+review:`. It never asks for more research. As a post-barrier singleton
+with no per-lane `Send`, it leaves x-tier fan-out untouched. Full
+contract in [`docs/consultants-roles.md`](consultants-roles.md#adversary).
+
+```
+claude-consultants config set-role adversary --enabled true
+claude-consultants config set-adversary-strictness strict   # soft|normal|strict
+```
+
+`adversary_strictness` is shared: it tunes the role **and** seeds the M4
+critic dial below.
+
+### Critic dial — a live strictness knob (M4)
+
+`runtime_control.critic_strictness` (`lax` / `normal` / `strict` /
+`adversarial`) threads a directive into the next **critic and
+meta-critic** prompt; `adversarial` makes the critic hunt to break the
+evidence and pairs with a free-text `adversarial_focus` attack brief.
+Live, mid-flight:
+
+```
+claude-consultants control <sid> --strictness adversarial \
+  --adversarial-focus "attack the claim that the cache is write-through"
+```
+
+Boot-time it's seeded from `adversary_strictness`; `adversarial` is
+reachable only via `POST /control`. Default `normal` + empty focus
+appends nothing (byte-identical to the pre-M4 critic).
+
+### Verify budget — the skeptic-panel cap
+
+`verify_budget` (`minimal` = 2 claims / 1 round, `bounded` = 3 default,
+`generous` = 5 up to the followup cap) sizes the skeptic panel the
+**Workflow driver** runs against surviving claims. It only affects the
+driver / review loop, never the bare council.
+
+```
+claude-consultants config set-verify-budget bounded
+```
+
+### Driving it from a Workflow
+
+The committed
+[`.claude/workflows/consult-with-adversarial-review.mjs`](../.claude/workflows/consult-with-adversarial-review.mjs)
+pipelines the whole loop — `consult --wait` → review agent → a `parallel`
+skeptic panel (sized by `verify_budget`) → `accept` or a `composeChallenge`
+follow-up. Run it (when you've opted into orchestration) with the
+Workflow tool: `Workflow(name="consult-with-adversarial-review",
+args={question, cwd, effort, verifyBudget, maxRounds})`. The SKILL's
+**Driving the council from a Workflow** section has the recipe + the
+four mandatory disciplines.
+
+### Worked examples — configure + invoke
+
+Three concrete recipes. Note the scope split: **`config` and `consult`
+take `--cwd`** (they resolve a project); the **control verbs
+(`events` / `inject` / `adversary-ack` / `control`) do not** — they act
+on a running `sid` through the engine endpoint.
+
+**1 · Checkpoint review — you author the red-team brief.** Turn the
+checkpoint on (per-project, so it applies only to this repo), then ask a
+high-stakes question. The run pauses at the pre-synthesis boundary and
+Claude — via the skill's **Dynamic adversary** flow — writes a bespoke
+challenge, injects it, and acks so synthesis proceeds with the challenge
+folded in:
+
+```bash
+# configure once, per project (writes .claude-hooks/consultants.toml)
+claude-consultants config set-adversary-checkpoint on --timeout 600 \
+  --project --cwd "$(pwd)"
+```
+
+```text
+# then, in Claude Code:
+/consultants ask is the new write-through cache coherent across the 3 md arrays?
+```
+
+When the run emits `awaiting_adversary`, Claude reacts (you don't type
+these — the skill does):
+
+```bash
+claude-consultants events <sid> --since 0      # watch for awaiting_adversary
+claude-consultants inject <sid> --role critic \
+  -m "Attack the coherence claim: what happens on a bcache writeback race?"
+claude-consultants adversary-ack <sid>         # resume into synthesis
+```
+
+Inject at `critic` to re-run the fanned critics against the brief, or at
+`synthesizer` to just sharpen the final answer. If nobody acks, the run
+auto-resumes at the `--timeout` deadline.
+
+**2 · Always-on adversary role — automatic refutation, no pause.** The
+answer comes back with a `⚠️ Adversarial review:` block appended (or a
+silent `REFUTATION: none` when it stands):
+
+```bash
+claude-consultants config set-role adversary --enabled true \
+  --project --cwd "$(pwd)"
+claude-consultants config set-adversary-strictness strict \
+  --project --cwd "$(pwd)"   # soft | normal | strict — also seeds the critic dial
+```
+
+```text
+/consultants ask review the lock ordering in consultants/server/runner.py
+```
+
+Prefer the menu? `/consultants config` → **Adversary / verify budget**
+(Subflow G) drives the same knobs interactively. To sharpen a *single*
+run mid-flight instead of enabling the role globally, escalate the critic
+dial live (no `--cwd`):
+
+```bash
+claude-consultants control <sid> --strictness adversarial \
+  --adversarial-focus "attack the claim that the cache is write-through"
+```
+
+**3 · Workflow-driven council — orchestrated review loop.** When you've
+opted into orchestration, drive the whole *ask → review → skeptic-panel
+→ accept|follow-up* loop with the committed Workflow (Claude runs this
+via the Workflow tool):
+
+```js
+Workflow(name="consult-with-adversarial-review", args={
+  question: "Is the M14 distillation reaper safe under a cohort-expiry storm?",
+  cwd: "/srv/dev-disk-by-label-opt/dev/claude-hooks",  // absolute, required
+  effort: "xhigh",            // optional — overrides the configured tier
+  verifyBudget: "generous",   // minimal=2 / bounded=3 / generous=5 skeptics
+  maxRounds: 4,               // optional — follow-up cap (default 4)
+})
+```
+
+It runs `consult --wait`, critiques the answer for wrong assumptions +
+gaps, fans a `verify_budget`-sized skeptic panel at the load-bearing
+claims, then `accept`s or turns surviving refutations into a focused
+follow-up and loops (bounded by `maxRounds`). See the SKILL's **Driving
+the council from a Workflow** section for the four mandatory disciplines.
 
 ---
 
@@ -695,7 +905,7 @@ claude-consultants config set-store-distillation --max-groups-per-sweep 3 \
     --pace-seconds-between-distillations 10
 
 # Coder language routes (opt-in coder role; M11b skill-eval)
-claude-consultants config coder set-route python --primary glm-5.1:cloud \
+claude-consultants config coder set python --primary glm-5.1:cloud \
     --fallback kimi-k2.6:cloud
 claude-consultants config coder set-default --primary glm-5.1:cloud
 
@@ -703,15 +913,98 @@ claude-consultants config coder set-default --primary glm-5.1:cloud
 claude-consultants config list-models
 ```
 
-Every `set-*` accepts `--project` + `--cwd` to write a per-project
-override file (`.claude-hooks/consultants.toml`) instead of the
-user-global `~/.claude/consultants-config.toml`. Both files are
-hand-editable if you prefer; the CLI is a typed wrapper around the
-same dataclass + TOML round-trip.
-
 `config list-models` calls Ollama's `/api/tags` and filters to
 tools-capable models — what the council can actually use as a role
 model.
+
+### Config scope — user-global vs per-project
+
+Two on-disk files back the config, layered defaults < user-global <
+per-project:
+
+- **user-global** — `~/.claude/consultants-config.toml`.
+- **per-project override** — `<cwd>/.claude-hooks/consultants.toml`.
+  When present and active it shadows user-global key-by-key (deep
+  merge), and the **engine reads it on every consult** from that cwd.
+
+Whether the per-project file is active is governed by a per-project-
+scoped directive that lives *only in that file*:
+
+```toml
+# .claude-hooks/consultants.toml
+override_user_global = true   # this file is the active config (default)
+                              # false → ignored everywhere; fall back to user-global
+```
+
+The flag is **on** by default when a new per-project file is created,
+and a legacy file missing the key is treated as on (preserves the
+historical "project wins" behavior). It is **not** a user-global
+setting — it has no meaning outside a per-project file.
+
+**Bootstrap a per-project config.** The repo ships
+[`.claude-hooks/consultants.example.toml`](../.claude-hooks/consultants.example.toml)
+— a committed, placeholder-only snapshot of the full schema (secrets
+like the pgvector DSN are commented out, and `override_user_global` is
+shown set to `true`). Start a per-project config either way:
+
+```bash
+# Option A — copy the committed template, then edit models / effort / store
+cp .claude-hooks/consultants.example.toml .claude-hooks/consultants.toml
+
+# Option B — let the CLI create it (a full snapshot of your effective config)
+claude-consultants config set-override-user-global on --cwd "$(pwd)"
+# …or any project-scoped set-*, which also creates the file:
+claude-consultants config set-effort xhigh --project --cwd "$(pwd)"
+```
+
+The real `<project>/.claude-hooks/consultants.toml` is **gitignored**
+(it carries host-specific secrets); only the `.example.toml` template is
+committed, mirroring the `config/claude-hooks.{json,example.json}`
+convention.
+
+**Write scope is automatic.** With no flags, a `config set-*` writes:
+
+- the **per-project** file when one exists *and* its flag is on
+  (the active scope), else
+- **user-global**.
+
+Override the auto-resolution explicitly:
+
+| Flag | Effect |
+|---|---|
+| `--project` | Force the per-project file (created as a full snapshot if absent). |
+| `--user` | Force user-global, ignoring any active per-project file. |
+| `--cwd <dir>` | Project root to resolve against (default: current directory). |
+
+`config show` (and `config coder list`) default to the active scope at
+the current directory; pass `--user` to force the user-global view.
+Every config command emits an `active_config` block in its JSON
+(`scope`, `override_user_global`, `project_config_path`,
+`project_file_exists`) and prints a one-line scope notice on **stderr**
+whenever a per-project file is in play, so you always know which file a
+write landed in.
+
+Flip the directive with the dedicated verb (inherently project-scoped —
+no `--user`/`--project`):
+
+```bash
+# Make the per-project file the active config (creates it if absent)
+claude-consultants config set-override-user-global on  --cwd "$(pwd)"
+
+# Dormant: engine + every config command ignore the file, use user-global.
+# The file's own content is preserved, so flipping back on restores it.
+claude-consultants config set-override-user-global off --cwd "$(pwd)"
+```
+
+Per-project files are **full snapshots** (not sparse diffs): the first
+project-scoped write captures the entire effective config, so
+user-global no longer "shows through" for those keys afterward — the
+stderr notice makes this visible. `set-idle-timeout` is the one
+exception — it writes `config/claude-hooks.json`, not the consultants
+TOML, so it has no scope flags.
+
+Both files are hand-editable if you prefer; the CLI is a typed wrapper
+around the same dataclass + TOML round-trip.
 
 ### Interactive installer
 

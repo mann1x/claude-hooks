@@ -207,6 +207,34 @@ class Resumed(CouncilEvent):
 
 
 @dataclass(frozen=True, kw_only=True)
+class AwaitingAdversary(CouncilEvent):
+    """M2 — the engine has paused at the always-on synthesizer
+    interrupt to solicit an assistant-authored adversarial challenge
+    *before* the final answer is synthesized. Fires only when the
+    opt-in ``adversary_checkpoint`` knob is enabled (default OFF).
+
+    The consumer (Claude, or a Workflow driver) reacts by POSTing an
+    inject — the bespoke red-team brief, ``role=researcher`` to force a
+    revalidation round or ``role=synthesizer`` to sharpen in place —
+    followed by ``POST /v1/consult/<sid>/adversary-ack`` to release the
+    pause early. Doing nothing is also valid: the runner owns
+    ``deadline_ts`` and auto-resumes when it passes, so a lost SSE frame
+    or a missed poll can never strand the council.
+
+    Recorded into ``runtime_events`` (not merely streamed) so a
+    reconnecting consumer replays it via ``GET /events?last-event-id=``.
+    ``self_confidence`` carries the latest pre-synthesis confidence
+    signal (the critic's verdict confidence from M0) when available, so
+    the consumer can decide how hard to push.
+    """
+    deadline_ts: float = 0.0
+    timeout_s: float = 0.0
+    self_confidence: Optional[float] = None
+    reason: str = "adversary_checkpoint"
+    kind: str = "awaiting_adversary"
+
+
+@dataclass(frozen=True, kw_only=True)
 class CoderFailover(CouncilEvent):
     """Task #111 — emitted between attempts when a coder lane's
     primary model fails and the lane falls through to its fallback.
@@ -298,5 +326,6 @@ __all__ = [
     "RuntimeMutation",
     "Interrupt",
     "Resumed",
+    "AwaitingAdversary",
     "emit",
 ]

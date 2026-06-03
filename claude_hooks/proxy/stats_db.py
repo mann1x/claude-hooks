@@ -28,7 +28,7 @@ from typing import Iterable, Optional
 
 log = logging.getLogger("claude_hooks.proxy.stats_db")
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def _schema_ddl() -> list[str]:
@@ -198,6 +198,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # v4 -> v5: stop-phrase behaviour canaries.
     if current < 5:
         _migrate_v5(conn)
+    # v5 -> v6: per-request retry/throttle telemetry.
+    if current < 6:
+        _migrate_v6(conn)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
@@ -509,6 +512,10 @@ def _row_from_record(
         # v5 — stop-phrase behaviour canaries.
         sp_json,
         *sp_vals,
+        # v6 — per-request retry/throttle telemetry.
+        rec.get("retry_count"),
+        rec.get("backoff_total_ms"),
+        rec.get("retry_outcome"),
     )
 
 
@@ -559,6 +566,30 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
                 f"ALTER TABLE daily_rollup ADD COLUMN {col} "
                 "INTEGER NOT NULL DEFAULT 0"
             )
+
+
+def _migrate_v6(conn: sqlite3.Connection) -> None:
+    """Add per-request retry/throttle telemetry columns to ``requests``
+    (all nullable — only populated when forward() actually retried /
+    honored a Retry-After / paid a breaker delay).
+
+    Deliberately scoped to ``requests`` only: the per-request truth is
+    fully captured here, and aggregates are a cheap SUM/COUNT over these
+    columns. We don't add ``daily_rollup`` columns — that would mean
+    threading two more fields through the fragile rollup INSERT…SELECT
+    for no extra signal. The live circuit-breaker weather is on the
+    proxy's ``GET /health`` endpoint instead.
+    """
+    req_cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(requests)").fetchall()
+    }
+    for col, decl in (
+        ("retry_count", "INTEGER"),
+        ("backoff_total_ms", "INTEGER"),
+        ("retry_outcome", "TEXT"),
+    ):
+        if col not in req_cols:
+            conn.execute(f"ALTER TABLE requests ADD COLUMN {col} {decl}")
 
 
 def _categorise_tools(counts: Optional[dict]) -> dict[str, int]:
@@ -615,13 +646,15 @@ _INSERT_SQL = """
         stop_phrase_counts,
         sp_ownership_dodging, sp_permission_seeking, sp_premature_stopping,
         sp_known_limitation_labeling, sp_session_length_excuses,
-        sp_simplest_fix, sp_reasoning_reversal, sp_self_admitted_error
+        sp_simplest_fix, sp_reasoning_reversal, sp_self_admitted_error,
+        retry_count, backoff_total_ms, retry_outcome
     ) VALUES (?, ?, ?, ?,  ?, ?, ?, ?, ?,  ?, ?,  ?, ?, ?,
               ?, ?,  ?, ?,  ?, ?,  ?, ?,  ?, ?, ?,  ?, ?,
               ?, ?, ?, ?, ?,  ?, ?, ?,
               ?, ?, ?, ?, ?,  ?, ?, ?, ?, ?,  ?,
               ?, ?,  ?,  ?, ?, ?, ?, ?, ?, ?,
-              ?,  ?, ?, ?, ?, ?, ?, ?, ?)
+              ?,  ?, ?, ?, ?, ?, ?, ?, ?,
+              ?, ?, ?)
 """
 
 

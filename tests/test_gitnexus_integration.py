@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -72,6 +71,16 @@ class TestStatus:
         fake.chmod(0o755)
         monkeypatch.setattr(gn.shutil, "which",
                             lambda name: str(fake) if name == "gitnexus" else None)
+        # Don't exec the fake binary: a ``#!/bin/sh`` script with no
+        # extension isn't directly runnable on Windows (CreateProcess
+        # rejects it → version probes None). Mock subprocess.run so the
+        # test exercises _probe_version's parsing portably; the which()
+        # mock already supplies the path.
+        monkeypatch.setattr(
+            gn.subprocess, "run",
+            lambda *a, **k: gn.subprocess.CompletedProcess(
+                a[0] if a else [], 0, "gitnexus 1.0.0\n", ""),
+        )
         (tmp_path / ".gitnexus").mkdir()
         s = gn.status(tmp_path)
         assert s["binary"] == str(fake)

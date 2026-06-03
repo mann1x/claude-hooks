@@ -398,6 +398,18 @@ def _build_http_handler(server: "McpServer"):
 
         def do_POST(self) -> None:  # noqa: N802
             if self.path.rstrip("/") != "/mcp":
+                # Drain a bounded request body before replying so a Windows
+                # client receives the 404 rather than a TCP RST (WinError
+                # 10054): a server that closes with unread bytes still in
+                # the socket buffer resets the connection on Windows, while
+                # POSIX discards them on FIN. The 16 MB cap stops a stray
+                # oversized body from tying us up.
+                try:
+                    n = int(self.headers.get("Content-Length", "0") or 0)
+                except ValueError:
+                    n = 0
+                if 0 < n <= 16 * 1024 * 1024:
+                    self.rfile.read(n)
                 self._write_status(404)
                 return
             try:

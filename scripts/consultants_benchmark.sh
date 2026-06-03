@@ -136,10 +136,14 @@ extract_query() {
 # untouched.
 maybe_set_model() {
     [[ -z "${MODEL}" ]] && return 0
-    echo "::: pinning every role to model=${MODEL}"
+    echo "::: pinning every role to model=${MODEL} (user-global)"
+    # --user pins the user-global config explicitly: the bench wants a
+    # clean global model swap, not a write into whatever per-project
+    # .claude-hooks/consultants.toml happens to be active at the launch
+    # cwd (config set-* auto-resolves to an active per-project file).
     for role in planner researcher critic synthesizer; do
         "${REPO}/bin/claude-consultants" config set-role \
-            "${role}" --model "${MODEL}" >/dev/null
+            "${role}" --model "${MODEL}" --user >/dev/null
     done
 }
 
@@ -255,10 +259,10 @@ write_results_md() {
         if [[ -n "${MODEL}" ]]; then
             echo "Model pin: \`${MODEL}\` (every role)."
         else
-            echo "Model pin: per-role config (no override). Snapshot of \`claude-consultants config show\`:"
+            echo "Model pin: per-role config (no override). Snapshot of \`claude-consultants config show --user\`:"
             echo
             echo '```json'
-            "${REPO}/bin/claude-consultants" config show 2>/dev/null \
+            "${REPO}/bin/claude-consultants" config show --user 2>/dev/null \
                 || echo '(could not read config)'
             echo '```'
         fi

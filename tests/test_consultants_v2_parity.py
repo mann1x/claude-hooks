@@ -216,11 +216,85 @@ class TestOptInsOffByDefault(unittest.TestCase):
         # roles must not have them populated. Catches a regression
         # where the seeded factory leaks into non-coder roles.
         for role in ("planner", "researcher", "critic", "synthesizer",
-                     "tool_executor"):
+                     "tool_executor", "adversary"):
             with self.subTest(role=role):
                 rc = self.cfg.roles[role]
                 self.assertEqual(rc.routes_by_language, {})
                 self.assertIsNone(rc.default_route)
+
+    # ----- M3 / M1 (dynamic adversary role + checkpoint) -------- #
+
+    def test_adversary_role_disabled_by_default(self):
+        # M3: the post-synthesis refuter. Off by default — when off,
+        # the council topology must stay synthesizer → END (the
+        # adversary singleton node is never registered), so the
+        # default answer surface is byte-identical to v1.
+        self.assertFalse(self.cfg.roles["adversary"].enabled)
+
+    def test_adversary_role_excluded_from_enabled_roles_by_default(self):
+        # enabled_roles() drives graph construction; adversary must
+        # not appear in the default list or _wrap_adversary would be
+        # registered + the synthesizer → END edge rerouted.
+        from consultants.config import enabled_roles
+        self.assertNotIn("adversary", enabled_roles(self.cfg))
+
+    def test_default_topology_tail_is_synthesizer_end(self):
+        # M3: with the adversary role off (default), plan_topology must
+        # emit the v1 synthesizer → END tail — NOT synthesizer →
+        # adversary → END. This is the edge-level parity guard.
+        from consultants.engine.graph import plan_topology
+        from consultants.config import enabled_roles
+        edges = plan_topology(tuple(enabled_roles(self.cfg)))
+        self.assertIn(("synthesizer", "END"), edges)
+        self.assertNotIn(("synthesizer", "adversary"), edges)
+
+    def test_verify_budget_default_is_bounded(self):
+        # M1: the Workflow skeptic-panel budget. ``bounded`` (3 claims)
+        # is the shipped default; the knob only affects the M6 driver
+        # script, never the bare council, but pin it so a default flip
+        # is loud.
+        self.assertEqual(self.cfg.verify_budget, "bounded")
+
+    def test_adversary_strictness_default_is_normal(self):
+        self.assertEqual(self.cfg.adversary_strictness, "normal")
+
+    def test_adversary_checkpoint_off_by_default(self):
+        # M2: the engine-initiated pause-before-synthesis. Off by
+        # default → _drive_council_stream never enters the
+        # awaiting_adversary park branch, so the synthesizer interrupt
+        # boundary resumes immediately as it does today.
+        self.assertFalse(self.cfg.adversary_checkpoint)
+        self.assertEqual(self.cfg.adversary_checkpoint_timeout_s, 600)
+
+    # ----- M4 (dynamic critic dial) ----------------------------- #
+
+    def test_critic_dial_seeds_to_normal_by_default(self):
+        # M4: the boot-time RuntimeControl seeds ``critic_strictness``
+        # from ``adversary_strictness`` (default normal → normal) and
+        # never seeds an ``adversarial_focus``. A default flip here
+        # would silently re-shape every critic prompt.
+        from consultants.engine import control
+        rc = control.runtime_control_defaults(self.cfg, effort="medium")
+        self.assertEqual(rc["critic_strictness"], "normal")
+        self.assertNotIn("adversarial_focus", rc)
+
+    def test_default_critic_prompt_is_byte_identical(self):
+        # M4: with the dial at its default (normal, no focus) the critic
+        # AND meta-critic prompts must be byte-identical to the
+        # no-dial-argument call — i.e. the M4 threading appends nothing.
+        from consultants.engine import council
+        self.assertEqual(
+            council.build_critic_messages("q?", "1. p", ["r"]),
+            council.build_critic_messages(
+                "q?", "1. p", ["r"],
+                strictness="normal", adversarial_focus=""),
+        )
+        self.assertEqual(
+            council.build_meta_critic_messages("q?", "p", ["r"], ["v"]),
+            council.build_meta_critic_messages(
+                "q?", "p", ["r"], ["v"],
+                strictness="normal", adversarial_focus=""),
+        )
 
     # ----- M1 (checkpointer) ------------------------------------ #
 

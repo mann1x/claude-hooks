@@ -84,6 +84,18 @@ class TestArgvDispatch(unittest.TestCase):
         self.assertEqual(args.strictness, "strict")
         self.assertEqual(args.enable, ["critic", "synthesizer"])
 
+    def test_control_adversarial_dial_flags(self):
+        # M4: the live-only 'adversarial' strictness + the free-text
+        # attack brief are both parseable.
+        args = build_parser().parse_args([
+            "control", "csl-1",
+            "--strictness", "adversarial",
+            "--adversarial-focus", "the cache invariant is unproven",
+        ])
+        self.assertEqual(args.strictness, "adversarial")
+        self.assertEqual(
+            args.adversarial_focus, "the cache invariant is unproven")
+
     def test_pause_resume_cancel_events_subparsers(self):
         p = build_parser()
         for argv, fn_name in [
@@ -196,7 +208,8 @@ class TestHandlerHttpShaping(unittest.TestCase):
             "file": None, "source": "user", "time": None,
             "soft_target": None, "max_rounds": None,
             "max_reroutes": None, "confidence": None,
-            "strictness": None, "enable": [], "disable": [],
+            "strictness": None, "adversarial_focus": None,
+            "enable": [], "disable": [],
             "reason": None, "value": None, "decision": "",
             "discard_partial": False, "since": None,
         }
@@ -237,6 +250,31 @@ class TestHandlerHttpShaping(unittest.TestCase):
     def test_control_empty_raises(self):
         with self.assertRaises(CLIError):
             cmd_control(self._ns(), "http://base")
+
+    def test_control_strictness_adversarial(self):
+        # M4: 'adversarial' is the live-only dial level.
+        cmd_control(self._ns(strictness="adversarial"), "http://base")
+        body = self.calls[0]["body"]
+        self.assertEqual(
+            body["runtime_control"]["critic_strictness"], "adversarial")
+
+    def test_control_adversarial_focus(self):
+        # M4: free-text attack brief threads into the body.
+        cmd_control(
+            self._ns(adversarial_focus="attack the O(1) claim"),
+            "http://base")
+        body = self.calls[0]["body"]
+        self.assertEqual(
+            body["runtime_control"]["adversarial_focus"],
+            "attack the O(1) claim")
+
+    def test_control_adversarial_focus_empty_clears(self):
+        # M4: '' is a meaningful clear signal (distinct from omitted →
+        # None), so the body must carry the empty string rather than
+        # dropping the knob (which would be an empty-PATCH 400).
+        cmd_control(self._ns(adversarial_focus=""), "http://base")
+        body = self.calls[0]["body"]
+        self.assertEqual(body["runtime_control"]["adversarial_focus"], "")
 
     def test_pause_sends_reason(self):
         cmd_pause(self._ns(reason="thinking"), "http://base")

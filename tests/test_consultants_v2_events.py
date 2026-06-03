@@ -25,12 +25,9 @@ import time
 import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
-from unittest.mock import patch
 
-from consultants.engine import events as ev
 from consultants.engine.events import (
     ConfidenceUpdate,
-    CouncilEvent,
     DeadlineWarning,
     Interrupt,
     NodeFinished,
@@ -255,6 +252,7 @@ class TestRecorderRecordEvent(unittest.TestCase):
                 self.assertEqual(row["payload"]["model"], "kimi-k2.6:cloud")
             finally:
                 rec.finalize(status="completed")
+                rec.close()  # release sqlite handle (Windows temp cleanup)
 
     def test_record_event_kind_required(self):
         with tempfile.TemporaryDirectory() as d:
@@ -264,6 +262,7 @@ class TestRecorderRecordEvent(unittest.TestCase):
                     rec.record_event(kind="", payload={})
             finally:
                 rec.finalize(status="completed")
+                rec.close()  # release sqlite handle (Windows temp cleanup)
 
     def test_record_event_payload_optional(self):
         with tempfile.TemporaryDirectory() as d:
@@ -279,6 +278,7 @@ class TestRecorderRecordEvent(unittest.TestCase):
                                   "heartbeat")
             finally:
                 rec.finalize(status="completed")
+                rec.close()  # release sqlite handle (Windows temp cleanup)
 
     def test_record_event_no_op_when_closed(self):
         with tempfile.TemporaryDirectory() as d:
@@ -320,6 +320,7 @@ class TestRecorderRecordEvent(unittest.TestCase):
                 self.assertEqual(first[1]["event_id"], 2)
             finally:
                 rec.finalize(status="completed")
+                rec.close()  # release sqlite handle (Windows temp cleanup)
 
     def test_list_runtime_events_payload_parse_error_safe(self):
         """A corrupt payload row should NOT crash the lister —
@@ -343,6 +344,7 @@ class TestRecorderRecordEvent(unittest.TestCase):
                 self.assertIn("__parse_error__", rows[0]["payload"])
             finally:
                 rec.finalize(status="completed")
+                rec.close()  # release sqlite handle (Windows temp cleanup)
 
     def test_record_event_round_trip_from_dataclass(self):
         """Persist an event dataclass via to_dict() through
@@ -368,6 +370,7 @@ class TestRecorderRecordEvent(unittest.TestCase):
                 self.assertEqual(payload["round"], 2)
             finally:
                 rec.finalize(status="completed")
+                rec.close()  # release sqlite handle (Windows temp cleanup)
 
 
 # ============================================================== #
@@ -411,6 +414,7 @@ class TestStallIntegration(unittest.TestCase):
                 self.assertIn("stall.attempt.ok", kinds)
             finally:
                 rec.finalize(status="completed")
+                rec.close()  # release sqlite handle (Windows temp cleanup)
 
 
 if __name__ == "__main__":

@@ -125,7 +125,14 @@ class TestClaudeJsonRegistration(unittest.TestCase):
                 "existing": {"type": "stdio", "command": "/keep/me"}
             }}))
             launcher = home / ".local" / "bin" / "sqlite-vec-mcp"
-            with patch.dict(install.os.environ, {"HOME": str(home)}, clear=False):
+            # USERPROFILE, not HOME, is what os.path.expanduser("~") reads on
+            # Windows — HOME-only isolation no-ops there, so the product would
+            # write to the *real* ~/.claude.json (clobber hazard) and this temp
+            # read would FileNotFoundError. Set both so isolation holds on both
+            # platforms. See [[feedback_home_isolation_userprofile]].
+            with patch.dict(install.os.environ,
+                            {"HOME": str(home), "USERPROFILE": str(home)},
+                            clear=False):
                 install._register_sqlite_vec_mcp_in_claude_json(launcher)
             after = json.loads(claude_json.read_text())
             backups = [p.name for p in home.iterdir()
@@ -145,7 +152,14 @@ class TestClaudeJsonRegistration(unittest.TestCase):
         with TemporaryDirectory() as d:
             home = Path(d)
             launcher = home / ".local" / "bin" / "sqlite-vec-mcp"
-            with patch.dict(install.os.environ, {"HOME": str(home)}, clear=False):
+            # USERPROFILE, not HOME, is what os.path.expanduser("~") reads on
+            # Windows — HOME-only isolation no-ops there, so the product would
+            # write to the *real* ~/.claude.json (clobber hazard) and this temp
+            # read would FileNotFoundError. Set both so isolation holds on both
+            # platforms. See [[feedback_home_isolation_userprofile]].
+            with patch.dict(install.os.environ,
+                            {"HOME": str(home), "USERPROFILE": str(home)},
+                            clear=False):
                 install._register_sqlite_vec_mcp_in_claude_json(launcher)
             after = json.loads((home / ".claude.json").read_text())
         self.assertIn("sqlite_vec", after["mcpServers"])

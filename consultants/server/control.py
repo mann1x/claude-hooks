@@ -54,7 +54,14 @@ VALID_INJECT_ROLES: tuple[str, ...] = (
 
 VALID_TOOL_PERMISSION_VALUES: tuple[str, ...] = ("allow", "deny", "ask")
 
-VALID_STRICTNESS_VALUES: tuple[str, ...] = ("lax", "normal", "strict")
+VALID_STRICTNESS_VALUES: tuple[str, ...] = (
+    "lax", "normal", "strict", "adversarial",
+)
+
+# M4: cap on the injected adversarial-focus brief. Generous enough for
+# a few sentences naming the claims to attack, bounded so a runaway
+# caller can't bloat every critic prompt for the rest of the session.
+ADVERSARIAL_FOCUS_MAX_CHARS: int = 4_000
 
 
 # ============================================================== #
@@ -333,7 +340,11 @@ def build_runtime_control_delta(
     - ``max_rounds`` (int ≥ 0) — researcher round cap.
     - ``max_reroutes`` (int ≥ 0) — critic reroute cap.
     - ``confidence_target`` (float in [0, 1]) — synth self-rating cutoff.
-    - ``critic_strictness`` (``"lax"`` / ``"normal"`` / ``"strict"``).
+    - ``critic_strictness`` (``"lax"`` / ``"normal"`` / ``"strict"`` /
+      ``"adversarial"``) — M4 dynamic critic dial; threads into the next
+      critic + meta-critic prompt.
+    - ``adversarial_focus`` (str; ``""`` clears) — M4 free-text attack
+      brief naming the claims the critic should hunt to break.
     - ``enabled_roles`` (list[str]) — subset of the project's roles.
     - ``tool_permissions`` (dict[str, "allow" / "deny" / "ask"]).
     - ``review_before_synthesis`` (bool) — toggle static interrupt.
@@ -383,6 +394,19 @@ def build_runtime_control_delta(
                 raise ControlInputError(
                     f"critic_strictness must be one of "
                     f"{VALID_STRICTNESS_VALUES}"
+                )
+            out[k] = v
+        elif k == "adversarial_focus":
+            # Free-text attack brief. Empty string is the canonical
+            # "clear it" signal; reject non-strings and over-long blobs.
+            if not isinstance(v, str):
+                raise ControlInputError(
+                    "adversarial_focus must be a string ('' clears it)"
+                )
+            if len(v) > ADVERSARIAL_FOCUS_MAX_CHARS:
+                raise ControlInputError(
+                    "adversarial_focus exceeds "
+                    f"{ADVERSARIAL_FOCUS_MAX_CHARS} chars; trim it"
                 )
             out[k] = v
         elif k == "enabled_roles":

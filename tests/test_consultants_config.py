@@ -25,9 +25,12 @@ class TestDefaults:
         # M10: coder joins too, inserted between critic and synthesizer
         # so the graph topology fans out coder lanes AFTER the critic
         # round (when critic enabled) but BEFORE the synthesizer.
+        # M3 (dynamic-adversary): the opt-in ``adversary`` post-synthesis
+        # refuter joins last so its singleton node hangs off
+        # synthesizer → adversary → END (no per-lane Send; x-tier safe).
         assert cc.ROLES == (
             "planner", "researcher", "tool_executor",
-            "critic", "coder", "synthesizer",
+            "critic", "coder", "synthesizer", "adversary",
         )
 
     def test_synthesizer_mandatory(self):
@@ -51,11 +54,14 @@ class TestDefaults:
         #   questions don't look like that bench corpus.
         # coder remains disabled-by-default (operator opts in to
         # sandboxed file writes). Every other role stays enabled.
+        # adversary (M3) is the third opt-in role — default OFF so the
+        # default council stays synthesizer → END (cohort-2 parity).
         cfg = cc.ConsultantsConfig()
         assert cfg.roles["tool_executor"].enabled is False
         assert cfg.roles["coder"].enabled is False
+        assert cfg.roles["adversary"].enabled is False
         for r in cc.ROLES:
-            if r in ("tool_executor", "coder"):
+            if r in ("tool_executor", "coder", "adversary"):
                 continue
             assert cfg.roles[r].enabled is True
 
@@ -106,6 +112,12 @@ class TestDefaults:
             elif r == "coder":
                 assert cfg.roles[r].enabled is False
                 assert cfg.roles[r].model == RECOMMENDED_CODER_MODEL
+            elif r == "adversary":
+                # M3: opt-in post-synthesis refuter, off by default,
+                # tracks the global DEFAULT_MODEL until the operator
+                # pins one via Subflow G.
+                assert cfg.roles[r].enabled is False
+                assert cfg.roles[r].model == cc.DEFAULT_MODEL
             else:
                 assert cfg.roles[r].enabled is True
                 assert cfg.roles[r].model == cc.DEFAULT_MODEL
@@ -555,3 +567,256 @@ class TestReviewLoopKnobs:
         cfg = cc.load_config()
         assert cfg.max_followups == 4   # -5 rejected → default
         assert cfg.allow_extra == 1     # 0 rejected → default
+
+
+# ----------------------- adversary / verify budget (M1) ---------- #
+
+class TestAdversaryKnobs:
+    """M1 — the dynamic-adversary config surface: verify_budget,
+    adversary_strictness, adversary_checkpoint (+ timeout). All
+    default-OFF / bounded so the council stays byte-identical until an
+    operator opts in (cohort-2 parity is asserted in
+    test_consultants_v2_parity.py)."""
+
+    def test_defaults(self):
+        cfg = cc.ConsultantsConfig()
+        assert cfg.verify_budget == cc.DEFAULT_VERIFY_BUDGET == "bounded"
+        assert cfg.adversary_strictness == \
+            cc.DEFAULT_ADVERSARY_STRICTNESS == "normal"
+        assert cfg.adversary_checkpoint is False
+        assert cfg.adversary_checkpoint_timeout_s == 600
+
+    def test_set_verify_budget_round_trip(self, isolated_home):
+        cc.set_verify_budget("generous")
+        cfg = cc.load_config()
+        assert cfg.verify_budget == "generous"
+        assert 'verify_budget = "generous"' in \
+            cc.user_config_path().read_text()
+
+    def test_set_verify_budget_rejects_unknown(self, isolated_home):
+        with pytest.raises(ValueError) as ei:
+            cc.set_verify_budget("unlimited")
+        assert "verify_budget must be one of" in str(ei.value)
+
+    def test_set_adversary_strictness_round_trip(self, isolated_home):
+        cc.set_adversary_strictness("strict")
+        cfg = cc.load_config()
+        assert cfg.adversary_strictness == "strict"
+        assert 'adversary_strictness = "strict"' in \
+            cc.user_config_path().read_text()
+
+    def test_set_adversary_strictness_rejects_unknown(self, isolated_home):
+        with pytest.raises(ValueError) as ei:
+            cc.set_adversary_strictness("brutal")
+        assert "adversary_strictness must be one of" in str(ei.value)
+
+    def test_set_adversary_checkpoint_round_trip(self, isolated_home):
+        cc.set_adversary_checkpoint(True, timeout_s=300)
+        cfg = cc.load_config()
+        assert cfg.adversary_checkpoint is True
+        assert cfg.adversary_checkpoint_timeout_s == 300
+        text = cc.user_config_path().read_text()
+        assert "adversary_checkpoint = true" in text
+        assert "adversary_checkpoint_timeout_s = 300" in text
+
+    def test_set_adversary_checkpoint_timeout_optional(self, isolated_home):
+        # Enabling without a timeout keeps the default; a later toggle-off
+        # leaves the timeout untouched.
+        cc.set_adversary_checkpoint(True)
+        cfg = cc.load_config()
+        assert cfg.adversary_checkpoint is True
+        assert cfg.adversary_checkpoint_timeout_s == 600
+        cc.set_adversary_checkpoint(False)
+        cfg = cc.load_config()
+        assert cfg.adversary_checkpoint is False
+        assert cfg.adversary_checkpoint_timeout_s == 600
+
+    def test_set_adversary_checkpoint_rejects_bad_timeout(self, isolated_home):
+        with pytest.raises(ValueError):
+            cc.set_adversary_checkpoint(True, timeout_s=0)
+
+    def test_merge_ignores_bad_values(self, isolated_home):
+        # Out-of-vocab strings / wrong-typed knobs fall back to defaults.
+        cc.user_config_path().parent.mkdir(parents=True, exist_ok=True)
+        cc.user_config_path().write_text(
+            'verify_budget = "huge"\n'
+            'adversary_strictness = "savage"\n'
+            'adversary_checkpoint = "yes"\n'
+            'adversary_checkpoint_timeout_s = 0\n',
+            encoding="utf-8")
+        cfg = cc.load_config()
+        assert cfg.verify_budget == "bounded"
+        assert cfg.adversary_strictness == "normal"
+        assert cfg.adversary_checkpoint is False
+        assert cfg.adversary_checkpoint_timeout_s == 600
+
+    def test_adversary_role_toggle_round_trip(self, isolated_home):
+        # The role itself is reached via the shared set_role mutator.
+        cc.set_role("adversary", enabled=True)
+        cfg = cc.load_config()
+        assert cfg.roles["adversary"].enabled is True
+        cc.set_role("adversary", enabled=False)
+        assert cc.load_config().roles["adversary"].enabled is False
+
+
+# ----------- per-project override_user_global directive ----------- #
+# The flag is a per-project-file-only directive (NOT a ConsultantsConfig
+# field). load_config(cwd) merges the project layer iff the file exists
+# AND its flag is on (absent/non-bool → treated on). It is read only from
+# the raw project TOML (before the merge) and written only to the project
+# file via save_config(..., override_flag=...) / set_override_user_global.
+
+class TestOverrideFlagHelpers:
+    def test_override_flag_absent_is_true(self):
+        # Legacy project files (pre-feature) have no key → merged (on).
+        assert cc._override_flag({}) is True
+        assert cc._override_flag({"effort": "high"}) is True
+
+    def test_override_flag_non_bool_is_true(self):
+        # Defensive: a stray non-bool value never silently turns the
+        # project layer off.
+        assert cc._override_flag({"override_user_global": "no"}) is True
+        assert cc._override_flag({"override_user_global": 0}) is True
+
+    def test_override_flag_explicit_bool(self):
+        assert cc._override_flag({"override_user_global": True}) is True
+        assert cc._override_flag({"override_user_global": False}) is False
+
+    def test_project_override_active_no_file(self, isolated_home,
+                                             tmp_path: Path):
+        assert cc.project_override_active(tmp_path) is False
+
+    def test_project_override_active_flag_on(self, isolated_home,
+                                             tmp_path: Path):
+        cc.set_role("planner", model="proj:tag", scope="project",
+                    cwd=tmp_path)  # new file → flag on by default
+        assert cc.project_override_active(tmp_path) is True
+
+    def test_project_override_active_flag_off(self, isolated_home,
+                                              tmp_path: Path):
+        cc.set_role("planner", model="proj:tag", scope="project",
+                    cwd=tmp_path)
+        cc.set_override_user_global(False, cwd=tmp_path)
+        assert cc.project_override_active(tmp_path) is False
+
+
+class TestOverrideFlagGate:
+    def test_flag_on_merges_project(self, isolated_home, tmp_path: Path):
+        cc.set_role("planner", model="user-pl", scope="user")
+        cc.set_role("planner", model="proj-pl", scope="project",
+                    cwd=tmp_path)  # flag on by default
+        assert cc.load_config(cwd=tmp_path).roles["planner"].model == "proj-pl"
+
+    def test_flag_off_ignores_project(self, isolated_home, tmp_path: Path):
+        cc.set_role("planner", model="user-pl", scope="user")
+        cc.set_role("planner", model="proj-pl", scope="project",
+                    cwd=tmp_path)
+        cc.set_override_user_global(False, cwd=tmp_path)
+        # Flag off → load_config(cwd) is identical to user-global.
+        assert cc.load_config(cwd=tmp_path).roles["planner"].model == "user-pl"
+        assert (cc.load_config(cwd=tmp_path).roles["planner"].model
+                == cc.load_config().roles["planner"].model)
+
+    def test_legacy_file_missing_flag_treated_as_on(self, isolated_home,
+                                                    tmp_path: Path):
+        # A hand-written project TOML with no override_user_global still
+        # merges (preserves the historical "project always wins" behavior).
+        p = cc.project_config_path(tmp_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('effort = "max"\n', encoding="utf-8")
+        assert cc.load_config(cwd=tmp_path).effort == "max"
+
+    def test_no_project_file_is_user_global(self, isolated_home,
+                                            tmp_path: Path):
+        cc.set_effort("high", scope="user")
+        # Gate is a no-op without a file → byte-identical to load_config().
+        assert cc.load_config(cwd=tmp_path).effort == "high"
+        assert cc.load_config(cwd=tmp_path).effort == cc.load_config().effort
+
+
+class TestOverrideFlagRender:
+    def test_project_save_emits_flag_line(self, isolated_home,
+                                          tmp_path: Path):
+        cc.set_role("planner", model="proj:tag", scope="project",
+                    cwd=tmp_path)
+        text = cc.project_config_path(tmp_path).read_text(encoding="utf-8")
+        assert "override_user_global = true" in text
+
+    def test_user_save_omits_flag_line(self, isolated_home):
+        # User-global renders must NOT carry the directive (byte-identical
+        # to pre-feature output → M12 parity).
+        cc.set_role("planner", model="user:tag", scope="user")
+        text = cc.user_config_path().read_text(encoding="utf-8")
+        assert "override_user_global" not in text
+
+    def test_project_save_flag_off_emits_false(self, isolated_home,
+                                               tmp_path: Path):
+        cc.set_role("planner", model="proj:tag", scope="project",
+                    cwd=tmp_path)
+        cc.set_override_user_global(False, cwd=tmp_path)
+        text = cc.project_config_path(tmp_path).read_text(encoding="utf-8")
+        assert "override_user_global = false" in text
+
+
+class TestSetOverrideUserGlobal:
+    def test_creates_file_flag_on(self, isolated_home, tmp_path: Path):
+        assert not cc.project_config_path(tmp_path).exists()
+        cc.set_override_user_global(True, cwd=tmp_path)
+        assert cc.project_config_path(tmp_path).exists()
+        assert cc.project_override_active(tmp_path) is True
+
+    def test_creates_file_flag_off(self, isolated_home, tmp_path: Path):
+        cc.set_override_user_global(False, cwd=tmp_path)
+        assert cc.project_config_path(tmp_path).exists()
+        assert cc.project_override_active(tmp_path) is False
+
+    def test_round_trip_on_off_on(self, isolated_home, tmp_path: Path):
+        cc.set_role("planner", model="proj:tag", scope="project",
+                    cwd=tmp_path)
+        cc.set_override_user_global(False, cwd=tmp_path)
+        assert cc.project_override_active(tmp_path) is False
+        cc.set_override_user_global(True, cwd=tmp_path)
+        assert cc.project_override_active(tmp_path) is True
+
+    def test_off_preserves_project_content(self, isolated_home,
+                                           tmp_path: Path):
+        # Turning the flag off must NOT clobber the project file's own
+        # content (the dormant snapshot survives so flipping back on
+        # restores it).
+        cc.set_role("researcher", model="proj-rs", scope="project",
+                    cwd=tmp_path)
+        cc.set_override_user_global(False, cwd=tmp_path)
+        raw = cc._read_toml(cc.project_config_path(tmp_path))
+        assert raw["role"]["researcher"]["model"] == "proj-rs"
+        # Flip back on → the preserved value is active again.
+        cc.set_override_user_global(True, cwd=tmp_path)
+        assert (cc.load_config(cwd=tmp_path).roles["researcher"].model
+                == "proj-rs")
+
+    def test_rejects_non_bool(self, isolated_home, tmp_path: Path):
+        with pytest.raises(ValueError):
+            cc.set_override_user_global("on", cwd=tmp_path)  # type: ignore
+
+    def test_mutator_preserves_existing_flag(self, isolated_home,
+                                             tmp_path: Path):
+        # A normal project-scoped set-* after the flag is off must keep
+        # the flag off (save_config preserves the on-disk directive when
+        # override_flag is not passed) AND preserve the dormant file's
+        # other content — a project-scope mutator loads the project layer
+        # unconditionally (via _load_for_edit), not through load_config's
+        # off-gate, so editing one field never reverts the rest to
+        # user-global. (Regression guard: the gated load silently
+        # clobbered dormant content — caught by the M4 adversarial review.)
+        cc.set_role("planner", model="proj-pl", scope="project",
+                    cwd=tmp_path)
+        cc.set_override_user_global(False, cwd=tmp_path)
+        cc.set_effort("max", scope="project", cwd=tmp_path)
+        raw = cc._read_toml(cc.project_config_path(tmp_path))
+        assert cc._override_flag(raw) is False
+        assert raw["effort"] == "max"                       # the edit landed
+        assert raw["role"]["planner"]["model"] == "proj-pl"  # rest survived
+        # Flipping back on restores the (still-intact) project content.
+        cc.set_override_user_global(True, cwd=tmp_path)
+        cfg = cc.load_config(cwd=tmp_path)
+        assert cfg.effort == "max"
+        assert cfg.roles["planner"].model == "proj-pl"

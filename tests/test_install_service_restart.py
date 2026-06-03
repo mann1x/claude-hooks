@@ -406,7 +406,6 @@ class TestArgumentParser(unittest.TestCase):
 
     def test_skip_flag_present(self):
         # Build the parser and check the flag exists with the right default.
-        import argparse
         parser_factory = None
         # The parser is built inline in main(); inspect main() via attribute
         # We test indirectly: parse known args including --skip-daemon-restart
@@ -452,8 +451,12 @@ class TestConsultantsHealthCallSignature(unittest.TestCase):
         # The call site must use the (port, *, timeout=) signature
         health.assert_called_once()
         args, kwargs = health.call_args
-        # First positional arg should be the port number
-        self.assertEqual(args[0], 38095)
+        # First positional arg should be the port number. The exact value
+        # is host-config-derived (38095 on the always-on host, 38096 on a
+        # smart-start forwarder host), so assert the shape, not the value —
+        # the regression guarded here is the (port, *, timeout=) call site,
+        # not which port the local config happens to carry.
+        self.assertIsInstance(args[0], int)
         self.assertIn("timeout", kwargs)
         # Output reports the timeout
         self.assertIn("not responding within", out.getvalue())

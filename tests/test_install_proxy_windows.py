@@ -71,9 +71,13 @@ def stub_xml_writer(tmp_path, monkeypatch):
 # ---------------------------------------------------------------- #
 class TestOuterOsGate:
     def test_no_op_on_posix(self, capsys):
-        # We're running on Linux, so the outer function returns
-        # without calling steps. Patch steps to ensure it isn't called.
-        with patch.object(install, "_install_proxy_windows_steps") as steps:
+        # Force the POSIX branch so this verifies the OS gate on ANY host
+        # (on a real Windows runner os.name=='nt' would otherwise let the
+        # steps run). Safe to flip os.name here: the no-op path is a bare
+        # ``if os.name != "nt": return`` that constructs no Path, so it
+        # can't poison pathlib's flavour selector (unlike the steps).
+        with patch.object(install, "_install_proxy_windows_steps") as steps, \
+             patch.object(install.os, "name", "posix"):
             install._install_proxy_windows(
                 {"proxy": {"enabled": True}},
                 non_interactive=True, dry_run=False,

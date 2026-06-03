@@ -32,7 +32,10 @@ except ImportError:
     HAVE_FASTAPI = False
 
 try:
-    import langgraph.types as _lg_types  # noqa: F401
+    # Concrete-leaf probe — a bare ``import langgraph.types`` is fooled by the
+    # empty ghost namespace dirs a pip-uninstall leaves behind. See the note in
+    # test_consultants_adversary_role.py.
+    from langgraph.graph import StateGraph  # noqa: F401
     HAVE_LANGGRAPH = True
 except ImportError:
     HAVE_LANGGRAPH = False

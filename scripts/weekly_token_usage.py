@@ -654,6 +654,10 @@ def render_json(
 # CLI
 # ------------------------------------------------------------------ #
 def main(argv: Optional[list[str]] = None) -> int:
+    # The summary prints "→" and other glyphs; a legacy Windows console (cp1252)
+    # would otherwise crash with UnicodeEncodeError on print().
+    from claude_hooks._io_utf8 import force_utf8_streams
+    force_utf8_streams()
     ap = argparse.ArgumentParser(
         description=__doc__.splitlines()[0],
         formatter_class=argparse.RawDescriptionHelpFormatter,

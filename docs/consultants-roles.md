@@ -15,6 +15,7 @@ opt-in roles — when flipping the default-off bit is worth it.
 | `synthesizer`  |    on   | global `DEFAULT_MODEL`            | all tiers                           | [synthesizer](#synthesizer) |
 | **`tool_executor`** | **off** (2026-05-18) | `gemma4:31b-cloud` (M11c-2 bench) | opt-in, all tiers      | [tool_executor](#tool_executor) |
 | **`coder`**         | **off** | `glm-5.1:cloud` (M11b bench)      | opt-in, all tiers                   | [coder](#coder)             |
+| **`adversary`**     | **off** | global `DEFAULT_MODEL`            | opt-in, all tiers (post-synthesis)  | [adversary](#adversary)     |
 
 "Default" means what a fresh `ConsultantsConfig` produces with no
 TOML overrides. Every role's enabled bit is one TOML line to flip
@@ -174,6 +175,18 @@ variant takes over inside the synthesizer to save the round).
 across multiple critic models and a `meta_critic` consolidates
 their verdicts. See `META_CRITIC_SYSTEM` in
 `consultants/engine/council.py`.
+
+**Dynamic dial (M4):** the critic's strictness is a live knob,
+`runtime_control.critic_strictness` — `lax` / `normal` / `strict` /
+`adversarial`. It threads a directive into the next critic **and**
+meta-critic prompt, so a mid-flight `control --strictness adversarial
+--adversarial-focus "<brief>"` actually re-shapes the next critique
+(the `adversarial` level makes the critic hunt to *break* the evidence;
+the focus brief points that hunt at a named claim). The boot-time value
+is seeded from the static `adversary_strictness` config
+(soft→lax / normal→normal / strict→strict); `adversarial` is reachable
+only via a live `POST /control`. The default (`normal`, no focus)
+appends nothing — the prompt is byte-identical to the pre-M4 critic.
 
 **When to swap the model:** the critic benefits from a strong
 reasoning model. Default uses the global `DEFAULT_MODEL` but at
@@ -383,6 +396,62 @@ for the M11b coder rubric pass rates per model.
 **Model default:** `glm-5.1:cloud` (M11b coder rubric winner).
 Routes can be overridden per-language at
 `[role.coder.routes_by_language]`.
+
+---
+
+## adversary
+
+**Status:** default **disabled**. Operator opts in for a
+post-synthesis refutation pass.
+
+**Purpose (when enabled):** a singleton refuter that runs **once
+after the synthesizer** (`synthesizer → adversary → END`). It reads
+the final answer + the question + plan + research and tries to refute
+the answer's load-bearing claims — hallucinations, unsupported
+assertions, cites that don't say what they're used for. It does NOT
+ask for more research (that's the critic's job); it annotates or
+clears.
+
+**Output contract:**
+- `REFUTATION: none` → the answer stands; the engine leaves it
+  untouched.
+- `REFUTATION:` + a list of issues → the engine appends an inline
+  `⚠️ Adversarial review:` block to the final answer and records
+  `final_answer_refutation` + `adversary_decision = "issues"` on the
+  turn. The original answer is preserved ahead of the annotation.
+- Empty / failed synthesis → the node skips itself (no LLM call).
+- An LLM error is non-fatal: `adversary_decision = "error"` and the
+  answer is left unmodified.
+
+**Strictness:** honors `adversary_strictness` (soft / normal /
+strict) — `soft` flags only clear hallucinations; `strict` challenges
+every unsupported claim. This is the *same* config that seeds the M4
+critic dial, so one knob tunes both the role and the boot-time critic
+strictness.
+
+**Topology / x-tier:** the adversary is a **post-barrier singleton**
+— it runs after the synthesizer barrier, with no per-lane `Send`, so
+the Phase 9/10 researcher fan-out upstream is completely untouched. A
+council at `xhigh` still produces its N×M researcher lanes; the
+adversary just adds one terminal node. When the role is disabled the
+tail is the unchanged `synthesizer → END` (M12 cohort-2 parity).
+
+**Relationship to the adversary checkpoint:** distinct, complementary
+features (both opt-in, independently toggleable):
+- The **adversary role** (this section) is an *automated* refuter
+  *after* synthesis.
+- The **adversary checkpoint** (`adversary_checkpoint`, see
+  [`docs/consultants.md`](consultants.md)) is an engine pause *before*
+  synthesis for an *assistant-authored* challenge.
+
+**When to enable:** high-stakes questions where a wrong-but-plausible
+answer is costly and you want a second model to attack the conclusion
+before you read it. Pairs naturally with the Workflow driver's skeptic
+panel (which does the same thing across multiple claims in parallel).
+
+**Model default:** global `DEFAULT_MODEL`; override with
+`[role.adversary] model = "..."` or `config set-role adversary
+--model <m>`.
 
 ---
 

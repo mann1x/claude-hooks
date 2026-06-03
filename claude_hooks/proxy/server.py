@@ -16,6 +16,7 @@ state is persisted beyond the already-written JSONL lines.
 
 from __future__ import annotations
 
+import json
 import logging
 import signal
 import socket
@@ -104,6 +105,13 @@ class _Handler(BaseHTTPRequestHandler):
         upstream = cfg.get("upstream", "https://api.anthropic.com")
         timeout = float(cfg.get("timeout", 120.0))
 
+        # --- Local /health — served by the proxy itself, never proxied
+        # upstream. Exposes the retry/throttle weather (flap counters +
+        # circuit-breaker state) so operators can see the throttle bite.
+        if self.command == "GET" and self.path.split("?", 1)[0] == "/health":
+            self._send_health(upstream)
+            return
+
         # --- Read inbound body
         body = b""
         clen = self.headers.get("Content-Length")
@@ -140,11 +148,17 @@ class _Handler(BaseHTTPRequestHandler):
                 timeout=timeout,
             )
         except Exception as e:
+            # Include the exception TYPE — a bare ``str(e)`` can be
+            # uninformative (e.g. ``17``) and leaves a 502 undiagnosable.
             log.warning(
-                "upstream call failed: %s %s -> %s",
-                self.command, self.path, e,
+                "upstream call failed: %s %s -> %s: %s",
+                self.command, self.path, type(e).__name__, e,
             )
-            self._send_bad_gateway(str(e), started, req_meta, len(body))
+            log.debug("upstream failure traceback", exc_info=True)
+            self._send_bad_gateway(
+                f"{type(e).__name__}: {e}", started, req_meta, len(body),
+                retry_stats=getattr(e, "_proxy_retry_stats", None),
+            )
             return
 
         resp_meta = extract_response_info(result.headers, result.first_chunk)
@@ -179,6 +193,33 @@ class _Handler(BaseHTTPRequestHandler):
             started, req_meta, resp_meta, result,
             req_bytes=len(body), resp_bytes=total_out,
         )
+
+    # -------------------------------------------------------------- #
+    def _send_health(self, upstream: str) -> None:
+        """Serve the proxy's retry/throttle health snapshot as JSON.
+
+        Mirrors the caliber-grounding-proxy's ``/health`` shape:
+        ``upstream_flaps`` (cumulative 429/529/conn-error + retry
+        outcome counters) and ``throttle`` (live circuit-breaker
+        state). Never touches upstream. Always exits 0-equivalent.
+        """
+        from claude_hooks.proxy import retry as _retry
+
+        payload = {
+            "ok": True,
+            "service": "claude-hooks-proxy",
+            "upstream": upstream,
+            **_retry.snapshot(time.monotonic()),
+        }
+        body = json.dumps(payload).encode("utf-8")
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            log.debug("client dropped during /health")
 
     # -------------------------------------------------------------- #
     def _send_warmup_stub(
@@ -219,6 +260,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _send_bad_gateway(
         self, msg: str, started: float, req_meta: dict, req_bytes: int,
+        retry_stats: Optional[dict] = None,
     ) -> None:
         body = f'{{"error":{{"type":"proxy_error","message":"{msg}"}}}}'.encode("utf-8")
         try:
@@ -229,12 +271,17 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         except Exception:
             pass
+        extra = {"error": "upstream_failure", "detail": msg}
+        if retry_stats:
+            # An exhausted-after-N-retries 502 carries its retry telemetry
+            # so the JSONL line distinguishes it from a never-retried one.
+            extra.update(retry_stats)
         self._log_line(
             started, req_meta,
             {"model_delivered": None, "usage": None, "rate_limit": None,
              "synthetic": False},
             None, req_bytes=req_bytes, resp_bytes=len(body),
-            extra={"error": "upstream_failure", "detail": msg},
+            extra=extra,
         )
 
     def _log_line(
@@ -295,6 +342,11 @@ class _Handler(BaseHTTPRequestHandler):
 
         if self.jsonl_logger is None or not self.proxy_cfg.get("log_requests", True):
             return
+        # Per-request retry telemetry — present only when forward()
+        # actually retried / honored a Retry-After / paid a breaker
+        # delay (forwarder._stamp_retry_stats). Null on the common
+        # zero-retry path so JSONL lines stay slim.
+        rstats = (result.stats if result is not None else None) or {}
         path, _, query = self.path.partition("?")
         record = {
             "ts": req_ts,
@@ -314,6 +366,10 @@ class _Handler(BaseHTTPRequestHandler):
             "is_warmup": req_meta.get("is_warmup", False),
             "synthetic": resp_meta.get("synthetic", False),
             "session_id": req_meta.get("session_id"),
+            # Retry / throttle telemetry (null on the common no-retry path).
+            "retry_count": rstats.get("retry_count"),
+            "backoff_total_ms": rstats.get("backoff_total_ms"),
+            "retry_outcome": rstats.get("retry_outcome"),
             # S2 additions — only emitted when non-null to keep lines slim.
             "account_uuid": req_meta.get("account_uuid"),
             "cc_version": req_meta.get("cc_version"),

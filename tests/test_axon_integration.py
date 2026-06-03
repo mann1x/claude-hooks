@@ -55,6 +55,16 @@ class TestStatus:
         fake.chmod(0o755)
         monkeypatch.setattr(ax.shutil, "which",
                             lambda name: str(fake) if name == "axon" else None)
+        # Don't exec the fake binary: a ``#!/bin/sh`` script with no
+        # extension isn't directly runnable on Windows (CreateProcess
+        # rejects it → version probes None). Mock subprocess.run so the
+        # test exercises _probe_version's parsing (returncode + stdout
+        # strip) portably; the which() mock already supplies the path.
+        monkeypatch.setattr(
+            ax.subprocess, "run",
+            lambda *a, **k: ax.subprocess.CompletedProcess(
+                a[0] if a else [], 0, "axon 1.0.0\n", ""),
+        )
         (tmp_path / ".axon").mkdir()
         s = ax.status(tmp_path)
         assert s["binary"] == str(fake)

@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.12.0** — ~4.3k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.13.0** — ~4.3k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -193,6 +193,38 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > [`docs/consultants.md`](docs/consultants.md) "Review loop" for the
 > runbook and [`docs/hyde.md`](docs/hyde.md) "Hook cap must cover the
 > whole chain".
+> v1.13 ships three opt-in subsystems. (1) The **API-proxy
+> throttle-aware retry layer** stops the proxy *amplifying* Anthropic's
+> edge throttle: a pure decision module
+> (`claude_hooks/proxy/retry.py`) drives a rewritten `forward()` loop
+> with full-jitter exponential backoff + `Retry-After` honoring, a 90 s
+> wall-clock **deadline** as the primary bound (`max_attempts=15` is
+> only a safety cap so the deadline binds first), **per-connection
+> httpx eviction** instead of the old whole-pool nuke that closed
+> sibling sessions' HTTP/2 connections, and a **cross-session circuit
+> breaker** — all surfaced live at the new `GET /health` flap-counter
+> snapshot. Validated under a real multi-hour Anthropic clamp on
+> 2026-06-02: the deadline binds, the breaker engages, and moderate
+> throttle is fully masked from Claude Code (only a hard *sustained*
+> brownout leaks 502s through). One known edge remains — an
+> accept-then-hung attempt overruns the deadline because it bounds
+> *between*-attempt time, not in-attempt latency; the fix is a
+> time-to-first-byte / first-byte-committed bound, not a read-timeout
+> cut (which would truncate healthy long streams). (2) The
+> **`/consultants` dynamic adversarial review** (M0–M8) adds an
+> engine-initiated adversary checkpoint (pause + SSE + auto-resume), a
+> post-synthesis refuter role (singleton, x-tier-safe), a revived
+> `critic_strictness` / `adversarial_focus` dial, the blocking
+> `consult --wait` convenience path, and a committed Workflow driver
+> (`consult-with-adversarial-review.mjs`) that drives the council
+> ask → review → skeptic panel → accept|follow-up loop. (3)
+> **Per-project config** becomes a first-class, consistently-applied
+> scope: an `override_user_global` directive promotes
+> `.claude-hooks/consultants.toml` to the active config across every
+> `config` command and the engine, with auto write-scope
+> (`--user`/`--project`/`--cwd`). See
+> [`docs/proxy.md`](docs/proxy.md) "Retry / throttle resilience" and
+> [`docs/consultants.md`](docs/consultants.md).
 
 ---
 
