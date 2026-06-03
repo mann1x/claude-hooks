@@ -61,24 +61,26 @@ class TestDetachKwargsWindows:
         assert "creationflags" in kw
         assert "start_new_session" not in kw
 
-    def test_windows_flags_or_two_constants(self):
-        # Stub real Windows constants so we can assert the OR holds.
-        # We patch the subprocess module on _popen since detach_kwargs
-        # reads them via getattr(subprocess, ...).
-        fake_subprocess = subprocess
-        fake_subprocess.CREATE_NO_WINDOW = 0x08000000  # real flag value
-        fake_subprocess.DETACHED_PROCESS = 0x00000008  # real flag value
-        try:
-            with patch.object(_popen, "os") as os_mod:
-                os_mod.name = "nt"
-                kw = _popen.detach_kwargs()
-            assert kw["creationflags"] == (0x08000000 | 0x00000008)
-        finally:
-            # Roll back only on POSIX where the constants didn't exist
-            # before; on real Windows leave them alone.
-            if not hasattr(subprocess, "_orig_flags"):
-                # We added them — they weren't there. Clean up.
-                pass
+    def test_windows_flags_or_three_constants(self):
+        # detach_kwargs ORs THREE constants on Windows (v1.10.6+):
+        # CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB.
+        # Stub all three on an *isolated* fake subprocess (patched onto
+        # _popen) so the assertion is platform-independent. The old form
+        # mutated the real subprocess module and omitted the breakaway
+        # flag, so it passed on POSIX (where CREATE_BREAKAWAY_FROM_JOB is
+        # absent → getattr returns 0) but failed on real Windows where the
+        # product's breakaway bit is genuinely present.
+        import types
+        fake = types.SimpleNamespace(
+            CREATE_NO_WINDOW=0x08000000,
+            DETACHED_PROCESS=0x00000008,
+            CREATE_BREAKAWAY_FROM_JOB=0x01000000,
+        )
+        with patch.object(_popen, "os") as os_mod, \
+             patch.object(_popen, "subprocess", fake):
+            os_mod.name = "nt"
+            kw = _popen.detach_kwargs()
+        assert kw["creationflags"] == (0x08000000 | 0x00000008 | 0x01000000)
 
     def test_windows_constants_absent_falls_back_to_zero(self):
         """Stripped Pythons may not have the constants — getattr

@@ -314,10 +314,13 @@ def _shorten_path(abs_path: str, project_cwd: str = "") -> str:
             # outside the project. Show the absolute path instead so
             # the user can see what's happening.
             if not rel.startswith(".."):
-                return rel
+                # Forward slashes for display: os.path.relpath emits the
+                # native separator (``sub\x.py`` on Windows); the header
+                # paths read better — and stay clickable — with ``/``.
+                return rel.replace(os.sep, "/")
         return abs_path
     try:
-        return os.path.relpath(abs_path)
+        return os.path.relpath(abs_path).replace(os.sep, "/")
     except ValueError:
         return abs_path
 

@@ -16,12 +16,9 @@ Strategy:
 from __future__ import annotations
 
 import io
-import os
 import socket
-import subprocess
 import sys
 import threading
-import time
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -315,7 +312,15 @@ class TestPlatformStop:
         assert argv[3] == "claude-hooks-daemon"
 
     def test_systemd_present_calls_systemctl_stop(self, monkeypatch):
-        monkeypatch.setattr(daemon_ctl.os, "name", "posix")
+        # Isolate the os reference so flipping ``name`` to "posix" does NOT
+        # mutate the shared os module — pathlib.Path() reads the *real*
+        # os.name to choose its flavour, so a global flip makes the
+        # systemd-branch ``Path("/etc/...")`` try to build a PosixPath on
+        # Windows and raise NotImplementedError. (``name`` is a reserved
+        # MagicMock ctor kwarg, so it's set after construction.)
+        fake_os = MagicMock()
+        fake_os.name = "posix"
+        monkeypatch.setattr(daemon_ctl, "os", fake_os)
 
         def fake_exists(self):
             return str(self).endswith("claude-hooks-daemon.service")
@@ -328,7 +333,11 @@ class TestPlatformStop:
         assert argv == ["systemctl", "stop", "claude-hooks-daemon.service"]
 
     def test_no_platform_entry_returns_false(self, monkeypatch):
-        monkeypatch.setattr(daemon_ctl.os, "name", "posix")
+        # Isolated fake os (see sibling test) — a global os.name flip
+        # breaks pathlib.Path() construction on Windows.
+        fake_os = MagicMock()
+        fake_os.name = "posix"
+        monkeypatch.setattr(daemon_ctl, "os", fake_os)
         with patch.object(Path, "exists", lambda self: False):
             assert daemon_ctl._platform_stop() is False
 
