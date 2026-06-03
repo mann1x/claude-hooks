@@ -44,7 +44,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Iterable, Optional
 
 log = logging.getLogger("benchmarks.consultants.harness")
 
@@ -1078,6 +1078,27 @@ def parse_constraint_tests(oracle_path: Path) -> set:
     return out
 
 
+def _pytest_timeout_args(per_test_timeout_s: float) -> list[str]:
+    """Per-test timeout flags for the oracle pytest invocation, but only
+    when the ``pytest-timeout`` plugin is importable.
+
+    ``--timeout`` is unknown to pytest unless the plugin is installed, so
+    passing it blindly aborts the whole session with "unrecognized
+    arguments" (observed on a host without the plugin). And the ``signal``
+    method uses SIGALRM, which does not exist on Windows — there only the
+    ``thread`` method works. When the plugin is absent we omit the flags
+    entirely and rely on the outer ``timeout_s`` subprocess safety net.
+    """
+    import importlib.util
+    try:
+        if importlib.util.find_spec("pytest_timeout") is None:
+            return []
+    except (ImportError, ValueError):
+        return []
+    method = "thread" if os.name == "nt" else "signal"
+    return [f"--timeout={per_test_timeout_s}", f"--timeout-method={method}"]
+
+
 def run_pytest_against_sandbox(oracle_path: Path,
                                sandbox_dir: Path,
                                *,
@@ -1144,13 +1165,14 @@ def run_pytest_against_sandbox(oracle_path: Path,
              "-q", "--no-header",
              "-p", "no:cacheprovider",
              f"--junitxml={junit_path}",
-             # Per-test timeout. ``signal`` method uses SIGALRM
-             # which pytest's pytest-timeout plugin catches and
-             # records as a test failure in the junit XML — the
-             # rest of the test session keeps running. POSIX-only
-             # but the bench is POSIX-only anyway.
-             f"--timeout={per_test_timeout_s}",
-             "--timeout-method=signal"],
+             # Per-test timeout via the pytest-timeout plugin: a hung
+             # test is killed and recorded in the junit XML while the
+             # rest of the session keeps running. Gated on the plugin
+             # being importable (else pytest aborts on the unknown
+             # flag) and on the platform (``signal``=SIGALRM is POSIX-
+             # only; Windows uses ``thread``). Absent → fall back to
+             # the outer subprocess ``timeout_s`` safety net.
+             *_pytest_timeout_args(per_test_timeout_s)],
             capture_output=True,
             text=True,
             env=env,
