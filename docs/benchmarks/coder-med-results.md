@@ -411,17 +411,58 @@ that route; it does not change it.
    winner** — top of both token- and speed-efficiency within the pass ≥ 90% /
    q ≥ 4.0 gate, trading ~0.34 quality points for ~3.7× fewer generated tokens.
    See [Efficiency](#efficiency--most-quality-per-token--second).
-4. **Routes are NOT changed by this page** — winners are mirrored + annotated
-   against [`coder_defaults.py`](../../consultants/engine/coder_defaults.py).
-   The efficiency result **corroborates** the existing `glm-5.1` default coder
-   route. Any realignment is a separate decision; see [Follow-ups](#follow-ups).
+4. **Routes adopted (2026-06-04).** The per-language coder routes were
+   realigned to the neutral-ladder winners (primary = winner, fallback =
+   runner-up) in the **live config** (user-global on solidpc + pandorum and
+   this repo's per-project override) **and** in the shipped code defaults
+   ([`coder_defaults.py`](../../consultants/engine/coder_defaults.py) →
+   `RECOMMENDED_CODER_ROUTES_BY_LANGUAGE`, suite `1.0-med`, `RECOMMENDED_AS_OF`
+   2026-06-04). `default_route` stays `glm-5.1:cloud` — the efficiency result
+   keeps glm the global/fallback default. See [Adopted routes](#adopted-routes).
 
 ---
 
+## Adopted routes
+
+On **2026-06-04** the per-language coder routes were realigned to the
+neutral-ladder winners above (primary = ladder winner, fallback = runner-up):
+
+| lang | primary | fallback |
+|------|---------|----------|
+| c | `kimi-k2.6:cloud` | `deepseek-v4-pro:cloud` |
+| cpp | `deepseek-v4-pro:cloud` | `deepseek-v4-flash:cloud` |
+| csharp | `kimi-k2.6:cloud` | `minimax-m3:cloud` |
+| go | `kimi-k2.6:cloud` | `deepseek-v4-pro:cloud` |
+| python | `kimi-k2.6:cloud` | `deepseek-v4-flash:cloud` |
+| rust | `kimi-k2.6:cloud` | `deepseek-v4-pro:cloud` |
+
+Applied in three places:
+
+- **Shipped code defaults** — `RECOMMENDED_CODER_ROUTES_BY_LANGUAGE` in
+  [`coder_defaults.py`](../../consultants/engine/coder_defaults.py)
+  (`RECOMMENDED_AS_OF = 2026-06-04`, `RECOMMENDED_SUITE_VERSION = 1.0-med`,
+  `RECOMMENDED_SUITE_HASH_PREFIX = 0e6ab0fd`), so fresh installs seed these
+  picks. This is the committed source of truth.
+- **Live user-global config** on **solidpc**
+  (`~/.claude/consultants-config.toml`) and **pandorum**
+  (`%USERPROFILE%\.claude\consultants-config.toml`).
+- **This repo's per-project override** (`.claude-hooks/consultants.toml`,
+  `override_user_global=on`) — gitignored/local, so it would otherwise shadow
+  the user-global routes inside `claude-hooks`. All three backed up
+  (`*.pre-codermed.bak`).
+
+This is a **quality-over-cost** adoption: `kimi-k2.6` is the primary for 5/6
+languages — the ladder winner everywhere except cpp — and the most
+token-heavy of the cohort (~3.7× glm-5.1). The global `default_route` stays
+`glm-5.1:cloud` (the balanced-efficiency winner), used only for languages with
+no explicit entry. Operators who prefer the cheaper all-rounder can override
+the whole table with `[role.coder].model = "glm-5.1:cloud"`.
+
 ## Follow-ups
 
-- **Reconcile per-language routes** against the medium winners + the gemini
-  ladder once both judges agree.
+- **Per-language routes adopted (2026-06-04)** — done; the table above is live
+  in code defaults + both hosts. Re-open only if a newer suite supersedes
+  `coder_med` v1.0.
 - **Retire kimi as the sole judge.** Adopt a cross-judge panel
   (`--audit-judge-model` / `--meta-judge-model`, or the offline gemini
   re-score) for any quality-decided pick, given the measured self-bias.

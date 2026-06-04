@@ -191,9 +191,33 @@ self-vs-cohort gap) **does not appear here** (+0.03): on substantive code kimi
 judges its own work neutrally. **Efficiency:** `kimi` is the per-language
 quality/correctness leader (5/6) but the most token-heavy of the gated set;
 `glm-5.1` wins the balanced token-/wall-vs-quality trade-off — **corroborating**
-its existing default-coder route. **`coder_defaults.py` is not changed by this
-run.** Full detail + per-language ladders:
+its existing default-coder route. Full detail + per-language ladders:
 [`benchmarks/coder-med-results.md`](benchmarks/coder-med-results.md).
+
+**Adopted into live config (2026-06-04).** The per-language coder routes were
+realigned to these neutral-ladder winners (primary = winner, fallback =
+runner-up) in the **live config** — user-global on **solidpc** + **pandorum**,
+and the `claude-hooks` per-project override (`.claude-hooks/consultants.toml`,
+gitignored/local; backups `*.pre-codermed.bak`):
+
+| lang | primary (ladder winner) | fallback (runner-up) |
+|------|-------------------------|----------------------|
+| c | `kimi-k2.6:cloud` | `deepseek-v4-pro:cloud` |
+| cpp | `deepseek-v4-pro:cloud` | `deepseek-v4-flash:cloud` |
+| csharp | `kimi-k2.6:cloud` | `minimax-m3:cloud` |
+| go | `kimi-k2.6:cloud` | `deepseek-v4-pro:cloud` |
+| python | `kimi-k2.6:cloud` | `deepseek-v4-flash:cloud` |
+| rust | `kimi-k2.6:cloud` | `deepseek-v4-pro:cloud` |
+
+This is a **quality-over-cost** choice (`kimi-k2.6` is primary for 5/6
+languages, ~3.7× the completion tokens of the prior glm/ds-flash primaries).
+The **shipped code defaults** in
+[`coder_defaults.py`](../consultants/engine/coder_defaults.py)
+(`RECOMMENDED_CODER_ROUTES_BY_LANGUAGE`) were **updated to match** so fresh
+installs seed the same per-language picks — `RECOMMENDED_AS_OF = 2026-06-04`,
+suite `1.0-med`, hash `0e6ab0fd` (provenance test + the `coder_unique_models`
+set updated accordingly). `default_route` stays `glm-5.1:cloud` (the efficiency
+winner, used only for languages with no explicit entry).
 
 ---
 

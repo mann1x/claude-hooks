@@ -307,9 +307,9 @@ def _default_role_config(role: str) -> "RoleConfig":
     role-iteration site sees consistent defaults.
 
     Task #111: the ``coder`` role additionally seeds
-    ``routes_by_language`` + ``default_route`` from the v1.0.1-mlang
-    bench winners. Other roles leave both fields empty / None so
-    the runtime stays a pure-``model`` lookup for them.
+    ``routes_by_language`` + ``default_route`` from the coder_med
+    v1.0 bench winners (2026-06-04). Other roles leave both fields
+    empty / None so the runtime stays a pure-``model`` lookup for them.
     """
     rc = RoleConfig(
         enabled=DEFAULT_ENABLED_BY_ROLE.get(role, True),

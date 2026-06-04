@@ -69,7 +69,7 @@ class TestCoderResolveRoute(unittest.TestCase):
     def test_per_language_entry_wins(self):
         cfg = cc.ConsultantsConfig()
         r = cc.coder_resolve_route(cfg, "csharp")
-        self.assertEqual(r.primary, "deepseek-v4-pro:cloud")
+        self.assertEqual(r.primary, "kimi-k2.6:cloud")
 
     def test_unknown_language_falls_to_default(self):
         cfg = cc.ConsultantsConfig()
@@ -93,11 +93,13 @@ class TestCoderUniqueModels(unittest.TestCase):
     def test_returns_all_distinct_models(self):
         cfg = cc.ConsultantsConfig()
         models = cc.coder_unique_models(cfg)
-        # Defaults: glm, kimi, pro, flash → 4 unique models
+        # coder_med defaults: routes use kimi/pro/flash/minimax-m3;
+        # default_route + legacy model add glm → 5 unique models.
         self.assertEqual(set(models),
                          {"glm-5.1:cloud", "kimi-k2.6:cloud",
                           "deepseek-v4-pro:cloud",
-                          "deepseek-v4-flash:cloud"})
+                          "deepseek-v4-flash:cloud",
+                          "minimax-m3:cloud"})
 
     def test_dedups_when_legacy_model_overlaps(self):
         cfg = cc.ConsultantsConfig()
@@ -233,13 +235,13 @@ class TestMutators(unittest.TestCase):
 
     def test_set_coder_route_updates_primary_keeps_fallback(self):
         cc.set_coder_route("python",
-                            primary="kimi-k2.6:cloud")  # no --fallback
+                            primary="glm-5.1:cloud")  # no --fallback
         cfg = cc.load_config(None)
         route = cfg.roles["coder"].routes_by_language["python"]
-        self.assertEqual(route.primary, "kimi-k2.6:cloud")
-        # Original fallback preserved (was kimi → now glm-default? no,
-        # we replaced primary only)
-        self.assertEqual(route.fallback, "kimi-k2.6:cloud")
+        self.assertEqual(route.primary, "glm-5.1:cloud")
+        # Original fallback preserved — we replaced primary only.
+        # coder_med default python fallback is deepseek-v4-flash.
+        self.assertEqual(route.fallback, "deepseek-v4-flash:cloud")
 
     def test_set_coder_route_clear_fallback_explicit_empty(self):
         # fallback="" is the explicit-clear contract.
