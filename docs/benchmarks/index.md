@@ -16,9 +16,10 @@ up-link.
 | 2 | **Coder — Python** | Best default for `cfg.roles.coder.model` (Python HumanEval-style) | [baselines → Coder](../consultants-skill-eval-baselines.md#coder) · [report](../../benchmarks/consultants/results/2026-05-16/coder/report.md) | [skill-eval protocol](../consultants-skill-eval-protocol.md#coder-sub-protocol-v10) |
 | 3 | **Coder — per-language (hard)** | Best coder per language (C / C++ / C# / Go / Python / Rust) + global fallback, on a deliberately-brutal suite | [`coder-mlang-results.md`](coder-mlang-results.md) | [mlang suite](../consultants-skill-eval-mlang-suite.md) |
 | 4 | **Coder — per-language (easy)** | Per-language *reliability floor* (30 easy problems × 6 langs) + how the new `minimax-m3` / `nemotron-3-super` candidates rank | [`coder-easy-results.md`](coder-easy-results.md) | [skill-eval protocol](../consultants-skill-eval-protocol.md) |
-| 5 | **Tool executor** | Best default for `cfg.roles.tool_executor.model` + the default-on bit | [baselines → Tool executor](../consultants-skill-eval-baselines.md#tool-executor) · [report](../../benchmarks/consultants/results/2026-05-17/tool_executor/report.md) | [skill-eval protocol](../consultants-skill-eval-protocol.md#tool_executor-sub-protocol-v10) |
-| 6 | **Stall thresholds** | Per-model `(stall_threshold_s, hard_cap_s)` for the M3 stall detector | [baselines → Stall](../consultants-skill-eval-baselines.md#stall-thresholds) · [report](../../benchmarks/consultants/results/2026-05-17/stall-tier1/report.md) | [skill-eval protocol](../consultants-skill-eval-protocol.md#stall-sub-protocol-v10) |
-| 7 | **Caliber-eval (grounding)** | Which model to use for `caliber init` agent-config generation | [`caliber-eval-results/`](../caliber-eval-results/README.md) | [`caliber-eval.md`](../caliber-eval.md) |
+| 5 | **Coder — medium + cross-judge** | The mid-band that separates the field on correctness (10 problems × 6 langs) **+ the kimi-vs-gemini judge-bias finding** and a comparative model ladder | [`coder-med-results.md`](coder-med-results.md) | [skill-eval protocol](../consultants-skill-eval-protocol.md) |
+| 6 | **Tool executor** | Best default for `cfg.roles.tool_executor.model` + the default-on bit | [baselines → Tool executor](../consultants-skill-eval-baselines.md#tool-executor) · [report](../../benchmarks/consultants/results/2026-05-17/tool_executor/report.md) | [skill-eval protocol](../consultants-skill-eval-protocol.md#tool_executor-sub-protocol-v10) |
+| 7 | **Stall thresholds** | Per-model `(stall_threshold_s, hard_cap_s)` for the M3 stall detector | [baselines → Stall](../consultants-skill-eval-baselines.md#stall-thresholds) · [report](../../benchmarks/consultants/results/2026-05-17/stall-tier1/report.md) | [skill-eval protocol](../consultants-skill-eval-protocol.md#stall-sub-protocol-v10) |
+| 8 | **Caliber-eval (grounding)** | Which model to use for `caliber init` agent-config generation | [`caliber-eval-results/`](../caliber-eval-results/README.md) | [`caliber-eval.md`](../caliber-eval.md) |
 
 **Protocols & specs:** council-role grading →
 [`EVALUATION.md`](EVALUATION.md) · skill-eval suites (coder / mlang / stall /
@@ -49,6 +50,13 @@ canonical council query set →
   c/cpp/csharp/python are competence-floor + quality/cost calls. See
   [`coder-easy-results.md`](coder-easy-results.md) — also where the two new
   candidates (`minimax-m3`, `nemotron-3-super`) are scored.
+- **Coder (medium + cross-judge)** — the **mid-band** between easy (saturated)
+  and mlang (all-fail): 10 algorithmic problems × 6 languages that separate the
+  field on pass-rate (100% → 77%). It also carries the **cross-judge study** —
+  a second independent judge (`gemini-3-flash-preview`) re-scores every solution
+  and ranks all models head-to-head, quantifying that the `kimi` judge
+  self-inflates on *saturated easy* code (−0.27) but **not** on substantive
+  medium code (+0.03). See [`coder-med-results.md`](coder-med-results.md).
 - **Tool executor** — measures *reading + reasoning over a codebase via tool
   calls* (grep/read/glob/survey), not code writing; picks the tool_executor
   default.

@@ -152,6 +152,51 @@ this run** — realigning go/rust is a follow-up. Full detail:
 
 ---
 
+<a id="coder_med"></a>
+
+### v1.0-med baseline (2026-06-04) — mid-band separation + cross-judge
+
+> **How to read this table.** `coder_med@1.0` is the **mid-band** between easy
+> (saturated) and mlang (all-fail): 10 algorithmic problems × 6 languages (60 q),
+> uniform stdin→stdout. **Every question discriminates** and pass-rate spreads a
+> real **100% → 77%** — `minimax-m2.7` drops out of the rubric (quality 3.30).
+> A second independent judge (`gemini-3-flash-preview`) re-scored all 420
+> solutions and ranked them head-to-head: the **kimi self-judge bias is
+> easy-only** (−0.27 on easy, **+0.03 here**), and the neutral ladder still
+> ranks `kimi` #1, tracking pass-rate. Full breakdown + per-language ladders +
+> the token-/wall-vs-quality efficiency table (balanced winner `glm-5.1`):
+> [`benchmarks/coder-med-results.md`](benchmarks/coder-med-results.md). Suite
+> hash `0e6ab0fd`; 7 models × 60 = 420 trials; git `5f5af00`. Judge
+> `kimi-k2.6` (primary) + `gemini-3-flash-preview` (cross-judge, num_predict
+> 4000 re-score / 8000 ladder; **100%** re-score / **95–98%** ladder parse
+> coverage after a high-budget retry of the truncated reasoning replies).
+
+`Gemini q` = neutral second-judge mean; `Ladder rank` = neutral head-to-head
+mean rank (lower = better); `comp-tok` = median completion (generated) tokens.
+
+| Date | Suite | Model | Pass rate | Kimi q | Gemini q | Ladder rank | comp-tok | wall | Suite hash | Notes |
+|------|-------|-------|----------:|-------:|---------:|------------:|---------:|-----:|------------|-------|
+| 2026-06-04 | med 1.0 | `kimi-k2.6:cloud` | **100% (60/60)** | 4.19 | 4.72 | **2.82 (#1)** | 1043 | 48.5s | `0e6ab0fd` | sole 100%-pass; #1 on the neutral ladder too (**is the judge**); wins 5/6 langs |
+| 2026-06-04 | med 1.0 | `deepseek-v4-pro:cloud` | 98% (59/60) | 4.00 | 4.58 | 3.30 (#2) | 476 | 53.8s | `0e6ab0fd` | wins cpp on the ladder |
+| 2026-06-04 | med 1.0 | `minimax-m3:cloud` | 97% (58/60) | 3.92 | 4.55 | 3.71 (#3) | 690 | 59.7s | `0e6ab0fd` | strong all-round |
+| 2026-06-04 | med 1.0 | `glm-5.1:cloud` | 95% (57/60) | 3.85 | 4.38 | 4.26 | **282** | 41.0s | `0e6ab0fd` | **balanced-efficiency winner** (leanest tokens, near-fastest wall) |
+| 2026-06-04 | med 1.0 | `deepseek-v4-flash:cloud` | 92% (55/60) | 3.96 | 4.20 | 4.20 | 366 | 46.8s | `0e6ab0fd` | efficiency runner-up |
+| 2026-06-04 | med 1.0 | `nemotron-3-super:cloud` | 88% (53/60) | 3.62 | 4.17 | 4.50 | 770 | **39.0s** | `0e6ab0fd` | fastest wall but pass<90 (gated out of efficiency) |
+| 2026-06-04 | med 1.0 | `minimax-m2.7:cloud` | 77% (46/60) | 3.30 | 3.73 | 5.17 (#7) | 618 | 52.3s | `0e6ab0fd` | **fails rubric** (quality); csharp/go collapse to 60% |
+
+**Cross-judge finding:** gemini is systematically more generous than kimi
+(cohort Δ +0.50, widest on **go +0.69** / **rust +0.60** — kimi under-rates
+those idioms). The self-judge bias that appeared on the *easy* suite (−0.27
+self-vs-cohort gap) **does not appear here** (+0.03): on substantive code kimi
+judges its own work neutrally. **Efficiency:** `kimi` is the per-language
+quality/correctness leader (5/6) but the most token-heavy of the gated set;
+`glm-5.1` wins the balanced token-/wall-vs-quality trade-off — **corroborating**
+its existing default-coder route. **`coder_defaults.py` is not changed by this
+run.** Full detail + per-language ladders:
+[`benchmarks/coder-med-results.md`](benchmarks/coder-med-results.md).
+
+---
+
 ## Stall thresholds
 
 The stall suite (M11a) gates per-model `stall_threshold_s` and
