@@ -177,6 +177,7 @@ class _Handler(BaseHTTPRequestHandler):
 
         # --- Stream the body
         total_out = 0
+        midstream_err: Optional[str] = None
         try:
             if result.first_chunk:
                 self.wfile.write(result.first_chunk)
@@ -188,10 +189,24 @@ class _Handler(BaseHTTPRequestHandler):
                 total_out += len(chunk)
         except (BrokenPipeError, ConnectionResetError):
             log.debug("client dropped mid-stream")
+        except Exception as e:
+            # Upstream failed mid-stream AFTER headers + bytes were already
+            # committed to the client — we cannot retry (the response is
+            # partially delivered). End cleanly and record it so the JSONL
+            # captures the truncation instead of the handler thread dying
+            # with an uncaught exception; Claude Code sees a truncated SSE
+            # stream and re-issues. TCP keepalive on the upstream socket
+            # makes the common idle-reap cause of this rare.
+            midstream_err = f"upstream_midstream:{type(e).__name__}"
+            log.warning(
+                "upstream mid-stream failure after %d bytes: %s: %s",
+                total_out, type(e).__name__, e,
+            )
 
         self._log_line(
             started, req_meta, resp_meta, result,
             req_bytes=len(body), resp_bytes=total_out,
+            extra={"error": midstream_err} if midstream_err else None,
         )
 
     # -------------------------------------------------------------- #

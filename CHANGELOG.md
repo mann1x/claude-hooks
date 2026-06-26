@@ -14,6 +14,41 @@ release with the auto-generated source archive
 (`claude-hooks-X.Y.Z.zip` / `.tar.gz`). See
 [`docs/RELEASING.md`](docs/RELEASING.md) for the cut procedure.
 
+## [Unreleased]
+
+### Fixed
+
+- **API proxy: enable TCP keepalive on the upstream socket — the missing
+  transparency that dropped long requests.** The transparent
+  `api.anthropic.com` proxy failed long-running requests with
+  `RemoteProtocolError: Server disconnected` ~60 s in, while a direct
+  (no-proxy) connection to the same endpoint never dropped. Root cause,
+  proven via `ss`: Claude Code's native client sets `SO_KEEPALIVE` (~60 s
+  idle) on its API socket; the proxy's httpx client set none, so during a
+  long silent *thinking* window (xhigh effort / large context) the
+  connection sat truly idle and an on-path stateful device reaped it at
+  ~60 s. The pool `keepalive_expiry` only retires *pool-idle* connections
+  between requests — it cannot keep an in-flight, mid-request-idle
+  connection alive; kernel keepalive probes can. `forwarder.py` now builds
+  the transport explicitly with `socket_options` enabling `SO_KEEPALIVE`
+  plus (Linux) `TCP_KEEPIDLE=30` / `KEEPINTVL=15` / `KEEPCNT=4`
+  (env-tunable via `CLAUDE_HOOKS_PROXY_TCP_KEEP*`). This also retro-explains
+  the "throttle engages when a 2nd session runs" report — the
+  keepalive-induced conn-errors were tripping the cross-session circuit
+  breaker, which *amplified* the bug rather than causing it.
+- **API proxy: stop withholding the first SSE byte to buffer 4 KB.**
+  `_forward_attempt` looped reading chunks until it had 4096 bytes before
+  returning the response headers + first byte to the client; on a
+  slow-thinking SSE response (small `message_start`, then quiet) that
+  delayed the client's first byte by tens of seconds, an SSE-TTFB stall
+  that can trip Claude Code's client-side body timeout. It now forwards the
+  first chunk as soon as it lands; final usage still flows via the SseTail.
+- **API proxy: handle upstream mid-stream errors gracefully.** The body
+  loop in `server.py` caught only client-side drops; an upstream httpx
+  error *after* headers were committed propagated uncaught, skipping the
+  JSONL line and killing the handler thread. It is now logged + recorded as
+  a truncation.
+
 ## [1.13.0] — 2026-06-03
 
 ### Added

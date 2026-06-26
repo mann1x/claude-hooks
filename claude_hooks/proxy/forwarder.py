@@ -25,6 +25,7 @@ from __future__ import annotations
 import atexit
 import logging
 import os
+import socket
 import ssl
 import threading
 import time
@@ -94,6 +95,33 @@ _CLIENT_TIMEOUT: Optional[float] = None
 # "Retry / throttle resilience".
 _KEEPALIVE_EXPIRY = float(os.environ.get("CLAUDE_HOOKS_PROXY_KEEPALIVE_SEC", "60"))
 
+# TCP keepalive on the UPSTREAM socket. Claude Code's native client sets
+# SO_KEEPALIVE (~60s idle); without it our connection sits truly idle
+# during long server-side "thinking" windows (xhigh effort / large
+# context) and an on-path stateful device reaps it at ~60s, surfacing as
+# RemoteProtocolError "Server disconnected". ``_KEEPALIVE_EXPIRY`` above
+# only retires POOL-idle connections between requests — it cannot keep an
+# in-flight, mid-request-idle connection alive. Kernel keepalive probes
+# do. KEEPIDLE is deliberately < the observed ~60s reap window.
+_KEEPALIVE_IDLE = int(os.environ.get("CLAUDE_HOOKS_PROXY_TCP_KEEPIDLE", "30"))
+_KEEPALIVE_INTVL = int(os.environ.get("CLAUDE_HOOKS_PROXY_TCP_KEEPINTVL", "15"))
+_KEEPALIVE_CNT = int(os.environ.get("CLAUDE_HOOKS_PROXY_TCP_KEEPCNT", "4"))
+
+
+def _keepalive_socket_options() -> list:
+    """SO_KEEPALIVE (+ Linux idle/intvl/cnt tuning when available) so the
+    upstream connection survives long silent thinking windows the way
+    Claude Code's native client does. SO_KEEPALIVE is portable; the
+    TCP_KEEP* knobs are Linux-only and guarded by ``hasattr``."""
+    opts = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+    if hasattr(socket, "TCP_KEEPIDLE"):
+        opts.append((socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, _KEEPALIVE_IDLE))
+    if hasattr(socket, "TCP_KEEPINTVL"):
+        opts.append((socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, _KEEPALIVE_INTVL))
+    if hasattr(socket, "TCP_KEEPCNT"):
+        opts.append((socket.IPPROTO_TCP, socket.TCP_KEEPCNT, _KEEPALIVE_CNT))
+    return opts
+
 
 class _RetryableStatus(Exception):
     """Raised by ``_forward_attempt`` when the upstream returned an HTTP
@@ -113,19 +141,28 @@ class _RetryableStatus(Exception):
 
 
 def _build_client(timeout: float) -> httpx.Client:
-    return httpx.Client(
+    # Build the transport explicitly so we can pass socket_options (TCP
+    # keepalive). http2 + limits move onto the transport — they are
+    # ignored on httpx.Client when a custom transport is supplied.
+    transport = httpx.HTTPTransport(
         http2=True,
-        timeout=httpx.Timeout(timeout, connect=10.0),
         limits=httpx.Limits(
             max_keepalive_connections=10,
             max_connections=20,
             keepalive_expiry=_KEEPALIVE_EXPIRY,
         ),
-        follow_redirects=False,
+        socket_options=_keepalive_socket_options(),
         # Do NOT read HTTPS_PROXY / NO_PROXY from env — we *are* the
         # proxy. If the host has those set pointing at us, trusting
         # env would cause infinite loops.
         trust_env=False,
+        retries=0,
+    )
+    return httpx.Client(
+        timeout=httpx.Timeout(timeout, connect=10.0),
+        follow_redirects=False,
+        trust_env=False,
+        transport=transport,
     )
 
 
@@ -401,18 +438,27 @@ def _forward_attempt(
 
     chunks_iter = resp.iter_raw(chunk_size=65536)
 
-    # Pull up to 4 KB for metadata extraction. SSE's ``message_start``
-    # fits well under that; JSON bodies are still streamed lazily.
+    # Pull the FIRST non-empty chunk for metadata extraction and return
+    # immediately. We deliberately do NOT block accumulating a fixed 4 KB:
+    # during a long "thinking" window upstream may emit a small
+    # ``message_start`` then go quiet (only periodic pings), and looping
+    # for more bytes would withhold the response headers + first byte from
+    # Claude Code for tens of seconds — tripping its client-side body
+    # timeout (the SSE-TTFB failure class). httpx ``iter_raw`` yields each
+    # network read as it lands, so one ``next`` is the earliest byte;
+    # ``message_start`` fits in it, and richer/final metadata still flows
+    # via the SseTail attached to the body below.
     first_chunk = b""
     try:
-        while len(first_chunk) < 4096:
+        while True:
             try:
                 chunk = next(chunks_iter)
             except StopIteration:
                 break
             if not chunk:
                 continue
-            first_chunk += chunk
+            first_chunk = chunk
+            break
     except Exception:
         try:
             resp.close()
