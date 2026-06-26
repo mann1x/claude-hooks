@@ -284,18 +284,23 @@ def forward(
             )
             return result
         except (httpx.TimeoutException, httpx.NetworkError,
-                httpx.RemoteProtocolError) as e:
+                httpx.ProtocolError) as e:
             # Transport-level failure — the throttle's other faces:
             # connect/read/write/pool *timeouts* (``TimeoutException``),
             # connect/read/write *errors* (``NetworkError``, incl.
-            # ``ConnectError``), and mid-stream server disconnects
-            # (``RemoteProtocolError``). All are safe to retry here
-            # because no byte has reached the client yet. httpx has
-            # already evicted the dead connection, so the next attempt
-            # on the shared client gets a fresh one — no whole-pool nuke
-            # (which would kill sibling sessions and re-trip the edge-429
-            # gate). hdrs is empty; there's no upstream response to read
-            # Retry-After from.
+            # ``ConnectError``), server disconnects (``RemoteProtocolError``),
+            # and LOCAL HTTP/2 protocol faults (``LocalProtocolError`` —
+            # REFUSED_STREAM / FLOW_CONTROL_ERROR / max-concurrent-streams
+            # exceeded when many parallel sessions multiplex over the pooled
+            # h2 connection). ``httpx.ProtocolError`` is the parent of both
+            # Local + Remote, so this covers the whole family. All are safe to
+            # retry here because no byte has reached the client yet, and the
+            # retry lands on a fresh stream/connection — exactly the recovery
+            # the native client makes for a refused stream under load. httpx
+            # has already evicted the dead connection; the next attempt on the
+            # shared client gets a fresh one — no whole-pool nuke (which would
+            # kill sibling sessions and re-trip the edge-429 gate). hdrs is
+            # empty; there's no upstream response to read Retry-After from.
             last_exc = e
             now = time.monotonic()
             hdrs: dict = {}
