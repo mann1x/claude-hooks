@@ -5661,11 +5661,19 @@ def _init_pgvector_schema(dsn: str, *, model: str = "qwen3") -> None:
 
 
 def _ensure_proxy_deps(cfg: dict, *, non_interactive: bool, dry_run: bool) -> None:
-    """Verify httpx + h2 are available when the proxy is enabled.
+    """Verify httpx is available when the proxy is enabled (h2 optional).
 
-    The proxy forwarder requires HTTP/2 (via httpx[http2]) to match
-    native Claude Code's connection profile. HTTP/1.1-per-request
-    trips Anthropic's edge 429 gate.
+    The proxy forwarder defaults to an HTTP/1.1 keepalive pool that
+    mimics native Claude Code (many reused connections, no churn) — this
+    needs only ``httpx`` itself. The HTTP/2 multiplexing path is an
+    env-selectable rollback (``CLAUDE_HOOKS_PROXY_UPSTREAM_HTTP=2``) and
+    is the only mode that needs the ``h2`` extra. Anthropic's edge gate
+    trips on connection *churn*, not the HTTP version, so the h1 pool is
+    gate-safe.
+
+    httpx is therefore a hard requirement; h2 is informational unless the
+    resolved upstream mode is 2. We still install the ``[http2]`` extra
+    by default so the rollback works without a second pip step.
 
     Runs after save_config so it sees the just-written state. No-op
     when proxy.enabled is false.
@@ -5678,17 +5686,36 @@ def _ensure_proxy_deps(cfg: dict, *, non_interactive: bool, dry_run: bool) -> No
     # Use conda env's python when available, else system python.
     py = str(conda_py) if conda_py.exists() else sys.executable
 
-    probe = subprocess.run(
-        [py, "-c", "import httpx, h2; print(httpx.__version__, h2.__version__)"],
+    # Resolve the upstream HTTP mode the proxy will actually run with.
+    upstream_http = str(
+        os.environ.get("CLAUDE_HOOKS_PROXY_UPSTREAM_HTTP")
+        or proxy_cfg.get("upstream_http")
+        or "1"
+    ).strip()
+    h2_required = upstream_http == "2"
+
+    httpx_probe = subprocess.run(
+        [py, "-c", "import httpx; print(httpx.__version__)"],
         capture_output=True, text=True,
     )
-    if probe.returncode == 0:
-        print(f"\nProxy deps:     httpx + h2 OK ({probe.stdout.strip()})")
+    h2_probe = subprocess.run(
+        [py, "-c", "import h2; print(h2.__version__)"],
+        capture_output=True, text=True,
+    )
+    httpx_ok = httpx_probe.returncode == 0
+    h2_ok = h2_probe.returncode == 0
+
+    if httpx_ok and (h2_ok or not h2_required):
+        h2_note = f"h2 {h2_probe.stdout.strip()}" if h2_ok else "h2 absent (h1 default)"
+        print(f"\nProxy deps:     httpx OK ({httpx_probe.stdout.strip()}, {h2_note})")
         return
 
-    print("\nProxy deps:     httpx / h2 MISSING")
-    print("  The proxy forwarder needs httpx[http2] to pass Anthropic's")
-    print("  HTTP/2 edge gate. Without it the proxy will import-error.")
+    if not httpx_ok:
+        print("\nProxy deps:     httpx MISSING")
+        print("  The proxy forwarder needs httpx. Without it it will import-error.")
+    else:  # httpx ok but h2 required + missing
+        print("\nProxy deps:     h2 MISSING (upstream_http=2 rollback selected)")
+        print("  The HTTP/2 upstream mode needs the httpx[http2] extra.")
 
     if dry_run:
         print(f"  [dry-run] Would: {py} -m pip install 'httpx[http2]>=0.27'")

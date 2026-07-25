@@ -1,12 +1,25 @@
 """
-Upstream forwarder using ``httpx`` with HTTP/2 + connection pooling.
+Upstream forwarder using ``httpx`` with an HTTP/1.1 keepalive pool.
 
-Rationale: Anthropic's edge enforces a per-request-connection gate on
-HTTP/1.1-per-request clients. Native Claude Code uses a single
-HTTP/2 connection and multiplexes streams over it. We match that
-profile with a module-level ``httpx.Client(http2=True)`` so the
-proxy presents one well-behaved client to upstream, regardless of
-how many requests Claude Code sends through us.
+Rationale: Anthropic's edge enforces a gate on connection **churn**
+(a fresh TCP+TLS connection per request), not on the HTTP version.
+A pcap of real traffic shows native Claude Code talks HTTP/1.1 and
+opens *many* connections, one request each, **reused** via keep-alive
+— it spreads load across connections and never trips the gate. We
+mimic that maniacally: a module-level ``httpx.Client`` over an
+``HTTPTransport(http1=True, http2=False)`` with a large, fully-retained
+keepalive pool, so finished connections are kept idle and reused rather
+than closed-and-reopened (churn) or concentrated onto a few multiplexed
+HTTP/2 streams (which the upstream sheds under heavy concurrency,
+cascading ``REFUSED_STREAM`` faults across sessions).
+
+The one invariant that keeps this gate-safe: ``max_keepalive_connections``
+must be **>= peak concurrency**. Above it every finished connection is
+retained and reused; below it httpx closes the excess and the next burst
+re-opens fresh ones — the per-request churn that trips the edge-429 gate.
+
+HTTP/2 multiplexing remains available as an env-selectable rollback
+(``CLAUDE_HOOKS_PROXY_UPSTREAM_HTTP=2``).
 
 Handles:
 
@@ -39,9 +52,11 @@ try:
     import httpx
 except ImportError as e:  # pragma: no cover - guarded at install time
     raise ImportError(
-        "claude-hooks proxy requires httpx[http2]. Install with:\n"
+        "claude-hooks proxy requires httpx. Install with:\n"
         "    pip install 'httpx[http2]>=0.27'\n"
-        "or re-run install.py with proxy.enabled=true to auto-install."
+        "(the [http2] extra is only needed for the optional h2 rollback,\n"
+        "CLAUDE_HOOKS_PROXY_UPSTREAM_HTTP=2; the default h1 pool needs\n"
+        "only httpx itself) or re-run install.py with proxy.enabled=true."
     ) from e
 
 log = logging.getLogger("claude_hooks.proxy.forwarder")
@@ -77,22 +92,22 @@ _CLIENT_TIMEOUT: Optional[float] = None
 
 
 # Upstream (Anthropic / other Claude endpoints) can silently drop idle
-# HTTP/2 connections well before our pool's keepalive_expiry would have
-# retired them, surfacing as ``httpx.RemoteProtocolError`` ("Server
+# connections well before our pool's keepalive_expiry would have retired
+# them, surfacing as ``httpx.RemoteProtocolError`` ("Server
 # disconnected"). A short keepalive retires stale connections ahead of
 # upstream's silent idle-drop; httpx evicts a connection that *raised*
 # on its own, so a retry on the shared client transparently lands on a
 # fresh connection without disturbing sibling sessions.
 #
 # The retry *policy* (jittered backoff, Retry-After honoring, the
-# wall-clock deadline, the cross-session circuit breaker) lives in
-# ``claude_hooks.proxy.retry`` — a pure, unit-testable module. This
-# file owns only the HTTP loop + ``time.sleep``. The old whole-pool
-# ``_reset_client()`` nuke on the retry path is gone: it closed sibling
-# sessions' live connections (collective storm) *and* recreated the
-# per-request fresh-connection profile the HTTP/2 pool exists to avoid
-# (which itself tripped Anthropic's edge-429 gate). See docs/proxy.md
-# "Retry / throttle resilience".
+# wall-clock deadline, the surgical conn-error budget, the off-by-default
+# circuit breaker) lives in ``claude_hooks.proxy.retry`` — a pure,
+# unit-testable module. This file owns only the HTTP loop + ``time.sleep``.
+# The old whole-pool ``_reset_client()`` nuke on the retry path is gone:
+# it closed sibling sessions' live connections (collective storm) *and*
+# recreated the per-request fresh-connection profile (churn) that trips
+# Anthropic's edge-429 gate. See docs/proxy.md "Retry / throttle
+# resilience".
 _KEEPALIVE_EXPIRY = float(os.environ.get("CLAUDE_HOOKS_PROXY_KEEPALIVE_SEC", "60"))
 
 # TCP keepalive on the UPSTREAM socket. Claude Code's native client sets
@@ -140,15 +155,50 @@ class _RetryableStatus(Exception):
         self.headers = headers
 
 
+def _int_env(key: str, default: int) -> int:
+    """Parse an int env knob, falling back to ``default`` on absent/blank/bad."""
+    raw = os.environ.get(key)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _upstream_http_version() -> str:
+    """``'1'`` (HTTP/1.1, default — mimics Claude Code) or ``'2'`` (the
+    HTTP/2 multiplexing rollback). Read per-build so a service restart
+    picks up the env without a code change."""
+    return (os.environ.get("CLAUDE_HOOKS_PROXY_UPSTREAM_HTTP", "1") or "1").strip()
+
+
 def _build_client(timeout: float) -> httpx.Client:
     # Build the transport explicitly so we can pass socket_options (TCP
-    # keepalive). http2 + limits move onto the transport — they are
+    # keepalive). http1/http2 + limits move onto the transport — they are
     # ignored on httpx.Client when a custom transport is supplied.
+    #
+    # Default: HTTP/1.1 only (http2=False) over a large keepalive pool —
+    # the Claude Code profile (many reused connections, no churn). The
+    # h2 rollback enables http2 negotiation; http1 stays on as the ALPN
+    # fallback either way.
+    use_h2 = _upstream_http_version() == "2"
+    # max_keepalive MUST be >= peak concurrency or finished connections
+    # get closed and the next burst re-opens fresh ones (churn) — the
+    # exact pattern that trips Anthropic's edge-429 gate. 50 covers the
+    # observed ~12-session heavy load with headroom.
+    max_keepalive = _int_env("CLAUDE_HOOKS_PROXY_MAX_KEEPALIVE", 50)
+    # 0 (default) → unlimited: never block a request waiting for a pool
+    # slot (pool-level head-of-line blocking would itself look like a
+    # stall to Claude Code). Set a positive value only to cap fan-out.
+    max_conn_raw = _int_env("CLAUDE_HOOKS_PROXY_MAX_CONNECTIONS", 0)
+    max_connections = max_conn_raw if max_conn_raw > 0 else None
     transport = httpx.HTTPTransport(
-        http2=True,
+        http1=True,
+        http2=use_h2,
         limits=httpx.Limits(
-            max_keepalive_connections=10,
-            max_connections=20,
+            max_keepalive_connections=max_keepalive,
+            max_connections=max_connections,
             keepalive_expiry=_KEEPALIVE_EXPIRY,
         ),
         socket_options=_keepalive_socket_options(),
@@ -225,9 +275,10 @@ def forward(
     Transparently retries (spaced, deadline-bounded — see
     ``claude_hooks.proxy.retry``) on transport-level failures
     (``httpx.TimeoutException`` / ``httpx.NetworkError`` /
-    ``httpx.RemoteProtocolError``) and on retryable upstream statuses.
-    All are safe to retry because no byte has reached our client yet —
-    the retry happens strictly *before* ``UpstreamResult`` is returned.
+    ``httpx.ProtocolError``) under the *surgical* conn-error budget, and
+    on retryable upstream statuses under the 5xx ride-out budget. All are
+    safe to retry because no byte has reached our client yet — the retry
+    happens strictly *before* ``UpstreamResult`` is returned.
     """
     u = urlparse(upstream_url)
     if not u.scheme or not u.hostname:
@@ -251,16 +302,23 @@ def forward(
     client = _get_client(timeout)
 
     last_exc: Optional[Exception] = None
-    attempt = 0                       # 0-indexed; 0 = first attempt
+    attempt = 0                       # total retries so far (for telemetry)
+    # Per-class attempt indices: the surgical conn-error budget and the
+    # 5xx ride-out budget each count + back off independently, so a conn
+    # drop *after* a couple of 5xx retries still gets its own fast couple
+    # of conn retries (and vice-versa) instead of inheriting the other
+    # class's exhausted count.
+    conn_attempt = 0
+    status_attempt = 0
     backoff_total = 0.0               # cumulative sleep, seconds
     retry_after_honored = False
     start = time.monotonic()
 
-    # Cross-session circuit breaker: when upstream is in an overload
-    # window, every session sharing this one proxy pool adds a
-    # coordinated delay *before its first attempt* so a second session
-    # can't pile on and turn a transient overload into a collective
-    # storm. 0 when the breaker is closed.
+    # Cross-session circuit breaker (off by default — see retry.py):
+    # under the h2 rollback, when upstream is in an overload window every
+    # session sharing the multiplexed pool adds a coordinated delay
+    # *before its first attempt* so a second session can't pile on. 0
+    # when the breaker is disabled or closed (the default h1 path).
     pre = retry.pre_attempt_delay(start)
     if pre > 0:
         time.sleep(pre)
@@ -288,23 +346,26 @@ def forward(
             # Transport-level failure — the throttle's other faces:
             # connect/read/write/pool *timeouts* (``TimeoutException``),
             # connect/read/write *errors* (``NetworkError``, incl.
-            # ``ConnectError``), server disconnects (``RemoteProtocolError``),
-            # and LOCAL HTTP/2 protocol faults (``LocalProtocolError`` —
-            # REFUSED_STREAM / FLOW_CONTROL_ERROR / max-concurrent-streams
-            # exceeded when many parallel sessions multiplex over the pooled
-            # h2 connection). ``httpx.ProtocolError`` is the parent of both
-            # Local + Remote, so this covers the whole family. All are safe to
-            # retry here because no byte has reached the client yet, and the
-            # retry lands on a fresh stream/connection — exactly the recovery
-            # the native client makes for a refused stream under load. httpx
-            # has already evicted the dead connection; the next attempt on the
-            # shared client gets a fresh one — no whole-pool nuke (which would
-            # kill sibling sessions and re-trip the edge-429 gate). hdrs is
-            # empty; there's no upstream response to read Retry-After from.
+            # ``ConnectError``), server disconnects on a reused keepalive
+            # connection (``RemoteProtocolError`` — the common h1 case when
+            # upstream silently closed an idle pooled connection), and LOCAL
+            # HTTP/2 protocol faults (``LocalProtocolError`` — REFUSED_STREAM /
+            # FLOW_CONTROL_ERROR / max-concurrent-streams, only under the h2
+            # rollback). ``httpx.ProtocolError`` is the parent of both Local +
+            # Remote, so this covers the whole family. All are safe to retry
+            # here because no byte has reached the client yet, and the retry
+            # lands on a fresh pool connection — exactly the recovery the
+            # native client makes. httpx has already evicted the dead
+            # connection; the next attempt on the shared client gets a fresh
+            # one — no whole-pool nuke (which would kill sibling sessions and
+            # re-trip the edge-429 gate via churn). These take the SURGICAL
+            # conn-error budget below (few/fast/short). hdrs is empty; there's
+            # no upstream response to read Retry-After from.
             last_exc = e
             now = time.monotonic()
             hdrs: dict = {}
             ra: Optional[float] = None
+            conn_error = True
             retry.record_overload(now, conn_error=True)
         except _RetryableStatus as e:
             last_exc = e
@@ -313,17 +374,39 @@ def forward(
             ra = (retry.parse_retry_after(hdrs, time.time(),
                                           cfg.retry_after_cap_s)
                   if cfg.honor_retry_after else None)
+            conn_error = False
             retry.record_overload(now, status=e.status, retry_after=ra)
 
         elapsed = now - start
-        wait = retry.next_delay(attempt, hdrs, cfg, time.time())
+        # Connection failures take the surgical conn-error budget (few,
+        # fast, short); retryable upstream statuses take the 5xx ride-out
+        # budget. Each uses its own attempt index so the backoff exponent
+        # and the attempt cap are per-class. Both honor Retry-After when
+        # present (conn errors carry no headers, so theirs is pure backoff).
+        if conn_error:
+            wait = retry.next_delay(
+                conn_attempt, hdrs, cfg, time.time(),
+                base_delay_s=cfg.conn_base_delay_s,
+                max_delay_s=cfg.conn_max_delay_s,
+            )
+        else:
+            wait = retry.next_delay(status_attempt, hdrs, cfg, time.time())
         if ra is not None:
             retry_after_honored = True
-        # While the breaker is open, use its coordinated delay as a floor.
+        # While the breaker is open (h2-rollback only — off by default),
+        # use its coordinated delay as a floor.
         floor = retry.pre_attempt_delay(now)
         if floor > wait:
             wait = floor
-        if not retry.should_retry(attempt, elapsed, wait, cfg):
+        if conn_error:
+            ok = retry.should_retry(
+                conn_attempt, elapsed, wait, cfg,
+                max_attempts=cfg.conn_max_attempts,
+                deadline_s=cfg.conn_deadline_s,
+            )
+        else:
+            ok = retry.should_retry(status_attempt, elapsed, wait, cfg)
+        if not ok:
             break
         log.debug(
             "proxy retry %d after %s (wait %.2fs, elapsed %.1fs)",
@@ -332,6 +415,10 @@ def forward(
         time.sleep(wait)
         backoff_total += wait
         attempt += 1
+        if conn_error:
+            conn_attempt += 1
+        else:
+            status_attempt += 1
 
     assert last_exc is not None  # loop only exits via return or break
     retry.record_exhausted()

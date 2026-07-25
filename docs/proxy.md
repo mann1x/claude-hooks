@@ -422,12 +422,15 @@ match nothing, keeping the log compact). Daily rollup gains per-
 category totals; dashboard renders the "behavior canaries" card with
 rate per 1K tool calls.
 
-## Forwarder: httpx + HTTP/2
+## Forwarder: HTTP/1.1 keepalive pool (h2 optional)
 
-The proxy forwards via a module-level `httpx.Client(http2=True)`
-with a keep-alive pool. Calls share one TCP+TLS connection that
-multiplexes HTTP/2 streams, matching the connection profile
-native Claude Code presents to `api.anthropic.com`.
+The proxy forwards via a module-level `httpx.Client` over an
+`HTTPTransport(http1=True, http2=False)` with a **large, fully-retained
+keepalive pool**. This mimics native Claude Code maniacally: a pcap of
+real CC traffic to `api.anthropic.com` shows **HTTP/1.1** with *many*
+connections (25 in a short window), one request per connection, each
+**reused** via keep-alive. CC spreads load across connections; finished
+ones are kept idle and reused, never closed-and-reopened.
 
 ### Why this matters
 
@@ -446,40 +449,81 @@ tripped Anthropic's edge 429 gate on bursts — even when the unified
 | 16:21:05 | **429** | 1.6 s | 2011 KB | **0** |
 | 16:21:57 | **429** | 1.6 s | 1950 KB | **0** |
 
-429s with `concurrent=0` on requests *smaller* than adjacent 200s,
-no `anthropic-ratelimit-unified-*` headers on the 429 responses →
-the differentiator was connection profile, not rate/size/overlap.
+429s with `concurrent=0` on requests *smaller* than adjacent 200s, no
+`anthropic-ratelimit-unified-*` headers on the 429 responses → the
+differentiator was connection **churn**, not rate/size/overlap. The
+per-request implementation opened a fresh TCP+TLS connection every call;
+**that churn** is what the gate bites, **not** the HTTP version. CC uses
+pooled HTTP/1.1 and never trips it.
 
-The HTTP/2 pooled client lands us in the same "one well-behaved
-client" bucket as native CC, so the edge gate doesn't trip.
+The original fix assumed the cure was HTTP/2 and switched to
+`httpx.Client(http2=True)`. That fixed the churn (one shared pool) but
+introduced a new failure under heavy concurrency: every session's
+streams **concentrate** onto a few multiplexed h2 connections, which the
+upstream sheds under load — cascading `REFUSED_STREAM` /
+`LocalProtocolError` faults across *all* sessions on that connection
+(~20% drop rate at ~12 parallel 1M-context xhigh sessions). The h1
+keepalive pool removes the concentration: each request rides its own
+connection, so a drop is isolated and recovered by a fresh pool
+connection.
+
+### The gate-safety invariant
+
+> `max_keepalive_connections` **must be >= peak concurrency.**
+
+Above it, every finished connection is retained idle and reused (CC's
+no-churn profile). Below it, httpx closes the excess and the next burst
+re-opens fresh ones — the per-request churn that trips the edge-429
+gate. The default `50` covers the observed ~12-session heavy load with
+headroom; raise it if you run more concurrent sessions.
+
+### HTTP/2 rollback
+
+HTTP/2 multiplexing remains available as a single-env rollback:
+
+```bash
+CLAUDE_HOOKS_PROXY_UPSTREAM_HTTP=2   # negotiate h2 (h1 stays as ALPN fallback)
+CLAUDE_HOOKS_PROXY_BREAKER_ENABLED=1 # re-enable the cross-session breaker
+```
 
 ### Dependency
 
-`httpx[http2]>=0.27` is listed in `requirements.txt` and is
-installed automatically by `install.py` when `proxy.enabled: true`.
-For manual installs:
+`httpx` is required; the `[http2]` extra is only needed for the h2
+rollback. `httpx[http2]>=0.27` is listed in `requirements.txt` and is
+installed by `install.py` when `proxy.enabled: true` (so the rollback
+works without a second step). For manual installs:
 
 ```bash
 pip install 'httpx[http2]>=0.27'
 ```
 
-Without it the proxy raises `ImportError` at startup with a
+Without `httpx` the proxy raises `ImportError` at startup with a
 pointer to this section.
 
 ### Tuning
 
 Pool defaults in `forwarder.py`:
 
-- `max_keepalive_connections=10`, `max_connections=20`
+- `http1=True, http2=False` (`CLAUDE_HOOKS_PROXY_UPSTREAM_HTTP`, `1`=h1
+  default / `2`=h2 rollback)
+- `max_keepalive_connections=50` (`CLAUDE_HOOKS_PROXY_MAX_KEEPALIVE`) —
+  **keep ≥ peak concurrency** (see the invariant above)
+- `max_connections=None` (unlimited; `CLAUDE_HOOKS_PROXY_MAX_CONNECTIONS`,
+  `0`=unlimited) — never block a request on a pool slot
 - `keepalive_expiry=60.0` s idle before the pool retires a conn
   (`CLAUDE_HOOKS_PROXY_KEEPALIVE_SEC`). Short so stale connections
   retire ahead of upstream's silent idle-drop.
+- TCP keepalive on the upstream socket (`SO_KEEPALIVE` + Linux
+  `TCP_KEEPIDLE`/`INTVL`/`CNT`) so a connection survives long silent
+  "thinking" windows the way CC's native client does — matters *more*
+  under h1 (no h2 ping). Tunable via `CLAUDE_HOOKS_PROXY_TCP_KEEPIDLE`
+  (30) / `…_KEEPINTVL` (15) / `…_KEEPCNT` (4).
 - `connect=10.0` s, `timeout=<proxy.timeout>` s for read/write
 - `trust_env=False` — we ignore `HTTPS_PROXY` / `NO_PROXY` from the
   environment because the host may have those set pointing *at us*
 
-The **retry** behaviour (backoff, deadline, circuit breaker) is tuned
-separately — see the next section.
+The **retry** behaviour (backoff, deadline, conn budget, circuit
+breaker) is tuned separately — see the next section.
 
 ## Retry / throttle resilience
 
@@ -507,22 +551,32 @@ unit-tested module); `forwarder.py` owns only the HTTP loop +
   body + headers) is passed through verbatim. The attempt count is only
   a safety cap. This is what keeps the *client* from giving up: the
   proxy holds the request and keeps trying in the background.
+- **Surgical connection-error budget.** Transport failures (timeouts,
+  network errors, `ProtocolError` server-disconnects on a reused
+  keepalive connection) take a *separate*, deliberately narrow budget:
+  ~3 attempts / 25 s deadline / 0.25–2.0 s backoff. A dropped connection
+  recovers by landing the next attempt on a fresh pool connection — a
+  couple of fast retries, not the minute-long ride-out an upstream 529
+  brownout wants. Retryable upstream **statuses** keep the wider 5xx
+  budget below.
 - **No whole-pool nuke.** Earlier versions drained the entire shared
-  HTTP/2 pool on a sticky failure. That closed sibling sessions' live
+  pool on a sticky failure. That closed sibling sessions' live
   connections (turning one session's overload into a collective storm)
-  *and* recreated the per-request fresh-connection profile the pool
-  exists to avoid — which itself tripped the edge **429** gate (see
-  [Forwarder: httpx + HTTP/2](#forwarder-httpx--http2)). The rewrite
+  *and* recreated the per-request fresh-connection profile (churn) that
+  trips the edge **429** gate (see
+  [the gate-safety invariant](#the-gate-safety-invariant)). The rewrite
   removes it: httpx already evicts a connection that *raised*, so the
   next attempt on the shared client lands on a fresh connection without
   disturbing other sessions.
-- **Cross-session circuit breaker.** The proxy is one process with one
-  shared pool; every session's request flows through it. When a burst
-  of overloads (529 + connection drops) crosses a threshold, the
-  breaker opens and *every* session adds a coordinated delay before its
-  next first-attempt — so a second session can't pile on. This is the
-  direct counter to "the throttle engages as soon as a 2nd session
-  runs".
+- **Cross-session circuit breaker (OFF by default).** When the upstream
+  client was a single shared HTTP/2 pool, every session's request flowed
+  through one multiplexed connection, so a burst of overloads on it was a
+  signal for all of them and a coordinated cooldown was protective. The
+  default h1 keepalive pool gives each session its own connection — a
+  global cooldown just penalises healthy sessions for one sibling's blip
+  (that *was* "the throttle engages as soon as a 2nd session runs"). So
+  the breaker is disabled unless `CLAUDE_HOOKS_PROXY_BREAKER_ENABLED=1`,
+  worth enabling only under the h2 rollback.
 - **429 passes straight through.** A 429 is the account's own quota,
   not an overload; the proxy never retries it (Claude Code + its
   `Retry-After` handle it). It's counted for visibility only.
@@ -541,16 +595,33 @@ unit-tested module); `forwarder.py` owns only the HTTP loop +
 
 **Env knobs** (all optional; safe defaults):
 
+Connection model (`forwarder.py`):
+
 | Env var | Default | Controls |
 |---|---|---|
-| `CLAUDE_HOOKS_PROXY_RETRY_DEADLINE_S` | `90` | wall-clock retry window |
-| `CLAUDE_HOOKS_PROXY_RETRY_BASE_DELAY_S` | `1.0` | backoff base |
-| `CLAUDE_HOOKS_PROXY_RETRY_MAX_DELAY_S` | `20.0` | backoff cap |
-| `CLAUDE_HOOKS_PROXY_RETRY_MAX_ATTEMPTS` | `15` | attempt safety cap, sized high so the **deadline** is the real bound (`1` = pass-through; legacy `CLAUDE_HOOKS_PROXY_RETRIES` honored as fallback) |
+| `CLAUDE_HOOKS_PROXY_UPSTREAM_HTTP` | `1` | `1`=HTTP/1.1 pool (mimics CC) / `2`=HTTP/2 rollback |
+| `CLAUDE_HOOKS_PROXY_MAX_KEEPALIVE` | `50` | retained keepalive conns — **keep ≥ peak concurrency** |
+| `CLAUDE_HOOKS_PROXY_MAX_CONNECTIONS` | `0` | pool cap (`0`=unlimited) |
+| `CLAUDE_HOOKS_PROXY_KEEPALIVE_SEC` | `60` | idle expiry before a pooled conn retires |
+| `CLAUDE_HOOKS_PROXY_TCP_KEEPIDLE` / `_KEEPINTVL` / `_KEEPCNT` | `30` / `15` / `4` | upstream-socket TCP keepalive |
+
+Retry policy (`retry.py`):
+
+| Env var | Default | Controls |
+|---|---|---|
+| `CLAUDE_HOOKS_PROXY_RETRY_DEADLINE_S` | `90` | 5xx wall-clock retry window |
+| `CLAUDE_HOOKS_PROXY_RETRY_BASE_DELAY_S` | `1.0` | 5xx backoff base |
+| `CLAUDE_HOOKS_PROXY_RETRY_MAX_DELAY_S` | `20.0` | 5xx backoff cap |
+| `CLAUDE_HOOKS_PROXY_RETRY_MAX_ATTEMPTS` | `15` | 5xx attempt safety cap, sized high so the **deadline** is the real bound (`1` = pass-through; legacy `CLAUDE_HOOKS_PROXY_RETRIES` honored as fallback) |
+| `CLAUDE_HOOKS_PROXY_CONN_RETRY_MAX_ATTEMPTS` | `3` | conn-error attempt cap (surgical) |
+| `CLAUDE_HOOKS_PROXY_CONN_RETRY_DEADLINE_S` | `25` | conn-error wall-clock window |
+| `CLAUDE_HOOKS_PROXY_CONN_RETRY_BASE_DELAY_S` | `0.25` | conn-error backoff base |
+| `CLAUDE_HOOKS_PROXY_CONN_RETRY_MAX_DELAY_S` | `2.0` | conn-error backoff cap |
 | `CLAUDE_HOOKS_PROXY_RETRY_AFTER_CAP_S` | `30.0` | max honored `Retry-After` |
 | `CLAUDE_HOOKS_PROXY_RETRY_JITTER` | `true` | full-jitter on/off |
 | `CLAUDE_HOOKS_PROXY_HONOR_RETRY_AFTER` | `true` | honor the header |
 | `CLAUDE_HOOKS_PROXY_RETRY_STATUS` | `500,502,503,504,520-527,529` | retryable status set (CSV) |
+| `CLAUDE_HOOKS_PROXY_BREAKER_ENABLED` | `0` (off) | cross-session circuit breaker (enable under h2 rollback) |
 | `CLAUDE_HOOKS_PROXY_BREAKER_WINDOW_S` | `30` | overload sliding window |
 | `CLAUDE_HOOKS_PROXY_BREAKER_THRESHOLD` | `4` | overloads to open |
 | `CLAUDE_HOOKS_PROXY_BREAKER_OPEN_S` | `10` | open duration |

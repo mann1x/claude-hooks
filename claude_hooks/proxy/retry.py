@@ -18,13 +18,23 @@ What changed from the old ad-hoc retry logic in ``forwarder.py``
   only a safety cap. "Keep retrying so Claude Code's own client never
   exhausts *its* budget" means holding the request for a generous
   window — but with proper spacing, not a flood.
-- **A process-global circuit breaker.** The proxy is one process with
-  one shared HTTP/2 pool; every session's request flows through it.
-  When upstream overloads (a burst of 529 / connection drops) the
-  breaker opens and *all* sessions add a coordinated pre-attempt
-  delay, so a second session can't pile on and turn a transient
-  overload into a collective storm. This is the direct counter to the
-  "throttle engages as soon as a 2nd session runs" failure mode.
+- **A process-global circuit breaker (OFF by default).** When the
+  upstream client was a single shared HTTP/2 pool, every session's
+  request flowed through one multiplexed connection, so a burst of 529 /
+  connection drops on it signalled trouble for *all* sessions and a
+  coordinated pre-attempt cooldown was protective. The default upstream
+  client is now an HTTP/1.1 keepalive pool (mimicking Claude Code) where
+  each session rides its own connection — a drop is isolated, and a
+  global cooldown just penalises healthy sessions for one sibling's blip
+  (that *was* the "throttle engages as soon as a 2nd session runs"
+  failure mode). So the breaker is disabled unless
+  ``CLAUDE_HOOKS_PROXY_BREAKER_ENABLED=1`` (worth it only under the h2
+  rollback, ``CLAUDE_HOOKS_PROXY_UPSTREAM_HTTP=2``). See ``breaker_enabled``.
+
+- **A surgical connection-error retry budget**, separate from the 5xx
+  overload budget. A dropped/refused connection recovers by landing the
+  next attempt on a fresh pool connection — a couple of fast (sub-second)
+  retries, not the minute-long ride-out an upstream 529 brownout wants.
 
 This module is **pure**: no sleeping, no HTTP, no I/O. ``forwarder.py``
 owns ``time.sleep`` + the ``httpx`` calls and feeds wall-clock +
@@ -75,11 +85,34 @@ DEFAULT_RETRY_STATUS = frozenset({
     520, 521, 522, 523, 524, 525, 526, 527, 529,
 })
 
+# Connection-error retry budget (timeouts / network errors / protocol
+# faults). SEPARATE from the 5xx-status budget above and deliberately
+# *surgical*: a dropped/refused connection on the h1 keepalive pool is
+# recovered by landing the next attempt on a fresh connection — that
+# wants a couple of fast retries, not the minute-long ride-out the 5xx
+# overload budget provides. Few attempts, short deadline, sub-second
+# backoff so a genuine upstream brownout surfaces quickly instead of
+# stalling Claude Code's own client.
+DEFAULT_CONN_RETRY_MAX_ATTEMPTS = 3
+DEFAULT_CONN_RETRY_DEADLINE_S = 25.0
+DEFAULT_CONN_RETRY_BASE_DELAY_S = 0.25
+DEFAULT_CONN_RETRY_MAX_DELAY_S = 2.0
+
 # Circuit-breaker knobs (read once at ThrottleState construction).
 DEFAULT_BREAKER_WINDOW_S = 30.0
 DEFAULT_BREAKER_THRESHOLD = 4
 DEFAULT_BREAKER_OPEN_S = 10.0
 DEFAULT_BREAKER_EXTRA_DELAY_S = 2.0
+# The cross-session breaker made sense for the old shared HTTP/2 pool:
+# one stream-limit fault on the single multiplexed connection signalled
+# trouble for *every* session riding it, so a coordinated cooldown was
+# protective. With the default HTTP/1.1 keepalive pool each session's
+# request rides its own connection — a drop is isolated, and a global
+# pre-attempt delay just penalises healthy sessions for one sibling's
+# blip (the "throttle engages when a 2nd session runs" report). So the
+# breaker is OFF by default and only worth enabling under the h2
+# rollback (CLAUDE_HOOKS_PROXY_UPSTREAM_HTTP=2). See ``breaker_enabled``.
+DEFAULT_BREAKER_ENABLED = False
 
 # Env knobs retired by this rewrite. Their semantics (sub-second fixed
 # backoff, whole-pool nuke) are exactly what amplified the throttle, so
@@ -235,6 +268,8 @@ class ApiProxyRetryConfig:
     __slots__ = (
         "deadline_s", "base_delay_s", "max_delay_s", "max_attempts",
         "retry_after_cap_s", "jitter", "honor_retry_after", "retry_status",
+        "conn_max_attempts", "conn_deadline_s",
+        "conn_base_delay_s", "conn_max_delay_s",
     )
 
     def __init__(self) -> None:
@@ -262,6 +297,23 @@ class ApiProxyRetryConfig:
         self.retry_status = _parse_status_set(
             os.environ.get("CLAUDE_HOOKS_PROXY_RETRY_STATUS")
         )
+        # Surgical connection-error budget (separate from the 5xx budget).
+        self.conn_max_attempts = _int_env(
+            "CLAUDE_HOOKS_PROXY_CONN_RETRY_MAX_ATTEMPTS",
+            DEFAULT_CONN_RETRY_MAX_ATTEMPTS,
+        )
+        self.conn_deadline_s = _float_env(
+            "CLAUDE_HOOKS_PROXY_CONN_RETRY_DEADLINE_S",
+            DEFAULT_CONN_RETRY_DEADLINE_S,
+        )
+        self.conn_base_delay_s = _float_env(
+            "CLAUDE_HOOKS_PROXY_CONN_RETRY_BASE_DELAY_S",
+            DEFAULT_CONN_RETRY_BASE_DELAY_S,
+        )
+        self.conn_max_delay_s = _float_env(
+            "CLAUDE_HOOKS_PROXY_CONN_RETRY_MAX_DELAY_S",
+            DEFAULT_CONN_RETRY_MAX_DELAY_S,
+        )
 
     def disabled(self) -> bool:
         """``CLAUDE_HOOKS_PROXY_RETRY_MAX_ATTEMPTS=1`` (or 0) → no retries.
@@ -276,33 +328,51 @@ def next_delay(attempt: int,
                headers: Optional[dict],
                cfg: ApiProxyRetryConfig,
                now: float,
-               rng: Optional[random.Random] = None) -> float:
+               rng: Optional[random.Random] = None,
+               *,
+               base_delay_s: Optional[float] = None,
+               max_delay_s: Optional[float] = None) -> float:
     """Backoff for the *next* attempt: ``Retry-After`` wins when present
-    and honored, else jittered exponential backoff."""
+    and honored, else jittered exponential backoff.
+
+    ``base_delay_s`` / ``max_delay_s`` override the cfg's 5xx-budget
+    backoff envelope — the forwarder passes the surgical conn-error
+    envelope (``cfg.conn_base_delay_s`` / ``cfg.conn_max_delay_s``) on
+    the connection-failure path. When ``None`` the 5xx defaults apply.
+    """
     if cfg.honor_retry_after:
         ra = parse_retry_after(headers, now, cfg.retry_after_cap_s)
         if ra is not None:
             return ra
-    return compute_backoff(
-        attempt, cfg.base_delay_s, cfg.max_delay_s, cfg.jitter, rng,
-    )
+    base = cfg.base_delay_s if base_delay_s is None else base_delay_s
+    cap = cfg.max_delay_s if max_delay_s is None else max_delay_s
+    return compute_backoff(attempt, base, cap, cfg.jitter, rng)
 
 
 def should_retry(attempt: int,
                  elapsed: float,
                  next_wait: float,
-                 cfg: ApiProxyRetryConfig) -> bool:
+                 cfg: ApiProxyRetryConfig,
+                 *,
+                 max_attempts: Optional[int] = None,
+                 deadline_s: Optional[float] = None) -> bool:
     """Permit another attempt after the 0-indexed ``attempt`` just failed?
 
     Two gates: the attempt-count safety cap and — the primary bound —
     the wall-clock deadline (we don't start a backoff that would push us
-    past it).
+    past it). ``max_attempts`` / ``deadline_s`` override the cfg's
+    5xx-budget bounds; the forwarder passes the surgical conn-error
+    budget (``cfg.conn_max_attempts`` / ``cfg.conn_deadline_s``) on the
+    connection-failure path. ``cfg.disabled()`` (retries globally off
+    via ``RETRY_MAX_ATTEMPTS<=1``) still vetoes both paths.
     """
     if cfg.disabled():
         return False
-    if attempt + 1 >= cfg.max_attempts:
+    cap = cfg.max_attempts if max_attempts is None else max_attempts
+    deadline = cfg.deadline_s if deadline_s is None else deadline_s
+    if attempt + 1 >= cap:
         return False
-    return (elapsed + next_wait) < cfg.deadline_s
+    return (elapsed + next_wait) < deadline
 
 
 # --- Counter snapshot ---------------------------------------------- #
@@ -448,10 +518,25 @@ def reset_state() -> None:
         _THROTTLE = ThrottleState()
 
 
+def breaker_enabled() -> bool:
+    """Is the cross-session circuit breaker active?
+
+    OFF by default (``DEFAULT_BREAKER_ENABLED``): with the default
+    HTTP/1.1 keepalive pool each session rides its own connection, so a
+    coordinated global cooldown penalises healthy sessions for one
+    sibling's blip. Set ``CLAUDE_HOOKS_PROXY_BREAKER_ENABLED=1`` to
+    re-enable it under the h2 rollback, where the shared multiplexed
+    connection makes one fault a signal for every session on it. Read
+    per-call so it tracks env restart-free."""
+    return _bool_env("CLAUDE_HOOKS_PROXY_BREAKER_ENABLED", DEFAULT_BREAKER_ENABLED)
+
+
 def pre_attempt_delay(now: float) -> float:
     """Coordinated delay to apply before an attempt (0 when the breaker
-    is closed). Read under the lock so it's consistent with concurrent
-    overload records."""
+    is disabled or closed). Read under the lock so it's consistent with
+    concurrent overload records."""
+    if not breaker_enabled():
+        return 0.0
     with _LOCK:
         return _THROTTLE.initial_extra_delay(now)
 
@@ -473,7 +558,11 @@ def record_overload(now: float, *, status: Optional[int] = None,
             _COUNTERS.upstream_5xx_total += 1
         if retry_after is not None:
             _THROTTLE.note_retry_after(retry_after)
-        if feeds_breaker:
+        # Counters above always advance (so /health reflects the true
+        # upstream weather); the breaker's sliding-window + open logic
+        # only runs when the breaker is enabled, so a disabled breaker
+        # never opens and ``breaker_open_total`` stays 0.
+        if feeds_breaker and breaker_enabled():
             was_open = _THROTTLE.is_open(now)
             opened = _THROTTLE.record_overload(now)
             if opened and not was_open:

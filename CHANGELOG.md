@@ -16,6 +16,49 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Changed
+
+- **API proxy: the upstream client is now an HTTP/1.1 keepalive pool,
+  not HTTP/2 multiplexing.** A pcap of real Claude Code traffic to
+  `api.anthropic.com` shows the native client speaks **HTTP/1.1** and
+  opens *many* connections, one request each, **reused** via keep-alive.
+  The edge gate bites connection **churn** (a fresh TCP+TLS connection
+  per request), not the HTTP version. The previous `http2=True` pool
+  fixed the churn but replaced it with *concentration*: under heavy
+  concurrency the upstream sheds multiplexed streams, cascading
+  `REFUSED_STREAM` / flow-control faults across every session riding the
+  shared connection. `forwarder.py` now builds an
+  `HTTPTransport(http1=True, http2=False)` with a large, fully-retained
+  keepalive pool. The load-bearing invariant:
+  `max_keepalive_connections` **must be >= peak concurrency**
+  (default 50, `CLAUDE_HOOKS_PROXY_MAX_KEEPALIVE`) — below it httpx
+  closes the excess and the next burst re-opens fresh connections, which
+  is precisely the churn that trips the gate. `max_connections` defaults
+  to unlimited so a request never blocks on a pool slot. HTTP/2 remains
+  a one-env rollback: `CLAUDE_HOOKS_PROXY_UPSTREAM_HTTP=2`. `httpx` is
+  now the only hard dependency; the `[http2]` extra is needed solely for
+  the rollback, and `install.py::_ensure_proxy_deps` probes the two
+  separately.
+- **API proxy: the cross-session circuit breaker is OFF by default.**
+  It was protective when one shared multiplexed h2 connection carried
+  every session, since a single fault genuinely signalled trouble for
+  all of them. On the h1 pool each session rides its own connection, so
+  a coordinated global cooldown just penalises healthy sessions for one
+  sibling's blip — which *was* the "throttle engages as soon as a 2nd
+  session runs" report. Re-enable under the h2 rollback with
+  `CLAUDE_HOOKS_PROXY_BREAKER_ENABLED=1`. Counters still advance while
+  it is disabled, so `/health` keeps reflecting true upstream weather;
+  only the sliding-window/open logic is skipped.
+- **API proxy: connection errors get their own surgical retry budget.**
+  A dropped or refused connection recovers by landing the next attempt
+  on a fresh pool connection — that wants a couple of fast retries, not
+  the minute-long ride-out an upstream 529 brownout needs. Connection
+  faults now use 3 attempts / 25 s deadline / 0.25–2 s backoff, separate
+  from the 5xx budget, with **per-class attempt indices** so a conn drop
+  after several 5xx retries still gets its own fast retries instead of
+  inheriting the other class's exhausted count. All four knobs are
+  env-tunable (`CLAUDE_HOOKS_PROXY_CONN_RETRY_*`).
+
 ### Fixed
 
 - **Embedder: multi-KB memories were silently dropped and reported as
