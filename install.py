@@ -3734,7 +3734,15 @@ def _setup_llamafile_engine(
         "ctx_size": int(ctx_size),
         "pooling": "last",
         "mode": mode,
-        "idle_timeout_seconds": float(existing.get("idle_timeout_seconds") or 300.0),
+        "idle_timeout_seconds": float(
+            existing.get("idle_timeout_seconds") or 3600.0
+        ),
+        # Negative nice = higher CPU priority for the embedder. It is a
+        # latency-critical shared service (interactive recall is bounded
+        # by a hook timeout) that often shares a box with minutes-long
+        # local inference jobs. Applied best-effort; needs root /
+        # CAP_SYS_NICE on POSIX, ignored otherwise. 0 disables.
+        "nice": int(existing.get("nice", -5)),
     }
     return block
 

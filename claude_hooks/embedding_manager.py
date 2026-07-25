@@ -117,6 +117,16 @@ class EmbeddingConfig:
     vram_budget_mb: int = _DEFAULT_VRAM_BUDGET_MB
 
     # Lifecycle knobs.
+    # OS scheduling priority for the llamafile process. Negative = higher
+    # priority on POSIX (requires root / CAP_SYS_NICE; a failure to apply
+    # is logged and ignored, never fatal). The embedder is a latency-
+    # critical *shared* service: an interactive recall on the
+    # UserPromptSubmit critical path is bounded by a hook timeout, and on
+    # a box also running heavy local inference the embedder otherwise
+    # competes as an equal with minutes-long batch jobs. -5 puts it ahead
+    # of default-priority CPU hogs without the starvation risk of a
+    # real-time class. 0 disables the adjustment.
+    nice: int = -5
     spawn_timeout_seconds: float = 30.0
     # 3600, not 300: spawn is only 1-2 s, so reaping aggressively buys
     # little, but every reap opens a respawn race that concurrent
@@ -350,13 +360,50 @@ class EmbeddingManager:
             # a child. DETACHED_PROCESS severs the inherited console
             # entirely so the child survives the parent's window
             # being closed by the user.
-            kwargs["creationflags"] = (
+            flags = (
                 subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
                 | subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
             )
+            # Windows has no nice(2); express the same intent with a
+            # priority class. Only the "raise it" direction is mapped —
+            # a positive nice would mean BELOW_NORMAL, which we never
+            # want for a latency-critical shared service.
+            if self.cfg.nice < 0:
+                flags |= getattr(
+                    subprocess, "ABOVE_NORMAL_PRIORITY_CLASS", 0,
+                )
+            kwargs["creationflags"] = flags
         else:
             kwargs["start_new_session"] = True
-        return subprocess.Popen(wrapped, **kwargs)
+        proc = subprocess.Popen(wrapped, **kwargs)
+        self._apply_priority(proc)
+        return proc
+
+    def _apply_priority(self, proc: subprocess.Popen) -> None:
+        """Nudge the llamafile's OS scheduling priority (POSIX).
+
+        Applied *after* spawn rather than via ``preexec_fn`` — the
+        latter is documented-unsafe in a threaded parent, and the daemon
+        is threaded. The PID is stable across the APE ``/bin/sh``
+        bootstrap because that shell ``exec``s the real program in
+        place, so adjusting ``proc.pid`` reaches the actual server.
+
+        Best-effort by design: lowering niceness needs root or
+        CAP_SYS_NICE, and the embedder must still start for an
+        unprivileged user. Windows is handled at creation time via the
+        priority class, so this is a POSIX-only no-op there.
+        """
+        if sys.platform.startswith("win") or not self.cfg.nice:
+            return
+        try:
+            os.setpriority(os.PRIO_PROCESS, proc.pid, self.cfg.nice)
+            log.debug("llamafile pid=%s nice set to %d",
+                      proc.pid, self.cfg.nice)
+        except (OSError, PermissionError, AttributeError) as e:
+            log.debug(
+                "could not set llamafile nice to %d (needs root/CAP_SYS_NICE): %s",
+                self.cfg.nice, e,
+            )
 
     @staticmethod
     def _maybe_wrap_for_ape(cmd: list[str]) -> list[str]:
@@ -562,6 +609,7 @@ def config_from_dict(cfg: dict) -> EmbeddingConfig:
         pooling=str(e.get("pooling") or "last"),
         mode=str(e.get("mode") or "auto"),
         vram_budget_mb=int(e.get("vram_budget_mb") or _DEFAULT_VRAM_BUDGET_MB),
+        nice=int(e.get("nice", -5)),
         spawn_timeout_seconds=float(e.get("spawn_timeout_seconds") or 30.0),
         idle_timeout_seconds=float(e.get("idle_timeout_seconds") or 3600.0),
         reaper_interval_seconds=float(e.get("reaper_interval_seconds") or 60.0),

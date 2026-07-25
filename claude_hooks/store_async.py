@@ -45,7 +45,6 @@ import logging
 import os
 import subprocess
 import sys
-from typing import Optional
 
 from claude_hooks._popen import detach_kwargs, windowless_python_executable
 
@@ -109,8 +108,35 @@ def spawn(payload: dict) -> bool:
             pass
         return False
 
+    _deprioritise(proc)
     log.debug("store_async: spawned pid=%s", proc.pid)
     return True
+
+
+# Background stores are explicitly *not* latency-critical: nothing waits
+# on them and the store gate already caps them at one in flight. Running
+# them below default priority means that when they do overlap with an
+# interactive recall (which IS on the user's critical path, under a hook
+# timeout), the kernel resolves the contention in recall's favour. This
+# is the client-side complement to raising the embedder's own priority
+# in embedding_manager.
+_STORE_NICE = 10
+
+
+def _deprioritise(proc: subprocess.Popen) -> None:
+    """Drop the detached store child below default scheduling priority.
+
+    Best-effort and never fatal: *raising* niceness needs no privilege
+    on POSIX, but the call can still fail if the child already exited.
+    Windows is handled at creation time by ``detach_kwargs``' priority
+    class when available.
+    """
+    if sys.platform.startswith("win"):
+        return
+    try:
+        os.setpriority(os.PRIO_PROCESS, proc.pid, _STORE_NICE)
+    except (OSError, PermissionError, AttributeError) as e:
+        log.debug("store_async: could not lower priority: %s", e)
 
 
 def main() -> int:
@@ -162,8 +188,20 @@ def _run_dedup_and_store(
     Kept as a tiny local copy so the child doesn't need to import the
     Stop hook module (which pulls in transcript parsing, observation
     classification, etc. — none of which the child needs).
+
+    The whole dedup+store is wrapped in
+    :func:`claude_hooks.store_lock.store_gate` so only one detached
+    store runs at a time across every session on the host. The gate has
+    to cover *both* halves, not just the write: dedup-recall and store
+    must be atomic with respect to other stores, or two children each
+    finish their dedup before either writes, neither sees the other, and
+    both store the same summary (the duplicate pairs observed on
+    solidpc 2026-07-25). Serialising also caps background embed load at
+    one in-flight request so interactive recall keeps the embedder's
+    remaining capacity. See ``store_lock`` for the failure policy.
     """
     from claude_hooks._parallel import parallel_map
+    from claude_hooks.store_lock import store_gate
 
     def _do(provider):
         provider_cfg = ((cfg.get("providers") or {}).get(provider.name)) or {}
@@ -186,7 +224,13 @@ def _run_dedup_and_store(
             log.warning("store_async: %s store failed: %s", provider.name, e)
         return None
 
-    parallel_map(_do, providers)
+    with store_gate() as held:
+        if not held:
+            log.warning(
+                "store_async: proceeding without the store gate — "
+                "a duplicate is possible",
+            )
+        parallel_map(_do, providers)
 
 
 if __name__ == "__main__":

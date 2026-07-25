@@ -25,6 +25,13 @@ from claude_hooks.providers import Provider
 
 log = logging.getLogger("claude_hooks.hooks.stop")
 
+# How long an INLINE store waits for the cross-process store gate before
+# giving up and proceeding ungated. Deliberately short: inline runs under
+# the Stop hook's timeout, so a long wait would trade a possible
+# duplicate for a killed hook and a dropped memory. The detached path
+# has no such bound and uses store_lock's much longer default.
+_INLINE_STORE_GATE_TIMEOUT_S = 10.0
+
 
 def _with_update_notice(result: Optional[dict], config: dict) -> Optional[dict]:
     """Augment the Stop hook return value with a "new release available"
@@ -238,9 +245,28 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
         log.warning("provider %s store failed: %s", provider.name, exc)
 
     from claude_hooks._parallel import parallel_map
-    results = parallel_map(
-        _dedup_and_store, auto_providers, on_error=_on_store_error,
-    )
+    from claude_hooks.store_lock import store_gate
+
+    # Same collision guard the detached path uses: dedup-recall + store
+    # must be atomic against other stores or two concurrent writers each
+    # dedup before either commits and both store the same summary. Two
+    # *sessions* can collide here even with detach off, so the inline
+    # path needs it too.
+    #
+    # Short timeout, unlike the detached path's 300 s: this runs under
+    # the Stop hook's own budget, so waiting long enough to be killed
+    # would trade a duplicate for a dropped memory — the exact
+    # regression this subsystem exists to prevent. Degrade to ungated
+    # quickly instead.
+    with store_gate(timeout=_INLINE_STORE_GATE_TIMEOUT_S) as held:
+        if not held:
+            log.debug(
+                "inline store proceeding without the store gate "
+                "(another store is in flight); a duplicate is possible",
+            )
+        results = parallel_map(
+            _dedup_and_store, auto_providers, on_error=_on_store_error,
+        )
     for r in results:
         if r is None:
             continue

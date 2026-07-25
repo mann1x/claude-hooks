@@ -171,7 +171,8 @@
     "ctx_size": 16384,
     "pooling": "last",
     "mode": "auto",
-    "idle_timeout_seconds": 3600
+    "idle_timeout_seconds": 3600,
+    "nice": -5
   },
   "hooks": {
     "user_prompt_submit": {

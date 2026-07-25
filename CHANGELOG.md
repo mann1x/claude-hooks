@@ -16,7 +16,55 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed
+
+- **Detached store: serialise it, or it breaks dedup and starves recall.**
+  Turning on `hooks.stop.detach_store` replaced a *serialised* store
+  workload with a *concurrent* one, and concurrency broke two things at
+  once (observed live on solidpc, 2026-07-25). (1) **Dedup stopped
+  working**: `store_async` runs dedup-recall then store, so two children
+  spawned seconds apart each completed dedup *before* either wrote,
+  neither saw the other, and both stored — five near-identical pairs
+  (cos 0.9986–0.9996) landed in the memory table, each one two Stop
+  firings 12–16 s apart. (2) **Interactive recall starved**: every store
+  costs two embeds, and a local CPU embedder has hard throughput limits,
+  so background writes ate the `UserPromptSubmit` hook budget and it
+  timed out at 65 s.
+  New `claude_hooks/store_lock.py` adds a cross-process **store gate**
+  (POSIX `flock` / Windows `msvcrt.locking`, following
+  `lsp_engine/daemon.py`'s `_WIN_LOCK_OFFSET` lesson, but queueing
+  rather than fail-fast). It wraps dedup **and** store — covering only
+  the write would leave the race open — on both the detached and inline
+  paths. Serialising means store N's dedup sees store N−1's committed
+  row, and background embed load is capped at one in-flight request
+  regardless of session count. Recall deliberately never takes the gate:
+  it must not block on a store. On timeout or an unusable lock the gate
+  degrades to *open* and the store still runs — a possible duplicate
+  beats a dropped memory. Inline uses a short 10 s timeout (it runs
+  under the Stop hook's own budget); detached uses 300 s.
+- **`install.py` wrote `idle_timeout_seconds: 300` on fresh llamafile
+  setup**, undoing the 3600 default for exactly the hosts getting a
+  clean install. Missed in the earlier timeout pass.
+
 ### Changed
+
+- **Embedder gets CPU priority.** New `embedding.nice` (default `-5`),
+  applied to the llamafile after spawn via `os.setpriority` on POSIX and
+  `ABOVE_NORMAL_PRIORITY_CLASS` on Windows. The embedder is a
+  latency-critical *shared* service — interactive recall is bounded by a
+  hook timeout — and it commonly shares a box with minutes-long local
+  inference jobs against which it would otherwise compete as an equal.
+  Best-effort: lowering niceness needs root/`CAP_SYS_NICE`, and a
+  failure is logged, never fatal. The complement: detached
+  `store_async` children now run at nice `+10`, so background stores
+  yield to interactive recall.
+  Measured on the reference host (Ryzen 5 5600G, 6 cores, AVX2-only):
+  llamafile thread/batch tuning is **not** worth changing — `-tb 12`,
+  `-ub 2048` and `-b 8192` in every combination land within run-to-run
+  noise of the shipped defaults (two identical baseline runs differed by
+  6.4% on their own). Embedding cost is superlinear in payload size
+  (93 tok/s at 134 tokens → 32 tok/s at 2178), so payload size, not
+  server tuning, is the lever that matters.
 
 - **API proxy: the upstream client is now an HTTP/1.1 keepalive pool,
   not HTTP/2 multiplexing.** A pcap of real Claude Code traffic to

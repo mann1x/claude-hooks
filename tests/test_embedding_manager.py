@@ -140,6 +140,34 @@ class TestConfig:
         assert cfg.mode == "auto"
         assert cfg.idle_timeout_seconds == 3600.0
         assert cfg.extra_args == []
+        # Embedder runs above default priority: it is a latency-critical
+        # shared service and typically shares a box with long local
+        # inference jobs.
+        assert cfg.nice == -5
+
+    def test_config_nice_override_and_disable(self):
+        assert em.config_from_dict({"embedding": {"nice": -10}}).nice == -10
+        # 0 must survive as 0 (disables the adjustment) — a naive
+        # ``or`` default would silently turn it back into -5.
+        assert em.config_from_dict({"embedding": {"nice": 0}}).nice == 0
+
+    def test_apply_priority_never_raises_without_permission(self, monkeypatch):
+        """Lowering niceness needs root/CAP_SYS_NICE; an unprivileged
+        host must still get a working embedder."""
+        import claude_hooks.embedding_manager as _em
+
+        m = _em.EmbeddingManager(_base_cfg(nice=-5))
+
+        def _boom(*a, **k):
+            raise PermissionError("not permitted")
+
+        monkeypatch.setattr(_em.os, "setpriority", _boom, raising=False)
+        monkeypatch.setattr(_em.sys, "platform", "linux")
+
+        class _Proc:
+            pid = 12345
+
+        m._apply_priority(_Proc())  # must not raise
 
     def test_config_from_dict_ignores_unknown(self):
         cfg = em.config_from_dict({"embedding": {"some_unknown_key": 1,
