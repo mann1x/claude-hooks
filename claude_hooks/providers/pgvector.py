@@ -66,6 +66,26 @@ from claude_hooks.providers.base import (
 
 _SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+#: ``hnsw.ef_search`` applied per connection. pgvector's default is 40;
+#: we raise it because the accuracy/latency trade is priced very
+#: differently here than in a general OLTP workload — see
+#: ``_apply_ef_search``. Override per host with the ``ef_search`` key in
+#: the provider's options; 0 or negative leaves the server default alone.
+#:
+#: Do NOT raise this much further without re-measuring. Swept on solidpc
+#: 2026-07-25 (memories_qwen3, 5835 rows, 200 perturbed queries, recall@5
+#: against an exact seq scan):
+#:
+#:     ef=40   99.90%  p50 0.65 ms      ef=150  100.00%  p50 1.46 ms
+#:     ef=64  100.00%  p50 0.83 ms      ef=200  100.00%  p50 1.45 ms
+#:     ef=100 100.00%  p50 1.18 ms      ef=400  100.00%  p50 16.53 ms
+#:
+#: The ef=400 row is not a smooth cost curve — past ~200 the planner's
+#: estimate for the index scan exceeds a seq scan and it **stops using
+#: the HNSW index at all** (verified with EXPLAIN). So higher is not
+#: monotonically better-and-slower; it silently falls off a cliff.
+DEFAULT_EF_SEARCH = 100
+
 log = logging.getLogger("claude_hooks.providers.pgvector")
 
 
@@ -593,8 +613,51 @@ class PgvectorProvider(Provider):
             if not dsn:
                 raise RuntimeError("pgvector dsn not configured")
             self._conn = psycopg.connect(dsn)
+            self._apply_ef_search()
         if not self._table_created:
             self._create_table()
+
+    def _apply_ef_search(self) -> None:
+        """Set ``hnsw.ef_search`` for this connection.
+
+        pgvector defaults to 40, which trades recall for speed. The
+        trade is badly priced here: the HNSW scan is ~1 ms against a
+        multi-second embed, so buying accuracy with half a millisecond
+        is nearly free, and a dedup search that misses a near-duplicate
+        costs a permanently duplicated memory.
+
+        Be honest about the size of the win at current scale: 40 already
+        measures 99.90% recall@5 on 5835 rows, so 100 buys one avoided
+        miss per thousand *today*. It is bought mainly as headroom —
+        HNSW recall decays as the table grows, and this is the knob that
+        absorbs that without a reindex.
+
+        Session-scoped rather than ``ALTER DATABASE`` so the setting
+        travels with the code to every host instead of living in one
+        machine's server config. Soft-fails: an unknown GUC (pgvector
+        too old) must not stop the provider from working.
+        """
+        # `or DEFAULT` would be wrong here: 0 is falsy, and 0 is the
+        # documented way to say "leave the server default alone".
+        raw = self.options.get("ef_search", DEFAULT_EF_SEARCH)
+        if raw is None:
+            raw = DEFAULT_EF_SEARCH
+        try:
+            ef = int(raw)
+        except (TypeError, ValueError):
+            ef = DEFAULT_EF_SEARCH
+        if ef <= 0:
+            return
+        try:
+            with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                cur.execute(f"SET hnsw.ef_search = {ef:d}")
+            self._conn.commit()  # type: ignore[union-attr]
+        except Exception as e:
+            log.debug("pgvector: could not set hnsw.ef_search=%s (%s)", ef, e)
+            try:
+                self._conn.rollback()  # type: ignore[union-attr]
+            except Exception:
+                pass
 
     def _create_table(self) -> None:
         """Create the memory table + HNSW index if they don't exist,

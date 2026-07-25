@@ -18,6 +18,31 @@ release with the auto-generated source archive
 
 ### Changed
 
+- **`hnsw.ef_search` raised from pgvector's default 40 to 100**, applied
+  per connection in `PgvectorProvider._ensure_ready` and overridable with
+  the new `ef_search` provider option (`0` keeps the server default).
+  Session-scoped rather than `ALTER DATABASE` so the setting travels with
+  the code to every host instead of living in one machine's server config.
+  Swept on solidpc 2026-07-25 (`memories_qwen3`, 5835 rows, 200 perturbed
+  queries, recall@5 against an exact seq scan):
+
+  | ef_search | recall@5 | p50 |
+  |---|---|---|
+  | 40 (pgvector default) | 99.90% | 0.65 ms |
+  | 64 | 100.00% | 0.83 ms |
+  | **100 (ours)** | **100.00%** | **1.18 ms** |
+  | 200 | 100.00% | 1.45 ms |
+  | 400 | 100.00% | 16.53 ms |
+
+  Two things worth carrying forward. First, the win at *current* scale is
+  small — 40 already measures 99.90%, so 100 buys about one avoided miss
+  per thousand; it is bought mainly as headroom, since HNSW recall decays
+  as the table grows and this is the knob that absorbs that without a
+  reindex. Second, the `ef=400` row is not a smooth cost curve: past ~200
+  the planner's estimate for the index scan exceeds a seq scan and it
+  **stops using the HNSW index at all** (verified with `EXPLAIN`). Higher
+  is not monotonically better-and-slower — it falls off a cliff.
+
 - **Single-embed store path — a dedup-then-store cycle now embeds once
   instead of twice.** `dedup.should_store` embedded `content[:500]` to
   find near-duplicates and `provider.store` then embedded the full

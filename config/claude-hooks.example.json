@@ -88,12 +88,19 @@
         "",
         "additional_tables hybrid-recalls across the kg_observations",
         "(formerly Memory-KG) table at the same model. Suffixes must",
-        "match — table=memories_qwen3 ↔ additional_tables[0]=kg_observations_qwen3."
+        "match — table=memories_qwen3 ↔ additional_tables[0]=kg_observations_qwen3.",
+        "",
+        "ef_search sets hnsw.ef_search per connection (pgvector default",
+        "40, ours 100). Higher = better recall, slightly slower. Do NOT",
+        "raise it far without measuring: past ~200 the planner stops",
+        "using the HNSW index altogether and seq-scans. 0 keeps the",
+        "server default."
       ],
       "enabled": false,
       "dsn": "postgresql://claude:CHANGE_ME@127.0.0.1:5432/memory",
       "table": "memories_qwen3",
       "additional_tables": ["kg_observations_qwen3"],
+      "ef_search": 100,
       "_embedder_examples": [
         "Three valid shapes — pick one and assign to embedder / embedder_options:",
         "  1) Ollama-only (legacy, pre-v1.4):",
