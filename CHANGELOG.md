@@ -16,6 +16,36 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed
+
+- **`LlamafileEmbedder` no longer loses a memory when the input overflows
+  the context window.** `max_chars` is a *character* cap standing in for
+  a token budget, and that substitution has a hidden assumption:
+  `max_chars=30000` against a 16384-token window needs at least ~1.83
+  chars/token. Measured with the model's own tokenizer on solidpc
+  2026-07-25 — real memory text is 3.13 chars/token at 30 000 chars
+  (9 580 tokens, fits with ~6 800 to spare), but base64 is 1.35 (22 188
+  tokens) and minified JSON 1.18 (25 471). Those overflow, and llama.cpp
+  answers `HTTP 400 exceed_context_size_error` in ~0.1 s — which raised
+  through `store()` and, on the now-default detached path, became a
+  `log.warning` and a **silently lost memory**.
+  Rather than lower `max_chars` for everyone to accommodate content
+  almost nobody stores, the overflow is now handled where it happens:
+  the 400 body carries `n_prompt_tokens` and `n_ctx`, so the text is cut
+  by that exact ratio and retried (bounded by `CTX_RETRY_ATTEMPTS`).
+  Non-overflow 400s and 5xx are never retried.
+  The retry is capped by a **token budget as well as the context
+  window**, which live testing proved necessary rather than
+  theoretical: the first implementation cut a 30 000-char base64 payload
+  to 20 299 chars — comfortably inside the 16 384 window — and the retry
+  then ran past a 300 s timeout, because CPU embedding measures ~32 tok/s
+  at 2 k tokens and degrades from there. Fitting the window but not the
+  clock merely trades a fast 400 for a slow timeout. `CTX_RETRY_TOKEN_BUDGET`
+  is sized for the *slowest* host (Windows runs llamafile ~2× slower at
+  byte-identical weights), so the retry stays inside the 180 s embedder
+  timeout on pandorum as well as solidpc. Verified end-to-end against an
+  isolated llamafile: both pathological payloads now embed successfully.
+
 ### Changed
 
 - **`hnsw.ef_search` raised from pgvector's default 40 to 100**, applied
