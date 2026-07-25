@@ -16,8 +16,51 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Changed
+
+- **Single-embed store path — a dedup-then-store cycle now embeds once
+  instead of twice.** `dedup.should_store` embedded `content[:500]` to
+  find near-duplicates and `provider.store` then embedded the full
+  content again to write it. On a CPU embedder that second embed *is*
+  the cost of the turn: measured on solidpc 2026-07-25 against an
+  isolated llamafile, 500 chars = 742 ms and 5000 chars = 12.7 s, while
+  every surrounding DB operation totals ~10 ms. The vector is now
+  computed once by `Provider.embed_for_store()` and spent twice — handed
+  to `Provider.recall_vec()` for the similarity search and to
+  `Provider.store(vec=...)` for the write.
+  Two side benefits beyond the saved embed: dedup now compares against a
+  **full-content** vector rather than a 500-character one, and the store
+  chain collapses to a single embed followed by one contiguous ~10 ms
+  block of DB work — which is what makes a short lease TTL viable for
+  the planned embedder-served lock (see
+  [`docs/embedder-lock-design.md`](docs/embedder-lock-design.md)).
+  Negotiation is **zero-config in both directions**. A provider opts in
+  by returning a vector from `embed_for_store()`; the base class returns
+  `None`, which every server-side-embedding provider (`qdrant`,
+  `memory_kg`) inherits unchanged. When no vector comes back, the
+  caller takes the original text path *and never passes the `vec`
+  keyword at all* — so third-party or older `store(content, metadata)`
+  implementations keep working. That last detail is guarded by a test
+  using a fake provider whose `store()` has no `vec` parameter: passing
+  the keyword unconditionally raises `TypeError`, which the hook
+  swallows as a provider failure and **silently loses the memory**.
+- `Provider.store()` gains an optional `vec` parameter, and
+  `Provider.embed_for_store()` / `Provider.recall_vec()` join
+  `recall_hybrid` / `batch_*` / `kg_*` as optional capabilities that
+  degrade silently. `pgvector` and `sqlite_vec` implement all three;
+  `qdrant` and `memory_kg` accept `vec` and ignore it.
+
 ### Added
 
+- **`scripts/bench_store_gaps.py` + `scripts/bench_embed_latency.py`** —
+  measurement tooling for the store chain. The first times the
+  lock-critical gap (HNSW search + dedup compare + INSERT) and takes a
+  `--nice` level so the effect of `store_async._deprioritise()` can be
+  checked rather than assumed; the second times embeds against an
+  isolated llamafile or saturates one as a load source. Both docstrings
+  carry the traps that make naive versions of these benchmarks wrong by
+  100× (llama.cpp's prompt cache serving repeated payloads; filler text
+  whose chars/token ratio is unrepresentative).
 - **Cross-host embedder admission gate (opt-in,
   `hooks.stop.embedder_gate.enabled`).** `store_lock` serialises stores
   within one host, but it is a per-host lock file — two machines sharing

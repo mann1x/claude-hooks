@@ -124,7 +124,36 @@ class SqliteVecProvider(Provider):
         except (ImportError, EmbedderError) as e:
             log.warning("sqlite_vec unavailable: %s", e)
             return []
+        return self._search_vec(qvec, k)
 
+    def embed_for_store(self, content: str) -> Optional[list[float]]:
+        """Embed once so dedup and store can share the result.
+
+        Soft-fails to None: the caller then embeds the old way, which
+        costs time but never loses the memory.
+        """
+        if not content.strip():
+            return None
+        try:
+            self._ensure_ready()
+            return self._embedder.embed(content)  # type: ignore[union-attr]
+        except (ImportError, EmbedderError) as e:
+            log.debug("sqlite_vec embed_for_store unavailable: %s", e)
+            return None
+
+    def recall_vec(self, vec: list[float], k: int = 5) -> Optional[list[Memory]]:
+        """Search by a precomputed embedding — the query-side half of the
+        single-embed store path."""
+        if not vec:
+            return None
+        try:
+            self._ensure_ready()
+        except (ImportError, EmbedderError) as e:
+            log.warning("sqlite_vec unavailable: %s", e)
+            return []
+        return self._search_vec(vec, k)
+
+    def _search_vec(self, qvec: list[float], k: int) -> list[Memory]:
         table = _safe_table(self.options.get("table") or "memory")
         vec_blob = _pack_vec(qvec)
         try:
@@ -161,12 +190,15 @@ class SqliteVecProvider(Provider):
             result.append(Memory(text=content, metadata=meta))
         return result
 
-    def store(self, content: str, metadata: Optional[dict] = None) -> None:
+    def store(self, content: str, metadata: Optional[dict] = None,
+              vec: Optional[list[float]] = None) -> None:
         if not content.strip():
             return
         try:
             self._ensure_ready()
-            vec = self._embedder.embed(content)  # type: ignore[union-attr]
+            # Reuse the dedup search's embedding when the caller has one.
+            if vec is None:
+                vec = self._embedder.embed(content)  # type: ignore[union-attr]
         except (ImportError, EmbedderError) as e:
             raise RuntimeError(f"sqlite_vec store failed: {e}")
 

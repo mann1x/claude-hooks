@@ -206,10 +206,20 @@ def _run_dedup_and_store(
     def _do(provider):
         provider_cfg = ((cfg.get("providers") or {}).get(provider.name)) or {}
         dedup_threshold = float(provider_cfg.get("dedup_threshold", 0.0))
+        # Single-embed store path — see the same block in stop.py. Keeping
+        # both copies in step matters: this is the path that actually runs
+        # once detach_store is on.
+        try:
+            vec = provider.embed_for_store(summary)
+        except Exception as e:
+            log.debug("store_async: embed_for_store failed for %s: %s",
+                      provider.name, e)
+            vec = None
         if dedup_threshold > 0.0 and len(summary) >= 100:
             try:
                 from claude_hooks.dedup import should_store as dedup_ok
-                if not dedup_ok(summary, provider, threshold=dedup_threshold):
+                if not dedup_ok(summary, provider,
+                                threshold=dedup_threshold, vec=vec):
                     log.info(
                         "store_async: skipping store to %s: near-duplicate",
                         provider.name,
@@ -218,7 +228,12 @@ def _run_dedup_and_store(
             except Exception as e:
                 log.debug("store_async dedup failed for %s: %s", provider.name, e)
         try:
-            provider.store(summary, metadata=metadata)
+            # See stop.py: the keyword only appears when a vector exists,
+            # so unaware store() implementations are never handed it.
+            if vec is None:
+                provider.store(summary, metadata=metadata)
+            else:
+                provider.store(summary, metadata=metadata, vec=vec)
             log.info("store_async: stored to %s", provider.name)
         except Exception as e:
             log.warning("store_async: %s store failed: %s", provider.name, e)

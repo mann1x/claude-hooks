@@ -330,7 +330,10 @@ class MemoryKgProvider(Provider):
     # ------------------------------------------------------------------ #
     # Store
     # ------------------------------------------------------------------ #
-    def store(self, content: str, metadata: Optional[dict] = None) -> None:
+    def store(self, content: str, metadata: Optional[dict] = None,
+              vec: Optional[list[float]] = None) -> None:
+        # ``vec`` is accepted and ignored: the Memory-KG MCP server
+        # embeds server-side, so there is no client-side embed to save.
         if not content.strip():
             return
         timeout = float(self.options.get("timeout") or 5.0)

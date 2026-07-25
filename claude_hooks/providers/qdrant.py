@@ -114,7 +114,11 @@ class QdrantProvider(Provider):
     # ------------------------------------------------------------------ #
     # Store
     # ------------------------------------------------------------------ #
-    def store(self, content: str, metadata: Optional[dict] = None) -> None:
+    def store(self, content: str, metadata: Optional[dict] = None,
+              vec: Optional[list[float]] = None) -> None:
+        # ``vec`` is accepted and ignored: Qdrant's MCP server embeds
+        # server-side, so there is no client-side embed to save. The
+        # parameter exists to keep one uniform store() signature.
         if not content.strip():
             return
         timeout = float(self.options.get("timeout") or 5.0)

@@ -222,10 +222,22 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
         ('skipped', name) on dedup-skip, raises on store error."""
         provider_cfg = ((config.get("providers") or {}).get(provider.name)) or {}
         dedup_threshold = float(provider_cfg.get("dedup_threshold", 0.0))
+        # One embed, spent twice. The dedup search and the write need the
+        # same vector, and on a CPU embedder that vector *is* the cost of
+        # the turn (5 KB = 12.7 s, vs ~10 ms for all the surrounding DB
+        # work). Providers with no client-side embedder return None and
+        # both halves fall back to their original text paths, so this
+        # needs no capability flag anywhere.
+        try:
+            vec = provider.embed_for_store(summary)
+        except Exception as e:
+            log.debug("embed_for_store failed for %s: %s", provider.name, e)
+            vec = None
         if dedup_threshold > 0.0 and len(summary) >= 100:
             try:
                 from claude_hooks.dedup import should_store as dedup_ok
-                if not dedup_ok(summary, provider, threshold=dedup_threshold):
+                if not dedup_ok(summary, provider,
+                                threshold=dedup_threshold, vec=vec):
                     log.info(
                         "skipping store to %s: near-duplicate detected",
                         provider.name,
@@ -233,7 +245,14 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
                     return ("skipped", provider.name)
             except Exception as e:
                 log.debug("dedup check failed, storing anyway: %s", e)
-        provider.store(summary, metadata=metadata)
+        # Only pass ``vec`` when we actually have one. A provider that
+        # never returns a vector also never sees the keyword, so older
+        # or third-party ``store(content, metadata)`` implementations
+        # keep working untouched.
+        if vec is None:
+            provider.store(summary, metadata=metadata)
+        else:
+            provider.store(summary, metadata=metadata, vec=vec)
         log.debug("provider %s stored turn summary", provider.name)
         return ("stored", provider.name)
 

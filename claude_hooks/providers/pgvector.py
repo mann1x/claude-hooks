@@ -171,6 +171,35 @@ class PgvectorProvider(Provider):
 
             return self._search_tables(qvec, k)
 
+    def embed_for_store(self, content: str) -> Optional[list[float]]:
+        """Embed once so dedup and store can share the result.
+
+        Soft-fails to None: the caller then embeds the old way, which
+        costs time but never loses the memory.
+        """
+        if not content.strip():
+            return None
+        with self._lock:
+            try:
+                self._ensure_ready()
+                return self._embedder.embed(content)  # type: ignore[union-attr]
+            except (ImportError, EmbedderError) as e:
+                log.debug("pgvector embed_for_store unavailable: %s", e)
+                return None
+
+    def recall_vec(self, vec: list[float], k: int = 5) -> Optional[list[Memory]]:
+        """Search by a precomputed embedding — the query-side half of the
+        single-embed store path."""
+        if not vec:
+            return None
+        with self._lock:
+            try:
+                self._ensure_ready()
+            except (ImportError, EmbedderError) as e:
+                log.warning("pgvector unavailable: %s", e)
+                return []
+            return self._search_tables(vec, k)
+
     def _resolve_tables(self) -> list[str]:
         """Return the validated list of tables to search.
 
@@ -230,13 +259,18 @@ class PgvectorProvider(Provider):
         self._read_only_finish()
         return result
 
-    def store(self, content: str, metadata: Optional[dict] = None) -> None:
+    def store(self, content: str, metadata: Optional[dict] = None,
+              vec: Optional[list[float]] = None) -> None:
         if not content.strip():
             return
         with self._lock:
             try:
                 self._ensure_ready()
-                vec = self._embedder.embed(content)  # type: ignore[union-attr]
+                # ``vec`` is the same embedding the dedup search just used.
+                # Reusing it halves the embed cost of a store; recomputing
+                # it would be pure waste on a CPU embedder.
+                if vec is None:
+                    vec = self._embedder.embed(content)  # type: ignore[union-attr]
             except (ImportError, EmbedderError) as e:
                 raise RuntimeError(f"pgvector store failed: {e}")
             table = _safe_table(self.options.get("table") or "claude_hooks_memory")
