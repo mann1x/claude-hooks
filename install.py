@@ -276,7 +276,17 @@ HOOK_TEMPLATE = {
                 {
                     "type": "command",
                     "command": "{cmd} Stop",
-                    "timeout": 20,
+                    # Stop can embed the turn summary inline when
+                    # hooks.stop.detach_store is false (or when the
+                    # detached spawn fails and falls back inline).
+                    # pgvector.store() issues TWO embeds -- the dedup
+                    # recall then the content -- and a CPU-only
+                    # qwen3-embedding-0.6b needs ~9 s per 5 KB, so a
+                    # 5 KB memory costs ~19 s. The old 20 s cap
+                    # SIGTERMed the hook before the embedder's own
+                    # timeout could fire, surfacing as "the embedder
+                    # is down". Measured on solidpc 2026-07-25.
+                    "timeout": 90,
                     "_managedBy": MANAGED_BY,
                 }
             ],
@@ -289,7 +299,9 @@ HOOK_TEMPLATE = {
                 {
                     "type": "command",
                     "command": "{cmd} SessionEnd",
-                    "timeout": 10,
+                    # Final flush can store buffered observations, so
+                    # it pays the same per-embed cost as Stop above.
+                    "timeout": 60,
                     "_managedBy": MANAGED_BY,
                 }
             ],
@@ -348,7 +360,7 @@ PRE_COMPACT_TEMPLATE = {
                 {
                     "type": "command",
                     "command": "{cmd} PreCompact",
-                    "timeout": 20,
+                    "timeout": 60,
                     "_managedBy": MANAGED_BY,
                 }
             ],
@@ -3800,7 +3812,12 @@ def _setup_embedding_engine(
                 _ollama_pull(base, model)
         ollama_block = {
             "url": url, "model": model,
-            "timeout": 30.0, "num_ctx": num_ctx, "max_chars": 30000,
+            # 180 s, not 30 s: embedding latency is superlinear in
+            # payload size and max_chars is 30000. Measured CPU-only
+            # on qwen3-embedding-0.6b: 5 KB ~9 s, 16 KB ~48 s,
+            # 30 KB ~135 s. A 30 s ceiling hard-fails any large
+            # memory. See docs/llamafile-integration.md.
+            "timeout": 180.0, "num_ctx": num_ctx, "max_chars": 30000,
         }
     else:
         # Offer remote-llamafile primary BEFORE OpenAI — #237 (2026-05-21).
@@ -3831,18 +3848,25 @@ def _setup_embedding_engine(
         remote_llamafile_block: Optional[dict] = None
         if use_remote_llamafile:
             default_url = remote_url_existing or "http://192.168.178.2:38092/embedding"
+            # 180 s default: a LAN llamafile pays the same superlinear
+            # per-payload cost as a local one plus the network hop.
+            # Prompt default reflects the current config so a scripted
+            # re-run never silently lowers an operator-raised ceiling.
+            default_timeout = float(existing_options.get("timeout") or 180.0)
             if non_interactive:
                 url = remote_url_existing or default_url
-                timeout = float(existing_options.get("timeout") or 30.0)
+                timeout = default_timeout
             else:
                 url = input(
                     f"    Endpoint URL [{default_url}]: "
                 ).strip() or default_url
-                raw_to = input("    Timeout seconds [30]: ").strip()
+                raw_to = input(
+                    f"    Timeout seconds [{default_timeout:g}]: "
+                ).strip()
                 try:
-                    timeout = float(raw_to) if raw_to else 30.0
+                    timeout = float(raw_to) if raw_to else default_timeout
                 except ValueError:
-                    timeout = 30.0
+                    timeout = default_timeout
             # Best-effort probe so misconfigured URLs surface here
             # rather than at the first recall. Failure is non-fatal —
             # the user may be wiring before the producer host is up.
@@ -3926,7 +3950,8 @@ def _setup_embedding_engine(
                 model = input(f"    Model [{existing_model}]: ").strip() or existing_model
                 api_key = input(f"    API key (env-var ref OK) [{existing_key}]: ").strip() or existing_key
             openai_block = {
-                "url": url, "model": model, "api_key": api_key, "timeout": 30.0,
+                "url": url, "model": model, "api_key": api_key,
+                "timeout": 180.0,
             }
 
     # ----- 2. Llamafile fallback (or primary) ---------------------
@@ -3959,7 +3984,7 @@ def _setup_embedding_engine(
         cfg["embedding"] = embedding_block
         llamafile_block = {
             "url": f"http://127.0.0.1:{embedding_block['port']}/embedding",
-            "timeout": 30.0,
+            "timeout": 180.0,
         }
 
     # ----- 3. Compose final embedder config -----------------------
@@ -4588,7 +4613,7 @@ def _setup_sqlite_vec_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) ->
     sv.setdefault("table", "memory")
     sv.setdefault("recall_k", 5)
     sv.setdefault("store_mode", "auto")
-    sv.setdefault("timeout", 10.0)
+    sv.setdefault("timeout", 30.0)
     if not sv.get("embedder"):
         _setup_embedding_engine(
             cfg, provider="sqlite_vec",
@@ -5163,6 +5188,88 @@ def _register_sqlite_vec_mcp_in_claude_json(launcher_path: Path) -> None:
 def _now_ts() -> str:
     import datetime
     return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def _migrate_embedder_timeouts(cfg: dict, *, dry_run: bool) -> None:
+    """Raise embedder-related ceilings that are still at their old
+    (too-low) shipped defaults.
+
+    Background (solidpc, 2026-07-25): embedding latency is superlinear
+    in payload size. Measured CPU-only on qwen3-embedding-0.6b:
+    5 KB ~9 s, 16 KB ~48 s, 30 KB ~135 s. ``pgvector.store()`` issues
+    *two* embeds (dedup recall + content), so a 5 KB memory costs ~19 s
+    — more than the 20 s Stop-hook cap that older installs wrote into
+    ``settings.json``. The hook was SIGTERMed before the embedder's own
+    30 s timeout could fire, the memory was silently dropped, and the
+    session reported the embedder as down.
+
+    New installs get the corrected values from ``DEFAULT_CONFIG`` and
+    the hook templates, but an **existing** config keeps whatever it
+    already has — which for every pre-2026-07-25 host is exactly the
+    broken combination. Hence this one-time bump.
+
+    Only raises a value that is still at-or-below the *old* shipped
+    default. An operator who deliberately picked something higher (or
+    anything other than the old default) is left alone, so re-running
+    the installer never lowers a hand-raised ceiling. Idempotent.
+    """
+    changed: list[str] = []
+
+    for pname in ("pgvector", "sqlite_vec"):
+        prov = (cfg.get("providers") or {}).get(pname)
+        if not isinstance(prov, dict):
+            continue
+        # Client-side embed timeout: old default 30 s -> 180 s.
+        opts = prov.get("embedder_options")
+        if isinstance(opts, dict):
+            try:
+                cur = float(opts.get("timeout"))
+            except (TypeError, ValueError):
+                cur = None
+            if cur is not None and cur <= 30.0:
+                opts["timeout"] = 180.0
+                changed.append(
+                    f"providers.{pname}.embedder_options.timeout "
+                    f"{cur:g} -> 180"
+                )
+        # Provider (DB connect) timeout: old default 10 s -> 30 s.
+        try:
+            pcur = float(prov.get("timeout"))
+        except (TypeError, ValueError):
+            pcur = None
+        if pcur is not None and pcur <= 10.0:
+            prov["timeout"] = 30.0
+            changed.append(f"providers.{pname}.timeout {pcur:g} -> 30")
+
+    # Idle reap: old default 300 s -> 3600 s. Spawn is only 1-2 s, so
+    # reaping aggressively buys little but every reap opens a respawn
+    # race that concurrent sessions observe as "the embedder is down".
+    emb = cfg.get("embedding")
+    if isinstance(emb, dict):
+        try:
+            icur = float(emb.get("idle_timeout_seconds"))
+        except (TypeError, ValueError):
+            icur = None
+        if icur is not None and icur <= 300.0:
+            emb["idle_timeout_seconds"] = 3600
+            changed.append(
+                f"embedding.idle_timeout_seconds {icur:g} -> 3600"
+            )
+
+    # Take the embed off the Stop hook's critical path entirely.
+    stop_cfg = (cfg.get("hooks") or {}).get("stop")
+    if isinstance(stop_cfg, dict) and stop_cfg.get("detach_store") is False:
+        stop_cfg["detach_store"] = True
+        changed.append("hooks.stop.detach_store false -> true")
+
+    if not changed:
+        return
+    print("\n--- Embedder timeout migration (2026-07-25) ---")
+    print("  Raising ceilings still at their old (too-low) defaults;")
+    print("  values you raised yourself are left untouched.")
+    for line in changed:
+        print(f"    {'[dry-run] ' if dry_run else ''}{line}")
+    print()
 
 
 def _migrate_claude_json_python_to_pythonw(*, non_interactive: bool,
@@ -7756,6 +7863,7 @@ def main() -> int:
         print(f"Claude config:  {claude_cfg_path}\n")
 
     cfg = load_config(cfg_path)
+    _migrate_embedder_timeouts(cfg, dry_run=args.dry_run)
     claude_cfg = load_claude_config(claude_cfg_path)
 
     # Detect MCP servers per provider.

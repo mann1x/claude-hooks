@@ -138,7 +138,7 @@ class TestConfig:
         assert cfg.ctx_size == 16384
         assert cfg.pooling == "last"
         assert cfg.mode == "auto"
-        assert cfg.idle_timeout_seconds == 300.0
+        assert cfg.idle_timeout_seconds == 3600.0
         assert cfg.extra_args == []
 
     def test_config_from_dict_ignores_unknown(self):

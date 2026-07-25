@@ -255,9 +255,10 @@ class LlamafileEmbedder(Embedder):
     The llamafile is supervised by ``claude-hooks-daemon`` (see
     :mod:`claude_hooks.embedding_manager`): the daemon lazily spawns
     it on the first ``ensure_running()`` ping, idle-reaps it after
-    ``embedding.idle_timeout_seconds`` (default 300 = matches
-    Ollama's ``OLLAMA_KEEP_ALIVE=5m`` semantics), and re-spawns on
-    the next ping. The embedder optionally fires that ping itself
+    ``embedding.idle_timeout_seconds`` (default 3600; was 300 for
+    Ollama ``OLLAMA_KEEP_ALIVE=5m`` parity, raised because each reap
+    opens a respawn race that sessions report as a down embedder),
+    and re-spawns on the next ping. The embedder optionally fires that ping itself
     via ``daemon_ensure=True`` (the default) so the supervision is
     transparent to the caller — the embedder behaves like a normal
     HTTP client and the warm/cold lifecycle is handled out of band.
@@ -284,7 +285,7 @@ class LlamafileEmbedder(Embedder):
     def __init__(
         self,
         url: str = "http://127.0.0.1:38092/embedding",
-        timeout: float = 30.0,
+        timeout: float = 180.0,
         max_chars: Optional[int] = None,
         daemon_ensure: bool = True,
     ):

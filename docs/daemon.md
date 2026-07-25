@@ -218,12 +218,31 @@ hook even when the daemon is off:
 | Tier | Mechanism | Savings | Default |
 |---|---|---|---|
 | 1.2 | HyDE expansion cache (`hyde_cache.py`) | 0.5–4 s on `UserPromptSubmit` cache hits | on (when HyDE is on) |
-| 1.3 | Detached store (`store_async.py`) | 200–500 ms per noteworthy turn on `Stop` | off |
+| 1.3 | Detached store (`store_async.py`) | 200–500 ms per noteworthy turn on `Stop` | **on** |
 | 3.8 | Long-lived daemon (`daemon.py`) | 100–300 ms per hook invocation | opt-in via installer |
 
-Tier 1.3 — detached store — is the focus of this section. It's
-opt-in via `hooks.stop.detach_store: true` in
-`config/claude-hooks.json`.
+Tier 1.3 — detached store — is the focus of this section. It is
+controlled by `hooks.stop.detach_store` in
+`config/claude-hooks.json`, and has been **on by default since
+2026-07-25**.
+
+> **Why it stopped being opt-in.** With a *local* embedder the inline
+> path is not merely slower, it is incorrect. `store()` issues two
+> embeds (dedup recall, then content) and embedding latency is
+> superlinear in payload size — measured CPU-only on
+> qwen3-embedding-0.6b: 5 KB ~9 s, 16 KB ~48 s, 30 KB ~135 s. A 5 KB
+> memory therefore needs ~19 s of embedding, which exceeded the 20 s
+> `Stop` cap older installs wrote into `settings.json`. Claude Code
+> SIGTERMed the hook mid-store: the memory was silently lost, and the
+> session reported the embedder as down. Raising the cap alone does not
+> fix it — at `max_chars: 30000` the two embeds can cost ~270 s, more
+> than any sane hook budget. Detaching removes the bound entirely.
+>
+> The trade-off is real and unchanged: a detached store cannot report
+> failures in the Stop `systemMessage`, because the parent has already
+> returned. Failures go to `~/.claude/claude-hooks.log` instead. Set
+> `detach_store: false` if you would rather see store errors inline and
+> your memories are small enough to fit the hook budget.
 
 ### Why the Stop hook is slow
 

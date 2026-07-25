@@ -227,13 +227,25 @@ class TestStopHandlerDetachIntegration:
             user="please", assistant_text="done",
             assistant_tools=[{"name": "Edit", "input": {"file_path": "x"}}],
         )
-        # Default: detach_store=False — store happens inline.
+        # detach_store must be set explicitly: the shipped default
+        # flipped to True on 2026-07-25 (see claude_hooks/config.py),
+        # so relying on the default here would test the wrong branch.
         stop.handle(
             event={"transcript_path": path, "cwd": "/p", "session_id": "s"},
-            config=base_config(),
+            config=base_config(hooks={"stop": {"detach_store": False}}),
             providers=[p],
         )
         assert len(p.stored) == 1
+
+    def test_detach_store_defaults_to_enabled(self, base_config):
+        """Regression guard for the 2026-07-25 default flip.
+
+        Inline store is not merely slower on a local embedder: store()
+        issues two embeds and the Stop hook's own cap SIGTERMs the hook
+        before they finish on a multi-KB memory, silently losing it.
+        """
+        cfg = base_config()
+        assert cfg["hooks"]["stop"]["detach_store"] is True
 
     def test_detach_enabled_spawns_and_skips_inline_store(
         self, base_config, transcript_file, fake_provider,

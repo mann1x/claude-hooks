@@ -118,7 +118,13 @@ class EmbeddingConfig:
 
     # Lifecycle knobs.
     spawn_timeout_seconds: float = 30.0
-    idle_timeout_seconds: float = 300.0
+    # 3600, not 300: spawn is only 1-2 s, so reaping aggressively buys
+    # little, but every reap opens a respawn race that concurrent
+    # sessions observe as "the embedder is down" (the complaint clears
+    # on the next attempt, once warm). Keeping the ~1.5 GB resident for
+    # an hour is the cheaper trade. Was 300 (Ollama OLLAMA_KEEP_ALIVE
+    # parity); see feedback_embedder_timeout_chain, solidpc 2026-07-25.
+    idle_timeout_seconds: float = 3600.0
     reaper_interval_seconds: float = 60.0
 
     # Optional extra args appended after the canonical ones.
@@ -557,7 +563,7 @@ def config_from_dict(cfg: dict) -> EmbeddingConfig:
         mode=str(e.get("mode") or "auto"),
         vram_budget_mb=int(e.get("vram_budget_mb") or _DEFAULT_VRAM_BUDGET_MB),
         spawn_timeout_seconds=float(e.get("spawn_timeout_seconds") or 30.0),
-        idle_timeout_seconds=float(e.get("idle_timeout_seconds") or 300.0),
+        idle_timeout_seconds=float(e.get("idle_timeout_seconds") or 3600.0),
         reaper_interval_seconds=float(e.get("reaper_interval_seconds") or 60.0),
         extra_args=list(e.get("extra_args") or []),
         cwd=str(e.get("cwd") or ""),

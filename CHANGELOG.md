@@ -18,6 +18,48 @@ release with the auto-generated source archive
 
 ### Fixed
 
+- **Embedder: multi-KB memories were silently dropped and reported as
+  "the embedder is down".** Four independent budgets stack on a store
+  (hook timeout → provider timeout → embedder HTTP timeout → daemon
+  spawn timeout) and the *smallest* one was binding: the 20 s `Stop`
+  cap in `settings.json`. Meanwhile `pgvector.store()` issues **two**
+  embeds — the dedup recall (`providers/pgvector.py:167`) then the
+  content (`:239`) — and embedding latency is superlinear in payload
+  size. Measured CPU-only on qwen3-embedding-0.6b (solidpc,
+  2026-07-25): 5 KB ~9 s, 16 KB ~48 s, 30 KB ~135 s; an end-to-end 5 KB
+  store took **18.98 s** against that 20 s cap. Claude Code SIGTERMed
+  the hook mid-store, so the memory was lost *before* the embedder's own
+  30 s timeout could fire — which is why the failure surfaced well under
+  30 s and why raising the embedder timeout alone changed nothing.
+  Separately, llamafile spawn is only **1–2 s**, so the 300 s idle reaper
+  bought little while every reap opened a respawn race that concurrent
+  sessions observed as a down embedder (the complaint cleared on the
+  next attempt, once warm).
+  Fixes, shipped as new defaults so fresh installs and Windows hosts do
+  not inherit the broken combination:
+  - `hooks.stop.detach_store` now defaults to **`true`** — the
+    structural fix, taking the embed off the hook's critical path
+    entirely. Raising caps alone cannot fix inline: at
+    `max_chars: 30000` the two embeds can cost ~270 s. Trade-off: a
+    detached store logs failures rather than surfacing them in the Stop
+    `systemMessage`.
+  - `settings.json` hook budgets: `Stop` 20 → **90**, `SessionEnd`
+    10 → **60**, `PreCompact` 20 → **60** (backstop for the
+    detach-spawn-failed fallback path).
+  - Embedder client timeout 30 → **180 s** (`DEFAULT_CONFIG`,
+    `LlamafileEmbedder`, and every `install.py` embedder block),
+    covering the measured 135 s worst case at `max_chars: 30000`.
+  - Provider (DB connect) timeout 10 → **30 s**.
+  - `embedding.idle_timeout_seconds` 300 → **3600 s**.
+  - New `install.py` migration `_migrate_embedder_timeouts` bumps
+    **existing** configs, since a re-run otherwise preserves the stored
+    (broken) values. It raises a knob only when it is still at-or-below
+    the old shipped default, so an operator-raised ceiling is never
+    lowered. Idempotent.
+  - The remote-llamafile timeout prompt now defaults from the current
+    config instead of a hardcoded `30`, so a scripted re-run cannot
+    silently lower a raised ceiling.
+
 - **API proxy: enable TCP keepalive on the upstream socket — the missing
   transparency that dropped long requests.** The transparent
   `api.anthropic.com` proxy failed long-running requests with

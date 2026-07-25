@@ -366,7 +366,9 @@ class TestStopStoreHandler:
         )
         stop.handle(
             event={"transcript_path": path, "cwd": "/p", "session_id": "s1"},
-            config=base_config(),
+            # Inline store: detach_store defaults to True since
+            # 2026-07-25, and a detached store is unobservable here.
+            config=base_config(hooks={"stop": {"detach_store": False}}),
             providers=[p],
         )
         assert len(p.stored) == 1
@@ -403,7 +405,7 @@ class TestStopStoreHandler:
         )
         stop.handle(
             event={"transcript_path": path, "cwd": "/p", "session_id": "s"},
-            config=base_config(),
+            config=base_config(hooks={"stop": {"detach_store": False}}),
             providers=[p],
         )
         # Store ran (edit happened), but the meta-prompt is not echoed
@@ -479,7 +481,8 @@ class TestStopStoreHandler:
     ):
         # When stop_hook_active=True, the guard is bypassed to prevent loops.
         p = fake_provider(name="qdrant")
-        cfg = base_config(hooks={"stop_guard": {"enabled": True}})
+        cfg = base_config(hooks={"stop_guard": {"enabled": True},
+                                 "stop": {"detach_store": False}})
         path = transcript_file(
             user="u",
             assistant_text="pre-existing issue here",

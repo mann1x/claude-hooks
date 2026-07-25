@@ -190,7 +190,7 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     # systemMessage immediately and Claude Code unblocks ~200-500 ms
     # sooner. Failures are logged but never surfaced because the parent
     # has already returned by the time the child finishes.
-    if hook_cfg.get("detach_store", False) and auto_providers:
+    if hook_cfg.get("detach_store", True) and auto_providers:
         try:
             from claude_hooks.store_async import spawn as _spawn_store
             ok = _spawn_store({
