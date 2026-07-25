@@ -221,7 +221,23 @@
       "extract_instincts": false,
       "instincts_dir": "~/.claude/instincts",
       "summary_format": "markdown",
-      "detach_store": true
+      "detach_store": true,
+      "_embedder_gate_comment": [
+        "Layer 2 of the store gate. store_lock serialises stores within",
+        "ONE host; this waits for a SHARED embedder to go idle before a",
+        "background store adds load, so several machines pointed at one",
+        "llamafile don't pile on. Keyed on the embedder (not the memory",
+        "backend) so it works for pgvector / sqlite_vec / qdrant alike.",
+        "Advisory backpressure, NOT mutual exclusion. Off by default -",
+        "only useful when hosts share an embedder. Auto-disables against",
+        "endpoints without /slots (Ollama, OpenAI-compatible)."
+      ],
+      "embedder_gate": {
+        "enabled": false,
+        "max_wait_s": 60.0,
+        "probe_timeout_s": 1.0,
+        "poll_interval_s": 2.0
+      }
     },
     "stop_guard": {
       "enabled": false,

@@ -16,6 +16,40 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added
+
+- **Cross-host embedder admission gate (opt-in,
+  `hooks.stop.embedder_gate.enabled`).** `store_lock` serialises stores
+  within one host, but it is a per-host lock file — two machines sharing
+  one embedder still run a store each. The new
+  `claude_hooks/embedder_gate.py` makes a background store wait for the
+  *shared embedder* to go idle before adding load. It keys on the
+  embedder, not the memory backend, deliberately: a Postgres advisory
+  lock would cover only `pgvector` and leave `sqlite_vec` / `qdrant` /
+  `memory_kg` unprotected, whereas every backend funnels through the
+  embedder.
+  The busy oracle looks odd and is load-bearing: llama.cpp answers
+  `/health` and `/props` straight from its HTTP threads (instant even at
+  full CPU load) but serves `/slots` and `/metrics` by queueing a task
+  into the **single-consumer inference loop**. Measured on solidpc
+  during a 29 s embed — `/health` 0.00 s throughout, `/slots`
+  5.6–11.7 s, `/metrics` 8.6 s. So a short-timeout `/slots` probe that
+  *stalls* is precisely the "loop is busy" signal, and a 404/501 (Ollama,
+  OpenAI-compatible endpoints, or `--no-slots`) means "not gateable" and
+  disables the gate rather than blocking every store.
+  This is **advisory backpressure, not mutual exclusion**: two hosts can
+  read "idle" in the same instant, and a busy server occasionally answers
+  fast between micro-batches. It reduces cross-host pile-up on the
+  embedder; it cannot close a cross-host dedup race, for which llama.cpp
+  offers no primitive. Runs only on the background store path (never on
+  interactive recall, which must not pay a probe) and inside the local
+  `store_gate`, so at most one process per host probes at a time. Off by
+  default — it only helps when hosts share an embedder.
+  Corollary, measured: **`--threads-http` is not worth raising.** The
+  HTTP thread pool is demonstrably healthy under load (`/health` and
+  `/props` stay at 0.00 s while the CPU is saturated); the stall is the
+  inference task queue, which more HTTP threads cannot drain.
+
 ### Fixed
 
 - **Detached store: serialise it, or it breaks dedup and starves recall.**

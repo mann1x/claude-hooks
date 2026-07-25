@@ -172,6 +172,30 @@ DEFAULT_CONFIG: dict[str, Any] = {
             # embed off the hook's critical path entirely. Falls back to
             # inline if the spawn fails (see hooks/stop.py).
             "detach_store": True,
+            # Layer 2 of the store gate (see claude_hooks/embedder_gate.py).
+            # store_lock serialises stores within ONE host; this waits for
+            # a *shared* embedder to go idle before a background store
+            # adds load, so several machines pointed at one llamafile
+            # don't pile on. Keyed on the embedder rather than the memory
+            # backend so it works for pgvector / sqlite_vec / qdrant /
+            # memory_kg alike.
+            #
+            # OFF by default: it only helps when multiple hosts share an
+            # embedder, and it costs a probe per store. Advisory
+            # backpressure, never mutual exclusion — a busy server
+            # sometimes answers fast between micro-batches, and two hosts
+            # can both read "idle" at once.
+            "embedder_gate": {
+                "enabled": False,
+                # Give up waiting and store anyway after this long: a
+                # delayed store is fine, a dropped one is not.
+                "max_wait_s": 60.0,
+                # /slots is answered from the inference loop, so a slow
+                # reply IS the busy signal. Keep this short.
+                "probe_timeout_s": 1.0,
+                # Each probe enqueues a task on the server; poll coarsely.
+                "poll_interval_s": 2.0,
+            },
         },
         "stop_guard": {
             # Disabled by default: the default patterns are opinionated

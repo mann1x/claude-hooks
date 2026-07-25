@@ -230,7 +230,36 @@ def _run_dedup_and_store(
                 "store_async: proceeding without the store gate — "
                 "a duplicate is possible",
             )
+        # Layer 2 (opt-in): when several HOSTS share one embedder, the
+        # per-host lock above still lets each machine run a store at the
+        # same time. Wait for the shared embedder to quiet down before
+        # adding ours. Advisory only — see embedder_gate for why this
+        # cannot be mutual exclusion. Deliberately inside the local gate
+        # so only one process per host probes at a time.
+        _wait_for_embedder(cfg, [p.name for p in providers])
         parallel_map(_do, providers)
+
+
+def _wait_for_embedder(cfg: dict, provider_names: list) -> None:
+    """Best-effort cross-host admission control. Never raises, never
+    prevents the store from running."""
+    try:
+        from claude_hooks import embedder_gate
+        gate_cfg = embedder_gate.config_from(cfg)
+        if not gate_cfg["enabled"]:
+            return
+        url = embedder_gate.embed_url_from(cfg, provider_names)
+        if not url:
+            return
+        result = embedder_gate.wait_for_capacity(
+            url,
+            max_wait=gate_cfg["max_wait_s"],
+            probe_timeout=gate_cfg["probe_timeout_s"],
+            poll_interval=gate_cfg["poll_interval_s"],
+        )
+        log.debug("store_async: embedder gate -> %s", result)
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug("store_async: embedder gate skipped (%s)", e)
 
 
 if __name__ == "__main__":
