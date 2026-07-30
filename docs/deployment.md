@@ -117,7 +117,48 @@ The installer:
 
 ### Verify
 
-Open a new Claude Code session. You should see:
+Run the post-deploy check on **every** host you deployed to:
+
+```bash
+python scripts/verify_deploy.py          # all checks
+python scripts/verify_deploy.py --store  # consultants store only
+```
+
+Exit code is 0 when everything passed, 1 if anything failed. Expected
+output on a healthy host:
+
+```
+version
+  [  ok] claude_hooks importable — v1.13.0
+memory providers
+  [  ok] provider pgvector — 6079 memories
+consultants store
+  [  ok] store config file — ~/.claude/consultants-config.toml + .claude-hooks/consultants.toml
+  [  ok] store.backend — pgvector
+  [  ok] store effort gate — effort='xhigh'
+  [  ok] store backend reachable — pgvector 127.0.0.1:5432/memory table=consultants_store rows=33
+```
+
+Two of those deserve attention because they catch failures that *look
+like* success:
+
+- **`store backend reachable`** connects and reads the table rather than
+  trusting the config. A `[store]` block can be present, parseable and
+  wrong.
+- **`provider … reports 0 memories`** is a warning, not a pass. Before
+  the connection-recovery fix, a long-lived process holding a dead
+  connection returned exactly that — an empty answer indistinguishable
+  from an empty corpus.
+
+> **Where the store config lives.** Not in `config/claude-hooks.json` —
+> reading `store` from there returns `None` on every host, healthy or
+> not. It is `~/.claude/consultants-config.toml` (user-global) or
+> `<cwd>/.claude-hooks/consultants.toml` (per-project). Mind the
+> asymmetry: the user-global file is `consultants-**config**.toml`, the
+> project one is plain `consultants.toml`. `verify_deploy.py` prints
+> which file it actually read, so you never have to guess.
+
+Then open a new Claude Code session. You should see:
 
 > _Started with claude-hooks recall enabled (2 provider(s): Qdrant, Memory KG)._
 
