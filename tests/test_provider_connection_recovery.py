@@ -255,10 +255,22 @@ class TestSqliteVecRecovery(unittest.TestCase):
         self.assertEqual(fresh.count(), 1)
         fresh._conn.close()
 
+    @unittest.skipIf(
+        sys.platform.startswith("win"),
+        "Windows refuses to rename a file SQLite still holds open "
+        "(WinError 32), so the OS itself prevents the scenario this "
+        "guards. The detection code is still exercised there by "
+        "test_closed_handle_is_reopened.",
+    )
     def test_replaced_database_file_is_reopened(self):
         """SQLite's analogue of a server restart. The old handle keeps
         serving the old inode happily — no error is ever raised — so
-        this is the silent-wrong-answer case."""
+        this is the silent-wrong-answer case.
+
+        POSIX-only by nature: it depends on being able to rename a file
+        out from under an open handle, which is exactly what Windows
+        forbids.
+        """
         p = self._p()
         p.store("alpha", metadata={})
         p.store("beta", metadata={})
