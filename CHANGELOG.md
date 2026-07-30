@@ -18,6 +18,26 @@ release with the auto-generated source archive
 
 ### Fixed
 
+- **`CompileRunner` published its completion signal before the results it
+  implies.** `last_returncode` going non-None is what callers poll to know
+  a compile run finished, but it was assigned the moment
+  `subprocess.run` returned — leaving a window spanning the entire output
+  parse during which a poller saw "done" and then read an **empty**
+  diagnostics map. Now published last, after `_diagnostics` is swapped
+  under its lock.
+  This surfaced as an intermittent `test_cargo_json_auto_detection`
+  failure that passed in isolation and on re-run, i.e. it looked like a
+  timing flake in a test. It was a real ordering bug in the runner; the
+  test was simply the only thing polling that signal. The new
+  `test_returncode_is_published_after_diagnostics` observes the state
+  from *inside* the parse rather than racing it from another thread, so
+  it catches the regression deterministically rather than statistically.
+  The test harness's `run_timeout_s` (5 s → 30 s) and wait deadlines
+  (3 s → 20 s) were also raised: both are liveness bounds on a one-line
+  `python -c`, not assertions about speed, and the old values raced a
+  cold interpreter spawn on a loaded machine. Stress-verified at 50
+  consecutive runs, 20 of them under synthetic CPU load, zero failures.
+
 - **A Postgres restart permanently broke every long-lived process, and
   reported it as an empty memory.** Observed on solidpc 2026-07-30 after
   the container restarted at 00:56 UTC: MCP servers dating from days

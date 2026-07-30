@@ -174,11 +174,17 @@ class TestCompileRunnerExecution(unittest.TestCase):
 
     def _runner(self, command: tuple[str, ...], *,
                 debounce: float = 0.05) -> CompileRunner:
+        # ``run_timeout_s`` is a liveness bound, not an assertion about
+        # speed: every command here is a one-line ``python -c``. The old
+        # 5 s raced a cold interpreter spawn on a loaded machine, killing
+        # the subprocess and leaving the diagnostics empty. Generous is
+        # free when things work. Tests that genuinely exercise the
+        # timeout build their own spec.
         spec = CompileSpec(
             language="rs",
             command=command,
             debounce_seconds=debounce,
-            run_timeout_s=5.0,
+            run_timeout_s=30.0,
         )
         return CompileRunner(spec=spec, project_root=self.root)
 
@@ -192,7 +198,7 @@ class TestCompileRunnerExecution(unittest.TestCase):
         try:
             runner.trigger()
             # Wait for the run to finish.
-            self._wait_for_run(runner, deadline=time.monotonic() + 3.0)
+            self._wait_for_run(runner, deadline=time.monotonic() + 20.0)
             # Returncode 0 from the python -c.
             self.assertEqual(runner.last_returncode, 0)
             diags = runner.get_diagnostics(str(self.root / "foo.rs"))
@@ -225,7 +231,7 @@ class TestCompileRunnerExecution(unittest.TestCase):
         runner.start()
         try:
             runner.trigger()
-            self._wait_for_run(runner, deadline=time.monotonic() + 3.0)
+            self._wait_for_run(runner, deadline=time.monotonic() + 20.0)
             diags = runner.get_diagnostics(str((self.root / "src/lib.rs").resolve()))
             self.assertEqual(len(diags), 1)
             # Source is the binary name (`python` on POSIX, `python.exe`
@@ -288,6 +294,54 @@ class TestCompileRunnerExecution(unittest.TestCase):
             self.assertEqual(runner.all_diagnostics(), {})
         finally:
             runner.stop()
+
+    def test_returncode_is_published_after_diagnostics(self) -> None:
+        """``last_returncode`` is the completion signal, so it must not
+        become visible before the diagnostics it implies are readable.
+
+        It used to be assigned as soon as ``subprocess.run`` returned,
+        leaving a window spanning the entire parse during which a poller
+        saw "done" and then read an empty diagnostics map. That is the
+        ordering bug behind the intermittent
+        ``test_cargo_json_auto_detection`` failure: rare on an idle
+        machine, reliably hit when the scheduler preempts between the
+        two assignments under load.
+
+        Deterministic by construction — it observes the state *from
+        inside* the parse rather than racing it from another thread.
+        """
+        cmd = (sys.executable, "-c", "print('foo.rs:3:5: error: oh no')")
+        runner = self._runner(cmd)
+        observed: dict[str, object] = {}
+        original = runner._parse_output
+
+        def spy(stdout: str, stderr: str):
+            # Mid-run: the results are not published yet, so the
+            # completion signal must still read as "not finished".
+            observed["rc_during_parse"] = runner.last_returncode
+            observed["diags_during_parse"] = runner.get_diagnostics(
+                str(self.root / "foo.rs"))
+            return original(stdout, stderr)
+
+        runner._parse_output = spy  # type: ignore[method-assign]
+        runner.start()
+        try:
+            runner.trigger()
+            self._wait_for_run(runner, deadline=time.monotonic() + 20.0)
+        finally:
+            runner.stop()
+
+        self.assertIn("rc_during_parse", observed, "parse never ran")
+        self.assertIsNone(
+            observed["rc_during_parse"],
+            "last_returncode became visible before diagnostics were "
+            "published — a poller can see 'done' and read an empty map",
+        )
+        self.assertEqual(observed["diags_during_parse"], [])
+        # And once it is visible, the results really are there.
+        self.assertEqual(runner.last_returncode, 0)
+        self.assertEqual(
+            len(runner.get_diagnostics(str(self.root / "foo.rs"))), 1)
 
     def _wait_for_run(self, runner: CompileRunner, *, deadline: float) -> None:
         while time.monotonic() < deadline:
