@@ -85,6 +85,14 @@ class TestStoreBackendReachability(unittest.TestCase):
         self.assertEqual(_statuses(r)["store backend reachable"], vd.WARN)
 
     def test_sqlite_existing_file_passes(self):
+        """Also pins that the check does not leak the connection.
+
+        ``with sqlite3.connect(...)`` commits but does NOT close, so an
+        earlier version held a handle on the live store database. On
+        POSIX that is an invisible leak; on Windows it locks the file,
+        which is how this surfaced — the temp-dir cleanup below raises
+        WinError 32 if the connection is still open.
+        """
         import sqlite3
         import tempfile
         with tempfile.TemporaryDirectory() as d:
@@ -97,7 +105,11 @@ class TestStoreBackendReachability(unittest.TestCase):
             vd._check_store_backend(
                 r, _store(backend="sqlite_vec", sqlite_vec_path=str(p)),
                 "sqlite_vec")
-        self.assertEqual(_statuses(r)["store backend reachable"], vd.PASS)
+            self.assertEqual(_statuses(r)["store backend reachable"], vd.PASS)
+            # Explicit unlink inside the context: on Windows this raises
+            # if the check leaked its handle, on POSIX it is a no-op that
+            # keeps the two platforms testing the same thing.
+            p.unlink()
 
     def test_unknown_backend_warns(self):
         r = _results()

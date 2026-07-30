@@ -173,9 +173,21 @@ def _check_store_backend(r: Results, s, backend: str) -> None:
             return
         try:
             import sqlite3
-            with sqlite3.connect(f"file:{p}?mode=ro", uri=True) as conn:
+            # `with sqlite3.connect(...)` commits the transaction but does
+            # NOT close the connection. Leaving it open holds a handle on
+            # the live store database, and on Windows that locks the file
+            # outright. Close it explicitly.
+            #
+            # as_uri() rather than f"file:{p}" so the read-only URI is
+            # well-formed on Windows, where a bare path carries a drive
+            # colon and backslashes.
+            uri = p.resolve().as_uri() + "?mode=ro"
+            conn = sqlite3.connect(uri, uri=True)
+            try:
                 tables = [t[0] for t in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'")]
+            finally:
+                conn.close()
             r.add(PASS, "store backend reachable",
                   f"sqlite_vec {p} ({len(tables)} tables)")
         except Exception as e:
