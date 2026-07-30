@@ -25,6 +25,13 @@ from claude_hooks.providers import Provider
 
 log = logging.getLogger("claude_hooks.hooks.stop")
 
+# How long an INLINE store waits for the cross-process store gate before
+# giving up and proceeding ungated. Deliberately short: inline runs under
+# the Stop hook's timeout, so a long wait would trade a possible
+# duplicate for a killed hook and a dropped memory. The detached path
+# has no such bound and uses store_lock's much longer default.
+_INLINE_STORE_GATE_TIMEOUT_S = 10.0
+
 
 def _with_update_notice(result: Optional[dict], config: dict) -> Optional[dict]:
     """Augment the Stop hook return value with a "new release available"
@@ -190,7 +197,7 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     # systemMessage immediately and Claude Code unblocks ~200-500 ms
     # sooner. Failures are logged but never surfaced because the parent
     # has already returned by the time the child finishes.
-    if hook_cfg.get("detach_store", False) and auto_providers:
+    if hook_cfg.get("detach_store", True) and auto_providers:
         try:
             from claude_hooks.store_async import spawn as _spawn_store
             ok = _spawn_store({
@@ -215,10 +222,22 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
         ('skipped', name) on dedup-skip, raises on store error."""
         provider_cfg = ((config.get("providers") or {}).get(provider.name)) or {}
         dedup_threshold = float(provider_cfg.get("dedup_threshold", 0.0))
+        # One embed, spent twice. The dedup search and the write need the
+        # same vector, and on a CPU embedder that vector *is* the cost of
+        # the turn (5 KB = 12.7 s, vs ~10 ms for all the surrounding DB
+        # work). Providers with no client-side embedder return None and
+        # both halves fall back to their original text paths, so this
+        # needs no capability flag anywhere.
+        try:
+            vec = provider.embed_for_store(summary)
+        except Exception as e:
+            log.debug("embed_for_store failed for %s: %s", provider.name, e)
+            vec = None
         if dedup_threshold > 0.0 and len(summary) >= 100:
             try:
                 from claude_hooks.dedup import should_store as dedup_ok
-                if not dedup_ok(summary, provider, threshold=dedup_threshold):
+                if not dedup_ok(summary, provider,
+                                threshold=dedup_threshold, vec=vec):
                     log.info(
                         "skipping store to %s: near-duplicate detected",
                         provider.name,
@@ -226,7 +245,14 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
                     return ("skipped", provider.name)
             except Exception as e:
                 log.debug("dedup check failed, storing anyway: %s", e)
-        provider.store(summary, metadata=metadata)
+        # Only pass ``vec`` when we actually have one. A provider that
+        # never returns a vector also never sees the keyword, so older
+        # or third-party ``store(content, metadata)`` implementations
+        # keep working untouched.
+        if vec is None:
+            provider.store(summary, metadata=metadata)
+        else:
+            provider.store(summary, metadata=metadata, vec=vec)
         log.debug("provider %s stored turn summary", provider.name)
         return ("stored", provider.name)
 
@@ -238,9 +264,28 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
         log.warning("provider %s store failed: %s", provider.name, exc)
 
     from claude_hooks._parallel import parallel_map
-    results = parallel_map(
-        _dedup_and_store, auto_providers, on_error=_on_store_error,
-    )
+    from claude_hooks.store_lock import store_gate
+
+    # Same collision guard the detached path uses: dedup-recall + store
+    # must be atomic against other stores or two concurrent writers each
+    # dedup before either commits and both store the same summary. Two
+    # *sessions* can collide here even with detach off, so the inline
+    # path needs it too.
+    #
+    # Short timeout, unlike the detached path's 300 s: this runs under
+    # the Stop hook's own budget, so waiting long enough to be killed
+    # would trade a duplicate for a dropped memory — the exact
+    # regression this subsystem exists to prevent. Degrade to ungated
+    # quickly instead.
+    with store_gate(timeout=_INLINE_STORE_GATE_TIMEOUT_S) as held:
+        if not held:
+            log.debug(
+                "inline store proceeding without the store gate "
+                "(another store is in flight); a duplicate is possible",
+            )
+        results = parallel_map(
+            _dedup_and_store, auto_providers, on_error=_on_store_error,
+        )
     for r in results:
         if r is None:
             continue

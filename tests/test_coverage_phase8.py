@@ -1362,7 +1362,9 @@ class TestStopHandlerOpenwolfAndDedup:
         )
         stop.handle(
             event={"transcript_path": path, "cwd": "/p", "session_id": "s"},
-            config=base_config(),
+            # Inline store: detach_store defaults to True since
+            # 2026-07-25 and a detached store is unobservable here.
+            config=base_config(hooks={"stop": {"detach_store": False}}),
             providers=[p],
         )
         assert len(p.stored) == 1
@@ -1407,7 +1409,11 @@ class TestStopHandlerOpenwolfAndDedup:
         )
         r = stop.handle(
             event={"transcript_path": path, "cwd": "/p", "session_id": "s"},
-            config=base_config(),
+            # Store failures are only surfaced in the systemMessage on
+            # the INLINE path -- a detached store has already returned
+            # by the time the child fails, so it can only log. Pin the
+            # flag: detach_store defaults to True since 2026-07-25.
+            config=base_config(hooks={"stop": {"detach_store": False}}),
             providers=[p],
         )
         assert r is not None

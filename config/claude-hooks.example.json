@@ -88,12 +88,19 @@
         "",
         "additional_tables hybrid-recalls across the kg_observations",
         "(formerly Memory-KG) table at the same model. Suffixes must",
-        "match — table=memories_qwen3 ↔ additional_tables[0]=kg_observations_qwen3."
+        "match — table=memories_qwen3 ↔ additional_tables[0]=kg_observations_qwen3.",
+        "",
+        "ef_search sets hnsw.ef_search per connection (pgvector default",
+        "40, ours 100). Higher = better recall, slightly slower. Do NOT",
+        "raise it far without measuring: past ~200 the planner stops",
+        "using the HNSW index altogether and seq-scans. 0 keeps the",
+        "server default."
       ],
       "enabled": false,
       "dsn": "postgresql://claude:CHANGE_ME@127.0.0.1:5432/memory",
       "table": "memories_qwen3",
       "additional_tables": ["kg_observations_qwen3"],
+      "ef_search": 100,
       "_embedder_examples": [
         "Three valid shapes — pick one and assign to embedder / embedder_options:",
         "  1) Ollama-only (legacy, pre-v1.4):",
@@ -129,11 +136,11 @@
         "model": "qwen3-embedding:0.6b",
         "num_ctx": 16384,
         "max_chars": 30000,
-        "timeout": 30.0
+        "timeout": 180.0
       },
       "recall_k": 5,
       "store_mode": "auto",
-      "timeout": 10.0
+      "timeout": 30.0
     },
     "sqlite_vec": {
       "enabled": false,
@@ -146,7 +153,7 @@
       },
       "recall_k": 5,
       "store_mode": "auto",
-      "timeout": 10.0
+      "timeout": 30.0
     }
   },
   "embedding": {
@@ -171,7 +178,8 @@
     "ctx_size": 16384,
     "pooling": "last",
     "mode": "auto",
-    "idle_timeout_seconds": 300
+    "idle_timeout_seconds": 3600,
+    "nice": -5
   },
   "hooks": {
     "user_prompt_submit": {
@@ -219,7 +227,24 @@
       "classify_observations": true,
       "extract_instincts": false,
       "instincts_dir": "~/.claude/instincts",
-      "summary_format": "markdown"
+      "summary_format": "markdown",
+      "detach_store": true,
+      "_embedder_gate_comment": [
+        "Layer 2 of the store gate. store_lock serialises stores within",
+        "ONE host; this waits for a SHARED embedder to go idle before a",
+        "background store adds load, so several machines pointed at one",
+        "llamafile don't pile on. Keyed on the embedder (not the memory",
+        "backend) so it works for pgvector / sqlite_vec / qdrant alike.",
+        "Advisory backpressure, NOT mutual exclusion. Off by default -",
+        "only useful when hosts share an embedder. Auto-disables against",
+        "endpoints without /slots (Ollama, OpenAI-compatible)."
+      ],
+      "embedder_gate": {
+        "enabled": false,
+        "max_wait_s": 60.0,
+        "probe_timeout_s": 1.0,
+        "poll_interval_s": 2.0
+      }
     },
     "stop_guard": {
       "enabled": false,

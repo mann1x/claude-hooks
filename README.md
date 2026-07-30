@@ -35,9 +35,10 @@ forgetting. Beyond the core:
     [`docs/consultants-roles.md`](docs/consultants-roles.md) for the
     role-by-role reference (all 6 active roles, including the
     opt-in `tool_executor` + `coder`), and
-    [`docs/benchmarks/EVALUATION.md`](docs/benchmarks/EVALUATION.md)
-    + [`docs/benchmarks/`](docs/benchmarks/) for the cloud-model
-    evaluation suite.
+    the [benchmark index](docs/benchmarks/index.md) for the cloud-model
+    evaluation suite (council-role sweeps, coder, per-language,
+    tool-executor, stall, and caliber-eval — each with its grading
+    protocol).
 - **v1.2** — caliber-grounding-proxy cloud-resilience port +
   in-repo caliber-eval cohort at
   [`docs/caliber-eval-results/`](docs/caliber-eval-results/). Verdict:
@@ -696,7 +697,7 @@ Full schema with all options: [`config/claude-hooks.example.json`](config/claude
 | Auto-consolidation | `consolidate.trigger` | `"manual"` | `"session_start"` runs `consolidate()` automatically every `min_sessions_between_runs` (default 10) sessions. CLI invocation always works regardless. |
 | PreToolUse memory warn | `hooks.pre_tool_use.warn_on_tools` / `warn_on_patterns` | `["Bash","Edit","Write"]` / `["rm ","DROP TABLE","git reset --hard"]` | Match a tool + a substring in its args; recall against that command and inject as advisory `additionalContext`. Never blocks. |
 | PreToolUse file-read gate | `hooks.pre_tool_use.file_read_gate` / `file_read_gate_tools` | `false` / `["Read","Edit","MultiEdit"]` | Port 5 from thedotmack/claude-mem. When `Read`/`Edit`/`MultiEdit` touches a path with prior memories, inject those memories regardless of `warn_on_patterns`. |
-| Detached store | `hooks.stop.detach_store` | `false` | Fork the dedup-and-store fan-out into a detached subprocess so Stop returns immediately. ~200–500 ms saved per noteworthy turn. See [`docs/daemon.md`](docs/daemon.md#latency-tiers-and-detach_store). |
+| Detached store | `hooks.stop.detach_store` | `true` | Fork the dedup-and-store fan-out into a detached subprocess so Stop returns immediately. ~200–500 ms saved per noteworthy turn, and — the reason it is on by default since 2026-07-25 — it takes the embed off the Stop hook's critical path, so a multi-KB memory can no longer be dropped by the hook timeout. Trade-off: store failures are logged, not surfaced in the systemMessage. See [`docs/daemon.md`](docs/daemon.md#latency-tiers-and-detach_store). |
 | Daemon (long-lived hook executor) | `hooks.daemon.enabled` (auto via installer) | platform-dependent | Single Python process owns providers + config across hook invocations. Each hook answers in milliseconds instead of 100–300 ms. See [`docs/daemon.md`](docs/daemon.md). |
 
 ### HyDE model

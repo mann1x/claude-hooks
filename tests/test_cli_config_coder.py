@@ -134,7 +134,7 @@ class TestHandlers(unittest.TestCase):
         )
         self.assertEqual(
             body["coder"]["routes_by_language"]["csharp"]["primary"],
-            "deepseek-v4-pro:cloud",
+            "kimi-k2.6:cloud",
         )
 
     def test_set_invokes_set_coder_route(self):

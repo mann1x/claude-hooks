@@ -23,16 +23,29 @@ def should_store(
     *,
     threshold: float = 0.85,
     k: int = 3,
+    vec: Optional[list] = None,
 ) -> bool:
     """
     Return True if ``content`` is sufficiently novel to store.
     Returns True on any error (fail-open: better to store a dup than lose data).
+
+    ``vec`` is an optional precomputed embedding of the *full* ``content``
+    (see ``Provider.embed_for_store``). When supplied and the provider
+    supports vector search, the search runs on it directly — saving an
+    embed, and comparing against the whole text rather than the first
+    500 characters. When it is absent or unsupported, the original
+    truncated-text path runs unchanged, so callers need no capability
+    check of their own.
     """
     if not content.strip():
         return False
 
     try:
-        existing = provider.recall(content[:500], k=k)
+        existing = None
+        if vec is not None:
+            existing = provider.recall_vec(vec, k=k)
+        if existing is None:
+            existing = provider.recall(content[:500], k=k)
     except Exception as e:
         log.debug("dedup recall failed for %s: %s", provider.name, e)
         return True

@@ -105,8 +105,45 @@ class Provider(ABC):
         """Return up to ``k`` memories relevant to ``query``."""
 
     @abstractmethod
-    def store(self, content: str, metadata: Optional[dict] = None) -> None:
-        """Persist a new memory. Idempotency is the backend's responsibility."""
+    def store(self, content: str, metadata: Optional[dict] = None,
+              vec: Optional[list[float]] = None) -> None:
+        """Persist a new memory. Idempotency is the backend's responsibility.
+
+        ``vec`` is an optional precomputed embedding of ``content``,
+        obtained from :meth:`embed_for_store`. Providers that embed
+        server-side accept it and ignore it.
+        """
+
+    # ------------------------------------------------------------------ #
+    # Single-embed store path (optional)
+    # ------------------------------------------------------------------ #
+    # A dedup-then-store cycle embeds twice by default: once to find
+    # near-duplicates, once to write. On a CPU embedder the content embed
+    # dominates the entire turn (5 KB = 12.7 s, measured on solidpc
+    # 2026-07-25, against ~10 ms for all the surrounding DB work), so a
+    # provider holding a *client-side* embedder can compute the vector
+    # once and spend it twice.
+    #
+    # Negotiation is zero-config: the caller asks for a vector and, if it
+    # gets None, takes the plain text path exactly as before. Providers
+    # that embed server-side (qdrant, memory_kg) inherit these defaults
+    # and are unaffected.
+
+    def embed_for_store(self, content: str) -> Optional[list[float]]:
+        """Embed ``content`` once, for reuse across dedup and store.
+
+        Returns None when this provider has no client-side embedder.
+        That is a normal answer, not an error — the caller falls back.
+        """
+        return None
+
+    def recall_vec(self, vec: list[float], k: int = 5) -> Optional[list[Memory]]:
+        """Recall by a precomputed embedding, skipping the query embed.
+
+        Returns None when unsupported, so callers can fall back to
+        :meth:`recall`.
+        """
+        return None
 
     # ------------------------------------------------------------------ #
     # Batch API (optional, Tier 2.6)

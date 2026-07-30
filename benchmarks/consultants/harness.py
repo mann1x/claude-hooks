@@ -38,6 +38,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import subprocess
 import sys
@@ -1724,6 +1725,241 @@ def parse_judge_response(text: str) -> tuple[Optional[float], str]:
 
 
 # ============================================================== #
+# Comparative ladder (rejudge.py --ladder)
+#
+# Instead of N isolated 1-5 scores, show ONE judge all candidate
+# solutions for a single question at once and ask it to rank them
+# best -> worst with ties. This removes the cross-trial scale drift
+# of absolute scoring (judge "4" on Monday != judge "4" on Tuesday)
+# and is the comparative signal the user asked for ("a ladder, best
+# to worst, ties").
+#
+# Model identities are anonymized to letters (A, B, C, ...) and the
+# label assignment is SHUFFLED per question (seeded by question_id,
+# so it is reproducible) to kill model-name bias in the judge.
+# ============================================================== #
+
+# Letters used to anonymize solutions in the ladder prompt. 26 is far
+# more than any realistic cohort (we run 7); guard in the builder.
+_LADDER_LABELS = [chr(ord("A") + i) for i in range(26)]
+
+_LADDER_RANKING_RE = re.compile(
+    r"^\s*RANKING\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE,
+)
+
+
+@dataclass
+class LadderRanking:
+    """Parsed result of one comparative-ladder judge call.
+
+    ``order`` — list of tie-groups, best first, e.g.
+        ``[["C"], ["A", "D"], ["B"]]`` for ``C>A=D>B``.
+    ``ranks`` — label -> fractional (average) rank. Ties share the
+        average of the positions they occupy, so the rank sum is
+        invariant (A>B=C>D over 4 labels => A=1, B=2.5, C=2.5, D=4).
+        Fractional ranks make mean-rank aggregation across questions
+        clean regardless of how many ties a question has.
+    ``rationale`` — the judge's one-line justification (may be "").
+    ``missing`` — labels the caller passed that the judge omitted.
+    ``unknown`` — labels in the judge reply that the caller never
+        assigned (hallucinated / typo'd letters).
+    ``duplicated`` — labels the judge listed more than once.
+    ``raw`` — the raw RANKING expression, for forensic logging.
+    """
+    order: list = field(default_factory=list)
+    ranks: dict = field(default_factory=dict)
+    rationale: str = ""
+    missing: list = field(default_factory=list)
+    unknown: list = field(default_factory=list)
+    duplicated: list = field(default_factory=list)
+    raw: str = ""
+
+    @property
+    def valid(self) -> bool:
+        """True when the parse covers exactly the expected labels —
+        no missing, no unknown, no duplicates."""
+        return (
+            bool(self.order)
+            and not self.missing
+            and not self.unknown
+            and not self.duplicated
+        )
+
+
+def build_ladder_system(language: str = "Python") -> str:
+    """System prompt for the comparative-ladder judge. Mirrors the
+    absolute-judge persona/rubric but asks for a single total order
+    with ties instead of a per-solution score."""
+    return (
+        f"You are a senior {language} code reviewer. You will be shown "
+        "ONE coding task and SEVERAL candidate solutions, each labeled "
+        "with a letter (A, B, C, ...). Rank ALL solutions from best to "
+        "worst.\n\n"
+        "Judge in this priority order:\n"
+        "1. Correctness — does it solve the task and handle edge cases?\n"
+        f"2. Robustness — does it fail on plausible inputs the examples "
+        "don't show?\n"
+        f"3. Idiomatic {language} quality — clarity, minimalism, structure.\n\n"
+        "Ties are allowed (and expected) when two solutions are genuinely "
+        "equivalent in quality. Use them rather than inventing a "
+        "distinction.\n\n"
+        "Output EXACTLY two lines:\n"
+        "Line 1: ``RANKING: <expression>`` where you separate strictly "
+        "better with ``>`` and ties with ``=``.\n"
+        "        Example: ``RANKING: C>A=D>B`` means C is best; A and D "
+        "tie for second; B is worst.\n"
+        "Line 2: One short sentence (max 30 words) justifying the top "
+        "and bottom picks.\n\n"
+        "You MUST include EVERY label EXACTLY ONCE. Do not add preamble, "
+        "headings, or markdown."
+    )
+
+
+def build_ladder_messages(
+    task: str,
+    labeled_solutions: list,
+    language: str = "Python",
+    fence: str = "python",
+) -> list:
+    """Construct the ladder conversation.
+
+    ``labeled_solutions`` — ordered list of ``(label, code)`` tuples.
+    The caller is responsible for the (shuffled) label assignment;
+    :func:`assign_ladder_labels` does it deterministically per
+    question. We render them in the order given.
+    """
+    parts = [f"TASK GIVEN TO THE ENGINEERS:\n{task.strip()}\n"]
+    for label, code in labeled_solutions:
+        parts.append(
+            f"\nSOLUTION {label}:\n```{fence}\n{code}\n```\n"
+        )
+    parts.append(
+        "\nRank ALL solutions per the rubric. Two lines only — the "
+        "RANKING line then one sentence."
+    )
+    return [
+        {"role": "system", "content": build_ladder_system(language)},
+        {"role": "user", "content": "".join(parts)},
+    ]
+
+
+def assign_ladder_labels(question_id: str, models: list) -> list:
+    """Deterministically map models -> ladder labels for a question.
+
+    Returns an ordered list of ``(label, model)`` with the models
+    SHUFFLED by a PRNG seeded on ``question_id`` so the label order is
+    reproducible but uncorrelated with model identity (kills
+    name-order bias in the judge). ``models`` is de-duplicated while
+    preserving first-seen order before the shuffle for stability.
+    """
+    seen = []
+    for m in models:
+        if m not in seen:
+            seen.append(m)
+    if len(seen) > len(_LADDER_LABELS):
+        raise ValueError(
+            f"ladder supports up to {len(_LADDER_LABELS)} solutions, "
+            f"got {len(seen)}"
+        )
+    shuffled = list(seen)
+    random.Random(question_id).shuffle(shuffled)
+    return [(_LADDER_LABELS[i], m) for i, m in enumerate(shuffled)]
+
+
+def parse_ladder_response(text: str, labels: Iterable[str]) -> LadderRanking:
+    """Parse a ladder judge reply into a :class:`LadderRanking`.
+
+    ``labels`` — the exact set of labels the judge was asked to rank
+    (e.g. ``["A", "B", "C"]``). Used to compute ``missing`` /
+    ``unknown``. Parsing is tolerant: extra prose, a missing RANKING
+    keyword (we fall back to the first line containing ``>`` or ``=``
+    among the labels), and stray markdown are handled.
+    """
+    expected = [str(x).strip().upper() for x in labels]
+    expected_set = set(expected)
+    result = LadderRanking()
+    if not text or not isinstance(text, str):
+        result.missing = list(expected)
+        return result
+
+    body = text.strip()
+    m = _LADDER_RANKING_RE.search(body)
+    expr = ""
+    if m is not None:
+        expr = m.group(1).strip()
+        after = body[m.end():].strip()
+        result.rationale = after.split("\n", 1)[0].strip()[:200] if after else ""
+    else:
+        # Fallback: find the first line that looks like a ranking
+        # expression (contains '>' or '=' and at least one expected
+        # label). Rationale = the following non-empty line if any.
+        lines = [ln.strip() for ln in body.splitlines()]
+        for i, ln in enumerate(lines):
+            probe = ln.upper()
+            if (">" in ln or "=" in ln) and any(
+                lab in probe for lab in expected_set
+            ):
+                expr = ln
+                rest = [x for x in lines[i + 1:] if x]
+                result.rationale = rest[0][:200] if rest else ""
+                break
+
+    # Strip markdown emphasis / backticks the model may wrap around it.
+    expr = expr.strip().strip("`").replace("*", "").strip()
+    result.raw = expr
+    if not expr:
+        result.missing = list(expected)
+        return result
+
+    # Parse "A>B=C>D" into tie-groups. Tolerate spaces and a trailing
+    # rationale glued on after a stray separator.
+    order = []
+    seen_labels = []
+    dup = []
+    for group_str in expr.split(">"):
+        group = []
+        for raw_lab in group_str.split("="):
+            # A token is a label ONLY if, after dropping any
+            # parenthetical aside ("A (best)") and surrounding
+            # punctuation/quotes, it reduces to a SINGLE letter. This
+            # accepts decorated labels but rejects multi-word prose
+            # ("I think B" -> not a label), so a free-text reply
+            # degrades to an empty/invalid parse instead of grabbing
+            # the first letter of a sentence.
+            core = re.sub(r"\([^)]*\)", "", raw_lab)
+            core = core.strip().strip("`*\"'.,;:").strip()
+            if not re.fullmatch(r"[A-Za-z]", core):
+                continue
+            lab = core.upper()
+            if lab in seen_labels:
+                if lab not in dup:
+                    dup.append(lab)
+                continue
+            seen_labels.append(lab)
+            group.append(lab)
+        if group:
+            order.append(group)
+
+    result.order = order
+    result.duplicated = dup
+    result.unknown = [lab for lab in seen_labels if lab not in expected_set]
+    result.missing = [lab for lab in expected if lab not in seen_labels]
+
+    # Fractional (average) ranks. Position counter advances by group
+    # size; each member of a tie-group gets the average position.
+    ranks = {}
+    pos = 1
+    for group in order:
+        size = len(group)
+        avg = (pos + (pos + size - 1)) / 2.0
+        for lab in group:
+            ranks[lab] = avg
+        pos += size
+    result.ranks = ranks
+    return result
+
+
+# ============================================================== #
 # JSON writer — append-only so Ctrl-C preserves prior trials
 # ============================================================== #
 
@@ -1825,14 +2061,18 @@ __all__ = [
     "BenchQuestion",
     "CoderTrial",
     "JUDGE_SYSTEM",
+    "LadderRanking",
     "OracleResult",
     "StallTrial",
     "SuiteManifest",
     "TIERS",
     "ToolExecTrial",
     "append_trial",
+    "assign_ladder_labels",
     "build_judge_messages",
     "build_judge_system",
+    "build_ladder_messages",
+    "build_ladder_system",
     "build_post_test_judge_messages",
     "build_post_test_judge_system",
     "build_meta_judge_messages",
@@ -1851,6 +2091,7 @@ __all__ = [
     "make_dry_run_loop_runner",
     "measure_complexity",
     "parse_judge_response",
+    "parse_ladder_response",
     "parse_meta_judge_response",
     "run_pytest_against_sandbox",
 ]

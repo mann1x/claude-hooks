@@ -1,5 +1,10 @@
 # caliber-eval results — published
 
+> ↟ Part of the [benchmark suite](../benchmarks/index.md). This family scores
+> the agent-config artefacts a model produces for `caliber init`; the other
+> families (council-role sweeps, coder, per-language, tool-executor, stall) are
+> indexed there.
+
 Versioned snapshots of caliber-eval bench reports. The full workbench
 (rsynced project workspaces, run logs, fake-HOME dirs, scratch state)
 lives outside the repo at `/srv/dev-disk-by-label-opt/dev/caliber-eval/`;

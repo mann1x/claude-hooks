@@ -53,7 +53,7 @@ def _ok_result(status: int = 200) -> UpstreamResult:
         status=status, reason="OK",
         headers={"content-type": "application/json"},
         first_chunk=b'{"ok":true}', body_iter=iter([]),
-        stats={"bytes_read": 11, "http_version": "HTTP/2"}, sse_tail=None,
+        stats={"bytes_read": 11, "http_version": "HTTP/1.1"}, sse_tail=None,
     )
 
 
@@ -353,9 +353,11 @@ class TestForwardRetryIntegration:
         assert 10.0 in captured_sleeps         # clamped to cap, not 999
 
     def test_breaker_pre_attempt_delay(self, monkeypatch, captured_sleeps):
-        """When the breaker is already open, forward() sleeps the
-        coordinated delay BEFORE its first attempt."""
+        """When the breaker is enabled AND already open, forward() sleeps
+        the coordinated delay BEFORE its first attempt. The breaker is
+        OFF by default now, so it must be explicitly enabled (h2 rollback)."""
         import time as _t
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_BREAKER_ENABLED", "1")
         monkeypatch.setenv("CLAUDE_HOOKS_PROXY_BREAKER_THRESHOLD", "1")
         monkeypatch.setenv("CLAUDE_HOOKS_PROXY_BREAKER_OPEN_S", "100")
         monkeypatch.setenv("CLAUDE_HOOKS_PROXY_BREAKER_EXTRA_DELAY_S", "4")
@@ -385,8 +387,9 @@ class TestForwardRetryIntegration:
         otherwise it's indistinguishable from a never-retried 502 (the
         live 2026-06-02 gap)."""
         monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_JITTER", "0")
-        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_BASE_DELAY_S", "0")
-        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_MAX_ATTEMPTS", "3")
+        # Conn errors take the surgical CONN budget, not the 5xx one.
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_CONN_RETRY_BASE_DELAY_S", "0")
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_CONN_RETRY_MAX_ATTEMPTS", "3")
         rt.reset_state()
         _seq_attempt(monkeypatch, [
             httpx.RemoteProtocolError("Server disconnected") for _ in range(10)
@@ -404,3 +407,141 @@ class TestForwardRetryIntegration:
         assert set(snap) == {"upstream_flaps", "throttle"}
         assert "breaker_open_total" in snap["upstream_flaps"]
         assert "open" in snap["throttle"]
+
+    def test_conn_error_budget_caps_and_fast_backoff(self, monkeypatch,
+                                                      captured_sleeps):
+        """A persistent connection error stops at the SURGICAL conn budget
+        (3 attempts default, NOT the wide 15-attempt 5xx cap) with
+        sub-second backoff (0.25, 0.5 — caps, jitter off)."""
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_JITTER", "0")
+        rt.reset_state()
+        _seq_attempt(monkeypatch, [
+            httpx.ConnectError("connection refused") for _ in range(10)
+        ])
+        with pytest.raises(httpx.ConnectError):
+            _fwd()
+        # 3 attempts → 2 spaced retries; breaker off → no pre-attempt sleep.
+        assert captured_sleeps == [0.25, 0.5]
+
+    def test_conn_budget_independent_of_status_budget(self, monkeypatch,
+                                                      captured_sleeps):
+        """A conn drop AFTER a couple of 5xx retries gets its own conn
+        budget — the per-class counters keep the conn cap from inheriting
+        the status attempts (with a single shared counter this would 502
+        early instead of recovering)."""
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_JITTER", "0")
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_BASE_DELAY_S", "0")
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_CONN_RETRY_BASE_DELAY_S", "0")
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_CONN_RETRY_MAX_ATTEMPTS", "3")
+        rt.reset_state()
+        calls = _seq_attempt(monkeypatch, [
+            _RetryableStatus(529, "Overloaded", b'{}', {}),
+            _RetryableStatus(529, "Overloaded", b'{}', {}),
+            httpx.RemoteProtocolError("drop"),
+            httpx.RemoteProtocolError("drop"),
+            200,
+        ])
+        result = _fwd()
+        assert result.status == 200
+        assert calls["n"] == 5
+
+    def test_breaker_off_by_default(self, monkeypatch, captured_sleeps):
+        """With the breaker OFF (new default), a conn-error burst never
+        opens it and forward() adds no coordinated pre-attempt delay even
+        with a hair-trigger threshold."""
+        import time as _t
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_BREAKER_THRESHOLD", "1")
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_BREAKER_EXTRA_DELAY_S", "9")
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_JITTER", "0")
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_CONN_RETRY_BASE_DELAY_S", "0")
+        rt.reset_state()
+        _seq_attempt(monkeypatch, [
+            httpx.ConnectError("x"), httpx.ConnectError("x"), 200,
+        ])
+        result = _fwd()
+        assert result.status == 200
+        assert rt.counters().snapshot()["breaker_open_total"] == 0
+        assert rt.pre_attempt_delay(_t.monotonic()) == 0.0
+        # no coordinated 9s floor leaked into the waits
+        assert all(s < 9 for s in captured_sleeps)
+
+
+class TestBreakerToggle:
+    """The breaker is off by default but must still work under the h2
+    rollback (``CLAUDE_HOOKS_PROXY_BREAKER_ENABLED=1``)."""
+
+    def test_breaker_enabled_parsing(self, monkeypatch):
+        monkeypatch.delenv("CLAUDE_HOOKS_PROXY_BREAKER_ENABLED", raising=False)
+        assert rt.breaker_enabled() is False
+        for v in ("1", "true", "yes", "on"):
+            monkeypatch.setenv("CLAUDE_HOOKS_PROXY_BREAKER_ENABLED", v)
+            assert rt.breaker_enabled() is True
+        for v in ("0", "false", "off", ""):
+            monkeypatch.setenv("CLAUDE_HOOKS_PROXY_BREAKER_ENABLED", v)
+            assert rt.breaker_enabled() is False
+
+    def test_breaker_on_still_opens(self, monkeypatch):
+        import time as _t
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_BREAKER_ENABLED", "1")
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_BREAKER_THRESHOLD", "1")
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_BREAKER_OPEN_S", "100")
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_BREAKER_EXTRA_DELAY_S", "3")
+        rt.reset_state()
+        now = _t.monotonic()
+        rt.record_overload(now, conn_error=True)
+        assert rt.counters().snapshot()["breaker_open_total"] == 1
+        assert rt.pre_attempt_delay(now) >= 3.0
+
+
+class TestTransportProtocol:
+    """The upstream transport defaults to HTTP/1.1 (mimicking Claude Code)
+    with a large keepalive pool; h2 is an env-selectable rollback."""
+
+    def _capture_transport_kwargs(self, monkeypatch):
+        captured: dict = {}
+        real = httpx.HTTPTransport
+
+        def fake(*a, **kw):
+            captured.update(kw)
+            return real(*a, **kw)
+
+        monkeypatch.setattr(fwd.httpx, "HTTPTransport", fake)
+        return captured
+
+    def test_http_version_default_is_1(self, monkeypatch):
+        monkeypatch.delenv("CLAUDE_HOOKS_PROXY_UPSTREAM_HTTP", raising=False)
+        assert fwd._upstream_http_version() == "1"
+
+    def test_default_transport_is_h1_pool(self, monkeypatch):
+        captured = self._capture_transport_kwargs(monkeypatch)
+        c = fwd._build_client(30.0)
+        try:
+            assert captured["http1"] is True
+            assert captured["http2"] is False
+            limits = captured["limits"]
+            assert limits.max_keepalive_connections == 50
+            assert limits.max_connections is None      # 0 → unlimited
+        finally:
+            c.close()
+
+    def test_rollback_enables_h2(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_UPSTREAM_HTTP", "2")
+        captured = self._capture_transport_kwargs(monkeypatch)
+        c = fwd._build_client(30.0)
+        try:
+            assert captured["http2"] is True
+            assert captured["http1"] is True           # h1 stays as ALPN fallback
+        finally:
+            c.close()
+
+    def test_pool_size_env_override(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_MAX_KEEPALIVE", "128")
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_MAX_CONNECTIONS", "200")
+        captured = self._capture_transport_kwargs(monkeypatch)
+        c = fwd._build_client(30.0)
+        try:
+            limits = captured["limits"]
+            assert limits.max_keepalive_connections == 128
+            assert limits.max_connections == 200
+        finally:
+            c.close()

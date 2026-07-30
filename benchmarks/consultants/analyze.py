@@ -332,6 +332,197 @@ def render_report(trials: list[CoderTrial],
     return "\n".join(lines)
 
 
+def _language_of(question_id: str) -> str:
+    """Language is the first dash-delimited token of the id.
+
+    All six suite languages are single tokens (``c``, ``cpp``,
+    ``csharp``, ``go``, ``python``, ``rust``), so ``<lang>-<tier>-NN``
+    and the easy suite's ``<lang>-easy-NN`` both yield the language at
+    ``[0]``. Returns ``"?"`` for an empty id.
+    """
+    return question_id.split("-", 1)[0] if question_id else "?"
+
+
+def _discriminating_qids(trials: list[CoderTrial]) -> set[str]:
+    """Question ids where at least one model passes the oracle.
+
+    Per the classification rule, questions that defeat **every** model
+    are excluded from the per-language scoring used to pick a winner —
+    they carry no signal about which model is better.
+    """
+    passed: dict[str, bool] = {}
+    for t in trials:
+        passed[t.question_id] = passed.get(t.question_id, False) or t.passes_tests
+    return {qid for qid, ok in passed.items() if ok}
+
+
+def _pick_language_winner(
+    norm_stats: dict[str, ModelStats],
+    full_stats: dict[str, ModelStats],
+) -> tuple[Optional[str], str]:
+    """Best model for a language by normalized pass-rate.
+
+    Selection axis is the discriminating-only (normalized) pass-rate so
+    all-fail questions don't dilute it; ties break on avg_quality
+    (higher) then median_tokens (lower). Falls back to full stats when
+    a language has no discriminating question (winner is then
+    *inconclusive* — quality-only).
+    """
+    pool = norm_stats or full_stats
+    if not pool:
+        return None, "no trials"
+    ranked = sorted(
+        pool.values(),
+        key=lambda s: (
+            -s.pass_rate,
+            -(s.avg_quality if s.avg_quality is not None else -1.0),
+            s.median_tokens,
+        ),
+    )
+    return ranked[0].model, ("normalized" if norm_stats else "quality-only")
+
+
+def render_per_language_report(
+    trials: list[CoderTrial],
+    metadata: Optional[dict] = None,
+) -> str:
+    """Per-language scoreboard for a multi-language coder suite.
+
+    Surfaces, per language: how many of the language's questions
+    *discriminate* (>=1 model passes), the winner picked on the
+    normalized (discriminating-only) pass-rate, and both the full and
+    normalized pass-rates so the reader sees the gap the very-hard tail
+    would otherwise hide. Also emits the full model x language pass-rate
+    matrix and an overall per-model summary.
+    """
+    md = metadata or {}
+    suite = md.get("suite") or "coder"
+    suite_version = md.get("suite_version") or "(unknown)"
+    rubric = md.get("rubric") or {
+        "pass_rate_floor": 0.70, "quality_score_floor": 3.5,
+    }
+    pass_floor = float(rubric.get("pass_rate_floor", 0.70))
+    quality_floor = float(rubric.get("quality_score_floor", 3.5))
+
+    lines: list[str] = []
+    lines.append(f"# Per-language scoreboard — {suite} suite v{suite_version}")
+    lines.append("")
+    lines.append(
+        f"Models: {', '.join(f'`{m}`' for m in sorted({t.model for t in trials}))}. "
+        f"Judge: `{md.get('judge_model') or '(none)'}`. "
+        f"Run: `{md.get('run_started_at', '?')}`."
+    )
+    lines.append("")
+    lines.append(
+        "**Classification axis = normalized pass-rate.** A question that "
+        "defeats *every* model carries no signal about which model is "
+        "better, so it is excluded from the per-language scoring (the "
+        "`#disc` column counts the questions that survive). Winners "
+        "break ties on `avg_quality` then `median_tokens`. A language "
+        "with **0** discriminating questions is *inconclusive* — its "
+        "winner is quality-judge-only and flagged as such."
+    )
+    lines.append("")
+
+    disc = _discriminating_qids(trials)
+    langs = sorted({_language_of(t.question_id) for t in trials})
+    models = sorted({t.model for t in trials})
+
+    # ---- Overall per-model summary ----
+    overall = aggregate_by_model(trials)
+    lines.append("## Overall (all languages)")
+    lines.append("")
+    lines.append(
+        f"Rubric: `pass_rate ≥ {pass_floor:.0%}` **AND** "
+        f"`avg_quality ≥ {quality_floor:.1f}`."
+    )
+    lines.append("")
+    lines.append("| Model | Pass rate | Avg quality | Median tokens | Qualifies? |")
+    lines.append("|---|---|---|---|---|")
+    for m in sorted(overall, key=lambda x: (-overall[x].pass_rate, x)):
+        s = overall[m]
+        q = f"{s.avg_quality:.2f}" if s.avg_quality is not None else "_n/a_"
+        ok = "✅" if s.qualifies(
+            pass_floor=pass_floor, quality_floor=quality_floor) else "❌"
+        lines.append(
+            f"| `{m}` | {s.pass_rate:.0%} ({s.n_passed}/{s.n_trials}) | "
+            f"{q} | {s.median_tokens} | {ok} |"
+        )
+    lines.append("")
+
+    # ---- Per-language winners ----
+    lines.append("## Per-language winners")
+    lines.append("")
+    lines.append(
+        "| Language | #disc / #q | Winner | Norm pass | Full pass | "
+        "Avg quality | Meets bar? |"
+    )
+    lines.append("|---|---|---|---|---|---|---|")
+    winners: dict[str, dict] = {}
+    for lang in langs:
+        lts = [t for t in trials if _language_of(t.question_id) == lang]
+        all_q = {t.question_id for t in lts}
+        disc_q = all_q & disc
+        full_stats = aggregate_by_model(lts)
+        norm_ts = [t for t in lts if t.question_id in disc]
+        norm_stats = aggregate_by_model(norm_ts) if norm_ts else {}
+        win, basis = _pick_language_winner(norm_stats, full_stats)
+        winners[lang] = {
+            "winner": win, "basis": basis,
+            "n_disc": len(disc_q), "n_q": len(all_q),
+        }
+        if win is None:
+            lines.append(f"| `{lang}` | 0 / {len(all_q)} | _none_ | — | — | — | — |")
+            continue
+        ws_full = full_stats.get(win)
+        ws_norm = norm_stats.get(win)
+        norm_pass = (f"{ws_norm.pass_rate:.0%}" if ws_norm else "—")
+        full_pass = (f"{ws_full.pass_rate:.0%}" if ws_full else "—")
+        aq = ws_full.avg_quality if ws_full else None
+        aq_cell = f"{aq:.2f}" if aq is not None else "_n/a_"
+        meets = "✅" if (ws_norm and ws_norm.pass_rate >= pass_floor
+                        and aq is not None and aq >= quality_floor) else "❌"
+        flag = "" if disc_q else " ⚠ inconclusive"
+        lines.append(
+            f"| `{lang}` | {len(disc_q)} / {len(all_q)} | "
+            f"`{win}`{flag} | {norm_pass} | {full_pass} | {aq_cell} | {meets} |"
+        )
+    lines.append("")
+
+    # ---- model × language full pass-rate matrix ----
+    lines.append("## Pass-rate matrix (full, all questions)")
+    lines.append("")
+    lines.append("| Model | " + " | ".join(langs) + " | overall |")
+    lines.append("|---|" + "|".join("---" for _ in langs) + "|---|")
+    for m in models:
+        cells = []
+        for lang in langs:
+            lts = [t for t in trials
+                   if t.model == m and _language_of(t.question_id) == lang]
+            if lts:
+                pr = sum(1 for t in lts if t.passes_tests) / len(lts)
+                cells.append(f"{pr:.0%}")
+            else:
+                cells.append("—")
+        ov = overall.get(m)
+        cells.append(f"{ov.pass_rate:.0%}" if ov else "—")
+        lines.append(f"| `{m}` | " + " | ".join(cells) + " |")
+    lines.append("")
+
+    # ---- adopted-route comparison hook ----
+    lines.append("## Adopted routes vs. data")
+    lines.append("")
+    lines.append(
+        "Compare the winners above against "
+        "`consultants/engine/coder_defaults.py`. A per-language route "
+        "that names a model the data does **not** crown for that "
+        "language is a divergence to reconcile (or to justify on "
+        "grounds the suite doesn't measure, e.g. latency/cost)."
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(
         prog="analyze",
@@ -344,6 +535,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument(
         "--output", type=Path, default=None,
         help="Where to write report.md. Default: next to trials.jsonl",
+    )
+    p.add_argument(
+        "--by-language", action="store_true",
+        help="Render the per-language scoreboard (winners on normalized "
+             "pass-rate) instead of the standard per-model report. For "
+             "multi-language suites (coder_mlang, coder_easy).",
     )
     args = p.parse_args(argv)
     if not args.trials_path.is_file():
@@ -362,8 +559,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not trials:
         print(f"error: no trials in {args.trials_path}", file=sys.stderr)
         return 1
-    report = render_report(trials, metadata=metadata)
-    out_path = args.output or (args.trials_path.parent / "report.md")
+    if args.by_language:
+        report = render_per_language_report(trials, metadata=metadata)
+        default_out = args.trials_path.parent / "report-by-language.md"
+    else:
+        report = render_report(trials, metadata=metadata)
+        default_out = args.trials_path.parent / "report.md"
+    out_path = args.output or default_out
     out_path.write_text(report, encoding="utf-8")
     print(f"wrote {out_path}")
     return 0

@@ -24,15 +24,65 @@ Five implementations:
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
 from typing import Optional
 
+log = logging.getLogger("claude_hooks.embedders")
+
 
 class EmbedderError(RuntimeError):
     """Raised when embedding a text fails."""
+
+
+class ContextOverflowError(EmbedderError):
+    """The input tokenised to more than the server's context window.
+
+    Carries the server's own numbers so the caller can shrink by the
+    exact ratio instead of guessing. ``n_ctx`` may be 0 when the server
+    reported the overflow without a usable figure.
+    """
+
+    def __init__(self, message: str, *, n_prompt_tokens: int = 0, n_ctx: int = 0):
+        super().__init__(message)
+        self.n_prompt_tokens = n_prompt_tokens
+        self.n_ctx = n_ctx
+
+
+def _parse_context_overflow(code: int, body: str) -> Optional[tuple[int, int]]:
+    """Recognise llama.cpp's over-context 400 and pull its numbers out.
+
+    The server answers a too-long input with, verbatim:
+
+        {"error": {"code": 400, "type": "exceed_context_size_error",
+                   "message": "request (22275 tokens) exceeds the
+                   available context size (16384 tokens), ...",
+                   "n_prompt_tokens": 22275, "n_ctx": 16384}}
+
+    Returns ``(n_prompt_tokens, n_ctx)``, or None when this is some
+    other 400 that must not be retried.
+    """
+    if code != 400:
+        return None
+    try:
+        err = (json.loads(body) or {}).get("error") or {}
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(err, dict):
+        return None
+    is_overflow = (
+        err.get("type") == "exceed_context_size_error"
+        or "exceeds the available context size" in str(err.get("message", ""))
+    )
+    if not is_overflow:
+        return None
+    try:
+        return int(err.get("n_prompt_tokens") or 0), int(err.get("n_ctx") or 0)
+    except (TypeError, ValueError):
+        return 0, 0
 
 
 class Embedder(ABC):
@@ -255,9 +305,10 @@ class LlamafileEmbedder(Embedder):
     The llamafile is supervised by ``claude-hooks-daemon`` (see
     :mod:`claude_hooks.embedding_manager`): the daemon lazily spawns
     it on the first ``ensure_running()`` ping, idle-reaps it after
-    ``embedding.idle_timeout_seconds`` (default 300 = matches
-    Ollama's ``OLLAMA_KEEP_ALIVE=5m`` semantics), and re-spawns on
-    the next ping. The embedder optionally fires that ping itself
+    ``embedding.idle_timeout_seconds`` (default 3600; was 300 for
+    Ollama ``OLLAMA_KEEP_ALIVE=5m`` parity, raised because each reap
+    opens a respawn race that sessions report as a down embedder),
+    and re-spawns on the next ping. The embedder optionally fires that ping itself
     via ``daemon_ensure=True`` (the default) so the supervision is
     transparent to the caller — the embedder behaves like a normal
     HTTP client and the warm/cold lifecycle is handled out of band.
@@ -281,10 +332,56 @@ class LlamafileEmbedder(Embedder):
     # see OllamaEmbedder for the rationale on the constants.
     DEFAULT_MAX_CHARS: int = 16000
 
+    #: Attempts allowed for the shrink-and-retry loop in ``embed`` when
+    #: the input overflows the server's context window. Each attempt
+    #: costs a full round trip, but the ratio-based cut converges in one
+    #: for every ratio observed so far (base64 1.35 chars/token and
+    #: minified JSON 1.18 both fit on the second try from 30 000 chars).
+    #: The budget is for pathological content where a single scaled cut
+    #: undershoots, not for repeated blind halving.
+    CTX_RETRY_ATTEMPTS: int = 4
+
+    #: Margin applied on top of the server's own token ratio.
+    #: Tokenisation is not linear in characters, so cutting to exactly
+    #: ``n_ctx / n_prompt_tokens`` can land marginally over again if the
+    #: removed tail was sparser than average.
+    CTX_SHRINK_SAFETY: float = 0.92
+
+    #: Fallback cut when the server reports an overflow but no usable
+    #: token numbers. Deliberately aggressive — it only runs when the
+    #: precise path is unavailable.
+    CTX_BLIND_SHRINK: float = 0.6
+
+    #: Token ceiling for a retry, *independent* of the context window.
+    #:
+    #: Fitting ``n_ctx`` is necessary but not sufficient. Verified live
+    #: on solidpc 2026-07-25: a 30 000-char base64 payload was correctly
+    #: cut to 20 299 chars (~15 000 tokens, comfortably inside the
+    #: 16 384 window) — and then the retry itself ran past a 300 s
+    #: timeout, because CPU embedding measures ~32 tok/s at 2 k tokens
+    #: and degrades from there. Fitting the window but not the clock
+    #: just trades a fast 400 for a slow timeout: same lost memory, many
+    #: minutes later.
+    #:
+    #: Sized for the *slowest* host, not the reference one. Measured on
+    #: solidpc (Ryzen 5 5600G, AVX2) at loadavg 16, a 3072-token retry
+    #: took 126-141 s — inside the 180 s default timeout, but with
+    #: almost no margin. Windows hosts run llamafile roughly 2× slower
+    #: at byte-identical weights (an OS/build gap, not hardware), which
+    #: would put 3072 tokens over the timeout on pandorum. 1536 lands
+    #: near 60-70 s here and ~125-140 s there, so both stay inside the
+    #: budget.
+    #:
+    #: Raise it only alongside ``embedder_options.timeout``. This
+    #: truncation is a last resort for pathologically dense content —
+    #: normal memories tokenise at 3.0-3.4 chars/token and never reach
+    #: this path at all.
+    CTX_RETRY_TOKEN_BUDGET: int = 1536
+
     def __init__(
         self,
         url: str = "http://127.0.0.1:38092/embedding",
-        timeout: float = 30.0,
+        timeout: float = 180.0,
         max_chars: Optional[int] = None,
         daemon_ensure: bool = True,
     ):
@@ -337,11 +434,84 @@ class LlamafileEmbedder(Embedder):
     # ----------------------------------------------------------------
 
     def embed(self, text: str) -> list[float]:
+        """Embed ``text``, shrinking and retrying if it overflows ctx.
+
+        ``max_chars`` is a *character* cap standing in for a token
+        budget, and that substitution has a hidden assumption: with
+        ``max_chars=30000`` against a 16384-token window it needs at
+        least ~1.83 chars/token. Real memories measure 3.0-3.4 (code,
+        paths and hashes tokenise densely), so the cap normally holds
+        with room to spare — but base64 (1.35) and minified JSON (1.18)
+        blow straight through it, and a store that fails here is a
+        memory silently lost on the detached path.
+
+        Rather than lower ``max_chars`` for everyone to suit content
+        almost nobody stores, overflow is handled where it happens: the
+        server reports both ``n_prompt_tokens`` and ``n_ctx``, so the
+        text can be cut by that exact ratio and retried. Costs an extra
+        round trip, but only for input that would otherwise have failed
+        outright.
+        """
         if not text:
             raise EmbedderError("cannot embed empty string")
         if self.max_chars:
             text = text[: self.max_chars]
         self._ensure_running()
+
+        for attempt in range(self.CTX_RETRY_ATTEMPTS):
+            try:
+                return self._embed_once(text)
+            except ContextOverflowError as e:
+                shorter = self._shrink_for_ctx(text, e)
+                if shorter is None or attempt == self.CTX_RETRY_ATTEMPTS - 1:
+                    raise EmbedderError(
+                        f"llamafile input exceeds context after "
+                        f"{attempt + 1} attempt(s): {e}"
+                    ) from e
+                log.warning(
+                    "llamafile: %d tokens exceeds ctx %d — retrying at "
+                    "%d chars (was %d)",
+                    e.n_prompt_tokens, e.n_ctx, len(shorter), len(text),
+                )
+                text = shorter
+        raise EmbedderError("llamafile: context-overflow retry loop exhausted")
+
+    def _shrink_for_ctx(
+        self, text: str, err: ContextOverflowError,
+    ) -> Optional[str]:
+        """Cut ``text`` to fit ``err.n_ctx``, or None if it can't help.
+
+        The target must satisfy *two* constraints, not one:
+
+        1. Fit the context window (``n_ctx``, with a safety margin —
+           tokenisation is not linear in characters, so the removed tail
+           may have been denser or sparser than the average).
+        2. Fit the clock (``CTX_RETRY_TOKEN_BUDGET``). A payload can sit
+           inside the window and still take many minutes to embed on
+           CPU, in which case the retry only moves the failure from a
+           fast 400 to a slow timeout.
+
+        The server's numbers give the observed chars/token for *this*
+        text, which converts both budgets into characters directly.
+        Returning None (no progress possible) is what stops a pointless
+        second round trip on a degenerate response.
+        """
+        if err.n_prompt_tokens <= 0 or err.n_ctx <= 0:
+            # No usable numbers: fall back to a flat cut so a server
+            # that reports the overflow without figures still converges.
+            target = int(len(text) * self.CTX_BLIND_SHRINK)
+        else:
+            chars_per_token = len(text) / float(err.n_prompt_tokens)
+            budget_tokens = min(
+                err.n_ctx * self.CTX_SHRINK_SAFETY,
+                float(self.CTX_RETRY_TOKEN_BUDGET),
+            )
+            target = int(budget_tokens * chars_per_token)
+        if target <= 0 or target >= len(text):
+            return None
+        return text[:target]
+
+    def _embed_once(self, text: str) -> list[float]:
         payload = {"content": text}
         body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
@@ -354,10 +524,15 @@ class LlamafileEmbedder(Embedder):
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            raise EmbedderError(
-                f"llamafile HTTP {e.code}: "
-                f"{e.read()[:200].decode('utf-8', 'replace')}"
-            )
+            raw = e.read()[:400].decode("utf-8", "replace")
+            overflow = _parse_context_overflow(e.code, raw)
+            if overflow is not None:
+                n_tok, n_ctx = overflow
+                raise ContextOverflowError(
+                    f"llamafile HTTP {e.code}: {raw[:200]}",
+                    n_prompt_tokens=n_tok, n_ctx=n_ctx,
+                )
+            raise EmbedderError(f"llamafile HTTP {e.code}: {raw[:200]}")
         except (urllib.error.URLError, socket.timeout) as e:
             raise EmbedderError(f"llamafile unreachable at {self.url}: {e}")
         emb = self._extract_vector(data)

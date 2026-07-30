@@ -57,13 +57,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "embedder_options": {
                 "url": "http://localhost:11434/api/embeddings",
                 "model": "qwen3-embedding:0.6b",
-                "timeout": 30.0,
+                # Embedding latency is superlinear in payload size and
+                # max_chars is 30000: measured CPU-only on
+                # qwen3-embedding-0.6b, 5 KB ~9 s / 16 KB ~48 s /
+                # 30 KB ~135 s. A 30 s ceiling hard-fails large
+                # memories. Raised 30 -> 180 on 2026-07-25.
+                "timeout": 180.0,
                 "num_ctx": 16384,
                 "max_chars": 30000,
             },
             "recall_k": 5,
             "store_mode": "auto",
-            "timeout": 10.0,
+            # psycopg connect_timeout. 10 s is tight when the box is
+            # loaded enough to make the embedder slow in the first place.
+            "timeout": 30.0,
         },
         "sqlite_vec": {
             "enabled": False,
@@ -76,7 +83,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             },
             "recall_k": 5,
             "store_mode": "auto",
-            "timeout": 10.0,
+            "timeout": 30.0,
         },
     },
     "hooks": {
@@ -153,8 +160,42 @@ DEFAULT_CONFIG: dict[str, Any] = {
             # (the parent has already returned by then), so providers
             # cannot block the hook even on hard error. Once the daemon
             # (Tier 3.8) ships this flag will be replaced by the daemon
-            # path. Off by default — opt-in.
-            "detach_store": False,
+            # path.
+            #
+            # ON by default since 2026-07-25. Inline is not merely
+            # slower, it is incorrect on a local embedder: store()
+            # issues TWO embeds (dedup recall + content) and CPU-only
+            # embedding is superlinear in payload size (~9 s per 5 KB),
+            # so a 5 KB memory needs ~19 s and the Stop hook's own cap
+            # SIGTERMs it first -- the memory is silently lost and the
+            # session reports the embedder as down. Detaching takes the
+            # embed off the hook's critical path entirely. Falls back to
+            # inline if the spawn fails (see hooks/stop.py).
+            "detach_store": True,
+            # Layer 2 of the store gate (see claude_hooks/embedder_gate.py).
+            # store_lock serialises stores within ONE host; this waits for
+            # a *shared* embedder to go idle before a background store
+            # adds load, so several machines pointed at one llamafile
+            # don't pile on. Keyed on the embedder rather than the memory
+            # backend so it works for pgvector / sqlite_vec / qdrant /
+            # memory_kg alike.
+            #
+            # OFF by default: it only helps when multiple hosts share an
+            # embedder, and it costs a probe per store. Advisory
+            # backpressure, never mutual exclusion — a busy server
+            # sometimes answers fast between micro-batches, and two hosts
+            # can both read "idle" at once.
+            "embedder_gate": {
+                "enabled": False,
+                # Give up waiting and store anyway after this long: a
+                # delayed store is fine, a dropped one is not.
+                "max_wait_s": 60.0,
+                # /slots is answered from the inference loop, so a slow
+                # reply IS the busy signal. Keep this short.
+                "probe_timeout_s": 1.0,
+                # Each probe enqueues a task on the server; poll coarsely.
+                "poll_interval_s": 2.0,
+            },
         },
         "stop_guard": {
             # Disabled by default: the default patterns are opinionated

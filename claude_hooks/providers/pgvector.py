@@ -48,6 +48,7 @@ import hashlib
 import json
 import logging
 import re
+import select
 import threading
 from typing import Optional
 
@@ -65,6 +66,26 @@ from claude_hooks.providers.base import (
 )
 
 _SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+#: ``hnsw.ef_search`` applied per connection. pgvector's default is 40;
+#: we raise it because the accuracy/latency trade is priced very
+#: differently here than in a general OLTP workload — see
+#: ``_apply_ef_search``. Override per host with the ``ef_search`` key in
+#: the provider's options; 0 or negative leaves the server default alone.
+#:
+#: Do NOT raise this much further without re-measuring. Swept on solidpc
+#: 2026-07-25 (memories_qwen3, 5835 rows, 200 perturbed queries, recall@5
+#: against an exact seq scan):
+#:
+#:     ef=40   99.90%  p50 0.65 ms      ef=150  100.00%  p50 1.46 ms
+#:     ef=64  100.00%  p50 0.83 ms      ef=200  100.00%  p50 1.45 ms
+#:     ef=100 100.00%  p50 1.18 ms      ef=400  100.00%  p50 16.53 ms
+#:
+#: The ef=400 row is not a smooth cost curve — past ~200 the planner's
+#: estimate for the index scan exceeds a seq scan and it **stops using
+#: the HNSW index at all** (verified with EXPLAIN). So higher is not
+#: monotonically better-and-slower; it silently falls off a cliff.
+DEFAULT_EF_SEARCH = 100
 
 log = logging.getLogger("claude_hooks.providers.pgvector")
 
@@ -171,6 +192,35 @@ class PgvectorProvider(Provider):
 
             return self._search_tables(qvec, k)
 
+    def embed_for_store(self, content: str) -> Optional[list[float]]:
+        """Embed once so dedup and store can share the result.
+
+        Soft-fails to None: the caller then embeds the old way, which
+        costs time but never loses the memory.
+        """
+        if not content.strip():
+            return None
+        with self._lock:
+            try:
+                self._ensure_ready()
+                return self._embedder.embed(content)  # type: ignore[union-attr]
+            except (ImportError, EmbedderError) as e:
+                log.debug("pgvector embed_for_store unavailable: %s", e)
+                return None
+
+    def recall_vec(self, vec: list[float], k: int = 5) -> Optional[list[Memory]]:
+        """Search by a precomputed embedding — the query-side half of the
+        single-embed store path."""
+        if not vec:
+            return None
+        with self._lock:
+            try:
+                self._ensure_ready()
+            except (ImportError, EmbedderError) as e:
+                log.warning("pgvector unavailable: %s", e)
+                return []
+            return self._search_tables(vec, k)
+
     def _resolve_tables(self) -> list[str]:
         """Return the validated list of tables to search.
 
@@ -230,13 +280,18 @@ class PgvectorProvider(Provider):
         self._read_only_finish()
         return result
 
-    def store(self, content: str, metadata: Optional[dict] = None) -> None:
+    def store(self, content: str, metadata: Optional[dict] = None,
+              vec: Optional[list[float]] = None) -> None:
         if not content.strip():
             return
         with self._lock:
             try:
                 self._ensure_ready()
-                vec = self._embedder.embed(content)  # type: ignore[union-attr]
+                # ``vec`` is the same embedding the dedup search just used.
+                # Reusing it halves the embed cost of a store; recomputing
+                # it would be pure waste on a CPU embedder.
+                if vec is None:
+                    vec = self._embedder.embed(content)  # type: ignore[union-attr]
             except (ImportError, EmbedderError) as e:
                 raise RuntimeError(f"pgvector store failed: {e}")
             table = _safe_table(self.options.get("table") or "claude_hooks_memory")
@@ -448,13 +503,26 @@ class PgvectorProvider(Provider):
                 raise
 
     def count(self) -> int:
-        """Return the number of stored memories."""
+        """Return the number of stored memories.
+
+        Returns 0 on failure, which is indistinguishable from an empty
+        corpus — so every failure path here logs at WARNING. A silent 0
+        from a dead connection is precisely what made a Postgres restart
+        look like "the memory is empty" rather than "the backend is
+        unreachable".
+
+        ``_ensure_ready`` is now called unconditionally rather than only
+        when ``_conn is None``: it is the thing that detects and replaces
+        a dead connection, so gating it on ``is None`` skipped the
+        recovery in exactly the case that needed it.
+        """
         with self._lock:
-            if self._conn is None:
-                try:
-                    self._ensure_ready()
-                except Exception:
-                    return 0
+            try:
+                self._ensure_ready()
+            except Exception as e:
+                log.warning("pgvector count: backend unavailable (%s); "
+                            "reporting 0 — this is NOT an empty corpus", e)
+                return 0
             table = _safe_table(self.options.get("table") or "claude_hooks_memory")
             try:
                 with self._conn.cursor() as cur:  # type: ignore[union-attr]
@@ -463,11 +531,10 @@ class PgvectorProvider(Provider):
                 # #218: close read-only transaction before returning.
                 self._read_only_finish()
                 return n
-            except Exception:
-                try:
-                    self._conn.rollback()  # type: ignore[union-attr]
-                except Exception:
-                    pass
+            except Exception as e:
+                log.warning("pgvector count on %s failed (%s); reporting 0 — "
+                            "this is NOT an empty corpus", table, e)
+                self._safe_rollback()
                 return 0
 
     # ------------------------------------------------------------------ #
@@ -550,6 +617,15 @@ class PgvectorProvider(Provider):
                 self.options.get("embedder") or "null",
                 self.options.get("embedder_options"),
             )
+        # A connection object that still *exists* but is dead must be
+        # treated exactly like a missing one. Checking `is None` alone
+        # is what let a Postgres restart brick every long-lived process
+        # (MCP servers, the consultants daemon): the corpse is not None,
+        # so this method never reconnected and every query failed into a
+        # legitimate-looking empty result forever after. Short-lived
+        # hook processes hid the bug — each one gets a fresh connection.
+        if self._conn is not None and self._connection_is_dead():
+            self._discard_connection()
         if self._conn is None:
             try:
                 import psycopg  # type: ignore
@@ -559,8 +635,148 @@ class PgvectorProvider(Provider):
             if not dsn:
                 raise RuntimeError("pgvector dsn not configured")
             self._conn = psycopg.connect(dsn)
+            self._apply_ef_search()
         if not self._table_created:
             self._create_table()
+
+    def _connection_is_dead(self) -> bool:
+        """True when ``self._conn`` can no longer serve queries.
+
+        Two checks, because one is not enough. psycopg only flips
+        ``closed``/``broken`` *after* an operation has failed, so a
+        connection whose server went away still reports ``closed=False``
+        until something tries to use it. Verified against a terminated
+        backend: the killing statement raises ``AdminShutdown`` and only
+        then does ``closed`` become True.
+
+        Relying on the flag alone would therefore still burn one request
+        per outage — the exact request that returns a wrong empty answer.
+
+        So the flag is backed by a socket probe. With no query in
+        flight there is nothing for the server to be sending us, so a
+        *readable* socket means it sent an ErrorResponse or closed the
+        connection. That costs microseconds, and — unlike issuing
+        ``SELECT 1`` on every call — it opens no transaction, so it
+        cannot perturb transaction state or leave the session
+        idle-in-transaction (#218). The SQL confirmation runs only once
+        the socket already looks suspicious.
+        """
+        conn = self._conn
+        if conn is None:
+            return True
+        try:
+            if getattr(conn, "closed", False):
+                return True
+        except Exception:
+            return True
+        try:
+            fd = conn.fileno()
+        except Exception:
+            # No socket to probe (test doubles, exotic wrappers) — the
+            # flag above is all we have.
+            return False
+        try:
+            readable, _, _ = select.select([fd], [], [], 0)
+        except (OSError, ValueError):
+            return True
+        if not readable:
+            return False
+        # Unsolicited traffic on an idle connection. Confirm with a real
+        # statement rather than guessing, then close the transaction it
+        # implicitly opened.
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+            conn.rollback()
+            return False
+        except Exception as e:
+            log.warning("pgvector: connection is dead (%s) — reconnecting", e)
+            return True
+
+    def _discard_connection(self) -> None:
+        """Drop a dead connection so the next ``_ensure_ready`` rebuilds it.
+
+        ``_table_created`` is reset deliberately: a reconnect may be
+        landing on a *different* database (restored volume, recreated
+        container), and the DDL is IF NOT EXISTS, so re-running it costs
+        a few milliseconds once per reconnect and removes the assumption
+        that the schema survived whatever killed the connection.
+        """
+        conn, self._conn = self._conn, None
+        self._table_created = False
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+    def _safe_rollback(self) -> None:
+        """Roll back after a failed statement; discard the connection if
+        the rollback itself cannot run.
+
+        PostgreSQL leaves a connection aborted until rollback, so every
+        soft-failure path must call this or the *next* caller sees
+        "current transaction is aborted, commands ignored". If the
+        rollback fails, the connection is beyond saving — drop it so
+        ``_ensure_ready`` rebuilds one instead of handing the corpse to
+        the next caller.
+        """
+        conn = self._conn
+        if conn is None:
+            return
+        try:
+            conn.rollback()
+        except Exception:
+            self._discard_connection()
+            return
+        try:
+            if getattr(conn, "closed", False):
+                self._discard_connection()
+        except Exception:
+            self._discard_connection()
+
+    def _apply_ef_search(self) -> None:
+        """Set ``hnsw.ef_search`` for this connection.
+
+        pgvector defaults to 40, which trades recall for speed. The
+        trade is badly priced here: the HNSW scan is ~1 ms against a
+        multi-second embed, so buying accuracy with half a millisecond
+        is nearly free, and a dedup search that misses a near-duplicate
+        costs a permanently duplicated memory.
+
+        Be honest about the size of the win at current scale: 40 already
+        measures 99.90% recall@5 on 5835 rows, so 100 buys one avoided
+        miss per thousand *today*. It is bought mainly as headroom —
+        HNSW recall decays as the table grows, and this is the knob that
+        absorbs that without a reindex.
+
+        Session-scoped rather than ``ALTER DATABASE`` so the setting
+        travels with the code to every host instead of living in one
+        machine's server config. Soft-fails: an unknown GUC (pgvector
+        too old) must not stop the provider from working.
+        """
+        # `or DEFAULT` would be wrong here: 0 is falsy, and 0 is the
+        # documented way to say "leave the server default alone".
+        raw = self.options.get("ef_search", DEFAULT_EF_SEARCH)
+        if raw is None:
+            raw = DEFAULT_EF_SEARCH
+        try:
+            ef = int(raw)
+        except (TypeError, ValueError):
+            ef = DEFAULT_EF_SEARCH
+        if ef <= 0:
+            return
+        try:
+            with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                cur.execute(f"SET hnsw.ef_search = {ef:d}")
+            self._conn.commit()  # type: ignore[union-attr]
+        except Exception as e:
+            log.debug("pgvector: could not set hnsw.ef_search=%s (%s)", ef, e)
+            try:
+                self._conn.rollback()  # type: ignore[union-attr]
+            except Exception:
+                pass
 
     def _create_table(self) -> None:
         """Create the memory table + HNSW index if they don't exist,

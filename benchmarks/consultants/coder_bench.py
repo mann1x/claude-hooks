@@ -973,7 +973,18 @@ def _make_dry_run_loop_runner_for(question: BenchQuestion):
     This is the dry-run's promise: "if the bench plumbing is
     correct, every question produces a passing trial."
     """
-    code = _DRY_RUN_SUBMISSIONS.get(question.id, "# stub\n")
+    code = _DRY_RUN_SUBMISSIONS.get(question.id)
+    if code is None:
+        # Large generated suites (e.g. coder_easy, 180 questions) ship a
+        # sibling reference solution ``<id>.ref<ext>`` next to the oracle
+        # rather than bloating the hand-written dict above. Use it when
+        # present; otherwise fall back to the inert stub (the question
+        # will "fail" the dry-run, which is the intended signal that a
+        # reference is missing).
+        import os
+        ext = os.path.splitext(question.sandbox_path)[1] or ".txt"
+        ref = question.oracle_path.parent / f"{question.id}.ref{ext}"
+        code = ref.read_text(encoding="utf-8") if ref.is_file() else "# stub\n"
     return make_dry_run_loop_runner(
         file_path=question.sandbox_path, content=code,
         iterations=3, prompt_tokens=500, completion_tokens=200,

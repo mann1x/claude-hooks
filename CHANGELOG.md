@@ -14,6 +14,371 @@ release with the auto-generated source archive
 (`claude-hooks-X.Y.Z.zip` / `.tar.gz`). See
 [`docs/RELEASING.md`](docs/RELEASING.md) for the cut procedure.
 
+## [Unreleased]
+
+### Fixed
+
+- **`CompileRunner` published its completion signal before the results it
+  implies.** `last_returncode` going non-None is what callers poll to know
+  a compile run finished, but it was assigned the moment
+  `subprocess.run` returned — leaving a window spanning the entire output
+  parse during which a poller saw "done" and then read an **empty**
+  diagnostics map. Now published last, after `_diagnostics` is swapped
+  under its lock.
+  This surfaced as an intermittent `test_cargo_json_auto_detection`
+  failure that passed in isolation and on re-run, i.e. it looked like a
+  timing flake in a test. It was a real ordering bug in the runner; the
+  test was simply the only thing polling that signal. The new
+  `test_returncode_is_published_after_diagnostics` observes the state
+  from *inside* the parse rather than racing it from another thread, so
+  it catches the regression deterministically rather than statistically.
+  The test harness's `run_timeout_s` (5 s → 30 s) and wait deadlines
+  (3 s → 20 s) were also raised: both are liveness bounds on a one-line
+  `python -c`, not assertions about speed, and the old values raced a
+  cold interpreter spawn on a loaded machine. Stress-verified at 50
+  consecutive runs, 20 of them under synthetic CPU load, zero failures.
+
+- **A Postgres restart permanently broke every long-lived process, and
+  reported it as an empty memory.** Observed on solidpc 2026-07-30 after
+  the container restarted at 00:56 UTC: MCP servers dating from days
+  earlier returned "no results" for every query, while the hooks kept
+  working — the asymmetry that made it hard to see. Two faults combined:
+  1. `_ensure_ready()` rebuilt the connection only `if self._conn is
+     None`. A killed connection is *not* None — it is an object whose
+     server is gone — so the rebuild never fired and the process handed
+     the same corpse to every subsequent call, forever. Hooks were
+     immune only because each hook is a fresh short-lived process.
+  2. Every failure path renders as a legitimate answer: `recall` returns
+     `[]`, `count` returned `0` **with no log at all**. "Backend
+     unreachable" was indistinguishable from "nothing stored".
+
+  `PgvectorProvider` now treats a dead connection as a missing one and
+  reconnects. Detection is a `closed`/`broken` flag check backed by a
+  **socket probe**: psycopg only sets those flags *after* an operation
+  has failed, so the flag alone still burns one request per outage —
+  precisely the request that returns the wrong empty answer. With no
+  query in flight a readable socket means the server sent an
+  `ErrorResponse` or hung up. The probe costs **0.9 µs** on a healthy
+  connection and, unlike issuing `SELECT 1` on every call, opens no
+  transaction, so it cannot perturb transaction state or leave the
+  session idle-in-transaction (#218). Verified live against both a
+  self-killed backend and one terminated externally while idle (where
+  `closed` is still `False` and the flag alone misses it entirely).
+  `count()` now calls `_ensure_ready()` unconditionally and logs
+  whenever it reports 0.
+- **`sqlite_vec` had the same structural bug with a different trigger,
+  plus a worse `count()`.** `count()` began `if self._conn is None:
+  return 0`, so a freshly-constructed provider **always reported an
+  empty corpus without ever opening the database** — visible in the
+  SessionStart status line and the `sqlite-vec-count` MCP tool — and its
+  error path returned 0 silently. SQLite has no server to restart, but
+  the analogous failure is worse because it raises no error at all: when
+  the database file is **replaced** (restore, migration rebuild, plain
+  `mv`), the open handle keeps serving the old inode and every query
+  succeeds while returning vanished data. The provider now detects both
+  a dead handle and a replaced file (by `(st_dev, st_ino)` identity) and
+  reopens.
+- `qdrant` and `memory_kg` are **not affected** — they build a fresh
+  `McpClient` per call over stateless HTTP, so they hold no connection
+  that can go stale. A test asserts they still hold no `self._conn`, so
+  that exemption fails loudly if it ever stops being true.
+
+- **`LlamafileEmbedder` no longer loses a memory when the input overflows
+  the context window.** `max_chars` is a *character* cap standing in for
+  a token budget, and that substitution has a hidden assumption:
+  `max_chars=30000` against a 16384-token window needs at least ~1.83
+  chars/token. Measured with the model's own tokenizer on solidpc
+  2026-07-25 — real memory text is 3.13 chars/token at 30 000 chars
+  (9 580 tokens, fits with ~6 800 to spare), but base64 is 1.35 (22 188
+  tokens) and minified JSON 1.18 (25 471). Those overflow, and llama.cpp
+  answers `HTTP 400 exceed_context_size_error` in ~0.1 s — which raised
+  through `store()` and, on the now-default detached path, became a
+  `log.warning` and a **silently lost memory**.
+  Rather than lower `max_chars` for everyone to accommodate content
+  almost nobody stores, the overflow is now handled where it happens:
+  the 400 body carries `n_prompt_tokens` and `n_ctx`, so the text is cut
+  by that exact ratio and retried (bounded by `CTX_RETRY_ATTEMPTS`).
+  Non-overflow 400s and 5xx are never retried.
+  The retry is capped by a **token budget as well as the context
+  window**, which live testing proved necessary rather than
+  theoretical: the first implementation cut a 30 000-char base64 payload
+  to 20 299 chars — comfortably inside the 16 384 window — and the retry
+  then ran past a 300 s timeout, because CPU embedding measures ~32 tok/s
+  at 2 k tokens and degrades from there. Fitting the window but not the
+  clock merely trades a fast 400 for a slow timeout. `CTX_RETRY_TOKEN_BUDGET`
+  is sized for the *slowest* host (Windows runs llamafile ~2× slower at
+  byte-identical weights), so the retry stays inside the 180 s embedder
+  timeout on pandorum as well as solidpc. Verified end-to-end against an
+  isolated llamafile: both pathological payloads now embed successfully.
+
+### Changed
+
+- **`hnsw.ef_search` raised from pgvector's default 40 to 100**, applied
+  per connection in `PgvectorProvider._ensure_ready` and overridable with
+  the new `ef_search` provider option (`0` keeps the server default).
+  Session-scoped rather than `ALTER DATABASE` so the setting travels with
+  the code to every host instead of living in one machine's server config.
+  Swept on solidpc 2026-07-25 (`memories_qwen3`, 5835 rows, 200 perturbed
+  queries, recall@5 against an exact seq scan):
+
+  | ef_search | recall@5 | p50 |
+  |---|---|---|
+  | 40 (pgvector default) | 99.90% | 0.65 ms |
+  | 64 | 100.00% | 0.83 ms |
+  | **100 (ours)** | **100.00%** | **1.18 ms** |
+  | 200 | 100.00% | 1.45 ms |
+  | 400 | 100.00% | 16.53 ms |
+
+  Two things worth carrying forward. First, the win at *current* scale is
+  small — 40 already measures 99.90%, so 100 buys about one avoided miss
+  per thousand; it is bought mainly as headroom, since HNSW recall decays
+  as the table grows and this is the knob that absorbs that without a
+  reindex. Second, the `ef=400` row is not a smooth cost curve: past ~200
+  the planner's estimate for the index scan exceeds a seq scan and it
+  **stops using the HNSW index at all** (verified with `EXPLAIN`). Higher
+  is not monotonically better-and-slower — it falls off a cliff.
+
+- **Single-embed store path — a dedup-then-store cycle now embeds once
+  instead of twice.** `dedup.should_store` embedded `content[:500]` to
+  find near-duplicates and `provider.store` then embedded the full
+  content again to write it. On a CPU embedder that second embed *is*
+  the cost of the turn: measured on solidpc 2026-07-25 against an
+  isolated llamafile, 500 chars = 742 ms and 5000 chars = 12.7 s, while
+  every surrounding DB operation totals ~10 ms. The vector is now
+  computed once by `Provider.embed_for_store()` and spent twice — handed
+  to `Provider.recall_vec()` for the similarity search and to
+  `Provider.store(vec=...)` for the write.
+  Two side benefits beyond the saved embed: dedup now compares against a
+  **full-content** vector rather than a 500-character one, and the store
+  chain collapses to a single embed followed by one contiguous ~10 ms
+  block of DB work — which is what makes a short lease TTL viable for
+  the planned embedder-served lock (see
+  [`docs/embedder-lock-design.md`](docs/embedder-lock-design.md)).
+  Negotiation is **zero-config in both directions**. A provider opts in
+  by returning a vector from `embed_for_store()`; the base class returns
+  `None`, which every server-side-embedding provider (`qdrant`,
+  `memory_kg`) inherits unchanged. When no vector comes back, the
+  caller takes the original text path *and never passes the `vec`
+  keyword at all* — so third-party or older `store(content, metadata)`
+  implementations keep working. That last detail is guarded by a test
+  using a fake provider whose `store()` has no `vec` parameter: passing
+  the keyword unconditionally raises `TypeError`, which the hook
+  swallows as a provider failure and **silently loses the memory**.
+- `Provider.store()` gains an optional `vec` parameter, and
+  `Provider.embed_for_store()` / `Provider.recall_vec()` join
+  `recall_hybrid` / `batch_*` / `kg_*` as optional capabilities that
+  degrade silently. `pgvector` and `sqlite_vec` implement all three;
+  `qdrant` and `memory_kg` accept `vec` and ignore it.
+
+### Added
+
+- **`scripts/bench_store_gaps.py` + `scripts/bench_embed_latency.py`** —
+  measurement tooling for the store chain. The first times the
+  lock-critical gap (HNSW search + dedup compare + INSERT) and takes a
+  `--nice` level so the effect of `store_async._deprioritise()` can be
+  checked rather than assumed; the second times embeds against an
+  isolated llamafile or saturates one as a load source. Both docstrings
+  carry the traps that make naive versions of these benchmarks wrong by
+  100× (llama.cpp's prompt cache serving repeated payloads; filler text
+  whose chars/token ratio is unrepresentative).
+- **Cross-host embedder admission gate (opt-in,
+  `hooks.stop.embedder_gate.enabled`).** `store_lock` serialises stores
+  within one host, but it is a per-host lock file — two machines sharing
+  one embedder still run a store each. The new
+  `claude_hooks/embedder_gate.py` makes a background store wait for the
+  *shared embedder* to go idle before adding load. It keys on the
+  embedder, not the memory backend, deliberately: a Postgres advisory
+  lock would cover only `pgvector` and leave `sqlite_vec` / `qdrant` /
+  `memory_kg` unprotected, whereas every backend funnels through the
+  embedder.
+  The busy oracle looks odd and is load-bearing: llama.cpp answers
+  `/health` and `/props` straight from its HTTP threads (instant even at
+  full CPU load) but serves `/slots` and `/metrics` by queueing a task
+  into the **single-consumer inference loop**. Measured on solidpc
+  during a 29 s embed — `/health` 0.00 s throughout, `/slots`
+  5.6–11.7 s, `/metrics` 8.6 s. So a short-timeout `/slots` probe that
+  *stalls* is precisely the "loop is busy" signal, and a 404/501 (Ollama,
+  OpenAI-compatible endpoints, or `--no-slots`) means "not gateable" and
+  disables the gate rather than blocking every store.
+  This is **advisory backpressure, not mutual exclusion**: two hosts can
+  read "idle" in the same instant, and a busy server occasionally answers
+  fast between micro-batches. It reduces cross-host pile-up on the
+  embedder; it cannot close a cross-host dedup race, for which llama.cpp
+  offers no primitive. Runs only on the background store path (never on
+  interactive recall, which must not pay a probe) and inside the local
+  `store_gate`, so at most one process per host probes at a time. Off by
+  default — it only helps when hosts share an embedder.
+  Corollary, measured: **`--threads-http` is not worth raising.** The
+  HTTP thread pool is demonstrably healthy under load (`/health` and
+  `/props` stay at 0.00 s while the CPU is saturated); the stall is the
+  inference task queue, which more HTTP threads cannot drain.
+
+### Fixed
+
+- **Detached store: serialise it, or it breaks dedup and starves recall.**
+  Turning on `hooks.stop.detach_store` replaced a *serialised* store
+  workload with a *concurrent* one, and concurrency broke two things at
+  once (observed live on solidpc, 2026-07-25). (1) **Dedup stopped
+  working**: `store_async` runs dedup-recall then store, so two children
+  spawned seconds apart each completed dedup *before* either wrote,
+  neither saw the other, and both stored — five near-identical pairs
+  (cos 0.9986–0.9996) landed in the memory table, each one two Stop
+  firings 12–16 s apart. (2) **Interactive recall starved**: every store
+  costs two embeds, and a local CPU embedder has hard throughput limits,
+  so background writes ate the `UserPromptSubmit` hook budget and it
+  timed out at 65 s.
+  New `claude_hooks/store_lock.py` adds a cross-process **store gate**
+  (POSIX `flock` / Windows `msvcrt.locking`, following
+  `lsp_engine/daemon.py`'s `_WIN_LOCK_OFFSET` lesson, but queueing
+  rather than fail-fast). It wraps dedup **and** store — covering only
+  the write would leave the race open — on both the detached and inline
+  paths. Serialising means store N's dedup sees store N−1's committed
+  row, and background embed load is capped at one in-flight request
+  regardless of session count. Recall deliberately never takes the gate:
+  it must not block on a store. On timeout or an unusable lock the gate
+  degrades to *open* and the store still runs — a possible duplicate
+  beats a dropped memory. Inline uses a short 10 s timeout (it runs
+  under the Stop hook's own budget); detached uses 300 s.
+- **`install.py` wrote `idle_timeout_seconds: 300` on fresh llamafile
+  setup**, undoing the 3600 default for exactly the hosts getting a
+  clean install. Missed in the earlier timeout pass.
+
+### Changed
+
+- **Embedder gets CPU priority.** New `embedding.nice` (default `-5`),
+  applied to the llamafile after spawn via `os.setpriority` on POSIX and
+  `ABOVE_NORMAL_PRIORITY_CLASS` on Windows. The embedder is a
+  latency-critical *shared* service — interactive recall is bounded by a
+  hook timeout — and it commonly shares a box with minutes-long local
+  inference jobs against which it would otherwise compete as an equal.
+  Best-effort: lowering niceness needs root/`CAP_SYS_NICE`, and a
+  failure is logged, never fatal. The complement: detached
+  `store_async` children now run at nice `+10`, so background stores
+  yield to interactive recall.
+  Measured on the reference host (Ryzen 5 5600G, 6 cores, AVX2-only):
+  llamafile thread/batch tuning is **not** worth changing — `-tb 12`,
+  `-ub 2048` and `-b 8192` in every combination land within run-to-run
+  noise of the shipped defaults (two identical baseline runs differed by
+  6.4% on their own). Embedding cost is superlinear in payload size
+  (93 tok/s at 134 tokens → 32 tok/s at 2178), so payload size, not
+  server tuning, is the lever that matters.
+
+- **API proxy: the upstream client is now an HTTP/1.1 keepalive pool,
+  not HTTP/2 multiplexing.** A pcap of real Claude Code traffic to
+  `api.anthropic.com` shows the native client speaks **HTTP/1.1** and
+  opens *many* connections, one request each, **reused** via keep-alive.
+  The edge gate bites connection **churn** (a fresh TCP+TLS connection
+  per request), not the HTTP version. The previous `http2=True` pool
+  fixed the churn but replaced it with *concentration*: under heavy
+  concurrency the upstream sheds multiplexed streams, cascading
+  `REFUSED_STREAM` / flow-control faults across every session riding the
+  shared connection. `forwarder.py` now builds an
+  `HTTPTransport(http1=True, http2=False)` with a large, fully-retained
+  keepalive pool. The load-bearing invariant:
+  `max_keepalive_connections` **must be >= peak concurrency**
+  (default 50, `CLAUDE_HOOKS_PROXY_MAX_KEEPALIVE`) — below it httpx
+  closes the excess and the next burst re-opens fresh connections, which
+  is precisely the churn that trips the gate. `max_connections` defaults
+  to unlimited so a request never blocks on a pool slot. HTTP/2 remains
+  a one-env rollback: `CLAUDE_HOOKS_PROXY_UPSTREAM_HTTP=2`. `httpx` is
+  now the only hard dependency; the `[http2]` extra is needed solely for
+  the rollback, and `install.py::_ensure_proxy_deps` probes the two
+  separately.
+- **API proxy: the cross-session circuit breaker is OFF by default.**
+  It was protective when one shared multiplexed h2 connection carried
+  every session, since a single fault genuinely signalled trouble for
+  all of them. On the h1 pool each session rides its own connection, so
+  a coordinated global cooldown just penalises healthy sessions for one
+  sibling's blip — which *was* the "throttle engages as soon as a 2nd
+  session runs" report. Re-enable under the h2 rollback with
+  `CLAUDE_HOOKS_PROXY_BREAKER_ENABLED=1`. Counters still advance while
+  it is disabled, so `/health` keeps reflecting true upstream weather;
+  only the sliding-window/open logic is skipped.
+- **API proxy: connection errors get their own surgical retry budget.**
+  A dropped or refused connection recovers by landing the next attempt
+  on a fresh pool connection — that wants a couple of fast retries, not
+  the minute-long ride-out an upstream 529 brownout needs. Connection
+  faults now use 3 attempts / 25 s deadline / 0.25–2 s backoff, separate
+  from the 5xx budget, with **per-class attempt indices** so a conn drop
+  after several 5xx retries still gets its own fast retries instead of
+  inheriting the other class's exhausted count. All four knobs are
+  env-tunable (`CLAUDE_HOOKS_PROXY_CONN_RETRY_*`).
+
+### Fixed
+
+- **Embedder: multi-KB memories were silently dropped and reported as
+  "the embedder is down".** Four independent budgets stack on a store
+  (hook timeout → provider timeout → embedder HTTP timeout → daemon
+  spawn timeout) and the *smallest* one was binding: the 20 s `Stop`
+  cap in `settings.json`. Meanwhile `pgvector.store()` issues **two**
+  embeds — the dedup recall (`providers/pgvector.py:167`) then the
+  content (`:239`) — and embedding latency is superlinear in payload
+  size. Measured CPU-only on qwen3-embedding-0.6b (solidpc,
+  2026-07-25): 5 KB ~9 s, 16 KB ~48 s, 30 KB ~135 s; an end-to-end 5 KB
+  store took **18.98 s** against that 20 s cap. Claude Code SIGTERMed
+  the hook mid-store, so the memory was lost *before* the embedder's own
+  30 s timeout could fire — which is why the failure surfaced well under
+  30 s and why raising the embedder timeout alone changed nothing.
+  Separately, llamafile spawn is only **1–2 s**, so the 300 s idle reaper
+  bought little while every reap opened a respawn race that concurrent
+  sessions observed as a down embedder (the complaint cleared on the
+  next attempt, once warm).
+  Fixes, shipped as new defaults so fresh installs and Windows hosts do
+  not inherit the broken combination:
+  - `hooks.stop.detach_store` now defaults to **`true`** — the
+    structural fix, taking the embed off the hook's critical path
+    entirely. Raising caps alone cannot fix inline: at
+    `max_chars: 30000` the two embeds can cost ~270 s. Trade-off: a
+    detached store logs failures rather than surfacing them in the Stop
+    `systemMessage`.
+  - `settings.json` hook budgets: `Stop` 20 → **90**, `SessionEnd`
+    10 → **60**, `PreCompact` 20 → **60** (backstop for the
+    detach-spawn-failed fallback path).
+  - Embedder client timeout 30 → **180 s** (`DEFAULT_CONFIG`,
+    `LlamafileEmbedder`, and every `install.py` embedder block),
+    covering the measured 135 s worst case at `max_chars: 30000`.
+  - Provider (DB connect) timeout 10 → **30 s**.
+  - `embedding.idle_timeout_seconds` 300 → **3600 s**.
+  - New `install.py` migration `_migrate_embedder_timeouts` bumps
+    **existing** configs, since a re-run otherwise preserves the stored
+    (broken) values. It raises a knob only when it is still at-or-below
+    the old shipped default, so an operator-raised ceiling is never
+    lowered. Idempotent.
+  - The remote-llamafile timeout prompt now defaults from the current
+    config instead of a hardcoded `30`, so a scripted re-run cannot
+    silently lower a raised ceiling.
+
+- **API proxy: enable TCP keepalive on the upstream socket — the missing
+  transparency that dropped long requests.** The transparent
+  `api.anthropic.com` proxy failed long-running requests with
+  `RemoteProtocolError: Server disconnected` ~60 s in, while a direct
+  (no-proxy) connection to the same endpoint never dropped. Root cause,
+  proven via `ss`: Claude Code's native client sets `SO_KEEPALIVE` (~60 s
+  idle) on its API socket; the proxy's httpx client set none, so during a
+  long silent *thinking* window (xhigh effort / large context) the
+  connection sat truly idle and an on-path stateful device reaped it at
+  ~60 s. The pool `keepalive_expiry` only retires *pool-idle* connections
+  between requests — it cannot keep an in-flight, mid-request-idle
+  connection alive; kernel keepalive probes can. `forwarder.py` now builds
+  the transport explicitly with `socket_options` enabling `SO_KEEPALIVE`
+  plus (Linux) `TCP_KEEPIDLE=30` / `KEEPINTVL=15` / `KEEPCNT=4`
+  (env-tunable via `CLAUDE_HOOKS_PROXY_TCP_KEEP*`). This also retro-explains
+  the "throttle engages when a 2nd session runs" report — the
+  keepalive-induced conn-errors were tripping the cross-session circuit
+  breaker, which *amplified* the bug rather than causing it.
+- **API proxy: stop withholding the first SSE byte to buffer 4 KB.**
+  `_forward_attempt` looped reading chunks until it had 4096 bytes before
+  returning the response headers + first byte to the client; on a
+  slow-thinking SSE response (small `message_start`, then quiet) that
+  delayed the client's first byte by tens of seconds, an SSE-TTFB stall
+  that can trip Claude Code's client-side body timeout. It now forwards the
+  first chunk as soon as it lands; final usage still flows via the SseTail.
+- **API proxy: handle upstream mid-stream errors gracefully.** The body
+  loop in `server.py` caught only client-side drops; an upstream httpx
+  error *after* headers were committed propagated uncaught, skipping the
+  JSONL line and killing the handler thread. It is now logged + recorded as
+  a truncation.
+
 ## [1.13.0] — 2026-06-03
 
 ### Added

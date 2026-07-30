@@ -138,8 +138,36 @@ class TestConfig:
         assert cfg.ctx_size == 16384
         assert cfg.pooling == "last"
         assert cfg.mode == "auto"
-        assert cfg.idle_timeout_seconds == 300.0
+        assert cfg.idle_timeout_seconds == 3600.0
         assert cfg.extra_args == []
+        # Embedder runs above default priority: it is a latency-critical
+        # shared service and typically shares a box with long local
+        # inference jobs.
+        assert cfg.nice == -5
+
+    def test_config_nice_override_and_disable(self):
+        assert em.config_from_dict({"embedding": {"nice": -10}}).nice == -10
+        # 0 must survive as 0 (disables the adjustment) — a naive
+        # ``or`` default would silently turn it back into -5.
+        assert em.config_from_dict({"embedding": {"nice": 0}}).nice == 0
+
+    def test_apply_priority_never_raises_without_permission(self, monkeypatch):
+        """Lowering niceness needs root/CAP_SYS_NICE; an unprivileged
+        host must still get a working embedder."""
+        import claude_hooks.embedding_manager as _em
+
+        m = _em.EmbeddingManager(_base_cfg(nice=-5))
+
+        def _boom(*a, **k):
+            raise PermissionError("not permitted")
+
+        monkeypatch.setattr(_em.os, "setpriority", _boom, raising=False)
+        monkeypatch.setattr(_em.sys, "platform", "linux")
+
+        class _Proc:
+            pid = 12345
+
+        m._apply_priority(_Proc())  # must not raise
 
     def test_config_from_dict_ignores_unknown(self):
         cfg = em.config_from_dict({"embedding": {"some_unknown_key": 1,
@@ -322,9 +350,15 @@ class TestSpawnDetachment:
         # exist regardless of the host OS — subprocess only defines
         # them on Windows, but the manager references them through
         # the ``subprocess`` module so we can pin them here.
+        # ABOVE_NORMAL_PRIORITY_CLASS must be pinned too, not just the
+        # console flags: it exists on Windows but NOT on POSIX, so
+        # leaving it unpinned makes this test assert different values
+        # depending on the host OS. It silently passed on Linux (the
+        # getattr fallback contributed 0) while failing on Windows.
         win_flags = {
             "CREATE_NO_WINDOW": 0x08000000,
             "DETACHED_PROCESS": 0x00000008,
+            "ABOVE_NORMAL_PRIORITY_CLASS": 0x00008000,
         }
         with patch.object(em.sys, "platform", "win32"):
             with patch.multiple(em.subprocess, **win_flags, create=True):
@@ -335,7 +369,11 @@ class TestSpawnDetachment:
         assert "creationflags" in kw, (
             "Windows spawn must set creationflags to hide the console"
         )
-        expected = win_flags["CREATE_NO_WINDOW"] | win_flags["DETACHED_PROCESS"]
+        # cfg.nice defaults to -5, so the raised-priority class is
+        # expected alongside the console flags.
+        expected = (win_flags["CREATE_NO_WINDOW"]
+                    | win_flags["DETACHED_PROCESS"]
+                    | win_flags["ABOVE_NORMAL_PRIORITY_CLASS"])
         assert kw["creationflags"] == expected
         # start_new_session is a POSIX knob; passing it alongside the
         # Windows creationflags is harmless but we keep them mutually
@@ -343,6 +381,29 @@ class TestSpawnDetachment:
         assert "start_new_session" not in kw
         # Stdin must be DEVNULL so the child cannot pin a console alive.
         assert kw.get("stdin") is em.subprocess.DEVNULL
+
+    def test_windows_nice_zero_omits_priority_class(self, tmp_path):
+        """nice=0 disables the adjustment on Windows as well as POSIX."""
+        binp = tmp_path / "llamafile.exe"
+        binp.write_bytes(b"")
+        m = em.EmbeddingManager(
+            _base_cfg(llamafile_path=str(binp), mode="cpu", nice=0)
+        )
+        captured: dict = {}
+        win_flags = {
+            "CREATE_NO_WINDOW": 0x08000000,
+            "DETACHED_PROCESS": 0x00000008,
+            "ABOVE_NORMAL_PRIORITY_CLASS": 0x00008000,
+        }
+        with patch.object(em.sys, "platform", "win32"):
+            with patch.multiple(em.subprocess, **win_flags, create=True):
+                with patch.object(em.subprocess, "Popen",
+                                  side_effect=self._spy_popen(em, captured)):
+                    m._spawn_once(cwd=None)
+        flags = captured["kwargs"]["creationflags"]
+        assert not flags & win_flags["ABOVE_NORMAL_PRIORITY_CLASS"]
+        assert flags == (win_flags["CREATE_NO_WINDOW"]
+                         | win_flags["DETACHED_PROCESS"])
 
     def test_posix_passes_start_new_session(self, tmp_path):
         binp = tmp_path / "llamafile"

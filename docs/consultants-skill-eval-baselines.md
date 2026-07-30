@@ -6,6 +6,11 @@ scored through the Consultancy Skill-Eval Protocol. This file is
 note rather than overwriting history, so we can spot upstream drift
 across time.
 
+> ↟ Part of the [benchmark suite](benchmarks/index.md) — this is the
+> running **ledger** (one summary row per run). For the *detailed* per-model
+> per-language coder results (full + normalized), see
+> [`benchmarks/coder-mlang-results.md`](benchmarks/coder-mlang-results.md).
+
 For methodology, decision rubric, and how to re-run a suite, see
 [`consultants-skill-eval-protocol.md`](consultants-skill-eval-protocol.md).
 
@@ -26,6 +31,8 @@ infrastructure.
 | 2026-05-16 |        1.0 | `kimi-k2.6:cloud`              |   100%    |    4.86     |      1957     |     10.0s   | `9aa6eaf0` | runner-up, ~tied on quality with glm but ~2× wall; **note: 1/8 trials had judge-empty-response → score computed from 7 trials** (harness hardened in same commit) |
 | 2026-05-16 |        1.0 | `gemma4:31b-cloud`             |   100%    |    4.62     |      1876     |     14.5s   | `9aa6eaf0` | slowest tail (peak 105 s on hard-01); only sub-4 cell (3.0 on hard-02-digit-filter) |
 | 2026-05-16 |        1.0 | `qwen3-coder-next:cloud`       |   100%    |    4.50     |      2111     |      2.9s   | `9aa6eaf0` | fastest median wall but most verbose / lowest avg quality. Pre-run wrong-name guess `qwen3-next:cloud` → corrected to `qwen3-coder-next:cloud` (the coder variant) |
+| 2026-06-03 |        1.0 | `minimax-m3:cloud`             |   100%    |    4.25     |      2528     |      7.7s   | `2103e6cc` | 🆕 candidate; 8/8 — competence-equivalent to the qualifiers on Python. Mid-pack (98%) on the multi-lang [easy suite](benchmarks/coder-easy-results.md). Hash differs from rows above **only** via oracle portability fix `5ca3ea3` — the 8 questions are byte-identical, so comparable |
+| 2026-06-03 |        1.0 | `nemotron-3-super:cloud`       |   100%    |    4.38     |      2406     |      2.7s   | `2103e6cc` | 🆕 candidate; 8/8, fastest median wall (2.7s). Strong on Python, but **weakest (93%) on the multi-lang [easy suite](benchmarks/coder-easy-results.md)** (csharp/go/rust slips) — not recommended for the coder role over incumbents |
 
 ### Recommended default
 
@@ -43,6 +50,22 @@ row. Results dir:
 [`benchmarks/consultants/results/2026-05-16/coder/`](../benchmarks/consultants/results/2026-05-16/coder/).
 
 ### v1.0.1-mlang baseline (2026-05-17) — per-language winners
+
+> **How to read this table — scores are normalized.** The suite is
+> deliberately brutal (medium / hard / very_hard, no easy tier). On the strict
+> full-oracle axis **no model qualifies** (8–15% pass). **10 of 13 questions
+> defeat every model**, so the per-language picks are computed over the **3
+> discriminating questions** (≥1 model passed) — questions all models fail are
+> excluded from classification. Two consequences: (1) **`go`, `python`, `rust`
+> have no discriminating question at all** — their picks below are
+> **quality-judge-only / inconclusive**, not test-validated; (2) the `c` pick
+> (`glm-5.1`) **diverges from the data** — glm failed the only discriminating C
+> question (kimi + minimax passed it); it was chosen for speed/consistency. Full
+> per-model + per-language breakdown with both full and normalized scores:
+> [`benchmarks/coder-mlang-results.md`](benchmarks/coder-mlang-results.md).
+> The `alg%` column below is the *winning model's* pass-fraction over **all**
+> that language's questions (incl. the all-fail ones), which is why it differs
+> from the normalized view.
 
 The mlang v1.0.1 delta fixed the `pytest -x` algorithm-axis bug
 (see commit `bench(coder_mlang): v1.0.1 two-axis oracle scoring`)
@@ -81,11 +104,120 @@ Failover triggers (in `coder.py`) are: any exception, zero files
 written, OR empty final assistant message — strictest of the
 three wins for the recorded reason.
 
+**2026-06-03 re-score (same 13 ids, hash `ddef8095`):**
+`minimax-m3:cloud` scored **4/13 (31%)** and `nemotron-3-super:cloud`
+**3/13 (23%)** — both beat the entire baseline cohort (best 2/13), and
+`minimax-m3` cracked `rust-hard-01-iter-window-pairs` (all-fail in the
+baseline). Routes unchanged pending a full-cohort re-baseline; detail in the
+[2026-06-03 addendum](benchmarks/coder-mlang-results.md#2026-06-03-addendum--two-new-candidates).
+
 Override surface (task #111):
 - TOML: `[role.coder.routes.<lang>]` + `[role.coder.default_route]`
   (see `consultants/config.py:_render`).
 - CLI: `claude-consultants config coder {list,set,unset,set-default}`.
 - Skill: `/consultants config` → "Coder routing" subflow.
+
+---
+
+### v1.0-easy baseline (2026-06-03) — per-language reliability floor
+
+> **How to read this table.** `coder_easy@1.0` is the *floor-fixing* counterpart
+> to mlang: 30 deliberately-easy problems × 6 languages (180 q), uniform
+> stdin→stdout. **Every question discriminates (zero all-fail), so full ==
+> normalized** — but the top *saturates*: only **go** and **rust** separate on
+> pass-rate; **c/cpp/csharp/python are ~100% for all models** (competence floor →
+> route on quality/cost). Single judge (`kimi-k2.6`, also under test), so the
+> quality-decided languages carry a **self-judge caveat**. Full breakdown +
+> token efficiency + the two new candidates:
+> [`benchmarks/coder-easy-results.md`](benchmarks/coder-easy-results.md). Suite
+> hash `76440a74`; 7 models × 180 = 1260 trials; git `d0fc724`.
+
+| Date | Suite | Model | Pass rate | Avg quality | Median compl. tok | Median wall | Suite hash | Notes |
+|------|-------|-------|----------:|------------:|------------------:|------------:|------------|-------|
+| 2026-06-03 | easy 1.0 | `deepseek-v4-flash:cloud` | 99% (178/180) | 3.90 | 248 | 17.8s | `76440a74` | tied-top pass; **sole 30/30 on go** |
+| 2026-06-03 | easy 1.0 | `glm-5.1:cloud` | 99% (178/180) | 4.16 | **145** | 16.1s | `76440a74` | **best all-rounder** — top pass, near-top quality, ~2× leanest tokens; confirms the global default |
+| 2026-06-03 | easy 1.0 | `deepseek-v4-pro:cloud` | 98% (177/180) | 4.13 | 257 | 17.4s | `76440a74` | strong across all six |
+| 2026-06-03 | easy 1.0 | `kimi-k2.6:cloud` | 98% (177/180) | 4.31 | 514 | 19.9s | `76440a74` | top judge-quality (**is the judge**); most verbose |
+| 2026-06-03 | easy 1.0 | `minimax-m3:cloud` 🆕 | 98% (176/180) | 4.14 | 249 | 18.6s | `76440a74` | competitive new candidate; token-efficient |
+| 2026-06-03 | easy 1.0 | `minimax-m2.7:cloud` | 97% (174/180) | 3.74 | 273 | 19.4s | `76440a74` | **sole 30/30 on rust**; worst on go (25/30) |
+| 2026-06-03 | easy 1.0 | `nemotron-3-super:cloud` 🆕 | 93% (168/180) | 3.92 | 480 | 17.7s | `76440a74` | cohort floor; csharp/go/rust slips |
+
+**Per-language picks (this suite):** **go → `deepseek-v4-flash`** and
+**rust → `minimax-m2.7`** are *test-based* (sole 30/30) — the two routes mlang
+left *inconclusive*. c/cpp/csharp/python are pass-saturated; their quality
+leaders (`kimi` for c/csharp, `glm` for python, `kimi`≈`deepseek-v4-pro` for
+cpp) carry the single-judge caveat. **`coder_defaults.py` is not changed by
+this run** — realigning go/rust is a follow-up. Full detail:
+[`benchmarks/coder-easy-results.md`](benchmarks/coder-easy-results.md).
+
+---
+
+<a id="coder_med"></a>
+
+### v1.0-med baseline (2026-06-04) — mid-band separation + cross-judge
+
+> **How to read this table.** `coder_med@1.0` is the **mid-band** between easy
+> (saturated) and mlang (all-fail): 10 algorithmic problems × 6 languages (60 q),
+> uniform stdin→stdout. **Every question discriminates** and pass-rate spreads a
+> real **100% → 77%** — `minimax-m2.7` drops out of the rubric (quality 3.30).
+> A second independent judge (`gemini-3-flash-preview`) re-scored all 420
+> solutions and ranked them head-to-head: the **kimi self-judge bias is
+> easy-only** (−0.27 on easy, **+0.03 here**), and the neutral ladder still
+> ranks `kimi` #1, tracking pass-rate. Full breakdown + per-language ladders +
+> the token-/wall-vs-quality efficiency table (balanced winner `glm-5.1`):
+> [`benchmarks/coder-med-results.md`](benchmarks/coder-med-results.md). Suite
+> hash `0e6ab0fd`; 7 models × 60 = 420 trials; git `5f5af00`. Judge
+> `kimi-k2.6` (primary) + `gemini-3-flash-preview` (cross-judge, num_predict
+> 4000 re-score / 8000 ladder; **100%** re-score / **95–98%** ladder parse
+> coverage after a high-budget retry of the truncated reasoning replies).
+
+`Gemini q` = neutral second-judge mean; `Ladder rank` = neutral head-to-head
+mean rank (lower = better); `comp-tok` = median completion (generated) tokens.
+
+| Date | Suite | Model | Pass rate | Kimi q | Gemini q | Ladder rank | comp-tok | wall | Suite hash | Notes |
+|------|-------|-------|----------:|-------:|---------:|------------:|---------:|-----:|------------|-------|
+| 2026-06-04 | med 1.0 | `kimi-k2.6:cloud` | **100% (60/60)** | 4.19 | 4.72 | **2.82 (#1)** | 1043 | 48.5s | `0e6ab0fd` | sole 100%-pass; #1 on the neutral ladder too (**is the judge**); wins 5/6 langs |
+| 2026-06-04 | med 1.0 | `deepseek-v4-pro:cloud` | 98% (59/60) | 4.00 | 4.58 | 3.30 (#2) | 476 | 53.8s | `0e6ab0fd` | wins cpp on the ladder |
+| 2026-06-04 | med 1.0 | `minimax-m3:cloud` | 97% (58/60) | 3.92 | 4.55 | 3.71 (#3) | 690 | 59.7s | `0e6ab0fd` | strong all-round |
+| 2026-06-04 | med 1.0 | `glm-5.1:cloud` | 95% (57/60) | 3.85 | 4.38 | 4.26 | **282** | 41.0s | `0e6ab0fd` | **balanced-efficiency winner** (leanest tokens, near-fastest wall) |
+| 2026-06-04 | med 1.0 | `deepseek-v4-flash:cloud` | 92% (55/60) | 3.96 | 4.20 | 4.20 | 366 | 46.8s | `0e6ab0fd` | efficiency runner-up |
+| 2026-06-04 | med 1.0 | `nemotron-3-super:cloud` | 88% (53/60) | 3.62 | 4.17 | 4.50 | 770 | **39.0s** | `0e6ab0fd` | fastest wall but pass<90 (gated out of efficiency) |
+| 2026-06-04 | med 1.0 | `minimax-m2.7:cloud` | 77% (46/60) | 3.30 | 3.73 | 5.17 (#7) | 618 | 52.3s | `0e6ab0fd` | **fails rubric** (quality); csharp/go collapse to 60% |
+
+**Cross-judge finding:** gemini is systematically more generous than kimi
+(cohort Δ +0.50, widest on **go +0.69** / **rust +0.60** — kimi under-rates
+those idioms). The self-judge bias that appeared on the *easy* suite (−0.27
+self-vs-cohort gap) **does not appear here** (+0.03): on substantive code kimi
+judges its own work neutrally. **Efficiency:** `kimi` is the per-language
+quality/correctness leader (5/6) but the most token-heavy of the gated set;
+`glm-5.1` wins the balanced token-/wall-vs-quality trade-off — **corroborating**
+its existing default-coder route. Full detail + per-language ladders:
+[`benchmarks/coder-med-results.md`](benchmarks/coder-med-results.md).
+
+**Adopted into live config (2026-06-04).** The per-language coder routes were
+realigned to these neutral-ladder winners (primary = winner, fallback =
+runner-up) in the **live config** — user-global on **solidpc** + **pandorum**,
+and the `claude-hooks` per-project override (`.claude-hooks/consultants.toml`,
+gitignored/local; backups `*.pre-codermed.bak`):
+
+| lang | primary (ladder winner) | fallback (runner-up) |
+|------|-------------------------|----------------------|
+| c | `kimi-k2.6:cloud` | `deepseek-v4-pro:cloud` |
+| cpp | `deepseek-v4-pro:cloud` | `deepseek-v4-flash:cloud` |
+| csharp | `kimi-k2.6:cloud` | `minimax-m3:cloud` |
+| go | `kimi-k2.6:cloud` | `deepseek-v4-pro:cloud` |
+| python | `kimi-k2.6:cloud` | `deepseek-v4-flash:cloud` |
+| rust | `kimi-k2.6:cloud` | `deepseek-v4-pro:cloud` |
+
+This is a **quality-over-cost** choice (`kimi-k2.6` is primary for 5/6
+languages, ~3.7× the completion tokens of the prior glm/ds-flash primaries).
+The **shipped code defaults** in
+[`coder_defaults.py`](../consultants/engine/coder_defaults.py)
+(`RECOMMENDED_CODER_ROUTES_BY_LANGUAGE`) were **updated to match** so fresh
+installs seed the same per-language picks — `RECOMMENDED_AS_OF = 2026-06-04`,
+suite `1.0-med`, hash `0e6ab0fd` (provenance test + the `coder_unique_models`
+set updated accordingly). `default_route` stays `glm-5.1:cloud` (the efficiency
+winner, used only for languages with no explicit entry).
 
 ---
 

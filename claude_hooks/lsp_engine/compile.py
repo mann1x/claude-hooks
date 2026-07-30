@@ -447,7 +447,6 @@ class CompileRunner:
             )
             return
 
-        self._last_returncode = proc.returncode
         self._last_stderr = (proc.stderr or "")[-2000:]
 
         diags = self._parse_output(proc.stdout or "", proc.stderr or "")
@@ -462,6 +461,17 @@ class CompileRunner:
             new_map.setdefault(d.uri, []).append(d)
         with self._diag_lock:
             self._diagnostics = new_map
+        # Publish the completion signal LAST.
+        #
+        # ``last_returncode`` going non-None is what callers poll to know
+        # a run finished, so it must not become visible before the
+        # results it implies are readable. It used to be assigned right
+        # after ``subprocess.run`` returned — leaving a window covering
+        # the whole parse during which a poller saw "done" and then read
+        # an empty diagnostics map. Rare on an idle machine, reliably hit
+        # under load, and it presented as a flaky test rather than as the
+        # ordering bug it is.
+        self._last_returncode = proc.returncode
         log.info(
             "compile: %s emitted %d diagnostics across %d files",
             self.spec.language, len(diags), len(new_map),

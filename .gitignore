@@ -101,10 +101,17 @@ vendor/llamafile/dist/*.llamafile
 benchmarks/consultants/results/**/*
 !benchmarks/consultants/results/**/
 !benchmarks/consultants/results/**/report.md
+!benchmarks/consultants/results/**/report-by-language.md
 !benchmarks/consultants/results/**/smoke-report.md
 !benchmarks/consultants/results/**/quota.md
 !benchmarks/consultants/results/**/metadata.json
 !benchmarks/consultants/results/**/smoke-metadata.json
+# Offline rejudge (rejudge.py) conclusions: the cross-judge re-score
+# and comparative-ladder *reports* are commit-eligible, but the bulky
+# regenerable payloads (trials-rejudged.jsonl, ladder.jsonl) stay
+# ignored like trials.jsonl — re-derivable from the persisted sandboxes.
+!benchmarks/consultants/results/**/rescore-report.md
+!benchmarks/consultants/results/**/ladder-report.md
 
 
 # Local developer overrides for test-fixture network identifiers (URLs,

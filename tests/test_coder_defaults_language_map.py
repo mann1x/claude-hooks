@@ -11,7 +11,7 @@ import unittest
 
 from consultants.engine.coder_defaults import (
     LANGUAGE_BY_EXTENSION,
-    QUALIFYING_MODELS_2026_05_17_MLANG,
+    QUALIFYING_MODELS_2026_06_04_MED,
     RECOMMENDED_AS_OF,
     RECOMMENDED_CODER_DEFAULT_ROUTE,
     RECOMMENDED_CODER_MODEL,
@@ -104,21 +104,37 @@ class TestRecommendedRoutes(unittest.TestCase):
                 self.assertTrue(route.fallback.strip(),
                                 f"{lang} missing fallback")
 
-    def test_user_overrides_present(self):
-        # Two explicit user overrides (2026-05-17) that differ from
-        # pure table-winner logic:
-        # - csharp.primary = deepseek-v4-pro:cloud (top avgQ, was
-        #   ambiguous on alg)
-        # - python.primary = glm-5.1:cloud (user preference; tied
-        #   for top avgQ with kimi)
-        self.assertEqual(
-            RECOMMENDED_CODER_ROUTES_BY_LANGUAGE["csharp"].primary,
-            "deepseek-v4-pro:cloud",
-        )
-        self.assertEqual(
-            RECOMMENDED_CODER_ROUTES_BY_LANGUAGE["python"].primary,
-            "glm-5.1:cloud",
-        )
+    def test_per_language_primaries_are_ladder_winners(self):
+        # 2026-06-04 coder_med v1.0 neutral-gemini-ladder winners.
+        # kimi-k2.6 wins 5/6 languages; deepseek-v4-pro takes cpp.
+        expected_primary = {
+            "c": "kimi-k2.6:cloud",
+            "cpp": "deepseek-v4-pro:cloud",
+            "csharp": "kimi-k2.6:cloud",
+            "go": "kimi-k2.6:cloud",
+            "python": "kimi-k2.6:cloud",
+            "rust": "kimi-k2.6:cloud",
+        }
+        for lang, prim in expected_primary.items():
+            with self.subTest(lang=lang):
+                self.assertEqual(
+                    RECOMMENDED_CODER_ROUTES_BY_LANGUAGE[lang].primary, prim,
+                )
+
+    def test_per_language_fallbacks_are_ladder_runners_up(self):
+        expected_fallback = {
+            "c": "deepseek-v4-pro:cloud",
+            "cpp": "deepseek-v4-flash:cloud",
+            "csharp": "minimax-m3:cloud",
+            "go": "deepseek-v4-pro:cloud",
+            "python": "deepseek-v4-flash:cloud",
+            "rust": "deepseek-v4-pro:cloud",
+        }
+        for lang, fb in expected_fallback.items():
+            with self.subTest(lang=lang):
+                self.assertEqual(
+                    RECOMMENDED_CODER_ROUTES_BY_LANGUAGE[lang].fallback, fb,
+                )
 
     def test_global_default_route_set(self):
         self.assertIsInstance(RECOMMENDED_CODER_DEFAULT_ROUTE,
@@ -132,9 +148,9 @@ class TestRecommendedRoutes(unittest.TestCase):
 
     def test_routes_only_use_qualifying_models(self):
         # Sanity check the recommended map only references models
-        # from the v1.0.1-mlang cohort — guard against typos that
-        # would land an unqualified model in defaults.
-        qualifying = set(QUALIFYING_MODELS_2026_05_17_MLANG)
+        # from the 2026-06-04 coder_med cohort — guard against typos
+        # that would land an unqualified model in defaults.
+        qualifying = set(QUALIFYING_MODELS_2026_06_04_MED)
         for lang, route in RECOMMENDED_CODER_ROUTES_BY_LANGUAGE.items():
             with self.subTest(lang=lang):
                 self.assertIn(route.primary, qualifying,
@@ -150,10 +166,10 @@ class TestRecommendedRoutes(unittest.TestCase):
 
     def test_provenance_stamps_current(self):
         # Date stamp + suite version + hash prefix all updated for
-        # the mlang v1.0.1 baseline.
-        self.assertEqual(RECOMMENDED_AS_OF, "2026-05-17")
-        self.assertEqual(RECOMMENDED_SUITE_VERSION, "1.0.1-mlang")
-        self.assertEqual(RECOMMENDED_SUITE_HASH_PREFIX, "ddef8095")
+        # the 2026-06-04 coder_med v1.0 per-language adoption.
+        self.assertEqual(RECOMMENDED_AS_OF, "2026-06-04")
+        self.assertEqual(RECOMMENDED_SUITE_VERSION, "1.0-med")
+        self.assertEqual(RECOMMENDED_SUITE_HASH_PREFIX, "0e6ab0fd")
 
 
 class TestResolveCoderRoute(unittest.TestCase):

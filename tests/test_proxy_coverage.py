@@ -205,8 +205,9 @@ class TestHttpxForwarder:
     def test_pooled_client_is_reused_across_calls(self):
         """Two forward() calls must share one httpx.Client instance.
 
-        This is the whole point of the httpx rewrite: one connection
-        profile to upstream, not fresh-per-request.
+        Connection REUSE (a retained keepalive pool, not fresh-per-request)
+        is what matches native Claude Code's profile and keeps us clear of
+        the edge-429 churn gate — independent of the HTTP version.
         """
         from claude_hooks.proxy import forwarder as fwd
 
@@ -215,8 +216,6 @@ class TestHttpxForwarder:
         c2 = fwd._get_client(timeout=5.0)
         try:
             assert c1 is c2
-            # http2 flag must be on — that's what matches native CC's
-            # connection profile.
             import httpx
             assert isinstance(c1, httpx.Client)
         finally:
@@ -226,7 +225,8 @@ class TestHttpxForwarder:
         """The forwarder tags each result with the negotiated protocol.
 
         For plain-HTTP test servers we'll see HTTP/1.1 — good enough to
-        confirm stats wiring. Real api.anthropic.com returns HTTP/2.
+        confirm stats wiring. Real api.anthropic.com is also HTTP/1.1 by
+        default now (the h1 keepalive pool that mimics Claude Code).
         """
         from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -257,7 +257,7 @@ class TestHttpxForwarder:
             assert result.status == 200
             assert b'{"ok":true}' in body
             assert "http_version" in result.stats
-            # Test server is HTTP/1.1; real upstream negotiates h2.
+            # Test server is HTTP/1.1; default upstream is also HTTP/1.1.
             assert result.stats["http_version"].startswith("HTTP/")
         finally:
             srv.shutdown(); srv.server_close()
@@ -280,6 +280,10 @@ def _fast_retry_env(monkeypatch):
     from claude_hooks.proxy import retry as rt
     monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_BASE_DELAY_S", "0")
     monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_MAX_DELAY_S", "0")
+    # Collapse the surgical conn-error backoff too, so conn-error tests
+    # don't sleep the (sub-second) conn budget.
+    monkeypatch.setenv("CLAUDE_HOOKS_PROXY_CONN_RETRY_BASE_DELAY_S", "0")
+    monkeypatch.setenv("CLAUDE_HOOKS_PROXY_CONN_RETRY_MAX_DELAY_S", "0")
     monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_JITTER", "0")
     rt.reset_state()
 
@@ -345,13 +349,14 @@ class TestForwarderRetry:
     def test_retries_exhausted_reraises(self, monkeypatch):
         """If every attempt raises a connection error, the last
         exception propagates (the server-level handler turns it into a
-        502). Bounded by ``max_attempts`` — the deadline gate is moot
-        because backoff is collapsed to 0."""
+        502). Connection errors are bounded by the SURGICAL conn budget
+        (``CONN_RETRY_MAX_ATTEMPTS``), not the wide 5xx ``MAX_ATTEMPTS``;
+        the deadline gate is moot because backoff is collapsed to 0."""
         import httpx
         from claude_hooks.proxy import forwarder as fwd
 
         _fast_retry_env(monkeypatch)
-        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_RETRY_MAX_ATTEMPTS", "4")
+        monkeypatch.setenv("CLAUDE_HOOKS_PROXY_CONN_RETRY_MAX_ATTEMPTS", "4")
         fwd._reset_client()
 
         calls = {"n": 0}
@@ -368,7 +373,7 @@ class TestForwarderRetry:
                 {"Content-Type": "application/json"},
                 b'{"x":1}', timeout=5.0,
             )
-        # max_attempts=4 → 4 attempts total (no extra "+1").
+        # conn_max_attempts=4 → 4 attempts total (no extra "+1").
         assert calls["n"] == 4
         fwd._reset_client()
 

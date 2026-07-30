@@ -1183,9 +1183,12 @@ event as one JSON object per line. Schema:
 
 Empirical model evaluation lives in:
 
+- [`docs/benchmarks/index.md`](benchmarks/index.md) — the **benchmark
+  index** (start here): links to every family + a metric glossary.
 - [`docs/benchmarks/EVALUATION.md`](benchmarks/EVALUATION.md) —
-  the protocol (run + grade + compare across models)
-- [`docs/benchmarks/`](benchmarks/) — the per-model results.
+  the council-role protocol (run + grade + compare across models)
+- [`docs/benchmarks/council-role-sweeps.md`](benchmarks/council-role-sweeps.md)
+  — the per-model results.
   Seven labels as of 2026-05-07: `kimi-k2.6-cloud`,
   `gemma4-31b-cloud`, `glm-5-1-cloud`, `qwen3-5-cloud`,
   `qwen3-5-397b-cloud`, `minimax-m2-7-cloud`, plus the
@@ -1432,8 +1435,9 @@ If you want to read the code:
 - [`docs/get-advice.md`](get-advice.md) — when one model is plenty
 - [`docs/benchmarks/EVALUATION.md`](benchmarks/EVALUATION.md) —
   evaluation protocol (run + grade + compare)
-- [`docs/benchmarks/index.md`](benchmarks/index.md) — per-label
-  benchmark sweeps
+- [`docs/benchmarks/index.md`](benchmarks/index.md) — the benchmark
+  index (all families + metric glossary); council-role per-label sweeps
+  live in [`council-role-sweeps.md`](benchmarks/council-role-sweeps.md)
 - [`docs/consultants-benchmarks.md`](consultants-benchmarks.md) —
   canonical query set
 - [`docs/consultants-skill-eval-protocol.md`](consultants-skill-eval-protocol.md)

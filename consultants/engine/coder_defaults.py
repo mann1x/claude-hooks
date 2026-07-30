@@ -1,6 +1,8 @@
 """Defaults for the optional coder role (M10), grounded in the
-2026-05-16 M11b skill-eval run (suite v1.0, single-language) and
-the 2026-05-17 M11b-mlang v1.0.1 multi-language delta.
+2026-05-16 M11b skill-eval run (suite v1.0, single-language), the
+2026-05-17 M11b-mlang v1.0.1 multi-language delta, and the
+2026-06-04 ``coder_med`` v1.0 cross-judge run (which set the
+current per-language routing to the neutral-gemini-ladder winners).
 
 The values here are the **recommended** defaults — they're loaded
 by `consultants/config.py` only when a config TOML doesn't override
@@ -35,25 +37,29 @@ from consultants.engine.state_v2 import CoderLanguageRoute
 
 # Legacy single-model recommendation (kept as the fallback when the
 # per-language map has no entry AND no global default is set; matches
-# the 2026-05-16 M11b winner). New per-language routing (task #111)
-# is anchored on the v1.0.1-mlang delta and lives below.
+# the 2026-05-16 M11b winner, re-corroborated as the balanced
+# token/wall-vs-quality efficiency winner by the 2026-06-04 coder_med
+# run). New per-language routing (task #111) is anchored on the
+# coder_med v1.0 neutral-ladder winners and lives below.
 RECOMMENDED_CODER_MODEL: str = "glm-5.1:cloud"
 
 # The date of the most-recent run that informed these defaults.
 # Stamp stays even if the constants don't change — proves the
 # recommendation is current.
-RECOMMENDED_AS_OF: str = "2026-05-17"
+RECOMMENDED_AS_OF: str = "2026-06-04"
 
-# Suite version the recommendation was scored against. The mlang
-# v1.0.1 delta supersedes v1.0 for per-language routing; v1.0 still
-# anchors the single-model fallback above.
-RECOMMENDED_SUITE_VERSION: str = "1.0.1-mlang"
+# Suite version the per-language routing was scored against. The
+# coder_med v1.0 cross-judge run supersedes the v1.0.1-mlang delta
+# for per-language routing; the glm-5.1 single-model fallback +
+# global default route are corroborated by coder_med's efficiency
+# result (glm-5.1 wins balanced token/wall-vs-quality).
+RECOMMENDED_SUITE_VERSION: str = "1.0-med"
 
 # First 8 chars of the suite manifest hash this rec was scored
 # against. If a baseline row claims this suite version but the
 # hash doesn't match, the question content drifted without a
 # version bump — investigate before trusting the score.
-RECOMMENDED_SUITE_HASH_PREFIX: str = "ddef8095"
+RECOMMENDED_SUITE_HASH_PREFIX: str = "0e6ab0fd"
 
 # Qualifying-models list for the v1.0 single-model winner.
 QUALIFYING_MODELS_2026_05_16: tuple[str, ...] = (
@@ -73,6 +79,20 @@ QUALIFYING_MODELS_2026_05_17_MLANG: tuple[str, ...] = (
     "glm-5.1:cloud",
     "kimi-k2.6:cloud",
     "minimax-m2.7:cloud",
+)
+
+# Qualifying-models list for the 2026-06-04 coder_med v1.0 cohort
+# (the 7 models that ran across all 10 problems × 6 languages). The
+# per-language routes below only reference models from this set —
+# note it adds minimax-m3 + nemotron-3-super over the mlang cohort.
+QUALIFYING_MODELS_2026_06_04_MED: tuple[str, ...] = (
+    "deepseek-v4-flash:cloud",
+    "deepseek-v4-pro:cloud",
+    "glm-5.1:cloud",
+    "kimi-k2.6:cloud",
+    "minimax-m2.7:cloud",
+    "minimax-m3:cloud",
+    "nemotron-3-super:cloud",
 )
 
 
@@ -134,40 +154,39 @@ def language_from_path(path: str) -> Optional[str]:
     return LANGUAGE_BY_EXTENSION.get(ext.lower())
 
 
-# Per-language route table — the v1.0.1-mlang winners with the
-# user's explicit overrides (2026-05-17 task #111). ``primary`` is
-# the alg/quality winner per language; ``fallback`` is the
-# second-best avgQ model from the same cohort, so a failover lands
-# on a still-strong-for-that-language candidate rather than a
-# random survivor.
+# Per-language route table — the 2026-06-04 ``coder_med`` v1.0
+# neutral-gemini-ladder winners (head-to-head ranking, model names
+# anonymized + shuffled per question to kill name bias). ``primary``
+# is the per-language ladder winner; ``fallback`` is the ladder
+# runner-up, so a failover lands on the next-strongest model for that
+# language rather than a random survivor.
 #
-# Override basis:
-# - csharp.primary: user override (table avgQ winner; tied for alg)
-# - python.primary: user override (table avgQ winner; tied)
-# - c.primary:      user "pick fastest" (table avgQ winner is pro
-#                   but the alg axis is a 3-way tie at 50%, so the
-#                   user chose glm for cohort consistency + speed)
-# - cpp.primary:    table alg+quality winner (flash; only model
-#                   with any cpp alg-pass)
-# - go.primary:     table avgQ winner (kimi; cohort 0% alg, so
-#                   quality is the only discriminator)
-# - rust.primary:   table avgQ winner (flash)
+# This is a QUALITY-FIRST table: ``kimi-k2.6`` is the primary for 5/6
+# languages (it won the neutral ladder everywhere except cpp). It is
+# also the most token-heavy of the cohort (~3.7× glm-5.1's completion
+# tokens). Operators who want the balanced token/wall-vs-quality pick
+# should override with ``[role.coder].model = "glm-5.1:cloud"`` (the
+# efficiency winner); see ``docs/benchmarks/coder-med-results.md``.
 #
-# Fallback basis: cohort-wide rank #2 for that language's avgQ
-# when not already the primary; pro fills the gap as the
-# cross-language #2 in most rows.
+# Ladder basis (primary = winner / fallback = runner-up, mean rank):
+# - c:      kimi 2.10            / deepseek-v4-pro 3.25
+# - cpp:    deepseek-v4-pro 1.95 / deepseek-v4-flash 3.45
+# - csharp: kimi 2.40           / minimax-m3 2.75
+# - go:     kimi 2.44           / deepseek-v4-pro 2.89
+# - python: kimi 2.89           / deepseek-v4-flash 3.06
+# - rust:   kimi 2.60           / deepseek-v4-pro 2.75
 RECOMMENDED_CODER_ROUTES_BY_LANGUAGE: dict[str, CoderLanguageRoute] = {
-    "c":      CoderLanguageRoute(primary="glm-5.1:cloud",
+    "c":      CoderLanguageRoute(primary="kimi-k2.6:cloud",
                                   fallback="deepseek-v4-pro:cloud"),
-    "cpp":    CoderLanguageRoute(primary="deepseek-v4-flash:cloud",
-                                  fallback="kimi-k2.6:cloud"),
-    "csharp": CoderLanguageRoute(primary="deepseek-v4-pro:cloud",
-                                  fallback="kimi-k2.6:cloud"),
+    "cpp":    CoderLanguageRoute(primary="deepseek-v4-pro:cloud",
+                                  fallback="deepseek-v4-flash:cloud"),
+    "csharp": CoderLanguageRoute(primary="kimi-k2.6:cloud",
+                                  fallback="minimax-m3:cloud"),
     "go":     CoderLanguageRoute(primary="kimi-k2.6:cloud",
                                   fallback="deepseek-v4-pro:cloud"),
-    "python": CoderLanguageRoute(primary="glm-5.1:cloud",
-                                  fallback="kimi-k2.6:cloud"),
-    "rust":   CoderLanguageRoute(primary="deepseek-v4-flash:cloud",
+    "python": CoderLanguageRoute(primary="kimi-k2.6:cloud",
+                                  fallback="deepseek-v4-flash:cloud"),
+    "rust":   CoderLanguageRoute(primary="kimi-k2.6:cloud",
                                   fallback="deepseek-v4-pro:cloud"),
 }
 
@@ -222,6 +241,7 @@ __all__ = [
     "LANGUAGE_BY_EXTENSION",
     "QUALIFYING_MODELS_2026_05_16",
     "QUALIFYING_MODELS_2026_05_17_MLANG",
+    "QUALIFYING_MODELS_2026_06_04_MED",
     "RECOMMENDED_AS_OF",
     "RECOMMENDED_CODER_DEFAULT_ROUTE",
     "RECOMMENDED_CODER_MODEL",

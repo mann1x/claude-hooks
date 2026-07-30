@@ -2088,7 +2088,7 @@ def build_parser() -> argparse.ArgumentParser:
         "coder",
         help=("Manage the coder role's per-language model routing "
               "(primary + fallback per language, plus a global "
-              "default). The map is seeded from the v1.0.1-mlang "
+              "default). The map is seeded from the coder_med v1.0 "
               "bench winners; overrides land here."),
     )
     coder_sub = coder_parser.add_subparsers(
