@@ -79,6 +79,9 @@ class SqliteVecProvider(Provider):
         self._embedder: Optional[Embedder] = None
         self._conn: Optional[sqlite3.Connection] = None
         self._tables_created = False
+        #: (st_dev, st_ino) of the file we opened, so a replacement of
+        #: the database underneath a long-lived handle is detectable.
+        self._db_identity: Optional[tuple] = None
 
     # ------------------------------------------------------------------ #
     # Detection — no MCP server.
@@ -815,14 +818,32 @@ class SqliteVecProvider(Provider):
         return out[:k]
 
     def count(self) -> int:
-        """Return the number of stored memories."""
-        if self._conn is None:
+        """Return the number of stored memories.
+
+        Two bugs used to live in this method, both of which rendered a
+        failure as a legitimate-looking answer:
+
+        * ``if self._conn is None: return 0`` never opened the database,
+          so a freshly-constructed provider reported an empty corpus —
+          visible in the SessionStart status line and the
+          ``sqlite-vec-count`` MCP tool.
+        * The error path returned 0 with no log, making "backend broken"
+          indistinguishable from "nothing stored yet".
+        """
+        try:
+            self._ensure_ready()
+        except Exception as e:
+            log.warning("sqlite_vec count: backend unavailable (%s); "
+                        "reporting 0 — this is NOT an empty corpus", e)
             return 0
         table = _safe_table(self.options.get("table") or "memory")
         try:
-            cur = self._conn.execute(f"SELECT COUNT(*) FROM {table}")
+            cur = self._conn.execute(  # type: ignore[union-attr]
+                f"SELECT COUNT(*) FROM {table}")
             return cur.fetchone()[0]
-        except sqlite3.Error:
+        except sqlite3.Error as e:
+            log.warning("sqlite_vec count on %s failed (%s); reporting 0 — "
+                        "this is NOT an empty corpus", table, e)
             return 0
 
     # ------------------------------------------------------------------ #
@@ -834,6 +855,13 @@ class SqliteVecProvider(Provider):
                 self.options.get("embedder") or "null",
                 self.options.get("embedder_options"),
             )
+        # Same rule as pgvector: a connection object that still exists
+        # but can no longer serve queries must be treated as missing.
+        # Gating the rebuild on `is None` alone leaves a long-lived
+        # process (the consultants daemon, the sqlite-vec MCP server)
+        # holding a dead or stale handle forever.
+        if self._conn is not None and self._connection_is_dead():
+            self._discard_connection()
         if self._conn is None:
             try:
                 import sqlite_vec  # type: ignore
@@ -847,8 +875,67 @@ class SqliteVecProvider(Provider):
             self._conn = sqlite3.connect(str(p))
             self._conn.enable_load_extension(True)
             sqlite_vec.load(self._conn)
+            self._db_identity = self._current_db_identity()
         if not self._tables_created:
             self._create_tables()
+
+    def _current_db_identity(self) -> Optional[tuple]:
+        """``(st_dev, st_ino)`` of the database file, or None.
+
+        Identity rather than path: the path can stay identical while the
+        file behind it is replaced.
+        """
+        db_path = self.server.url or self.options.get("db_path") or ""
+        if not db_path:
+            return None
+        try:
+            st = expand_user_path(db_path).stat()
+            return (st.st_dev, st.st_ino)
+        except OSError:
+            return None
+
+    def _connection_is_dead(self) -> bool:
+        """True when ``self._conn`` can no longer serve *current* data.
+
+        SQLite has no server to restart, so the equivalent failure is
+        different but the consequence is the same silent wrong answer:
+
+        * The handle is closed or the file is unreadable (I/O error on a
+          network mount, corrupted image) — caught by the ping.
+        * **The database file was replaced underneath us** — a restore,
+          a migration that rebuilds the file, or a plain ``mv``. The old
+          handle keeps serving the *old inode* perfectly happily, so
+          every query succeeds and returns vanished data. No error is
+          ever raised, which makes this the more dangerous of the two.
+        """
+        conn = self._conn
+        if conn is None:
+            return True
+        try:
+            conn.execute("SELECT 1").fetchone()
+        except Exception as e:
+            log.warning("sqlite_vec: connection is dead (%s) — reopening", e)
+            return True
+        if self._db_identity is not None:
+            current = self._current_db_identity()
+            if current is not None and current != self._db_identity:
+                log.warning(
+                    "sqlite_vec: database file was replaced "
+                    "(inode %s -> %s) — reopening", self._db_identity, current,
+                )
+                return True
+        return False
+
+    def _discard_connection(self) -> None:
+        """Close and forget the handle so ``_ensure_ready`` rebuilds it."""
+        conn, self._conn = self._conn, None
+        self._tables_created = False
+        self._db_identity = None
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
     def _create_tables(self) -> None:
         """Bring the on-disk schema up to v1.7.0 (idempotent).

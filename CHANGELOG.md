@@ -18,6 +18,51 @@ release with the auto-generated source archive
 
 ### Fixed
 
+- **A Postgres restart permanently broke every long-lived process, and
+  reported it as an empty memory.** Observed on solidpc 2026-07-30 after
+  the container restarted at 00:56 UTC: MCP servers dating from days
+  earlier returned "no results" for every query, while the hooks kept
+  working — the asymmetry that made it hard to see. Two faults combined:
+  1. `_ensure_ready()` rebuilt the connection only `if self._conn is
+     None`. A killed connection is *not* None — it is an object whose
+     server is gone — so the rebuild never fired and the process handed
+     the same corpse to every subsequent call, forever. Hooks were
+     immune only because each hook is a fresh short-lived process.
+  2. Every failure path renders as a legitimate answer: `recall` returns
+     `[]`, `count` returned `0` **with no log at all**. "Backend
+     unreachable" was indistinguishable from "nothing stored".
+
+  `PgvectorProvider` now treats a dead connection as a missing one and
+  reconnects. Detection is a `closed`/`broken` flag check backed by a
+  **socket probe**: psycopg only sets those flags *after* an operation
+  has failed, so the flag alone still burns one request per outage —
+  precisely the request that returns the wrong empty answer. With no
+  query in flight a readable socket means the server sent an
+  `ErrorResponse` or hung up. The probe costs **0.9 µs** on a healthy
+  connection and, unlike issuing `SELECT 1` on every call, opens no
+  transaction, so it cannot perturb transaction state or leave the
+  session idle-in-transaction (#218). Verified live against both a
+  self-killed backend and one terminated externally while idle (where
+  `closed` is still `False` and the flag alone misses it entirely).
+  `count()` now calls `_ensure_ready()` unconditionally and logs
+  whenever it reports 0.
+- **`sqlite_vec` had the same structural bug with a different trigger,
+  plus a worse `count()`.** `count()` began `if self._conn is None:
+  return 0`, so a freshly-constructed provider **always reported an
+  empty corpus without ever opening the database** — visible in the
+  SessionStart status line and the `sqlite-vec-count` MCP tool — and its
+  error path returned 0 silently. SQLite has no server to restart, but
+  the analogous failure is worse because it raises no error at all: when
+  the database file is **replaced** (restore, migration rebuild, plain
+  `mv`), the open handle keeps serving the old inode and every query
+  succeeds while returning vanished data. The provider now detects both
+  a dead handle and a replaced file (by `(st_dev, st_ino)` identity) and
+  reopens.
+- `qdrant` and `memory_kg` are **not affected** — they build a fresh
+  `McpClient` per call over stateless HTTP, so they hold no connection
+  that can go stale. A test asserts they still hold no `self._conn`, so
+  that exemption fails loudly if it ever stops being true.
+
 - **`LlamafileEmbedder` no longer loses a memory when the input overflows
   the context window.** `max_chars` is a *character* cap standing in for
   a token budget, and that substitution has a hidden assumption:
