@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.14.0-WIP** — ~4.4k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.14.0** — ~4.8k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -225,6 +225,39 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > (`--user`/`--project`/`--cwd`). See
 > [`docs/proxy.md`](docs/proxy.md) "Retry / throttle resilience" and
 > [`docs/consultants.md`](docs/consultants.md).
+>
+> v1.14 is a **store-path reliability release**, and its theme is that
+> every bug it fixes rendered a failure as a plausible-looking success.
+> (1) A Postgres restart used to brick every long-lived process
+> permanently: `_ensure_ready` rebuilt the connection only `if
+> self._conn is None`, and a killed connection is not None — it is an
+> object whose server is gone. Recall returned `[]` and `count()`
+> returned `0` **with no log**, so "backend unreachable" was
+> indistinguishable from "nothing stored", and only short-lived hook
+> processes (fresh connection each time) appeared healthy. Both
+> `pgvector` and `sqlite_vec` now detect a dead handle and reconnect;
+> for sqlite that includes a **replaced database file**, which raises no
+> error at all because the old handle keeps serving the old inode.
+> (2) The **single-embed store path** — the dedup search and the write
+> now share one vector via `Provider.embed_for_store()` /
+> `recall_vec()` / `store(vec=)`, which also widens dedup from a
+> 500-character prefix to the full text. Negotiation is zero-config in
+> both directions: a provider opts in by *returning* a vector, and one
+> that doesn't never sees the `vec` keyword at all. (3) `LlamafileEmbedder`
+> shrinks and retries instead of losing a memory when dense content
+> (base64 at 1.35 chars/token) overflows the context window, bounded by
+> a token budget as well as the window because fitting the window but
+> not the clock only trades a fast 400 for a slow timeout. (4)
+> `hnsw.ef_search` 40 → 100, per connection. (5) `CompileRunner`
+> published its completion signal before the diagnostics it implies.
+> (6) New **`scripts/verify_deploy.py`** post-deploy check — it resolves
+> config through the real loader, prints *which* file it read, and then
+> *uses* the backend, because "configured" and "working" are different
+> claims. Note the store block lives in
+> `~/.claude/consultants-config.toml` (user) or
+> `.claude-hooks/consultants.toml` (project), **never** in
+> `claude-hooks.json`. See
+> [`docs/deployment.md`](docs/deployment.md) "Verify".
 
 ---
 
