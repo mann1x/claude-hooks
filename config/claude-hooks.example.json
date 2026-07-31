@@ -185,6 +185,7 @@
     "user_prompt_submit": {
       "enabled": true,
       "min_prompt_chars": 30,
+      "max_query_chars": 3500,
       "include_providers": [
         "qdrant",
         "memory_kg"

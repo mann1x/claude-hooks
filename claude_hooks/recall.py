@@ -9,12 +9,153 @@ calls ``run_recall()`` with its own query and formatting preferences.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
 from claude_hooks.providers import Provider
 from claude_hooks.providers.base import Memory
 
 log = logging.getLogger("claude_hooks.recall")
+
+
+# ---------------------------------------------------------------------- #
+# Query clamp
+# ---------------------------------------------------------------------- #
+# A recall query is spent twice -- once on the embedder, whose cost is
+# linear in length and dwarfs every other step in this pipeline, and once
+# as HyDE's chat prefill. Neither had an upper bound. ``min_prompt_chars``
+# was the only length check anywhere, so a pasted diagnosis or log dump
+# was embedded in full.
+#
+# Measured on solidpc 2026-07-25 against the CPU llamafile embedder:
+#
+#     1 000 chars   1.4 s        16 000 chars  67.6 s
+#     5 000 chars   9.0 s        30 000 chars  ~300 s  (``max_chars``)
+#
+# The UserPromptSubmit hook is capped at 65 s, and the embedder's own
+# timeout is 180 s -- so the embedder never gives up first. A ~15 KB
+# prompt loses the *entire* recall for that turn: Claude Code discards
+# the hook output, and nothing surfaces beyond a timeout notice.
+#
+# 3 500 is sized for the worst of the density range rather than for
+# average prose: ~1 100 tokens of prose at 3.2 chars/token, ~2 600 tokens
+# of base64 at 1.35, both comfortably inside 65 s even on pandorum
+# (~2x slower at identical weights -- an OS/build gap, not hardware).
+DEFAULT_MAX_QUERY_CHARS = 3500
+
+# Why this is not a prefix cut. A long prompt's signal sits at both ends
+# -- the framing at the top, the actual ask at the bottom -- while the
+# bulk in between is usually pasted logs, diffs or JSON whose repetitive
+# boilerplate drags the embedding toward a generic centroid. Dropping the
+# middle is better for recall *quality*, not only for latency, which is
+# the whole reason a query cap is worth doing well.
+_HEAD_SHARE = 0.65          # framing is denser than the closing ask
+_ELLIPSIS = "\n…\n"         # bare marker: "(truncated)" would inject
+                            # English tokens that no stored memory has
+# Boundaries in descending preference. Cutting mid-word leaves a mangled
+# trailing token that is pure noise in the vector.
+_BOUNDARIES = ("\n\n", "\n", ". ", " ")
+_MAX_BACKTRACK = 0.25       # never sacrifice more than this hunting a
+                            # boundary; a minified-JSON prompt has none
+
+# Fenced blocks are squeezed rather than dropped. A pasted traceback is
+# often the entire point of the question, and its identifying line -- the
+# exception, the failing symbol -- is at the top; what follows is frame
+# after frame of boilerplate. Keeping the head preserves the signal and
+# sheds the bulk, where dropping the block outright would lose exactly
+# the string the user wants matched.
+_BLOCK_KEEP_CHARS = 400
+_BLOCK_MIN_SQUEEZE = 600    # below this a block is not the problem
+
+
+def _cut_head(text: str, budget: int) -> str:
+    """Trim ``text`` to at most ``budget``, ending on a natural boundary."""
+    if budget <= 0:
+        return ""
+    if len(text) <= budget:
+        return text
+    window = text[:budget]
+    floor = int(budget * (1 - _MAX_BACKTRACK))
+    for sep in _BOUNDARIES:
+        idx = window.rfind(sep)
+        if idx >= floor:
+            return window[: idx + len(sep)].rstrip()
+    return window.rstrip()
+
+
+def _cut_tail(text: str, budget: int) -> str:
+    """Keep at most ``budget`` trailing chars, starting on a boundary."""
+    if budget <= 0:
+        return ""
+    if len(text) <= budget:
+        return text
+    window = text[-budget:]
+    ceiling = int(budget * _MAX_BACKTRACK)
+    for sep in _BOUNDARIES:
+        idx = window.find(sep)
+        if 0 <= idx <= ceiling:
+            return window[idx + len(sep):].lstrip()
+    return window.lstrip()
+
+
+def _squeeze_fenced_blocks(text: str) -> str:
+    """Shorten long ``` fenced blocks to their opening lines."""
+    out: list[str] = []
+    pos = 0
+    for m in re.finditer(r"```[^\n]*\n.*?(?:```|\Z)", text, re.DOTALL):
+        block = m.group(0)
+        if len(block) <= _BLOCK_MIN_SQUEEZE:
+            continue
+        out.append(text[pos:m.start()])
+        # The cut keeps the opening fence, so the language tag survives.
+        out.append(_cut_head(block, _BLOCK_KEEP_CHARS) + _ELLIPSIS)
+        pos = m.end()
+    if not out:
+        return text
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def clamp_query(query: str, max_chars: int = DEFAULT_MAX_QUERY_CHARS) -> str:
+    """Bound a recall query to ``max_chars``, preserving both ends.
+
+    ``max_chars <= 0`` disables the clamp, matching the convention used
+    by ``_truncate`` and the ``ef_search`` provider option. A query
+    already inside the budget is returned unchanged and untouched --
+    the fast path costs one ``len()``, which matters because this runs
+    on every prompt while an actual clamp is rare.
+    """
+    if max_chars <= 0 or len(query) <= max_chars:
+        return query
+
+    squeezed = _squeeze_fenced_blocks(query)
+    if len(squeezed) <= max_chars:
+        return squeezed
+
+    budget = max_chars - len(_ELLIPSIS)
+    head_budget = int(budget * _HEAD_SHARE)
+    tail_budget = budget - head_budget
+    # head_budget + tail_budget == budget < max_chars <= len(squeezed),
+    # so the two windows provably cannot overlap and duplicate content.
+    clamped = (_cut_head(squeezed, head_budget) + _ELLIPSIS
+               + _cut_tail(squeezed, tail_budget))
+    return clamped if len(clamped) <= max_chars else clamped[:max_chars]
+
+
+def _max_query_chars(hook_cfg: dict) -> int:
+    """Read the knob defensively.
+
+    ``.get(key, default)`` rather than ``or``: a configured ``0`` means
+    "disable", and ``or`` would silently turn that into the default --
+    the same sentinel trap that bit ``ef_search``.
+    """
+    raw = hook_cfg.get("max_query_chars", DEFAULT_MAX_QUERY_CHARS)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        log.warning("invalid max_query_chars %r, using %d",
+                    raw, DEFAULT_MAX_QUERY_CHARS)
+        return DEFAULT_MAX_QUERY_CHARS
 
 
 def run_recall(
@@ -65,6 +206,18 @@ def run_recall(
 
     hyde_enabled = bool(hook_cfg.get("hyde_enabled"))
     hyde_grounded = bool(hook_cfg.get("hyde_grounded", True))
+
+    # --- Step 0: Clamp the query ---
+    # Applied here rather than at either call site so that both consumers
+    # -- the raw embed below and the HyDE prefill in step 2 -- are bounded
+    # by one decision. Doing it per-call-site would leave whichever one
+    # was added next unbounded again.
+    max_query_chars = _max_query_chars(hook_cfg)
+    clamped = clamp_query(query, max_query_chars)
+    if len(clamped) != len(query):
+        log.info("query clamped for recall: %d -> %d chars (max_query_chars=%d)",
+                 len(query), len(clamped), max_query_chars)
+        query = clamped
 
     # --- Step 1: Raw recall (with raw query) ---
     # Port 2 from thedotmack/claude-mem: metadata-gated rerank.

@@ -16,6 +16,51 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed
+
+- **Recall queries are now bounded (`max_query_chars`, default 3500).**
+  Nothing capped the *length* of a recall query: `min_prompt_chars` was
+  the only length check in the pipeline, and neither `max_total_chars`
+  (which bounds the injected **output**) nor `hyde_ground_max_chars`
+  (which bounds the **grounding memories**) touches the prompt. A pasted
+  diagnosis or log dump therefore went to the embedder in full.
+
+  The failure was total and silent. Step 1 of `run_recall` embeds the raw
+  query *before* HyDE is reached, and the embedder's own timeout (180 s)
+  sits well above the `UserPromptSubmit` hook cap (65 s) — so the embedder
+  never gave up first, Claude Code SIGTERMed the hook and discarded the
+  output. The entire recall for that turn was lost, surfacing only as
+  `hook timed out after 65s`. Measured on solidpc against the CPU
+  llamafile embedder: 5 000 chars 9.0 s, 16 000 chars 67.6 s, and the
+  30 000-char embedder `max_chars` ceiling permitted roughly 300 s. So
+  ~15 KB was already fatal on solidpc and ~8 KB on pandorum (~2× slower).
+
+  3 500 is sized for the worst of the density range rather than for
+  average prose: ~1 100 tokens of prose at 3.2 chars/token, ~2 600 tokens
+  of base64 at 1.35, both comfortably inside the cap on either host. The
+  clamp applies once at the top of `run_recall`, so it bounds both
+  consumers of the query — the embed **and** HyDE's chat prefill — rather
+  than one call site that the next addition would silently escape. `0`
+  disables it; the fast path for an ordinary prompt is a single `len()`.
+
+  `clamp_query` is deliberately not `query[:3500]`. A long prompt carries
+  its framing at the top and its actual ask at the bottom with pasted bulk
+  in between, so the clamp keeps **both ends** (65 % head / 35 % tail
+  joined by `…`), cuts on paragraph → line → sentence → word boundaries
+  rather than mid-word (a mangled trailing token is pure noise in the
+  vector), and **squeezes** long fenced blocks to their opening lines
+  instead of dropping them — for "here is the traceback, what is it?" the
+  exception line at the top of the block is the highest-signal string in
+  the prompt, and dropping the block would discard exactly what the user
+  wants matched. Cutting the middle also helps recall *quality*, not only
+  latency: a 20 KB query collapses into one mushy centroid vector whose
+  nearest neighbours drift generic. Against the longest real prompt in
+  the originating session — 46 604 chars — this yields 3 338 chars, about
+  84 s of embed reduced to about 6 s. A clamp logs at INFO so thin recall
+  on a long prompt is explainable. See
+  [`docs/hyde.md`](docs/hyde.md) "The 'recall overhead' term is only
+  bounded by `max_query_chars`".
+
 ## [1.14.0] — 2026-07-30
 
 

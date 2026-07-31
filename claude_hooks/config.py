@@ -90,6 +90,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "user_prompt_submit": {
             "enabled": True,
             "min_prompt_chars": 30,
+            # Upper bound on the *query* (0 disables). Distinct from
+            # max_total_chars, which bounds the injected output.
+            "max_query_chars": 3500,
             "include_providers": ["qdrant", "memory_kg"],
             "max_total_chars": 4000,
             # --- v0.2 features ---
