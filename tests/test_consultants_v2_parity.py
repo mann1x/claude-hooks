@@ -305,27 +305,50 @@ class TestOptInsOffByDefault(unittest.TestCase):
         # ``store`` was handled (scaffold off → validated → M14 on).
         self.assertFalse(self.cfg.tools.git)
 
-    def test_uniform_role_tools_off_by_default(self):
-        # M-B: giving planner / critic / meta_critic / synthesizer /
-        # adversary the researcher's tools changes cost, not
-        # correctness — one LLM call per tool iteration per role per
-        # lane, and critic fans out per lane at the x-tiers. Same gate
-        # discipline as tool_executor: land it off, measure, then flip.
-        self.assertFalse(self.cfg.tools.all_roles)
+    def test_uniform_role_tools_on_by_default(self):
+        # M-B flip history:
+        # - 2026-08-01: landed False on the cost argument (one LLM call
+        #   per tool iteration per role per lane, critic fanning out
+        #   per lane at the x-tiers).
+        # - 2026-08-01: flipped True. Both bench tiers cleared, and the
+        #   cost argument turned out to be backwards —
+        #   benchmarks/consultants/results/2026-08-01/ measured -30%
+        #   prompt / -13% completion at effort=high with
+        #   NON-OVERLAPPING ranges, because a tooled planner shortens
+        #   the researcher loop by more than the other roles add.
+        # Same gate discipline as tool_executor, opposite outcome:
+        # that one was measured and flipped back OFF.
+        self.assertTrue(self.cfg.tools.all_roles)
 
-    def test_default_graph_hands_no_role_any_tools(self):
-        # The knob's runtime consequence. An ungated role must receive
-        # exactly its pre-M-B argument list — not tool_specs=None, but
-        # no tool kwargs at all.
+    def test_default_graph_hands_every_toolable_role_its_tools(self):
+        # The knob's runtime consequence, post-flip. Each toolable role
+        # must receive all three kwargs; a role silently missing them
+        # is the M-B knob being a no-op for that role, which is exactly
+        # how the first live bench read 0 tool calls.
         from consultants.engine.graph import (
             TOOLABLE_ROLES, GraphDeps, _tools_for,
         )
+        from consultants.server.tool_surface import build_tool_surface
+        specs, executor, _reg = build_tool_surface(self.cfg)
         deps = GraphDeps(chat_clients={}, models={}, enabled_roles=(),
-                         cwd="/p", tool_specs=[{"x": 1}],
-                         tool_executor=lambda *a: "")
-        self.assertEqual(deps.tooled_roles, ())
+                         cwd="/p", tool_specs=specs,
+                         tool_executor=executor,
+                         tooled_roles=TOOLABLE_ROLES)
         for role in TOOLABLE_ROLES:
-            self.assertEqual(_tools_for(deps, role), {}, role)
+            got = _tools_for(deps, role)
+            self.assertEqual(sorted(got),
+                             ["cwd", "tool_executor", "tool_specs"], role)
+
+    def test_a_role_without_a_tool_directive_would_be_a_silent_noop(self):
+        # Now that the knob is on by default, a toolable role with no
+        # entry in _ROLE_TOOL_DIRECTIVE gets tools it is never told
+        # about — indistinguishable from the feature not working, and
+        # the exact failure the 2026-08-01 baseline run recorded (0
+        # tool calls across 18 tooled trials).
+        from consultants.engine import council
+        from consultants.engine.graph import TOOLABLE_ROLES
+        for role in TOOLABLE_ROLES:
+            self.assertIn(role, council._ROLE_TOOL_DIRECTIVE, role)
 
     def test_default_permission_level_is_auto(self):
         # M-A: the ladder's cheap rung. If this ever defaulted to an

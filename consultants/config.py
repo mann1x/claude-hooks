@@ -657,13 +657,29 @@ class ToolsConfig:
     #: M-C git history provider (git_history / log / blame / diff / show).
     git: bool = False
     #: M-B: give every role the same tool access, not just the
-    #: researcher. Off by default because it changes cost, not
-    #: correctness: a single-shot role costs one LLM call, a tooled one
-    #: costs one per iteration, and critic fans out per lane at the
-    #: x-tiers — so the multiplier is roles x lanes x iterations. Flip
-    #: it after a measured before/after, the way tool_executor was
-    #: gated on the M11c bench.
-    all_roles: bool = False
+    #: researcher.
+    #:
+    #: Flip history:
+    #: - 2026-08-01, landed False. The cost argument was that a
+    #:   single-shot role costs one LLM call and a tooled one costs one
+    #:   per iteration, with critic fanning out per lane at the
+    #:   x-tiers — multiplier roles x lanes x iterations.
+    #: - 2026-08-01, flipped True after both bench tiers.
+    #:   Tier 1 (critic driven directly against planted-false research,
+    #:   n=72): 100% recall vs 0% untooled, 100% precision, zero silent
+    #:   corrections. Tier 2 (full council, n=3 per arm, paired
+    #:   concurrent): -30% prompt tokens, -13% completion, ranges
+    #:   NON-OVERLAPPING — the off arm's cheapest trial cost more than
+    #:   the on arm's most expensive.
+    #:
+    #: The cost argument was simply wrong, and the reason is worth
+    #: keeping: a tooled *planner* grounds its plan in the code, and
+    #: the researcher then converges in ~2 fewer iterations. A tool
+    #: loop resends its history each iteration, so the iterations
+    #: removed are the most expensive ones. The knob pays for itself
+    #: through the planner, not the critic.
+    #: See benchmarks/consultants/results/2026-08-01/.
+    all_roles: bool = True
     #: Fallback rung for a tool no provider or override names.
     default_level: str = "auto"
     #: Per-tool overrides, ``[tools.permissions]``.
@@ -1278,8 +1294,9 @@ def _render(cfg: ConsultantsConfig, *,
     L.append(f"git = {'true' if cfg.tools.git else 'false'}")
     L.append("# all_roles: give planner / critic / meta_critic /")
     L.append("#   synthesizer / adversary the same tools the researcher")
-    L.append("#   has. Costs one LLM call per tool iteration per role")
-    L.append("#   per lane — measure before flipping this on.")
+    L.append("#   has. On by default since 2026-08-01: measured -30%")
+    L.append("#   prompt / -13% completion tokens at effort=high, and")
+    L.append("#   100% vs 0% detection of false research claims.")
     L.append(f"all_roles = {'true' if cfg.tools.all_roles else 'false'}")
     L.append("# default_level: auto | ask_assistant | ask_human | deny")
     L.append(f"default_level = {_toml_str(cfg.tools.default_level)}")

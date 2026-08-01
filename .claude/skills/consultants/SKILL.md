@@ -924,7 +924,7 @@ Read the `tools` block from `config show`:
 Tool surface
   registry:      on
   git history:   off
-  all roles:     off   (researcher only)
+  all roles:     on    (planner/critic/meta_critic/synth/adversary)
   default rung:  auto
   pinned:        (none)
 ```
@@ -947,16 +947,28 @@ AskUserQuestion the sub-action:
 - **Uniform role access** →
   `config set-tools --all-roles true|false --cwd "$(pwd)"`.
 
-  > By default only the **researcher** can call tools. Turning this on
-  > gives planner, critic, meta_critic, synthesizer and adversary the
-  > same surface — so a critic can `read_file` a citation instead of
-  > taking the researcher's word for it.
+  > planner, critic, meta_critic, synthesizer and adversary get the
+  > same tool surface the researcher has — so a critic can `read_file`
+  > a citation instead of taking the researcher's word for it, and
+  > reports a `CORRECTIONS:` block when the two disagree.
 
-  It ships **off** because it changes cost, not correctness: a
-  single-shot role is one LLM call, a tooled role is one per tool
-  iteration, and critic fans out **per lane** at the x-tiers. Before
-  recommending it at `xhigh`/`xmax`, say plainly that the multiplier is
-  roles × lanes × iterations. At `medium` the cost is modest.
+  It ships **on** since 2026-08-01. It was gated off pending a
+  measurement, on the theory that it changed cost and not correctness;
+  the measurement said the opposite on both counts
+  (`benchmarks/consultants/results/2026-08-01/`):
+
+  - **Cheaper.** −30% prompt / −13% completion at `effort=high`, with
+    non-overlapping ranges across three paired trials. The saving comes
+    from the *planner*: it grounds the plan in the code, and the
+    researcher then converges in ~2 fewer iterations. A tool loop
+    resends its history every iteration, so the iterations removed are
+    the most expensive ones.
+  - **More accurate.** Against research with planted false claims, the
+    tooled critic caught 100% vs 0% untooled, with no false positives.
+
+  If an operator asks to turn it **off**, that is supported and the
+  path is tested — but say what they give up, and that the cost
+  argument for turning it off did not survive measurement.
 
 - **Pin a tool's permission** → AskUserQuestion the tool, then the
   rung, then

@@ -25,7 +25,14 @@ forgetting. Beyond the core:
     researcher → critic → synthesizer) with full per-role
     LLM-message-history persistence in `transcript.db`, so a
     follow-up against a session reopened from disk produces an
-    answer indistinguishable from a still-warm one. Multi-model
+    answer indistinguishable from a still-warm one. **Every role can
+    call tools**, not just the researcher — so the critic verifies a
+    `path:line` instead of taking the researcher's word for it, and
+    reports a `CORRECTIONS:` block when the two disagree. Measured
+    cheaper *and* more accurate than the researcher-only surface
+    (−30% prompt tokens, and 100% vs 0% detection of false research
+    claims — see
+    [`benchmarks/consultants/results/2026-08-01/`](benchmarks/consultants/results/2026-08-01/)). Multi-model
     fan-out at `xmedium`/`xhigh`/`xmax` effort tiers, multi-critic
     consensus with meta-critic combine at `xmax`, synthesizer
     failure-fallback model chain, and a degraded-answer composer

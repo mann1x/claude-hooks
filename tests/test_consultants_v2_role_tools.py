@@ -496,9 +496,13 @@ class TestExtraToolsNote(unittest.TestCase):
 # Config
 # ===================================================================== #
 class TestConfigKnob(unittest.TestCase):
-    def test_all_roles_defaults_off(self):
+    def test_all_roles_defaults_on(self):
+        # Flipped 2026-08-01 on both bench tiers; see the flip history
+        # on ToolsConfig.all_roles. The knob's own tests below still
+        # cover the OFF path, because a per-project config can disable
+        # it and that path must keep working.
         import consultants.config as cc
-        self.assertFalse(cc.ConsultantsConfig().tools.all_roles)
+        self.assertTrue(cc.ConsultantsConfig().tools.all_roles)
 
     def test_round_trips_through_toml(self):
         import tomllib

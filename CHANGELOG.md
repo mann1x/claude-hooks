@@ -16,7 +16,99 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Changed
+
+- **`[tools] all_roles` now defaults to ON** — planner, critic,
+  meta_critic, synthesizer and adversary get the same tool surface the
+  researcher has. It landed OFF pending a measurement, on the theory
+  that it changed cost and not correctness. The measurement said the
+  opposite on both counts
+  ([`benchmarks/consultants/results/2026-08-01/`](benchmarks/consultants/results/2026-08-01/)):
+
+  - **Cheaper.** −30% prompt / −13% completion tokens at
+    `effort=high` across three paired trials, with **non-overlapping**
+    ranges — the off arm's cheapest trial cost more than the on arm's
+    most expensive. The saving comes from the *planner*, not the
+    critic: a tooled planner grounds its plan in the code, and the
+    researcher then converges in ~2 fewer iterations. A tool loop
+    resends its whole history each iteration, so the iterations
+    removed are the most expensive ones.
+  - **More accurate.** Against research carrying planted false claims,
+    the tooled critic caught **100%** vs **0%** untooled (n=72), with
+    100% precision and zero silent corrections.
+
+  Same gate discipline as `tool_executor`, opposite outcome: that one
+  was measured and flipped back off. Turn this off per project with
+  `claude-consultants config set-tools --all-roles false`.
+
 ### Added
+
+- **Tool addendum for tooled roles.** The first live bench recorded
+  **zero** tool calls in 18 tooled trials: the surface was live and the
+  model declined it every time, because each role's system prompt
+  predates the tool surface and describes a job involving no looking.
+  `CRITIC_SYSTEM` was the sharpest case — it frames the job as routing
+  and says "default to ready … each extra round costs another full
+  agent loop", which reads as *investigating is expensive*.
+  `build_tool_addendum()` appends a per-role directive to the system
+  turn, and only when the role is actually handed tools, so an
+  unequipped role is never told about tools it cannot call.
+
+- **`CORRECTIONS:` channel (v1.3 directives).** Roles are told to check
+  **equality, not existence** — a grep that "succeeds" survives both a
+  wrong constant and a wrong line number — and never to correct
+  silently. A discrepancy is reported in a `CORRECTIONS:` block
+  attributed to the `RESEARCHER REPORT (round N)` header the
+  synthesizer also sees. A correction is explicitly *not* grounds for
+  another research round. The channel is wired end to end: the
+  synthesizer honours it, and the **meta-critic** merges every critic's
+  block into its own — without that last hop the feature would work at
+  low effort and silently degrade at exactly the x-tiers running the
+  most lanes.
+
+- **`build_extra_tools_note()`.** `RESEARCHER_SYSTEM` and the tool-plan
+  prompt enumerate their six tools in prose, and a model works from
+  that list rather than the schema array — so enabling the git provider
+  put five tools in the payload the role had effectively been told did
+  not exist. The note names only the *difference*, derived from the
+  live specs.
+
+- **M-B bench** (`benchmarks/consultants/role_tools_bench.py`) — Tier 1
+  drives `critic_node` against a planted-claim corpus; Tier 2 runs a
+  full-council cost A/B with each arm in its own project so the two can
+  run concurrently and cloud latency cannot drift between them.
+
+### Fixed
+
+- **`install.py`: `NameError` on the Windows proxy scheduled-task
+  install path.** `_write_proxy_task_xml` called `tempfile.mkstemp`
+  with no `tempfile` in scope; the file's two other `import tempfile`
+  are function-local to different functions.
+
+- **Dead code with misleading comments.** `graph.py` carried
+  `xauto_active = "xauto" == "xauto"` — always True, never read, with a
+  six-line comment describing gating that really lives in the escalator
+  node's `is_xauto_run` guard (verified: `next_escalation()`
+  short-circuits, the node returns `{}`, and
+  `tests/test_consultants_v2_escalation.py` pins it). Also
+  `pgvector.py` capturing a rowcount delta it never used, and
+  `council.py` tracking `used_model` and never reading it.
+
+- **`.gitignore` anchoring.** `.claude-hooks/consultants/` has an
+  embedded slash, so it only ever matched at the repo root — a council
+  run inside a bench fixture wrote `transcript.db` plus WAL/SHM
+  sidecars into version control's view. Now `**/`-prefixed too.
+
+### Tooling
+
+- **Ruff config** in `pyproject.toml` — `target-version` pinned to the
+  `requires-python` floor and the default `E4/E7/E9/F` selection made
+  explicit rather than inherited from whichever ruff is installed.
+  `line-length = 79` is recorded but `E501` is deliberately *not*
+  selected: ~2700 lines exceed it, so enforcing it today is a style
+  backlog rather than a lint. Repo-wide findings went 472 → 63.
+
+### Added (earlier in this cycle)
 
 - **Composable council tool surface with a permission gate (M-A) + git
   history tools (M-C).** First two milestones of

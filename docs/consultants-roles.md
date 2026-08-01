@@ -17,6 +17,15 @@ opt-in roles — when flipping the default-off bit is worth it.
 | **`coder`**         | **off** | `glm-5.1:cloud` (M11b bench)      | opt-in, all tiers                   | [coder](#coder)             |
 | **`adversary`**     | **off** | global `DEFAULT_MODEL`            | opt-in, all tiers (post-synthesis)  | [adversary](#adversary)     |
 
+**Tool access.** Since 2026-08-01 `[tools] all_roles` defaults to
+**on**, so planner, critic, meta_critic, synthesizer and adversary
+call the same tools the researcher does. Set
+`[tools] all_roles = false` to restore the researcher-only surface —
+that path stays tested, but the cost argument for it did not survive
+measurement (the tooled surface came out **cheaper**: −30% prompt
+tokens at `effort=high`, non-overlapping ranges over three paired
+trials).
+
 "Default" means what a fresh `ConsultantsConfig` produces with no
 TOML overrides. Every role's enabled bit is one TOML line to flip
 in `~/.claude/consultants-config.toml` (user-global) or
@@ -46,8 +55,15 @@ Both opt-in roles also accept `claude-consultants config set-role
 
 **Purpose:** decompose the user's question into a numbered plan of
 1–N concrete investigation steps. Each step names files / paths /
-symbols the researcher should ground in. The planner does NOT
-call tools; it produces a plan only.
+symbols the researcher should ground in.
+
+**The planner calls tools** (since 2026-08-01, `[tools] all_roles`).
+It looks at the code before writing the plan rather than pointing the
+researcher at files inferred from names. This is where the knob's cost
+saving comes from: a grounded plan lets the researcher converge in
+~2 fewer iterations, and since a tool loop resends its whole history
+each iteration, the iterations removed are the most expensive ones.
+Set `[tools] all_roles = false` to restore the plan-only behaviour.
 
 **Why it exists:** without a planner the researcher tends to wander
 across the entire codebase on broad questions. The planner pulls
@@ -167,13 +183,56 @@ researcher for another round, up to the effort-tier round cap.
 Default bias is **toward `ready`** — extra rounds cost a full
 agent loop each (~30-90 s).
 
+**The critic calls tools** (since 2026-08-01, `[tools] all_roles`), so
+it can *check* a claim instead of judging it on plausibility. Three
+things follow, all in the prompt addendum
+(`council.build_tool_addendum`):
+
+- **Verifying is cheap; re-routing is not.** A citation lookup is one
+  tool call, not another research round, so the "extra rounds are
+  expensive" bias above does not apply to checking. A load-bearing
+  `path:line` the critic looked up and could NOT confirm *is* a
+  concrete missing fact.
+- **Equality, not existence.** A `grep` that "succeeds" tells you the
+  name exists and nothing more — a wrong constant and a wrong line
+  number both survive it. When a report asserts a value, a line, a
+  signature or a return, the critic reads it and compares.
+- **Never correct silently.** When what the critic read differs from
+  what a report claimed, that discrepancy is reported, not quietly
+  patched:
+
+  ```
+  DECISION: ready
+
+  CORRECTIONS:
+  - report 1: claimed `MAX_ATTEMPTS = 5` — actual `15` (`retry.py:3`)
+  ```
+
+  Attributed by the `RESEARCHER REPORT (round N)` header the
+  synthesizer also sees. The block is **omitted** when nothing was
+  corrected (not `CORRECTIONS: none`), and a correction is explicitly
+  *not* grounds for another research round — `ready` **with** a
+  corrections block is the intended cheap outcome. Before this, a
+  critic that fetched the right line would silently substitute it and
+  call the report accurate, and the synthesizer went on relaying the
+  wrong cite.
+
+Measured against research carrying planted false claims: **100%**
+caught tooled vs **0%** untooled (n=72), 100% precision, zero silent
+corrections. See
+[`benchmarks/consultants/results/2026-08-01/`](../benchmarks/consultants/results/2026-08-01/).
+
 **When it's enabled:** medium / high / max / xmedium / xhigh /
 xmax. Skipped at `low` effort (a `synthesizer_self_critic`
 variant takes over inside the synthesizer to save the round).
 
 **Meta-critic at xmax:** at the `xmax` tier the role fans out
 across multiple critic models and a `meta_critic` consolidates
-their verdicts. See `META_CRITIC_SYSTEM` in
+their verdicts. Its consolidated verdict **replaces** the individual
+critics', so it is instructed to merge every critic's `CORRECTIONS:`
+block into its own — without that hop the corrections channel would
+work at low effort and silently degrade at exactly the tier running
+the most lanes. See `META_CRITIC_SYSTEM` in
 `consultants/engine/council.py`.
 
 **Dynamic dial (M4):** the critic's strictness is a live knob,
@@ -196,6 +255,14 @@ gemma / glm rotation as the researcher.
 ---
 
 ## synthesizer
+
+**Tool access + corrections.** The synthesizer can verify a citation
+before relaying it, and when the critic's verdict carries a
+`CORRECTIONS:` block each line **supersedes** the researcher report it
+names — relay the corrected value, never the superseded one, and never
+average between them. It does not re-verify a corrected fact and does
+not mention that a correction happened; the user wants the answer, not
+the council's process.
 
 **Purpose:** write the final user-visible answer from the
 planner's plan, researcher's reports, and critic's verdict.
@@ -400,6 +467,15 @@ Routes can be overridden per-language at
 ---
 
 ## adversary
+
+**Tool access.** Until 2026-08-01 this role was asked to catch
+"fabricated or mis-attributed `path:line` citations" while having no
+way to check one — it could only judge whether a claim was *reported*,
+never whether the report was *true*. It now resolves the answer's
+load-bearing cites itself. A cite that does not resolve, or resolves
+to something other than what the answer claims, is exactly the
+fabrication this role exists to surface; a claim it verified and found
+correct is **not** a refutation.
 
 **Status:** default **disabled**. Operator opts in for a
 post-synthesis refutation pass.

@@ -848,13 +848,67 @@ hand-editable if you prefer.
 | `store.ttl.jitter_pct` | store | #215 cohort spread — at write time `expires_at += ttl * uniform(-jitter, +jitter)`. Stops N sessions from expiring on the same reaper tick. Default 0.1 (±10 %). |
 | `store.distillation.enabled` | store | Master switch for Caliber-style summarization at expiry. M14 default = `true`. |
 | `store.distillation.model` | store | Primary distiller LLM. Default `gemma4:31b-cloud` (M11c-2 tool_executor winner). |
-| `store.distillation.fallback_models` | store | Tried in order on primary failure. Default `["glm-5.1:cloud"]`. |
+| `store.distillation.fallback_models` | store | Tried in order on primary failure. Default `["glm-5.2:cloud"]`. |
 | `store.distillation.sweep_interval_seconds` | store | Reaper cadence. Minimum 30 s; default 3600 (1 h). |
 | `store.distillation.min_entries_per_distillation` | store | Cost gate — research groups below this delete without an LLM call. Default 3. |
 | `store.distillation.max_session_entries` | store | Per-prompt truncation cap. Default 50 (~30 k tokens at `gemma4:31b-cloud`'s 32 k ctx). |
 | `store.distillation.max_groups_per_sweep` | store | #215 cap on **successful** distillations per tick. Cost-gate skips + tool_results deletes don't burn the budget. Default 5; `0` = uncapped. |
 | `store.distillation.pace_seconds_between_distillations` | store | #215 inter-call sleep (0.5 s sliced for shutdown). Default 5 s. |
 | `coder_limits.max_file_bytes` / `max_total_bytes` / `max_files` | role | Sandbox caps for the opt-in `coder` role. Defaults 50 KB / 1 MB / 16. |
+| `tools.enabled` | tools | Master switch for the composable tool registry. Default `true`. `false` restores the fixed pre-registry surface. |
+| `tools.all_roles` | tools | Give planner / critic / meta_critic / synthesizer / adversary the same tools the researcher has. **Default `true` since 2026-08-01** — measured cheaper *and* more accurate (see below). |
+| `tools.git` | tools | Read-only git history tools: `git_history` ("when did this regress?", wraps `git log -L`), `git_log` / `git_blame` / `git_diff` / `git_show`. Default `false` — safe, but five more schemas on every prompt on every lane. |
+| `tools.default_level` | tools | Fallback permission rung for a tool no provider or override names: `auto` / `ask_assistant` / `ask_human` / `deny`. Default `auto`. |
+| `tools.permissions` | tools | Per-tool rung overrides, `[tools.permissions]`. |
+
+### Tool surface — why `all_roles` is on
+
+Until 2026-08-01 only the **researcher** could call tools. Every other
+role reasoned about the researcher's text without any way to check it —
+which is why the CitationLinter had to exist at all.
+
+`all_roles` landed **off**, gated on a measurement, on the theory that
+it changed cost and not correctness. Both halves of that theory were
+wrong. The record is in
+[`benchmarks/consultants/results/2026-08-01/`](../benchmarks/consultants/results/2026-08-01/).
+
+**It is cheaper.** Three paired trials at `effort=high`, each arm in
+its own project, both arms of a trial run concurrently so cloud latency
+could not drift between them:
+
+| metric | all_roles off | all_roles on | delta |
+|---|---|---|---|
+| prompt tokens | 186,309 `[158,794–210,185]` | 129,514 `[102,216–149,424]` | **−30%** |
+| completion tokens | 12,160 `[11,664–12,952]` | 10,535 `[9,562–11,365]` | **−13%** |
+| LLM calls | 18 | 19 | +8% |
+| wall | 1,922 s | 1,938 s | +0.8% |
+
+The ranges **do not overlap** — the off arm's cheapest trial cost more
+than the on arm's most expensive. The saving comes from the *planner*,
+not the critic: a tooled planner (1.0 → 3.3 calls) grounds its plan in
+the code, and the researcher then converges in ~2 fewer iterations
+(14.7 → 12.7). A tool loop resends its whole history each iteration, so
+the iterations removed are the most expensive ones.
+
+**It is more accurate — when there is something to catch.** Driving the
+critic directly against research carrying planted false claims (n=72):
+100% caught tooled vs 0% untooled, 100% precision, zero silent
+corrections. A separate full-council run with a deliberately stale
+design doc found *no* correctness difference, and the reason is worth
+knowing: the researcher read the stale doc and cross-checked it against
+the code anyway. The researcher has tools in both arms, so a stale doc
+next to readable code does not produce wrong research. **The
+correctness benefit is real but conditional** — it needs research that
+is actually wrong, which a tooled researcher rarely produces.
+
+**Turning it off** is supported and tested:
+
+```bash
+claude-consultants config set-tools --all-roles false --cwd "$(pwd)"
+```
+
+Worth knowing before you do: the cost argument for turning it off did
+not survive measurement.
 
 ### CLI
 
@@ -898,7 +952,7 @@ claude-consultants config set-store-ttl --refresh-on-read false --jitter-pct 0.0
 
 # Distillation knobs (M14 sweep + #215 pacing)
 claude-consultants config set-store-distillation --enabled true \
-    --model gemma4:31b-cloud --add-fallback-model glm-5.1:cloud
+    --model gemma4:31b-cloud --add-fallback-model glm-5.2:cloud
 claude-consultants config set-store-distillation --sweep-interval-seconds 1800 \
     --min-entries-per-distillation 5
 claude-consultants config set-store-distillation --max-groups-per-sweep 3 \
@@ -908,6 +962,14 @@ claude-consultants config set-store-distillation --max-groups-per-sweep 3 \
 claude-consultants config coder set python --primary glm-5.1:cloud \
     --fallback kimi-k2.6:cloud
 claude-consultants config coder set-default --primary glm-5.1:cloud
+
+# Tool surface (registry / uniform role access / git history / rungs)
+claude-consultants config set-tools --all-roles false   # researcher-only
+claude-consultants config set-tools --git true          # git history tools
+claude-consultants config set-tools --default-level auto
+claude-consultants config set-tools --permission write_file ask_assistant
+claude-consultants config set-tools --clear-permission write_file
+claude-consultants config set-tools --enabled false     # pre-registry surface
 
 # Discover what's available
 claude-consultants config list-models
