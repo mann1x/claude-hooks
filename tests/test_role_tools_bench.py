@@ -620,6 +620,36 @@ class TestCostArmConfig(unittest.TestCase):
         off["tools"].pop("all_roles"), on["tools"].pop("all_roles")
         self.assertEqual(off, on)
 
+    def test_the_config_RESOLVES_to_the_intended_pipeline(self):
+        """Assert through the loader, not against the file text.
+
+        The first version used ``[roles.coder]``; the key is
+        ``[role.coder]``, singular. An unknown top-level table raises
+        nothing — the block was silently ignored and the coder ran in
+        an arm documented as excluding it. Reading the file back would
+        have "passed" just as happily, because the file said exactly
+        what I meant. Only the loader knows what it means.
+        """
+        import consultants.config as cc
+        from benchmarks.consultants.role_tools_bench import write_arm_config
+        write_arm_config(self.project, all_roles=True, effort="high")
+        cfg = cc.load_config(self.project)
+        enabled = set(cc.enabled_roles(cfg))
+        self.assertNotIn("coder", enabled)
+        self.assertNotIn("tool_executor", enabled)
+        for role in ("planner", "researcher", "critic", "synthesizer"):
+            self.assertIn(role, enabled, role)
+        self.assertTrue(cfg.tools.all_roles)
+
+    def test_all_roles_resolves_per_arm(self):
+        """The one variable under test has to survive the loader too."""
+        import consultants.config as cc
+        from benchmarks.consultants.role_tools_bench import write_arm_config
+        write_arm_config(self.project, all_roles=False, effort="high")
+        self.assertFalse(cc.load_config(self.project).tools.all_roles)
+        write_arm_config(self.project, all_roles=True, effort="high")
+        self.assertTrue(cc.load_config(self.project).tools.all_roles)
+
     def test_is_idempotent(self):
         from benchmarks.consultants.role_tools_bench import write_arm_config
         a = write_arm_config(self.project, all_roles=True, effort="high")
