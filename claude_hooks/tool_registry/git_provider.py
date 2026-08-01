@@ -83,6 +83,13 @@ def _run_git(args: list[str], cwd: str) -> str:
         proc = subprocess.run(
             ["git", "-C", cwd, *args],
             capture_output=True, text=True,
+            # git emits UTF-8 regardless of platform, but ``text=True``
+            # decodes with the locale codepage — cp1252 on a stock
+            # Windows box, which dies on the first em dash in a commit
+            # message. Pin the encoding, and never let a decode error
+            # take down a read-only history query: a mojibake byte in
+            # one author name is not worth losing the whole log.
+            encoding="utf-8", errors="replace",
             timeout=TIMEOUT_SECONDS, check=False,
         )
     except FileNotFoundError:

@@ -414,6 +414,32 @@ class TestGitProvider(unittest.TestCase):
     def _run(self, tool, **args):
         return self.p.execute(tool, json.dumps(args), self.cwd)
 
+    def test_git_output_is_decoded_as_utf8_not_the_locale_codepage(self):
+        """Windows-only failure, found on pandorum 2026-08-01.
+
+        ``text=True`` decodes with the locale codepage — cp1252 on a
+        stock Windows box — and this repo's own commit messages are
+        full of em dashes, so ``git log`` raised UnicodeDecodeError on
+        byte 0x8f before it returned a line. Linux never reproduces it
+        because the locale is UTF-8 there, which is exactly why it
+        needs a test that does not depend on the platform.
+        """
+        import inspect
+
+        from claude_hooks.tool_registry import git_provider
+        src = inspect.getsource(git_provider._run_git)
+        self.assertIn('encoding="utf-8"', src)
+        # errors="replace" matters as much as the encoding: a single
+        # mojibake byte in one author name must not lose the whole log.
+        self.assertIn('errors="replace"', src)
+
+    def test_non_ascii_commit_subjects_survive_a_log(self):
+        """The behavioural half — the repo's history contains em
+        dashes, so this exercises the decode path for real."""
+        out = self._run("git_log", max_count=40)
+        self.assertNotIn("error:", out.split("\n")[0])
+        self.assertTrue(out.strip())
+
     # -- the composed tool, which is the point of the milestone ------- #
     def test_history_finds_the_commit_that_added_a_symbol(self):
         out = self._run("git_history", path="claude_hooks/recall.py",
