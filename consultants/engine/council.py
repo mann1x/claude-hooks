@@ -2742,7 +2742,6 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
     text: Optional[str] = None
     pt = ct = 0
     last_exc: Optional[Exception] = None
-    used_model: str = model
     for attempt_idx, try_model in enumerate(models_to_try):
         try:
             text, pt, ct = _role_turn(
@@ -2751,7 +2750,6 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                 tool_specs=tool_specs, tool_executor=tool_executor,
                 cwd=cwd,
             )
-            used_model = try_model
             if attempt_idx > 0:
                 log.warning(
                     "synthesizer fell back from %s to %s on attempt %d/%d",

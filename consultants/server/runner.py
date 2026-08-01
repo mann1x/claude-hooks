@@ -30,19 +30,16 @@ def make_runner(*, ollama_base_url: str):
     """
     # Lazy imports — none of these are present in the main test env.
     from claude_hooks.allowed_roots import (
-        discover_allowed_roots,
-        discover_allowed_roots_with_display,
         render_for_log,
     )
-    from claude_hooks.get_advice.chat_client import ChatClient, make_agent_chat_client
+    from claude_hooks.get_advice.chat_client import make_agent_chat_client
     from claude_hooks.caliber_proxy.prompt import build_grounding_messages
     from consultants.server.tool_surface import build_tool_surface
     from consultants.engine.graph import (
         TOOLABLE_ROLES, GraphDeps, build_council_graph,
     )
-    from consultants.engine.recorder import MessageRecorder, RecorderMeta
     from consultants.engine.trace import (
-        Tracer, TracedChat, traced_tool, traced_node,
+        Tracer, TracedChat, traced_tool,
     )
     # #214: Default to an in-memory checkpointer so the M9 control
     # surface (state / cancel / inject / pause / resume) works in
@@ -517,19 +514,16 @@ def make_follow_up_runner(*, ollama_base_url: str):
     parent was reaped between completion and follow-up).
     """
     from claude_hooks.allowed_roots import (
-        discover_allowed_roots,
-        discover_allowed_roots_with_display,
         render_for_log,
     )
-    from claude_hooks.get_advice.chat_client import ChatClient, make_agent_chat_client
+    from claude_hooks.get_advice.chat_client import make_agent_chat_client
     from claude_hooks.caliber_proxy.prompt import build_grounding_messages
     from consultants.server.tool_surface import build_tool_surface
     from consultants.engine.graph import (
         TOOLABLE_ROLES, GraphDeps, build_follow_up_graph,
     )
-    from consultants.engine.recorder import MessageRecorder, RecorderMeta
     from consultants.engine.trace import (
-        Tracer, TracedChat, traced_tool, traced_node,
+        Tracer, TracedChat, traced_tool,
     )
 
     def run_follow_up(state, runner_input: dict) -> None:

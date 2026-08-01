@@ -47,7 +47,6 @@ from typing import Any, Literal, Optional
 
 from consultants.engine.state_v2 import (
     latest_confidence,
-    time_remaining_s,
 )
 
 log = logging.getLogger("consultants.engine.escalation")

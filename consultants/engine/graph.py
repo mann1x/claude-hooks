@@ -31,10 +31,31 @@ from __future__ import annotations
 import logging
 import operator
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Callable, Optional, TypedDict
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    Callable,
+    Optional,
+    TypedDict,
+)
+
+if TYPE_CHECKING:
+    # The CouncilStateV2 schema below refers to these by quoted
+    # forward-ref so the module stays importable without pulling in
+    # state_v2 at load time (see the note on ``tool_plan_item``). The
+    # quotes alone leave the names genuinely undefined — a type checker
+    # cannot resolve them and ``get_type_hints()`` would raise — so
+    # bind them here, where the cost is zero at runtime.
+    from consultants.engine.state_v2 import (  # noqa: F401
+        CoderArtifact,
+        CoderTaskItem,
+        Doc,
+        ToolPlanItem,
+        ToolResult,
+    )
 
 from consultants.engine import council
-from consultants.config import ROLES
 
 
 # ----------------------- state schema --------------------------- #
@@ -1385,15 +1406,10 @@ def build_council_graph(deps: GraphDeps,
     # at session start; the escalator node short-circuits to {}
     # (no mutation) when state.effort != "xauto", so wiring it
     # unconditionally is safe and avoids a topology-time branch.
-    xauto_active = "xauto" == (
-        # cfg.effort isn't directly visible here, but the deps
-        # carries it indirectly via state at run time. We always
-        # wire the node when there's a critic; the node itself
-        # honors the is_xauto_run guard.
-        # (Could be plumbed via deps for a topology-time check,
-        # but the runtime guard is cheaper and equivalent.)
-        "xauto"  # placeholder — actual gating is at the node body
-    )
+    # (There was a ``xauto_active = "xauto" == "xauto"`` placeholder
+    # here — always True, never read. The gating it described really
+    # does live in the node body's is_xauto_run guard, so the variable
+    # was documentation pretending to be code.)
     use_escalator = ("critic" in enabled) and "researcher" in enabled
     if use_escalator:
         sg.add_node(

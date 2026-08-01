@@ -31,9 +31,8 @@ import os
 import statistics
 import sys
 import time
-from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Optional
 
 from benchmarks.consultants.harness import (
     HARNESS_VERSION,
@@ -46,7 +45,6 @@ from benchmarks.consultants.harness import (
     load_suite_manifest,
 )
 from benchmarks.consultants.stall_capture import (
-    CallTiming,
     TimingCaptureChat,
     aggregate_calls,
 )

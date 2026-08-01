@@ -1149,7 +1149,6 @@ def _kg_add_observations_unlocked(
                 payload.append((eid, c, _content_hash(c), str(v)))
             if not payload:
                 return 0
-            before = cur.rowcount
             cur.executemany(
                 f"INSERT INTO {obs_table} (entity_id, content, content_hash, embedding) "
                 f"VALUES (%s, %s, %s, %s) "

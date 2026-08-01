@@ -38,7 +38,6 @@ Tests live in ``tests/test_consultants_v2_control_routes.py``.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 from typing import TYPE_CHECKING, Any, Optional

@@ -25,7 +25,6 @@ gone (e.g. after a service restart).
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import threading
@@ -48,14 +47,9 @@ log = logging.getLogger("consultants.server")
 # (app imports control_routes at app-build time).
 from consultants.server.control import (  # noqa: E402
     Injection,
-    INJECT_STATUS_APPLIED,
     INJECT_STATUS_FAILED,
     INJECT_STATUS_PENDING,
-    INJECT_STATUS_REJECTED,
-    ROUTED_BEST_EFFORT_CAP_REACHED,
-    ROUTED_IN_PLACE,
     ROUTED_QUEUED,
-    ROUTED_REWOUND_TO_RESEARCHER,
 )
 
 

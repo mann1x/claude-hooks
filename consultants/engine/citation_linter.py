@@ -66,11 +66,10 @@ from __future__ import annotations
 
 import ast
 import logging
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Optional, Sequence
 
 # How far back from a cite to scan the answer for a "claimed symbol"
 # referenced in backticks. 80 chars covers natural-language patterns
