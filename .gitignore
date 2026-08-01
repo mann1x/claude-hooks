@@ -106,6 +106,7 @@ benchmarks/consultants/results/**/*
 # that, and a superseded number with no note beside it is worse than
 # no number.
 !benchmarks/consultants/results/**/README.md
+!benchmarks/consultants/results/**/NOTES.md
 !benchmarks/consultants/results/**/report-by-language.md
 !benchmarks/consultants/results/**/smoke-report.md
 !benchmarks/consultants/results/**/quota.md
