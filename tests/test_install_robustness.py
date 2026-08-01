@@ -22,6 +22,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -44,6 +45,13 @@ def install_mod():
         "install", repo_root / "install.py",
     )
     mod = importlib.util.module_from_spec(spec)
+    # Register BEFORE exec: install.py is ``from __future__ import
+    # annotations``, so ``@dataclasses.dataclass`` resolves its string
+    # annotations through ``sys.modules[cls.__module__]``. Without this
+    # the whole file errors at fixture setup unless some earlier test
+    # module happened to ``import install`` first — a collection-order
+    # dependency that made this file unrunnable on its own.
+    sys.modules.setdefault("install", mod)
     spec.loader.exec_module(mod)  # type: ignore[union-attr]
     return mod
 
@@ -646,6 +654,210 @@ class TestSyncConsultantsServiceMode:
         out = capsys.readouterr().out
         assert "consultants env python not found" in out
         assert "claude-consultants config set-service-mode" in out
+
+
+# ----------------------- service-mode drift (2026-08-01) -------- #
+#
+# pandorum ran smart-start for weeks while its
+# ~/.claude/consultants-config.toml still said "always-on", and every
+# deploy left it that way. Two compounding causes:
+#
+#   1. install.py resolved the mode from the MIRROR
+#      (config/claude-hooks.json hooks.consultants.smart_start.enabled)
+#      and never read the TOML the operator actually edits with
+#      `claude-consultants config set-service-mode`. So a mode set
+#      through the documented CLI was invisible to the installer and
+#      got written back to the stale value on the next deploy.
+#   2. All of the mode handling — drift detection, the prompt, the
+#      TOML sync — sat behind the "Refresh /consultants engine deps?
+#      [y/N]" gate, which a routine deploy answers no to. Nothing
+#      self-healed.
+#
+# The fix reads the TOML directly and reconciles the mirror to it,
+# before the gate.
+
+class TestReadUserConsultantsServiceMode:
+    """``_read_user_consultants_service_mode`` — a stdlib, env-free
+    read of ``[service].mode`` from the user-global consultants TOML."""
+
+    def _write(self, tmp_path: Path, body: str) -> Path:
+        p = tmp_path / "consultants-config.toml"
+        p.write_text(body, encoding="utf-8")
+        return p
+
+    def test_reads_smart_start(self, install_mod, tmp_path):
+        p = self._write(tmp_path,
+                        'topology = "star"\n\n'
+                        '[service]\nmode = "smart-start"\nhttp_port = 38095\n')
+        assert install_mod._read_user_consultants_service_mode(p) \
+            == "smart-start"
+
+    def test_reads_always_on(self, install_mod, tmp_path):
+        p = self._write(tmp_path, '[service]\nmode = "always-on"\n')
+        assert install_mod._read_user_consultants_service_mode(p) \
+            == "always-on"
+
+    def test_missing_file_is_none(self, install_mod, tmp_path):
+        assert install_mod._read_user_consultants_service_mode(
+            tmp_path / "absent.toml") is None
+
+    def test_unknown_mode_is_none(self, install_mod, tmp_path):
+        # A typo must read as "no opinion" so the caller keeps the
+        # mirror rather than registering a task for a mode that has no
+        # task.
+        p = self._write(tmp_path, '[service]\nmode = "frobnicate"\n')
+        assert install_mod._read_user_consultants_service_mode(p) is None
+
+    def test_missing_service_table_is_none(self, install_mod, tmp_path):
+        p = self._write(tmp_path, 'topology = "star"\neffort = "high"\n')
+        assert install_mod._read_user_consultants_service_mode(p) is None
+
+    def test_mode_key_in_another_table_is_not_picked_up(
+            self, install_mod, tmp_path):
+        # ``[coder] mode = ...`` is a different knob entirely; a naive
+        # whole-file regex would return it.
+        p = self._write(
+            tmp_path,
+            '[coder]\nmode = "smart-start"\n\n'
+            '[service]\nmode = "always-on"\n')
+        assert install_mod._read_user_consultants_service_mode(p) \
+            == "always-on"
+
+    def test_unparseable_toml_falls_back_to_the_scan(
+            self, install_mod, tmp_path):
+        # Hand-edited file with a syntax error further down: tomllib
+        # raises, the scoped scan still finds the mode. Losing the
+        # mode over an unrelated typo would resurrect the drift.
+        p = self._write(
+            tmp_path,
+            '[service]\nmode = "smart-start"\n\n'
+            '[store]\nthis is not toml\n')
+        assert install_mod._read_user_consultants_service_mode(p) \
+            == "smart-start"
+
+
+class TestReconcileConsultantsServiceMode:
+    """``_reconcile_consultants_service_mode`` — the TOML wins, and the
+    JSON mirror is rewritten to match."""
+
+    @pytest.fixture
+    def toml_at(self, install_mod, tmp_path, monkeypatch):
+        """Point the reconciler at a temp TOML; return a writer."""
+        p = tmp_path / "consultants-config.toml"
+
+        def _write(mode: str | None) -> Path:
+            if mode is not None:
+                p.write_text(f'[service]\nmode = "{mode}"\n',
+                             encoding="utf-8")
+            return p
+
+        monkeypatch.setattr(install_mod, "_user_consultants_config_path",
+                            lambda: p)
+        return _write
+
+    def _cfg(self, smart_enabled: bool) -> dict:
+        return {"hooks": {"consultants": {
+            "smart_start": {"enabled": smart_enabled}}}}
+
+    def test_toml_smart_start_overrides_always_on_mirror(
+            self, install_mod, tmp_path, toml_at):
+        # The pandorum reproducer, in the direction that bit: the
+        # operator set smart-start via the CLI, the mirror still says
+        # always-on.
+        toml_at("smart-start")
+        cfg = self._cfg(False)
+        cfg_path = tmp_path / "claude-hooks.json"
+        assert install_mod._reconcile_consultants_service_mode(
+            cfg, cfg_path, dry_run=False) == "smart-start"
+        assert cfg["hooks"]["consultants"]["smart_start"]["enabled"] is True
+        # Persisted, not just mutated in memory — the next deploy reads
+        # the file, not this dict.
+        on_disk = json.loads(cfg_path.read_text(encoding="utf-8"))
+        assert on_disk["hooks"]["consultants"]["smart_start"]["enabled"] \
+            is True
+
+    def test_toml_always_on_overrides_smart_start_mirror(
+            self, install_mod, tmp_path, toml_at):
+        toml_at("always-on")
+        cfg = self._cfg(True)
+        cfg_path = tmp_path / "claude-hooks.json"
+        assert install_mod._reconcile_consultants_service_mode(
+            cfg, cfg_path, dry_run=False) == "always-on"
+        assert cfg["hooks"]["consultants"]["smart_start"]["enabled"] is False
+
+    def test_agreement_is_a_no_op(self, install_mod, tmp_path, toml_at,
+                                  capsys):
+        toml_at("always-on")
+        cfg = self._cfg(False)
+        cfg_path = tmp_path / "claude-hooks.json"
+        assert install_mod._reconcile_consultants_service_mode(
+            cfg, cfg_path, dry_run=False) == "always-on"
+        # No rewrite, no drift banner — the common case must stay quiet.
+        assert not cfg_path.exists()
+        assert "drift" not in capsys.readouterr().out
+
+    def test_no_toml_leaves_the_mirror_alone(
+            self, install_mod, tmp_path, toml_at):
+        toml_at(None)  # never written
+        cfg = self._cfg(True)
+        cfg_path = tmp_path / "claude-hooks.json"
+        assert install_mod._reconcile_consultants_service_mode(
+            cfg, cfg_path, dry_run=False) is None
+        assert cfg["hooks"]["consultants"]["smart_start"]["enabled"] is True
+        assert not cfg_path.exists()
+
+    def test_missing_consultants_block_gets_created(
+            self, install_mod, tmp_path, toml_at):
+        toml_at("smart-start")
+        cfg: dict = {}
+        cfg_path = tmp_path / "claude-hooks.json"
+        assert install_mod._reconcile_consultants_service_mode(
+            cfg, cfg_path, dry_run=False) == "smart-start"
+        assert cfg["hooks"]["consultants"]["smart_start"]["enabled"] is True
+
+    def test_dry_run_reports_but_does_not_write(
+            self, install_mod, tmp_path, toml_at, capsys):
+        toml_at("smart-start")
+        cfg = self._cfg(False)
+        cfg_path = tmp_path / "claude-hooks.json"
+        assert install_mod._reconcile_consultants_service_mode(
+            cfg, cfg_path, dry_run=True) == "smart-start"
+        assert cfg["hooks"]["consultants"]["smart_start"]["enabled"] is False
+        assert not cfg_path.exists()
+        assert "dry-run" in capsys.readouterr().out
+
+    def test_unwritable_mirror_warns_and_still_returns_the_mode(
+            self, install_mod, tmp_path, toml_at, capsys):
+        toml_at("smart-start")
+        cfg = self._cfg(False)
+        # A directory where the file should be → OSError on write.
+        cfg_path = tmp_path / "wedged"
+        cfg_path.mkdir()
+        assert install_mod._reconcile_consultants_service_mode(
+            cfg, cfg_path, dry_run=False) == "smart-start"
+        assert "could not write" in capsys.readouterr().out
+
+    def test_reconciled_mirror_drives_the_non_interactive_prompt(
+            self, install_mod, tmp_path, toml_at):
+        # The end-to-end property: after reconciliation, the mode a
+        # --non-interactive deploy resolves is the operator's TOML
+        # value. Pre-fix this returned the stale mirror and the deploy
+        # wrote it back over the TOML.
+        toml_at("smart-start")
+        cfg = self._cfg(False)
+        install_mod._reconcile_consultants_service_mode(
+            cfg, tmp_path / "claude-hooks.json", dry_run=False)
+        assert install_mod._prompt_consultants_service_mode(
+            cfg, non_interactive=True) == "smart-start"
+
+    def test_reconcile_runs_before_the_refresh_gate(self, install_mod):
+        # Structural pin for cause (2): every mode-handling call must
+        # stay ABOVE the "Refresh /consultants engine deps?" prompt,
+        # because a routine deploy answers no and returns early.
+        import inspect
+        src = inspect.getsource(install_mod._install_consultants)
+        assert src.index("_reconcile_consultants_service_mode") \
+            < src.index("Refresh /consultants engine deps?")
 
 
 # ----- #237: install.py audit (2026-05-21) ----------------------------- #

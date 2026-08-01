@@ -2513,14 +2513,139 @@ def _restart_claude_hooks_daemon() -> None:
               f"~/.claude/claude-hooks-daemon.log")
 
 
+#: The consultants engine's own config file. This is the file the
+#: **operator** edits — directly, via ``claude-consultants config
+#: set-service-mode``, or via the ``/consultants config`` menu — and
+#: the only one the running engine reads. ``config/claude-hooks.json``'s
+#: ``hooks.consultants.smart_start.enabled`` is a *mirror* of
+#: ``[service].mode`` here, maintained for the installer's own
+#: task-registration and restart logic.
+def _user_consultants_config_path() -> Path:
+    return Path.home() / ".claude" / "consultants-config.toml"
+
+
+def _read_user_consultants_service_mode(
+        path: Optional[Path] = None) -> Optional[str]:
+    """Return ``[service].mode`` from the user-global consultants TOML.
+
+    ``None`` when the file is absent, unreadable, or holds a mode we
+    don't recognise — every caller treats that as "no opinion" and
+    falls back to the installer-side mirror.
+
+    Deliberately stdlib-and-direct rather than going through the
+    consultants env's ``load_config`` (see
+    :func:`_read_consultants_config_service_mode`): the service mode
+    decides which *host-wide* task/unit gets registered, so the
+    user-global file is the right layer to read — a per-project
+    ``.claude-hooks/consultants.toml`` override must not change which
+    service this host runs. It also has to work before (and without)
+    the consultants env existing.
+    """
+    p = path or _user_consultants_config_path()
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    mode: Optional[str] = None
+    try:
+        import tomllib
+    except ImportError:  # py3.10 — no stdlib TOML reader
+        tomllib = None  # type: ignore[assignment]
+    if tomllib is not None:
+        try:
+            svc = tomllib.loads(text).get("service") or {}
+            if isinstance(svc, dict):
+                mode = svc.get("mode")
+        except Exception:
+            mode = None
+    if mode is None:
+        # Fallback: scan the ``[service]`` table only, so a ``mode =``
+        # key from some other section can't be mistaken for this one.
+        import re
+        table = re.search(r"^\[service\]\s*$(.*?)(?=^\[|\Z)", text,
+                          re.M | re.S)
+        if table:
+            m = re.search(r'^\s*mode\s*=\s*"([^"]+)"', table.group(1), re.M)
+            if m:
+                mode = m.group(1)
+    return mode if mode in ("always-on", "smart-start") else None
+
+
+def _reconcile_consultants_service_mode(
+        cfg: dict, cfg_path: Path, *, dry_run: bool) -> Optional[str]:
+    """Adopt the engine TOML's ``[service].mode`` into the installer's
+    JSON mirror, and return the reconciled mode.
+
+    The 2026-08 pandorum bug: the operator sets the mode with
+    ``claude-consultants config set-service-mode`` (or the
+    ``/consultants config`` menu), which writes the TOML and *only* the
+    TOML. install.py read the mirror in ``config/claude-hooks.json``,
+    never the TOML, so the next deploy resolved the stale mirror value,
+    registered the task for it, and wrote that value straight back over
+    the operator's choice — a silent revert on every deploy, with the
+    repair path (``_detect_consultants_config_drift`` + the mode
+    prompt + the TOML sync) sitting *behind* the "Refresh /consultants
+    engine deps? [y/N]" gate that a routine deploy answers no to.
+
+    Resolution rule: **the TOML wins.** It is the operator-facing knob
+    and the only file the engine itself reads; the mirror exists to
+    serve the installer. Reconciling here — before the refresh gate,
+    before the mode prompt — means a skipped refresh and a
+    ``--non-interactive`` deploy both keep the operator's choice
+    instead of overwriting it.
+
+    Returns ``None`` when the TOML has no usable opinion (fresh host,
+    unreadable file); callers then fall back to the mirror as before.
+    """
+    toml_mode = _read_user_consultants_service_mode()
+    if toml_mode is None:
+        return None
+    mirror_mode = _detect_consultants_service_mode(cfg)
+    if toml_mode == mirror_mode:
+        return toml_mode
+
+    print(f"    [drift] {_user_consultants_config_path().name} says "
+          f"service mode = {toml_mode!r}; the installer's mirror in "
+          f"config/claude-hooks.json said {mirror_mode!r}.")
+    print(f"            Adopting {toml_mode!r} — the engine's own file "
+          f"is authoritative. Change it with "
+          f"`claude-consultants config set-service-mode <mode>`.")
+    if dry_run:
+        print("    [dry-run] Would update hooks.consultants.smart_start"
+              ".enabled to match.")
+        return toml_mode
+
+    smart = (cfg.setdefault("hooks", {})
+                .setdefault("consultants", {})
+                .setdefault("smart_start", {}))
+    smart["enabled"] = (toml_mode == "smart-start")
+    try:
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(json.dumps(cfg, indent=2) + "\n",
+                            encoding="utf-8")
+    except OSError as e:
+        print(f"    [warn] could not write the service-mode mirror to "
+              f"{cfg_path}: {e}")
+    return toml_mode
+
+
 def _detect_consultants_service_mode(cfg: dict) -> str:
     """Determine the currently-configured consultants service mode.
 
     Reads ``hooks.consultants.smart_start.enabled`` from
-    ``config/claude-hooks.json`` (the canonical installer-side
-    record). Returns ``"smart-start"`` if enabled, ``"always-on"``
-    otherwise — matching the default service-mode prompt branch in
-    ``_setup_consultants_engine``.
+    ``config/claude-hooks.json`` — the installer-side *mirror*, not
+    the source of truth. Returns ``"smart-start"`` if enabled,
+    ``"always-on"`` otherwise — matching the default service-mode
+    prompt branch in ``_setup_consultants_engine``.
+
+    The authoritative value is ``[service].mode`` in the engine's own
+    ``~/.claude/consultants-config.toml``;
+    :func:`_reconcile_consultants_service_mode` runs first and brings
+    the mirror in line with it, so by the time anything calls this the
+    two agree. Read the mirror rather than the TOML directly here
+    because every caller already holds ``cfg``, and because the mirror
+    is what the Windows task/port lookup was built around.
 
     Used by the post-install restart logic so it talks to the RIGHT
     schtasks task + port, not the always-on defaults. Pre-#223 the
@@ -6115,6 +6240,17 @@ def _install_consultants(cfg: dict, cfg_path: Path, *,
         print(f"      {consultants_py}")
     else:
         print(f"    {CONSULTANTS_ENV_NAME} env not found.")
+
+    # Service-mode reconciliation runs BEFORE the refresh gate below.
+    # A routine deploy answers "n" to "Refresh deps?" (the pip install
+    # is slow), and every piece of mode handling — the drift detector,
+    # the prompt, the TOML sync — used to sit behind that gate. So a
+    # host whose mode was set with `claude-consultants config
+    # set-service-mode` kept the mirror it started with, and the next
+    # deploy that *did* go through the gate wrote the stale mirror back
+    # over the operator's choice. See
+    # :func:`_reconcile_consultants_service_mode`.
+    _reconcile_consultants_service_mode(cfg, cfg_path, dry_run=dry_run)
 
     # Decide whether to (re)install. In non-interactive mode, only
     # update the existing env; never create a new one without consent.

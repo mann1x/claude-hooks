@@ -317,6 +317,23 @@ claude-consultants config set-service-mode smart-start
 The CLI prints an exact follow-up command (re-run install.py to
 install/uninstall the service unit, then restart the daemon).
 
+**Which file owns the mode.** `[service].mode` in
+`~/.claude/consultants-config.toml` is the single source of truth —
+the engine reads it, and `set-service-mode` (and the `/consultants
+config` menu) writes it. `hooks.consultants.smart_start.enabled` in
+`config/claude-hooks.json` is a *mirror* install.py keeps for its own
+task-registration and restart logic; you never edit it by hand. Every
+install run reconciles the mirror to the TOML before it does anything
+else, including on a `--non-interactive` deploy and on a run where you
+decline the "Refresh /consultants engine deps?" prompt. If the two ever
+disagree the installer prints a `[drift]` line saying which value it
+adopted.
+
+Before 2026-08-01 the installer resolved the mode from the mirror and
+never read the TOML, so a mode set with `set-service-mode` was reverted
+by the next deploy that got past the refresh prompt — pandorum ran
+smart-start for two months with a config file that said `always-on`.
+
 ---
 
 ## Effort tiers

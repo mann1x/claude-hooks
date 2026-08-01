@@ -80,6 +80,39 @@ release with the auto-generated source archive
 
 ### Fixed
 
+- **Consultants service mode was reverted by every deploy.** The mode
+  has two records: `[service].mode` in
+  `~/.claude/consultants-config.toml`, which the engine reads and
+  `claude-consultants config set-service-mode` writes, and
+  `hooks.consultants.smart_start.enabled` in
+  `config/claude-hooks.json`, which install.py uses to pick the task to
+  register and the port to health-check. install.py only ever read the
+  second one, so a mode set through the documented CLI was invisible to
+  it and got written back to the stale value on the next deploy — and
+  the repair path (drift detector, mode prompt, TOML sync) sat *behind*
+  the "Refresh /consultants engine deps? [y/N]" gate that a routine
+  deploy answers no to, so nothing self-healed either. pandorum ran
+  smart-start for two months with a config file that said `always-on`.
+
+  `_reconcile_consultants_service_mode()` now adopts the TOML's value
+  into the mirror at the top of the consultants section, before the
+  refresh gate and before the prompt — the TOML wins, because it is the
+  operator-facing knob and the only file the engine itself reads. It
+  reads the file directly (stdlib, scoped to the `[service]` table,
+  with a scan fallback if `tomllib` chokes on an unrelated hand-edit)
+  so it works without the consultants env, and reads the *user-global*
+  file specifically: which service a host registers is a host-wide
+  decision that a per-project `.claude-hooks/consultants.toml` must not
+  change.
+
+- **`tests/test_install_robustness.py` could not run on its own.** Its
+  `install_mod` fixture didn't register the module in `sys.modules`
+  before executing it, and install.py is `from __future__ import
+  annotations`, so `@dataclasses.dataclass` had no module namespace to
+  resolve its string annotations against. All 76 tests errored at setup
+  unless an alphabetically-earlier test module had already done `import
+  install` — passing in the full suite, failing in isolation.
+
 - **`install.py`: `NameError` on the Windows proxy scheduled-task
   install path.** `_write_proxy_task_xml` called `tempfile.mkstemp`
   with no `tempfile` in scope; the file's two other `import tempfile`
