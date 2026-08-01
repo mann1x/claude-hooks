@@ -5,14 +5,21 @@ Three runs, same model (`gemma4:31b-cloud`), 3 trials × 6 questions ×
 are the evidence for *why* the third is the number, not because they
 are alternative results.
 
-| dir | suite | recall (un→tooled) | precision (tooled) | tool calls | what changed |
-|---|---|---|---|---|---|
-| `role-tools-tier1` | v1.0 | 0.0% → 6.7% | 20.0% | **0** | baseline — no prompt addendum |
-| `role-tools-tier1-addendum` | v1.0 | 13.3% → 60.0% | 69.2% | 32 | addendum added |
-| `role-tools-tier1-v1.1` | v1.1 | 0.0% → 73.3% | 78.6% | 28 | corpus cite errors fixed |
-| `role-tools-tier1-v1.2` | v1.2 | 6.7% → **60.0%** | **100.0%** | 32 | unscorable controls dropped |
+| dir | suite | recall (un→tooled) | precision | silent fixes | tool calls | what changed |
+|---|---|---|---|---|---|---|
+| `role-tools-tier1` | v1.0 | 0.0% → 6.7% | 20.0% | — | **0** | baseline — no prompt addendum |
+| `role-tools-tier1-addendum` | v1.0 | 13.3% → 60.0% | 69.2% | — | 32 | addendum added |
+| `role-tools-tier1-v1.1` | v1.1 | 0.0% → 73.3% | 78.6% | — | 28 | corpus cite errors fixed |
+| `role-tools-tier1-v1.2` | v1.2 | 6.7% → 60.0% | 100.0% | — | 32 | unscorable controls dropped |
+| `role-tools-tier1-v1.3` | v1.3 | 0.0% → 66.7%\* | 100.0% | **0** | 35 | equality + no-silent-correction directives |
+| `role-tools-tier1-v1.3-confirm` | v1.3 | 0.0% → **100.0%** | **100.0%** | **0** | 35 | confirming sample, corrected scorer |
 
-**`role-tools-tier1-v1.2` is the citable result.**
+**`role-tools-tier1-v1.3-confirm` is the citable result.**
+
+\* `v1.3`'s `report.md` is kept as produced, by the pre-fix scorer. Its
+own `trials.jsonl` re-scores to 100.0% under the corrected rule below —
+that offline re-score is what prompted the confirming run, and the two
+independent samples agree.
 
 ## Run 1 — the knob did nothing
 
@@ -58,7 +65,96 @@ Both defects are now enforced by tests
 `test_no_true_token_shares_a_sentence_with_a_false_one`) because
 hand-auditing is exactly what missed them.
 
-## The v1.2 result
+## Run 4 (v1.3) — equality, and the silent-correction channel
+
+v1.2's misses were not random. The tooled critic verified **existence**
+and stopped: it grepped the symbol, found it, and called
+`MAX_ATTEMPTS = 5` accurate against a file saying 15. Worse, on
+`hard-02` it fetched the right line, wrote *"`should_retry` is defined
+at `retry.py:14`"*, and still called the report accurate — the report
+had cited `retry.py:1`. It looked, got the right answer, and kept it to
+itself while the synthesizer relayed the wrong cite.
+
+That is strictly worse than not looking: the evidence was in hand and
+discarded, and the council paid for the tool call. So v1.3 adds two
+things to the tooled-role directives:
+
+1. **Check equality, not existence.** A grep that "succeeds" survives
+   both a wrong constant and a wrong line number.
+2. **Never silently correct.** A discrepancy is a finding, reported in
+   a `CORRECTIONS:` block attributed to the `RESEARCHER REPORT (round
+   N)` header — the same label the synthesizer sees. A correction is
+   explicitly *not* grounds for another research round; emitting
+   `ready` **with** a corrections block is the intended cheap outcome.
+
+The channel is wired end to end, because a block that any hop drops is
+the same wrong cite reaching the user: the synthesizer is told a
+correction supersedes the report it names, and the **meta-critic** is
+told to merge every critic's block into its own. That last one matters
+because at the x-tiers the meta-critic's verdict *replaces* the
+individual critics' — without it the feature would work at low effort
+and silently degrade at exactly the tier running the most lanes.
+
+### A scorer change, disclosed
+
+The first v1.3 run scored 66.7% recall while `easy-02` and `hard-02` —
+the two questions that had been failing — emitted correct
+`CORRECTIONS` blocks in 3/3 trials each. The oracle was scoring the
+*intended* behaviour as a miss: a row reads "claimed `retry.py:1` —
+actual `retry.py:14`", which contains no doubt word anywhere near the
+token.
+
+So the scorer now counts a falsehood named inside a `CORRECTIONS`
+block as caught. Changing a scorer after seeing results deserves
+suspicion, so: the rule is applied **symmetrically** — a *true* claim
+quoted inside the block counts against precision exactly as a flag
+would — and it replaces a proxy signal (doubt-word proximity) with a
+direct one (the block means dispute by definition). `v1.3-confirm` is
+an independent sample run after the change, and it agrees.
+
+## The v1.3 result (`v1.3-confirm`)
+
+```
+                     untooled    tooled
+recall                   0.0%    100.0%
+precision                 n/a    100.0%
+false positives             0         0
+silent fixes                0         0
+tool calls                  0        35
+completion tokens        1246      1857   (+49%)
+wall (s)                 44.3      87.7
+```
+
+15/15 planted falsehoods caught, every question, both samples:
+
+| question | v1.3 | v1.3-confirm | CORRECTIONS |
+|---|---|---|---|
+| easy-01-fabricated-file | 3/3 | 3/3 | — |
+| easy-02-wrong-constant | 1/3 → 3/3 re-scored | **3/3** | 3/3 |
+| medium-01-nonexistent-symbol | 3/3 | 3/3 | — |
+| medium-02-all-true (control) | 0 flags | 0 flags | — |
+| hard-01-mixed | 3/3 | 3/3 | 1/3 |
+| hard-02-line-drift | 0/3 → 3/3 re-scored | **3/3** | 3/3 |
+
+Corrections appear exactly where they should: on the two questions
+whose falsehood is a wrong *value* or a wrong *line*. The three
+non-existence questions produce flags rather than corrections, which is
+right — there is no corrected value to name.
+
+### Against the rubric
+
+| threshold | value | result |
+|---|---|---|
+| `min_delta_over_untooled` | 0.30 | **+1.00** ✅ |
+| `precision_floor` | 0.80 | **1.00** ✅ |
+| `recall_floor` | 0.70 | **1.00** ✅ |
+| `silent_fix_ceiling` | 0 | **0** ✅ |
+
+Cost: +49% completion tokens for one role at one lane (v1.2 was +57%,
+so the longer directive did not cost more output — it redirected it).
+Tier 2 remains the arm that should decide the default.
+
+## The v1.2 result (superseded)
 
 ```
                      untooled    tooled

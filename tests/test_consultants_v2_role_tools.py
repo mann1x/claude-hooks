@@ -324,6 +324,66 @@ class TestToolAddendum(unittest.TestCase):
         self.assertIn("concrete", d)
         self.assertIn("not another research round", d)
 
+    def test_verifying_roles_are_told_to_check_equality(self):
+        """The v1.2 bench's coherent failure: the tooled critic verified
+        *existence* and stopped. It grepped the symbol, found it, and
+        called a claim of `MAX_ATTEMPTS = 5` accurate against a file
+        saying 15 — a grep that 'succeeds' survives both a wrong
+        constant and a wrong line number."""
+        for role in ("critic", "adversary"):
+            d = council._ROLE_TOOL_DIRECTIVE[role]
+            self.assertIn("EQUALITY, NOT EXISTENCE", d, role)
+
+    def test_critic_and_adversary_are_told_not_to_silently_correct(self):
+        """Worse than a miss: on hard-02 the critic fetched the right
+        line, wrote it down, and still called the report accurate. The
+        correction never left the model, and the synthesizer kept
+        relaying the wrong cite."""
+        for role in ("critic", "adversary"):
+            self.assertIn("silently correct",
+                          council._ROLE_TOOL_DIRECTIVE[role].lower(), role)
+
+    def test_critic_correction_contract_is_attributable(self):
+        """'Something was wrong' is not actionable downstream. The
+        block names the report it corrects, using the header the critic
+        and the synthesizer both see."""
+        d = council._ROLE_TOOL_DIRECTIVE["critic"]
+        self.assertIn("CORRECTIONS:", d)
+        self.assertIn("RESEARCHER REPORT (round N)", d)
+        self.assertIn("report N: claimed", d)
+
+    def test_a_correction_does_not_trigger_another_research_round(self):
+        """A resolved discrepancy is not a missing fact. Without this
+        the critic reroutes on every off-by-one and the council loops
+        on questions it has already answered."""
+        d = council._ROLE_TOOL_DIRECTIVE["critic"]
+        self.assertIn("NOT grounds for `needs_more_research`", d)
+
+    def test_synthesizer_is_told_to_honour_corrections(self):
+        """The other half of the channel. A correction the synthesizer
+        ignores is the same wrong cite reaching the user, having cost
+        an extra tool call to discover."""
+        d = council._ROLE_TOOL_DIRECTIVE["synthesizer"]
+        self.assertIn("CORRECTIONS:", d)
+        self.assertIn("supersedes", d)
+
+    def test_meta_critic_carries_corrections_forward(self):
+        """The x-tier hole. In multi-critic mode the meta-critic's
+        consolidated verdict REPLACES the individual critics', so a
+        correction it drops is lost before the synthesizer sees it —
+        the feature would work at low effort and silently degrade at
+        exactly the tier that runs the most lanes."""
+        d = council._ROLE_TOOL_DIRECTIVE["meta_critic"]
+        self.assertIn("CORRECTIONS:", d)
+        self.assertIn("REPLACES", d)
+
+    def test_correction_contract_is_consistent_across_the_chain(self):
+        """Producer, consolidator and consumer must name the same
+        block, or the channel silently drops at a hop."""
+        for role in ("critic", "meta_critic", "synthesizer"):
+            self.assertIn("CORRECTIONS:", council._ROLE_TOOL_DIRECTIVE[role],
+                          role)
+
     def test_adversary_directive_addresses_the_verify_gap(self):
         """ADVERSARY_SYSTEM asks it to catch 'fabricated or
         mis-attributed path:line citations' while giving it no way to

@@ -109,6 +109,14 @@ class DetectQuestion:
     research: str
     planted_false: tuple[str, ...]
     planted_true: tuple[str, ...]
+    #: Tokens that appear ONLY in the correct version of a claim — the
+    #: true value the research got wrong (``15`` where it said ``5``),
+    #: or the true line (``retry.py:14`` where it said ``:1``). Their
+    #: presence in a verdict is proof the critic looked and got the
+    #: right answer; whether it then *said so* is the silent-correction
+    #: measurement. Empty for questions whose falsehood is a pure
+    #: non-existence, where there is no corrected value to name.
+    correction_tokens: tuple[str, ...] = ()
 
     @property
     def is_control(self) -> bool:
@@ -166,6 +174,9 @@ def load_detect_questions(suite_dir: Path = SUITE_DIR) -> list[DetectQuestion]:
             planted_true=tuple(
                 x.strip() for x in sec.get("PLANTED_TRUE", "").splitlines()
                 if x.strip()),
+            correction_tokens=tuple(
+                x.strip() for x in
+                sec.get("CORRECTION_TOKENS", "").splitlines() if x.strip()),
         ))
     return qs
 
@@ -196,6 +207,51 @@ def flagged(verdict: str, token: str) -> bool:
         start = i + len(tok)
 
 
+_CORRECTIONS_RE = re.compile(r"^\s*CORRECTIONS\s*:", re.MULTILINE)
+
+
+def has_corrections_block(verdict: str) -> bool:
+    """Whether the verdict declares corrections in the agreed shape.
+
+    The v1.2 run showed the critic fetching the right line, silently
+    substituting it, and calling the report accurate — the correction
+    happened inside the model and never reached the synthesizer, which
+    went on relaying the wrong value. Detecting the block is how we
+    tell "it corrected and told us" from "it corrected and didn't".
+    """
+    if not verdict:
+        return False
+    # ``CORRECTIONS: none`` is explicitly not the contract — the block
+    # is omitted when nothing was corrected — so treat it as absent
+    # rather than crediting a model that wrote the header and no rows.
+    for m in _CORRECTIONS_RE.finditer(verdict):
+        tail = verdict[m.end():m.end() + 40].strip().lower()
+        if not tail.startswith("none"):
+            return True
+    return False
+
+
+def corrections_block_text(verdict: str) -> str:
+    """The text of the CORRECTIONS block, or ``""``.
+
+    Scoring needs this because the block is a *structured* declaration
+    and the doubt-word heuristic cannot read it. A correct row reads
+    "claimed `retry.py:1` — actual `retry.py:14`": no doubt word
+    anywhere near the token, so the proximity oracle called three
+    perfect catches misses. Inside the block, naming a claim IS
+    doubting it — that is what the block means.
+    """
+    if not verdict:
+        return ""
+    m = _CORRECTIONS_RE.search(verdict)
+    if not m:
+        return ""
+    tail = verdict[m.end():]
+    if tail.strip().lower().startswith("none"):
+        return ""
+    return tail
+
+
 @dataclass
 class DetectTrial:
     """One (question × arm × trial_idx) Tier-1 result.
@@ -217,6 +273,12 @@ class DetectTrial:
     caught: list = field(default_factory=list)      # planted-false flagged
     missed: list = field(default_factory=list)      # planted-false not flagged
     false_positives: list = field(default_factory=list)  # planted-true flagged
+    #: Looked it up, got the right answer, did not flag the wrong one.
+    #: The failure the v1.3 directive pass targets: worse than a plain
+    #: miss, because the evidence was in hand and thrown away.
+    silent_fixes: list = field(default_factory=list)
+    #: Verdict carried a CORRECTIONS block naming what it changed.
+    corrections_reported: bool = False
     verdict_chars: int = 0
     #: The verdict itself. The oracle is keyword-based and undercounts,
     #: so the report tells the reader to check transcripts on a close
@@ -369,11 +431,33 @@ def run_detect_trial(q: DetectQuestion, *, arm: str, trial_idx: int,
         t.prompt_tokens += int(getattr(turn, "prompt_tokens", 0) or 0)
         t.completion_tokens += int(getattr(turn, "completion_tokens", 0) or 0)
 
+    # A falsehood named inside the CORRECTIONS block is caught, and
+    # caught through the *preferred* channel: the critic resolved it
+    # rather than routing it back for another research round. Scoring
+    # only the doubt-word phrasing would mark the intended behaviour a
+    # failure and push the next directive pass the wrong way.
+    block = corrections_block_text(verdict)
     for tok in q.planted_false:
-        (t.caught if flagged(verdict, tok) else t.missed).append(tok)
+        if flagged(verdict, tok) or tok.lower() in block.lower():
+            t.caught.append(tok)
+        else:
+            t.missed.append(tok)
     for tok in q.planted_true:
-        if flagged(verdict, tok):
+        # A true claim quoted inside the block IS being contradicted,
+        # so it counts against precision exactly as a flag would.
+        if flagged(verdict, tok) or tok.lower() in block.lower():
             t.false_positives.append(tok)
+
+    t.corrections_reported = has_corrections_block(verdict)
+    # A silent fix requires evidence of BOTH halves: the correct value
+    # is present (so it looked and got it right) and nothing was
+    # flagged (so it kept that to itself). Missing the claim entirely
+    # is a plain miss and is already counted as one.
+    if t.missed and not t.corrections_reported:
+        low = verdict.lower()
+        for tok in q.correction_tokens:
+            if tok.lower() in low:
+                t.silent_fixes.append(tok)
     return t
 
 
@@ -399,6 +483,9 @@ def summarize(trials: list[DetectTrial]) -> dict:
             "recall": (caught / planted) if planted else None,
             "false_positives": fps,
             "precision": (caught / flags) if flags else None,
+            "silent_fixes": sum(len(t.silent_fixes) for t in rows),
+            "corrections_reported": sum(
+                1 for t in rows if t.corrections_reported),
             "tool_calls": sum(t.tool_calls for t in rows),
             "prompt_tokens": sum(t.prompt_tokens for t in rows),
             "completion_tokens": sum(t.completion_tokens for t in rows),
@@ -426,25 +513,36 @@ def render_report(summary: dict, trials: list[DetectTrial]) -> str:
         f"| {pct(t.get('precision'))} |",
         f"| false positives | {u.get('false_positives')} "
         f"| {t.get('false_positives')} |",
+        f"| silent fixes (looked, knew, didn't say) | "
+        f"{u.get('silent_fixes')} | {t.get('silent_fixes')} |",
+        f"| trials reporting CORRECTIONS | {u.get('corrections_reported')} "
+        f"| {t.get('corrections_reported')} |",
         f"| tool calls | {u.get('tool_calls')} | {t.get('tool_calls')} |",
         f"| completion tokens | {u.get('completion_tokens')} "
         f"| {t.get('completion_tokens')} |",
         f"| wall (s) | {u.get('wall_s')} | {t.get('wall_s')} |",
         "",
-        "Recall here is a **lower bound**: the oracle scores a catch only",
-        "when the verdict names the fabricated token near a doubt word, so",
-        "a critic that describes the problem without naming it reads as a",
-        "miss. Read transcripts before acting on a close call.",
+        "Recall is a **lower bound**. A catch is scored two ways: the",
+        "verdict names the fabricated token near a doubt word, or names",
+        "it inside a `CORRECTIONS:` block (where naming a claim *is*",
+        "disputing it). A critic that describes the problem without",
+        "naming the token still reads as a miss. The block rule counts",
+        "symmetrically — a *true* claim quoted inside it scores as a",
+        "false positive — so it is not a one-way loosening.",
+        "Read transcripts before acting on a close call.",
         "",
         "## Per question",
         "",
-        "| question | arm | caught | missed | false pos | tools |",
-        "|---|---|---|---|---|---|",
+        "| question | arm | caught | missed | false pos | silent | corr |"
+        " tools |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for tr in trials:
         lines.append(
             f"| {tr.question_id} | {tr.arm} | {len(tr.caught)} "
             f"| {len(tr.missed)} | {len(tr.false_positives)} "
+            f"| {len(tr.silent_fixes)} "
+            f"| {'y' if tr.corrections_reported else '-'} "
             f"| {tr.tool_calls} |")
     return "\n".join(lines) + "\n"
 

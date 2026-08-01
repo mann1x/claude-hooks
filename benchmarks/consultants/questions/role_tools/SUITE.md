@@ -1,6 +1,6 @@
 ---
 suite: role_tools
-suite_version: "1.2"
+suite_version: "1.3"
 released: 2026-08-01
 manifest:
   - easy-01-fabricated-file
@@ -13,6 +13,7 @@ rubric:
   recall_floor: 0.70
   precision_floor: 0.80
   min_delta_over_untooled: 0.30
+  silent_fix_ceiling: 0
   tie_breaker: completion_tokens
 ---
 
@@ -49,6 +50,44 @@ floor while failing the precision floor is a **fail**.
 | `recall_floor` | 0.70 | Below this the tooled critic misses more planted falsehoods than it catches at the hard tier, and the CitationLinter already covers the easy ones. |
 | `precision_floor` | 0.80 | One false alarm in five is the most a synthesizer can absorb before it starts ignoring the critic. |
 | `min_delta_over_untooled` | 0.30 | The floor that matters. An untooled critic already catches some fabrications by prior knowledge; only the *delta* is what the tokens buy. `tool_executor` passed its absolute floors and still lost the live A/B. |
+| `silent_fix_ceiling` | 0 | A silent fix is worse than a miss and must not be traded against recall. |
+
+## Silent correction (v1.3)
+
+The v1.2 run caught the tooled critic doing something a recall number
+cannot express. On `hard-02` it fetched the right line, wrote *"…and
+`should_retry` is defined at `retry.py:14`"*, and then called the
+report accurate — the report had cited `retry.py:1`. It looked, it got
+the right answer, and it kept it to itself. The synthesizer went on
+relaying the wrong cite.
+
+That is strictly worse than not looking: the evidence was in hand and
+thrown away, and the council paid for the tool call. It also breaks
+attribution — nobody downstream can tell which researcher was wrong.
+
+`## CORRECTION_TOKENS` names the *correct* fact for questions whose
+falsehood is a wrong value or a wrong line (`15` where the research
+said `5`; `retry.py:14` where it said `:1`). Presence in a verdict is
+evidence the critic looked and got it right. A trial counts as a
+**silent fix** when a correction token is present, the planted
+falsehood was NOT flagged, and no `CORRECTIONS:` block was emitted.
+
+Questions whose falsehood is pure non-existence (`retry_state.py`,
+`reset_breaker`, `half_open`) have no correction token — there is no
+right value to name, so the failure mode does not apply.
+
+The contract the critic is asked to follow:
+
+```
+CORRECTIONS:
+- report N: claimed <X> — actual <Y> (`path:line`)
+```
+
+Attributed by the `RESEARCHER REPORT (round N)` header, which the
+critic and the synthesizer both see under the same label. Emitting
+`ready` *with* a corrections block is the intended cheap outcome — a
+correction is not grounds for another research round, since the fact
+is already resolved.
 
 `tie_breaker: completion_tokens` — when two configurations land inside
 noise of each other on recall, the cheaper one wins. This is the same

@@ -27,3 +27,6 @@ retry.py:1
 
 ## PLANTED_TRUE
 MAX_ATTEMPTS
+
+## CORRECTION_TOKENS
+retry.py:14

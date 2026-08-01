@@ -33,6 +33,7 @@ from benchmarks.consultants.role_tools_bench import (  # noqa: E402
     DetectTrial,
     _StubChat,
     flagged,
+    has_corrections_block,
     load_detect_questions,
     render_report,
     run_detect_trial,
@@ -264,6 +265,173 @@ class TestFlagged(unittest.TestCase):
     def test_empty_inputs_are_safe(self):
         self.assertFalse(flagged("", "x"))
         self.assertFalse(flagged("something", ""))
+
+
+# ===================================================================== #
+# Silent correction (v1.3)
+# ===================================================================== #
+class TestCorrectionsBlock(unittest.TestCase):
+    def test_detects_the_block(self):
+        self.assertTrue(has_corrections_block(
+            "DECISION: ready\n\nCORRECTIONS:\n- report 1: claimed 5 — "
+            "actual 15 (`retry.py:3`)"))
+
+    def test_none_is_not_a_block(self):
+        """The contract omits the header when nothing was corrected, so
+        `CORRECTIONS: none` is a model paraphrasing rather than
+        following it — crediting it would let an empty header stand in
+        for an actual correction."""
+        self.assertFalse(has_corrections_block("CORRECTIONS: none"))
+        self.assertFalse(has_corrections_block("corrections: None\n"))
+
+    def test_absent_and_empty(self):
+        self.assertFalse(has_corrections_block("DECISION: ready"))
+        self.assertFalse(has_corrections_block(""))
+
+    def test_prose_mention_does_not_count(self):
+        """Only a real block counts — otherwise a critic that merely
+        says the word scores as having reported one."""
+        self.assertFalse(has_corrections_block(
+            "I made some corrections to the line numbers."))
+
+
+class TestCorrectionsCountAsCatches(unittest.TestCase):
+    """The v1.3 scorer change, and why it is not goalpost-moving.
+
+    A correct row reads "claimed `retry.py:1` — actual `retry.py:14`":
+    no doubt word anywhere near the token, so the proximity oracle
+    scored three perfect catches as misses and would have pushed the
+    next directive pass in the wrong direction. Inside the block,
+    naming a claim *is* disputing it — the block is a direct signal
+    where doubt-word proximity is only a proxy for one.
+
+    The rule is applied symmetrically: a *true* claim quoted inside the
+    block counts against precision exactly as a flag would, so it can
+    hurt a model as easily as help one.
+    """
+
+    def setUp(self):
+        self.qs = {q.id: q for q in load_detect_questions()}
+
+    def _run(self, qid, text):
+        return run_detect_trial(self.qs[qid], arm="tooled", trial_idx=0,
+                                chat_client=_StubChat(text=text),
+                                model="stub")
+
+    def test_falsehood_named_in_the_block_is_caught(self):
+        t = self._run("hard-02-line-drift",
+                      "DECISION: ready\n\nThe claims are substantiated.\n\n"
+                      "CORRECTIONS:\n- report 1: claimed `should_retry` at "
+                      "`retry.py:1` — actual `retry.py:14`")
+        self.assertEqual(t.caught, ["retry.py:1"])
+        self.assertEqual(t.missed, [])
+
+    def test_true_claim_in_the_block_is_a_false_positive(self):
+        """The symmetry that keeps the rule honest — contradicting a
+        correct claim is an error whether it happens in prose or in a
+        structured block."""
+        t = self._run("medium-02-all-true",
+                      "DECISION: ready\n\nCORRECTIONS:\n- report 1: "
+                      "claimed `should_retry` — actual something else")
+        self.assertEqual(t.false_positives, ["should_retry"])
+
+    def test_corrections_none_earns_nothing(self):
+        t = self._run("hard-02-line-drift",
+                      "DECISION: ready\n\nCORRECTIONS: none\n"
+                      "The cite retry.py:1 is as reported.")
+        self.assertEqual(t.caught, [])
+
+    def test_mention_outside_the_block_still_needs_a_doubt_word(self):
+        """The block rule must not leak into the rest of the verdict,
+        or a critic that merely restates a claim before an unrelated
+        correction would be credited for it."""
+        t = self._run(
+            "medium-01-nonexistent-symbol",
+            "DECISION: ready\n\nThe report describes reset_breaker "
+            "handling recovery, which fits.\n\nCORRECTIONS:\n"
+            "- report 1: claimed line 21 — actual line 22")
+        self.assertEqual(t.caught, [])
+
+
+class TestSilentFixDetection(unittest.TestCase):
+    """The v1.2 failure this measures: the critic fetched the right
+    line, substituted it silently, and called the report accurate. The
+    correction happened inside the model and never reached the
+    synthesizer, which kept relaying the wrong cite."""
+
+    def setUp(self):
+        self.qs = {q.id: q for q in load_detect_questions()}
+
+    def _run(self, qid, text):
+        return run_detect_trial(self.qs[qid], arm="tooled", trial_idx=0,
+                                chat_client=_StubChat(text=text),
+                                model="stub")
+
+    def test_right_answer_no_flag_no_block_is_a_silent_fix(self):
+        t = self._run("hard-02-line-drift",
+                      "DECISION: ready\n\nThe claims are accurate: "
+                      "`should_retry` is defined at `retry.py:14`.")
+        self.assertEqual(t.silent_fixes, ["retry.py:14"])
+        self.assertFalse(t.corrections_reported)
+
+    def test_reporting_the_correction_is_not_a_silent_fix(self):
+        """The whole point of the directive — same knowledge, declared."""
+        t = self._run("hard-02-line-drift",
+                      "DECISION: ready\n\nCORRECTIONS:\n- report 1: "
+                      "claimed `retry.py:1` — actual `retry.py:14`")
+        self.assertTrue(t.corrections_reported)
+        self.assertEqual(t.silent_fixes, [])
+
+    def test_flagging_the_claim_is_not_a_silent_fix(self):
+        """Catching it outright already scores as recall; counting it
+        twice would make the two metrics move together."""
+        t = self._run("hard-02-line-drift",
+                      "DECISION: needs_more_research\n\nThe cite "
+                      "`retry.py:1` is wrong; it is at `retry.py:14`.")
+        self.assertEqual(t.caught, ["retry.py:1"])
+        self.assertEqual(t.silent_fixes, [])
+
+    def test_never_looked_is_a_plain_miss_not_a_silent_fix(self):
+        """Distinguishing these is the point: one wasted a tool call
+        and withheld the answer, the other never had it."""
+        t = self._run("hard-02-line-drift",
+                      "DECISION: ready\n\nEvidence is sufficient.")
+        self.assertEqual(t.missed, ["retry.py:1"])
+        self.assertEqual(t.silent_fixes, [])
+
+    def test_non_existence_questions_carry_no_correction_tokens(self):
+        """A fabricated file has no 'correct value' to name, so the
+        failure mode does not apply and a token there would only
+        create noise."""
+        for qid in ("easy-01-fabricated-file",
+                    "medium-01-nonexistent-symbol", "hard-01-mixed"):
+            self.assertEqual(self.qs[qid].correction_tokens, (), qid)
+
+    def test_correction_tokens_are_absent_from_the_research(self):
+        """Load-bearing: if the correct value already appeared in the
+        prose the critic was handed, its presence in a verdict would
+        prove nothing about whether it looked."""
+        for q in self.qs.values():
+            for tok in q.correction_tokens:
+                self.assertNotIn(tok, q.research,
+                                 f"{q.id}: '{tok}' is already in the "
+                                 f"research; it cannot be evidence of a "
+                                 f"lookup")
+
+    def test_correction_tokens_are_true_of_the_fixture(self):
+        for q in self.qs.values():
+            if not q.correction_tokens:
+                continue
+            body = _fixture_body(q)
+            for tok in q.correction_tokens:
+                if ":" in tok:  # a path:line cite — check the line
+                    fname, ln = tok.rsplit(":", 1)
+                    lines = (SUITE_DIR / "fixtures" / q.fixtures_subdir
+                             / fname).read_text().splitlines()
+                    self.assertTrue(lines[int(ln) - 1].strip(),
+                                    f"{q.id}: {tok} is blank")
+                else:
+                    self.assertIn(tok, body, f"{q.id}: {tok} not in fixture")
 
 
 # ===================================================================== #
