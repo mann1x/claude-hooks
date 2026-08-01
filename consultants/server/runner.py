@@ -35,10 +35,8 @@ def make_runner(*, ollama_base_url: str):
         render_for_log,
     )
     from claude_hooks.get_advice.chat_client import ChatClient, make_agent_chat_client
-    from claude_hooks.caliber_proxy.tools import (
-        openai_tool_specs, make_executor,
-    )
     from claude_hooks.caliber_proxy.prompt import build_grounding_messages
+    from consultants.server.tool_surface import build_tool_surface
     from consultants.engine.graph import GraphDeps, build_council_graph
     from consultants.engine.recorder import MessageRecorder, RecorderMeta
     from consultants.engine.trace import (
@@ -267,15 +265,22 @@ def make_runner(*, ollama_base_url: str):
             )
             consultants_store = None
 
+        # M-A: compose the tool surface from [tools] config. Returns the
+        # same (specs, executor) shape the fixed builtin surface did, so
+        # nothing downstream of GraphDeps knows a registry exists.
+        _tool_specs, _tool_executor, _tool_registry = build_tool_surface(
+            cfg, extra_roots=extra_roots,
+        )
+
         deps = GraphDeps(
             chat_clients=chat_clients,
             models=models,
             enabled_roles=enabled,
             cwd=cwd,
             tool_executor=traced_tool(
-                make_executor(extra_roots), tracer=tracer,
+                _tool_executor, tracer=tracer,
             ),
-            tool_specs=openai_tool_specs(),
+            tool_specs=_tool_specs,
             grounding_msgs=grounding_msgs,
             think_by_role=think_by_role,
             synthesizer_self_critic=synthesizer_self_critic,
@@ -507,10 +512,8 @@ def make_follow_up_runner(*, ollama_base_url: str):
         render_for_log,
     )
     from claude_hooks.get_advice.chat_client import ChatClient, make_agent_chat_client
-    from claude_hooks.caliber_proxy.tools import (
-        openai_tool_specs, make_executor,
-    )
     from claude_hooks.caliber_proxy.prompt import build_grounding_messages
+    from consultants.server.tool_surface import build_tool_surface
     from consultants.engine.graph import GraphDeps, build_follow_up_graph
     from consultants.engine.recorder import MessageRecorder, RecorderMeta
     from consultants.engine.trace import (
@@ -714,15 +717,22 @@ def make_follow_up_runner(*, ollama_base_url: str):
             )
             consultants_store_followup = None
 
+        # M-A: compose the tool surface from [tools] config. Returns the
+        # same (specs, executor) shape the fixed builtin surface did, so
+        # nothing downstream of GraphDeps knows a registry exists.
+        _tool_specs, _tool_executor, _tool_registry = build_tool_surface(
+            cfg, extra_roots=extra_roots,
+        )
+
         deps = GraphDeps(
             chat_clients=chat_clients,
             models=models,
             enabled_roles=enabled_t,
             cwd=cwd,
             tool_executor=traced_tool(
-                make_executor(extra_roots), tracer=tracer,
+                _tool_executor, tracer=tracer,
             ),
-            tool_specs=openai_tool_specs(),
+            tool_specs=_tool_specs,
             grounding_msgs=grounding_msgs,
             think_by_role=think_by_role,
             synthesizer_self_critic=False,  # follow-ups never

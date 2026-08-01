@@ -16,6 +16,61 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added
+
+- **Composable council tool surface with a permission gate (M-A) + git
+  history tools (M-C).** First two milestones of
+  [`docs/PLAN-council-tool-surface.md`](docs/PLAN-council-tool-surface.md).
+
+  `claude_hooks/tool_registry/` adds a `ToolProvider` ABC (shaped like
+  the memory-backend `Provider` ABC, so it is one idiom rather than
+  two), a `ToolRegistry` that merges providers into one schema list and
+  one dispatch path, and a `PolicyGate` that runs on **every** call.
+  Wiring the gate at dispatch rather than inside each provider is the
+  point: a provider added later inherits approval, denial and audit
+  without knowing the gate exists.
+
+  The ladder has four rungs — `auto` (nobody approves; reads run
+  silently, because routing a `grep` through an approver burns tokens
+  for nothing), `ask_assistant` (writes/builds), `ask_human` (spend
+  only), `deny`. Taint escalates every *effectful* tool one rung for
+  the rest of a session once untrusted external content is consumed;
+  read-only tools are exempt, which is what keeps the common path free.
+  Escalation is implemented against `ToolSpec.read_only` rather than
+  against "shell" specifically, so a future effectful tool is covered
+  the day it lands. With only the read-only built-ins wired, taint has
+  no observable effect yet — correct, not a gap.
+
+  Everything fails closed: an invalid rung in config is refused at
+  dispatch (naming the tool and the source) rather than coerced to
+  `auto`; a caller with no approval channel refuses `ask_*` rather than
+  running it; a provider whose `specs()` raises offers no tools instead
+  of taking down the council. Refusals are returned as `error: ...`
+  tool results, matching `caliber_proxy.tools.execute`, so the model
+  reroutes instead of the lane dying.
+
+  M-C adds `GitToolProvider`: `git_history`, `git_log`, `git_blame`,
+  `git_diff`, `git_show`. `git_history` is the one that matters — it
+  wraps `git log -L`, so it answers "when did this regress, and why?"
+  from the history of a *specific function or line range* rather than
+  the whole file, in one call instead of four. Read-only by
+  construction, not by intent: every invocation is a fixed `argv` built
+  from an allowlist of observation-only subcommands, so the
+  "read-only is undecidable from a command string" problem that makes
+  the shell provider hard does not arise. Confined to the same roots as
+  the path tools, output capped, revisions rejected if they could be
+  read as flags.
+
+  Configurable from both surfaces per the project rule: a `[tools]`
+  block, `claude-consultants config set-tools`, and Subflow I in the
+  `/consultants config` menu. Git tools ship **off** — read-only and
+  safe, but five more schemas on every prompt on every lane is a
+  default-behaviour change, so it lands disabled and gets flipped after
+  a live smoke, exactly how `store` was handled. Default config
+  produces a surface byte-identical to the previous hardcoded
+  `openai_tool_specs()` call sites; four new M12 cohort-2 parity tests
+  pin that.
+
 ### Fixed
 
 - **Recall queries are now bounded (`max_query_chars`, default 3500).**

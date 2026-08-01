@@ -1,6 +1,15 @@
 # PLAN — council tool surface: MCP bridge, network, shell, git, uniform roles
 
-Status: **scoping draft**, 2026-08-01. No code written.
+Status, 2026-08-01: **M-A partially landed, M-C landed.** The registry,
+the provider ABC, the policy gate and the git provider are in
+`claude_hooks/tool_registry/`, wired through
+`consultants/server/tool_surface.py`, configurable via `[tools]` /
+`config set-tools` / Subflow I. **M-A's remaining piece is the
+lane-scoped interrupt** — until it lands there is no approval channel,
+so the registry refuses any `ask_*` tool rather than running it. That
+costs nothing today (every tool in the default surface is `auto`) and
+is the correct failure direction the moment an effectful provider
+arrives. Everything below M-C is still scoping.
 
 Scope request (2026-08-01): (1) generic MCP bridge, fully configurable
 including the config menu; (2) direct network access, configurable,

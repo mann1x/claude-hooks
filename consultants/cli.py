@@ -547,6 +547,15 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
             }
             for r in cc.ROLES
         },
+        # M-A: the tool surface. Same rule as the store block below —
+        # every knob `set-tools` can mutate must be visible here, or the
+        # skill's dialog cannot show the user what they are changing.
+        "tools": {
+            "enabled": cfg.tools.enabled,
+            "git": cfg.tools.git,
+            "default_level": cfg.tools.default_level,
+            "permissions": dict(cfg.tools.permissions),
+        },
         # M8 + M14 (#220): expose the cross-session store block so
         # `config show` reveals the same knobs that `set-store{,-ttl,
         # -distillation}` mutate. The skill renders this; the test
@@ -809,6 +818,29 @@ def cmd_config_set_store(args, base: str) -> int:
             add_enable_at_effort=args.add_effort,
             remove_enable_at_effort=args.remove_effort,
             clear_enable_at_efforts=bool(args.clear_efforts),
+            **_resolve_active_scope(args),
+        )
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def cmd_config_set_tools(args, base: str) -> int:
+    """``config set-tools`` — the [tools] block (M-A tool surface)."""
+    try:
+        perm = None
+        if args.permission:
+            if len(args.permission) != 2:
+                raise ValueError(
+                    "--permission takes exactly two values: TOOL LEVEL")
+            perm = (args.permission[0], args.permission[1])
+        cfg = cc.set_tools(
+            enabled=_parse_cli_bool(args.enabled, flag="--enabled"),
+            git=_parse_cli_bool(args.git, flag="--git"),
+            default_level=args.default_level,
+            set_permission=perm,
+            clear_permission=args.clear_permission,
+            clear_all_permissions=bool(args.clear_permissions),
             **_resolve_active_scope(args),
         )
     except ValueError as e:
@@ -1998,6 +2030,36 @@ def build_parser() -> argparse.ArgumentParser:
                           "inert at every tier).")
     _add_scope_args(css)
     css.set_defaults(fn=cmd_config_set_store)
+
+    ctl = cfg_sub.add_parser(
+        "set-tools",
+        help=("Configure the [tools] block — which tools the council can "
+              "reach and what each one needs to run."),
+    )
+    ctl.add_argument("--enabled",
+                     help="true|false — the composable tool registry. "
+                          "false restores the fixed builtin surface.")
+    ctl.add_argument("--git",
+                     help="true|false — read-only git history tools: "
+                          "git_history (\"when did this regress?\" via "
+                          "git log -L), git_log / blame / diff / show.")
+    ctl.add_argument("--default-level", dest="default_level",
+                     choices=cc.VALID_PERMISSION_LEVELS,
+                     help="Rung for a tool nothing else names. "
+                          "auto runs silently; ask_assistant routes to "
+                          "the assistant; ask_human needs a person; "
+                          "deny refuses.")
+    ctl.add_argument("--permission", nargs=2, metavar=("TOOL", "LEVEL"),
+                     help="Pin one tool to a rung, e.g. "
+                          "--permission git_diff auto.")
+    ctl.add_argument("--clear-permission", dest="clear_permission",
+                     metavar="TOOL",
+                     help="Drop one tool's pin (back to its default).")
+    ctl.add_argument("--clear-permissions", dest="clear_permissions",
+                     action="store_true",
+                     help="Drop every per-tool pin.")
+    _add_scope_args(ctl)
+    ctl.set_defaults(fn=cmd_config_set_tools)
 
     cst = cfg_sub.add_parser(
         "set-store-ttl",

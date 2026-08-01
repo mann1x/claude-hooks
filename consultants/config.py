@@ -631,6 +631,38 @@ class StoreConfig:
 
 
 @dataclass
+class ToolsConfig:
+    """M-A: the council's tool surface and its permission ladder.
+
+    See ``docs/PLAN-council-tool-surface.md``. Every tool the council
+    can reach is composed here and dispatched through one gate, so a
+    provider added later inherits approval and denial without its own
+    plumbing.
+
+    ``git`` defaults **off** deliberately, mirroring how ``store``
+    landed: scaffold disabled, validated live, flipped on in a later
+    change. The tools themselves are read-only and carry no new risk
+    surface, but turning them on adds five schemas to every prompt on
+    every lane, which is a default-behaviour change and therefore an
+    M12 parity concern. One config command flips it.
+
+    ``permissions`` maps a tool name to a rung:
+    ``auto`` / ``ask_assistant`` / ``ask_human`` / ``deny``. An invalid
+    value is refused at dispatch rather than coerced — a typo must
+    never silently produce an ungated tool.
+    """
+
+    #: Master switch for the registry. False keeps the pre-M-A path.
+    enabled: bool = True
+    #: M-C git history provider (git_history / log / blame / diff / show).
+    git: bool = False
+    #: Fallback rung for a tool no provider or override names.
+    default_level: str = "auto"
+    #: Per-tool overrides, ``[tools.permissions]``.
+    permissions: dict = field(default_factory=dict)
+
+
+@dataclass
 class CoderLimitsConfig:
     """M10: per-session sandbox caps for the coder role.
 
@@ -681,6 +713,7 @@ class ConsultantsConfig:
     checkpointer: CheckpointerConfig = field(default_factory=CheckpointerConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     store: StoreConfig = field(default_factory=StoreConfig)
+    tools: ToolsConfig = field(default_factory=ToolsConfig)
     coder_limits: CoderLimitsConfig = field(
         default_factory=CoderLimitsConfig,
     )
@@ -907,6 +940,26 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
                 bool(rt["interrupt_on_low_confidence"])
 
     # store (M8)
+    tl = raw.get("tools") or {}
+    if isinstance(tl, dict):
+        if "enabled" in tl:
+            base.tools.enabled = bool(tl["enabled"])
+        if "git" in tl:
+            base.tools.git = bool(tl["git"])
+        if "default_level" in tl and isinstance(tl["default_level"], str):
+            base.tools.default_level = (
+                tl["default_level"].strip() or base.tools.default_level)
+        perms = tl.get("permissions")
+        if isinstance(perms, dict):
+            # Values are NOT validated here on purpose. The gate refuses
+            # an unknown rung at dispatch with a message naming the tool
+            # and the source; silently dropping a bad value at load time
+            # would leave the operator believing a restriction is in
+            # force when it is not.
+            base.tools.permissions = {
+                str(k): v for k, v in perms.items()
+            }
+
     st = raw.get("store") or {}
     if isinstance(st, dict):
         if "enabled" in st:
@@ -1204,6 +1257,27 @@ def _render(cfg: ConsultantsConfig, *,
              "self-rates below confidence_target")
     L.append("interrupt_on_low_confidence = "
              f"{'true' if cfg.runtime.interrupt_on_low_confidence else 'false'}")
+    L.append("")
+    L.append("[tools]")
+    L.append("# The council's tool surface (M-A). Every tool is dispatched")
+    L.append("# through one permission gate; see docs/PLAN-council-tool-surface.md")
+    L.append("# enabled = false restores the pre-M-A fixed builtin surface.")
+    L.append(f"enabled = {'true' if cfg.tools.enabled else 'false'}")
+    L.append("# git: read-only history tools — git_history (\"when did this")
+    L.append("#   regress?\" via git log -L), git_log / blame / diff / show.")
+    L.append(f"git = {'true' if cfg.tools.git else 'false'}")
+    L.append("# default_level: auto | ask_assistant | ask_human | deny")
+    L.append(f"default_level = {_toml_str(cfg.tools.default_level)}")
+    if cfg.tools.permissions:
+        L.append("")
+        L.append("[tools.permissions]")
+        for k in sorted(cfg.tools.permissions):
+            L.append(f"{_toml_str(k)} = {_toml_str(str(cfg.tools.permissions[k]))}")
+    else:
+        L.append("")
+        L.append("# [tools.permissions]")
+        L.append('# "git_diff" = "auto"')
+        L.append('# "some_tool" = "ask_assistant"')
     L.append("")
     L.append("[store]")
     L.append("# Long-term memory BaseStore for cross-lane / cross-session recall.")
@@ -1839,6 +1913,67 @@ def set_override_user_global(enabled: bool, *,
 # installer can drive them programmatically.
 
 VALID_STORE_BACKENDS: tuple[str, ...] = ("memory", "pgvector", "sqlite_vec")
+
+#: The permission ladder, mirrored from
+#: ``claude_hooks.tool_registry.policy.LEVELS``. Duplicated rather than
+#: imported so ``consultants.config`` stays importable without
+#: ``claude_hooks`` on the path — the same reason ``interrupt_policy``
+#: avoids its LangGraph import. ``test_tool_registry`` pins the two
+#: lists together so they cannot drift.
+VALID_PERMISSION_LEVELS: tuple[str, ...] = (
+    "auto", "ask_assistant", "ask_human", "deny",
+)
+
+
+def set_tools(
+    *,
+    enabled: Optional[bool] = None,
+    git: Optional[bool] = None,
+    default_level: Optional[str] = None,
+    set_permission: Optional[tuple] = None,
+    clear_permission: Optional[str] = None,
+    clear_all_permissions: bool = False,
+    scope: str = "user",
+    cwd: Optional[Path] = None,
+) -> ConsultantsConfig:
+    """Mutate the ``[tools]`` block and persist.
+
+    Same "pass None to leave unchanged" contract as ``set_role`` and
+    ``set_store``. ``set_permission`` takes a ``(tool, level)`` pair.
+
+    Levels ARE validated here, unlike at load time: a value typed at the
+    CLI can be rejected immediately with the valid list, whereas a value
+    already sitting in a file is better refused loudly at dispatch than
+    silently dropped at load.
+    """
+    cfg = load_config(cwd=cwd)
+    if enabled is not None:
+        cfg.tools.enabled = bool(enabled)
+    if git is not None:
+        cfg.tools.git = bool(git)
+    if default_level is not None:
+        lvl = default_level.strip()
+        if lvl not in VALID_PERMISSION_LEVELS:
+            raise ValueError(
+                f"invalid permission level {lvl!r}. Valid: "
+                f"{', '.join(VALID_PERMISSION_LEVELS)}")
+        cfg.tools.default_level = lvl
+    if set_permission is not None:
+        tool, lvl = set_permission
+        tool = str(tool).strip()
+        lvl = str(lvl).strip()
+        if not tool:
+            raise ValueError("tool name must be non-empty")
+        if lvl not in VALID_PERMISSION_LEVELS:
+            raise ValueError(
+                f"invalid permission level {lvl!r}. Valid: "
+                f"{', '.join(VALID_PERMISSION_LEVELS)}")
+        cfg.tools.permissions[tool] = lvl
+    if clear_permission:
+        cfg.tools.permissions.pop(str(clear_permission).strip(), None)
+    if clear_all_permissions:
+        cfg.tools.permissions = {}
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 
 def _normalize_ttl_days(val: Optional[float]) -> Optional[float]:

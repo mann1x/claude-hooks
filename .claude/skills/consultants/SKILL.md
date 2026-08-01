@@ -648,7 +648,7 @@ per-language entry the same way. The routes only matter when
 
 ### 2. Top-level menu (loop until Done)
 
-The menu has seven areas; AskUserQuestion caps at 4 options, so
+The menu has eight areas; AskUserQuestion caps at 4 options, so
 present it in rounds — round 1 offers the first three plus **More…**,
 and **More…** opens the next batch (ending with **Done**):
 
@@ -665,6 +665,8 @@ and **More…** opens the next batch (ending with **Done**):
    skeptic-panel `verify_budget` — see Subflow G
 7. **Config scope** — choose user-global vs per-project and flip the
    per-project `override_user_global` directive — see Subflow H
+8. **Tool surface** — which tools the council can reach and what each
+   one needs before it runs — see Subflow I
 
 Loop back to step 1 after each successful change; exit on **Done**.
 
@@ -911,6 +913,66 @@ create one). Flip the directive with
 `config set-override-user-global on|off --cwd "$(pwd)"` (Subflow H).
 Always surface which scope a change landed in — read
 `active_config.scope` from the JSON and relay the CLI's stderr notice.
+
+---
+
+### Subflow I — Tool surface
+
+Read the `tools` block from `config show`:
+
+```
+Tool surface
+  registry:      on
+  git history:   off
+  default rung:  auto
+  pinned:        (none)
+```
+
+AskUserQuestion the sub-action:
+
+- **Toggle git history tools** →
+  `config set-tools --git true|false --cwd "$(pwd)"`.
+
+  Say what it buys, because the name undersells it:
+  > Adds `git_history` — "when did this regress, and why?" — plus
+  > `git_log` / `git_blame` / `git_diff` / `git_show`. All read-only.
+  > `git_history` wraps `git log -L`, so it answers from the history
+  > of *specific lines or a function*, not the whole file.
+
+  It ships **off**: the tools are read-only and safe, but they add
+  five schemas to every prompt on every lane, which is a
+  default-behaviour change. Turning it on is the operator's call.
+
+- **Pin a tool's permission** → AskUserQuestion the tool, then the
+  rung, then
+  `config set-tools --permission <tool> <level> --cwd "$(pwd)"`.
+
+  Explain the rungs in cost terms, not just safety terms:
+
+  | rung | who approves | when to use it |
+  |---|---|---|
+  | `auto` | nobody — it just runs | reads and non-destructive work. Routing these through an approver burns tokens for nothing |
+  | `ask_assistant` | Claude, which auto-approves and may escalate | writes, builds |
+  | `ask_human` | you, and only you | anything that spends money |
+  | `deny` | — | refused outright |
+
+- **Change the default rung** →
+  `config set-tools --default-level <level> --cwd "$(pwd)"`. This is
+  the rung for a tool nothing else names. Warn before setting it above
+  `auto`: it applies to *every* tool, including `grep` and
+  `read_file`, so a council would pay an approval round-trip per read.
+
+- **Clear pins** → `config set-tools --clear-permissions --cwd "$(pwd)"`.
+
+- **Disable the registry** → `config set-tools --enabled false`. Falls
+  back to the fixed six built-in tools. Offer this only as a
+  troubleshooting step.
+
+**If a tool is refused mid-council** you will see an
+`error: tool 'X' was not approved` result in the transcript rather
+than a crash — that is by design, so the model reroutes. If it happens
+repeatedly, the pin is probably too strict for the question being
+asked; say so rather than letting the council grind.
 
 ---
 

@@ -820,3 +820,91 @@ class TestSetOverrideUserGlobal:
         cfg = cc.load_config(cwd=tmp_path)
         assert cfg.effort == "max"
         assert cfg.roles["planner"].model == "proj-pl"
+
+
+# ----------------------- set-tools (M-A) -------------------------- #
+
+class TestSetTools:
+    """The ``[tools]`` block: what the council can reach, and what each
+    tool needs before it runs.
+
+    Every test pins **cwd as well as home**. ``isolated_home`` alone is
+    not enough here: ``load_config`` resolves the project file from
+    ``os.getcwd()``, and this repo's own project config sets
+    ``override_user_global``, so an unpinned mutation test writes into
+    the developer's live council config (bug-664).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _pin_cwd(self, isolated_home, tmp_path, monkeypatch):
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        return work
+
+    def test_defaults(self):
+        cfg = cc.load_config()
+        assert cfg.tools.enabled is True
+        assert cfg.tools.git is False       # opt-in, see M12 parity
+        assert cfg.tools.default_level == "auto"
+        assert cfg.tools.permissions == {}
+
+    def test_toggle_git_persists(self):
+        cc.set_tools(git=True)
+        assert cc.load_config().tools.git is True
+        cc.set_tools(git=False)
+        assert cc.load_config().tools.git is False
+
+    def test_disable_registry_persists(self):
+        cc.set_tools(enabled=False)
+        assert cc.load_config().tools.enabled is False
+
+    def test_default_level_validated(self):
+        cc.set_tools(default_level="ask_human")
+        assert cc.load_config().tools.default_level == "ask_human"
+        with pytest.raises(ValueError) as ei:
+            cc.set_tools(default_level="allow")   # the pre-ladder value
+        assert "invalid permission level" in str(ei.value)
+
+    def test_set_and_clear_a_permission(self):
+        cc.set_tools(set_permission=("git_diff", "ask_assistant"))
+        assert cc.load_config().tools.permissions == {
+            "git_diff": "ask_assistant"}
+        cc.set_tools(clear_permission="git_diff")
+        assert cc.load_config().tools.permissions == {}
+
+    def test_permission_level_validated(self):
+        with pytest.raises(ValueError):
+            cc.set_tools(set_permission=("git_diff", "maybe"))
+
+    def test_permission_tool_name_required(self):
+        with pytest.raises(ValueError):
+            cc.set_tools(set_permission=("  ", "auto"))
+
+    def test_clear_all_permissions(self):
+        cc.set_tools(set_permission=("a", "deny"))
+        cc.set_tools(set_permission=("b", "ask_human"))
+        assert len(cc.load_config().tools.permissions) == 2
+        cc.set_tools(clear_all_permissions=True)
+        assert cc.load_config().tools.permissions == {}
+
+    def test_none_leaves_values_unchanged(self):
+        """The 'pass None to leave unchanged' contract shared with
+        set_role / set_store."""
+        cc.set_tools(git=True, default_level="deny")
+        cc.set_tools(enabled=True)          # touches nothing else
+        cfg = cc.load_config()
+        assert cfg.tools.git is True
+        assert cfg.tools.default_level == "deny"
+
+    def test_permissions_round_trip_through_toml(self):
+        cc.set_tools(set_permission=("some_tool", "ask_human"))
+        text = cc.user_config_path().read_text(encoding="utf-8")
+        assert "[tools.permissions]" in text
+        assert cc.load_config().tools.permissions["some_tool"] == "ask_human"
+
+    def test_levels_match_the_registry_enum(self):
+        """config duplicates the ladder to stay importable without
+        claude_hooks on the path; the two must not drift."""
+        from claude_hooks.tool_registry.policy import LEVELS
+        assert cc.VALID_PERMISSION_LEVELS == LEVELS

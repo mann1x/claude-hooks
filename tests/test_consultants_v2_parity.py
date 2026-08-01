@@ -296,6 +296,43 @@ class TestOptInsOffByDefault(unittest.TestCase):
                 strictness="normal", adversarial_focus=""),
         )
 
+    # ----- M-A / M-C (tool registry + git provider) -------------- #
+
+    def test_git_tools_off_by_default(self):
+        # M-C: the git history provider is read-only and carries no new
+        # risk surface, but turning it on adds five schemas to every
+        # prompt on every lane — a default-behaviour change. It lands
+        # disabled and gets flipped after a live smoke, exactly how
+        # ``store`` was handled (scaffold off → validated → M14 on).
+        self.assertFalse(self.cfg.tools.git)
+
+    def test_default_permission_level_is_auto(self):
+        # M-A: the ladder's cheap rung. If this ever defaulted to an
+        # ask_* level, every grep in every lane would pay an approval
+        # round-trip — the exact cost the ``auto`` rung exists to avoid.
+        self.assertEqual(self.cfg.tools.default_level, "auto")
+        self.assertEqual(self.cfg.tools.permissions, {})
+
+    def test_default_tool_surface_is_byte_identical_to_pre_registry(self):
+        # M-A is a refactor, not a capability change: with default
+        # config the composed surface must equal what the two hardcoded
+        # ``openai_tool_specs()`` call sites produced. Anything else
+        # re-shapes every researcher prompt and invalidates the M11c
+        # benchmark corpus.
+        from claude_hooks.caliber_proxy.tools import openai_tool_specs
+        from consultants.server.tool_surface import build_tool_surface
+        specs, _executor, _registry = build_tool_surface(self.cfg)
+        self.assertEqual(specs, openai_tool_specs())
+
+    def test_registry_is_not_shared_between_sessions(self):
+        # The gate carries per-session taint, which is sticky. A shared
+        # registry would leak that into the next consultation — and in
+        # the wrong direction, since taint never clears.
+        from consultants.server.tool_surface import build_tool_surface
+        _s1, _e1, r1 = build_tool_surface(self.cfg)
+        _s2, _e2, r2 = build_tool_surface(self.cfg)
+        self.assertIsNot(r1, r2)
+
     # ----- M1 (checkpointer) ------------------------------------ #
 
     def test_checkpointer_backend_is_sqlite_by_default(self):
