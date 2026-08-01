@@ -1,0 +1,53 @@
+{
+  "servers": [
+    {
+      "extensions": [
+        "py",
+        "pyi"
+      ],
+      "command": [
+        "pyright-langserver",
+        "--stdio"
+      ]
+    },
+    {
+      "extensions": [
+        "go"
+      ],
+      "command": [
+        "gopls"
+      ]
+    },
+    {
+      "extensions": [
+        "rs"
+      ],
+      "command": [
+        "rust-analyzer"
+      ]
+    },
+    {
+      "extensions": [
+        "c",
+        "cc",
+        "cpp",
+        "cxx",
+        "h",
+        "hh",
+        "hpp"
+      ],
+      "command": [
+        "clangd"
+      ]
+    },
+    {
+      "extensions": [
+        "cs"
+      ],
+      "command": [
+        "omnisharp",
+        "-lsp"
+      ]
+    }
+  ]
+}
