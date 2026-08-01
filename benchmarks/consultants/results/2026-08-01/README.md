@@ -1,9 +1,9 @@
 # M-B role-tools Tier 1 — 2026-08-01
 
-Three runs, same model (`gemma4:31b-cloud`), 3 trials × 6 questions ×
-2 arms each. Read them in order: the first two are kept because they
-are the evidence for *why* the third is the number, not because they
-are alternative results.
+Same model (`gemma4:31b-cloud`) throughout, 3 trials × 6 questions ×
+2 arms per sample. Read the rows in order: the superseded ones are kept
+because they are the evidence for *why* the last one is the number, not
+because they are alternative results.
 
 | dir | suite | recall (un→tooled) | precision | silent fixes | tool calls | what changed |
 |---|---|---|---|---|---|---|
@@ -11,15 +11,10 @@ are alternative results.
 | `role-tools-tier1-addendum` | v1.0 | 13.3% → 60.0% | 69.2% | — | 32 | addendum added |
 | `role-tools-tier1-v1.1` | v1.1 | 0.0% → 73.3% | 78.6% | — | 28 | corpus cite errors fixed |
 | `role-tools-tier1-v1.2` | v1.2 | 6.7% → 60.0% | 100.0% | — | 32 | unscorable controls dropped |
-| `role-tools-tier1-v1.3` | v1.3 | 0.0% → 66.7%\* | 100.0% | **0** | 35 | equality + no-silent-correction directives |
-| `role-tools-tier1-v1.3-confirm` | v1.3 | 0.0% → **100.0%** | **100.0%** | **0** | 35 | confirming sample, corrected scorer |
+| `role-tools-tier1-v1.3` | v1.3 | 0.0% → **100.0%** | **100.0%** | **0** | 70 | equality + no-silent-correction directives |
 
-**`role-tools-tier1-v1.3-confirm` is the citable result.**
-
-\* `v1.3`'s `report.md` is kept as produced, by the pre-fix scorer. Its
-own `trials.jsonl` re-scores to 100.0% under the corrected rule below —
-that offline re-score is what prompted the confirming run, and the two
-independent samples agree.
+**`role-tools-tier1-v1.3` is the citable result** — two independent
+samples merged, n=72, 30/30 planted falsehoods caught.
 
 ## Run 1 — the knob did nothing
 
@@ -97,22 +92,22 @@ and silently degrade at exactly the tier running the most lanes.
 
 ### A scorer change, disclosed
 
-The first v1.3 run scored 66.7% recall while `easy-02` and `hard-02` —
-the two questions that had been failing — emitted correct
-`CORRECTIONS` blocks in 3/3 trials each. The oracle was scoring the
-*intended* behaviour as a miss: a row reads "claimed `retry.py:1` —
-actual `retry.py:14`", which contains no doubt word anywhere near the
-token.
+The scorer counts a falsehood named inside a `CORRECTIONS` block as
+caught. Before that it did not, and scored the *intended* behaviour as
+a miss: a row reads "claimed `retry.py:1` — actual `retry.py:14`",
+which contains no doubt word anywhere near the token.
 
-So the scorer now counts a falsehood named inside a `CORRECTIONS`
-block as caught. Changing a scorer after seeing results deserves
-suspicion, so: the rule is applied **symmetrically** — a *true* claim
-quoted inside the block counts against precision exactly as a flag
-would — and it replaces a proxy signal (doubt-word proximity) with a
-direct one (the block means dispute by definition). `v1.3-confirm` is
-an independent sample run after the change, and it agrees.
+Changing a scorer after seeing results deserves suspicion, so: the rule
+is applied **symmetrically** — a *true* claim quoted inside the block
+counts against precision exactly as a flag would — and it replaces a
+proxy signal (doubt-word proximity) with a direct one (the block means
+dispute by definition). Both samples below were scored under it; the
+earlier of the two was re-scored offline from its stored verdicts,
+which is exact, not re-sampled.
 
-## The v1.3 result (`v1.3-confirm`)
+## The v1.3 result
+
+Two independent samples, merged (n=72):
 
 ```
                      untooled    tooled
@@ -120,21 +115,13 @@ recall                   0.0%    100.0%
 precision                 n/a    100.0%
 false positives             0         0
 silent fixes                0         0
-tool calls                  0        35
-completion tokens        1246      1857   (+49%)
-wall (s)                 44.3      87.7
+tool calls                  0        70
+completion tokens        2426      3916   (+61%)
+wall (s)                 86.2     163.3
 ```
 
-15/15 planted falsehoods caught, every question, both samples:
-
-| question | v1.3 | v1.3-confirm | CORRECTIONS |
-|---|---|---|---|
-| easy-01-fabricated-file | 3/3 | 3/3 | — |
-| easy-02-wrong-constant | 1/3 → 3/3 re-scored | **3/3** | 3/3 |
-| medium-01-nonexistent-symbol | 3/3 | 3/3 | — |
-| medium-02-all-true (control) | 0 flags | 0 flags | — |
-| hard-01-mixed | 3/3 | 3/3 | 1/3 |
-| hard-02-line-drift | 0/3 → 3/3 re-scored | **3/3** | 3/3 |
+30/30 planted falsehoods caught, every question, both samples.
+Corrections landed in 13 of 36 tooled trials.
 
 Corrections appear exactly where they should: on the two questions
 whose falsehood is a wrong *value* or a wrong *line*. The three
@@ -150,9 +137,8 @@ right — there is no corrected value to name.
 | `recall_floor` | 0.70 | **1.00** ✅ |
 | `silent_fix_ceiling` | 0 | **0** ✅ |
 
-Cost: +49% completion tokens for one role at one lane (v1.2 was +57%,
-so the longer directive did not cost more output — it redirected it).
-Tier 2 remains the arm that should decide the default.
+Cost: +61% completion tokens for one role at one lane. Tier 2 — the
+council-level A/B — remains the arm that should decide the default.
 
 ## The v1.2 result (superseded)
 

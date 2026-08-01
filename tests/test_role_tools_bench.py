@@ -575,5 +575,143 @@ class TestRunDetectTrial(unittest.TestCase):
         self.assertEqual(t.missed, [])
 
 
+# ===================================================================== #
+# Tier 2 — council cost A/B
+# ===================================================================== #
+class TestCostArmConfig(unittest.TestCase):
+    """The arm config is written into an isolated project on purpose.
+
+    The engine reads the project layer for the request's cwd, so an A/B
+    that flipped the operator's real config would change the config of
+    every other session on the host mid-flight — and a crashed arm
+    would leave it flipped.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.project = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_writes_an_overriding_project_config(self):
+        from benchmarks.consultants.role_tools_bench import write_arm_config
+        path = write_arm_config(self.project, all_roles=True, effort="high")
+        self.assertEqual(
+            path, self.project / ".claude-hooks" / "consultants.toml")
+        raw = path.read_text()
+        self.assertIn("override_user_global = true", raw)
+        self.assertIn("all_roles = true", raw)
+
+    def test_arms_differ_only_in_all_roles(self):
+        """Anything else differing between arms would confound the
+        cost delta with a second variable."""
+        import tomllib
+        from benchmarks.consultants.role_tools_bench import write_arm_config
+        write_arm_config(self.project, all_roles=False, effort="high")
+        off = tomllib.loads(
+            (self.project / ".claude-hooks" / "consultants.toml").read_text())
+        write_arm_config(self.project, all_roles=True, effort="high")
+        on = tomllib.loads(
+            (self.project / ".claude-hooks" / "consultants.toml").read_text())
+        self.assertFalse(off["tools"]["all_roles"])
+        self.assertTrue(on["tools"]["all_roles"])
+        off["tools"].pop("all_roles"), on["tools"].pop("all_roles")
+        self.assertEqual(off, on)
+
+    def test_is_idempotent(self):
+        from benchmarks.consultants.role_tools_bench import write_arm_config
+        a = write_arm_config(self.project, all_roles=True, effort="high")
+        first = a.read_text()
+        self.assertEqual(
+            write_arm_config(self.project, all_roles=True,
+                             effort="high").read_text(), first)
+
+
+class TestCostTotals(unittest.TestCase):
+    """Built through the real recorder, not a hand-written schema.
+
+    The first version of this test created `llm_calls` / `tool_calls`
+    tables because that is what the reader assumed. The reader was
+    wrong — the transcript is ONE `events` table discriminated by
+    `kind` — and the test passed anyway, because it validated the
+    assumption instead of reality. A live run then failed on
+    `no such table: llm_calls`. Driving the writer is what makes the
+    reader's schema knowledge falsifiable.
+    """
+
+    def setUp(self):
+        import tempfile
+        from consultants.engine.recorder import MessageRecorder, RecorderMeta
+        self.tmp = tempfile.TemporaryDirectory()
+        self.project = Path(self.tmp.name)
+        d = self.project / ".claude-hooks" / "consultants" / "sid-1"
+        d.mkdir(parents=True)
+        rec = MessageRecorder(
+            d / "transcript.db",
+            meta=RecorderMeta(sid="sid-1", cwd=str(self.project),
+                              question="q", effort="high",
+                              topology="council", models={}))
+        for role, pt, ct in (("critic", 100, 20), ("critic", 150, 30),
+                             ("synthesizer", 200, 90)):
+            rec.record_llm(role=role, round=1, lane_idx=None, model="m",
+                           request={}, response={}, prompt_tokens=pt,
+                           completion_tokens=ct, duration_ms=1)
+        for tool in ("grep", "read_file"):
+            rec.record_tool(role="critic", round=1, lane_idx=None, tool=tool,
+                            args="{}", output="x", duration_ms=1, error=None)
+        rec.close()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_totals_come_from_the_engine_s_own_record(self):
+        from benchmarks.consultants.role_tools_bench import cost_totals
+        t = cost_totals("sid-1", self.project)
+        self.assertEqual(t["llm_calls"], 3)
+        self.assertEqual(t["prompt_tokens"], 450)
+        self.assertEqual(t["completion_tokens"], 140)
+        self.assertEqual(t["tool_calls"], 2)
+        self.assertEqual(t["by_role"]["critic"]["calls"], 2)
+        self.assertEqual(t["tool_calls_by_role"], {"critic": 2})
+
+    def test_missing_db_is_reported_not_zero(self):
+        """A run whose transcript is absent must not read as a run that
+        cost nothing — that would silently make the tooled arm look
+        free."""
+        from benchmarks.consultants.role_tools_bench import cost_totals
+        t = cost_totals("nope", self.project)
+        self.assertIn("error", t)
+        self.assertNotIn("llm_calls", t)
+
+
+class TestCostReport(unittest.TestCase):
+    def _arm(self, all_roles, calls, ct):
+        return {"all_roles": all_roles, "effort": "high", "wall_s": 10.0,
+                "question": "q",
+                "totals": {"llm_calls": calls, "prompt_tokens": 0,
+                           "completion_tokens": ct, "tool_calls": 0,
+                           "by_role": {"critic": {"calls": calls,
+                                                  "completion_tokens": ct}}}}
+
+    def test_renders_the_delta(self):
+        from benchmarks.consultants.role_tools_bench import render_cost_report
+        out = render_cost_report(
+            [self._arm(False, 4, 1000), self._arm(True, 6, 1500)])
+        self.assertIn("+50%", out)
+        self.assertIn("critic", out)
+
+    def test_survives_a_failed_arm(self):
+        """A crashed arm must still render — reporting nothing at all
+        after paying for one full council run loses the half that did
+        succeed."""
+        from benchmarks.consultants.role_tools_bench import render_cost_report
+        out = render_cost_report(
+            [self._arm(False, 4, 1000),
+             {"all_roles": True, "effort": "high", "wall_s": 0, "ok": False}])
+        self.assertIn("all_roles on", out)
+
+
 if __name__ == "__main__":
     unittest.main()
