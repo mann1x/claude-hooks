@@ -579,7 +579,92 @@ def _argparser() -> argparse.ArgumentParser:
                    help="Tier 2: council effort tier (default high).")
     p.add_argument("--base", default="http://127.0.0.1:38095",
                    help="Tier 2: consultants engine base URL.")
+    p.add_argument("--seed-dir", default="",
+                   help="Tier 2: code copied into each arm's project. "
+                        "Required for --trials > 1, since arms must not "
+                        "share a config file.")
     return p
+
+
+#: Ground truth for the stale-doc question, as (label, true, false)
+#: triples. The seeded ``RETRY-DESIGN.md`` states each false value
+#: confidently; the code says the true one. A final answer is scored
+#: per fact, so an arm that fixes two of four is not the same as one
+#: that fixes none.
+#: Markers are matched as word-boundary regexes, not substrings.
+#: Substrings cannot express these facts: "15 attempts" *contains*
+#: "5 attempts", so the doc's wrong value matches inside the code's
+#: right one and every correct answer also scores as wrong. Numbers
+#: also need context — bare "15" matches a line number and bare "1.0"
+#: matches a confidence score.
+STALE_DOC_FACTS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    ("deadline_s",
+     (r"\b90(\.0)?\s*(s\b|seconds?\b|-second)", r"\b90\.0\b"),
+     (r"\b45(\.0)?\s*(s\b|seconds?\b|-second)", r"\b45\.0\b")),
+    ("max_attempts",
+     (r"\b15\s*(attempts?|tries)\b", r"attempts?\b[^.]{0,30}?\b15\b",
+      r"max_attempts\W{0,4}15\b"),
+     (r"\b5\s*(attempts?|tries)\b", r"attempts?\b[^.]{0,30}?\b5\b",
+      r"max_attempts\W{0,4}5\b")),
+    ("base_delay_s",
+     (r"\b1\.0\s*(s\b|seconds?\b)", r"base[_ ]delay\w*\W{0,6}1\.0\b"),
+     (r"\b0\.5\s*(s\b|seconds?\b)", r"base[_ ]delay\w*\W{0,6}0\.5\b")),
+    ("breaker_enabled",
+     (r"disabled by default", r"off by default", r"opt[- ]in",
+      r"not enabled by default", r"breaker_enabled\W{0,4}false"),
+     (r"(?<!dis)(?<!not )enabled by default",
+      r"enabled on all deployments", r"on by default")),
+)
+
+
+def score_answer(answer: str) -> dict:
+    """Per-fact verdict on a final answer.
+
+    ``true`` — the answer states the code's value.
+    ``false`` — it repeats the stale doc's value.
+    ``absent`` — it does not commit either way, which is neither a
+    catch nor a failure and must not be scored as one; a council that
+    stayed quiet about a fact did not get it wrong.
+    """
+    low = (answer or "").lower()
+    out: dict[str, str] = {}
+    for label, trues, falses in STALE_DOC_FACTS:
+        has_t = any(re.search(t, low) for t in trues)
+        has_f = any(re.search(f, low) for f in falses)
+        if has_t and not has_f:
+            out[label] = "true"
+        elif has_f and not has_t:
+            out[label] = "false"
+        elif has_t and has_f:
+            # Both present — usually "the notes say 45 s but the code
+            # says 90.0", i.e. a correction. Scored as true because the
+            # answer lands on the right value.
+            out[label] = "true"
+        else:
+            out[label] = "absent"
+    return out
+
+
+def materialize_arm_project(base: Path, seed: Path, tag: str) -> Path:
+    """One project dir per arm per trial.
+
+    Arms must not share a project: ``write_arm_config`` rewrites
+    ``.claude-hooks/consultants.toml`` in place, so two concurrent arms
+    pointed at one directory would each run under whichever config was
+    written last — silently turning an A/B into two samples of the same
+    arm.
+    """
+    import shutil
+    dst = base / tag
+    if dst.exists():
+        shutil.rmtree(dst)
+    dst.mkdir(parents=True)
+    for item in sorted(seed.iterdir()):
+        if item.name in (".claude-hooks", "__pycache__"):
+            continue
+        (shutil.copytree if item.is_dir() else shutil.copy2)(
+            item, dst / item.name)
+    return dst
 
 
 def run_cost_arm(*, project: Path, question: str, all_roles: bool,
@@ -692,12 +777,101 @@ def cost_totals(sid: str, project: Path) -> dict:
     return out
 
 
+def _mean(xs):
+    xs = [x for x in xs if x is not None]
+    return (sum(xs) / len(xs)) if xs else 0
+
+
+def _render_cost_multi(arms, offs, ons, vals) -> str:
+    def row(label, key, fmt="{:.0f}"):
+        a, b = vals(False, key), vals(True, key)
+        ma, mb = _mean(a), _mean(b)
+        d = "n/a" if not ma else f"{(mb - ma) / ma * 100:+.0f}%"
+        return (f"| {label} | {fmt.format(ma)} {_spread(a)} "
+                f"| {fmt.format(mb)} {_spread(b)} | {d} |")
+
+    lines = [
+        "# M-B Tier 2 — council cost A/B (stale-doc question)",
+        "",
+        f"effort={(offs or ons)[0].get('effort')}  "
+        f"trials={len(offs)} per arm  "
+        f"question hash="
+        f"{hashlib.sha256(((offs or ons)[0].get('question') or '').encode()).hexdigest()[:12]}",
+        "",
+        "Means across trials; `[min–max]` is the per-trial spread.",
+        "",
+        "| metric | all_roles off | all_roles on | delta |",
+        "|---|---|---|---|",
+        row("LLM calls", "llm_calls"),
+        row("prompt tokens", "prompt_tokens"),
+        row("completion tokens", "completion_tokens"),
+        row("tool calls", "tool_calls"),
+        f"| wall (s) | {_mean([a.get('wall_s') for a in offs]):.0f} "
+        f"| {_mean([a.get('wall_s') for a in ons]):.0f} |  |",
+        "",
+        "## Correctness — did the stale doc reach the answer?",
+        "",
+        "The seeded `RETRY-DESIGN.md` states four values the code",
+        "contradicts. `true` = the answer states the code's value;",
+        "`false` = it repeats the doc; `absent` = it did not commit",
+        "either way, which is neither a catch nor a failure.",
+        "",
+        "| fact | off (true/false/absent) | on (true/false/absent) |",
+        "|---|---|---|",
+    ]
+    for label, _t, _f in STALE_DOC_FACTS:
+        def tally(group):
+            got = [a.get("facts", {}).get(label, "absent") for a in group
+                   if a.get("facts") is not None]
+            return (f"{got.count('true')}/{got.count('false')}/"
+                    f"{got.count('absent')}")
+        lines.append(f"| {label} | {tally(offs)} | {tally(ons)} |")
+
+    lines += ["", "## Per role (mean LLM calls / mean completion tokens)", "",
+              "| role | off | on |", "|---|---|---|"]
+    roles = sorted({r for a in arms
+                    for r in (a.get("totals") or {}).get("by_role", {})})
+    for r in roles:
+        def per(group, k):
+            return _mean([(a.get("totals") or {}).get("by_role", {})
+                          .get(r, {}).get(k, 0) for a in group
+                          if a.get("totals")])
+        lines.append(
+            f"| {r} | {per(offs, 'calls'):.1f} / "
+            f"{per(offs, 'completion_tokens'):.0f} "
+            f"| {per(ons, 'calls'):.1f} / "
+            f"{per(ons, 'completion_tokens'):.0f} |")
+    return "\n".join(lines) + "\n"
+
+
+def _spread(xs):
+    xs = [x for x in xs if x is not None]
+    if len(xs) < 2:
+        return ""
+    return f"[{min(xs):.0f}–{max(xs):.0f}]"
+
+
 def render_cost_report(arms: list[dict]) -> str:
+    """Report per arm, averaged across trials.
+
+    Means, plus the per-trial spread, because a mean over 3 high-variance
+    council runs can hide a split that reverses the sign.
+    """
+    def vals(all_roles, k):
+        return [(a.get("totals") or {}).get(k) or 0 for a in arms
+                if a.get("all_roles") is all_roles and a.get("totals")]
+
     def g(a, k, d=0):
         return (a.get("totals") or {}).get(k, d) or 0
 
-    off = next((a for a in arms if not a["all_roles"]), {})
-    on = next((a for a in arms if a["all_roles"]), {})
+    offs = [a for a in arms if not a.get("all_roles")]
+    ons = [a for a in arms if a.get("all_roles")]
+    off = offs[0] if offs else {}
+    on = ons[0] if ons else {}
+    multi = len(offs) > 1 or len(ons) > 1
+
+    if multi:
+        return _render_cost_multi(arms, offs, ons, vals)
 
     def delta(k):
         a, b = g(off, k), g(on, k)
@@ -749,26 +923,54 @@ def main(argv: Optional[list[str]] = None) -> int:
                   "is overwritten per arm)", file=sys.stderr)
             return 2
         project = Path(args.project).resolve()
+        seed = Path(args.seed_dir).resolve() if args.seed_dir else None
         arms: list[dict] = []
-        for all_roles in (False, True):
-            if args.dry_run:
-                path = write_arm_config(project, all_roles=all_roles,
+        if args.dry_run:
+            for all_roles in (False, True):
+                p = (materialize_arm_project(
+                    project, seed, f"dry-{'on' if all_roles else 'off'}")
+                    if seed else project)
+                path = write_arm_config(p, all_roles=all_roles,
                                         effort=args.effort)
                 print(f"[dry-run] wrote {path} (all_roles={all_roles})")
-                continue
-            arm = run_cost_arm(project=project, question=args.question,
+            return 0
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        def one(trial: int, all_roles: bool) -> dict:
+            tag = f"t{trial}-{'on' if all_roles else 'off'}"
+            proj = (materialize_arm_project(project, seed, tag)
+                    if seed else project)
+            arm = run_cost_arm(project=proj, question=args.question,
                                all_roles=all_roles, base=args.base,
                                effort=args.effort)
-            arm["question"] = args.question
+            arm.update(question=args.question, trial=trial, tag=tag,
+                       project=str(proj))
             if arm.get("sid"):
-                arm["totals"] = cost_totals(arm["sid"], project)
-            print(f"arm all_roles={all_roles}: ok={arm['ok']} "
-                  f"wall={arm['wall_s']}s sid={arm.get('sid')}")
-            if not arm["ok"]:
-                print(f"  stderr: {arm['stderr'][-400:]}", file=sys.stderr)
-            arms.append(arm)
-        if args.dry_run:
-            return 0
+                arm["totals"] = cost_totals(arm["sid"], proj)
+                arm["facts"] = score_answer(
+                    (arm.get("payload") or {}).get("summary_markdown") or "")
+            return arm
+
+        for trial in range(args.trials):
+            # The two arms of a trial run CONCURRENTLY and are compared
+            # to each other. Cloud latency and upstream load drift over
+            # the ~30 min a council takes, so running arm A now and arm
+            # B an hour later confounds the knob with the time of day.
+            # Pairing them costs nothing and removes that.
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futs = {pool.submit(one, trial, ar): ar
+                        for ar in (False, True)}
+                for fut, ar in futs.items():
+                    try:
+                        arm = fut.result()
+                    except Exception as e:  # keep the sibling's data
+                        arm = {"all_roles": ar, "trial": trial, "ok": False,
+                               "error": f"{type(e).__name__}: {e}"}
+                    print(f"trial {trial} all_roles={arm['all_roles']}: "
+                          f"ok={arm.get('ok')} wall={arm.get('wall_s')}s "
+                          f"sid={arm.get('sid')} facts={arm.get('facts')}")
+                    arms.append(arm)
         report = render_cost_report(arms)
         print(report)
         if args.out:

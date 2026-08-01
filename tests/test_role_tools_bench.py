@@ -716,6 +716,134 @@ class TestCostTotals(unittest.TestCase):
         self.assertNotIn("llm_calls", t)
 
 
+class TestStaleDocScoring(unittest.TestCase):
+    """Tier 2's correctness half. A seeded `RETRY-DESIGN.md` states four
+    values the code contradicts, so the researcher can read a plausible
+    doc and repeat it — the real-world shape of "the research is wrong",
+    which cannot be planted directly into a live council."""
+
+    def _s(self, text):
+        from benchmarks.consultants.role_tools_bench import score_answer
+        return score_answer(text)
+
+    def test_code_value_scores_true(self):
+        self.assertEqual(
+            self._s("The deadline is 90.0 s and the cap is 15.")
+            ["deadline_s"], "true")
+
+    def test_doc_value_scores_false(self):
+        self.assertEqual(
+            self._s("The deadline is 45.0 seconds.")["deadline_s"], "false")
+
+    def test_silence_is_absent_not_wrong(self):
+        """A council that never mentions a fact did not get it wrong.
+        Scoring silence as a failure would reward verbosity and punish
+        an answer that stayed within what it checked."""
+        self.assertEqual(self._s("Retries are bounded.")["deadline_s"],
+                         "absent")
+
+    def test_an_explicit_correction_scores_true(self):
+        """'the notes say 45 s but the code says 90.0' is the outcome
+        the whole v1.3 channel exists to produce."""
+        self.assertEqual(
+            self._s("The design notes say 45.0 s, but the code sets 90.0.")
+            ["deadline_s"], "true")
+
+    def test_the_right_answer_does_not_also_match_the_wrong_one(self):
+        """The defect that forced regex markers: as substrings,
+        "15 attempts" *contains* "5 attempts", so the doc's wrong value
+        matched inside the code's right one and every correct answer
+        scored as wrong too. Checked on realistic prose, not on the
+        markers themselves — the markers are patterns now, and a
+        pattern cannot be a substring of another pattern in any
+        meaningful sense."""
+        cases = {
+            "deadline_s": ("the deadline is 90.0 s",
+                           "the deadline is 45.0 s"),
+            "max_attempts": ("a cap of 15 attempts", "a cap of 5 attempts"),
+            "base_delay_s": ("base delay 1.0 s", "base delay 0.5 s"),
+            "breaker_enabled": ("the breaker is disabled by default",
+                                "the breaker is enabled by default"),
+        }
+        for label, (true_prose, false_prose) in cases.items():
+            self.assertEqual(self._s(true_prose)[label], "true", label)
+            self.assertEqual(self._s(false_prose)[label], "false", label)
+
+    def test_a_negated_default_is_not_read_as_the_doc_s_claim(self):
+        """"not enabled by default" states the code's position while
+        containing the doc's phrase verbatim."""
+        self.assertEqual(
+            self._s("the breaker is not enabled by default")
+            ["breaker_enabled"], "true")
+
+    def test_bare_numbers_elsewhere_do_not_score(self):
+        """"15" alone is a line number and "1.0" is a confidence
+        score; neither is a claim about the retry layer."""
+        got = self._s("See retry.py:15 for details. CONFIDENCE: 1.0")
+        self.assertEqual(got["max_attempts"], "absent")
+        self.assertEqual(got["base_delay_s"], "absent")
+
+
+class TestArmProjectIsolation(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name) / "runs"
+        self.seed = Path(self.tmp.name) / "seed"
+        (self.seed / "pkg").mkdir(parents=True)
+        (self.seed / "pkg" / "a.py").write_text("X = 1\n")
+        (self.seed / "DESIGN.md").write_text("stale\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_each_arm_gets_its_own_copy(self):
+        """Concurrent arms sharing a project would each run under
+        whichever config was written last — silently turning an A/B
+        into two samples of the same arm."""
+        from benchmarks.consultants.role_tools_bench import (
+            materialize_arm_project,
+            write_arm_config,
+        )
+        a = materialize_arm_project(self.base, self.seed, "t0-off")
+        b = materialize_arm_project(self.base, self.seed, "t0-on")
+        self.assertNotEqual(a, b)
+        write_arm_config(a, all_roles=False, effort="high")
+        write_arm_config(b, all_roles=True, effort="high")
+        import consultants.config as cc
+        self.assertFalse(cc.load_config(a).tools.all_roles)
+        self.assertTrue(cc.load_config(b).tools.all_roles)
+
+    def test_seed_content_is_copied(self):
+        from benchmarks.consultants.role_tools_bench import (
+            materialize_arm_project,
+        )
+        p = materialize_arm_project(self.base, self.seed, "t0-off")
+        self.assertEqual((p / "pkg" / "a.py").read_text(), "X = 1\n")
+        self.assertTrue((p / "DESIGN.md").is_file())
+
+    def test_seed_config_is_not_copied(self):
+        """The seed must not carry a config into the arms, or it would
+        merge under the arm's own and the difference stops being the
+        only variable."""
+        from benchmarks.consultants.role_tools_bench import (
+            materialize_arm_project,
+        )
+        (self.seed / ".claude-hooks").mkdir()
+        (self.seed / ".claude-hooks" / "consultants.toml").write_text("x=1\n")
+        p = materialize_arm_project(self.base, self.seed, "t0-off")
+        self.assertFalse((p / ".claude-hooks").exists())
+
+    def test_rerun_replaces_a_stale_arm_dir(self):
+        from benchmarks.consultants.role_tools_bench import (
+            materialize_arm_project,
+        )
+        p = materialize_arm_project(self.base, self.seed, "t0-off")
+        (p / "leftover.txt").write_text("old")
+        p2 = materialize_arm_project(self.base, self.seed, "t0-off")
+        self.assertFalse((p2 / "leftover.txt").exists())
+
+
 class TestCostReport(unittest.TestCase):
     def _arm(self, all_roles, calls, ct):
         return {"all_roles": all_roles, "effort": "high", "wall_s": 10.0,
