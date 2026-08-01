@@ -50,7 +50,6 @@ import json
 import logging
 import re
 import sqlite3
-from typing import Optional
 
 from claude_hooks.providers._content_hash import content_hash
 

@@ -3,13 +3,10 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
 
 import pytest
 
 from claude_hooks.hyde_cache import (
-    DEFAULT_MAX_ENTRIES,
-    DEFAULT_TTL_SECONDS,
     clear,
     get,
     put,

@@ -27,7 +27,6 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
-from typing import Any, Optional
 
 REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:

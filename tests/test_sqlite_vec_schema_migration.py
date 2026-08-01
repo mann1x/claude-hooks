@@ -17,7 +17,6 @@ and the legacy-DB path (v0 tables + rows pre-existing).
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import unittest
 from pathlib import Path

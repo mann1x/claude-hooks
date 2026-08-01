@@ -24,8 +24,6 @@ are the regression guard.
 """
 from __future__ import annotations
 
-import os
-import subprocess
 import sys
 import unittest
 from pathlib import Path

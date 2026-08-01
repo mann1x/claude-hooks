@@ -23,7 +23,6 @@ Coverage:
 """
 from __future__ import annotations
 
-import json
 import unittest
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -133,7 +132,6 @@ class TestCreateTableEmitsAlter(unittest.TestCase):
     pre-M14 tables (PG's ADD COLUMN IF NOT EXISTS handles re-runs)."""
 
     def test_alter_table_add_column_emitted(self):
-        from claude_hooks.providers.pgvector import PgvectorProvider
         p, conn = _make_provider()
         # _create_table normally runs inside _ensure_ready; call it
         # directly so we don't have to drive the full connection
@@ -156,7 +154,6 @@ class TestCreateTableEmitsAlter(unittest.TestCase):
         self.assertIn("TIMESTAMPTZ", match[0])
 
     def test_partial_index_emitted(self):
-        from claude_hooks.providers.pgvector import PgvectorProvider
         p, conn = _make_provider()
         p._table_created = False  # type: ignore[attr-defined]
         # _create_table reads dim from self._embedder; the fake
@@ -177,7 +174,6 @@ class TestCreateTableEmitsAlter(unittest.TestCase):
         # PG ≥ 9.6 supports ADD COLUMN IF NOT EXISTS — confirm the
         # DDL string uses it so re-running on a v1.7 deploy doesn't
         # raise ``duplicate column``.
-        from claude_hooks.providers.pgvector import PgvectorProvider
         p, conn = _make_provider()
         p._table_created = False  # type: ignore[attr-defined]
         # _create_table reads dim from self._embedder; the fake
@@ -406,7 +402,6 @@ class TestCreateTableMigratesExistingTables(unittest.TestCase):
     """
 
     def test_existing_table_still_gets_alter_and_index(self):
-        from claude_hooks.providers.pgvector import PgvectorProvider
         p, conn = _make_provider()
         # Simulate "table already exists" — the
         # ``SELECT 1 FROM information_schema.tables`` fetchone returns
@@ -449,7 +444,6 @@ class TestCreateTableMigratesExistingTables(unittest.TestCase):
         connection must be rolled back before the exception
         propagates — otherwise subsequent queries fail with
         ``current transaction is aborted, commands ignored``."""
-        from claude_hooks.providers.pgvector import PgvectorProvider
 
         class _RaisingCursor(_FakeCursor):
             def execute(self, sql, params=None):

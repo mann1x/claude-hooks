@@ -13,7 +13,7 @@ These tests run only in environments where LangGraph is installed
 from __future__ import annotations
 
 import unittest
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 

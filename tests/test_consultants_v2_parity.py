@@ -37,7 +37,6 @@ from consultants.engine.coder_defaults import (
     RECOMMENDED_CODER_DEFAULT_ROUTE,
     RECOMMENDED_CODER_ROUTES_BY_LANGUAGE,
 )
-from consultants.engine.state_v2 import CoderLanguageRoute
 
 from tests._parity_helpers import (
     V2_OPT_IN_EVENT_KINDS,

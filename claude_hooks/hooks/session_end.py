@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Optional
 
 from claude_hooks._popen import detach_kwargs
-from claude_hooks.config import expand_user_path
 from claude_hooks.providers import Provider
 
 log = logging.getLogger("claude_hooks.hooks.session_end")

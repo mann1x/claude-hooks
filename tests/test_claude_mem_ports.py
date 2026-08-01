@@ -9,9 +9,7 @@ Tests for the four features ported from thedotmack/claude-mem:
 
 from __future__ import annotations
 
-from unittest.mock import patch
 
-import pytest
 
 from claude_hooks.decay import memory_hash
 from claude_hooks.hooks.stop import (

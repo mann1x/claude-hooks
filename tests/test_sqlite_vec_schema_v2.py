@@ -293,7 +293,8 @@ class TestSecondTableInMigratedDb(unittest.TestCase):
         # One shared on-disk db file, mirroring how two providers in the
         # same process share ``cfg...sqlite_vec_path``. (``:memory:``
         # would also work, but on-disk matches the real failure mode.)
-        import tempfile, os
+        import tempfile
+        import os
         self._tmp = tempfile.mkdtemp(prefix="ch-schema-test-")
         self._path = os.path.join(self._tmp, "shared.db")
         self.conn = _conn(self._path)

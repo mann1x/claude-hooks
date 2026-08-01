@@ -704,9 +704,9 @@ def _build_summary_markdown(
     # Back-compat: read + modified go under the same "Files touched" heading.
     files_touched = sorted(files_modified | files_read)[:20]
     if files_touched:
-        parts.append(f"\n## Files touched\n" + "\n".join(f"- {f}" for f in files_touched))
+        parts.append("\n## Files touched\n" + "\n".join(f"- {f}" for f in files_touched))
     if commands:
-        parts.append(f"\n## Commands\n" + "\n".join(f"- `{c}`" for c in commands[:10]))
+        parts.append("\n## Commands\n" + "\n".join(f"- `{c}`" for c in commands[:10]))
     return "\n".join(parts)
 
 

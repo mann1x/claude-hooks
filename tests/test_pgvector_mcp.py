@@ -359,7 +359,6 @@ class TestHttpTransport:
 
     @pytest.fixture
     def http_server(self):
-        import socket
         import threading
         from http.server import ThreadingHTTPServer
         from claude_hooks.pgvector_mcp.server import McpServer, _build_http_handler

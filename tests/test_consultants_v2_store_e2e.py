@@ -53,7 +53,7 @@ class TestStoreE2ERecall(unittest.TestCase):
             GraphDeps, build_council_graph,
         )
         from consultants.engine.store import (
-            Namespaces, record_research,
+            record_research,
         )
 
         store = InMemoryStore()

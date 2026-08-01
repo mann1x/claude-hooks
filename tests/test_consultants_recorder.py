@@ -429,7 +429,6 @@ class TestRuntimeEventsMirror(unittest.TestCase):
     def test_node_enter_emits_info_log_line(self):
         """Fix D — ops watching the daemon log see role transitions
         without querying the DB."""
-        import logging as _logging
         with TemporaryDirectory() as td:
             db = Path(td) / "transcript.db"
             rec = MessageRecorder(db, meta=_meta())

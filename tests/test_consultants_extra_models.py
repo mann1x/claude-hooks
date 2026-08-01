@@ -22,12 +22,7 @@ Coverage:
 
 from __future__ import annotations
 
-import io
 import logging
-from contextlib import redirect_stderr
-from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 

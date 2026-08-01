@@ -17,13 +17,11 @@ import json
 import sqlite3
 from pathlib import Path
 
-import pytest
 
 from claude_hooks.proxy.stats_db import (
     SCHEMA_VERSION,
     connect,
     ingest_dir,
-    ingest_file,
     rebuild_rollups,
 )
 

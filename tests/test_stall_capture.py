@@ -13,11 +13,10 @@ deterministic.
 from __future__ import annotations
 
 import unittest
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 from benchmarks.consultants.stall_capture import (
     CallTiming,
-    CallTimingAggregate,
     TimingCaptureChat,
     aggregate_calls,
     _percentile,

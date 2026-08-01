@@ -44,7 +44,6 @@ required" and prompts for the DSN if the user wants to enable it.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re

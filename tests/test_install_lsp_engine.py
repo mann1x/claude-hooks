@@ -22,9 +22,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from typing import Iterable
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:

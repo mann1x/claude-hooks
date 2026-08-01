@@ -15,15 +15,12 @@ Test layout:
 """
 from __future__ import annotations
 
-import os
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
 
 from consultants.engine.citation_linter import (
-    CITATION_RE,
-    CitationIssue,
     extract_citations,
     lint_answer,
     verify_citation,

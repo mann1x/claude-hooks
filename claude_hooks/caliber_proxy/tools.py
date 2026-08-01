@@ -17,7 +17,6 @@ import json
 import logging
 import os
 import re
-from pathlib import Path
 from typing import Any
 
 log = logging.getLogger("claude_hooks.caliber_proxy.tools")

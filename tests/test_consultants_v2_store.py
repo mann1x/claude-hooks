@@ -23,7 +23,6 @@ from __future__ import annotations
 import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, Optional
 
 
 try:
@@ -33,7 +32,6 @@ except ImportError:
     HAVE_LANGGRAPH = False
 
 
-from consultants.engine import store as store_mod
 from consultants.engine.store import (
     Namespaces,
     format_findings_block,

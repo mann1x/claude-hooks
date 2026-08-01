@@ -33,21 +33,17 @@ without langgraph.
 from __future__ import annotations
 
 import operator
-import os
 import unittest
 from pathlib import Path
-from unittest import mock
 
 from consultants.engine.coder import (
     CODER_SYSTEM,
     CODER_WRITE_FILE_TOOL_SPEC,
     CoderSandbox,
-    PLANNER_CODER_GATE_BLOCK,
     _normalise_sandbox_path,
     build_coder_artifacts_block,
     build_coder_messages,
     coder_node,
-    make_coder_sandbox,
     make_sandbox_tool_executor,
     parse_coder_preamble,
     parse_coder_tasks,

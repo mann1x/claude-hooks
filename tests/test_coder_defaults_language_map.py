@@ -245,7 +245,6 @@ class TestLanguageByExtensionShape(unittest.TestCase):
                 self.assertEqual(ext, ext.lower(), ext)
 
     def test_values_lower_case_slugs(self):
-        import re
         for ext, lang in LANGUAGE_BY_EXTENSION.items():
             with self.subTest(ext=ext, lang=lang):
                 self.assertRegex(lang, r"^[a-z][a-z0-9_+-]*$")

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from claude_hooks import consolidate as con_mod
 from claude_hooks.providers.base import Memory

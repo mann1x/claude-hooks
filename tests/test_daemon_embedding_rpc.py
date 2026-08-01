@@ -9,7 +9,6 @@ the wire protocol & dispatch routing, not the lifecycle state machine
 
 from __future__ import annotations
 
-import os
 import threading
 from unittest.mock import patch
 

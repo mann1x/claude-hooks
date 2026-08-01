@@ -13,12 +13,10 @@ the lifecycle state machine.
 
 from __future__ import annotations
 
-import socket
 import subprocess
-import threading
 import time
 from io import BytesIO
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 

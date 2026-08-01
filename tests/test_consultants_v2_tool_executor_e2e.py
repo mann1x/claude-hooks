@@ -44,10 +44,6 @@ class TestToolExecutorE2E(unittest.TestCase):
         from consultants.engine.graph import (
             GraphDeps, build_council_graph,
         )
-        from consultants.engine.state_v2 import ToolResult
-        from consultants.engine.tool_executor import (
-            tool_executor_node,
-        )
 
         # Per-role chat-client replies. The planner returns a 1-item
         # plan (single-researcher path). The researcher returns a

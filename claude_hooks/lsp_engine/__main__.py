@@ -122,7 +122,6 @@ from claude_hooks.lsp_engine.daemon import (
     Daemon,
     DaemonAlreadyRunning,
     load_daemon_config,
-    lock_path_for,
     pid_is_alive,
     project_dir,
     socket_path_for,

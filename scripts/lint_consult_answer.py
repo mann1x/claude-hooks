@@ -70,7 +70,7 @@ def _fetch_session(
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            http_error = f"HTTP 404 (session not in memory)"
+            http_error = "HTTP 404 (session not in memory)"
         else:
             print(
                 f"error: HTTP {e.code} fetching {url}: {e.reason}",

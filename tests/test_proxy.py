@@ -18,7 +18,6 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Optional
 
 import pytest
 

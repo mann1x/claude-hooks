@@ -64,7 +64,7 @@ import re
 import signal
 import sys
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
 
 
 # Same regex as ``claude_hooks/providers/pgvector.py:_safe_table``

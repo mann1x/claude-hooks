@@ -30,7 +30,6 @@ from unittest.mock import patch
 import pytest
 
 from tests._fixtures_net import (
-    FIXTURE_LAN_HOST,
     FIXTURE_LAN_HOST_ALT,
     FIXTURE_LLAMAFILE_URL,
 )
@@ -738,7 +737,6 @@ class TestValidateSqliteVecOnly:
         conn.commit()
         conn.close()
         # Stub the launcher path so the assertion is host-independent.
-        from pathlib import Path
         fake_launcher = tmp_path / "fake-launcher"
         fake_launcher.write_text("#!/bin/sh\necho launcher\n")
         monkeypatch.setattr(

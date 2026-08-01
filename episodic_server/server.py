@@ -25,7 +25,6 @@ import sys
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 

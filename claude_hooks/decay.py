@@ -18,7 +18,6 @@ import math
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from claude_hooks.config import expand_user_path
 from claude_hooks.providers.base import Memory

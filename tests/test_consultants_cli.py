@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import io
 import json
-import socket
-import threading
 import time
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path

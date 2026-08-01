@@ -21,12 +21,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 import unittest
 from typing import Any, AsyncIterator
 
 from consultants.server.events_sse import (
-    DEFAULT_HEARTBEAT_S,
     classify_astream_event,
     format_sse_event,
     format_sse_heartbeat,

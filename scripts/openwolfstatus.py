@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """OpenWolf status — shows all daemons, dashboards, and port assignments."""
-import json, subprocess, os, sys, shutil
+import json
+import subprocess
+import os
+import sys
+import shutil
 
 def main():
     registry_path = os.path.join(os.path.expanduser("~"), ".openwolf", "registry.json")

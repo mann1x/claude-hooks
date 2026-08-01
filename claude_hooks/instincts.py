@@ -9,16 +9,13 @@ future sessions recall them when encountering similar errors.
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from claude_hooks.config import expand_user_path
 
 log = logging.getLogger("claude_hooks.instincts")
 

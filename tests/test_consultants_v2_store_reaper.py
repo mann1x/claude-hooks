@@ -20,7 +20,6 @@ doubles so this test runs in either env (no LangGraph required).
 """
 from __future__ import annotations
 
-import threading
 import time
 import unittest
 from dataclasses import dataclass, field

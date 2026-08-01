@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from claude_hooks import hyde
 from claude_hooks.hyde import (
     _call_ollama,
     _format_context,
@@ -49,7 +48,6 @@ class TestCallOllama:
         def _capture(req, timeout):
             import json
             captured["body"] = json.loads(req.data.decode("utf-8"))
-            from io import BytesIO
             return _FakeResp(b'{"response": "response long enough"}')
 
         class _FakeResp:
@@ -79,7 +77,6 @@ class TestCallOllama:
         def _capture(req, timeout):
             import json
             captured["body"] = json.loads(req.data.decode("utf-8"))
-            from io import BytesIO
             class _R:
                 def read(self_inner, *a, **kw): return b'{"response": "long enough"}'
                 def __enter__(self_inner): return self_inner

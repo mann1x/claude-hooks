@@ -7,10 +7,7 @@ runner suites; here we pin the contracts new to v1.8.
 
 from __future__ import annotations
 
-import os
-import tempfile
 import unittest
-from pathlib import Path
 
 from consultants.server.app import (
     SessionState,
