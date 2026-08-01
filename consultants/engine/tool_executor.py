@@ -260,7 +260,14 @@ def tool_executor_node(state: dict,
     msgs = build_tool_executor_messages(
         item, grounding_msgs, question=state.get("question") or "",
     )
-    payload = {"model": model, "messages": msgs, "stream": False}
+    # The tool-plan prompt the researcher wrote against enumerates six
+    # tools in prose (``TOOL_PLAN_*``), so a provider-supplied extra is
+    # in the payload but absent from anything the executor was told
+    # about. Announce the difference; no-op on the default surface.
+    from consultants.engine.council import _with_extra_tools_note
+    payload = {"model": model,
+               "messages": _with_extra_tools_note(msgs, tool_specs),
+               "stream": False}
 
     cfg = None
     if LoopConfig is not None:

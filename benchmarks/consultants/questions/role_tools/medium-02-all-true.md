@@ -17,7 +17,7 @@ claim below is verifiable in the cohort.
 
 ## RESEARCH
 
-`forwarder.py:9` loops attempts 1..15. Each iteration consults
+`forwarder.py:11` loops attempts 1..15. Each iteration consults
 `should_retry` (`retry.py:14`), which returns False once `elapsed`
 reaches `DEADLINE_SECONDS`. Retryable statuses are 429, 500, 502, 503
 and 529 (`retry.py:18`). `KEEPALIVE_SECONDS = 15` sits at

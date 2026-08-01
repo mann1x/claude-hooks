@@ -218,6 +218,12 @@ class DetectTrial:
     missed: list = field(default_factory=list)      # planted-false not flagged
     false_positives: list = field(default_factory=list)  # planted-true flagged
     verdict_chars: int = 0
+    #: The verdict itself. The oracle is keyword-based and undercounts,
+    #: so the report tells the reader to check transcripts on a close
+    #: call — which is only actionable if the transcript was kept. A
+    #: scored run whose evidence was discarded cannot be audited later,
+    #: and by then the tokens are spent.
+    verdict: str = ""
     # Cost
     wall_s: float = 0.0
     prompt_tokens: int = 0
@@ -358,6 +364,7 @@ def run_detect_trial(q: DetectQuestion, *, arm: str, trial_idx: int,
         turns = out.get("turns") or []
         verdict = " ".join(getattr(x, "content", "") or "" for x in turns)
     t.verdict_chars = len(verdict)
+    t.verdict = verdict
     for turn in (out.get("turns") or []):
         t.prompt_tokens += int(getattr(turn, "prompt_tokens", 0) or 0)
         t.completion_tokens += int(getattr(turn, "completion_tokens", 0) or 0)

@@ -1063,6 +1063,185 @@ ROLE_TOOL_MAX_CALLS_PER_TURN = 4
 ROLE_TOOL_FORCE_ANSWER_AFTER = 3
 
 
+# ---------------------------------------------------------------------- #
+# The tool addendum — why wiring alone was not enough
+# ---------------------------------------------------------------------- #
+# The first live M-B bench (2026-08-01, gemma4:31b-cloud, 18 tooled
+# trials) recorded **zero tool calls**. The surface was live — 11 specs
+# in every payload, the registry answering correctly when called
+# directly — and the model declined it every single time.
+#
+# The cause is in the prompts. Each role's system prompt predates the
+# tool surface and describes a job that does not involve looking at
+# anything. CRITIC_SYSTEM is the sharpest case: it frames the job as a
+# routing decision ("is more research needed?") and then says "Default
+# to ready unless you can name a concrete missing fact… each extra
+# round costs another full agent loop". A model reading that has been
+# told, in effect, that investigating is expensive and the safe answer
+# is yes. ADVERSARY_SYSTEM is the most ironic: it is explicitly asked to
+# catch "fabricated or mis-attributed `path:line` citations" while
+# having no way to check one, so it can only judge whether a claim was
+# *reported*, never whether the report was *true*.
+#
+# So the addendum is not decoration around the plumbing; it is the half
+# that makes the plumbing reachable. It is appended to the system
+# message only when a role is actually handed tools, which keeps the
+# default-config prompt byte-identical (cohort-2 parity) and means a
+# role can never be told about a tool it cannot call.
+
+#: What each role should *do* with a tool, in its own terms. Generic
+#: encouragement ("you may use tools") loses to a role prompt that
+#: already told the model not to bother, so each entry names the
+#: specific move and, where the base prompt pushes the other way,
+#: overrides it explicitly.
+_ROLE_TOOL_DIRECTIVE: dict[str, str] = {
+    "planner": (
+        "You may call these tools yourself before writing the plan. Use "
+        "them sparingly and only to make steps concrete: confirm a file "
+        "or symbol you are about to point the researcher at actually "
+        "exists, rather than inferring it from a plausible name. A plan "
+        "step aimed at a file that is not there costs a full research "
+        "round to discover."
+    ),
+    "critic": (
+        "You may call these tools to CHECK the researcher's claims, not "
+        "merely to judge whether more research is wanted. This changes "
+        "what counts as a concrete missing fact: a load-bearing "
+        "`path:line` you looked up and could NOT confirm is concrete — "
+        "name it. Verifying a citation costs one cheap tool call, not "
+        "another research round, so the 'each extra round is expensive' "
+        "caution above does not apply to checking. Spot-check the cites "
+        "the answer will rest on; do not re-verify everything."
+    ),
+    "meta_critic": (
+        "You may call these tools to settle a disagreement between "
+        "critics rather than picking a side on plausibility. When "
+        "critics disagree about a fact in the code, look it up — a "
+        "verified answer beats a weighed one."
+    ),
+    "synthesizer": (
+        "You may call these tools to verify a citation before relaying "
+        "it. Cheapest use: when you are about to emit a `path:line` "
+        "that only one researcher reported, confirm it. Do not conduct "
+        "new research — the research phase is over."
+    ),
+    "adversary": (
+        "You may call these tools to CHECK the citations you are asked "
+        "to refute. Until now you could only judge whether a claim was "
+        "reported by a researcher; you can now judge whether the report "
+        "was true. Look up the answer's load-bearing `path:line` cites: "
+        "a cite that does not resolve, or resolves to something other "
+        "than what the answer claims, is exactly the fabricated or "
+        "mis-attributed citation this role exists to surface. A claim "
+        "you verified and found correct is NOT a refutation — do not "
+        "flag it."
+    ),
+}
+
+
+def _tool_names(tool_specs: Optional[list[dict]]) -> tuple[str, ...]:
+    """Names from OpenAI-shape specs, order preserved, dupes dropped."""
+    out: list[str] = []
+    for spec in tool_specs or []:
+        try:
+            name = ((spec.get("function") or {}).get("name")
+                    or spec.get("name") or "")
+        except AttributeError:  # pragma: no cover — malformed spec
+            continue
+        if name and name not in out:
+            out.append(str(name))
+    return tuple(out)
+
+
+def build_tool_addendum(role: Optional[str],
+                        tool_specs: Optional[list[dict]]) -> str:
+    """The block appended to a role's system prompt when it has tools.
+
+    Returns ``""`` when the role has no tools or none is known for the
+    role, so callers can append unconditionally. The tool list is
+    derived from the specs actually in the payload rather than written
+    out in prose — a hardcoded list silently goes stale the moment a
+    provider is enabled, which is how the researcher ended up being
+    told about six tools while eleven were on offer.
+    """
+    names = _tool_names(tool_specs)
+    directive = _ROLE_TOOL_DIRECTIVE.get(role or "")
+    if not names or not directive:
+        return ""
+    return ("\n\nTOOLS AVAILABLE TO YOU: " + ", ".join(names) + ".\n"
+            + directive
+            + "\nCite what you verify as `path:line`. If a tool call "
+            "fails or returns nothing, say so rather than assuming the "
+            "claim is false — absence of a result is not evidence.")
+
+
+def _builtin_tool_names() -> tuple[str, ...]:
+    """The six tools RESEARCHER_SYSTEM and the tool-plan prompt spell
+    out in prose. Read from the provider rather than re-typed, because
+    a second hardcoded list is how the first one went stale."""
+    try:
+        from claude_hooks.caliber_proxy.tools import openai_tool_specs
+        return _tool_names(openai_tool_specs())
+    except Exception:  # pragma: no cover — package always present
+        log.exception("could not resolve builtin tool names")
+        return ()
+
+
+def build_extra_tools_note(tool_specs: Optional[list[dict]]) -> str:
+    """Announce tools the prose enumeration does not mention.
+
+    ``RESEARCHER_SYSTEM`` and the tool-plan prompt name their six tools
+    inline, and a model generally works from that list rather than from
+    the schema array. So enabling a provider — git, later MCP or shell —
+    puts tools in the payload that the role has effectively been told do
+    not exist. Rather than rewriting the prose (which would change the
+    default prompt byte-for-byte and invalidate the M11c corpus), name
+    only the *difference*, and only when there is one.
+    """
+    extras = [n for n in _tool_names(tool_specs)
+              if n not in _builtin_tool_names()]
+    if not extras:
+        return ""
+    return ("\n\nALSO AVAILABLE (beyond the tools listed above): "
+            + ", ".join(extras) + ". Same citation rules apply.")
+
+
+def _with_extra_tools_note(messages: list[dict],
+                           tool_specs: Optional[list[dict]]) -> list[dict]:
+    """Copy of ``messages`` with :func:`build_extra_tools_note` appended
+    to the LAST system turn. Byte-identical when there are no extras."""
+    note = build_extra_tools_note(tool_specs)
+    if not note:
+        return messages
+    out = [dict(m) for m in messages]
+    for m in reversed(out):
+        if m.get("role") == "system":
+            m["content"] = (m.get("content") or "") + note
+            break
+    return out
+
+
+def _with_tool_addendum(messages: list[dict], role: Optional[str],
+                        tool_specs: Optional[list[dict]]) -> list[dict]:
+    """Copy ``messages`` with the addendum appended to the system turn.
+
+    Never mutates the caller's list: the same message list is reused
+    across x-tier lanes, and appending in place would compound the
+    addendum once per lane.
+    """
+    add = build_tool_addendum(role, tool_specs)
+    if not add:
+        return messages
+    out = [dict(m) for m in messages]
+    for m in out:
+        if m.get("role") == "system":
+            m["content"] = (m.get("content") or "") + add
+            return out
+    # No system turn (shouldn't happen for these roles) — prepend one
+    # rather than dropping the directive on the floor.
+    return [{"role": "system", "content": add.lstrip("\n")}] + out
+
+
 def _role_turn(chat_client, model: str, messages: list[dict],
                *, think: Any = True,
                recorder=None, role: Optional[str] = None,
@@ -1129,7 +1308,11 @@ def _role_turn(chat_client, model: str, messages: list[dict],
 
         on_iter_cb, on_tool_cb = _on_iter, _on_tool
 
-    payload = {"model": model, "messages": messages,
+    # Applied here, past every fallback branch: a role that ends up in
+    # ``_single_shot`` must never see a directive about tools it will
+    # not be offered.
+    payload = {"model": model,
+               "messages": _with_tool_addendum(messages, role, tool_specs),
                "stream": False, "think": think}
     try:
         from claude_hooks.agent_loop.runner import LoopConfig
@@ -1762,6 +1945,12 @@ def researcher_node(state: dict, *,
             build_tool_plan_user_appendix(prior_for_round)
             if report_mode else RESEARCHER_PLAN_MODE_BLOCK
         )
+        if not report_mode:
+            # PLAN mode ends with an "Available tools:" enumeration that
+            # feeds ``suggested_tools``. Left stale, a provider-supplied
+            # tool can never be suggested, so the executor never sees an
+            # intent shaped for it. Empty on the default surface.
+            appendix = appendix + build_extra_tools_note(tool_specs)
         msgs = list(msgs)
         msgs[-1] = dict(msgs[-1])
         msgs[-1]["content"] = msgs[-1]["content"] + (
@@ -1904,7 +2093,10 @@ def researcher_node(state: dict, *,
 
     payload = {
         "model": model,
-        "messages": msgs,
+        # RESEARCHER_SYSTEM enumerates its six tools in prose; anything
+        # a provider adds beyond those has to be announced or the role
+        # never learns it exists. No-op on the default surface.
+        "messages": _with_extra_tools_note(msgs, tool_specs),
         "stream": False,
     }
 

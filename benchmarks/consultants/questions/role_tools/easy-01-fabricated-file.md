@@ -20,7 +20,7 @@ tooled critic runs one `list_files` or `glob` and sees it.
 The retry layer bounds attempts two ways. `retry.py:3` sets
 `MAX_ATTEMPTS = 15` as a safety cap, and `retry.py:4` sets
 `DEADLINE_SECONDS = 90.0` so the deadline binds first. Backoff is
-full-jitter exponential (`retry.py:8`). Persistent breaker state is
+full-jitter exponential (`retry.py:7`). Persistent breaker state is
 kept in `retry_state.py:12`, which serialises the failure counter to
 disk between sessions.
 

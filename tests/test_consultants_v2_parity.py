@@ -346,6 +346,38 @@ class TestOptInsOffByDefault(unittest.TestCase):
         specs, _executor, _registry = build_tool_surface(self.cfg)
         self.assertEqual(specs, openai_tool_specs())
 
+    def test_default_surface_adds_no_extra_tools_note(self):
+        # The prompt half of the same guarantee. RESEARCHER_SYSTEM and
+        # the tool-plan prompt enumerate their six tools in prose; the
+        # note names only what a provider adds *beyond* that list, so on
+        # the default surface it must be empty and every researcher /
+        # tool_executor prompt stays byte-identical.
+        from claude_hooks.caliber_proxy.tools import openai_tool_specs
+        from consultants.engine import council
+        from consultants.server.tool_surface import build_tool_surface
+        specs, _e, _r = build_tool_surface(self.cfg)
+        self.assertEqual(council.build_extra_tools_note(specs), "")
+        self.assertEqual(council.build_extra_tools_note(openai_tool_specs()),
+                         "")
+        msgs = [{"role": "system", "content": "S"},
+                {"role": "user", "content": "U"}]
+        self.assertIs(council._with_extra_tools_note(msgs, specs), msgs)
+
+    def test_tool_addendum_is_unreachable_with_default_tooled_roles(self):
+        # The addendum exists to make the M-B knob actually change
+        # behaviour (the 2026-08-01 bench measured 0 tool calls without
+        # it). It must remain unreachable while the knob is off — the
+        # gate is ``_tools_for`` returning {}, so no toolable role is
+        # ever handed the tool_specs the addendum keys on.
+        from consultants.engine.graph import (
+            TOOLABLE_ROLES, GraphDeps, _tools_for,
+        )
+        deps = GraphDeps(chat_clients={}, models={}, enabled_roles=(),
+                         cwd="/p", tool_specs=[{"x": 1}],
+                         tool_executor=lambda *a: "")
+        for role in TOOLABLE_ROLES:
+            self.assertNotIn("tool_specs", _tools_for(deps, role), role)
+
     def test_registry_is_not_shared_between_sessions(self):
         # The gate carries per-session taint, which is sticky. A shared
         # registry would leak that into the next consultation — and in

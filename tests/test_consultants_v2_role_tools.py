@@ -274,6 +274,166 @@ class TestNodesAcceptTools(unittest.TestCase):
 
 
 # ===================================================================== #
+# The tool addendum
+# ===================================================================== #
+class TestToolAddendum(unittest.TestCase):
+    """The 2026-08-01 live bench recorded 0 tool calls across 18 tooled
+    trials. The surface was live; the prompts were not. Wiring a role to
+    a toolbox while its system prompt describes a job that involves
+    looking at nothing produces a knob that costs schema tokens and
+    changes no behaviour."""
+
+    def test_no_tools_means_no_addendum(self):
+        self.assertEqual(council.build_tool_addendum("critic", None), "")
+        self.assertEqual(council.build_tool_addendum("critic", []), "")
+
+    def test_unknown_role_gets_no_addendum(self):
+        """Better silent than wrong: a role with no directive would
+        otherwise be handed a tool list and no reason to use it."""
+        self.assertEqual(council.build_tool_addendum("researcher", _spec()),
+                         "")
+        self.assertEqual(council.build_tool_addendum(None, _spec()), "")
+
+    def test_every_toolable_role_has_a_directive(self):
+        """The regression guard for the bug this fixes. A role added to
+        TOOLABLE_ROLES without a directive gets tools it is never told
+        about — indistinguishable, from the outside, from the knob
+        simply not working."""
+        for role in TOOLABLE_ROLES:
+            self.assertIn(role, council._ROLE_TOOL_DIRECTIVE, role)
+            self.assertTrue(council.build_tool_addendum(role, _spec()), role)
+
+    def test_names_come_from_the_specs_not_a_hardcoded_list(self):
+        """A prose list goes stale the moment a provider is enabled —
+        which is exactly how the researcher ended up being told about
+        six tools while eleven were on offer."""
+        out = council.build_tool_addendum(
+            "critic", _spec("git_blame") + _spec("weird_new_tool"))
+        self.assertIn("git_blame", out)
+        self.assertIn("weird_new_tool", out)
+        self.assertNotIn("read_file", out)
+
+    def test_critic_directive_overrides_the_default_to_ready_pressure(self):
+        """CRITIC_SYSTEM says 'default to ready' and 'each extra round
+        costs another full agent loop'. Left unaddressed, a model reads
+        that as 'investigating is expensive, say ready' — which is
+        precisely what the transcripts showed. The directive has to
+        distinguish a cheap tool call from an expensive research round
+        and redefine what counts as a concrete missing fact."""
+        d = council._ROLE_TOOL_DIRECTIVE["critic"]
+        self.assertIn("concrete", d)
+        self.assertIn("not another research round", d)
+
+    def test_adversary_directive_addresses_the_verify_gap(self):
+        """ADVERSARY_SYSTEM asks it to catch 'fabricated or
+        mis-attributed path:line citations' while giving it no way to
+        check one — it could only judge whether a claim was reported."""
+        d = council._ROLE_TOOL_DIRECTIVE["adversary"]
+        self.assertIn("path:line", d)
+        self.assertIn("NOT a refutation", d)
+
+    def test_addendum_lands_on_the_system_turn(self):
+        msgs = [{"role": "system", "content": "SYS"},
+                {"role": "user", "content": "U"}]
+        out = council._with_tool_addendum(msgs, "critic", _spec())
+        self.assertTrue(out[0]["content"].startswith("SYS"))
+        self.assertIn("TOOLS AVAILABLE TO YOU", out[0]["content"])
+        self.assertEqual(out[1]["content"], "U")
+
+    def test_does_not_mutate_the_caller_s_messages(self):
+        """The same message list is reused across x-tier lanes. In-place
+        appending would stack one addendum per lane, and the last lane
+        would carry N copies."""
+        msgs = [{"role": "system", "content": "SYS"}]
+        council._with_tool_addendum(msgs, "critic", _spec())
+        council._with_tool_addendum(msgs, "critic", _spec())
+        self.assertEqual(msgs[0]["content"], "SYS")
+
+    def test_missing_system_turn_still_carries_the_directive(self):
+        out = council._with_tool_addendum(
+            [{"role": "user", "content": "U"}], "critic", _spec())
+        self.assertEqual(out[0]["role"], "system")
+        self.assertIn("TOOLS AVAILABLE TO YOU", out[0]["content"])
+
+    def test_untooled_role_never_sees_it(self):
+        """A role that falls through to _single_shot must not be told
+        about tools it will not be offered."""
+        chat = FakeChat()
+        council._role_turn(chat, "m", [{"role": "system", "content": "SYS"}])
+        self.assertEqual(chat.payloads[0]["messages"][0]["content"], "SYS")
+
+    def test_tooled_role_payload_carries_it(self):
+        captured = {}
+
+        def fake_loop(payload, cwd, **kw):
+            captured["msgs"] = payload["messages"]
+            return {"message": {"content": "ok"}}
+
+        council._role_turn(FakeChat(), "m",
+                           [{"role": "system", "content": "SYS"}],
+                           tool_specs=_spec(), tool_executor=lambda *a: "",
+                           loop_runner=fake_loop, role="critic")
+        self.assertIn("TOOLS AVAILABLE TO YOU", captured["msgs"][0]["content"])
+
+    def test_fallback_to_single_shot_drops_the_addendum(self):
+        """When the loop dies the role answers tool-free, so a directive
+        telling it to go look would be actively misleading."""
+        chat = FakeChat()
+
+        def boom(payload, cwd, **kw):
+            raise RuntimeError("nope")
+
+        council._role_turn(chat, "m", [{"role": "system", "content": "SYS"}],
+                           tool_specs=_spec(), tool_executor=lambda *a: "",
+                           loop_runner=boom, role="critic")
+        self.assertEqual(chat.payloads[0]["messages"][0]["content"], "SYS")
+
+
+class TestExtraToolsNote(unittest.TestCase):
+    """RESEARCHER_SYSTEM and the tool-plan prompt name their six tools
+    in prose, and a model works from that list rather than the schema
+    array. Enabling a provider puts tools in the payload that the role
+    has effectively been told do not exist."""
+
+    def test_default_surface_adds_nothing(self):
+        """Load-bearing for cohort-2 parity: rewriting the prose would
+        change the default prompt byte-for-byte and invalidate the M11c
+        corpus, so only the difference is named."""
+        from claude_hooks.caliber_proxy.tools import openai_tool_specs
+        self.assertEqual(
+            council.build_extra_tools_note(openai_tool_specs()), "")
+
+    def test_no_tools_adds_nothing(self):
+        self.assertEqual(council.build_extra_tools_note(None), "")
+
+    def test_names_only_the_extras(self):
+        from claude_hooks.caliber_proxy.tools import openai_tool_specs
+        note = council.build_extra_tools_note(
+            openai_tool_specs() + _spec("git_blame"))
+        self.assertIn("git_blame", note)
+        self.assertNotIn("read_file", note)
+
+    def test_lands_on_the_last_system_turn(self):
+        msgs = [{"role": "system", "content": "GROUNDING"},
+                {"role": "system", "content": "ROLE"},
+                {"role": "user", "content": "U"}]
+        out = council._with_extra_tools_note(msgs, _spec("git_blame"))
+        self.assertEqual(out[0]["content"], "GROUNDING")
+        self.assertIn("ALSO AVAILABLE", out[1]["content"])
+
+    def test_identity_when_empty(self):
+        """Returning the same object, not a copy, keeps the default
+        researcher path allocation-identical to pre-addendum."""
+        msgs = [{"role": "system", "content": "S"}]
+        self.assertIs(council._with_extra_tools_note(msgs, None), msgs)
+
+    def test_does_not_mutate(self):
+        msgs = [{"role": "system", "content": "S"}]
+        council._with_extra_tools_note(msgs, _spec("git_blame"))
+        self.assertEqual(msgs[0]["content"], "S")
+
+
+# ===================================================================== #
 # Config
 # ===================================================================== #
 class TestConfigKnob(unittest.TestCase):

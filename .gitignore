@@ -101,6 +101,11 @@ vendor/llamafile/dist/*.llamafile
 benchmarks/consultants/results/**/*
 !benchmarks/consultants/results/**/
 !benchmarks/consultants/results/**/report.md
+# A per-date README is the interpretation of a run set — which run is
+# citable, which is superseded and why. The reports alone don't carry
+# that, and a superseded number with no note beside it is worse than
+# no number.
+!benchmarks/consultants/results/**/README.md
 !benchmarks/consultants/results/**/report-by-language.md
 !benchmarks/consultants/results/**/smoke-report.md
 !benchmarks/consultants/results/**/quota.md

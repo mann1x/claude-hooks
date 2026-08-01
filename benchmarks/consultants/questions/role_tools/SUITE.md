@@ -1,6 +1,6 @@
 ---
 suite: role_tools
-suite_version: "1.0"
+suite_version: "1.2"
 released: 2026-08-01
 manifest:
   - easy-01-fabricated-file

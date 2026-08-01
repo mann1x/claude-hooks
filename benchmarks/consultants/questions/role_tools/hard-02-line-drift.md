@@ -26,5 +26,4 @@ safety cap.
 retry.py:1
 
 ## PLANTED_TRUE
-should_retry
 MAX_ATTEMPTS

@@ -19,6 +19,7 @@ So the tests here are mostly about the oracle being honest:
 from __future__ import annotations
 
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -94,6 +95,60 @@ class TestCorpus(unittest.TestCase):
                               f"{q.id}: '{tok}' is planted as true but is "
                               f"absent from the fixture")
 
+    def test_every_cite_in_the_research_resolves(self):
+        """The check that hand-auditing failed to do.
+
+        v1.0 shipped with four `path:line` cites that pointed at the
+        wrong line — including one in the *control*, where the only
+        correct number of flags is zero. The tooled critic looked them
+        up, correctly reported the drift, and the harness scored it as
+        a false positive: the bench punished the model for being right
+        and understated precision as 69.2% when it was 100%.
+
+        Substring checks on the planted tokens cannot see this, because
+        the symbol really is in the file — just not on the cited line.
+        ``expected_drift`` below is the allow-list of cites that are
+        wrong on purpose; everything else must resolve to a line that
+        plausibly supports the claim.
+        """
+        #: (question id, cite) pairs that are deliberately false.
+        expected_drift = {
+            ("easy-01-fabricated-file", "retry_state.py:12"),
+            ("hard-02-line-drift", "retry.py:1"),
+        }
+        cite_re = re.compile(r"\b([\w.]+\.py):(\d+)")
+        checked = 0
+        for q in self.qs:
+            d = SUITE_DIR / "fixtures" / q.fixtures_subdir
+            for m in cite_re.finditer(q.research):
+                fname, lineno = m.group(1), int(m.group(2))
+                cite = f"{fname}:{lineno}"
+                if (q.id, cite) in expected_drift:
+                    continue
+                checked += 1
+                path = d / fname
+                self.assertTrue(path.is_file(),
+                                f"{q.id}: cites missing file {fname}")
+                lines = path.read_text(encoding="utf-8").splitlines()
+                self.assertTrue(
+                    0 < lineno <= len(lines),
+                    f"{q.id}: {cite} is out of range ({len(lines)} lines)")
+                body = lines[lineno - 1].strip()
+                self.assertTrue(
+                    body, f"{q.id}: {cite} points at a blank line")
+        self.assertGreater(checked, 10, "cite regex matched almost nothing")
+
+    def test_control_question_has_no_drifting_cites(self):
+        """Stated separately because it is the one that matters most.
+        Any wrong cite in the control makes a correct flag score as a
+        false positive, which is the only thing the control measures."""
+        q = next(x for x in self.qs if x.is_control)
+        d = SUITE_DIR / "fixtures" / q.fixtures_subdir
+        for m in re.finditer(r"\b([\w.]+\.py):(\d+)", q.research):
+            lines = (d / m.group(1)).read_text(encoding="utf-8").splitlines()
+            self.assertTrue(lines[int(m.group(2)) - 1].strip(),
+                            f"control cites blank line {m.group(0)}")
+
     def test_line_drift_question_really_does_drift(self):
         """hard-02 plants a real symbol at a wrong line, so the
         substring check above cannot see the falsehood. Verify the
@@ -107,6 +162,35 @@ class TestCorpus(unittest.TestCase):
                         "but the symbol must exist somewhere, or this is "
                         "just another nonexistent-symbol question")
 
+    def test_no_true_token_shares_a_sentence_with_a_false_one(self):
+        """v1.1's precision was understated at 78.6% by this defect.
+
+        The oracle scores a flag by finding a doubt word near a token.
+        When a "true" token sits in the same sentence as the fabricated
+        claim, a *correct* verdict has to name both — "there is no
+        `reset_breaker`; the class only implements `record_failure` and
+        `is_open`" doubts one and confirms the other, and the window
+        cannot tell them apart. The token then counts as a false alarm
+        for a critic that did exactly the right thing.
+
+        A token that cannot be flagged independently of the falsehood
+        is not a usable control, so it must not be listed as one.
+        """
+        for q in self.qs:
+            if not q.planted_false:
+                continue
+            for sentence in re.split(r"(?<=[.!?])\s+", q.research):
+                hits_false = [f for f in q.planted_false if f in sentence]
+                if not hits_false:
+                    continue
+                for tok in q.planted_true:
+                    self.assertNotIn(
+                        tok, sentence,
+                        f"{q.id}: '{tok}' is a precision control but shares "
+                        f"a sentence with the planted falsehood "
+                        f"{hits_false[0]!r} — a correct catch would score "
+                        f"as a false positive")
+
     def test_exactly_one_control_question(self):
         """Precision needs a question where the only correct number of
         flags is zero. More than one and the control dominates; none and
@@ -115,13 +199,26 @@ class TestCorpus(unittest.TestCase):
         controls = [q for q in self.qs if q.is_control]
         self.assertEqual([q.id for q in controls], ["medium-02-all-true"])
 
-    def test_every_non_control_carries_true_claims_too(self):
-        """A question of pure falsehood would let a flag-everything
-        critic score perfectly on it."""
-        for q in self.qs:
-            if not q.is_control:
-                self.assertTrue(q.planted_true,
-                                f"{q.id}: no true claims to be wrong about")
+    def test_the_suite_carries_enough_true_claims_to_measure_precision(self):
+        """A corpus of pure falsehood would let a flag-everything critic
+        score perfectly, so precision needs true claims to be wrong
+        about — but they have to be *scorable* ones.
+
+        This is asserted across the suite rather than per question. v1.1
+        listed a true token in every question and two of them were
+        unusable: a correct verdict could not avoid naming them while
+        doubting the falsehood beside them, so they measured the
+        oracle's proximity window rather than the critic's judgement.
+        Dropping an unscorable control is an improvement; the bar is
+        that enough remain, concentrated in the control question where
+        the correct number of flags is unambiguously zero.
+        """
+        total = sum(len(q.planted_true) for q in self.qs)
+        self.assertGreaterEqual(total, 4, "too few precision controls")
+        control = next(q for q in self.qs if q.is_control)
+        self.assertGreaterEqual(
+            len(control.planted_true), 3,
+            "the control carries the uncontaminated precision signal")
 
     def test_fixture_directories_exist(self):
         for q in self.qs:

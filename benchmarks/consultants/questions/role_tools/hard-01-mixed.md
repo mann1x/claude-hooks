@@ -20,7 +20,7 @@ tool budget and *what it chooses to verify* both matter.
 The layer has four bounds. `MAX_ATTEMPTS = 15` (`retry.py:3`) caps
 attempts. `DEADLINE_SECONDS = 90.0` (`retry.py:4`) is the wall clock.
 `compute_backoff` (`retry.py:7`) is full-jitter with a 30 s cap.
-`CircuitBreaker` opens at 5 failures (`retry.py:22`). Finally,
+`CircuitBreaker` opens at 5 failures (`retry.py:24`). Finally,
 `forwarder.py` calls `breaker.half_open()` after the deadline to probe
 whether upstream has recovered before resuming full traffic.
 

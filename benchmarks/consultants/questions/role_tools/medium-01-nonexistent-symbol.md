@@ -17,14 +17,13 @@ code around it.
 
 ## RESEARCH
 
-`CircuitBreaker` in `retry.py:20` counts failures and opens at a
+`CircuitBreaker` in `retry.py:21` counts failures and opens at a
 threshold. Recovery is handled by `CircuitBreaker.reset_breaker()`,
 which zeroes the counter once the upstream returns a 200. The
-`is_open()` check at `retry.py:29` gates each attempt.
+`is_open()` check at `retry.py:31` gates each attempt.
 
 ## PLANTED_FALSE
 reset_breaker
 
 ## PLANTED_TRUE
-is_open
-CircuitBreaker
+
