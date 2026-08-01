@@ -553,6 +553,7 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
         "tools": {
             "enabled": cfg.tools.enabled,
             "git": cfg.tools.git,
+            "all_roles": cfg.tools.all_roles,
             "default_level": cfg.tools.default_level,
             "permissions": dict(cfg.tools.permissions),
         },
@@ -837,6 +838,7 @@ def cmd_config_set_tools(args, base: str) -> int:
         cfg = cc.set_tools(
             enabled=_parse_cli_bool(args.enabled, flag="--enabled"),
             git=_parse_cli_bool(args.git, flag="--git"),
+            all_roles=_parse_cli_bool(args.all_roles, flag="--all-roles"),
             default_level=args.default_level,
             set_permission=perm,
             clear_permission=args.clear_permission,
@@ -2043,6 +2045,11 @@ def build_parser() -> argparse.ArgumentParser:
                      help="true|false — read-only git history tools: "
                           "git_history (\"when did this regress?\" via "
                           "git log -L), git_log / blame / diff / show.")
+    ctl.add_argument("--all-roles", dest="all_roles",
+                     help="true|false — give every role the same tools as "
+                          "the researcher (planner / critic / meta_critic / "
+                          "synthesizer / adversary). Costs one LLM call per "
+                          "tool iteration per role per lane.")
     ctl.add_argument("--default-level", dest="default_level",
                      choices=cc.VALID_PERMISSION_LEVELS,
                      help="Rung for a tool nothing else names. "

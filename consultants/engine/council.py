@@ -1036,6 +1036,152 @@ def _single_shot(chat_client, model: str, messages: list[dict],
     return (_extract_text(response), pt, ct)
 
 
+# ====================================================================== #
+# M-B: uniform role tool access
+# ====================================================================== #
+# Before M-B the researcher was the only default role that could call a
+# tool. planner / critic / meta_critic / synthesizer / adversary each ran
+# through ``_single_shot`` — one call, no tools — so they could reason
+# about the researcher's text but never check it.
+#
+# That is why the CitationLinter had to exist. The 2026-05-18 forensic
+# (csl-2026-05-18-1031-9e3b) traced a fabricated filename to a researcher
+# lane with zero tool calls; the critic could not verify it because the
+# critic had no way to look. A critic that can ``read_file`` checks the
+# claim directly instead of inheriting it.
+#
+# Cost is the reason this is opt-in rather than simply switched on. A
+# single-shot role costs exactly one LLM call; a tooled role costs one
+# per iteration, and critic fans out per lane at the x-tiers, so the
+# multiplier is roles × lanes × iterations. The caps below are therefore
+# deliberately tighter than the researcher's: these roles are meant to
+# *check* a handful of specific claims, not to conduct research. If a
+# critic needs eight tool calls to form a verdict, the plan was wrong.
+ROLE_TOOL_MAX_ITERATIONS = 4
+ROLE_TOOL_MAX_CALLS_PER_TURN = 4
+#: Strip tools after this many iterations so a role always produces text.
+ROLE_TOOL_FORCE_ANSWER_AFTER = 3
+
+
+def _role_turn(chat_client, model: str, messages: list[dict],
+               *, think: Any = True,
+               recorder=None, role: Optional[str] = None,
+               round: int = 1,
+               lane_idx: Optional[int] = None,
+               tool_specs: Optional[list[dict]] = None,
+               tool_executor=None,
+               cwd: str = "",
+               loop_runner=None) -> tuple[str, int, int]:
+    """One role turn, returning ``(text, prompt_tokens, completion_tokens)``.
+
+    Runs a tool loop when ``tool_specs`` **and** ``tool_executor`` are
+    both supplied; otherwise delegates to :func:`_single_shot`
+    unchanged. The default path is therefore byte-identical to pre-M-B
+    behaviour — the loop is reachable only when the graph deliberately
+    hands a role its tools.
+
+    Failures fall back to a single shot rather than propagating. A role
+    that cannot run its tool loop should still deliver its verdict:
+    losing the critic entirely because the loop misbehaved is strictly
+    worse than a critic that reasons without having looked.
+    """
+    if not tool_specs or tool_executor is None:
+        return _single_shot(
+            chat_client, model, messages, think=think,
+            recorder=recorder, role=role, round=round, lane_idx=lane_idx,
+        )
+
+    if loop_runner is None:
+        try:
+            from claude_hooks.agent_loop.runner import run_loop
+            loop_runner = run_loop
+        except Exception:  # pragma: no cover — claude_hooks always present
+            log.exception("agent_loop unavailable; %s falls back to "
+                          "a single shot", role)
+            return _single_shot(
+                chat_client, model, messages, think=think,
+                recorder=recorder, role=role, round=round,
+                lane_idx=lane_idx,
+            )
+
+    on_iter_cb = on_tool_cb = None
+    if recorder is not None and role is not None:
+        def _on_iter(_idx: int, req: dict, resp: dict, dt_ms: int) -> None:
+            pt_l, ct_l = _usage_from(resp)
+            try:
+                recorder.record_llm(
+                    role=role, round=round, lane_idx=lane_idx, model=model,
+                    request=req, response=resp, prompt_tokens=pt_l,
+                    completion_tokens=ct_l, duration_ms=dt_ms,
+                )
+            except Exception:  # pragma: no cover
+                log.exception("recorder.record_llm raised; ignored")
+
+        def _on_tool(name: str, args: str, output: str,
+                     dt_ms: int, err: Optional[str]) -> None:
+            try:
+                recorder.record_tool(
+                    role=role, round=round, lane_idx=lane_idx, tool=name,
+                    args=args, output=output, duration_ms=dt_ms, error=err,
+                )
+            except Exception:  # pragma: no cover
+                log.exception("recorder.record_tool raised; ignored")
+
+        on_iter_cb, on_tool_cb = _on_iter, _on_tool
+
+    payload = {"model": model, "messages": messages,
+               "stream": False, "think": think}
+    try:
+        from claude_hooks.agent_loop.runner import LoopConfig
+        cfg = LoopConfig(
+            max_iterations=ROLE_TOOL_MAX_ITERATIONS,
+            max_tool_calls_per_turn=ROLE_TOOL_MAX_CALLS_PER_TURN,
+            force_answer_after=ROLE_TOOL_FORCE_ANSWER_AFTER,
+            tools_available=True,
+            think=think,
+            # These roles are handed a full brief and must be free to
+            # answer immediately. Forcing a first tool call would make
+            # a critic that has nothing to verify burn a call proving it.
+            force_first_tool_call=False,
+        )
+        loop_kwargs = dict(config=cfg, tool_specs=tool_specs,
+                           chat_fn=chat_client.chat,
+                           tool_executor=tool_executor)
+        if on_iter_cb is not None:
+            try:
+                import inspect
+                sig = inspect.signature(loop_runner)
+                if "on_iter" in sig.parameters:
+                    loop_kwargs["on_iter"] = on_iter_cb
+                if "on_tool" in sig.parameters:
+                    loop_kwargs["on_tool"] = on_tool_cb
+            except (TypeError, ValueError):
+                pass
+        final = loop_runner(payload, cwd, **loop_kwargs)
+    except Exception as e:
+        log.warning("%s tool loop failed (%s); falling back to a single "
+                    "shot", role, e)
+        return _single_shot(
+            chat_client, model, messages, think=think,
+            recorder=recorder, role=role, round=round, lane_idx=lane_idx,
+        )
+
+    text = _extract_text(final)
+    pt, ct = _usage_from(final)
+    if not text.strip():
+        # Same failure the researcher hit in the 2026-05-07 audit: the
+        # loop can exhaust its iterations mid-tool-call and return no
+        # prose. A role that returns "" is a silent hole downstream, so
+        # spend one tool-free call to get its actual answer.
+        log.warning("%s: empty text after tool loop; forcing a "
+                    "tool-free summary call", role)
+        return _single_shot(
+            chat_client, model, messages, think=think,
+            recorder=recorder, role=role, round=round, lane_idx=lane_idx,
+        )
+    return (text, pt, ct)
+
+
 def _compose_degraded_answer(state: dict, *, error: str) -> str:
     """Build a fallback ``final_answer`` from researcher + critic work
     when the synthesizer fails after exhausting its retry budget.
@@ -1135,7 +1281,9 @@ def _compose_degraded_answer(state: dict, *, error: str) -> str:
 
 def planner_node(state: dict, *, chat_client, model: str,
                  think: Any = True, recorder=None,
-                 coder_enabled: bool = False) -> dict:
+                 coder_enabled: bool = False,
+                 tool_specs: Optional[list[dict]] = None,
+                 tool_executor=None, cwd: str = "") -> dict:
     t0 = time.monotonic()
     _emit_started("planner", round=1, model=model)
     if recorder is not None:
@@ -1173,9 +1321,10 @@ def planner_node(state: dict, *, chat_client, model: str,
                             + PLANNER_CODER_GATE_BLOCK,
             }
     try:
-        plan, pt, ct = _single_shot(
+        plan, pt, ct = _role_turn(
             chat_client, model, msgs, think=think,
             recorder=recorder, role="planner", round=1,
+            tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
         )
     except Exception as e:
         log.exception("planner_node failed: %s", e)
@@ -2020,7 +2169,9 @@ def researcher_node(state: dict, *,
 
 
 def critic_node(state: dict, *, chat_client, model: str,
-                think: Any = True, recorder=None) -> dict:
+                think: Any = True, recorder=None,
+                tool_specs: Optional[list[dict]] = None,
+                tool_executor=None, cwd: str = "") -> dict:
     rounds_used_pre = int(state.get("research_rounds_used") or 0)
     # Phase 10: per-lane multi-model fan-out for critics. Same shape
     # as researcher's model_override path. lane_idx propagates from
@@ -2053,11 +2204,12 @@ def critic_node(state: dict, *, chat_client, model: str,
     )
     t0 = time.monotonic()
     try:
-        text, pt, ct = _single_shot(
+        text, pt, ct = _role_turn(
             chat_client, model, msgs, think=think,
             recorder=recorder, role="critic",
             round=max(rounds_used_pre, 1),
             lane_idx=lane_idx,
+            tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
         )
     except Exception as e:
         log.exception("critic_node failed: %s", e)
@@ -2148,7 +2300,9 @@ def critic_node(state: dict, *, chat_client, model: str,
 
 
 def meta_critic_node(state: dict, *, chat_client, model: str,
-                     think: Any = True, recorder=None) -> dict:
+                     think: Any = True, recorder=None,
+                     tool_specs: Optional[list[dict]] = None,
+                     tool_executor=None, cwd: str = "") -> dict:
     """Phase 10: synthesize the C parallel-critic verdicts at xmax
     into one final decision. Reads the C critic critiques from the
     additive ``turns`` list (filtering by ``role == 'critic'`` and
@@ -2197,10 +2351,11 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
     )
     t0 = time.monotonic()
     try:
-        text, pt, ct = _single_shot(
+        text, pt, ct = _role_turn(
             chat_client, model, msgs, think=think,
             recorder=recorder, role="meta_critic",
             round=this_round,
+            tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
         )
     except Exception as e:
         log.exception("meta_critic_node failed: %s", e)
@@ -2275,7 +2430,9 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                      self_critic: bool = False,
                      recorder=None,
                      prior_messages: Optional[list[dict]] = None,
-                     fallback_models: Optional[list[str]] = None) -> dict:
+                     fallback_models: Optional[list[str]] = None,
+                     tool_specs: Optional[list[dict]] = None,
+                     tool_executor=None, cwd: str = "") -> dict:
     _emit_started("synthesizer", round=1, model=model)
     if recorder is not None:
         try:
@@ -2352,9 +2509,11 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
     used_model: str = model
     for attempt_idx, try_model in enumerate(models_to_try):
         try:
-            text, pt, ct = _single_shot(
+            text, pt, ct = _role_turn(
                 chat_client, try_model, msgs, think=think,
                 recorder=recorder, role="synthesizer", round=1,
+                tool_specs=tool_specs, tool_executor=tool_executor,
+                cwd=cwd,
             )
             used_model = try_model
             if attempt_idx > 0:
@@ -2472,7 +2631,9 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
 
 def adversary_node(state: dict, *, chat_client, model: str,
                    think: Any = True, strictness: str = "normal",
-                   recorder=None) -> dict:
+                   recorder=None,
+                   tool_specs: Optional[list[dict]] = None,
+                   tool_executor=None, cwd: str = "") -> dict:
     """M3: post-synthesis red team. Reads the synthesizer's
     ``final_answer`` and the upstream evidence, emits a ``REFUTATION``
     block, and — when it finds real problems — annotates the
@@ -2502,9 +2663,10 @@ def adversary_node(state: dict, *, chat_client, model: str,
     )
     t0 = time.monotonic()
     try:
-        text, pt, ct = _single_shot(
+        text, pt, ct = _role_turn(
             chat_client, model, msgs, think=think,
             recorder=recorder, role="adversary", round=1,
+            tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
         )
     except Exception as e:
         log.exception("adversary_node failed: %s", e)

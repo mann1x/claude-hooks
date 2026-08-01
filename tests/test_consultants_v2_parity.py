@@ -306,6 +306,28 @@ class TestOptInsOffByDefault(unittest.TestCase):
         # ``store`` was handled (scaffold off → validated → M14 on).
         self.assertFalse(self.cfg.tools.git)
 
+    def test_uniform_role_tools_off_by_default(self):
+        # M-B: giving planner / critic / meta_critic / synthesizer /
+        # adversary the researcher's tools changes cost, not
+        # correctness — one LLM call per tool iteration per role per
+        # lane, and critic fans out per lane at the x-tiers. Same gate
+        # discipline as tool_executor: land it off, measure, then flip.
+        self.assertFalse(self.cfg.tools.all_roles)
+
+    def test_default_graph_hands_no_role_any_tools(self):
+        # The knob's runtime consequence. An ungated role must receive
+        # exactly its pre-M-B argument list — not tool_specs=None, but
+        # no tool kwargs at all.
+        from consultants.engine.graph import (
+            TOOLABLE_ROLES, GraphDeps, _tools_for,
+        )
+        deps = GraphDeps(chat_clients={}, models={}, enabled_roles=(),
+                         cwd="/p", tool_specs=[{"x": 1}],
+                         tool_executor=lambda *a: "")
+        self.assertEqual(deps.tooled_roles, ())
+        for role in TOOLABLE_ROLES:
+            self.assertEqual(_tools_for(deps, role), {}, role)
+
     def test_default_permission_level_is_auto(self):
         # M-A: the ladder's cheap rung. If this ever defaulted to an
         # ask_* level, every grep in every lane would pay an approval

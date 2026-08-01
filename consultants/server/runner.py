@@ -37,7 +37,9 @@ def make_runner(*, ollama_base_url: str):
     from claude_hooks.get_advice.chat_client import ChatClient, make_agent_chat_client
     from claude_hooks.caliber_proxy.prompt import build_grounding_messages
     from consultants.server.tool_surface import build_tool_surface
-    from consultants.engine.graph import GraphDeps, build_council_graph
+    from consultants.engine.graph import (
+        TOOLABLE_ROLES, GraphDeps, build_council_graph,
+    )
     from consultants.engine.recorder import MessageRecorder, RecorderMeta
     from consultants.engine.trace import (
         Tracer, TracedChat, traced_tool, traced_node,
@@ -271,6 +273,13 @@ def make_runner(*, ollama_base_url: str):
         _tool_specs, _tool_executor, _tool_registry = build_tool_surface(
             cfg, extra_roots=extra_roots,
         )
+        # M-B: which roles get those tools. Empty unless [tools]
+        # all_roles is on, which keeps the default graph pre-M-B.
+        _tooled_roles = (
+            TOOLABLE_ROLES
+            if getattr(getattr(cfg, "tools", None), "all_roles", False)
+            else ()
+        )
 
         deps = GraphDeps(
             chat_clients=chat_clients,
@@ -281,6 +290,7 @@ def make_runner(*, ollama_base_url: str):
                 _tool_executor, tracer=tracer,
             ),
             tool_specs=_tool_specs,
+            tooled_roles=_tooled_roles,
             grounding_msgs=grounding_msgs,
             think_by_role=think_by_role,
             synthesizer_self_critic=synthesizer_self_critic,
@@ -514,7 +524,9 @@ def make_follow_up_runner(*, ollama_base_url: str):
     from claude_hooks.get_advice.chat_client import ChatClient, make_agent_chat_client
     from claude_hooks.caliber_proxy.prompt import build_grounding_messages
     from consultants.server.tool_surface import build_tool_surface
-    from consultants.engine.graph import GraphDeps, build_follow_up_graph
+    from consultants.engine.graph import (
+        TOOLABLE_ROLES, GraphDeps, build_follow_up_graph,
+    )
     from consultants.engine.recorder import MessageRecorder, RecorderMeta
     from consultants.engine.trace import (
         Tracer, TracedChat, traced_tool, traced_node,
@@ -723,6 +735,13 @@ def make_follow_up_runner(*, ollama_base_url: str):
         _tool_specs, _tool_executor, _tool_registry = build_tool_surface(
             cfg, extra_roots=extra_roots,
         )
+        # M-B: which roles get those tools. Empty unless [tools]
+        # all_roles is on, which keeps the default graph pre-M-B.
+        _tooled_roles = (
+            TOOLABLE_ROLES
+            if getattr(getattr(cfg, "tools", None), "all_roles", False)
+            else ()
+        )
 
         deps = GraphDeps(
             chat_clients=chat_clients,
@@ -733,6 +752,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
                 _tool_executor, tracer=tracer,
             ),
             tool_specs=_tool_specs,
+            tooled_roles=_tooled_roles,
             grounding_msgs=grounding_msgs,
             think_by_role=think_by_role,
             synthesizer_self_critic=False,  # follow-ups never

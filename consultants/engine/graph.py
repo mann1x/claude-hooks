@@ -169,6 +169,29 @@ log = logging.getLogger("consultants.engine.graph")
 # Knobs are bundled into a dataclass so the caller (server / cli)
 # constructs it once and graph.py doesn't grow a 12-arg signature.
 
+#: Roles that ran a single tool-free call before M-B. ``researcher`` is
+#: absent because its tool loop predates this gate and is wired directly.
+TOOLABLE_ROLES: tuple[str, ...] = (
+    "planner", "critic", "meta_critic", "synthesizer", "adversary",
+)
+
+
+def _tools_for(deps: "GraphDeps", role: str) -> dict:
+    """Kwargs handing ``role`` its tools, or an empty dict.
+
+    Returning ``{}`` rather than ``tool_specs=None`` matters: the node
+    signatures default these to None, so an ungated role is called with
+    exactly the argument list it had before M-B.
+    """
+    if role not in (deps.tooled_roles or ()):
+        return {}
+    if not deps.tool_specs or deps.tool_executor is None:
+        return {}
+    return {"tool_specs": deps.tool_specs,
+            "tool_executor": deps.tool_executor,
+            "cwd": deps.cwd}
+
+
 @dataclass
 class GraphDeps:
     """All non-state inputs the council nodes need.
@@ -191,6 +214,12 @@ class GraphDeps:
     cwd: str
     tool_executor: Optional[Callable[..., str]] = None
     tool_specs: list[dict] = field(default_factory=list)
+    # M-B: roles that receive ``tool_specs`` + ``tool_executor``.
+    # ``researcher`` is not listed because its tool loop is wired
+    # directly rather than through this gate. Empty (the default)
+    # reproduces pre-M-B behaviour exactly: every role here runs a
+    # single tool-free call.
+    tooled_roles: tuple[str, ...] = ()
     grounding_msgs: list[dict] = field(default_factory=list)
     think_by_role: dict[str, Any] = field(default_factory=dict)
     # When ``True``, the synthesizer takes on critic duty inside its
@@ -310,6 +339,7 @@ def _wrap_planner(deps: GraphDeps):
             think=_think_for(deps, "planner"),
             recorder=deps.recorder,
             coder_enabled=coder_on,
+            **_tools_for(deps, "planner"),
         )
     return _node
 
@@ -349,6 +379,7 @@ def _wrap_critic(deps: GraphDeps):
             model=deps.models["critic"],
             think=_think_for(deps, "critic"),
             recorder=deps.recorder,
+            **_tools_for(deps, "critic"),
         )
     return _node
 
@@ -555,6 +586,7 @@ def _wrap_synthesizer(deps: GraphDeps):
             recorder=deps.recorder,
             prior_messages=deps.prior_messages_by_role.get("synthesizer"),
             fallback_models=list(deps.synthesizer_fallback_models),
+            **_tools_for(deps, "synthesizer"),
         )
     return _node
 
@@ -571,6 +603,7 @@ def _wrap_adversary(deps: GraphDeps):
             think=_think_for(deps, "adversary"),
             strictness=deps.adversary_strictness,
             recorder=deps.recorder,
+            **_tools_for(deps, "adversary"),
         )
     return _node
 
@@ -587,6 +620,7 @@ def _wrap_meta_critic(deps: GraphDeps):
             model=deps.models["critic"],
             think=_think_for(deps, "critic"),
             recorder=deps.recorder,
+            **_tools_for(deps, "meta_critic"),
         )
     return _node
 

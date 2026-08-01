@@ -71,6 +71,42 @@ release with the auto-generated source archive
   `openai_tool_specs()` call sites; four new M12 cohort-2 parity tests
   pin that.
 
+- **Uniform role tool access (M-B, opt-in via `[tools] all_roles`).**
+  Before this, the researcher was the only default role that could call
+  a tool: planner, critic, meta_critic, synthesizer and adversary each
+  ran one tool-free call through `_single_shot`, so they could reason
+  about the researcher's text but never check it. That is the structural
+  reason the CitationLinter had to exist — the 2026-05-18 forensic
+  traced a fabricated filename to a researcher lane with zero tool
+  calls, and the critic could not catch it because the critic had no way
+  to look. A critic that can `read_file` verifies the claim instead of
+  inheriting it.
+
+  New `council._role_turn()` runs a tool loop when both `tool_specs` and
+  `tool_executor` are supplied and delegates to `_single_shot`
+  otherwise, so the ungated path is unchanged. `GraphDeps.tooled_roles`
+  decides which roles get them; it is empty by default, and
+  `_tools_for()` returns `{}` rather than `tool_specs=None` so an
+  ungated role is called with exactly its pre-M-B argument list.
+
+  Caps are deliberately tighter than the researcher's (4 iterations, 4
+  calls per turn, tools stripped after 3): these roles are meant to
+  check a handful of specific claims, not to conduct research. The first
+  tool call is **not** forced, so a critic with nothing to verify can
+  answer immediately rather than burning a call proving it. Every
+  failure in the tool path — loop exception, empty final text, missing
+  `agent_loop` — degrades to a single shot, because losing a critic's
+  verdict to a misbehaving loop is worse than a critic that reasons
+  without having looked.
+
+  **Off by default, and the reason is cost rather than risk**: a
+  single-shot role is one LLM call, a tooled role is one per iteration,
+  and critic fans out per lane at the x-tiers, so the multiplier is
+  roles × lanes × iterations. It ships disabled pending an M11c-style
+  before/after measurement, the same gate discipline that governed
+  `tool_executor`. Two new M12 cohort-2 parity tests pin the default and
+  its runtime consequence.
+
 ### Fixed
 
 - **Recall queries are now bounded (`max_query_chars`, default 3500).**

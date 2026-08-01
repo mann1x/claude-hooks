@@ -924,6 +924,7 @@ Read the `tools` block from `config show`:
 Tool surface
   registry:      on
   git history:   off
+  all roles:     off   (researcher only)
   default rung:  auto
   pinned:        (none)
 ```
@@ -942,6 +943,20 @@ AskUserQuestion the sub-action:
   It ships **off**: the tools are read-only and safe, but they add
   five schemas to every prompt on every lane, which is a
   default-behaviour change. Turning it on is the operator's call.
+
+- **Uniform role access** →
+  `config set-tools --all-roles true|false --cwd "$(pwd)"`.
+
+  > By default only the **researcher** can call tools. Turning this on
+  > gives planner, critic, meta_critic, synthesizer and adversary the
+  > same surface — so a critic can `read_file` a citation instead of
+  > taking the researcher's word for it.
+
+  It ships **off** because it changes cost, not correctness: a
+  single-shot role is one LLM call, a tooled role is one per tool
+  iteration, and critic fans out **per lane** at the x-tiers. Before
+  recommending it at `xhigh`/`xmax`, say plainly that the multiplier is
+  roles × lanes × iterations. At `medium` the cost is modest.
 
 - **Pin a tool's permission** → AskUserQuestion the tool, then the
   rung, then

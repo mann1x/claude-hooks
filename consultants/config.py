@@ -656,6 +656,14 @@ class ToolsConfig:
     enabled: bool = True
     #: M-C git history provider (git_history / log / blame / diff / show).
     git: bool = False
+    #: M-B: give every role the same tool access, not just the
+    #: researcher. Off by default because it changes cost, not
+    #: correctness: a single-shot role costs one LLM call, a tooled one
+    #: costs one per iteration, and critic fans out per lane at the
+    #: x-tiers — so the multiplier is roles x lanes x iterations. Flip
+    #: it after a measured before/after, the way tool_executor was
+    #: gated on the M11c bench.
+    all_roles: bool = False
     #: Fallback rung for a tool no provider or override names.
     default_level: str = "auto"
     #: Per-tool overrides, ``[tools.permissions]``.
@@ -946,6 +954,8 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
             base.tools.enabled = bool(tl["enabled"])
         if "git" in tl:
             base.tools.git = bool(tl["git"])
+        if "all_roles" in tl:
+            base.tools.all_roles = bool(tl["all_roles"])
         if "default_level" in tl and isinstance(tl["default_level"], str):
             base.tools.default_level = (
                 tl["default_level"].strip() or base.tools.default_level)
@@ -1266,6 +1276,11 @@ def _render(cfg: ConsultantsConfig, *,
     L.append("# git: read-only history tools — git_history (\"when did this")
     L.append("#   regress?\" via git log -L), git_log / blame / diff / show.")
     L.append(f"git = {'true' if cfg.tools.git else 'false'}")
+    L.append("# all_roles: give planner / critic / meta_critic /")
+    L.append("#   synthesizer / adversary the same tools the researcher")
+    L.append("#   has. Costs one LLM call per tool iteration per role")
+    L.append("#   per lane — measure before flipping this on.")
+    L.append(f"all_roles = {'true' if cfg.tools.all_roles else 'false'}")
     L.append("# default_level: auto | ask_assistant | ask_human | deny")
     L.append(f"default_level = {_toml_str(cfg.tools.default_level)}")
     if cfg.tools.permissions:
@@ -1929,6 +1944,7 @@ def set_tools(
     *,
     enabled: Optional[bool] = None,
     git: Optional[bool] = None,
+    all_roles: Optional[bool] = None,
     default_level: Optional[str] = None,
     set_permission: Optional[tuple] = None,
     clear_permission: Optional[str] = None,
@@ -1951,6 +1967,8 @@ def set_tools(
         cfg.tools.enabled = bool(enabled)
     if git is not None:
         cfg.tools.git = bool(git)
+    if all_roles is not None:
+        cfg.tools.all_roles = bool(all_roles)
     if default_level is not None:
         lvl = default_level.strip()
         if lvl not in VALID_PERMISSION_LEVELS:
