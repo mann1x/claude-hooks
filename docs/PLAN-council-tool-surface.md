@@ -345,15 +345,10 @@ block, multiplied by N×M lanes. Mitigation: uniform *surface* per
 requirement 3, but provider activation gated by effort tier, so a
 `medium` run doesn't pay for MCP schemas it will never call.
 
-**Confused deputy — the one I most want on the record.** After M-E/M-F
-the council reads untrusted external content (web pages, MCP server
-output) and after M-D it can run commands. That is the classic injection
-chain: a crafted page tells a researcher lane to run something, and the
-lane has a shell. Proposed invariant: **once a session has consumed
-network or MCP content, shell escalation requires human approval for the
-remainder of that session, regardless of pattern match.** Cheap to
-enforce (a sticky flag on session state), and it keeps the fast path fast
-for the common no-network run.
+**Confused deputy.** Decided — see §3.1 below. After M-E/M-F the council
+reads untrusted external content and after M-D it can run commands: a
+crafted page tells a researcher lane to run something, and the lane has a
+shell.
 
 **Citation linter vs new evidence types.** The linter verifies
 `path:line` against the mtime-cached code graph. Web-sourced and
@@ -366,9 +361,58 @@ door.
 
 ---
 
+### 3.1 The taint invariant (decided 2026-08-01)
+
+**Once the session is tainted, every shell command moves one rung up the
+ladder for the rest of the session.** `auto` → `ask_assistant`,
+`ask_assistant` → `ask_human`. `ask_human` and `deny` are already at the
+ceiling and do not move.
+
+The property that makes this worth having: after untrusted text enters
+the session, *no shell command runs without some reviewer seeing it* —
+but nothing jumps straight to a human either, so the cost of the common
+case stays on the assistant. Enforcement is one boolean on session state;
+there is no dataflow analysis and therefore no false precision. Rejected
+alternatives, for the record: per-lane taint (precise, but M13 already
+showed that LangGraph `Send` delivers only dict keys, so a missed
+propagation edge silently drops the taint while still looking like a
+guarantee) and capability separation (structurally strongest, but it
+contradicts requirement 3).
+
+Accepted cost: a clean lane pays for a sibling's fetch. That is the price
+of not pretending to track dataflow.
+
+#### When the taint fires — the two sources are not symmetric
+
+This is the part that is easy to get wrong.
+
+- **Network provider — taint on first result.** Nothing untrusted exists
+  until a fetch returns. A council that never fetches is never tainted.
+- **MCP provider — taint on activation, before any call.** An MCP
+  server's **tool descriptions are third-party text that lands in the
+  prompt as part of the schema block**, and the model reads them whether
+  or not it ever calls the tool. So a hostile server does not need to be
+  invoked to inject; being listed is enough. Waiting for a first result
+  would leave exactly that window open.
+
+The practical consequence is worth stating plainly rather than
+discovering later: **any council with the MCP provider active is tainted
+from turn 0**, so every shell command in such a run is gated at
+`ask_assistant` or above. If that proves too heavy in practice the lever
+is per-server trust marking (a reviewed server declared trusted at
+import), not weakening the rule.
+
+#### Follow-ups inherit taint
+
+A follow-up replays the parent's message thread, which contains the
+parent's fetched content. Taint is therefore a property of the
+consultancy, not of a single run, and must be persisted alongside the
+consultancy status rather than recomputed per run.
+
 ## 4. Decisions
 
-Resolved 2026-08-01:
+All resolved 2026-08-01. Nothing in this plan is blocked on a further
+decision; what remains is estimation and sequencing.
 
 | # | Decision | Resolution |
 |---|---|---|
@@ -378,12 +422,14 @@ Resolved 2026-08-01:
 | 3b | Server configured for the council but absent from the session | **Silently skipped** — never an error. Only *present-and-unhealthy* blocks. Skill supplies the session's server list via `--session-servers` |
 | 4 | MCP transport | **Both from the start.** stdio is new work (subprocess lifecycle + Windows windowless spawn) but is what most of the ecosystem, including context7, actually needs |
 
-Still open:
+| 5 | Confused deputy | **Session taint, +1 rung**, sticky, inherited by follow-ups. Network taints on first result; MCP taints on activation because tool descriptions are third-party prompt text. See §3.1 |
+| 6 | Preflight caching | **Asymmetric: cache success briefly, never cache failure.** A 4-follow-up review loop pays one handshake; a fix-then-retry always gets an honest re-probe, which is the moment a stale verdict would be worst |
+| 7 | Pending `ask_human` hits the idle reaper | **Expire as a recorded denial, and keep it resumable.** The lane gets `error: approval timed out`, reroutes, and the council finishes degraded with provenance — absence of a human never authorizes spend. The durable checkpoint is retained so a late approval re-runs *that lane* rather than discarding the run |
 
-| # | Decision | Recommendation |
-|---|---|---|
-| 5 | Preflight every run, or cache a healthy verdict? | Probe every run with a short per-server TTL cache — a council is minutes of expensive work, so seconds of probing is cheap insurance |
-| 6 | Does `ask_human` inherit the follow-up cap's `awaiting_approval` timeout, or wait indefinitely? | Reuse the existing status + idle reaper, but make the reaper's expiry of a pending approval an explicit *denial* with a recorded reason, never a silent resume |
+Decision 7 carries a dependency worth flagging: lane-level replay sits on
+top of the per-lane parking already scheduled for M-A. If that proves
+expensive, the fallback is the plain form — recorded denial, continue
+degraded, no resume — which satisfies the safety property on its own.
 
 ---
 
