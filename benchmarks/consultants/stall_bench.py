@@ -68,7 +68,7 @@ DEFAULT_OLLAMA_BASE = "http://192.168.178.2:11433"
 # gemini-3-flash-preview that triggered the 2026-05-15 audit
 # pathology.
 DEFAULT_MODELS: tuple[str, ...] = (
-    "glm-5.1:cloud",
+    "glm-5.2:cloud",
     "kimi-k2.6:cloud",
     "gemma4:31b-cloud",
     "qwen3-coder-next:cloud",

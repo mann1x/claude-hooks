@@ -96,17 +96,17 @@ class TestCoderUniqueModels(unittest.TestCase):
         # coder_med defaults: routes use kimi/pro/flash/minimax-m3;
         # default_route + legacy model add glm → 5 unique models.
         self.assertEqual(set(models),
-                         {"glm-5.1:cloud", "kimi-k2.6:cloud",
+                         {"glm-5.2:cloud", "kimi-k2.6:cloud",
                           "deepseek-v4-pro:cloud",
                           "deepseek-v4-flash:cloud",
                           "minimax-m3:cloud"})
 
     def test_dedups_when_legacy_model_overlaps(self):
         cfg = cc.ConsultantsConfig()
-        # The legacy ``model`` field is glm-5.1:cloud, which is
+        # The legacy ``model`` field is glm-5.2:cloud, which is
         # already in the default route + python route → de-duped.
         models = cc.coder_unique_models(cfg)
-        self.assertEqual(models.count("glm-5.1:cloud"), 1)
+        self.assertEqual(models.count("glm-5.2:cloud"), 1)
 
 
 class TestTomlRoundTrip(unittest.TestCase):
@@ -235,10 +235,10 @@ class TestMutators(unittest.TestCase):
 
     def test_set_coder_route_updates_primary_keeps_fallback(self):
         cc.set_coder_route("python",
-                            primary="glm-5.1:cloud")  # no --fallback
+                            primary="glm-5.2:cloud")  # no --fallback
         cfg = cc.load_config(None)
         route = cfg.roles["coder"].routes_by_language["python"]
-        self.assertEqual(route.primary, "glm-5.1:cloud")
+        self.assertEqual(route.primary, "glm-5.2:cloud")
         # Original fallback preserved — we replaced primary only.
         # coder_med default python fallback is deepseek-v4-flash.
         self.assertEqual(route.fallback, "deepseek-v4-flash:cloud")
@@ -281,9 +281,9 @@ class TestMutators(unittest.TestCase):
     def test_set_coder_default_route_partial_update(self):
         cc.set_coder_default_route(fallback="x:cloud")  # primary unchanged
         cfg = cc.load_config(None)
-        # Default primary was glm-5.1:cloud from the seed.
+        # Default primary was glm-5.2:cloud from the seed.
         self.assertEqual(cfg.roles["coder"].default_route.primary,
-                         "glm-5.1:cloud")
+                         "glm-5.2:cloud")
         self.assertEqual(cfg.roles["coder"].default_route.fallback,
                          "x:cloud")
 

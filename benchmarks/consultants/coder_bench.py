@@ -33,7 +33,7 @@ CLI:
         --output-dir results/2026-05-16/coder
 
     coder_bench.py --live --accept-cost \\
-        --models kimi-k2.6:cloud,qwen3-next:cloud,glm-5.1:cloud,gemma4:31b-cloud \\
+        --models kimi-k2.6:cloud,qwen3-next:cloud,glm-5.2:cloud,gemma4:31b-cloud \\
         --ollama-base http://192.168.178.2:11433 \\
         --output-dir results/2026-05-16/coder \\
         --judge-model kimi-k2.6:cloud
@@ -77,7 +77,7 @@ log = logging.getLogger("benchmarks.consultants.coder_bench")
 DEFAULT_MODELS = [
     "kimi-k2.6:cloud",
     "qwen3-next:cloud",
-    "glm-5.1:cloud",
+    "glm-5.2:cloud",
     "gemma4:31b-cloud",
 ]
 DEFAULT_OLLAMA_BASE = "http://192.168.178.2:11433"
@@ -808,7 +808,7 @@ def _make_live_clients(models: list[str], ollama_base: str,
     Pick the meta judge to be OUT-OF-COHORT (not in the ``models``
     list) for true impartiality. Default v1.0.1 setup:
       judge        = kimi-k2.6:cloud      (in cohort)
-      audit_judge  = glm-5.1:cloud        (in cohort)
+      audit_judge  = glm-5.2:cloud        (in cohort)
       meta_judge   = gemma4:31b-cloud     (OUT of cohort)
     """
     from claude_hooks.get_advice.chat_client import make_agent_chat_client

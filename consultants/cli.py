@@ -2184,7 +2184,7 @@ def build_parser() -> argparse.ArgumentParser:
     cset.add_argument("language",
                       help="Language id (e.g. python, csharp, cpp).")
     cset.add_argument("--primary",
-                      help="Primary model tag (e.g. glm-5.1:cloud).")
+                      help="Primary model tag (e.g. glm-5.2:cloud).")
     cset.add_argument("--fallback", default=None,
                       help="Fallback model tag. Empty string clears "
                            "the failover model on an existing entry.")

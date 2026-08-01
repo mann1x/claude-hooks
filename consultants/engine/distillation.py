@@ -22,7 +22,7 @@ my findings before distillation could capture them" failure mode.
 
 User-locked defaults (2026-05-17):
     - ``model = "gemma4:31b-cloud"`` (M11c-2 tool_executor winner)
-    - ``fallback_models = ["glm-5.1:cloud"]`` (~64k ctx fallback)
+    - ``fallback_models = ["glm-5.2:cloud"]`` (~64k ctx fallback)
     - ``min_entries_per_distillation = 3`` — small cost gate
     - ``max_session_entries = 50`` — prompt size cap (~30k tokens)
 """

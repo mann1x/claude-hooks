@@ -41,7 +41,37 @@ from consultants.engine.state_v2 import CoderLanguageRoute
 # token/wall-vs-quality efficiency winner by the 2026-06-04 coder_med
 # run). New per-language routing (task #111) is anchored on the
 # coder_med v1.0 neutral-ladder winners and lives below.
-RECOMMENDED_CODER_MODEL: str = "glm-5.1:cloud"
+#: Model successions: ``{superseded: successor}``.
+#:
+#: A benchmark result belongs to the exact model tag that ran. When a
+#: vendor ships a point release the operator wants routed to, rewriting
+#: the cohort lists below would claim the successor earned scores it
+#: never ran for — so the cohorts stay frozen and the succession is
+#: declared here instead. Routing may name a successor of a qualifying
+#: model; the score is *inherited, not re-measured*, and a fresh bench
+#: is what turns an inherited route into an earned one.
+#:
+#: 2026-08-01: glm-5.2 supersedes glm-5.1 (operator decision).
+MODEL_SUCCESSIONS: dict[str, str] = {
+    "glm-5.1:cloud": "glm-5.2:cloud",
+}
+
+
+def successor_of(model: str) -> str:
+    """The tag that should actually be routed for ``model``."""
+    return MODEL_SUCCESSIONS.get(model, model)
+
+
+def qualifying_with_successors(models) -> set:
+    """``models`` plus every declared successor — the set a route may
+    legitimately name."""
+    out = set(models)
+    for m in models:
+        out.add(successor_of(m))
+    return out
+
+
+RECOMMENDED_CODER_MODEL: str = "glm-5.2:cloud"
 
 # The date of the most-recent run that informed these defaults.
 # Stamp stays even if the constants don't change — proves the
@@ -165,7 +195,7 @@ def language_from_path(path: str) -> Optional[str]:
 # languages (it won the neutral ladder everywhere except cpp). It is
 # also the most token-heavy of the cohort (~3.7× glm-5.1's completion
 # tokens). Operators who want the balanced token/wall-vs-quality pick
-# should override with ``[role.coder].model = "glm-5.1:cloud"`` (the
+# should override with ``[role.coder].model = "glm-5.2:cloud"`` (the
 # efficiency winner); see ``docs/benchmarks/coder-med-results.md``.
 #
 # Ladder basis (primary = winner / fallback = runner-up, mean rank):
@@ -198,7 +228,9 @@ RECOMMENDED_CODER_ROUTES_BY_LANGUAGE: dict[str, CoderLanguageRoute] = {
 # vendor than the primary so a vendor-specific cloud incident
 # doesn't take down both legs.
 RECOMMENDED_CODER_DEFAULT_ROUTE: CoderLanguageRoute = CoderLanguageRoute(
-    primary="glm-5.1:cloud",
+    # glm-5.2 by succession from the glm-5.1 cohort winner — see
+    # MODEL_SUCCESSIONS. Score inherited, not re-measured.
+    primary="glm-5.2:cloud",
     fallback="kimi-k2.6:cloud",
 )
 
@@ -239,6 +271,9 @@ def resolve_coder_route(
 
 __all__ = [
     "LANGUAGE_BY_EXTENSION",
+    "MODEL_SUCCESSIONS",
+    "successor_of",
+    "qualifying_with_successors",
     "QUALIFYING_MODELS_2026_05_16",
     "QUALIFYING_MODELS_2026_05_17_MLANG",
     "QUALIFYING_MODELS_2026_06_04_MED",

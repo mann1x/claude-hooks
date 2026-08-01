@@ -140,7 +140,7 @@ class TestRecommendedRoutes(unittest.TestCase):
         self.assertIsInstance(RECOMMENDED_CODER_DEFAULT_ROUTE,
                               CoderLanguageRoute)
         self.assertEqual(
-            RECOMMENDED_CODER_DEFAULT_ROUTE.primary, "glm-5.1:cloud",
+            RECOMMENDED_CODER_DEFAULT_ROUTE.primary, "glm-5.2:cloud",
         )
         self.assertEqual(
             RECOMMENDED_CODER_DEFAULT_ROUTE.fallback, "kimi-k2.6:cloud",
@@ -162,7 +162,9 @@ class TestRecommendedRoutes(unittest.TestCase):
         # Don't accidentally rename the legacy fallback — it's the
         # v1 single-model winner and several callers still reference
         # it by name.
-        self.assertEqual(RECOMMENDED_CODER_MODEL, "glm-5.1:cloud")
+        # Succession: routed tag is glm-5.2, the score behind it is
+        # glm-5.1's. See coder_defaults.MODEL_SUCCESSIONS.
+        self.assertEqual(RECOMMENDED_CODER_MODEL, "glm-5.2:cloud")
 
     def test_provenance_stamps_current(self):
         # Date stamp + suite version + hash prefix all updated for

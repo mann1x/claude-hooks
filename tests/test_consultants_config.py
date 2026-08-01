@@ -74,14 +74,16 @@ class TestDefaults:
     def test_coder_default_model_is_rubric_winner(self):
         # M11b 2026-05-16 baseline crowned ``glm-5.1:cloud`` as
         # the coder rubric winner (pass=100%, avg_quality=4.88,
-        # median_tokens=1841). The constant lives in
-        # consultants.engine.coder_defaults so future re-baselines
-        # are a single-file edit + a CHANGELOG / baselines-ledger
-        # row. See docs/consultants-skill-eval-baselines.md.
+        # median_tokens=1841). 2026-08-01 routes the declared
+        # successor ``glm-5.2:cloud`` instead — the SCORE is
+        # inherited, not re-measured, which is exactly what
+        # coder_defaults.MODEL_SUCCESSIONS records. The cohort
+        # lists stay frozen at the tags that actually ran.
+        # See docs/consultants-skill-eval-baselines.md.
         from consultants.engine.coder_defaults import RECOMMENDED_CODER_MODEL
         cfg = cc.ConsultantsConfig()
         assert cfg.roles["coder"].model == RECOMMENDED_CODER_MODEL
-        assert RECOMMENDED_CODER_MODEL == "glm-5.1:cloud"
+        assert RECOMMENDED_CODER_MODEL == "glm-5.2:cloud"
 
     def test_coder_limits_defaults(self):
         # M10: 50 KB per file, 1 MB total, 16 files max — the
