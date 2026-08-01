@@ -9,3 +9,11 @@ coverage>=7.0
 # path; without the plugin the oracle subprocess errors out on
 # the unknown flag.
 pytest-timeout>=2.0
+# pytest-asyncio: no test in ``tests/`` needs it today — the one async
+# test class is a ``unittest.IsolatedAsyncioTestCase``, which unittest
+# drives natively. Listed so the main env matches the floor in
+# ``consultants/pyproject.toml``'s ``[test]`` extra, and so an
+# ``async def test_`` written as a plain pytest function doesn't
+# silently no-op (pytest skips it with a warning when the plugin is
+# absent) on whichever host happens not to have it.
+pytest-asyncio>=0.24
