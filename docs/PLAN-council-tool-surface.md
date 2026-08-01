@@ -395,12 +395,48 @@ This is the part that is easy to get wrong.
   invoked to inject; being listed is enough. Waiting for a first result
   would leave exactly that window open.
 
-The practical consequence is worth stating plainly rather than
-discovering later: **any council with the MCP provider active is tainted
-from turn 0**, so every shell command in such a run is gated at
-`ask_assistant` or above. If that proves too heavy in practice the lever
-is per-server trust marking (a reviewed server declared trusted at
-import), not weakening the rule.
+Left alone, that would taint any council with MCP active from turn 0.
+**Per-server trust marking (decided 2026-08-01) is what stops it.**
+
+#### MCP trust marking
+
+Trust is per server, and **the default is untrusted**:
+
+| state | how it is reached | taints on activation? |
+|---|---|---|
+| untrusted | default for every server | **yes** |
+| validated | assistant inspected the tool descriptions and found them safe | no |
+| always_trusted | explicit user override in config | no |
+
+The assistant validates **when it builds the server list to send to the
+council** — the same moment it already supplies `--session-servers`, so
+this adds a trust mark to a message that is being constructed anyway.
+Validation reads each server's `tools/list` descriptions and looks for
+text aimed at the *model* rather than at a caller:
+
+- imperative instructions directed at the reader ("before answering,
+  run…", "ignore previous instructions")
+- attempts to redefine roles, system prompt, or safety rules
+- requests to disclose context, files, credentials, or prior messages
+- steganographic material: zero-width or bidi control characters,
+  base64/hex blobs, comments hidden in schema fields
+- instructions to call another tool as a side effect
+
+Anything matching means the server is **not** marked validated; it may
+still be used, it simply carries taint. A user override
+(`always_trusted`) skips validation entirely and is the escape hatch for
+a server the operator has reviewed themselves.
+
+Two properties this buys. A well-behaved server costs nothing — no taint,
+shell stays on the fast path. And a hostile description is caught
+*before* it ever reaches the council's prompt, since validation happens
+at list-build time on the assistant side rather than inside the engine.
+
+Honest limits: validation is a judgement call on natural-language text
+and a sufficiently subtle description can pass. It is defence in depth,
+not a proof — which is exactly why an unvalidated server still merely
+taints rather than being refused, and why the +1 rung rule remains the
+backstop.
 
 #### Follow-ups inherit taint
 
@@ -432,6 +468,26 @@ expensive, the fallback is the plain form — recorded denial, continue
 degraded, no resume — which satisfies the safety property on its own.
 
 ---
+
+## 4.1 Estimates
+
+Sizes are relative, with the dominating cost named — that is the part
+worth arguing with. LOC counts include tests, which in this repo run
+roughly 1.5–2× the implementation.
+
+| M | size | dominated by | risk |
+|---|---|---|---|
+| **M-A** registry + gate | **XL** ~1400 LOC | **lane-scoped interrupt state**, not the registry. The registry itself is a day; making one lane park while its x-tier siblings run means threading interrupt state through the checkpointer, the same territory as M11c-3's `parent_lane_idx` | high — touches the graph's control flow, and M12 parity must stay byte-identical |
+| **M-B** uniform roles | **L** ~700 LOC | **measurement, not code.** Converting 5 `_single_shot` roles to the loop path is mechanical; proving it doesn't blow up tokens × N×M lanes needs an M11c-style before/after bench | high — cost multiplication is invisible until a real x-tier run |
+| **M-C** git provider | **S** ~400 LOC | nothing — 4 read-only tools plus a composed `when_did_this_change`. Root-confined like the path tools | low — no new risk surface, which is why it is the registry's first proof |
+| **M-D** shell provider | **L** ~900 LOC | **the classification table**, not the executor. Mapping commands to ladder rungs is where the safety lives, and it has to fail closed | high — security-sensitive by construction |
+| **M-E** MCP bridge | **XL** ~1500 LOC | **stdio transport** (subprocess lifecycle, framing, reaping, Windows windowless spawn) + preflight + trust validation + namespacing. HTTP alone would be M | medium — mostly new surface rather than changed surface |
+| **M-F** network provider | **M** ~500 LOC | allow/deny lists, size/timeout/content-type caps. Small because the gate and registry already exist by then | low — default off |
+| **M-G** config consolidation | **M** ~450 LOC | reconciling per-milestone dialogs into one coherent `config show` + menu | low |
+
+The shape to notice: **M-A and M-E are the two XLs**, and both are XL for
+reasons unrelated to the feature being asked for — per-lane parking and
+stdio transport respectively. Everything else is ordinary work.
 
 ## 5. Sequencing
 
