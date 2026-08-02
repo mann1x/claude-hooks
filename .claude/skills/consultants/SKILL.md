@@ -194,6 +194,12 @@ claude-consultants follow-up <parent_sid> --message "<focused>" \
   --cwd "$(pwd)" --add-dir /opt/llama.cpp
 ```
 
+Paths in the question may be written relative to *any* root — the file
+tools try `--cwd` first, then each `--add-dir` in order — so you do not
+need to rewrite `eval/scorers.py` as an absolute path before asking.
+Do still pass the root: a path with no root that contains it is what
+pre-flight refuses on.
+
 Returns:
 
 ```json

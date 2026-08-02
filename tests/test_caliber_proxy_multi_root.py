@@ -90,6 +90,145 @@ class TestResolveInRoots:
         assert out == str((cwd / "f.txt").resolve())
 
 
+class TestRelativePathFallsBackToExtraRoots:
+    """A relative path is tried against every allowed root, not just cwd.
+
+    Regression for ``csl-2026-08-02-0847-e4e2``: the question named
+    ``eval/netconfig_scorers.py:600``, the file lived in a configured
+    ``--add-dir`` root, and every file tool answered "not a file" because
+    a relative path was joined to the primary cwd and nowhere else. The
+    citation linter — which *does* search all roots — resolved the same
+    path fine, so the council spent a full run concluding the file was
+    absent while holding a reader that could have opened it.
+    """
+
+    def test_relative_path_resolves_under_an_extra_root(self, tmp_path: Path):
+        cwd = tmp_path / "proj"
+        extra = tmp_path / "sister"
+        (extra / "eval").mkdir(parents=True)
+        cwd.mkdir()
+        target = extra / "eval" / "scorer.py"
+        target.write_text("x")
+        out = tools.resolve_in_roots(
+            "eval/scorer.py", str(cwd), (str(extra.resolve()),),
+        )
+        assert out == str(target.resolve())
+
+    def test_primary_cwd_wins_when_both_have_it(self, tmp_path: Path):
+        """The fallback must not change which file an already-resolving
+        relative path refers to."""
+        cwd = tmp_path / "proj"
+        extra = tmp_path / "sister"
+        for base in (cwd, extra):
+            (base / "eval").mkdir(parents=True)
+            (base / "eval" / "scorer.py").write_text("x")
+        out = tools.resolve_in_roots(
+            "eval/scorer.py", str(cwd), (str(extra.resolve()),),
+        )
+        assert out == str((cwd / "eval" / "scorer.py").resolve())
+
+    def test_extra_roots_break_ties_in_configuration_order(self, tmp_path: Path):
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        first = tmp_path / "a"
+        second = tmp_path / "b"
+        for base in (first, second):
+            base.mkdir()
+            (base / "dup.py").write_text("x")
+        out = tools.resolve_in_roots(
+            "dup.py", str(cwd),
+            (str(first.resolve()), str(second.resolve())),
+        )
+        assert out == str((first / "dup.py").resolve())
+
+    def test_missing_everywhere_returns_the_cwd_resolution(self, tmp_path: Path):
+        """Callers emit their own "not found" / "not a file" message,
+        which is more useful to the model than a generic escape error."""
+        cwd = tmp_path / "proj"
+        extra = tmp_path / "sister"
+        cwd.mkdir()
+        extra.mkdir()
+        out = tools.resolve_in_roots(
+            "nope.py", str(cwd), (str(extra.resolve()),),
+        )
+        assert out == str((cwd / "nope.py").resolve())
+
+    def test_absolute_path_outside_every_root_still_rejects(self, tmp_path: Path):
+        cwd = tmp_path / "proj"
+        extra = tmp_path / "sister"
+        cwd.mkdir()
+        extra.mkdir()
+        with pytest.raises(ValueError):
+            tools.resolve_in_roots(
+                "/etc/passwd", str(cwd), (str(extra.resolve()),),
+            )
+
+    def test_traversal_out_of_every_root_still_rejects(self, tmp_path: Path):
+        cwd = tmp_path / "proj"
+        extra = tmp_path / "sister"
+        cwd.mkdir()
+        extra.mkdir()
+        (tmp_path / "outside.txt").write_text("x")
+        with pytest.raises(ValueError):
+            tools.resolve_in_roots(
+                "../outside.txt", str(cwd), (str(extra.resolve()),),
+            )
+
+    def test_read_file_reaches_an_extra_root_by_relative_path(self, tmp_path: Path):
+        cwd = tmp_path / "proj"
+        extra = tmp_path / "sister"
+        (extra / "eval").mkdir(parents=True)
+        cwd.mkdir()
+        (extra / "eval" / "scorer.py").write_text("line1\nline2\n")
+        out = tools.read_file(
+            {"path": "eval/scorer.py"}, str(cwd), (str(extra.resolve()),),
+        )
+        assert "line1" in out
+        # Rendered absolute, since it lives outside the primary cwd.
+        assert str((extra / "eval" / "scorer.py").resolve()) in out
+
+    def test_not_found_error_names_the_roots_it_tried(self, tmp_path: Path):
+        cwd = tmp_path / "proj"
+        extra = tmp_path / "sister"
+        cwd.mkdir()
+        extra.mkdir()
+        out = tools.read_file(
+            {"path": "eval/scorer.py"}, str(cwd), (str(extra.resolve()),),
+        )
+        assert out.startswith("error: not a file:")
+        assert str(extra.resolve()) in out
+        assert "1 extra root(s)" in out
+
+    def test_not_found_error_stays_terse_without_extra_roots(self, tmp_path: Path):
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        out = tools.read_file({"path": "nope.py"}, str(cwd), ())
+        assert out == "error: not a file: nope.py"
+
+    def test_not_found_error_stays_terse_for_an_absolute_path(self, tmp_path: Path):
+        """An absolute path was tried in exactly one place — listing the
+        roots would misdescribe what happened."""
+        cwd = tmp_path / "proj"
+        extra = tmp_path / "sister"
+        cwd.mkdir()
+        extra.mkdir()
+        out = tools.read_file(
+            {"path": str(extra / "nope.py")}, str(cwd), (str(extra.resolve()),),
+        )
+        assert "extra root(s)" not in out
+
+    def test_list_files_reaches_an_extra_root_by_relative_path(self, tmp_path: Path):
+        cwd = tmp_path / "proj"
+        extra = tmp_path / "sister"
+        (extra / "eval").mkdir(parents=True)
+        cwd.mkdir()
+        (extra / "eval" / "scorer.py").write_text("x")
+        out = tools.list_files(
+            {"path": "eval"}, str(cwd), (str(extra.resolve()),),
+        )
+        assert str((extra / "eval" / "scorer.py").resolve()) in out
+
+
 # ---------- resolve_in_cwd (legacy shim) ----------
 
 class TestResolveInCwdShim:
@@ -170,7 +309,11 @@ class TestPathAwareToolsMultiRoot:
         assert str(extra.resolve()) in out
         assert "target" in out
 
-    def test_glob_still_only_walks_primary_cwd(self, tmp_path: Path):
+    def test_glob_walks_extra_roots_too(self, tmp_path: Path):
+        """v1.8 confined glob to the primary cwd, which made an
+        ``--add-dir`` root reachable only by an absolute path the model
+        did not have. It fans out now — cwd hits stay relative, extra-root
+        hits render absolute so ``read_file`` can take them straight."""
         cwd = tmp_path / "proj"
         extra = tmp_path / "sister"
         cwd.mkdir()
@@ -182,10 +325,31 @@ class TestPathAwareToolsMultiRoot:
             str(cwd),
             (str(extra.resolve()),),
         )
-        # Glob walks cwd only (documented limitation in v1.8). The
-        # model uses read_file for cross-root reaches.
         assert "in_cwd.py" in out
-        assert "in_extra.py" not in out
+        assert str(extra.resolve() / "in_extra.py") in out
+        # The cwd hit is still rendered relative, not absolute.
+        assert "in_cwd.py" in out.splitlines()
+
+    def test_glob_with_no_extra_roots_is_unchanged(self, tmp_path: Path):
+        cwd = tmp_path / "proj"
+        sister = tmp_path / "sister"
+        cwd.mkdir()
+        sister.mkdir()
+        (cwd / "in_cwd.py").write_text("x")
+        (sister / "not_a_root.py").write_text("y")
+        out = tools.glob_files({"pattern": "*.py"}, str(cwd), ())
+        assert out.splitlines() == ["in_cwd.py"]
+
+    def test_glob_does_not_double_report_a_nested_root(self, tmp_path: Path):
+        """An extra root inside the primary cwd is walked once, not twice."""
+        cwd = tmp_path / "proj"
+        nested = cwd / "vendor"
+        nested.mkdir(parents=True)
+        (nested / "dep.py").write_text("x")
+        out = tools.glob_files(
+            {"pattern": "*.py"}, str(cwd), (str(nested.resolve()),),
+        )
+        assert out.splitlines() == [os.path.join("vendor", "dep.py")]
 
 
 # ---------- execute() dispatch with _extra_roots ----------

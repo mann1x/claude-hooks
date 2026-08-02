@@ -17,7 +17,7 @@ import json
 import logging
 import os
 import re
-from typing import Any
+from typing import Any, Optional
 
 log = logging.getLogger("claude_hooks.caliber_proxy.tools")
 
@@ -49,6 +49,23 @@ def resolve_in_roots(raw: str, primary_cwd: str,
     before the path is resolved. A path like `` `claude_hooks/` `` —
     backticks and trailing slash included — becomes ``claude_hooks``.
 
+    A **relative** path is tried against the primary cwd first and, only
+    if nothing exists there, against each extra root in order. Without
+    that fallback an extra root is reachable only by absolute path —
+    and the model rarely has one. A question that says "what does
+    ``eval/netconfig_scorers.py:600`` do?" hands the model a relative
+    path; cwd-only resolution turns that into ``error: not a file`` even
+    though the file sits in a configured ``--add-dir`` root, and the
+    council answers "the file is absent" instead of answering the
+    question. (Observed live in ``csl-2026-08-02-0847-e4e2``: the
+    citation linter resolved the path across all roots while every file
+    tool refused it.)
+
+    The primary cwd stays authoritative — a relative path that exists
+    there wins, so nothing changes for the single-root case or for any
+    path that already resolved. Ties between extra roots break in
+    configuration order, deterministically.
+
     `extra_roots` is expected to already be realpath-canonical (the
     ``make_executor`` factory and ``discover_allowed_roots`` both
     canonicalise on entry). The empty-tuple default makes this a
@@ -56,15 +73,34 @@ def resolve_in_roots(raw: str, primary_cwd: str,
     """
     cleaned = raw.strip().strip("`").strip().strip("'").strip('"').strip()
     primary_real = os.path.realpath(primary_cwd)
-    joined = (
-        os.path.join(primary_real, cleaned)
-        if not os.path.isabs(cleaned) else cleaned
-    )
-    resolved = os.path.realpath(joined)
     allowed = (primary_real,) + tuple(extra_roots)
-    for root in allowed:
-        if resolved == root or resolved.startswith(root + os.sep):
-            return resolved
+
+    if os.path.isabs(cleaned):
+        candidates = [os.path.realpath(cleaned)]
+    else:
+        candidates = [
+            os.path.realpath(os.path.join(root, cleaned)) for root in allowed
+        ]
+
+    def _inside(path: str) -> bool:
+        return any(path == root or path.startswith(root + os.sep)
+                   for root in allowed)
+
+    first_inside: Optional[str] = None
+    for cand in candidates:
+        if not _inside(cand):
+            continue
+        if first_inside is None:
+            first_inside = cand
+        if os.path.exists(cand):
+            return cand
+    # Nothing exists under any root. Return the primary-cwd resolution
+    # so the caller emits its own "not found" / "not a file" message —
+    # the specific one is more useful to the model than a generic
+    # escape error, and this is the pre-fallback behaviour unchanged.
+    if first_inside is not None:
+        return first_inside
+
     roots_pretty = ", ".join(allowed)
     raise ValueError(
         f"path escapes allowed roots: {raw!r}\n  allowed: {roots_pretty}"
@@ -104,6 +140,26 @@ def _to_rel(abs_path: str, cwd: str) -> str:
     return _render_path(abs_path, cwd)
 
 
+def _tried_roots(raw: str, extra_roots: tuple[str, ...]) -> str:
+    """Suffix for a not-found error, naming the roots a *relative* path
+    was tried against.
+
+    Without it, "not a file: eval/foo.py" reads as "that file does not
+    exist" when what actually happened is "it is not under any root I
+    can see" — and the model, believing the first, reports the file
+    absent instead of asking for it by absolute path. Absolute paths get
+    no suffix: they were tried in exactly one place.
+    """
+    cleaned = raw.strip().strip("`").strip().strip("'").strip('"').strip()
+    if not extra_roots or os.path.isabs(cleaned):
+        return ""
+    return (
+        f"\n  (tried the primary root and {len(extra_roots)} extra root(s): "
+        + ", ".join(extra_roots)
+        + ")"
+    )
+
+
 # -- Tool: list_files -------------------------------------------------- #
 def list_files(args: dict, cwd: str,
                 extra_roots: tuple[str, ...] = ()) -> str:
@@ -113,7 +169,7 @@ def list_files(args: dict, cwd: str,
     except ValueError as e:
         return f"error: {e}"
     if not os.path.exists(abs_path):
-        return f"error: path not found: {raw_path}"
+        return f"error: path not found: {raw_path}{_tried_roots(raw_path, extra_roots)}"
     if not os.path.isdir(abs_path):
         return f"error: not a directory: {raw_path}"
     entries = []
@@ -146,7 +202,7 @@ def read_file(args: dict, cwd: str,
     except ValueError as e:
         return f"error: {e}"
     if not os.path.isfile(abs_path):
-        return f"error: not a file: {raw_path}"
+        return f"error: not a file: {raw_path}{_tried_roots(raw_path, extra_roots)}"
     try:
         with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -183,32 +239,52 @@ def read_file(args: dict, cwd: str,
 
 # -- Tool: glob -------------------------------------------------------- #
 def glob_files(args: dict, cwd: str,
-                extra_roots: tuple[str, ...] = ()) -> str:  # noqa: ARG001
-    # ``extra_roots`` is accepted for dispatch-signature uniformity but
-    # not used: glob walks only the primary cwd. To reach files under
-    # an extra root, the model uses ``read_file`` with the absolute
-    # path. Cross-root glob would require a separate output budget and
-    # is deferred to a later change.
+                extra_roots: tuple[str, ...] = ()) -> str:
+    """Name-match walk over the primary cwd **and** every extra root.
+
+    glob is the tool a model reaches for when it doesn't know where a
+    file lives, so confining it to the primary cwd made an ``--add-dir``
+    root effectively invisible: the only way in was an absolute path the
+    model didn't have. The walk fans out, cwd first, and the single
+    ``_GLOB_MAX_ENTRIES`` budget is shared across roots so a large first
+    root can't be made cheaper by hiding the rest.
+
+    Hits under the primary cwd render cwd-relative (unchanged); hits
+    under an extra root render absolute, which is what ``read_file``
+    then needs.
+    """
     pattern = str(args.get("pattern") or "")
     if not pattern:
         return "error: pattern is required"
     cwd_real = os.path.realpath(cwd)
-    matches = []
+    roots = [cwd_real]
+    for extra in extra_roots:
+        real = os.path.realpath(extra)
+        # Skip a root nested inside one already walked — otherwise its
+        # files come back twice.
+        if any(real == r or real.startswith(r + os.sep) for r in roots):
+            continue
+        roots.append(real)
+
+    matches: list[str] = []
     try:
-        for root, dirs, files in os.walk(cwd_real):
-            # Skip .git and other heavy dirs by convention.
-            dirs[:] = [d for d in dirs if d not in
-                       {".git", "node_modules", "__pycache__", ".venv",
-                        "venv", ".claude", ".caliber", ".wolf", "dist",
-                        "build", ".cache", "target"}]
-            for name in files:
-                full = os.path.join(root, name)
-                rel = os.path.relpath(full, cwd_real)
-                if fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(name, pattern):
-                    matches.append(rel)
-                    if len(matches) >= _GLOB_MAX_ENTRIES:
-                        matches.append(f"... (truncated at {_GLOB_MAX_ENTRIES})")
-                        return "\n".join(matches)
+        for walk_root in roots:
+            for root, dirs, files in os.walk(walk_root):
+                # Skip .git and other heavy dirs by convention.
+                dirs[:] = [d for d in dirs if d not in
+                           {".git", "node_modules", "__pycache__", ".venv",
+                            "venv", ".claude", ".caliber", ".wolf", "dist",
+                            "build", ".cache", "target"}]
+                for name in files:
+                    full = os.path.join(root, name)
+                    rel = os.path.relpath(full, walk_root)
+                    if (fnmatch.fnmatch(rel, pattern)
+                            or fnmatch.fnmatch(name, pattern)):
+                        matches.append(_render_path(full, cwd_real))
+                        if len(matches) >= _GLOB_MAX_ENTRIES:
+                            matches.append(
+                                f"... (truncated at {_GLOB_MAX_ENTRIES})")
+                            return "\n".join(matches)
     except OSError as e:
         return f"error: {e}"
     if not matches:

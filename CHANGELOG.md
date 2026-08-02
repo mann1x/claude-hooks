@@ -83,6 +83,24 @@ release with the auto-generated source archive
   that lane from a durable checkpoint); a timed-out lane reroutes and
   the run finishes degraded.
 
+- **Relative paths reach every allowed root.** The file tools joined a
+  relative path to the primary `--cwd` and nowhere else, so an
+  `--add-dir` root was reachable only by an absolute path the model
+  didn't have — while the citation linter, which always searched every
+  root, resolved the same path fine. A question naming
+  `eval/scorers.py:600` passed pre-flight (the file *is* readable under
+  some root), then had every `read_file`, `list_files` and `glob` come
+  back empty, and the council reported the file absent. Observed live
+  in `csl-2026-08-02-0847-e4e2`, which spent a full run concluding a
+  file did not exist while holding a reader that could open it.
+
+  Resolution now falls back through the extra roots in configuration
+  order, and `glob` fans out with a shared entry budget. `--cwd` stays
+  authoritative, so a relative path that already resolved still refers
+  to the same file. When one is missing everywhere the error names the
+  roots it tried — "doesn't exist" and "not under any root I can see"
+  should not read the same.
+
 - **`parent_lane_idx` is now a declared channel.** It was passed in
   Send payloads and read by `tool_executor` while declared nowhere. It
   worked — a Send payload reaches its node unfiltered, unlike the

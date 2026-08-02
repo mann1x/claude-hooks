@@ -498,6 +498,29 @@ tell "the guard was off" from "the guard passed". It is a cost guard,
 not a security boundary — the tool sandbox still confines every read
 to the allowed roots either way.
 
+### Relative paths reach every root, not just `--cwd`
+
+The file tools resolve a relative path against the primary `--cwd`
+first and, only if nothing exists there, against each `--add-dir` root
+in configuration order. `glob` fans out the same way. Hits under
+`--cwd` render cwd-relative as before; hits under an extra root render
+absolute, which is the handle `read_file` needs.
+
+This closes an asymmetry that cost a full run. Before, a relative path
+was joined to `--cwd` and nowhere else, so an `--add-dir` root was
+reachable only by an absolute path the model didn't have — while the
+citation linter, which always searched every root, resolved the same
+path fine. A question naming `eval/scorers.py:600` would pass
+pre-flight (the file *is* readable under some root), then have every
+`read_file` and `glob` come back empty, and the council would
+confidently report the file absent. When a relative path is missing
+everywhere, the error now names the roots it tried, so "doesn't exist"
+and "not under any root I can see" stop reading the same.
+
+Where a relative path exists under more than one root, the primary
+`--cwd` wins and extra roots break ties in the order they were passed
+— deterministic, and unchanged for the single-root case.
+
 This exists because a council that cannot see its subject does not
 fail. It answers confidently from nothing, and the only tell is a wall
 of `[unverified — file not found]` annotations at the very end — 55
