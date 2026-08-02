@@ -231,6 +231,21 @@ class SessionState:
     # path for the WHOLE time the runner owns the graph. Set + cleared by
     # the runner under ``_inject_lock``.
     _adversary_checkpoint_active: bool = field(default=False, repr=False)
+    # M-A approval channel: parked ``ask_human`` tool calls for this
+    # session. Its own lock lives inside the broker — the runner's lane
+    # threads open + wait, the POST /tool-ack handler resolves, exactly
+    # the cross-thread shape as the adversary ack above.
+    _tool_approvals: Any = field(default=None, repr=False)
+
+    @property
+    def tool_approvals(self):
+        """Lazily built so every construction path gets one without
+        touching its call site (SessionState is instantiated in the
+        consult route, the follow-up route, and the disk-reopen path)."""
+        if self._tool_approvals is None:
+            from consultants.engine.tool_approval import ToolApprovalBroker
+            self._tool_approvals = ToolApprovalBroker(self.sid)
+        return self._tool_approvals
 
     def public_dict(self) -> dict:
         out = {
@@ -260,6 +275,13 @@ class SessionState:
         if self._checkpoint_deadline_ts is not None:
             out["adversary_checkpoint_deadline_ts"] = \
                 self._checkpoint_deadline_ts
+        # Same parity discipline as the checkpoint deadline: the key
+        # appears ONLY while a tool call is actually parked, so a
+        # default run's status response is byte-identical to pre-M-A.
+        if self._tool_approvals is not None:
+            pending = self._tool_approvals.pending_public()
+            if pending:
+                out["pending_tool_approvals"] = pending
         return out
 
     def bump_activity(self) -> None:

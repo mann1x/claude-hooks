@@ -995,3 +995,73 @@ class TestEventsMilestoneFilter:
         args = build_parser().parse_args(["events", "csl-x"])
         assert not args.milestones
         assert args.kinds is None
+
+
+class TestToolAckVerb:
+    """``tool-ack`` — the CLI surface of the M-A approval channel."""
+
+    def _body_for(self, argv):
+        import consultants.cli as CLI
+        args = CLI.build_parser().parse_args(argv)
+        captured = {}
+
+        def _fake_http(method, url, body=None, **kw):
+            captured["method"] = method
+            captured["url"] = url
+            captured["body"] = body
+            return {"resolved": True}
+
+        orig = CLI._http
+        CLI._http = _fake_http
+        try:
+            args.fn(args, "http://127.0.0.1:38095")
+        finally:
+            CLI._http = orig
+        return captured
+
+    def test_allow_posts_true(self):
+        got = self._body_for(["tool-ack", "csl-x", "--allow"])
+        assert got["method"] == "POST"
+        assert got["url"].endswith("/v1/consult/csl-x/tool-ack")
+        assert got["body"] == {"allow": True}
+
+    def test_deny_posts_false(self):
+        got = self._body_for(["tool-ack", "csl-x", "--deny"])
+        assert got["body"] == {"allow": False}
+
+    def test_request_id_and_reason_are_forwarded(self):
+        got = self._body_for([
+            "tool-ack", "csl-x", "--deny",
+            "--request-id", "tap-7", "--reason", "too expensive"])
+        assert got["body"] == {
+            "allow": False, "request_id": "tap-7",
+            "reason": "too expensive"}
+
+    def test_a_verdict_is_required(self):
+        # No default: guessing either way is the failure the channel
+        # exists to prevent.
+        import consultants.cli as CLI
+        with pytest.raises(SystemExit):
+            CLI.build_parser().parse_args(["tool-ack", "csl-x"])
+
+    def test_allow_and_deny_are_mutually_exclusive(self):
+        import consultants.cli as CLI
+        with pytest.raises(SystemExit):
+            CLI.build_parser().parse_args(
+                ["tool-ack", "csl-x", "--allow", "--deny"])
+
+    def test_approval_events_are_milestones(self):
+        # The one event in the stream that BLOCKS a lane must never be
+        # filtered out of the monitor view.
+        from consultants.cli import _MILESTONE_KINDS
+        assert "awaiting_tool_approval" in _MILESTONE_KINDS
+        assert "tool_approval_resolved" in _MILESTONE_KINDS
+
+    def test_compact_line_shows_tool_and_request_id(self):
+        from consultants.cli import _compact_event_line
+        line = _compact_event_line("awaiting_tool_approval", {
+            "ts": 1785654000.0, "tool": "rent_pod", "level": "ask_human",
+            "request_id": "tap-1", "deadline_ts": 1785654600.0})
+        assert "tool=rent_pod" in line
+        assert "request_id=tap-1" in line
+        assert "level=ask_human" in line

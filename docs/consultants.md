@@ -933,7 +933,8 @@ hand-editable if you prefer.
 | `tools.enabled` | tools | Master switch for the composable tool registry. Default `true`. `false` restores the fixed pre-registry surface. |
 | `tools.all_roles` | tools | Give planner / critic / meta_critic / synthesizer / adversary the same tools the researcher has. **Default `true` since 2026-08-01** — measured cheaper *and* more accurate (see below). |
 | `tools.git` | tools | Read-only git history tools: `git_history` ("when did this regress?", wraps `git log -L`), `git_log` / `git_blame` / `git_diff` / `git_show`. Default `false` — safe, but five more schemas on every prompt on every lane. |
-| `tools.default_level` | tools | Fallback permission rung for a tool no provider or override names: `auto` / `ask_assistant` / `ask_human` / `deny`. Default `auto`. **The `ask_*` rungs are not wired to an approval channel yet — see below.** |
+| `tools.default_level` | tools | Fallback permission rung for a tool no provider or override names: `auto` / `ask_assistant` / `ask_human` / `deny`. Default `auto`. |
+| `tools.approval_timeout_s` | tools | Seconds a parked `ask_human` tool call waits before it is **denied**. Default `600`. `ask_assistant` never parks. |
 | `tools.permissions` | tools | Per-tool rung overrides, `[tools.permissions]`. |
 
 ### Tool surface — why `all_roles` is on
@@ -1045,18 +1046,48 @@ claude-consultants config set-tools --default-level auto
 claude-consultants config set-tools --permission write_file ask_assistant
 ```
 
-**`ask_*` refuses today, it does not ask.** The ladder
-(`auto` / `ask_assistant` / `ask_human` / `deny`) is enforced on every
-dispatch, but the engine passes no approval channel to the registry, so
-a call that lands on an `ask_*` rung is **refused** — the model gets
-`error: tool <name> was not approved`, works around it, and the
-operator sees a weaker answer with no explanation. Since 2026-08-02 the
-engine logs a warning at session start naming what will be refused.
+**The approval channel (M-A, wired 2026-08-02).** The two `ask_*`
+rungs behave differently on purpose:
 
-This costs nothing on the default surface: every built-in and git tool
-declares `auto`, so the ladder never fires. It matters the moment you
-set a rung by hand, or an effectful provider lands. Until the interrupt
-wiring exists, use `auto` or `deny` — those two say what they mean.
+| rung | behaviour |
+|---|---|
+| `ask_assistant` | **auto-approves and never stalls.** Records a `tool_approval_auto` event so the call is visible and the rung can be tightened afterwards. A round-trip per write per lane would burn tokens for a verdict that is yes by construction. |
+| `ask_human` | **parks the lane** — the only rung that can stall, which is why it is reserved for spend. Blocks inside the tool executor, so N×M x-tier siblings keep running. |
+
+A parked call surfaces two ways: `status <sid>` grows a
+`pending_tool_approvals` array (present **only** while parked), and the
+event stream emits `awaiting_tool_approval` (kept by `--milestones`).
+Each carries `request_id`, `tool`, `arguments`, `cwd`, `reason` and
+`deadline_ts` — the plan's rule that "an approver cannot judge
+`sh -c "..."` on its own".
+
+Answer it:
+
+```
+claude-consultants tool-ack <sid> --allow
+claude-consultants tool-ack <sid> --deny --reason "not worth the spend"
+claude-consultants tool-ack <sid> --allow --request-id tap-3
+```
+
+`--allow` / `--deny` is required — there is no default verdict.
+`--request-id` is optional and answers the oldest pending request when
+omitted.
+
+**Timeout denies**, after `tools.approval_timeout_s` (default 600 s,
+`set-tools --approval-timeout`). The lane gets `error: tool 'X' was not
+approved`, the model reroutes, and the council finishes degraded with
+the denial recorded. This is the plan's decision-table row 7: absence
+of an approver never authorizes spend. A denial is always a tool-result
+string, never an exception — a refused tool teaches the model to try
+another route rather than crashing the lane.
+
+None of this is reachable on a default config: every built-in and git
+tool declares `auto`, `default_level` is `auto`, and nothing is pinned,
+so the gate stays a dict lookup that never touches the channel.
+
+**Not yet implemented:** the plan's "keep it resumable" refinement — a
+late approval re-running *that lane* from a durable checkpoint. Today a
+timed-out lane reroutes and the run finishes degraded.
 
 ```
 claude-consultants config set-tools --clear-permission write_file

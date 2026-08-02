@@ -665,3 +665,104 @@ class TestEvents(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ============================================================== #
+# POST /tool-ack — the M-A approval channel's HTTP surface
+# ============================================================== #
+
+
+@unittest.skipUnless(HAVE_FASTAPI, "fastapi not installed")
+class TestToolAck(unittest.TestCase):
+    """Answering a parked ``ask_human`` tool call.
+
+    The lane is blocked inside its tool executor, so resolving the
+    request IS the resume — nothing re-invokes the graph, exactly like
+    /adversary-ack.
+    """
+
+    def _park(self, app, sid="csl-1"):
+        s = _install_session(app, sid)
+        return s, s.tool_approvals.open(
+            tool="rent_pod", level="ask_human",
+            arguments='{"gpu": "h100"}', cwd="/proj",
+            reason="spends money", timeout_s=600,
+        )
+
+    def test_allow_resolves_the_request(self):
+        c, app = _client()
+        _s, req = self._park(app)
+        r = c.post("/v1/consult/csl-1/tool-ack", json={"allow": True})
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertTrue(body["resolved"])
+        self.assertEqual(body["request"]["request_id"], req.request_id)
+        self.assertEqual(body["request"]["resolution"], "allowed")
+        self.assertEqual(body["pending"], [])
+
+    def test_deny_resolves_the_request(self):
+        c, app = _client()
+        self._park(app)
+        r = c.post("/v1/consult/csl-1/tool-ack", json={"allow": False})
+        self.assertEqual(r.json()["request"]["resolution"], "denied")
+
+    def test_allow_is_required(self):
+        # No default verdict: guessing either way is the failure this
+        # channel exists to prevent.
+        c, app = _client()
+        self._park(app)
+        r = c.post("/v1/consult/csl-1/tool-ack", json={})
+        self.assertEqual(r.status_code, 400)
+
+    def test_targets_a_specific_request_id(self):
+        c, app = _client()
+        s, first = self._park(app)
+        second = s.tool_approvals.open(
+            tool="other", level="ask_human", arguments="", cwd="/proj",
+            reason="r", timeout_s=600,
+        )
+        r = c.post("/v1/consult/csl-1/tool-ack",
+                   json={"allow": True, "request_id": second.request_id})
+        self.assertEqual(r.json()["request"]["tool"], "other")
+        self.assertEqual([p["request_id"] for p in r.json()["pending"]],
+                         [first.request_id])
+
+    def test_acking_nothing_is_a_no_op_not_an_error(self):
+        # A duplicate ack after a timeout already denied must not 500.
+        c, app = _client()
+        _install_session(app, "csl-1")
+        r = c.post("/v1/consult/csl-1/tool-ack", json={"allow": True})
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.json()["resolved"])
+
+    def test_404_on_unknown_session(self):
+        c, _app = _client()
+        r = c.post("/v1/consult/missing/tool-ack", json={"allow": True})
+        self.assertEqual(r.status_code, 404)
+
+    def test_status_surfaces_the_pending_request(self):
+        # The signal a monitor polls for — same discipline as
+        # adversary_checkpoint_deadline_ts: present only while parked.
+        c, app = _client()
+        self._park(app)
+        body = c.get("/v1/consult/csl-1").json()
+        self.assertIn("pending_tool_approvals", body)
+        self.assertEqual(body["pending_tool_approvals"][0]["tool"],
+                         "rent_pod")
+        self.assertEqual(body["pending_tool_approvals"][0]["level"],
+                         "ask_human")
+
+    def test_status_omits_the_key_when_nothing_is_parked(self):
+        # M12 parity: a default run's status response must be
+        # byte-identical to pre-M-A.
+        c, app = _client()
+        _install_session(app, "csl-1")
+        self.assertNotIn("pending_tool_approvals",
+                         c.get("/v1/consult/csl-1").json())
+
+    def test_status_omits_the_key_again_after_the_ack(self):
+        c, app = _client()
+        self._park(app)
+        c.post("/v1/consult/csl-1/tool-ack", json={"allow": True})
+        self.assertNotIn("pending_tool_approvals",
+                         c.get("/v1/consult/csl-1").json())

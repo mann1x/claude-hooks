@@ -844,6 +844,7 @@ def cmd_config_set_tools(args, base: str) -> int:
             git=_parse_cli_bool(args.git, flag="--git"),
             all_roles=_parse_cli_bool(args.all_roles, flag="--all-roles"),
             default_level=args.default_level,
+            approval_timeout_s=args.approval_timeout,
             set_permission=perm,
             clear_permission=args.clear_permission,
             clear_all_permissions=bool(args.clear_permissions),
@@ -1344,6 +1345,11 @@ def cmd_cancel(args, base: str) -> int:
 _MILESTONE_KINDS = (
     "node_enter", "node_exit", "awaiting_adversary",
     "adversary_resumed", "interrupt", "error", "complete", "lifecycle",
+    # M-A approval channel. ``awaiting_tool_approval`` is the one event
+    # in the stream that BLOCKS a lane until someone answers, so it must
+    # never be filtered out of the monitor view.
+    "awaiting_tool_approval", "tool_approval_resolved",
+    "tool_approval_auto",
 )
 
 
@@ -1358,11 +1364,34 @@ def _compact_event_line(event_type: str, data: dict) -> str:
         when = _dt.datetime.fromtimestamp(ts).strftime("%H:%M:%S") + " "
     bits = []
     for key in ("role", "round", "lane_idx", "status", "reason",
-                "final_answer_present", "deadline_ts", "timeout_s"):
+                "final_answer_present", "deadline_ts", "timeout_s",
+                # approval-channel fields: an operator staring at a
+                # parked lane needs the tool, the id to ack, and the
+                # verdict once it lands.
+                "tool", "level", "request_id", "resolution", "allowed"):
         val = data.get(key)
         if val not in (None, ""):
             bits.append(f"{key}={val}")
     return f"{when}{event_type:<18} " + " ".join(bits)
+
+
+def cmd_tool_ack(args, base: str) -> int:
+    """``tool-ack <sid> --allow|--deny`` — answer a parked ``ask_human``
+    tool-approval request.
+
+    There is deliberately no default verdict: guessing either way is
+    the failure the channel exists to prevent, so ``--allow`` /
+    ``--deny`` is a required, mutually-exclusive pair.
+    """
+    body: dict = {"allow": bool(args.allow)}
+    if args.request_id:
+        body["request_id"] = args.request_id
+    if args.reason:
+        body["reason"] = args.reason
+    out = _http("POST", f"{base}/v1/consult/{args.sid}/tool-ack",
+                body=body)
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
 
 
 def cmd_events(args, base: str) -> int:
@@ -1963,6 +1992,27 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Human-readable cancel reason (logged).")
     can.set_defaults(fn=cmd_cancel)
 
+    # tool-ack — answer a parked ask_human tool approval (M-A).
+    ta = sub.add_parser(
+        "tool-ack",
+        help="Approve or deny a parked tool call awaiting approval.",
+    )
+    ta.add_argument("sid")
+    grp = ta.add_mutually_exclusive_group(required=True)
+    grp.add_argument("--allow", dest="allow", action="store_true",
+                     help="Approve the parked call.")
+    grp.add_argument("--deny", dest="allow", action="store_false",
+                     help="Refuse it. The lane gets an error string and "
+                          "reroutes; it does not crash.")
+    ta.add_argument("--request-id", dest="request_id", default=None,
+                    help="Which request to answer. Omit to answer the "
+                         "oldest pending one (the common case of a "
+                         "single parked call).")
+    ta.add_argument("--reason", default=None,
+                    help="Recorded with the decision for the "
+                         "post-mortem.")
+    ta.set_defaults(fn=cmd_tool_ack)
+
     # events — SSE stream.
     ev = sub.add_parser(
         "events",
@@ -2163,6 +2213,14 @@ def build_parser() -> argparse.ArgumentParser:
                           "auto runs silently; ask_assistant routes to "
                           "the assistant; ask_human needs a person; "
                           "deny refuses.")
+    ctl.add_argument("--approval-timeout", dest="approval_timeout",
+                     type=float, default=None, metavar="SECONDS",
+                     help="How long a parked ask_human tool call waits "
+                          "before it is DENIED (default 600). Only "
+                          "ask_human parks — ask_assistant auto-approves "
+                          "per the ladder — so this is the spend gate. "
+                          "Timeout denies on purpose: absence of an "
+                          "approver never authorizes spend.")
     ctl.add_argument("--permission", nargs=2, metavar=("TOOL", "LEVEL"),
                      help="Pin one tool to a rung, e.g. "
                           "--permission git_diff auto.")

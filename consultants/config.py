@@ -684,6 +684,11 @@ class ToolsConfig:
     default_level: str = "auto"
     #: Per-tool overrides, ``[tools.permissions]``.
     permissions: dict = field(default_factory=dict)
+    #: Seconds a parked ``ask_human`` call waits before it is DENIED.
+    #: Only ``ask_human`` can stall (``ask_assistant`` auto-approves per
+    #: the ladder), so this is the spend-approval deadline. Timeout
+    #: denies on purpose: absence of an approver never authorizes spend.
+    approval_timeout_s: float = 600.0
 
 
 @dataclass
@@ -975,6 +980,11 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
         if "default_level" in tl and isinstance(tl["default_level"], str):
             base.tools.default_level = (
                 tl["default_level"].strip() or base.tools.default_level)
+        if "approval_timeout_s" in tl:
+            raw_to = tl["approval_timeout_s"]
+            if (isinstance(raw_to, (int, float))
+                    and not isinstance(raw_to, bool) and raw_to > 0):
+                base.tools.approval_timeout_s = float(raw_to)
         perms = tl.get("permissions")
         if isinstance(perms, dict):
             # Values are NOT validated here on purpose. The gate refuses
@@ -1300,6 +1310,10 @@ def _render(cfg: ConsultantsConfig, *,
     L.append(f"all_roles = {'true' if cfg.tools.all_roles else 'false'}")
     L.append("# default_level: auto | ask_assistant | ask_human | deny")
     L.append(f"default_level = {_toml_str(cfg.tools.default_level)}")
+    L.append("# approval_timeout_s: how long a parked ask_human tool")
+    L.append("#   call waits before it is DENIED. ask_assistant never")
+    L.append("#   parks (it auto-approves), so this is the spend gate.")
+    L.append(f"approval_timeout_s = {cfg.tools.approval_timeout_s:g}")
     if cfg.tools.permissions:
         L.append("")
         L.append("[tools.permissions]")
@@ -1963,6 +1977,7 @@ def set_tools(
     git: Optional[bool] = None,
     all_roles: Optional[bool] = None,
     default_level: Optional[str] = None,
+    approval_timeout_s: Optional[float] = None,
     set_permission: Optional[tuple] = None,
     clear_permission: Optional[str] = None,
     clear_all_permissions: bool = False,
@@ -1986,6 +2001,14 @@ def set_tools(
         cfg.tools.git = bool(git)
     if all_roles is not None:
         cfg.tools.all_roles = bool(all_roles)
+    if approval_timeout_s is not None:
+        if float(approval_timeout_s) <= 0:
+            raise ValueError(
+                "approval_timeout_s must be > 0 — a zero or negative "
+                "deadline denies every parked call before an approver "
+                "can see it, which is 'deny' with extra steps"
+            )
+        cfg.tools.approval_timeout_s = float(approval_timeout_s)
     if default_level is not None:
         lvl = default_level.strip()
         if lvl not in VALID_PERMISSION_LEVELS:

@@ -257,18 +257,26 @@ backgrounded loop that exits on either signal:
 ```bash
 while :; do
   claude-consultants status <sid> > /tmp/st.json
-  python3 -c "import json,sys; d=json.load(open('/tmp/st.json')); sys.exit(0 if d.get('status')!='running' or d.get('adversary_checkpoint_deadline_ts') else 3)" && break
+  python3 -c "import json,sys; d=json.load(open('/tmp/st.json')); sys.exit(0 if d.get('status')!='running' or d.get('adversary_checkpoint_deadline_ts') or d.get('pending_tool_approvals') else 3)" && break
   sleep 20
 done
 claude-consultants status <sid>
 ```
 
-`adversary_checkpoint_deadline_ts` appears in `status` **only while a
-checkpoint is open**. Its presence is the "answer me" signal; its
-value is the wall-clock at which the engine gives up and auto-resumes.
-Write the challenge, then release the pause with `claude-consultants
-adversary-ack <sid>`. Details in [Adversarial
-review](#adversarial-review).
+Two fields appear in `status` **only while something is waiting on
+you**, and either one means "answer me":
+
+- `adversary_checkpoint_deadline_ts` — the engine paused before
+  synthesis for an assistant-authored challenge. Write it, then
+  release with `claude-consultants adversary-ack <sid>`. Details in
+  [Adversarial review](#adversarial-review).
+- `pending_tool_approvals` — a lane is parked on an `ask_human` tool
+  call. Answer with `claude-consultants tool-ack <sid> --allow|--deny`.
+  Details in [Subflow I](#subflow-i--tool-surface).
+
+Both carry the wall-clock at which the engine gives up. The adversary
+checkpoint auto-resumes on timeout; a tool approval is **denied** on
+timeout.
 
 #### C. Live visibility wanted → `events --milestones`, backgrounded
 
@@ -979,6 +987,7 @@ Tool surface
   git history:   off
   all roles:     on    (planner/critic/meta_critic/synth/adversary)
   default rung:  auto
+  approval wait: 600s  (ask_human only; timeout denies)
   pinned:        (none)
 ```
 
@@ -1042,11 +1051,70 @@ AskUserQuestion the sub-action:
   `auto`: it applies to *every* tool, including `grep` and
   `read_file`, so a council would pay an approval round-trip per read.
 
+- **Change the approval deadline** →
+  `config set-tools --approval-timeout <seconds> --cwd "$(pwd)"`
+  (default 600). How long a parked `ask_human` call waits before it is
+  **denied**. Only `ask_human` parks, so this is the spend gate.
+  Denying on timeout is deliberate: absence of an approver never
+  authorizes spend.
+
 - **Clear pins** → `config set-tools --clear-permissions --cwd "$(pwd)"`.
 
 - **Disable the registry** → `config set-tools --enabled false`. Falls
   back to the fixed six built-in tools. Offer this only as a
   troubleshooting step.
+
+#### When a tool asks for approval
+
+Since 2026-08-02 the two `ask_*` rungs behave differently, and the
+difference is the whole design:
+
+- **`ask_assistant` never stalls.** It auto-approves, records a
+  `tool_approval_auto` event, and the lane continues. You see that the
+  call happened and can tighten the rung afterwards; you are not asked
+  to bless each one. Making it stall would burn a round-trip per write
+  per lane for a verdict that is yes by construction.
+- **`ask_human` parks the lane** and is the only rung that can. The
+  lane blocks inside its tool executor — its N×M x-tier siblings keep
+  running — until someone answers or the deadline passes.
+
+**Detecting a parked call.** Two signals, same as the adversary
+checkpoint:
+
+- `status <sid>` grows a `pending_tool_approvals` array **only while a
+  call is parked**. Each entry carries `request_id`, `tool`,
+  `arguments`, `cwd`, `reason` and `deadline_ts`.
+- The events stream emits `awaiting_tool_approval`, which
+  `--milestones` always keeps.
+
+Pattern B in [Wait for the run](#4-wait-for-the-run--the-only-three-patterns)
+already exits on either signal; extend its check to
+`pending_tool_approvals` when a run can reach an `ask_human` rung.
+
+**Answering.**
+
+```
+claude-consultants tool-ack <sid> --allow
+claude-consultants tool-ack <sid> --deny --reason "not worth the spend"
+claude-consultants tool-ack <sid> --allow --request-id tap-3
+```
+
+`--allow` / `--deny` is required and mutually exclusive — there is no
+default verdict, because guessing either way is the failure the channel
+exists to prevent. Omit `--request-id` to answer the oldest pending
+request, which is the common case of exactly one parked call.
+
+**Do not answer an `ask_human` yourself.** The rung exists because a
+person decides; `ask_assistant` is the rung that delegates to you. Show
+the user the tool, its arguments, the root it would run in, the reason
+it tripped the rung, and how long until it auto-denies — then ask.
+
+**If nobody answers**, the call is denied at the deadline and the lane
+gets `error: tool 'X' was not approved`. The council finishes degraded
+with the denial on the record rather than spending money nobody
+approved. Say so when you relay the answer: a result produced without a
+tool the council wanted is a weaker result, and the user should know
+which one it was.
 
 **If a tool is refused mid-council** you will see an
 `error: tool 'X' was not approved` result in the transcript rather

@@ -225,6 +225,20 @@ def should_interrupt_on_low_confidence(
     )
 
 
+# SUPERSEDED 2026-08-02 — do not wire this.
+#
+# The plan (docs/PLAN-council-tool-surface.md, M-A) called for pausing
+# "at the call site, surface the args, wait for human approval", and
+# that is what shipped — but at the DISPATCH boundary, in
+# ``consultants.engine.tool_approval``, not as a graph interrupt. The
+# reasons are in that module: an ``ask_human`` there parks one lane by
+# blocking its worker thread while its x-tier siblings keep running,
+# which is the pause scope the plan decided on, and it costs no
+# lane-scoped interrupt state in the checkpointer.
+#
+# This function is kept because its tests document the intended
+# semantics, and deleting it would lose that. Wiring it as well would
+# give one tool call two approval paths that can disagree.
 def should_interrupt_on_tool_permission(
     state: dict,
     tool_name: str,

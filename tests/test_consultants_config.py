@@ -909,3 +909,53 @@ class TestSetTools:
         claude_hooks on the path; the two must not drift."""
         from claude_hooks.tool_registry.policy import LEVELS
         assert cc.VALID_PERMISSION_LEVELS == LEVELS
+
+
+class TestToolsApprovalTimeout:
+    """``[tools] approval_timeout_s`` — the spend-approval deadline.
+
+    Only ``ask_human`` parks (``ask_assistant`` auto-approves per the
+    ladder), so this is the one knob that decides how long a council
+    waits for a person before denying.
+    """
+
+    def test_default_is_ten_minutes(self, isolated_home):
+        assert cc.ConsultantsConfig().tools.approval_timeout_s == 600.0
+
+    def test_round_trips_through_the_file(self, isolated_home):
+        cc.set_tools(approval_timeout_s=120)
+        assert cc.load_config().tools.approval_timeout_s == 120.0
+
+    def test_rejects_a_non_positive_deadline(self, isolated_home):
+        # Zero denies every parked call before an approver can see it,
+        # which is "deny" with extra steps and a confusing name.
+        with pytest.raises(ValueError):
+            cc.set_tools(approval_timeout_s=0)
+        with pytest.raises(ValueError):
+            cc.set_tools(approval_timeout_s=-5)
+
+    def test_a_bad_value_in_the_file_falls_back_to_the_default(
+            self, isolated_home):
+        # Load-time is lenient by design (the CLI is where a typo gets
+        # rejected loudly); a garbage value must not produce a
+        # zero-second deadline that denies everything.
+        path = cc.user_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '[tools]\napproval_timeout_s = "soon"\n', encoding="utf-8")
+        assert cc.load_config().tools.approval_timeout_s == 600.0
+
+    def test_zero_in_the_file_is_ignored(self, isolated_home):
+        path = cc.user_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('[tools]\napproval_timeout_s = 0\n',
+                        encoding="utf-8")
+        assert cc.load_config().tools.approval_timeout_s == 600.0
+
+    def test_other_tools_settings_survive_the_write(self, isolated_home):
+        cc.set_tools(git=True, default_level="ask_human")
+        cc.set_tools(approval_timeout_s=42)
+        cfg = cc.load_config()
+        assert cfg.tools.approval_timeout_s == 42.0
+        assert cfg.tools.git is True
+        assert cfg.tools.default_level == "ask_human"

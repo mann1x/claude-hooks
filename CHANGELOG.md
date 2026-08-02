@@ -43,6 +43,54 @@ release with the auto-generated source archive
 
 ### Added
 
+- **The approval channel — M-A's last unwired piece.** The permission
+  ladder has been enforced at dispatch since the registry landed, but
+  the runner passed no `approval_fn`, so `ToolRegistry` refused every
+  `ask_*` call for want of somewhere to route it. A documented config
+  value (`set-tools --permission write_file ask_assistant`) silently
+  meant "deny". `consultants/engine/tool_approval.py` is the channel,
+  and the two rungs behave as `docs/PLAN-council-tool-surface.md`
+  decided:
+
+  - **`ask_assistant` auto-approves and never stalls.** The plan is
+    explicit that it is "auto-approve with discretion, not wait for a
+    verdict" — a round-trip per write per lane would burn tokens for a
+    verdict that is yes by construction. What it buys over `auto` is
+    the audit trail: a `tool_approval_auto` event the assistant sees.
+  - **`ask_human` parks the lane** and is the only rung that can,
+    which is why the plan reserves it for spend. `POST /tool-ack` and
+    `claude-consultants tool-ack <sid> --allow|--deny` answer it;
+    `status` grows `pending_tool_approvals` and the stream emits
+    `awaiting_tool_approval` while one is open.
+  - **Timeout denies** after `tools.approval_timeout_s` (default 600,
+    `set-tools --approval-timeout`). Decision-table row 7: absence of
+    an approver never authorizes spend. The lane gets an `error:` tool
+    result and reroutes — never an exception, so a denial teaches the
+    model another route rather than crashing the lane.
+
+  **Per-lane parking, verified rather than argued.** The plan called
+  lane-scoped suspension the largest piece of M-A because a
+  graph-level pause would idle every sibling on exactly the x-tier
+  runs that matter most. Blocking inside the tool executor gets it for
+  free — LangGraph runs sync nodes on its own worker threads — and a
+  test drives the real `CouncilState` graph with three Send lanes to
+  prove one parking while two finish.
+
+  Unchanged on a default config, with a cohort-2 parity test for each
+  condition that keeps it so: every built-in tool declares `auto`,
+  `default_level` is `auto`, and nothing is pinned. Not implemented:
+  the plan's "keep it resumable" refinement (a late approval re-running
+  that lane from a durable checkpoint); a timed-out lane reroutes and
+  the run finishes degraded.
+
+- **`parent_lane_idx` is now a declared channel.** It was passed in
+  Send payloads and read by `tool_executor` while declared nowhere. It
+  worked — a Send payload reaches its node unfiltered, unlike the
+  top-level `invoke` input, which is filtered by the schema — but
+  relying on that asymmetry is exactly how `extra_roots` went missing
+  for two months. The regression test now requires **every** key any
+  Send payload passes to be a declared channel.
+
 - **`events --milestones` / `--kinds`.** The unfiltered SSE stream is
   dominated by `llm_call` and `tool_call` records — hundreds per
   council, each a full payload — which makes it unusable as a monitor

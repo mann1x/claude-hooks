@@ -290,6 +290,8 @@ def make_runner(*, ollama_base_url: str):
         # nothing downstream of GraphDeps knows a registry exists.
         _tool_specs, _tool_executor, _tool_registry = build_tool_surface(
             cfg, extra_roots=extra_roots,
+            approval_fn=_make_tool_approval_fn(
+                state, recorder, cfg, cwd, log_label="council"),
         )
         # M-B: which roles get those tools. Empty unless [tools]
         # all_roles is on, which keeps the default graph pre-M-B.
@@ -773,6 +775,8 @@ def make_follow_up_runner(*, ollama_base_url: str):
         # nothing downstream of GraphDeps knows a registry exists.
         _tool_specs, _tool_executor, _tool_registry = build_tool_surface(
             cfg, extra_roots=extra_roots,
+            approval_fn=_make_tool_approval_fn(
+                state, recorder, cfg, cwd, log_label="council follow-up"),
         )
         # M-B: which roles get those tools. Empty unless [tools]
         # all_roles is on, which keeps the default graph pre-M-B.
@@ -1443,6 +1447,54 @@ def _finalize_recorder(recorder, *, status: str,
         recorder.close()
     except Exception as exc:  # pragma: no cover
         log.warning("recorder.close raised: %s", exc)
+
+
+def _make_tool_approval_fn(state, recorder, cfg, cwd: str,
+                           *, log_label: str):
+    """Build the ``approval_fn`` the tool registry calls on an ``ask_*``.
+
+    Without one the registry refuses every gated call — correct, but
+    silent, and it was the last unwired piece of M-A
+    (``docs/PLAN-council-tool-surface.md``). ``ask_assistant``
+    auto-approves per the plan's ladder; ``ask_human`` parks the lane
+    and denies on timeout, because absence of a human never authorizes
+    spend.
+    """
+    from consultants.engine.tool_approval import (
+        DEFAULT_APPROVAL_TIMEOUT_S, ApprovalContext, make_approval_fn,
+    )
+
+    tools_cfg = getattr(cfg, "tools", None)
+    timeout_s = float(getattr(
+        tools_cfg, "approval_timeout_s", DEFAULT_APPROVAL_TIMEOUT_S)
+        if tools_cfg is not None else DEFAULT_APPROVAL_TIMEOUT_S)
+
+    def _emit(kind: str, payload: dict) -> None:
+        # The recorder row is the load-bearing path, exactly as in
+        # ``_record_awaiting_adversary``: GET /events replays recorder
+        # rows, so a consumer that reconnects (or attaches late) still
+        # sees the parked request via Last-Event-ID. Failing to record
+        # must never break the run — the runner owns the deadline
+        # regardless of who is listening.
+        if recorder is None or not hasattr(recorder, "record_event"):
+            return
+        body = dict(payload)
+        body.setdefault("kind", kind)
+        body.setdefault("sid", getattr(state, "sid", ""))
+        body.setdefault("ts", time.time())
+        try:
+            recorder.record_event(kind=kind, payload=body)
+        except Exception:  # pragma: no cover — defensive
+            log.exception("%s: record_event(%s) failed", log_label, kind)
+
+    ctx = ApprovalContext(
+        broker=state.tool_approvals,
+        cwd=cwd,
+        timeout_s=timeout_s,
+        emit=_emit,
+        is_closed=lambda: bool(getattr(state, "closed", False)),
+    )
+    return make_approval_fn(ctx)
 
 
 def _preflight_refused(state, question: str, *, cwd: str,

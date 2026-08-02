@@ -117,6 +117,14 @@ class CouncilState(TypedDict, total=False):
     # on the single-researcher path used by critic re-routes.
     plan_item: Optional[str]
     lane_idx: Optional[int]
+    #: #103: which researcher lane emitted the tool plan this
+    #: tool_executor lane is serving, so its ToolResult routes back to
+    #: that lane and not a sibling's. Declared even though a Send
+    #: payload reaches its node unfiltered (unlike the top-level
+    #: ``invoke`` input, which IS filtered by this schema): relying on
+    #: that asymmetry is how ``extra_roots`` went missing for two
+    #: months. Anything the graph passes around is a channel.
+    parent_lane_idx: Optional[int]
     model_override: Optional[str]
     # M6: per-lane Send-injected payload for the tool_executor node.
     # Carries exactly one ToolPlanItem the lane will execute. The

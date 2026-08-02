@@ -320,6 +320,38 @@ class TestOptInsOffByDefault(unittest.TestCase):
         # that one was measured and flipped back OFF.
         self.assertTrue(self.cfg.tools.all_roles)
 
+    def test_permission_ladder_never_fires_on_the_default_surface(self):
+        # M-A cohort-2 entry for the approval channel (2026-08-02).
+        # The channel now parks an ``ask_human`` call and denies it on
+        # timeout — a behaviour change that must be unreachable by
+        # default. Two conditions make it so: the fallback rung is
+        # ``auto``, and nothing is pinned to an ``ask_*`` rung. If
+        # either drifts, a default run gains a way to stall for ten
+        # minutes on a tool call nobody is watching for.
+        self.assertEqual(self.cfg.tools.default_level, "auto")
+        self.assertEqual(self.cfg.tools.permissions, {})
+
+    def test_every_default_tool_declares_auto(self):
+        # The other half: a provider could ship a tool whose own
+        # declared level is ask_*, which the gate honours without any
+        # config change. "The gate must be cheap on the common path"
+        # only holds while every default tool is auto.
+        from claude_hooks.tool_registry import BuiltinToolProvider
+        provider = BuiltinToolProvider(())
+        for spec in provider.specs():
+            name = (spec.get("function") or {}).get("name")
+            self.assertEqual(
+                provider.default_level(name), "auto",
+                f"builtin tool {name!r} defaults to a gated rung; a "
+                f"default council run would now need an approver",
+            )
+
+    def test_approval_timeout_default_is_ten_minutes(self):
+        # Only reachable once someone opts into ask_human, but pin it:
+        # the value is the spend-approval deadline, and shortening it
+        # silently converts "waiting for a person" into "denied".
+        self.assertEqual(self.cfg.tools.approval_timeout_s, 600.0)
+
     def test_default_graph_hands_every_toolable_role_its_tools(self):
         # The knob's runtime consequence, post-flip. Each toolable role
         # must receive all three kwargs; a role silently missing them

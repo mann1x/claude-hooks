@@ -299,6 +299,54 @@ class TestExtraRootsChannel(unittest.TestCase):
         # already be there or this regresses on the switchover.
         self.assertIn("extra_roots", CouncilStateV2.__annotations__)
 
+    def test_every_send_payload_key_is_a_declared_channel(self):
+        # Generalised from the extra_roots case. A Send payload reaches
+        # its node unfiltered, while the top-level invoke input is
+        # filtered by the schema — an asymmetry that let
+        # ``parent_lane_idx`` work for months while undeclared. Relying
+        # on it is how the next channel goes missing, so require every
+        # key the graph passes to be declared.
+        import ast
+
+        repo_root = Path(__file__).resolve().parent.parent
+        src = (repo_root / "consultants" / "engine" / "graph.py").read_text()
+        tree = ast.parse(src)
+
+        declared: dict[str, set[str]] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                declared[node.name] = {
+                    stmt.target.id for stmt in node.body
+                    if isinstance(stmt, ast.AnnAssign)
+                    and isinstance(stmt.target, ast.Name)
+                }
+        channels: set[str] = set()
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "StateGraph"
+                    and node.args
+                    and isinstance(node.args[0], ast.Name)):
+                channels |= declared.get(node.args[0].id, set())
+
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "Send"):
+                continue
+            for arg in node.args:
+                if not isinstance(arg, ast.Dict):
+                    continue
+                for key in arg.keys:
+                    if not isinstance(key, ast.Constant):
+                        continue
+                    self.assertIn(
+                        key.value, channels,
+                        f"Send payload at graph.py:{node.lineno} passes "
+                        f"{key.value!r}, which no compiled state schema "
+                        f"declares",
+                    )
+
     def test_every_send_payload_carrying_cwd_also_carries_extra_roots(self):
         # A Send delivers ONLY the keys in its own dict — a fanout lane
         # never inherits a global channel. So declaring the channel is

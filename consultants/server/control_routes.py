@@ -698,6 +698,57 @@ def register_control_routes(app: "FastAPI") -> None:
             "deadline_ts": deadline,
         }
 
+    # -------------------- POST /tool-ack ----------------------- #
+    @app.post("/v1/consult/{sid}/tool-ack")
+    def tool_ack(sid: str, body: Optional[dict] = None) -> dict:
+        """M-A: answer a parked ``ask_human`` tool-approval request.
+
+        Body: ``{"allow": true|false, "request_id": "tap-N"?,
+        "reason": "..."?}``. ``allow`` is REQUIRED — there is no default
+        verdict, because guessing either way is the failure this channel
+        exists to prevent. ``request_id`` is optional; omitted, it
+        answers the oldest pending request, which is the common case of
+        exactly one parked call.
+
+        Like /adversary-ack this does not touch the graph: the lane is
+        blocked inside its tool executor, so resolving the request is
+        the whole resume. Answering when nothing is pending returns
+        ``resolved: false`` rather than erroring — a duplicate ack after
+        a timeout is a harmless no-op, and the timeout has already
+        denied.
+        """
+        body = body or {}
+        if "allow" not in body:
+            raise HTTPException(400, "tool-ack requires 'allow'")
+        allow = bool(body.get("allow"))
+        request_id = body.get("request_id")
+        if request_id is not None and not isinstance(request_id, str):
+            raise HTTPException(400, "request_id must be a string")
+        # NOT ``_require_live_session``: that also demands the live
+        # graph handles, and this verb never touches the graph. The
+        # parked lane is blocked inside its tool executor, so resolving
+        # the request is the entire resume. Requiring ``_compiled``
+        # here would 503 an ack that is perfectly answerable.
+        s = _require_session(app, sid)
+        if getattr(s, "closed", False):
+            raise HTTPException(_HTTP_GONE, f"session closed: {sid}")
+        req = s.tool_approvals.resolve(
+            request_id, allow=allow,
+            by=str(body.get("reason") or "assistant"),
+        )
+        s.bump_activity()
+        if req is None:
+            return {
+                "ok": True, "resolved": False,
+                "reason": "no matching pending approval request",
+                "pending": s.tool_approvals.pending_public(),
+            }
+        return {
+            "ok": True, "resolved": True,
+            "request": req.public_dict(),
+            "pending": s.tool_approvals.pending_public(),
+        }
+
     # -------------------- POST /cancel ------------------------- #
     @app.post("/v1/consult/{sid}/cancel")
     def cancel(sid: str, body: Optional[dict] = None) -> dict:
