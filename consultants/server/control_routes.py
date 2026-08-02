@@ -622,33 +622,45 @@ def register_control_routes(app: "FastAPI") -> None:
         # what closes the post-ack re-stream double-resume window. Read
         # under the lock so the check races neither the runner's set nor
         # its clear.
+        #
+        # A node parked on ``POST /interrupt`` is checked FIRST, and
+        # ``_adversary_checkpoint_active`` is why: that flag spans the
+        # whole runner-owned window, so it can still be set long after
+        # the checkpoint itself was acked. Testing it first swallowed
+        # the pause release — observed live on
+        # ``csl-2026-08-02-1042-1036``, where /resume returned
+        # ``adversary_ack`` while the synthesizer stayed parked with no
+        # way to free it. ``run_control.paused`` is the precise
+        # condition: true only while a pause is actually outstanding.
+        #
+        # Both can be set at once, and then both get released — the ack
+        # is idempotent, and returning after only one would leave the
+        # run blocked on the other.
+        released_pause = s.run_control.paused
+        if released_pause:
+            # The parked node is blocked inside its own worker thread,
+            # so releasing the flag IS the entire resume; nothing
+            # re-enters the graph.
+            s.run_control.release_pause(by="resume")
         with s._inject_lock:
             checkpoint_active = bool(
                 getattr(s, "_adversary_checkpoint_active", False))
         if checkpoint_active:
             s.ack_adversary()
+        if released_pause or checkpoint_active:
             s.bump_activity()
+            modes = []
+            if released_pause:
+                modes.append("pause_release")
+            if checkpoint_active:
+                modes.append("adversary_ack")
             return {
                 "ok": True,
-                "mode": "adversary_ack",
-                "acked": True,
+                "mode": "+".join(modes),
+                "resumed": bool(released_pause),
+                "acked": bool(checkpoint_active),
                 "checkpoint_open": getattr(
                     s, "_checkpoint_deadline_ts", None) is not None,
-            }
-
-        # Same rule for a node parked on ``POST /interrupt``: the
-        # runner still owns the stream, so re-invoking the graph here
-        # would double-resume against a live invocation — the bug the
-        # adversary branch above exists to prevent. The parked node is
-        # blocked inside its own worker thread, so releasing the pause
-        # IS the entire resume; nothing re-enters the graph.
-        if s.run_control.paused:
-            s.run_control.release_pause(by="resume")
-            s.bump_activity()
-            return {
-                "ok": True,
-                "mode": "pause_release",
-                "resumed": True,
             }
 
         value = body.get("value")

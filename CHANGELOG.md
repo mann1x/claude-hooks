@@ -182,6 +182,17 @@ release with the auto-generated source archive
     already spent everything up to that point and abandoning the run
     would waste it.
 
+  Two bugs the first live run found, both fixed before this shipped:
+  `/resume` tested `_adversary_checkpoint_active` before the pause, and
+  since that flag spans the whole runner-owned window it kept answering
+  `adversary_ack` while the synthesizer stayed parked with nothing able
+  to free it — the pause is checked first now, and both are released
+  when both are set. And the pause deadline is measured from when the
+  pause was *requested*, not from when a node reaches the gate: the
+  pause landed at 10:43 and the synthesizer parked at 10:49, so
+  measuring from park time left the node waiting past the
+  `pause_deadline_ts` that `status` was already advertising.
+
   `RuntimeControl` still declares `cancel_requested` / `pause_requested`
   as the durable record of the request, now with a class note saying
   they are advisory and that anything added there which must take

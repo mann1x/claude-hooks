@@ -415,6 +415,34 @@ class TestGraphDepsWiring(unittest.TestCase):
                 "a _wrap site does not install the cancel/pause gate")
 
 
+class TestPauseDeadlineIsMeasuredFromTheRequest(unittest.TestCase):
+    """Observed live on ``csl-2026-08-02-1042-1036``.
+
+    The pause landed at 10:43; the synthesizer did not reach the gate
+    until 10:49, because the adversary checkpoint held the runner in
+    between. Measuring the wait from *park* time would let the node keep
+    waiting past the ``pause_deadline_ts`` that ``status`` is already
+    advertising — a deadline visibly in the past while the thing it
+    bounds is still blocked.
+    """
+
+    def test_a_late_arriving_node_inherits_the_original_deadline(self):
+        rc = RunControl("csl-x", pause_timeout_s=10.0)
+        # Requested 9.9 s ago: only 0.1 s of the budget is left.
+        rc.request_pause("hold", now=time.time() - 9.9)
+        started = time.time()
+        assert rc.check("synthesizer") == "run"
+        waited = time.time() - started
+        assert waited < 2.0, (
+            f"node waited {waited:.1f}s — it restarted the clock instead "
+            "of inheriting the pause's own deadline")
+
+    def test_the_advertised_deadline_is_the_one_enforced(self):
+        rc = RunControl("csl-x", pause_timeout_s=10.0)
+        rc.request_pause("hold", now=1000.0)
+        assert rc.snapshot()["pause_deadline_ts"] == 1010.0
+
+
 class TestDefaults(unittest.TestCase):
     def test_pause_timeout_is_generous_on_purpose(self):
         # The run is already paid for; resuming a pause nobody released

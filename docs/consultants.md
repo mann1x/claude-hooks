@@ -542,9 +542,20 @@ that point, and abandoning the run would waste it — so the safe default
 is to carry on, after `DEFAULT_PAUSE_TIMEOUT_S` (1800 s).
 
 `resume` picks its mode server-side from what is actually parked:
-`pause_release`, `adversary_ack`, or `scheduled` for a real LangGraph
-interrupt. The first two never re-enter the graph — the runner still
-owns the stream, and re-invoking would double-resume a live invocation.
+`pause_release`, `adversary_ack`, both (`pause_release+adversary_ack`),
+or `scheduled` for a real LangGraph interrupt. Everything but
+`scheduled` avoids re-entering the graph — the runner still owns the
+stream, and re-invoking would double-resume a live invocation. A pause
+is checked first and both are released when both are set:
+`_adversary_checkpoint_active` spans the whole runner-owned window, so
+it can still be set long after the checkpoint was acked, and testing it
+first swallowed the pause release entirely.
+
+The pause deadline is measured from when the pause was **requested**,
+not from when a node reaches the gate — a node can enter minutes later
+(the checkpoint above will do it), and restarting the clock at park time
+would leave a node blocked past the `pause_deadline_ts` that `status` is
+already advertising.
 
 `status` grows `cancel_requested` / `paused` (with `pause_deadline_ts`
 and the parked roles) only once something has been requested, so an

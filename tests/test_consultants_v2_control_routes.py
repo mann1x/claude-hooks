@@ -513,6 +513,46 @@ class TestResume(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_FASTAPI, "fastapi not installed")
+class TestResumeReleasesAPause(unittest.TestCase):
+    """``_adversary_checkpoint_active`` spans the whole runner-owned
+    window, so it can still be set long after the checkpoint was acked.
+    Testing it before the pause swallowed the release — observed live on
+    ``csl-2026-08-02-1042-1036``, where /resume kept answering
+    ``adversary_ack`` while the synthesizer stayed parked with nothing
+    able to free it."""
+
+    def test_a_pause_is_released(self):
+        c, app = _client()
+        s = _install_session(app, "csl-p1", compiled=_FakeCompiledGraph())
+        s.run_control.request_pause("hold")
+        r = c.post("/v1/consult/csl-p1/resume", json={})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["mode"], "pause_release")
+        self.assertTrue(r.json()["resumed"])
+        self.assertFalse(s.run_control.paused)
+
+    def test_a_pause_is_released_even_while_the_adversary_window_is_open(self):
+        c, app = _client()
+        s = _install_session(app, "csl-p2", compiled=_FakeCompiledGraph())
+        s.run_control.request_pause("hold")
+        s._adversary_checkpoint_active = True
+        r = c.post("/v1/consult/csl-p2/resume", json={})
+        self.assertEqual(r.status_code, 200)
+        # BOTH released — returning after only one leaves the run
+        # blocked on the other.
+        self.assertEqual(r.json()["mode"], "pause_release+adversary_ack")
+        self.assertFalse(s.run_control.paused)
+
+    def test_the_adversary_ack_alone_still_works(self):
+        c, app = _client()
+        s = _install_session(app, "csl-p3", compiled=_FakeCompiledGraph())
+        s._adversary_checkpoint_active = True
+        r = c.post("/v1/consult/csl-p3/resume", json={})
+        self.assertEqual(r.json()["mode"], "adversary_ack")
+        self.assertTrue(r.json()["acked"])
+        self.assertFalse(r.json()["resumed"])
+
+
 class TestCancel(unittest.TestCase):
 
     def test_flips_cancel_requested_on_running(self):

@@ -199,11 +199,23 @@ class RunControl:
         if not self.paused:
             return "run"
 
-        deadline = now_fn() + self.pause_timeout_s
+        # Bound from when the pause was REQUESTED, not from when this
+        # node happened to reach the gate. A node can enter minutes
+        # after the request (live smoke 2026-08-02: the pause landed at
+        # 10:43, the synthesizer parked at 10:49 because the adversary
+        # checkpoint held the runner in between). Measuring from park
+        # time would let a node keep waiting past the
+        # ``pause_deadline_ts`` that ``status`` is already advertising —
+        # a deadline that has visibly passed while the thing it bounds
+        # is still blocked.
         with self._lock:
+            started = self._paused_at
             if role and role not in self.paused_roles:
                 self.paused_roles.append(role)
             reason = self._pause_reason
+        deadline = (started + self.pause_timeout_s
+                    if started is not None
+                    else now_fn() + self.pause_timeout_s)
         if emit is not None:
             _safe_emit(emit, "awaiting_resume", {
                 "role": role, "reason": reason,
