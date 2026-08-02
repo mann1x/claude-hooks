@@ -681,5 +681,71 @@ class TestRootMisconfigurationHint(unittest.TestCase):
         self.assertIn("(none)", hint)
 
 
+class TestAbsolutePathCitations(unittest.TestCase):
+    """Absolute cites must survive extraction intact.
+
+    csl-2026-08-02-0730-bb5b cited real files by absolute path and came
+    back 7-for-7 "file not found in any allowed_root". The cause was in
+    this regex, not in the roots: the ``(?<![/:])`` guard refused to
+    start a match at the leading ``/`` and at every ``/`` after it, so
+    the first viable position was one character INTO the first segment.
+    ``/shared/dev/x/eval/y.py:12`` was extracted as
+    ``hared/dev/x/eval/y.py`` — unresolvable by construction, and
+    indistinguishable in the output from a fabricated filename.
+    """
+
+    def test_absolute_path_extracted_whole(self):
+        got = extract_citations(
+            "see /shared/dev/an-finetune/eval/run_v9_a2a.sh:44-49")
+        self.assertEqual(
+            got,
+            [("/shared/dev/an-finetune/eval/run_v9_a2a.sh:44-49",
+              "/shared/dev/an-finetune/eval/run_v9_a2a.sh", 44, 49)],
+        )
+
+    def test_absolute_path_does_not_lose_its_first_character(self):
+        # The exact shape of the bug, pinned by name.
+        (_, path, _, _) = extract_citations("/shared/dev/x/eval/y.py:12")[0]
+        self.assertTrue(path.startswith("/shared/"), path)
+
+    def test_absolute_and_relative_cites_coexist(self):
+        got = [c[1] for c in
+               extract_citations("see /a/b/c.py:1 and rel/d.py:2")]
+        self.assertEqual(got, ["/a/b/c.py", "rel/d.py"])
+
+    def test_absolute_cite_verifies_against_the_real_file(self, ):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "pkg" / "mod.py"
+            f.parent.mkdir(parents=True)
+            f.write_text("a\nb\nc\n")
+            text = f"look at {f}:2"
+            annotated, issues = lint_answer(text, allowed_roots=[td])
+            self.assertEqual(issues, [], annotated)
+            self.assertEqual(annotated, text)
+
+    def test_url_is_not_mistaken_for_a_citation(self):
+        # Pre-existing sibling of the same bug: the guard blocked the
+        # "/" boundaries of a URL but not one char into the host, so
+        # "ithub.com/x/blob/main/foo.py:123" matched out of a github
+        # link and was reported as a fabricated cite.
+        self.assertEqual(
+            extract_citations(
+                "docs: https://github.com/x/blob/main/foo.py:123"),
+            [],
+        )
+
+    def test_url_and_real_cite_in_the_same_sentence(self):
+        got = [c[1] for c in extract_citations(
+            "see http://h/a/b.py:9 and rel/d.py:2")]
+        self.assertEqual(got, ["rel/d.py"])
+
+    def test_url_cite_is_not_annotated_by_lint_answer(self):
+        text = "docs: https://github.com/x/blob/main/foo.py:123"
+        annotated, issues = lint_answer(text, allowed_roots=["/tmp"])
+        self.assertEqual(issues, [])
+        self.assertEqual(annotated, text)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -246,7 +246,57 @@ class TestExtraRootsChannel(unittest.TestCase):
     that make the next such drop fail loudly in CI instead.
     """
 
-    def test_extra_roots_is_a_declared_channel(self):
+    def test_extra_roots_is_declared_in_every_compiled_schema(self):
+        # NOT just in CouncilStateV2. The first attempt at this fix
+        # declared the channel there and stopped, but every
+        # ``StateGraph(...)`` in graph.py compiles against
+        # ``CouncilState`` — V2 is the not-yet-adopted successor. The
+        # key kept being stripped, a 33-minute follow-up linted against
+        # cwd alone, and this test was green the whole time.
+        #
+        # So resolve the schema STRUCTURALLY: whatever class name is
+        # passed to StateGraph is the one that has to declare it.
+        import ast
+
+        repo_root = Path(__file__).resolve().parent.parent
+        src = (repo_root / "consultants" / "engine" / "graph.py").read_text()
+        tree = ast.parse(src)
+
+        declared: dict[str, set[str]] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                declared[node.name] = {
+                    stmt.target.id for stmt in node.body
+                    if isinstance(stmt, ast.AnnAssign)
+                    and isinstance(stmt.target, ast.Name)
+                }
+
+        compiled: set[str] = set()
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "StateGraph"
+                    and node.args
+                    and isinstance(node.args[0], ast.Name)):
+                compiled.add(node.args[0].id)
+
+        self.assertTrue(compiled, "no StateGraph(<Name>) call found")
+        for name in sorted(compiled):
+            self.assertIn(
+                name, declared,
+                f"StateGraph compiles {name} but it isn't a class in "
+                f"graph.py — widen this test",
+            )
+            self.assertIn(
+                "extra_roots", declared[name],
+                f"{name} is compiled by StateGraph but doesn't declare "
+                f"extra_roots; LangGraph will strip it and the citation "
+                f"verifiers will run against cwd alone",
+            )
+
+    def test_extra_roots_is_declared_in_the_v2_schema_too(self):
+        # V2 isn't compiled yet; when it is adopted the channel has to
+        # already be there or this regresses on the switchover.
         self.assertIn("extra_roots", CouncilStateV2.__annotations__)
 
     def test_every_send_payload_carrying_cwd_also_carries_extra_roots(self):

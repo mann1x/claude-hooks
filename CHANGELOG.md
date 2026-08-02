@@ -43,6 +43,14 @@ release with the auto-generated source archive
 
 ### Added
 
+- **`events --milestones` / `--kinds`.** The unfiltered SSE stream is
+  dominated by `llm_call` and `tool_call` records — hundreds per
+  council, each a full payload — which makes it unusable as a monitor
+  and buries the one event that needs an answer
+  (`awaiting_adversary`). `--milestones` keeps state changes and
+  renders one compact line each. Default output is unchanged for
+  machine consumers.
+
 - **Pre-flight path check (`consultants/engine/preflight.py`).** Before
   a token is spent, the engine resolves every `path.ext[:line]` the
   question names against `[cwd, *extra_roots]` and refuses to start
@@ -128,6 +136,29 @@ release with the auto-generated source archive
   run concurrently and cloud latency cannot drift between them.
 
 ### Fixed
+
+- **The citation linter mangled every absolute path.** Its regex
+  guarded against URLs with `(?<![/:])`, which also refused to start a
+  match at the leading `/` of an absolute path *and* at every `/`
+  after it — so the first viable position was one character into the
+  first segment. `/shared/dev/x/eval/y.py:12` was extracted as
+  `hared/dev/x/eval/y.py`, unresolvable by construction. An answer
+  citing real files by absolute path came back 100% `[unverified —
+  file not found in any allowed_root]` no matter how correct it was,
+  and read exactly like a fabricated filename. The same hole let
+  `ithub.com/x/blob/main/foo.py:123` match out of a github URL and be
+  reported as a fabricated cite; URL tails are now filtered by a
+  bounded backscan instead of by a lookbehind that cannot express it.
+
+- **`extra_roots` was declared in the wrong schema.** The 2026-08-02
+  fix added the channel to `CouncilStateV2`, but every `StateGraph` in
+  `graph.py` compiles `CouncilState` — V2 is the not-yet-adopted
+  successor. The key kept being stripped, and the regression test was
+  green the whole time because it asserted on V2. The channel is now
+  declared where the graph actually compiles it, and the test resolves
+  the schema **structurally**: it parses `graph.py`, finds whatever
+  class each `StateGraph(...)` is given, and requires `extra_roots` in
+  that class.
 
 - **`extra_roots` never reached the council.** LangGraph builds its
   channels from `CouncilStateV2` and silently drops any input key that

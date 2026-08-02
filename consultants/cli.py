@@ -1336,13 +1336,53 @@ def cmd_cancel(args, base: str) -> int:
     return 0
 
 
+#: Event kinds worth a human's attention. ``llm_call`` / ``tool_call``
+#: are the bulk of the stream — a single ``xhigh`` council emits
+#: hundreds, each with a full payload — and reading them is how the
+#: consumer loses the events that actually demand a response. These
+#: are the ones that mark a state change.
+_MILESTONE_KINDS = (
+    "node_enter", "node_exit", "awaiting_adversary",
+    "adversary_resumed", "interrupt", "error", "complete", "lifecycle",
+)
+
+
+def _compact_event_line(event_type: str, data: dict) -> str:
+    """One line per event: time, kind, and only the fields that
+    distinguish this event from the next one of the same kind."""
+    import datetime as _dt
+
+    ts = data.get("ts")
+    when = ""
+    if isinstance(ts, (int, float)):
+        when = _dt.datetime.fromtimestamp(ts).strftime("%H:%M:%S") + " "
+    bits = []
+    for key in ("role", "round", "lane_idx", "status", "reason",
+                "final_answer_present", "deadline_ts", "timeout_s"):
+        val = data.get(key)
+        if val not in (None, ""):
+            bits.append(f"{key}={val}")
+    return f"{when}{event_type:<18} " + " ".join(bits)
+
+
 def cmd_events(args, base: str) -> int:
     """GET /v1/consult/<sid>/events — SSE stream over runtime_events.
 
     Streams indefinitely (until the session terminates or the user
     hits ^C). The endpoint supports Last-Event-ID resume; pass
     ``--since`` to skip events older than the given id.
+
+    By default the raw SSE records are printed verbatim, which is what
+    a machine consumer wants and what a human consumer drowns in. Pass
+    ``--milestones`` (or ``--kinds a,b``) to filter to state changes
+    and render one compact line each — the form in which "the council
+    is waiting for you" is actually visible.
     """
+    kinds: Optional[set] = None
+    if getattr(args, "kinds", None):
+        kinds = {k.strip() for k in args.kinds.split(",") if k.strip()}
+    elif getattr(args, "milestones", False):
+        kinds = set(_MILESTONE_KINDS)
     headers = {}
     if args.since:
         headers["Last-Event-ID"] = str(int(args.since))
@@ -1364,6 +1404,30 @@ def cmd_events(args, base: str) -> int:
     # Read line-by-line and pretty-print each event block. SSE
     # records are separated by a blank line, so we accumulate
     # lines until we see one.
+    def _emit(record_lines: list[str]) -> None:
+        if kinds is None:
+            print("\n".join(record_lines))
+            print()  # blank line separator in the CLI output
+            return
+        event_type = ""
+        payload: dict = {}
+        for ln in record_lines:
+            if ln.startswith("event:"):
+                event_type = ln[len("event:"):].strip()
+            elif ln.startswith("data:"):
+                try:
+                    payload = json.loads(ln[len("data:"):].strip())
+                except (ValueError, TypeError):
+                    payload = {}
+        # ``kind`` inside the payload is authoritative when present —
+        # the SSE ``event:`` name is derived from it but a few
+        # lifecycle records carry a coarser type.
+        kind = payload.get("kind") or event_type
+        if kind not in kinds and event_type not in kinds:
+            return
+        print(_compact_event_line(kind or event_type, payload),
+              flush=True)
+
     try:
         record_lines: list[str] = []
         while True:
@@ -1373,8 +1437,7 @@ def cmd_events(args, base: str) -> int:
             line = raw.decode("utf-8", errors="replace").rstrip("\n")
             if line == "":
                 if record_lines:
-                    print("\n".join(record_lines))
-                    print()  # blank line separator in the CLI output
+                    _emit(record_lines)
                     record_lines = []
                 continue
             record_lines.append(line)
@@ -1906,6 +1969,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Tail the SSE event stream for a session.",
     )
     ev.add_argument("sid")
+    ev.add_argument(
+        "--milestones", action="store_true",
+        help=(
+            "Filter to state-change events (node_enter / node_exit / "
+            "awaiting_adversary / interrupt / error / complete) and "
+            "render one compact line each. The unfiltered stream is "
+            "dominated by llm_call and tool_call records — hundreds "
+            "per council — which is how a human consumer misses the "
+            "events that need an answer."
+        ),
+    )
+    ev.add_argument(
+        "--kinds", default=None, metavar="A,B",
+        help=("Comma-separated event kinds to keep (implies the "
+              "compact renderer). Overrides --milestones."),
+    )
     ev.add_argument(
         "--since", type=int,
         help="Resume from this event_id (Last-Event-ID).",

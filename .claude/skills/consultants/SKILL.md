@@ -106,20 +106,10 @@ authoritative `consultancy` block — read this, don't infer:
   "effective_cap": 4}
 ```
 
-**While the run is `running`, monitor progress on one of two channels**
-(step 4 of the [ask flow](#ask--run-a-fresh-council-consultation) shows
-both, with examples):
-
-- **`claude-consultants events <sid>`** — live **SSE stream** over the
-  engine's `GET /v1/consult/{sid}/events` endpoint. One JSON event per
-  role transition (`node_enter` / `node_exit`), LLM call (`llm_call`), or
-  tool call (`tool_call`) as it happens, ending with a **`complete`**
-  event carrying `{sid, status, final_answer_present}` — that's your
-  canonical "council is done" signal. Preferred for real-time visibility.
-  See the [events subsection](#events--live-monitor-sse-stream).
-- **`claude-consultants status <sid>`** — coarse poll (~10 s cadence).
-  Returns `{status, progress, consultancy, ...}`. Use when a periodic
-  "is it done yet?" check is all you need.
+**While the run is `running`, wait for it with ONE long-lived waiter**
+— never a foreground poll loop. See [Waiting for a
+run](#4-wait-for-the-run--the-only-three-patterns) for the three
+supported patterns and the anti-pattern they replace.
 
 **When the council finishes**, do NOT silently present the answer — the
 consultancy is in `ready_to_review`. Enter the [Review
@@ -134,10 +124,10 @@ trust `consultancy.status` over your own memory of where you were.
 
 ## ask — run a fresh council consultation
 
-A consultation typically takes 1–5 minutes (longer for `high` or
-`max` effort). Keep the user productive during that time: poll
-status periodically, surface per-role progress on visible
-transitions, only block when the synthesizer's answer arrives.
+A consultation takes minutes to tens of minutes (33 min is normal at
+`xhigh`). Start ONE long-lived waiter (step 4), tell the user what you
+kicked off, and keep them productive while it runs — never sit in a
+foreground poll loop, and never re-check on your own cadence.
 
 ### 1. Read engine settings
 
@@ -214,43 +204,102 @@ Returns:
 Save the `sid`. Tell the user briefly you've kicked off the council
 and will surface progress.
 
-### 4. Monitor progress
+### 4. Wait for the run — the only three patterns
 
-Two channels are available — pick one; the consultancy lifecycle is in
-the [overview](#how-a-consultation-works).
+A council takes **minutes to tens of minutes** (33 min is normal at
+`xhigh`). One Bash tool call is bounded by a timeout far shorter than
+that, so the waiting has to live somewhere that outlasts a single
+foreground call.
 
-**Live SSE stream — preferred for real-time visibility:**
+**Never do this.** It is the most common failure mode, it burns a full
+tool timeout, and it never sees the run finish:
+
+```bash
+# ANTI-PATTERN. Do not write this.
+for i in 1 2 3 4 5 6; do
+  s=$(claude-consultants status <sid> | jq -r .status)
+  case "$s" in completed*|failed*) break;; esac
+  sleep 45
+done
+```
+
+Six iterations at 45 s is 4.5 minutes against a 33-minute run: it
+always exits still `running`, you learn nothing, and repeating it
+spends the consultation's whole wall-clock on tool calls. `jq` is also
+not guaranteed to be installed — the examples here use `python3 -c`.
+
+Pick a pattern by whether the run can pause for you:
+
+#### A. Adversary checkpoint OFF → `--wait`, backgrounded
+
+`consult` and `follow-up` both accept `--wait`: the CLI blocks
+server-side until the run is terminal, then prints the **result** JSON
+(`{"ok": true, "summary_markdown": …}`), exiting 1 on failure.
+
+Issue it as a **background** Bash call (`run_in_background: true`).
+The harness notifies you when the process exits, so there is no
+polling and completion cannot be missed:
 
 ```
-claude-consultants events <sid>
+claude-consultants consult --wait --message "<framing>" --cwd "$(pwd)"
 ```
 
-Wraps `GET /v1/consult/{sid}/events`. Each role transition
-(`node_enter` / `node_exit`), LLM call (`llm_call`), and tool call
-(`tool_call`) lands as one JSON event as it happens, with a heartbeat
-every 15 s through quiet research rounds. The stream ends with a
-**`complete`** event carrying `{sid, status, final_answer_present}` —
-that's your trigger to move to step 5. Use `--since <event_id>` to
-resume from a known point (e.g. after a network blip or across a
-compaction boundary). The events subsection below has the wire format.
+`--wait-timeout <s>` bounds the client only; the run continues
+server-side if the wait gives up.
 
-**Coarse status poll — use when a periodic check is enough:**
+#### B. Adversary checkpoint ON → wait for terminal *or* pause
 
-```
+`--wait` would sit through the entire checkpoint (up to
+`adversary_checkpoint_timeout_s`, default 30 min) without telling you
+it wants an answer. Launch without `--wait`, then run **one**
+backgrounded loop that exits on either signal:
+
+```bash
+while :; do
+  claude-consultants status <sid> > /tmp/st.json
+  python3 -c "import json,sys; d=json.load(open('/tmp/st.json')); sys.exit(0 if d.get('status')!='running' or d.get('adversary_checkpoint_deadline_ts') else 3)" && break
+  sleep 20
+done
 claude-consultants status <sid>
 ```
 
-Returns `{status, progress, consultancy, duration_seconds, ...}`.
-Cadence: **~10 s between polls**, no faster. States:
+`adversary_checkpoint_deadline_ts` appears in `status` **only while a
+checkpoint is open**. Its presence is the "answer me" signal; its
+value is the wall-clock at which the engine gives up and auto-resumes.
+Write the challenge, then release the pause with `claude-consultants
+adversary-ack <sid>`. Details in [Adversarial
+review](#adversarial-review).
 
-- `running` — `progress` shows per-role state. Continue answering
-  the user; the consultation runs in the background.
-- `completed` — move to step 5.
-- `failed` — `error` carries the detail; jump to failure handling.
+#### C. Live visibility wanted → `events --milestones`, backgrounded
 
-Either way, surface role transitions in plain language ("Planner done;
-researcher mid-investigation, 3 tool calls so far") — one line per
-visible transition, no spam.
+```
+claude-consultants events <sid> --milestones
+```
+
+**Always pass `--milestones`.** The unfiltered stream is dominated by
+`llm_call` and `tool_call` records — hundreds per council, each with a
+full payload — and it is unusable as a monitor: the one event that
+needs an answer scrolls past inside thousands of lines. `--milestones`
+keeps only state changes and renders one compact line each:
+
+```
+07:30:07 node_enter         role=researcher round=1 lane_idx=0
+07:31:09 node_exit          role=researcher round=1 lane_idx=0
+07:56:42 awaiting_adversary reason=adversary_checkpoint timeout_s=1800.0
+08:03:35 complete           status=completed final_answer_present=True
+```
+
+`complete` is the canonical done signal; `awaiting_adversary` is the
+"answer me" signal. Backgrounded, the stream's exit *is* the
+completion notification. `--kinds a,b` narrows further; `--since
+<event_id>` resumes after a blip or across a compaction boundary.
+
+**In all three cases**: start the waiter, tell the user what you
+kicked off, and get on with other work. Do not re-check on your own
+cadence — the notification is the signal. When you do have progress
+(pattern C, or the status you read on exit), surface transitions in
+plain language: "Planner done; researcher mid-investigation, 3 tool
+calls so far." One line per transition, no spam.
 
 ### 5. Fetch the result
 
@@ -348,9 +397,11 @@ Optional `--effort ...` to override the tier for this follow-up
  "status": "running", "status_url": "/v1/consult/csl-..."}
 ```
 
-### 4. Poll + fetch (same as ask)
+### 4. Wait + fetch (same as ask)
 
-`status <new_sid>` until `completed`, then `result <new_sid>`.
+Wait with one of the [three patterns](#4-wait-for-the-run--the-only-three-patterns)
+— `follow-up --wait` backgrounded is the default — then
+`result <new_sid>`. Never a foreground `for`/`sleep` poll loop.
 Print `summary_markdown` verbatim. Use an extended footer to thread
 the lineage:
 
@@ -423,7 +474,9 @@ focused follow-up and loop back to step 1:
 claude-consultants follow-up <sid> --message "<specific clarifying question>" --cwd "$(pwd)"
 ```
 
-Poll `status <new_sid>` to `completed`, fetch `result <new_sid>`, and
+Wait for `<new_sid>` the same way you waited for the parent
+([three patterns](#4-wait-for-the-run--the-only-three-patterns)),
+fetch `result <new_sid>`, and
 **return to step 1** on the new answer. Do this WITHOUT asking the user
 each round — that's the whole point of the bounded auto-loop.
 
@@ -1180,10 +1233,18 @@ consumer is notified without having to ``/state``-poll.
 
 ``--since <event_id>`` (sent as ``Last-Event-ID``) replays the stream
 from a known point — useful when reconnecting after a network blip or
-across a compaction boundary. The CLI prints one block per event; you
-can also hit the HTTP endpoint directly (``curl -N
-$endpoint/v1/consult/<sid>/events``) when you want to consume it
-without the CLI wrapper.
+across a compaction boundary.
+
+**Pass ``--milestones`` whenever a human (or you) is the consumer.**
+Unfiltered, the CLI prints every raw SSE record including every
+``llm_call`` and ``tool_call`` — hundreds per council, each a full
+payload — which is unreadable as a monitor and buries the
+``awaiting_adversary`` event that needs an answer. ``--milestones``
+keeps state changes only and prints one compact line each;
+``--kinds a,b`` narrows further. The raw form is for machine
+consumers: hit the HTTP endpoint directly (``curl -N
+$endpoint/v1/consult/<sid>/events``) when you want to parse it
+yourself.
 
 ### When to autonomously call these
 

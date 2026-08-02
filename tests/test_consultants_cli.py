@@ -922,3 +922,76 @@ class TestTopLevelErrors:
     def test_consult_requires_message(self):
         with pytest.raises(SystemExit):
             cli.main(["consult"])
+
+
+# ---------------- events --milestones (2026-08-02) ---------------- #
+
+class TestEventsMilestoneFilter:
+    """``events --milestones`` — the unfiltered SSE stream is unusable
+    as a monitor.
+
+    A single xhigh council emits hundreds of ``llm_call`` /
+    ``tool_call`` records, each a full payload. The consumer that has
+    to notice ``awaiting_adversary`` (the engine is paused, waiting for
+    an assistant-authored challenge) never sees it in that volume. The
+    filter keeps state changes and renders one line each.
+    """
+
+    def test_llm_and_tool_calls_are_not_milestones(self):
+        from consultants.cli import _MILESTONE_KINDS
+        assert "llm_call" not in _MILESTONE_KINDS
+        assert "tool_call" not in _MILESTONE_KINDS
+
+    def test_the_signals_that_need_a_response_are_milestones(self):
+        from consultants.cli import _MILESTONE_KINDS
+        for kind in ("awaiting_adversary", "complete", "error",
+                     "node_enter", "node_exit"):
+            assert kind in _MILESTONE_KINDS
+
+    def test_compact_line_names_role_round_and_lane(self):
+        from consultants.cli import _compact_event_line
+        line = _compact_event_line(
+            "node_enter",
+            {"ts": 1785647084.0, "role": "researcher",
+             "round": 1, "lane_idx": 0},
+        )
+        assert "node_enter" in line
+        assert "role=researcher" in line
+        assert "round=1" in line
+        assert "lane_idx=0" in line
+
+    def test_compact_line_surfaces_the_checkpoint_timeout(self):
+        # The operator's next question at a pause is "how long do I
+        # have before it auto-resumes?"
+        from consultants.cli import _compact_event_line
+        line = _compact_event_line(
+            "awaiting_adversary",
+            {"ts": 1785647084.0, "reason": "adversary_checkpoint",
+             "timeout_s": 1800.0},
+        )
+        assert "awaiting_adversary" in line
+        assert "timeout_s=1800.0" in line
+
+    def test_compact_line_survives_a_payload_without_ts(self):
+        from consultants.cli import _compact_event_line
+        line = _compact_event_line(
+            "complete", {"status": "completed",
+                         "final_answer_present": True})
+        assert "status=completed" in line
+
+    def test_flags_parse(self):
+        from consultants.cli import build_parser
+        args = build_parser().parse_args(
+            ["events", "csl-x", "--milestones"])
+        assert args.milestones
+        args = build_parser().parse_args(
+            ["events", "csl-x", "--kinds", "complete,error"])
+        assert args.kinds == "complete,error"
+
+    def test_default_is_unfiltered(self):
+        # Machine consumers parse the raw records; don't change what
+        # they get without a flag.
+        from consultants.cli import build_parser
+        args = build_parser().parse_args(["events", "csl-x"])
+        assert not args.milestones
+        assert args.kinds is None

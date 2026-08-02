@@ -71,6 +71,17 @@ from consultants.engine import council
 class CouncilState(TypedDict, total=False):
     question: str
     cwd: str
+    # Additional sandbox roots (CLI ``--add-dir``, realpath'd). The
+    # citation verifiers read ``[cwd, *extra_roots]`` off state.
+    #
+    # THIS is the schema every ``StateGraph`` in this module compiles
+    # against — ``CouncilStateV2`` in ``state_v2.py`` is the not-yet-
+    # adopted successor and declaring a channel there does nothing for
+    # production. The 2026-08-02 fix declared it in V2 only, so the
+    # key kept being stripped exactly as the comment above this class
+    # warns, and a follow-up whose roots were logged correctly by the
+    # runner still linted against cwd alone.
+    extra_roots: list[str]
     models: dict
     topology: str
     effort: str
