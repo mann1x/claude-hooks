@@ -484,7 +484,19 @@ The second reading is the known conservative case: a greenfield ask
 that names *only* files under a directory that doesn't exist yet
 (`mypkg/__init__.py`, `mypkg/core.py`) looks identical to wrong roots.
 Naming one existing file — which such a question almost always does,
-if only as the pattern to follow — clears it.
+if only as the pattern to follow — clears it. So does the explicit
+override:
+
+```
+claude-consultants consult --skip-preflight --message "…"
+claude-consultants follow-up <sid> --skip-preflight --message "…"
+```
+
+The skip is logged as a warning on the engine, not applied silently:
+someone reading a run full of `[unverified]` cites has to be able to
+tell "the guard was off" from "the guard passed". It is a cost guard,
+not a security boundary — the tool sandbox still confines every read
+to the allowed roots either way.
 
 This exists because a council that cannot see its subject does not
 fail. It answers confidently from nothing, and the only tell is a wall

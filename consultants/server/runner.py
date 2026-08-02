@@ -92,6 +92,7 @@ def make_runner(*, ollama_base_url: str):
             cwd_display=cwd_display,
             extra_roots_display=extra_roots_display,
             label="council",
+            skip=bool(runner_input.get("skip_preflight")),
         ):
             return
 
@@ -581,6 +582,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
             state, question, cwd=cwd, extra_roots=extra_roots,
             cwd_display=cwd, extra_roots_display=extra_roots,
             label="council follow-up",
+            skip=bool(runner_input.get("skip_preflight")),
         ):
             return
 
@@ -1446,15 +1448,28 @@ def _finalize_recorder(recorder, *, status: str,
 def _preflight_refused(state, question: str, *, cwd: str,
                        extra_roots: tuple, cwd_display: str,
                        extra_roots_display: tuple,
-                       label: str) -> bool:
+                       label: str, skip: bool = False) -> bool:
     """Run the path pre-flight; on a blocking verdict mark the session
     failed, write the artifacts, and return True so the caller returns
     without spending anything.
+
+    ``skip=True`` (the CLI's ``--skip-preflight``) bypasses the check
+    entirely, for the greenfield ask whose every named path is one the
+    asker wants created — indistinguishable from wrong roots by
+    inspection alone. It is a cost guard, not a security boundary: the
+    tool sandbox still confines every read to the allowed roots.
 
     Never raises: a pre-flight that itself breaks must not be able to
     stop a run that would otherwise have worked — the check exists to
     save money, not to become a new failure mode.
     """
+    if skip:
+        # --skip-preflight. Logged, not silent: the next person reading
+        # a run full of "[unverified]" cites needs to know the guard
+        # was turned off rather than that it passed.
+        log.warning("%s sid=%s preflight SKIPPED by request",
+                    label, state.sid)
+        return False
     try:
         from consultants.engine.preflight import check_question_paths
         pf = check_question_paths(

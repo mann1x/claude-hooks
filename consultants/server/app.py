@@ -659,6 +659,11 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             "trace": trace_flag,
             "extra_roots": session_extra_roots,
             "extra_roots_display": session_extra_roots_display,
+            # Operator override for the path pre-flight (see
+            # ``consultants.engine.preflight``). Honoured verbatim —
+            # the check is a cost guard, not a security boundary; the
+            # tool sandbox still confines every read to the roots.
+            "skip_preflight": bool(body.get("skip_preflight")),
         }
 
         # Hand off to the executor. The runner mutates ``state`` and
@@ -890,6 +895,11 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             "extra_roots": followup_body_extras,
             # Parallel pre-realpath display form of the body extras.
             "extra_roots_display": list(followup_body_extras),
+            # Operator override for the path pre-flight (see
+            # ``consultants.engine.preflight``). Honoured verbatim —
+            # the check is a cost guard, not a security boundary; the
+            # tool sandbox still confines every read to the roots.
+            "skip_preflight": bool(body.get("skip_preflight")),
         }
         future = app.state.executor.submit(
             _run_with_state, app, app.state.run_follow_up, child,

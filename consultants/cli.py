@@ -160,6 +160,8 @@ def cmd_consult(args, base: str) -> int:
         # unions them with settings-file auto-discovery and stores the
         # result on the session record so follow-ups inherit.
         body["extra_roots"] = list(args.add_dir)
+    if getattr(args, "skip_preflight", False):
+        body["skip_preflight"] = True
     # --trace / --no-trace are deprecated in v1.1 (the JSONL trace
     # was replaced by the per-session transcript.db). The flag is
     # still accepted but no longer forwarded to the engine; warn
@@ -275,6 +277,8 @@ def cmd_follow_up(args, base: str) -> int:
         # entries. The engine merges the two lists (parent first, then
         # this turn's, dedup'd) before running the executor.
         body["extra_roots"] = list(args.add_dir)
+    if getattr(args, "skip_preflight", False):
+        body["skip_preflight"] = True
     # Consultancy review loop: ``--allow-extra [N]`` / ``--force`` is
     # the over-cap approval carrier. In the Claude Code harness the
     # skill re-issues the followup with this flag after the user
@@ -1578,6 +1582,18 @@ def build_parser() -> argparse.ArgumentParser:
             "follow-ups inherit."
         ),
     )
+    c.add_argument(
+        "--skip-preflight", dest="skip_preflight", action="store_true",
+        help=(
+            "Start even when none of the files the question names are "
+            "readable under the session's roots. The pre-flight exists "
+            "because a council that cannot see its subject answers "
+            "confidently from nothing and only shows it 55 minutes "
+            "later; skip it when the question is greenfield (every path "
+            "it names is one you want created) and you know the roots "
+            "are right."
+        ),
+    )
     # M5: --wait turns the otherwise-async consult into a blocking call —
     # POST, then poll until terminal, then print the RESULT (same shape
     # as `result`) instead of the initial run record. Removes the
@@ -1646,6 +1662,18 @@ def build_parser() -> argparse.ArgumentParser:
             "tool sandbox. Merged with the parent's extra_roots "
             "(parent first, then this turn, dedup'd) before the "
             "executor runs."
+        ),
+    )
+    fu.add_argument(
+        "--skip-preflight", dest="skip_preflight", action="store_true",
+        help=(
+            "Start even when none of the files the question names are "
+            "readable under the session's roots. The pre-flight exists "
+            "because a council that cannot see its subject answers "
+            "confidently from nothing and only shows it 55 minutes "
+            "later; skip it when the question is greenfield (every path "
+            "it names is one you want created) and you know the roots "
+            "are right."
         ),
     )
     fu.add_argument(

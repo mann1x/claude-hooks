@@ -62,6 +62,14 @@ release with the auto-generated source archive
   raises never blocks a run: it exists to save money, not to become a
   new way for runs to die.
 
+  `--skip-preflight` (on `consult` and `follow-up`) is the override for
+  the one case the check cannot distinguish: a greenfield ask whose
+  every named path is one the asker wants created. Logged as a warning
+  rather than applied silently, so a run full of `[unverified]` cites
+  can be told from one where the guard simply passed. It is a cost
+  guard, not a security boundary — the tool sandbox confines every read
+  to the allowed roots either way.
+
 - **`root_misconfiguration_hint()`** in the citation linter. An
   unresolvable cite is annotated identically whether the model invented
   the file or the file is real and sitting under a root the run never

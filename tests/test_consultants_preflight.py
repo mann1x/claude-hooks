@@ -302,5 +302,105 @@ class TestRunnerRefusal(unittest.TestCase):
         self.assertEqual(state.status, "running")
 
 
+class TestSkipPreflightOverride(unittest.TestCase):
+    """``--skip-preflight`` — the escape hatch for the one case the
+    check cannot distinguish.
+
+    A greenfield ask that names only files under a directory that
+    doesn't exist yet is byte-identical, to this check, to a run whose
+    roots are wrong. Widening the rule to fix that would gut it (see
+    ``preflight`` module docstring), so the operator gets an explicit
+    override instead.
+    """
+
+    def test_skip_bypasses_a_blocking_verdict(self):
+        from consultants.server import runner as R
+        state = _FakeState("/tmp")
+        out = R._preflight_refused(
+            state, "create pkg/a.py, pkg/b.py and pkg/c.py",
+            cwd="/nonexistent-root", extra_roots=(),
+            cwd_display="/nonexistent-root", extra_roots_display=(),
+            label="council", skip=True,
+        )
+        self.assertFalse(out)
+        self.assertEqual(state.status, "running")
+        self.assertIsNone(state.error)
+
+    def test_skip_is_logged_not_silent(self):
+        # Someone reading a run full of "[unverified]" cites has to be
+        # able to tell "the guard was off" from "the guard passed".
+        import logging
+        from consultants.server import runner as R
+        with self.assertLogs("consultants.server.runner",
+                             level=logging.WARNING) as cm:
+            R._preflight_refused(
+                _FakeState("/tmp"), "see a/x.py, b/y.py, c/z.py",
+                cwd="/nonexistent-root", extra_roots=(),
+                cwd_display="/nonexistent-root", extra_roots_display=(),
+                label="council", skip=True,
+            )
+        self.assertTrue(
+            any("SKIPPED" in m for m in cm.output),
+            f"no skip warning in {cm.output}",
+        )
+
+    def test_default_is_not_skipped(self):
+        # The flag must be opt-in; a caller that doesn't pass ``skip``
+        # gets the check.
+        from consultants.server import runner as R
+        state = _FakeState("/tmp")
+        orig = R._write_failed_artifacts
+        R._write_failed_artifacts = lambda *a, **k: None
+        try:
+            out = R._preflight_refused(
+                state, "see a/x.py, b/y.py, c/z.py",
+                cwd="/nonexistent-root", extra_roots=(),
+                cwd_display="/nonexistent-root", extra_roots_display=(),
+                label="council",
+            )
+        finally:
+            R._write_failed_artifacts = orig
+        self.assertTrue(out)
+
+
+class TestCliForwardsTheFlag(unittest.TestCase):
+    """The flag has to reach the engine, not just parse."""
+
+    def _body_for(self, argv: list) -> dict:
+        import consultants.cli as CLI
+        parser = CLI.build_parser()
+        args = parser.parse_args(argv)
+        captured = {}
+
+        def _fake_http(method, url, body=None, **kw):
+            captured["body"] = body
+            return {"sid": "csl-x", "status": "running"}
+
+        orig = CLI._http
+        CLI._http = _fake_http
+        try:
+            args.fn(args, "http://127.0.0.1:38095")
+        finally:
+            CLI._http = orig
+        return captured.get("body") or {}
+
+    def test_consult_forwards_skip_preflight(self):
+        body = self._body_for(
+            ["consult", "--message", "q", "--skip-preflight"])
+        self.assertIs(body.get("skip_preflight"), True)
+
+    def test_consult_omits_the_key_by_default(self):
+        # Absent rather than False: the engine coerces with bool(), and
+        # an absent key keeps old clients' bodies byte-identical.
+        body = self._body_for(["consult", "--message", "q"])
+        self.assertNotIn("skip_preflight", body)
+
+    def test_followup_forwards_skip_preflight(self):
+        body = self._body_for(
+            ["follow-up", "csl-parent", "--message", "q",
+             "--skip-preflight"])
+        self.assertIs(body.get("skip_preflight"), True)
+
+
 if __name__ == "__main__":
     unittest.main()
