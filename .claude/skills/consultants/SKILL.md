@@ -285,7 +285,12 @@ you**, and either one means "answer me":
 
 - `paused` — someone called `pause`. The node that entered next is
   parked; its x-tier siblings keep running. Release with
-  `claude-consultants resume <sid>`.
+  `claude-consultants resume <sid>`. `paused: true` with an empty
+  `paused_roles` just means no node has reached the gate yet — if it
+  stays that way, look at `adversary_checkpoint_deadline_ts` in the
+  same payload: the runner parks there for up to 30 minutes before the
+  synthesizer and no node enters meanwhile. One `resume` releases both
+  and says so (`pause_release+adversary_ack`).
 - `cancel_requested` — the run is draining. Every remaining node skips
   and the run ends with status `cancelled` and **no final answer**.
   Don't wait for one.

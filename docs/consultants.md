@@ -561,6 +561,14 @@ already advertising.
 and the parked roles) only once something has been requested, so an
 untouched run's payload is unchanged.
 
+**`paused: true` with an empty `paused_roles` is normal, briefly** — the
+pause is registered and the next node to enter will take it. If it stays
+that way, check `adversary_checkpoint_deadline_ts` in the same payload:
+the runner parks there for up to 30 minutes before the synthesizer, and
+no node enters during that window, so a pause issued into it looks like
+nothing happened. `resume` releases both at once and reports
+`pause_release+adversary_ack`. `cancel` cuts through either.
+
 ### Relative paths reach every root, not just `--cwd`
 
 The file tools resolve a relative path against the primary `--cwd`
