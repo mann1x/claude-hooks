@@ -141,7 +141,53 @@ release with the auto-generated source archive
   for two months. The regression test now requires **every** key any
   Send payload passes to be a declared channel.
 
-- **Audit: `/cancel` and `/interrupt` are advisory, and now say so.**
+- **`/cancel` and `/interrupt` actually stop the run now.** Yesterday's
+  audit found both were advisory: they set a flag on `runtime_control`
+  that no node read. The fix is not "make a node read the flag" —
+  that would not have worked either, and why is the whole design. A
+  graph already inside `invoke` carries its channel values in memory
+  through the superstep; `update_state` writes a checkpoint the running
+  invocation never re-reads. A node consulting
+  `runtime_control.cancel_requested` would have seen `False` for the
+  entire run. The flag was **unreadable**, not merely unread.
+
+  So the control travels out-of-band, on a new `RunControl` object on
+  the SessionState that the node gate reads directly — the same shape
+  as the adversary ack and the tool-approval broker, the two
+  cross-thread controls in this codebase that already worked. The gate
+  goes in `build_council_graph`'s single `_wrap` choke point, so all
+  eight node bodies get it untouched and a node added later cannot
+  forget it. A structural test requires **both** `_wrap` sites (council
+  and follow-up) to install it, because a gate in only one is a run
+  that stops being cancellable after the first follow-up.
+
+  - **Cancel** makes every remaining node a no-op and the graph drains
+    to END. It **skips, it never raises** — an exception would abort
+    the stream mid-superstep and lose exactly the partial state
+    `--keep-partial` exists to preserve. Terminal status is
+    `cancelled`, and a cancelled run has **no synthesized answer**: the
+    synthesizer is a node like any other, and running it would be
+    spending after the caller said stop.
+  - **Pause** parks the next node to enter *inside its own worker
+    thread*, so x-tier siblings keep running — a graph-level pause
+    would idle the whole fanout on exactly the runs where the fanout is
+    the point. Released by `resume`, which now picks its mode from what
+    is actually parked (`pause_release` / `adversary_ack` /
+    `scheduled`); the first two never re-enter the graph, because the
+    runner still owns the stream and re-invoking would double-resume a
+    live invocation.
+  - **Pause resumes on timeout while a tool approval denies on
+    timeout.** Opposite defaults on purpose: an unanswered spend
+    approval must not authorize spend, but an unanswered pause has
+    already spent everything up to that point and abandoning the run
+    would waste it.
+
+  `RuntimeControl` still declares `cancel_requested` / `pause_requested`
+  as the durable record of the request, now with a class note saying
+  they are advisory and that anything added there which must take
+  effect mid-run needs the same out-of-band treatment.
+
+- **Audit: how `/cancel` and `/interrupt` were found, and now say so.**
   `POST /cancel` carried a comment claiming "nodes consult this at
   entry and exit early". No node does — nothing in
   `consultants/engine/` reads `cancel_requested` or `pause_requested`,

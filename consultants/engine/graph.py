@@ -349,6 +349,21 @@ class GraphDeps:
     # is in ``enabled_roles``; ``normal`` is inert (the default-shape
     # prompt) so a build without the role is unaffected.
     adversary_strictness: str = "normal"
+    # Cooperative cancel / pause (2026-08-02). A
+    # :class:`consultants.engine.run_control.RunControl` living on the
+    # SessionState, read by the node gate in ``_wrap``. Out-of-band on
+    # purpose: a mid-invoke graph never re-reads its own channels, so a
+    # flag on ``runtime_control`` is unreadable rather than merely
+    # unread. ``None`` — every caller that builds a graph without a
+    # session — leaves every node byte-identical to pre-gate.
+    run_control: Optional[Any] = None
+    # Called with (kind, payload) for gate events (``node_cancelled`` /
+    # ``awaiting_resume`` / ``resumed``). The runner passes a recorder
+    # bridge; ``None`` means the gate still works, silently.
+    run_control_emit: Optional[Callable[[str, dict], None]] = None
+    # Returns True once the session is gone, so a parked node doesn't
+    # hold a thread on a reaped run.
+    run_control_is_closed: Optional[Callable[[], bool]] = None
 
 
 # ----------------------- node wrappers --------------------------- #
@@ -815,6 +830,18 @@ def build_council_graph(deps: GraphDeps,
         raise ValueError("synthesizer must be enabled")
 
     def _wrap(role: str, fn):
+        # The single choke point every council node passes through, and
+        # therefore where the cancel / pause gate belongs: all eight
+        # node bodies get it untouched, and a node added later cannot
+        # forget it. Gate goes INSIDE the tracer so a skipped node is
+        # still traced as having been entered and skipped.
+        if deps.run_control is not None:
+            from consultants.engine.run_control import gate_node
+            fn = gate_node(
+                fn, role=role, run_control=deps.run_control,
+                emit=deps.run_control_emit,
+                is_closed=deps.run_control_is_closed,
+            )
         if tracer is None:
             return fn
         from consultants.engine.trace import traced_node
@@ -1653,6 +1680,18 @@ def build_follow_up_graph(deps: GraphDeps,
         raise ValueError("researcher must be enabled for follow-up")
 
     def _wrap(role: str, fn):
+        # The single choke point every council node passes through, and
+        # therefore where the cancel / pause gate belongs: all eight
+        # node bodies get it untouched, and a node added later cannot
+        # forget it. Gate goes INSIDE the tracer so a skipped node is
+        # still traced as having been entered and skipped.
+        if deps.run_control is not None:
+            from consultants.engine.run_control import gate_node
+            fn = gate_node(
+                fn, role=role, run_control=deps.run_control,
+                emit=deps.run_control_emit,
+                is_closed=deps.run_control_is_closed,
+            )
         if tracer is None:
             return fn
         from consultants.engine.trace import traced_node

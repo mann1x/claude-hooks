@@ -498,6 +498,58 @@ tell "the guard was off" from "the guard passed". It is a cost guard,
 not a security boundary — the tool sandbox still confines every read
 to the allowed roots either way.
 
+### Cancel and pause actually stop the run
+
+`POST /cancel` (`claude-consultants cancel <sid>`) and `POST /interrupt`
+(`pause`) took effect on 2026-08-02. Before that they set a flag on
+`runtime_control` that nothing read — and simply teaching a node to read
+it would not have worked either, which is the part worth knowing:
+
+> A graph already inside `invoke` carries its channel values in memory
+> through the superstep. `update_state` writes a checkpoint the running
+> invocation never re-reads. A node consulting
+> `runtime_control.cancel_requested` would have seen `False` for the
+> whole run.
+
+So the control travels **out-of-band**, on a `RunControl` object on the
+SessionState that the node gate reads directly — the same shape as the
+adversary ack and the tool-approval broker, the two cross-thread
+controls that already worked. The gate is installed at
+`build_council_graph`'s single `_wrap` choke point, so every node has it
+and a node added later cannot forget it.
+
+| | cancel | pause |
+|---|---|---|
+| effect | remaining nodes skip; graph drains to END | next node to enter parks |
+| granularity | whole run | one node's worker thread — x-tier siblings keep running |
+| on timeout | n/a | **resumes** |
+| release | — | `resume` (mode `pause_release`) |
+
+**A cancelled run has no synthesized answer.** The synthesizer is a node
+like any other, and running it would be spending after you said stop.
+Terminal status is `cancelled`, not `completed`, and partial state is
+kept unless you pass `--discard-partial`. "Stop and synthesize what you
+have" would be a different verb; it does not exist yet.
+
+**Cancel skips, it never raises.** An exception would abort the stream
+mid-superstep and lose exactly the partial state `--keep-partial` exists
+to preserve.
+
+**Pause resumes on timeout; a tool approval denies on timeout.** The
+opposite defaults are deliberate. An unanswered spend approval must not
+authorize spend. An unanswered pause has already spent everything up to
+that point, and abandoning the run would waste it — so the safe default
+is to carry on, after `DEFAULT_PAUSE_TIMEOUT_S` (1800 s).
+
+`resume` picks its mode server-side from what is actually parked:
+`pause_release`, `adversary_ack`, or `scheduled` for a real LangGraph
+interrupt. The first two never re-enter the graph — the runner still
+owns the stream, and re-invoking would double-resume a live invocation.
+
+`status` grows `cancel_requested` / `paused` (with `pause_deadline_ts`
+and the parked roles) only once something has been requested, so an
+untouched run's payload is unchanged.
+
 ### Relative paths reach every root, not just `--cwd`
 
 The file tools resolve a relative path against the primary `--cwd`

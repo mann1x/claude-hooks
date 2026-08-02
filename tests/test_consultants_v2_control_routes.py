@@ -545,17 +545,42 @@ class TestCancel(unittest.TestCase):
         r = c.post("/v1/consult/csl-cl/cancel", json={})
         self.assertEqual(r.status_code, 410)
 
-    def test_reports_that_a_plain_cancel_does_not_stop_the_run(self):
-        # No node reads ``cancel_requested`` (audit 2026-08-02), so a
-        # cancel without ``discard_partial`` records the request and the
-        # run streams to completion. Saying so is the point: a caller
-        # told "ok" would otherwise believe the run had been stopped.
+    def test_a_plain_cancel_now_stops_the_run(self):
+        # Before the node gate was wired this reported False: the flag
+        # was set and the run streamed to completion anyway. It stops
+        # now, and the response says so.
         c, app = _client()
-        _install_session(app, "csl-c2", compiled=_FakeCompiledGraph())
+        s = _install_session(app, "csl-c2", compiled=_FakeCompiledGraph())
         r = c.post(
             "/v1/consult/csl-c2/cancel", json={"discard_partial": False},
         )
         self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["stops_the_run"])
+        self.assertTrue(r.json()["cancel_accepted"])
+        # And the mechanism that does it is out-of-band, not the delta.
+        self.assertTrue(s.run_control.cancelled)
+
+    def test_cancel_promises_no_final_answer(self):
+        # The synthesizer is a node like any other; running it would be
+        # spending after the caller said stop.
+        c, app = _client()
+        _install_session(app, "csl-c4", compiled=_FakeCompiledGraph())
+        r = c.post("/v1/consult/csl-c4/cancel", json={})
+        self.assertFalse(r.json()["final_answer_expected"])
+
+    def test_a_second_cancel_is_not_accepted_twice(self):
+        c, app = _client()
+        _install_session(app, "csl-c5", compiled=_FakeCompiledGraph())
+        c.post("/v1/consult/csl-c5/cancel", json={})
+        r = c.post("/v1/consult/csl-c5/cancel", json={})
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.json()["cancel_accepted"])
+        self.assertTrue(r.json()["stops_the_run"])
+
+    def test_a_finished_run_reports_nothing_left_to_stop(self):
+        c, app = _client()
+        _install_session(app, "csl-c6", status="completed")
+        r = c.post("/v1/consult/csl-c6/cancel", json={})
         self.assertFalse(r.json()["stops_the_run"])
 
     def test_discard_partial_does_stop_the_run(self):

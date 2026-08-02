@@ -283,9 +283,27 @@ you**, and either one means "answer me":
   you how many lanes one answer releases. Details in
   [Subflow I](#subflow-i--tool-surface).
 
-Both carry the wall-clock at which the engine gives up. The adversary
-checkpoint auto-resumes on timeout; a tool approval is **denied** on
-timeout.
+- `paused` — someone called `pause`. The node that entered next is
+  parked; its x-tier siblings keep running. Release with
+  `claude-consultants resume <sid>`.
+- `cancel_requested` — the run is draining. Every remaining node skips
+  and the run ends with status `cancelled` and **no final answer**.
+  Don't wait for one.
+
+Each carries the wall-clock at which the engine gives up, and the three
+deadlines resolve differently — check which one you are looking at
+before telling the user what happens if they do nothing:
+
+| signal | on timeout |
+|---|---|
+| `adversary_checkpoint_deadline_ts` | auto-resumes |
+| `pending_tool_approvals[].deadline_ts` | **denied** |
+| `pause_deadline_ts` | **resumes** |
+
+The pause resumes and the approval denies for the same reason from
+opposite ends: an unanswered spend approval must not authorize spend,
+while an unanswered pause has already spent everything up to that point
+and abandoning the run would waste it.
 
 #### C. Live visibility wanted → `events --milestones`, backgrounded
 

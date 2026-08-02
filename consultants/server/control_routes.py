@@ -570,14 +570,34 @@ def register_control_routes(app: "FastAPI") -> None:
     # -------------------- POST /interrupt ---------------------- #
     @app.post("/v1/consult/{sid}/interrupt")
     def interrupt_(sid: str, body: Optional[dict] = None) -> dict:
+        """Pause the run at the next node boundary.
+
+        The state delta below is kept as the *record* of the request.
+        The delta alone never paused anything — a graph that is already
+        inside ``invoke`` carries its channels in memory and never
+        re-reads the checkpoint ``update_state`` writes — so the pause
+        that actually takes effect is the out-of-band one on
+        ``run_control``. The next node to enter parks inside its own
+        worker thread, which means its x-tier siblings keep running;
+        pausing the graph instead would idle the whole fanout.
+        """
         s = _require_live_session(app, sid)
         body = body or {}
-        delta = build_interrupt_delta(
-            reason=str(body.get("reason") or "user-pause"),
-        )
+        reason = str(body.get("reason") or "user-pause")
+        delta = build_interrupt_delta(reason=reason)
         _safe_apply_state_delta(s, delta)
+        paused = s.run_control.request_pause(reason)
         s.bump_activity()
-        return {"ok": True, "applied": _serialize_for_json(delta)}
+        return {
+            "ok": True,
+            "applied": _serialize_for_json(delta),
+            # False when the run is already cancelling — pausing a run
+            # that is draining would park a node that should be
+            # finishing.
+            "paused": bool(paused),
+            "pause_deadline_ts": s.run_control.snapshot().get(
+                "pause_deadline_ts"),
+        }
 
     # -------------------- POST /resume ------------------------- #
     @app.post("/v1/consult/{sid}/resume")
@@ -614,6 +634,21 @@ def register_control_routes(app: "FastAPI") -> None:
                 "acked": True,
                 "checkpoint_open": getattr(
                     s, "_checkpoint_deadline_ts", None) is not None,
+            }
+
+        # Same rule for a node parked on ``POST /interrupt``: the
+        # runner still owns the stream, so re-invoking the graph here
+        # would double-resume against a live invocation — the bug the
+        # adversary branch above exists to prevent. The parked node is
+        # blocked inside its own worker thread, so releasing the pause
+        # IS the entire resume; nothing re-enters the graph.
+        if s.run_control.paused:
+            s.run_control.release_pause(by="resume")
+            s.bump_activity()
+            return {
+                "ok": True,
+                "mode": "pause_release",
+                "resumed": True,
             }
 
         value = body.get("value")
@@ -788,30 +823,26 @@ def register_control_routes(app: "FastAPI") -> None:
         req = build_cancel_request(
             discard_partial=discard, reason=reason,
         )
-        # If the run is still going, flip cancel_requested on
-        # runtime_control.
+        # The state delta is the *record* of the request. It is not
+        # what stops the run, and the difference is the whole reason
+        # cancel was a no-op until 2026-08-02: a graph already inside
+        # ``invoke`` carries its channels in memory for the superstep,
+        # so the checkpoint ``update_state`` writes is never re-read. A
+        # node consulting ``runtime_control.cancel_requested`` would
+        # have seen False for the entire run.
         #
-        # AUDIT 2026-08-02 — this comment used to claim "nodes consult
-        # this at entry and exit early". No node does. Nothing in
-        # ``consultants/engine/`` reads ``cancel_requested`` or
-        # ``pause_requested``; both are written and never read. So on a
-        # graph that is mid-invoke, cancel is a *record* that someone
-        # asked, not a stop: the flag is set, the adversary checkpoint
-        # is released, and the run streams to completion. The two
-        # things that do take effect immediately are
-        # ``discard_partial`` (closes the session, which the wait loops
-        # break on) and the checkpoint release below.
-        #
-        # A node-entry check is the honest mechanism and the extension
-        # point is here — but it means touching all eight node bodies,
-        # so it is deliberately not smuggled in with the approval
-        # channel. The response now reports ``stops_the_run`` so a
-        # caller isn't told a request was honoured when it was only
-        # recorded.
+        # What actually stops it is ``run_control`` — a plain threading
+        # object on the SessionState that the node gate reads directly,
+        # the same out-of-band shape as the adversary ack and the
+        # tool-approval broker. Every remaining node becomes a no-op
+        # and the graph drains to END, keeping the partial state that
+        # ``--keep-partial`` exists to preserve.
         if (getattr(s, "status", "") == "running"
                 and getattr(s, "_compiled", None) is not None
                 and getattr(s, "_thread_config", None) is not None):
             _safe_apply_state_delta(s, req.state_delta)
+        running = getattr(s, "status", "") == "running"
+        cancelled_now = s.run_control.request_cancel(reason)
         # M2: release the adversary checkpoint so the runner thread isn't
         # blocked for up to the full timeout on a session being
         # cancelled. The wait loop breaks on this ack (and on ``closed``
@@ -838,11 +869,17 @@ def register_control_routes(app: "FastAPI") -> None:
             "ok": True,
             "discard_partial": discard,
             "applied": _serialize_for_json(req.state_delta),
-            # False whenever the graph is mid-invoke and the caller
-            # didn't ask to discard: the flag is recorded, the run
-            # finishes. Reported rather than inferred so "cancelled"
-            # and "asked to cancel" don't read the same.
-            "stops_the_run": bool(discard),
+            # True once the node gate is wired: the remaining nodes
+            # skip and the run drains. Still reported rather than
+            # assumed — on a run that already finished there is
+            # nothing left to stop, and "cancelled" should not read the
+            # same as "asked to cancel".
+            "stops_the_run": bool(discard or running),
+            "cancel_accepted": bool(cancelled_now),
+            # A cancelled run has no synthesized answer: the
+            # synthesizer is a node like any other, and running it
+            # would be spending after the caller said stop.
+            "final_answer_expected": False if running else None,
         }
 
     # -------------------- GET /events (SSE) -------------------- #

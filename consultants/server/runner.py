@@ -335,6 +335,14 @@ def make_runner(*, ollama_base_url: str):
             # M3: strictness dial for the opt-in adversary refuter.
             adversary_strictness=getattr(cfg, "adversary_strictness",
                                          "normal"),
+            # Cooperative cancel / pause. Out-of-band by necessity: a
+            # mid-invoke graph never re-reads its own channels, so the
+            # flag has to reach the node gate off the SessionState.
+            run_control=state.run_control,
+            run_control_emit=_make_run_control_emit(
+                state, recorder, log_label="council"),
+            run_control_is_closed=lambda: bool(
+                getattr(state, "closed", False)),
         )
         # #314: ALWAYS compile with interrupt_before=["synthesizer"].
         # The pause before the final-answer node is the window where a
@@ -445,6 +453,19 @@ def make_runner(*, ollama_base_url: str):
         node_error = final_state.get("error")
         node_failed = final_state.get("_role_failed")
         terminal_status = "failed" if node_error else "completed"
+        # A cancelled run drained rather than finished. Reporting it as
+        # "completed" would be the same lie the flag itself used to
+        # tell: there is no synthesized answer, because the synthesizer
+        # is a node like any other and running it would be spending
+        # after the user said stop.
+        if state.run_control is not None and state.run_control.cancelled:
+            terminal_status = "cancelled"
+            log.warning(
+                "council: run cancelled (%s) - %d node(s) skipped, "
+                "partial state kept",
+                state.run_control.cancel_reason,
+                len(state.run_control.skipped),
+            )
 
         # Persist artifacts.
         result = storage.ConsultationResult(
@@ -817,6 +838,14 @@ def make_follow_up_runner(*, ollama_base_url: str):
             coder_default_route=coder_default_route_fu,
             adversary_strictness=getattr(cfg, "adversary_strictness",
                                          "normal"),
+            # Cooperative cancel / pause. Out-of-band by necessity: a
+            # mid-invoke graph never re-reads its own channels, so the
+            # flag has to reach the node gate off the SessionState.
+            run_control=state.run_control,
+            run_control_emit=_make_run_control_emit(
+                state, recorder, log_label="council follow-up"),
+            run_control_is_closed=lambda: bool(
+                getattr(state, "closed", False)),
         )
         # #214/M9 parity fix: follow-ups MUST attach a checkpointer
         # too. run_council does (line ~319) but run_follow_up did not,
@@ -942,6 +971,19 @@ def make_follow_up_runner(*, ollama_base_url: str):
         node_error = final_state.get("error")
         node_failed = final_state.get("_role_failed")
         terminal_status = "failed" if node_error else "completed"
+        # A cancelled run drained rather than finished. Reporting it as
+        # "completed" would be the same lie the flag itself used to
+        # tell: there is no synthesized answer, because the synthesizer
+        # is a node like any other and running it would be spending
+        # after the user said stop.
+        if state.run_control is not None and state.run_control.cancelled:
+            terminal_status = "cancelled"
+            log.warning(
+                "council follow-up: run cancelled (%s) - %d node(s) skipped, "
+                "partial state kept",
+                state.run_control.cancel_reason,
+                len(state.run_control.skipped),
+            )
 
         # Persist artifacts for the FOLLOW-UP (its own sid + dir).
         # parent_sid is recorded in metadata so the chain is
@@ -1447,6 +1489,29 @@ def _finalize_recorder(recorder, *, status: str,
         recorder.close()
     except Exception as exc:  # pragma: no cover
         log.warning("recorder.close raised: %s", exc)
+
+
+def _make_run_control_emit(state, recorder, *, log_label: str):
+    """Bridge the cancel/pause gate's events onto the recorder.
+
+    Same discipline as ``_make_tool_approval_fn``'s emitter: the
+    recorder row is the load-bearing path because ``GET /events``
+    replays rows, so a consumer that attaches late still sees that a
+    node parked. Failing to record must never break the gate — the run
+    control owns the decision regardless of who is listening.
+    """
+    def _emit(kind: str, payload: dict) -> None:
+        if recorder is None or not hasattr(recorder, "record_event"):
+            return
+        body = dict(payload)
+        body.setdefault("kind", kind)
+        body.setdefault("sid", getattr(state, "sid", ""))
+        body.setdefault("ts", time.time())
+        try:
+            recorder.record_event(kind=kind, payload=body)
+        except Exception:  # pragma: no cover — defensive
+            log.exception("%s: record_event(%s) failed", log_label, kind)
+    return _emit
 
 
 def _make_tool_approval_fn(state, recorder, cfg, cwd: str,

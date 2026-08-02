@@ -1282,21 +1282,43 @@ def cmd_control(args, base: str) -> int:
 
 
 def cmd_pause(args, base: str) -> int:
-    """POST /v1/consult/<sid>/interrupt — flip pause_requested.
-    ``pause`` is the friendlier verb name; the HTTP route is
-    ``/interrupt`` because that matches LangGraph's terminology."""
+    """POST /v1/consult/<sid>/interrupt — park the run at the next node
+    boundary. ``pause`` is the friendlier verb name; the HTTP route is
+    ``/interrupt`` because that matches LangGraph's terminology.
+
+    The pause takes effect where the *next* node enters, not mid-call:
+    a node already inside an LLM round finishes it first. Release with
+    ``resume``; if nobody does, the pause expires and the run continues
+    rather than being abandoned — everything up to that point is
+    already paid for.
+    """
     body = {"reason": args.reason or "user-pause"}
     out = _http("POST",
                 f"{base}/v1/consult/{args.sid}/interrupt", body=body)
     print(json.dumps({"ok": True, **out}, indent=2))
+    if out.get("paused") is False:
+        print(
+            "note: not paused — the run is already cancelling. Pausing "
+            "a draining run would park a node that should be "
+            "finishing.",
+            file=sys.stderr,
+        )
     return 0
 
 
 def cmd_resume(args, base: str) -> int:
-    """POST /v1/consult/<sid>/resume — clear the interrupt and
-    re-enter via Command(resume=value). The actual graph re-invoke
-    runs on the server's executor pool; this returns 200 with a
-    ``mode: scheduled`` payload and the caller polls /state."""
+    """POST /v1/consult/<sid>/resume — release a pause, or re-enter a
+    LangGraph interrupt via Command(resume=value).
+
+    Three modes, decided server-side by what is actually parked:
+    ``pause_release`` (a node parked by ``pause`` — releasing the flag
+    IS the resume, since the node is blocked in its own worker thread),
+    ``adversary_ack`` (the engine's pre-synthesis checkpoint), and
+    ``scheduled`` (a real graph interrupt; the re-invoke runs on the
+    server's executor pool and the caller polls /state). The first two
+    never re-enter the graph — the runner still owns the stream, and
+    re-invoking it would double-resume a live invocation.
+    """
     value: Any = None
     if args.value:
         try:
@@ -1345,9 +1367,16 @@ def cmd_cancel(args, base: str) -> int:
     print(json.dumps({"ok": True, **out}, indent=2))
     if not out.get("stops_the_run", True):
         print(
-            "note: cancel recorded, but the run is not stopped — no node "
-            "acts on the flag. Use --discard-partial to close the "
-            "session.",
+            "note: nothing left to stop — the run is no longer "
+            "executing. The cancel is recorded.",
+            file=sys.stderr,
+        )
+    elif out.get("final_answer_expected") is False:
+        print(
+            "note: the run will drain within a node boundary and has "
+            "NO synthesized answer — the synthesizer is a node like "
+            "any other, and running it would spend after you said "
+            "stop. Partial state is kept unless --discard-partial.",
             file=sys.stderr,
         )
     return 0

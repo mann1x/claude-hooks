@@ -241,6 +241,11 @@ class SessionState:
     # threads open + wait, the POST /tool-ack handler resolves, exactly
     # the cross-thread shape as the adversary ack above.
     _tool_approvals: Any = field(default=None, repr=False)
+    # Cooperative cancel / pause. Third member of the same family as
+    # the two above, and for the same reason: a mid-invoke graph never
+    # re-reads its own channels, so a control that must reach a running
+    # node has to travel outside LangGraph.
+    _run_control: Any = field(default=None, repr=False)
 
     @property
     def tool_approvals(self):
@@ -251,6 +256,14 @@ class SessionState:
             from consultants.engine.tool_approval import ToolApprovalBroker
             self._tool_approvals = ToolApprovalBroker(self.sid)
         return self._tool_approvals
+
+    @property
+    def run_control(self):
+        """Lazily built, same reasoning as :attr:`tool_approvals`."""
+        if self._run_control is None:
+            from consultants.engine.run_control import RunControl
+            self._run_control = RunControl(self.sid)
+        return self._run_control
 
     def public_dict(self) -> dict:
         out = {
@@ -293,6 +306,11 @@ class SessionState:
                 # calls. Shown so the approver can see why later calls
                 # sailed through, and narrow the rule if it was too wide.
                 out["tool_approval_grants"] = grants
+        # Same parity discipline again: ``snapshot()`` is empty unless a
+        # cancel or pause has actually been requested, so an untouched
+        # run's status stays byte-identical.
+        if self._run_control is not None:
+            out.update(self._run_control.snapshot())
         return out
 
     def bump_activity(self) -> None:
