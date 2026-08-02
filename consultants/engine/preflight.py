@@ -131,9 +131,11 @@ class Preflight:
             f"allowed roots.\n"
             f"Unreachable: {paths}\n"
             f"Roots searched:\n{roots_txt}\n"
-            f"Nothing was spent. Re-run with the right roots — put the "
+            f"Nothing was spent. Either the roots are wrong — put the "
             f"subject repo in --cwd and pass secondary trees with "
-            f"--add-dir."
+            f"--add-dir — or every path named is one that doesn't exist "
+            f"yet, in which case create the directory (or name one file "
+            f"that does exist) and re-run."
         )
 
     def warning(self) -> Optional[str]:

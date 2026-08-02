@@ -191,6 +191,15 @@ class TestMessage(unittest.TestCase):
         # The operator's first question is "did this cost me anything?"
         self.assertIn("Nothing was spent", msg)
 
+    def test_message_offers_both_explanations(self):
+        # Refusing on "all named paths are unreachable" catches the
+        # wrong-roots case, but a greenfield ask that names only
+        # files under a directory that doesn't exist yet looks
+        # identical. The message must not assert the first reading.
+        msg = self._blocked().message()
+        self.assertIn("roots are wrong", msg)
+        self.assertIn("doesn't exist", msg)
+
     def test_message_prefers_display_roots(self):
         # Realpaths are unreadable to a human who typed /shared/dev/x.
         msg = self._blocked().message(display_roots=["/shared/dev/x"])

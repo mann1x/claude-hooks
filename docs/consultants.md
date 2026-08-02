@@ -474,9 +474,17 @@ readable under the session's allowed roots.
 Unreachable: eval/scorers.py, a2at/tools_dataset.py, netconfig/generate.py
 Roots searched:
   - /srv/.../backup_models
-Nothing was spent. Re-run with the right roots — put the subject repo
-in --cwd and pass secondary trees with --add-dir.
+Nothing was spent. Either the roots are wrong — put the subject repo
+in --cwd and pass secondary trees with --add-dir — or every path named
+is one that doesn't exist yet, in which case create the directory (or
+name one file that does exist) and re-run.
 ```
+
+The second reading is the known conservative case: a greenfield ask
+that names *only* files under a directory that doesn't exist yet
+(`mypkg/__init__.py`, `mypkg/core.py`) looks identical to wrong roots.
+Naming one existing file — which such a question almost always does,
+if only as the pattern to follow — clears it.
 
 This exists because a council that cannot see its subject does not
 fail. It answers confidently from nothing, and the only tell is a wall
