@@ -121,17 +121,32 @@ def step_repo(dry: bool) -> Step:
 # --------------------------------------------------------------------- #
 # 2. Packages
 # --------------------------------------------------------------------- #
+def _env_name(py: Path) -> str:
+    """Environment name for an interpreter path.
+
+    The two conda layouts put the interpreter at different depths —
+    ``<env>/bin/python`` on POSIX, ``<env>/python.exe`` on Windows — so
+    a fixed ``parent.parent`` walk names the env correctly on one and
+    returns the literal string "envs" on the other. That is what the
+    first pandorum dry-run printed.
+    """
+    return py.parent.parent.name if py.parent.name == "bin" else py.parent.name
+
+
 def _envs_with_package() -> list[Path]:
     """Conda envs that already import ``claude_hooks``.
 
-    Discovered, not listed: this host has 25+ envs sharing the editable
+    Discovered, not listed: solidpc has 25+ envs sharing the editable
     install, and any hardcoded subset would go stale the first time one
     is added.
     """
     roots = [Path(os.path.expanduser("~/anaconda3/envs")),
              Path(os.path.expanduser("~/miniconda3/envs")),
+             Path(os.path.expanduser("~/Miniconda3/envs")),
+             Path(os.path.expanduser("~/Anaconda3/envs")),
              Path("/opt/conda/envs")]
     found: list[Path] = []
+    seen: set[str] = set()
     for root in roots:
         if not root.is_dir():
             continue
@@ -141,6 +156,10 @@ def _envs_with_package() -> list[Path]:
                 py = env / "python.exe"          # Windows layout
             if not py.is_file():
                 continue
+            key = str(py).lower()
+            if key in seen:
+                continue
+            seen.add(key)
             probe = _run([str(py), "-c", "import claude_hooks"])
             if probe.returncode == 0:
                 found.append(py)
@@ -161,12 +180,12 @@ def step_packages(dry: bool, only_env: str | None) -> Step:
     # exactly the things nobody remembers to check.
     s.note(f"{len(pys)} env(s) with the package installed")
     targets = [p for p in pys
-               if p.parent.parent.name in ("claude-hooks",
-                                           "claude-hooks-consultants")]
+               if _env_name(p) in ("claude-hooks",
+                                   "claude-hooks-consultants")]
     if not targets:
         targets = pys[:1]
     for py in targets:
-        env_name = py.parent.parent.name
+        env_name = _env_name(py)
         if dry:
             s.note(f"[dry-run] would pip install -e . in {env_name}")
             continue
