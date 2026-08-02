@@ -33,6 +33,7 @@ from __future__ import annotations
 import ast
 import pathlib
 import re
+import sys
 import unittest
 
 import pytest
@@ -58,9 +59,21 @@ class TestDeployScriptExists(unittest.TestCase):
     def test_it_parses(self):
         ast.parse(_src(DEPLOY))
 
+    @unittest.skipIf(sys.platform == "win32",
+                     "POSIX exec bits do not exist on Windows; the script "
+                     "is invoked as `python scripts/deploy.py` there")
     def test_it_is_executable(self):
         self.assertTrue(DEPLOY.stat().st_mode & 0o111,
                         "scripts/deploy.py should be chmod +x")
+
+    def test_it_has_a_shebang(self):
+        # The portable half of the same claim: on Windows the exec bit
+        # is meaningless, but a missing shebang breaks ./scripts/deploy.py
+        # on every POSIX host regardless of mode.
+        self.assertTrue(
+            _src(DEPLOY).startswith("#!/usr/bin/env python3"),
+            "scripts/deploy.py needs a python3 shebang",
+        )
 
 
 class TestEveryArtifactClassIsDeployed(unittest.TestCase):
