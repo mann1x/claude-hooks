@@ -63,7 +63,15 @@ release with the auto-generated source archive
     `status` grows `pending_tool_approvals` and the stream emits
     `awaiting_tool_approval` while one is open.
   - **Timeout denies** after `tools.approval_timeout_s` (default 600,
-    `set-tools --approval-timeout`). Decision-table row 7: absence of
+    minimum **180**, `set-tools --approval-timeout`). The floor is
+    there because a shorter deadline is un-answerable rather than
+    strict: the request has to be polled, relayed to a person and
+    decided, and Claude Code's own turn latency eats most of a minute
+    before anyone has read the tool name. A deadline nobody can meet is
+    `deny` that also costs the wall-clock, and against a 30–60 minute
+    council three minutes is not a delay. `set-tools` rejects a lower
+    value; a hand-edited TOML is raised to the floor with a warning
+    rather than taking the council down over it. Decision-table row 7: absence of
     an approver never authorizes spend. The lane gets an `error:` tool
     result and reroutes — never an exception, so a denial teaches the
     model another route rather than crashing the lane.

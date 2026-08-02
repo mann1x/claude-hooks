@@ -25,6 +25,7 @@ env.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -43,6 +44,8 @@ from .engine.coder_defaults import (
     RECOMMENDED_CODER_ROUTES_BY_LANGUAGE,
 )
 from .engine.state_v2 import CoderLanguageRoute
+
+log = logging.getLogger("consultants.config")
 
 
 # ----------------------- defaults ----------------------------------- #
@@ -691,6 +694,17 @@ class ToolsConfig:
     approval_timeout_s: float = 600.0
 
 
+#: Floor for :attr:`ToolsConfig.approval_timeout_s`. A value below this
+#: is un-answerable in practice rather than strict: the request has to
+#: reach the assistant through a poll, be relayed to a person, and get a
+#: decision back, and Claude Code's own turn latency eats most of a
+#: minute before anyone has read the tool name. A deadline nobody can
+#: meet is ``deny`` with extra steps — and worse than ``deny``, because
+#: it also spends the wall-clock. Against a council that runs 30–60
+#: minutes, three minutes is not a meaningful delay.
+MIN_APPROVAL_TIMEOUT_S = 180.0
+
+
 @dataclass
 class CoderLimitsConfig:
     """M10: per-session sandbox caps for the coder role.
@@ -984,6 +998,21 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
             raw_to = tl["approval_timeout_s"]
             if (isinstance(raw_to, (int, float))
                     and not isinstance(raw_to, bool) and raw_to > 0):
+                # A hand-edited TOML below the floor is raised to it and
+                # logged rather than rejected — refusing the whole config
+                # over one short deadline would take the council down for
+                # a value we can safely correct. The setter still errors,
+                # because there the operator is right there to be told.
+                if float(raw_to) < MIN_APPROVAL_TIMEOUT_S:
+                    log.warning(
+                        "[tools] approval_timeout_s=%gs is below the %gs "
+                        "floor and is un-answerable in practice; using "
+                        "%gs. Use permission level 'deny' if you mean "
+                        "deny.",
+                        float(raw_to), MIN_APPROVAL_TIMEOUT_S,
+                        MIN_APPROVAL_TIMEOUT_S,
+                    )
+                    raw_to = MIN_APPROVAL_TIMEOUT_S
                 base.tools.approval_timeout_s = float(raw_to)
         perms = tl.get("permissions")
         if isinstance(perms, dict):
@@ -1313,6 +1342,9 @@ def _render(cfg: ConsultantsConfig, *,
     L.append("# approval_timeout_s: how long a parked ask_human tool")
     L.append("#   call waits before it is DENIED. ask_assistant never")
     L.append("#   parks (it auto-approves), so this is the spend gate.")
+    L.append(f"#   Minimum {MIN_APPROVAL_TIMEOUT_S:g}s — a shorter deadline is")
+    L.append("#   un-answerable once poll latency and a human decision")
+    L.append("#   are in the loop. Use level 'deny' if you mean deny.")
     L.append(f"approval_timeout_s = {cfg.tools.approval_timeout_s:g}")
     if cfg.tools.permissions:
         L.append("")
@@ -2007,6 +2039,15 @@ def set_tools(
                 "approval_timeout_s must be > 0 — a zero or negative "
                 "deadline denies every parked call before an approver "
                 "can see it, which is 'deny' with extra steps"
+            )
+        if float(approval_timeout_s) < MIN_APPROVAL_TIMEOUT_S:
+            raise ValueError(
+                f"approval_timeout_s must be >= {MIN_APPROVAL_TIMEOUT_S:g} "
+                "— a shorter deadline is un-answerable in practice: the "
+                "request has to be polled, relayed to a person and "
+                "decided, and Claude Code's turn latency alone eats most "
+                "of a minute. Against a 30-60 minute council, three "
+                "minutes costs nothing. Use 'deny' if you mean deny."
             )
         cfg.tools.approval_timeout_s = float(approval_timeout_s)
     if default_level is not None:

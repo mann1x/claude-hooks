@@ -957,7 +957,7 @@ hand-editable if you prefer.
 | `tools.all_roles` | tools | Give planner / critic / meta_critic / synthesizer / adversary the same tools the researcher has. **Default `true` since 2026-08-01** — measured cheaper *and* more accurate (see below). |
 | `tools.git` | tools | Read-only git history tools: `git_history` ("when did this regress?", wraps `git log -L`), `git_log` / `git_blame` / `git_diff` / `git_show`. Default `false` — safe, but five more schemas on every prompt on every lane. |
 | `tools.default_level` | tools | Fallback permission rung for a tool no provider or override names: `auto` / `ask_assistant` / `ask_human` / `deny`. Default `auto`. |
-| `tools.approval_timeout_s` | tools | Seconds a parked `ask_human` tool call waits before it is **denied**. Default `600`. `ask_assistant` never parks, and a call covered by a standing grant never parks either. |
+| `tools.approval_timeout_s` | tools | Seconds a parked `ask_human` tool call waits before it is **denied**. Default `600`, **minimum `180`**. `ask_assistant` never parks, and a call covered by a standing grant never parks either. |
 | `tools.permissions` | tools | Per-tool rung overrides, `[tools.permissions]`. |
 
 ### Tool surface — why `all_roles` is on
@@ -1133,7 +1133,15 @@ sandboxed writes belong on `auto` or `ask_assistant`, which give the
 audit trail without the stall.
 
 **Timeout denies**, after `tools.approval_timeout_s` (default 600 s,
-`set-tools --approval-timeout`). The lane gets `error: tool 'X' was not
+minimum 180 s, `set-tools --approval-timeout`). The floor is there
+because a shorter deadline is un-answerable rather than strict: the
+request has to be polled, relayed to a person and decided, and Claude
+Code's own turn latency eats most of a minute before anyone has read
+the tool name. A deadline nobody can meet is `deny` that also costs the
+wall-clock — and against a council that runs 30–60 minutes, three
+minutes is not a meaningful delay. `set-tools` rejects a lower value;
+a hand-edited TOML is raised to the floor with a warning rather than
+taking the council down over it. The lane gets `error: tool 'X' was not
 approved`, the model reroutes, and the council finishes degraded with
 the denial recorded. This is the plan's decision-table row 7: absence
 of an approver never authorizes spend. A denial is always a tool-result

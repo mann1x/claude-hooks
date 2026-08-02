@@ -2265,11 +2265,16 @@ def build_parser() -> argparse.ArgumentParser:
     ctl.add_argument("--approval-timeout", dest="approval_timeout",
                      type=float, default=None, metavar="SECONDS",
                      help="How long a parked ask_human tool call waits "
-                          "before it is DENIED (default 600). Only "
-                          "ask_human parks — ask_assistant auto-approves "
-                          "per the ladder — so this is the spend gate. "
-                          "Timeout denies on purpose: absence of an "
-                          "approver never authorizes spend.")
+                          "before it is DENIED (default 600, minimum "
+                          "180). Only ask_human parks — ask_assistant "
+                          "auto-approves per the ladder — so this is "
+                          "the spend gate. Timeout denies on purpose: "
+                          "absence of an approver never authorizes "
+                          "spend. The floor exists because a shorter "
+                          "deadline is un-answerable once poll latency "
+                          "and a human decision are in the loop, and a "
+                          "deadline nobody can meet is 'deny' that also "
+                          "costs the wall-clock.")
     ctl.add_argument("--permission", nargs=2, metavar=("TOOL", "LEVEL"),
                      help="Pin one tool to a rung, e.g. "
                           "--permission git_diff auto.")

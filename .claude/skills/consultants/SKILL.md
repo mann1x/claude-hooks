@@ -1062,10 +1062,14 @@ AskUserQuestion the sub-action:
 
 - **Change the approval deadline** →
   `config set-tools --approval-timeout <seconds> --cwd "$(pwd)"`
-  (default 600). How long a parked `ask_human` call waits before it is
-  **denied**. Only `ask_human` parks, so this is the spend gate.
-  Denying on timeout is deliberate: absence of an approver never
-  authorizes spend.
+  (default 600, **minimum 180**). How long a parked `ask_human` call
+  waits before it is **denied**. Only `ask_human` parks, so this is the
+  spend gate. Denying on timeout is deliberate: absence of an approver
+  never authorizes spend. The floor exists because a shorter deadline
+  is un-answerable rather than strict — the request has to be polled,
+  relayed to the user and decided, and turn latency alone eats most of
+  a minute. Against a council that runs 30–60 minutes, three minutes
+  costs nothing.
 
 - **Clear pins** → `config set-tools --clear-permissions --cwd "$(pwd)"`.
 

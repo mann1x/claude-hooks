@@ -923,8 +923,8 @@ class TestToolsApprovalTimeout:
         assert cc.ConsultantsConfig().tools.approval_timeout_s == 600.0
 
     def test_round_trips_through_the_file(self, isolated_home):
-        cc.set_tools(approval_timeout_s=120)
-        assert cc.load_config().tools.approval_timeout_s == 120.0
+        cc.set_tools(approval_timeout_s=900)
+        assert cc.load_config().tools.approval_timeout_s == 900.0
 
     def test_rejects_a_non_positive_deadline(self, isolated_home):
         # Zero denies every parked call before an approver can see it,
@@ -954,8 +954,43 @@ class TestToolsApprovalTimeout:
 
     def test_other_tools_settings_survive_the_write(self, isolated_home):
         cc.set_tools(git=True, default_level="ask_human")
-        cc.set_tools(approval_timeout_s=42)
+        cc.set_tools(approval_timeout_s=420)
         cfg = cc.load_config()
-        assert cfg.tools.approval_timeout_s == 42.0
+        assert cfg.tools.approval_timeout_s == 420.0
         assert cfg.tools.git is True
         assert cfg.tools.default_level == "ask_human"
+
+    def test_rejects_a_deadline_below_the_floor(self, isolated_home):
+        # 60 s looked answerable on paper and wasn't: the request has to
+        # be polled, relayed to a person and decided, and Claude Code's
+        # own turn latency eats most of a minute. A deadline nobody can
+        # meet is "deny" that also costs the wall-clock.
+        with pytest.raises(ValueError) as exc:
+            cc.set_tools(approval_timeout_s=60)
+        assert "180" in str(exc.value)
+
+    def test_the_floor_itself_is_accepted(self, isolated_home):
+        cc.set_tools(approval_timeout_s=cc.MIN_APPROVAL_TIMEOUT_S)
+        assert (cc.load_config().tools.approval_timeout_s
+                == cc.MIN_APPROVAL_TIMEOUT_S)
+
+    def test_a_short_value_in_the_file_is_raised_not_rejected(
+            self, isolated_home):
+        # Load-time stays lenient: refusing the whole config over one
+        # short deadline would take the council down for a value that
+        # can safely be corrected. The setter errors instead, because
+        # there the operator is present to be told.
+        path = cc.user_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('[tools]\napproval_timeout_s = 60\n',
+                        encoding="utf-8")
+        assert (cc.load_config().tools.approval_timeout_s
+                == cc.MIN_APPROVAL_TIMEOUT_S)
+
+    def test_a_value_above_the_floor_in_the_file_is_untouched(
+            self, isolated_home):
+        path = cc.user_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('[tools]\napproval_timeout_s = 240\n',
+                        encoding="utf-8")
+        assert cc.load_config().tools.approval_timeout_s == 240.0
