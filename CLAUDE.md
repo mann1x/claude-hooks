@@ -724,6 +724,51 @@ before committing (`git checkout dev` if needed). Use `main` only
 during a release cut.
 
 <!-- caliber:managed:pre-commit -->
+## Deploying — `scripts/deploy.py`, always
+
+**Deploy is a full deploy.** There is one command:
+
+```bash
+python3 scripts/deploy.py            # full deploy, gated on verification
+python3 scripts/deploy.py --dry-run  # show every action, change nothing
+```
+
+Do **not** hand-roll `pip install -e . && systemctl restart <service>`.
+That was the routine until 2026-08-02, and it is why
+`~/.claude/skills/consultants/SKILL.md` sat at its **21 May** content for
+ten weeks — 791 lines against the repo's 1591. Every session in that
+window loaded half a skill (no wait patterns, no review loop, no
+`accept` / `tool-ack` verbs) while the engine underneath moved three
+releases on. Nothing surfaced it: a stale skill does not error, it just
+instructs the model to drive something that no longer exists.
+
+The trap is that "deploy" naturally means "make the running service run
+the new code", and the artifacts that drift are the ones **no service
+loads**:
+
+| artifact | loaded by | fails how |
+|---|---|---|
+| package code | services (editable, live) | loudly |
+| entry points / deps | shell + services | loudly |
+| **`.claude/skills/*/SKILL.md`** | **Claude Code, at session start** | **silently** |
+| systemd units | systemd | loudly |
+| config mirrors | `install.py` | silently |
+
+`scripts/deploy.py` covers all of them, discovers rather than hardcodes
+(envs, units, skills are all globbed), searches **both** systemd scopes
+— this host splits them, the consultants engine is a `--user` unit while
+daemon/proxy/dashboard are system units — and finishes by running
+`scripts/verify_deploy.py`. A failed step fails the whole deploy; there
+is no partial success, because a partial deploy reporting success is the
+exact failure it replaces.
+
+`tests/test_deploy_completeness.py` enforces this. Adding a new class of
+deployable artifact means adding it there first.
+
+**After deploying a skill change, the session must be restarted** —
+Claude Code reads `SKILL.md` at session start, so a running session
+keeps the old copy no matter what is on disk.
+
 ## Before Committing
 
 **IMPORTANT:** Before every git commit, you MUST ensure Caliber syncs agent configs with the latest code changes.

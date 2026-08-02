@@ -141,6 +141,45 @@ release with the auto-generated source archive
   for two months. The regression test now requires **every** key any
   Send payload passes to be a declared channel.
 
+- **Deploy is a full deploy — `scripts/deploy.py`.** The installed
+  `~/.claude/skills/consultants/SKILL.md` was found still at its **21
+  May** content: 791 lines against the repo's 1591. Ten weeks of
+  sessions had been loading half a skill — no wait patterns, no review
+  loop, no `accept` / `tool-ack` verbs — while the engine underneath
+  moved three releases on. Nothing surfaced it, because a stale skill
+  does not error; it just instructs the model to drive something that
+  no longer exists.
+
+  The cause was a routine, not a bug. "Deploy" had come to mean
+  `pip install -e . && systemctl restart <service>`, which makes the
+  *engine* current and touches nothing else. No service loads a skill —
+  Claude Code reads it at session start — so it sat outside the
+  definition and drifted silently. Every artifact that drifts has that
+  property: nothing at runtime complains when it is behind.
+
+  `scripts/deploy.py` is now the only supported path. It discovers
+  rather than hardcodes (envs, units and skills are all globbed, so the
+  next artifact of an existing class is picked up automatically),
+  searches **both** systemd scopes — this host splits them, the
+  consultants engine is a `--user` unit while daemon/proxy/dashboard are
+  system units — and gates on `verify_deploy.py`. A failed step fails
+  the whole deploy: a partial deploy reporting success is the exact
+  failure it replaces.
+
+  `verify_deploy.py` grows a **skills** check that compares content, not
+  presence, and reports a stale skill as **FAIL** rather than WARN — a
+  warning would scroll past, which is how the May copy survived ten
+  weeks. `tests/test_deploy_completeness.py` enforces that every
+  artifact class is both deployed and verified, that the script cannot
+  hardcode a skill name, and that CLAUDE.md still tells the next session
+  which command to use. Adding a new class of deployable artifact means
+  adding it to that test first.
+
+  Also found while auditing: `consolidate` and `reflect` ship without
+  YAML frontmatter, so they cannot appear in the skill listing at all.
+  Recorded as an explicit allowlist rather than fixed in the same
+  change — the list makes the debt visible and stops it growing.
+
 - **`/cancel` and `/interrupt` actually stop the run now.** Yesterday's
   audit found both were advisory: they set a flag on `runtime_control`
   that no node read. The fix is not "make a node read the flag" —

@@ -242,18 +242,90 @@ def check_version(r: Results) -> None:
         r.add(FAIL, "claude_hooks importable", str(e))
 
 
+# --------------------------------------------------------------------- #
+# Skills
+# --------------------------------------------------------------------- #
+def check_skills(r: Results) -> None:
+    """Compare the in-repo SKILL.md files with the installed ones.
+
+    Added 2026-08-02 after ``~/.claude/skills/consultants/SKILL.md`` was
+    found still at its **21 May** content — 791 lines against the repo's
+    1591. Every session since had been loading half a skill: no wait
+    patterns, no review loop, no ``accept`` / ``tool-ack`` verbs. It
+    failed the way everything in this release failed, by looking fine.
+
+    The cause is a deploy routine, not a bug. ``pip install -e .`` plus a
+    service restart makes the *engine* current, and that is what "deploy"
+    had come to mean. A skill is not loaded by the service — Claude Code
+    reads it at session start — so it sat outside the definition and
+    drifted for ten weeks unnoticed. Checking it here makes the deploy
+    step mechanical instead of remembered.
+
+    ``install.py`` is the thing that syncs them; this only reports.
+    """
+    print("skills")
+    repo_skills = REPO / ".claude" / "skills"
+    user_skills = Path(os.path.expanduser("~/.claude/skills"))
+    if not repo_skills.is_dir():
+        r.add(WARN, "skills", f"no in-repo skills dir at {repo_skills}")
+        return
+    if not user_skills.is_dir():
+        r.add(WARN, "skills", f"nothing installed at {user_skills}")
+        return
+
+    stale: list[str] = []
+    missing: list[str] = []
+    ok = 0
+    for src in sorted(repo_skills.glob("*/SKILL.md")):
+        name = src.parent.name
+        dst = user_skills / name / "SKILL.md"
+        if not dst.is_file():
+            # Not an error: skills are opt-in per host, and install.py
+            # never auto-installs a new one.
+            missing.append(name)
+            continue
+        try:
+            same = (src.read_text(encoding="utf-8")
+                    == dst.read_text(encoding="utf-8"))
+        except OSError as e:
+            r.add(FAIL, f"skill /{name}", f"unreadable: {e}")
+            continue
+        if same:
+            ok += 1
+        else:
+            src_n = len(src.read_text(encoding="utf-8").splitlines())
+            dst_n = len(dst.read_text(encoding="utf-8").splitlines())
+            stale.append(f"{name} (installed {dst_n} lines, repo {src_n})")
+
+    if ok:
+        r.add(PASS, "skills in sync", f"{ok} up to date")
+    if missing:
+        r.add(WARN, "skills not installed",
+              ", ".join(missing) + " — opt-in; `python3 install.py` offers them")
+    if stale:
+        # FAIL, not WARN: a stale skill is a session running instructions
+        # that do not match the engine it is driving, and nothing in the
+        # session surfaces the mismatch.
+        r.add(FAIL, "skills STALE",
+              "; ".join(stale) + " — run `python3 install.py` to sync")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--store", action="store_true", help="store checks only")
+    ap.add_argument("--skills", action="store_true", help="skill checks only")
     ap.add_argument("--quiet", action="store_true", help="show only failures")
     a = ap.parse_args()
 
     r = Results(quiet=a.quiet)
     if a.store:
         check_store(r)
+    elif a.skills:
+        check_skills(r)
     else:
         check_version(r)
         check_providers(r)
+        check_skills(r)
         check_store(r)
 
     failed = r.failed
