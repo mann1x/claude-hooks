@@ -518,3 +518,56 @@ class TestConfigKnob(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---- approval-channel gap warning (2026-08-02) --------------------- #
+
+class TestAskRungWithoutApprovalChannelWarns:
+    """Configuring an ``ask_*`` rung with no approval channel refuses
+    the call instead of asking anyone.
+
+    That is the right failure direction, but it is invisible from the
+    answer: the model gets an ``error: not approved`` string mid-loop,
+    routes around it, and the operator reads a weaker answer with no
+    indication why. ``build_tool_surface`` says it once, at session
+    start, naming what will be refused.
+    """
+
+    def _cfg(self, **tools):
+        import types
+        base = {"enabled": True, "git": False, "all_roles": True,
+                "default_level": "auto", "permissions": {}}
+        base.update(tools)
+        return types.SimpleNamespace(tools=types.SimpleNamespace(**base))
+
+    def test_warns_on_an_ask_permission_override(self, caplog):
+        from consultants.server.tool_surface import build_tool_surface
+        with caplog.at_level("WARNING"):
+            build_tool_surface(
+                self._cfg(permissions={"write_file": "ask_assistant"}))
+        assert "no approval channel" in caplog.text
+        assert "write_file" in caplog.text
+
+    def test_warns_on_an_ask_default_level(self, caplog):
+        from consultants.server.tool_surface import build_tool_surface
+        with caplog.at_level("WARNING"):
+            build_tool_surface(self._cfg(default_level="ask_human"))
+        assert "no approval channel" in caplog.text
+        assert "ask_human" in caplog.text
+
+    def test_silent_on_the_default_surface(self, caplog):
+        # Every builtin tool declares auto, so the ladder never fires
+        # and the warning must not cry wolf on a stock config.
+        from consultants.server.tool_surface import build_tool_surface
+        with caplog.at_level("WARNING"):
+            build_tool_surface(self._cfg())
+        assert "no approval channel" not in caplog.text
+
+    def test_silent_when_an_approval_channel_is_supplied(self, caplog):
+        from consultants.server.tool_surface import build_tool_surface
+        with caplog.at_level("WARNING"):
+            build_tool_surface(
+                self._cfg(permissions={"write_file": "ask_assistant"}),
+                approval_fn=lambda decision: True,
+            )
+        assert "no approval channel" not in caplog.text

@@ -58,6 +58,33 @@ def build_tool_surface(cfg: Any, *, extra_roots: tuple[str, ...] = (),
             overrides=dict(getattr(tools_cfg, "permissions", {}) or {})
             if tools_cfg is not None else {},
         )
+        # Configuring an ``ask_*`` rung with no approval channel means
+        # every such call is REFUSED, not asked — the registry has
+        # nowhere to route it. That is the right failure direction, but
+        # it is invisible from the answer: the model gets an "error:
+        # not approved" string mid-loop, works around it, and the
+        # operator sees a weaker answer with no explanation. Say it
+        # once, at session start, naming what will be refused.
+        if approval_fn is None and tools_cfg is not None:
+            asks = sorted(
+                name for name, level in
+                (getattr(tools_cfg, "permissions", {}) or {}).items()
+                if isinstance(level, str) and level.startswith("ask_")
+            )
+            default_asks = str(
+                getattr(tools_cfg, "default_level", "auto") or ""
+            ).startswith("ask_")
+            if asks or default_asks:
+                log.warning(
+                    "[tools] requests approval (%s) but this session has "
+                    "no approval channel wired — every affected call "
+                    "will be REFUSED, not asked. Set those rungs to "
+                    "'auto' or 'deny' to make the outcome explicit.",
+                    "default_level=" + str(getattr(
+                        tools_cfg, "default_level", "auto"))
+                    if default_asks else "permissions: " + ", ".join(asks),
+                )
+
         registry = ToolRegistry(providers, gate=gate, approval_fn=approval_fn)
         log.info("tool surface: %d tools from %d provider(s): %s",
                  len(registry.tool_names()), len(providers),

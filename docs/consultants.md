@@ -933,7 +933,7 @@ hand-editable if you prefer.
 | `tools.enabled` | tools | Master switch for the composable tool registry. Default `true`. `false` restores the fixed pre-registry surface. |
 | `tools.all_roles` | tools | Give planner / critic / meta_critic / synthesizer / adversary the same tools the researcher has. **Default `true` since 2026-08-01** — measured cheaper *and* more accurate (see below). |
 | `tools.git` | tools | Read-only git history tools: `git_history` ("when did this regress?", wraps `git log -L`), `git_log` / `git_blame` / `git_diff` / `git_show`. Default `false` — safe, but five more schemas on every prompt on every lane. |
-| `tools.default_level` | tools | Fallback permission rung for a tool no provider or override names: `auto` / `ask_assistant` / `ask_human` / `deny`. Default `auto`. |
+| `tools.default_level` | tools | Fallback permission rung for a tool no provider or override names: `auto` / `ask_assistant` / `ask_human` / `deny`. Default `auto`. **The `ask_*` rungs are not wired to an approval channel yet — see below.** |
 | `tools.permissions` | tools | Per-tool rung overrides, `[tools.permissions]`. |
 
 ### Tool surface — why `all_roles` is on
@@ -1043,6 +1043,22 @@ claude-consultants config set-tools --all-roles false   # researcher-only
 claude-consultants config set-tools --git true          # git history tools
 claude-consultants config set-tools --default-level auto
 claude-consultants config set-tools --permission write_file ask_assistant
+```
+
+**`ask_*` refuses today, it does not ask.** The ladder
+(`auto` / `ask_assistant` / `ask_human` / `deny`) is enforced on every
+dispatch, but the engine passes no approval channel to the registry, so
+a call that lands on an `ask_*` rung is **refused** — the model gets
+`error: tool <name> was not approved`, works around it, and the
+operator sees a weaker answer with no explanation. Since 2026-08-02 the
+engine logs a warning at session start naming what will be refused.
+
+This costs nothing on the default surface: every built-in and git tool
+declares `auto`, so the ladder never fires. It matters the moment you
+set a rung by hand, or an effectful provider lands. Until the interrupt
+wiring exists, use `auto` or `deny` — those two say what they mean.
+
+```
 claude-consultants config set-tools --clear-permission write_file
 claude-consultants config set-tools --enabled false     # pre-registry surface
 
