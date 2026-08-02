@@ -287,6 +287,12 @@ class SessionState:
             pending = self._tool_approvals.pending_public()
             if pending:
                 out["pending_tool_approvals"] = pending
+            grants = self._tool_approvals.grants_public()
+            if grants:
+                # What has already been answered for a whole class of
+                # calls. Shown so the approver can see why later calls
+                # sailed through, and narrow the rule if it was too wide.
+                out["tool_approval_grants"] = grants
         return out
 
     def bump_activity(self) -> None:

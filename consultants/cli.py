@@ -1398,15 +1398,35 @@ def cmd_tool_ack(args, base: str) -> int:
     There is deliberately no default verdict: guessing either way is
     the failure the channel exists to prevent, so ``--allow`` /
     ``--deny`` is a required, mutually-exclusive pair.
+
+    ``--all-of-tool`` / ``--all-matching <glob>`` answer for a class of
+    calls instead of one. The rule is session-scoped — authorization is
+    per council, so every role and x-tier lane inherits it — and it
+    releases the already-parked requests it matches. Answer one call at
+    a time on a wide council and the queue outruns you: the first live
+    run parked four ``read_file`` requests in 90 seconds.
     """
     body: dict = {"allow": bool(args.allow)}
     if args.request_id:
         body["request_id"] = args.request_id
     if args.reason:
         body["reason"] = args.reason
+    if args.all_matching:
+        body["scope"] = "glob"
+        body["pattern"] = args.all_matching
+    elif args.all_of_tool:
+        body["scope"] = "tool"
     out = _http("POST", f"{base}/v1/consult/{args.sid}/tool-ack",
                 body=body)
     print(json.dumps({"ok": True, **out}, indent=2))
+    still = out.get("pending") or []
+    if still and not (args.all_matching or args.all_of_tool):
+        print(
+            f"note: {len(still)} request(s) still parked. "
+            "--all-of-tool or --all-matching '<glob>' answers the class "
+            "instead of one call at a time.",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -2027,6 +2047,19 @@ def build_parser() -> argparse.ArgumentParser:
     ta.add_argument("--reason", default=None,
                     help="Recorded with the decision for the "
                          "post-mortem.")
+    scope_grp = ta.add_mutually_exclusive_group()
+    scope_grp.add_argument(
+        "--all-of-tool", dest="all_of_tool", action="store_true",
+        help="Apply the verdict to EVERY future call to this tool in "
+             "this council, and release the parked ones it covers.",
+    )
+    scope_grp.add_argument(
+        "--all-matching", dest="all_matching", default=None,
+        metavar="GLOB",
+        help="Apply the verdict to calls to this tool whose target "
+             "matches GLOB (e.g. 'src/**', '*.py'). Session-scoped: "
+             "every role and x-tier lane inherits it.",
+    )
     ta.set_defaults(fn=cmd_tool_ack)
 
     # events — SSE stream.

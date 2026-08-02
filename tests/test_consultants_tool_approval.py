@@ -191,8 +191,8 @@ class TestAskHumanParks(unittest.TestCase):
 class TestBroker(unittest.TestCase):
     def test_resolve_without_an_id_answers_the_oldest(self):
         b = ToolApprovalBroker("csl-x")
-        first = b.open(tool="a", level="ask_human", arguments="",
-                       cwd="/p", reason="r", timeout_s=60, now=100.0)
+        first, _ = b.open(tool="a", level="ask_human", arguments="",
+                          cwd="/p", reason="r", timeout_s=60, now=100.0)
         b.open(tool="b", level="ask_human", arguments="", cwd="/p",
                reason="r", timeout_s=60, now=200.0)
         got = b.resolve(None, allow=True)
@@ -203,8 +203,8 @@ class TestBroker(unittest.TestCase):
         b = ToolApprovalBroker("csl-x")
         b.open(tool="a", level="ask_human", arguments="", cwd="/p",
                reason="r", timeout_s=60, now=100.0)
-        second = b.open(tool="b", level="ask_human", arguments="",
-                        cwd="/p", reason="r", timeout_s=60, now=200.0)
+        second, _ = b.open(tool="b", level="ask_human", arguments="",
+                           cwd="/p", reason="r", timeout_s=60, now=200.0)
         got = b.resolve(second.request_id, allow=False)
         assert got is not None and got.tool == "b"
         assert [r.tool for r in b.pending()] == ["a"]
@@ -225,10 +225,10 @@ class TestBroker(unittest.TestCase):
         # Two sessions parking at once must not collide on an id the
         # operator quotes back.
         a, b = ToolApprovalBroker("csl-a"), ToolApprovalBroker("csl-b")
-        ra = a.open(tool="t", level="ask_human", arguments="", cwd="/p",
-                    reason="r", timeout_s=60)
-        rb = b.open(tool="t", level="ask_human", arguments="", cwd="/p",
-                    reason="r", timeout_s=60)
+        ra, _ = a.open(tool="t", level="ask_human", arguments="", cwd="/p",
+                       reason="r", timeout_s=60)
+        rb, _ = b.open(tool="t", level="ask_human", arguments="", cwd="/p",
+                       reason="r", timeout_s=60)
         assert ra.request_id != rb.request_id
 
     def test_concurrent_resolves_answer_once(self):
@@ -428,3 +428,196 @@ class TestParkingIsPerLane(unittest.TestCase):
             o for o in order[:released_at] if o.endswith("-done")]
         assert len(finished_while_parked) == 2, (
             f"siblings did NOT run while lane 0 was parked: {order}")
+
+
+# ==================================================================== #
+# Coalescing + standing grants (2026-08-02).
+#
+# The first live run parked FOUR read_file requests in 90 seconds —
+# three of them the same file from three x-tier researcher lanes. A
+# per-call verdict means a human answers a dozen times a run or watches
+# them all deny on timeout, which is worse than `deny` because it costs
+# the wall-clock too. Authorization is per COUNCIL: one verdict binds
+# every role and every lane.
+# ==================================================================== #
+
+
+class TestCoalescing(unittest.TestCase):
+    def test_identical_calls_share_one_request(self):
+        b = ToolApprovalBroker("csl-x")
+        first, created_a = b.open(
+            tool="read_file", level="ask_human", arguments='{"path": "a.py"}',
+            cwd="/p", reason="r", timeout_s=60,
+        )
+        second, created_b = b.open(
+            tool="read_file", level="ask_human", arguments='{"path": "a.py"}',
+            cwd="/p", reason="r", timeout_s=60,
+        )
+        assert created_a is True and created_b is False
+        assert first.request_id == second.request_id
+        assert len(b.pending()) == 1
+        assert first.waiters == 2
+
+    def test_different_arguments_do_not_coalesce(self):
+        b = ToolApprovalBroker("csl-x")
+        b.open(tool="read_file", level="ask_human",
+               arguments='{"path": "a.py"}', cwd="/p", reason="r",
+               timeout_s=60)
+        b.open(tool="read_file", level="ask_human",
+               arguments='{"path": "b.py"}', cwd="/p", reason="r",
+               timeout_s=60)
+        assert len(b.pending()) == 2
+
+    def test_one_answer_releases_every_coalesced_lane(self):
+        b = ToolApprovalBroker("csl-x")
+        results: list = []
+        args = '{"path": "shared.py"}'
+
+        def _lane(idx):
+            fn = make_approval_fn(_ctx(b, timeout_s=20))
+            results.append(
+                fn(_decision("ask_human", tool="read_file", raw_args=args)))
+
+        threads = [threading.Thread(target=_lane, args=(i,))
+                   for i in range(3)]
+        for t in threads:
+            t.start()
+        deadline = time.time() + 10
+        while time.time() < deadline and not b.pending():
+            time.sleep(0.02)
+        assert len(b.pending()) == 1, "three lanes should be ONE decision"
+        b.resolve(None, allow=True, by="test")
+        for t in threads:
+            t.join(timeout=10)
+        assert results == [True, True, True]
+
+    def test_public_dict_hides_waiters_when_only_one(self):
+        # Parity: a single-lane park must render exactly as before.
+        b = ToolApprovalBroker("csl-x")
+        b.open(tool="t", level="ask_human", arguments="{}", cwd="/p",
+               reason="r", timeout_s=60)
+        assert "waiters" not in b.pending_public()[0]
+
+
+class TestStandingGrants(unittest.TestCase):
+    def test_tool_scope_covers_later_calls_without_parking(self):
+        b = ToolApprovalBroker("csl-x")
+        b.open(tool="read_file", level="ask_human",
+               arguments='{"path": "a.py"}', cwd="/p", reason="r",
+               timeout_s=60)
+        b.resolve(None, allow=True, by="human", scope="tool")
+        fn = make_approval_fn(_ctx(b, timeout_s=0.2))
+        # A *different* file, and it never reaches the queue.
+        assert fn(_decision("ask_human", tool="read_file",
+                            raw_args='{"path": "z.py"}')) is True
+        assert b.pending() == []
+
+    def test_glob_scope_matches_by_target(self):
+        b = ToolApprovalBroker("csl-x")
+        b.open(tool="read_file", level="ask_human",
+               arguments='{"path": "src/a.py"}', cwd="/p", reason="r",
+               timeout_s=60)
+        b.resolve(None, allow=True, by="human", scope="glob",
+                  pattern="src/**")
+        fn = make_approval_fn(_ctx(b, timeout_s=0.2))
+        assert fn(_decision("ask_human", tool="read_file",
+                            raw_args='{"path": "src/deep/b.py"}')) is True
+        assert fn(_decision("ask_human", tool="read_file",
+                            raw_args='{"path": "other/c.py"}')) is False
+
+    def test_glob_defaults_to_the_answered_calls_own_target(self):
+        b = ToolApprovalBroker("csl-x")
+        b.open(tool="read_file", level="ask_human",
+               arguments='{"path": "cfg.toml"}', cwd="/p", reason="r",
+               timeout_s=60)
+        b.resolve(None, allow=True, by="human", scope="glob")
+        fn = make_approval_fn(_ctx(b, timeout_s=0.2))
+        assert fn(_decision("ask_human", tool="read_file",
+                            raw_args='{"path": "cfg.toml"}')) is True
+
+    def test_a_grant_does_not_leak_across_tools(self):
+        b = ToolApprovalBroker("csl-x")
+        b.open(tool="read_file", level="ask_human", arguments="{}",
+               cwd="/p", reason="r", timeout_s=60)
+        b.resolve(None, allow=True, by="human", scope="tool")
+        assert b.matching_grant("write_file", "{}") is None
+
+    def test_installing_a_grant_releases_already_parked_siblings(self):
+        # Otherwise "allow all reads under src/" still leaves the three
+        # lanes already waiting to time out.
+        b = ToolApprovalBroker("csl-x")
+        a, _ = b.open(tool="read_file", level="ask_human",
+                      arguments='{"path": "src/a.py"}', cwd="/p",
+                      reason="r", timeout_s=60)
+        c, _ = b.open(tool="read_file", level="ask_human",
+                      arguments='{"path": "src/c.py"}', cwd="/p",
+                      reason="r", timeout_s=60)
+        d, _ = b.open(tool="read_file", level="ask_human",
+                      arguments='{"path": "vendor/d.py"}', cwd="/p",
+                      reason="r", timeout_s=60)
+        b.resolve(a.request_id, allow=True, by="human", scope="glob",
+                  pattern="src/**")
+        assert c.resolution == "allowed"
+        assert [r.request_id for r in b.pending()] == [d.request_id]
+
+    def test_a_standing_deny_is_expressible(self):
+        # Stops a model that keeps retrying a forbidden path from
+        # parking a lane on every attempt.
+        b = ToolApprovalBroker("csl-x")
+        b.open(tool="rent_pod", level="ask_human", arguments="{}",
+               cwd="/p", reason="r", timeout_s=60)
+        b.resolve(None, allow=False, by="human", scope="tool")
+        fn = make_approval_fn(_ctx(b, timeout_s=0.2))
+        assert fn(_decision("ask_human", tool="rent_pod")) is False
+        assert b.pending() == []
+
+    def test_a_later_rule_overrides_an_earlier_one(self):
+        b = ToolApprovalBroker("csl-x")
+        b.open(tool="read_file", level="ask_human", arguments="{}",
+               cwd="/p", reason="r", timeout_s=60)
+        b.resolve(None, allow=True, by="human", scope="tool")
+        b.open(tool="read_file", level="ask_human",
+               arguments='{"path": "secrets.env"}', cwd="/p", reason="r",
+               timeout_s=60)
+        b.resolve(None, allow=False, by="human", scope="glob",
+                  pattern="secrets.env")
+        fn = make_approval_fn(_ctx(b, timeout_s=0.2))
+        assert fn(_decision("ask_human", tool="read_file",
+                            raw_args='{"path": "secrets.env"}')) is False
+        assert fn(_decision("ask_human", tool="read_file",
+                            raw_args='{"path": "ok.py"}')) is True
+
+    def test_once_scope_installs_nothing(self):
+        # Parity: the default answer must not silently widen.
+        b = ToolApprovalBroker("csl-x")
+        b.open(tool="read_file", level="ask_human", arguments="{}",
+               cwd="/p", reason="r", timeout_s=60)
+        b.resolve(None, allow=True, by="human")
+        assert b.grants_public() == []
+        assert b.matching_grant("read_file", "{}") is None
+
+    def test_grant_records_itself_on_the_answered_request(self):
+        b = ToolApprovalBroker("csl-x")
+        req, _ = b.open(tool="read_file", level="ask_human",
+                        arguments='{"path": "a.py"}', cwd="/p",
+                        reason="r", timeout_s=60)
+        b.resolve(req.request_id, allow=True, by="human", scope="tool")
+        assert "read_file" in (req.grant or "")
+        assert req.public_dict()["grant"]
+
+
+class TestTargetExtraction(unittest.TestCase):
+    def test_reads_the_common_path_keys(self):
+        from consultants.engine.tool_approval import target_of
+        assert target_of('{"path": "a.py"}') == "a.py"
+        assert target_of('{"file_path": "b.py"}') == "b.py"
+        assert target_of('{"pattern": "**/*.py"}') == "**/*.py"
+
+    def test_no_target_means_a_glob_rule_cannot_match(self):
+        # A rule scoped to src/** must never silently cover a call whose
+        # target can't be established.
+        from consultants.engine.tool_approval import GrantRule, target_of
+        assert target_of('{"limit": 5}') == ""
+        assert target_of("not json") == ""
+        rule = GrantRule(scope="glob", tool="t", allow=True, pattern="src/**")
+        assert rule.matches("t", '{"limit": 5}') is False

@@ -277,8 +277,11 @@ you**, and either one means "answer me":
   release with `claude-consultants adversary-ack <sid>`. Details in
   [Adversarial review](#adversarial-review).
 - `pending_tool_approvals` — a lane is parked on an `ask_human` tool
-  call. Answer with `claude-consultants tool-ack <sid> --allow|--deny`.
-  Details in [Subflow I](#subflow-i--tool-surface).
+  call. Answer with `claude-consultants tool-ack <sid> --allow|--deny`,
+  and prefer `--all-of-tool` / `--all-matching '<glob>'` so the next
+  lane doesn't park on the same question. `waiters` on an entry tells
+  you how many lanes one answer releases. Details in
+  [Subflow I](#subflow-i--tool-surface).
 
 Both carry the wall-clock at which the engine gives up. The adversary
 checkpoint auto-resumes on timeout; a tool approval is **denied** on
@@ -1110,10 +1113,54 @@ default verdict, because guessing either way is the failure the channel
 exists to prevent. Omit `--request-id` to answer the oldest pending
 request, which is the common case of exactly one parked call.
 
+**Answer the class, not the call.** A council is wide: the first live
+run parked four `read_file` requests in 90 seconds, three of them the
+same file from three x-tier researcher lanes. One-at-a-time answers do
+not keep up, and what does not get answered is **denied** at the
+deadline — so a queue you can't keep up with is a run that quietly
+degrades. Two flags fix that, and you should reach for them by default
+rather than after the third prompt:
+
+```
+claude-consultants tool-ack <sid> --allow --all-of-tool
+claude-consultants tool-ack <sid> --allow --all-matching 'src/**'
+claude-consultants tool-ack <sid> --deny --all-matching '*.env'
+```
+
+The rule is **per council** — every role and every x-tier lane inherits
+it — and installing one immediately releases the parked requests it
+matches, so the siblings already waiting don't sit out the deadline for
+a decision that has been made. `status` shows the active rules under
+`tool_approval_grants`. A later rule overrides an earlier one, so a
+blanket allow can be narrowed by a specific deny without restarting.
+
+When you put the request to the user, propose the scope with it rather
+than asking four times:
+
+> The council wants to read `src/config.py` (3 lanes are waiting on
+> it). Allow **all reads under `src/**`** for this council, allow just
+> this file, or deny?
+
+Identical concurrent calls are already coalesced into one request —
+`waiters: 3` on the entry tells you how many lanes one answer releases.
+
 **Do not answer an `ask_human` yourself.** The rung exists because a
 person decides; `ask_assistant` is the rung that delegates to you. Show
 the user the tool, its arguments, the root it would run in, the reason
 it tripped the rung, and how long until it auto-denies — then ask.
+
+**But most calls should never reach a human.** `ask_human` is for spend
+and irreversibility — renting a GPU, pushing a branch, calling a paid
+API. Reads, greps, globs and sandboxed writes belong on `auto` or
+`ask_assistant`, which give you the audit trail without the stall. If a
+run is producing a steady stream of approval requests, the rung is
+wrong, not the workflow: say so, and offer
+
+```
+claude-consultants config set-tools --permission read_file ask_assistant --cwd "$(pwd)"
+```
+
+rather than shepherding the queue for the rest of the council.
 
 **If nobody answers**, the call is denied at the deadline and the lane
 gets `error: tool 'X' was not approved`. The council finishes degraded

@@ -68,6 +68,30 @@ release with the auto-generated source archive
     result and reroutes — never an exception, so a denial teaches the
     model another route rather than crashing the lane.
 
+  **A per-call verdict does not survive council scale**, which the
+  first live run made obvious: four `read_file` requests in 90 seconds,
+  three of them the same file from three x-tier researcher lanes. Since
+  an unanswered request is *denied* at the deadline, a queue nobody can
+  keep up with is a run that quietly degrades — worse than `deny`,
+  because it costs the wall-clock too. Two mechanisms, both keyed on
+  the fact that authorization is per **council**, not per role:
+
+  - **Coalescing.** Concurrent lanes asking the identical question join
+    one request; `waiters` says how many lanes one answer releases.
+  - **Standing grants.** `tool-ack --all-of-tool` /
+    `--all-matching '<glob>'` answer the class instead of the instance,
+    and installing one releases the parked requests it already matches
+    — otherwise "allow all reads under `src/**`" would still leave
+    three lanes waiting out the deadline. Rules show in `status` under
+    `tool_approval_grants`; a later rule overrides an earlier one, so a
+    blanket allow can be narrowed mid-run. Standing *denies* are
+    expressible too, which stops a model retrying a forbidden path from
+    parking a lane on every attempt.
+
+  Neither widens anything by default: a plain `tool-ack` installs no
+  rule, and a glob rule never matches a call whose target can't be
+  established.
+
   **Per-lane parking, verified rather than argued.** The plan called
   lane-scoped suspension the largest piece of M-A because a
   graph-level pause would idle every sibling on exactly the x-tier

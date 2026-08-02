@@ -704,11 +704,22 @@ def register_control_routes(app: "FastAPI") -> None:
         """M-A: answer a parked ``ask_human`` tool-approval request.
 
         Body: ``{"allow": true|false, "request_id": "tap-N"?,
-        "reason": "..."?}``. ``allow`` is REQUIRED — there is no default
-        verdict, because guessing either way is the failure this channel
-        exists to prevent. ``request_id`` is optional; omitted, it
-        answers the oldest pending request, which is the common case of
-        exactly one parked call.
+        "reason": "..."?, "scope": "once"|"tool"|"glob"?,
+        "pattern": "src/**"?}``. ``allow`` is REQUIRED — there is no
+        default verdict, because guessing either way is the failure this
+        channel exists to prevent. ``request_id`` is optional; omitted,
+        it answers the oldest pending request, which is the common case
+        of exactly one parked call.
+
+        ``scope`` answers for a *class* of calls rather than one:
+        ``"tool"`` covers every future call to the same tool, ``"glob"``
+        covers calls whose target matches ``pattern`` (default: the
+        answered call's own target). The rule is session-scoped —
+        authorization is per council, so every role and every x-tier
+        lane inherits it — and installing one also releases the parked
+        requests it already matches. Without this the rung floods: three
+        researcher lanes reading the same file produced three requests
+        in the same second on the first live run.
 
         Like /adversary-ack this does not touch the graph: the lane is
         blocked inside its tool executor, so resolving the request is
@@ -724,6 +735,14 @@ def register_control_routes(app: "FastAPI") -> None:
         request_id = body.get("request_id")
         if request_id is not None and not isinstance(request_id, str):
             raise HTTPException(400, "request_id must be a string")
+        scope = str(body.get("scope") or "once")
+        if scope not in ("once", "tool", "glob"):
+            raise HTTPException(
+                400, "scope must be one of: once, tool, glob")
+        pattern = str(body.get("pattern") or "")
+        if scope == "glob" and pattern and any(
+                c in pattern for c in ("\n", "\r")):
+            raise HTTPException(400, "pattern must be a single line")
         # NOT ``_require_live_session``: that also demands the live
         # graph handles, and this verb never touches the graph. The
         # parked lane is blocked inside its tool executor, so resolving
@@ -735,6 +754,7 @@ def register_control_routes(app: "FastAPI") -> None:
         req = s.tool_approvals.resolve(
             request_id, allow=allow,
             by=str(body.get("reason") or "assistant"),
+            scope=scope, pattern=pattern,
         )
         s.bump_activity()
         if req is None:
@@ -742,11 +762,13 @@ def register_control_routes(app: "FastAPI") -> None:
                 "ok": True, "resolved": False,
                 "reason": "no matching pending approval request",
                 "pending": s.tool_approvals.pending_public(),
+                "grants": s.tool_approvals.grants_public(),
             }
         return {
             "ok": True, "resolved": True,
             "request": req.public_dict(),
             "pending": s.tool_approvals.pending_public(),
+            "grants": s.tool_approvals.grants_public(),
         }
 
     # -------------------- POST /cancel ------------------------- #

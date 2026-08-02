@@ -957,7 +957,7 @@ hand-editable if you prefer.
 | `tools.all_roles` | tools | Give planner / critic / meta_critic / synthesizer / adversary the same tools the researcher has. **Default `true` since 2026-08-01** — measured cheaper *and* more accurate (see below). |
 | `tools.git` | tools | Read-only git history tools: `git_history` ("when did this regress?", wraps `git log -L`), `git_log` / `git_blame` / `git_diff` / `git_show`. Default `false` — safe, but five more schemas on every prompt on every lane. |
 | `tools.default_level` | tools | Fallback permission rung for a tool no provider or override names: `auto` / `ask_assistant` / `ask_human` / `deny`. Default `auto`. |
-| `tools.approval_timeout_s` | tools | Seconds a parked `ask_human` tool call waits before it is **denied**. Default `600`. `ask_assistant` never parks. |
+| `tools.approval_timeout_s` | tools | Seconds a parked `ask_human` tool call waits before it is **denied**. Default `600`. `ask_assistant` never parks, and a call covered by a standing grant never parks either. |
 | `tools.permissions` | tools | Per-tool rung overrides, `[tools.permissions]`. |
 
 ### Tool surface — why `all_roles` is on
@@ -1095,6 +1095,42 @@ claude-consultants tool-ack <sid> --allow --request-id tap-3
 `--allow` / `--deny` is required — there is no default verdict.
 `--request-id` is optional and answers the oldest pending request when
 omitted.
+
+**Answer the class, not the call.** A per-call verdict does not survive
+council scale. The first live run parked four `read_file` requests in
+90 seconds — three of them the same file, from three x-tier researcher
+lanes — and what nobody answers is *denied* at the deadline, so a queue
+you can't keep up with is a run that quietly degrades. Two mechanisms:
+
+*Coalescing* is automatic. Concurrent lanes asking the identical
+question join one request; `waiters: 3` on the entry says how many
+lanes one answer releases. Authorization is per **council**, so it does
+not matter which role asked.
+
+*Standing grants* are the answer's scope:
+
+```
+claude-consultants tool-ack <sid> --allow --all-of-tool
+claude-consultants tool-ack <sid> --allow --all-matching 'src/**'
+claude-consultants tool-ack <sid> --deny  --all-matching '*.env'
+```
+
+`--all-of-tool` covers every future call to that tool; `--all-matching`
+covers calls whose target matches the glob (matched against `path` /
+`file` / `file_path` / `root` / `dir` / `pattern`, whichever the call
+carries — a call with no establishable target never matches a glob
+rule). Installing a rule also **releases the already-parked requests it
+matches**, so siblings don't sit out the deadline for a decision that
+has been made. Active rules appear in `status` under
+`tool_approval_grants`; a later rule overrides an earlier one, so a
+blanket allow can be narrowed by a specific deny mid-run. A standing
+*deny* is worth having on its own: it stops a model that keeps retrying
+a forbidden path from parking a lane on every attempt.
+
+If a run needs standing grants to stay tolerable, the rung is usually
+wrong. `ask_human` is for spend and irreversibility; reads, greps and
+sandboxed writes belong on `auto` or `ask_assistant`, which give the
+audit trail without the stall.
 
 **Timeout denies**, after `tools.approval_timeout_s` (default 600 s,
 `set-tools --approval-timeout`). The lane gets `error: tool 'X' was not

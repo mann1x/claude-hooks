@@ -1050,6 +1050,29 @@ class TestToolAckVerb:
             CLI.build_parser().parse_args(
                 ["tool-ack", "csl-x", "--allow", "--deny"])
 
+    def test_all_of_tool_sends_scope_tool(self):
+        got = self._body_for(["tool-ack", "csl-x", "--allow",
+                              "--all-of-tool"])
+        assert got["body"] == {"allow": True, "scope": "tool"}
+
+    def test_all_matching_sends_the_glob(self):
+        got = self._body_for(["tool-ack", "csl-x", "--allow",
+                              "--all-matching", "src/**"])
+        assert got["body"] == {
+            "allow": True, "scope": "glob", "pattern": "src/**"}
+
+    def test_scope_flags_are_mutually_exclusive(self):
+        import consultants.cli as CLI
+        with pytest.raises(SystemExit):
+            CLI.build_parser().parse_args(
+                ["tool-ack", "csl-x", "--allow", "--all-of-tool",
+                 "--all-matching", "src/**"])
+
+    def test_default_ack_sends_no_scope(self):
+        # Parity: answering one call must not silently widen.
+        got = self._body_for(["tool-ack", "csl-x", "--allow"])
+        assert "scope" not in got["body"]
+
     def test_approval_events_are_milestones(self):
         # The one event in the stream that BLOCKS a lane must never be
         # filtered out of the monitor view.

@@ -705,11 +705,12 @@ class TestToolAck(unittest.TestCase):
 
     def _park(self, app, sid="csl-1"):
         s = _install_session(app, sid)
-        return s, s.tool_approvals.open(
+        req, _created = s.tool_approvals.open(
             tool="rent_pod", level="ask_human",
             arguments='{"gpu": "h100"}', cwd="/proj",
             reason="spends money", timeout_s=600,
         )
+        return s, req
 
     def test_allow_resolves_the_request(self):
         c, app = _client()
@@ -739,7 +740,7 @@ class TestToolAck(unittest.TestCase):
     def test_targets_a_specific_request_id(self):
         c, app = _client()
         s, first = self._park(app)
-        second = s.tool_approvals.open(
+        second, _ = s.tool_approvals.open(
             tool="other", level="ask_human", arguments="", cwd="/proj",
             reason="r", timeout_s=600,
         )
@@ -748,6 +749,60 @@ class TestToolAck(unittest.TestCase):
         self.assertEqual(r.json()["request"]["tool"], "other")
         self.assertEqual([p["request_id"] for p in r.json()["pending"]],
                          [first.request_id])
+
+    def test_scope_tool_grants_the_whole_tool(self):
+        c, app = _client()
+        s, _req = self._park(app)
+        r = c.post("/v1/consult/csl-1/tool-ack",
+                   json={"allow": True, "scope": "tool"})
+        self.assertEqual(r.status_code, 200)
+        grants = r.json()["grants"]
+        self.assertEqual(grants[0]["scope"], "tool")
+        self.assertEqual(grants[0]["tool"], "rent_pod")
+        # Session-scoped: authorization is per council, so a later call
+        # from any role inherits it.
+        self.assertIsNotNone(
+            s.tool_approvals.matching_grant("rent_pod", "{}"))
+
+    def test_scope_glob_releases_matching_parked_siblings(self):
+        c, app = _client()
+        s = _install_session(app, "csl-g")
+        first, _ = s.tool_approvals.open(
+            tool="read_file", level="ask_human",
+            arguments='{"path": "src/a.py"}', cwd="/proj",
+            reason="r", timeout_s=600,
+        )
+        s.tool_approvals.open(
+            tool="read_file", level="ask_human",
+            arguments='{"path": "src/b.py"}', cwd="/proj",
+            reason="r", timeout_s=600,
+        )
+        outside, _ = s.tool_approvals.open(
+            tool="read_file", level="ask_human",
+            arguments='{"path": "vendor/c.py"}', cwd="/proj",
+            reason="r", timeout_s=600,
+        )
+        r = c.post("/v1/consult/csl-g/tool-ack",
+                   json={"allow": True, "scope": "glob",
+                         "pattern": "src/**",
+                         "request_id": first.request_id})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual([p["request_id"] for p in r.json()["pending"]],
+                         [outside.request_id])
+
+    def test_rejects_an_unknown_scope(self):
+        c, app = _client()
+        self._park(app)
+        r = c.post("/v1/consult/csl-1/tool-ack",
+                   json={"allow": True, "scope": "everything"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_default_scope_installs_no_grant(self):
+        # Parity: the plain ack must not silently widen.
+        c, app = _client()
+        self._park(app)
+        r = c.post("/v1/consult/csl-1/tool-ack", json={"allow": True})
+        self.assertEqual(r.json()["grants"], [])
 
     def test_acking_nothing_is_a_no_op_not_an_error(self):
         # A duplicate ack after a timeout already denied must not 500.
