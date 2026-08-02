@@ -1314,6 +1314,16 @@ def _load_session_from_artifacts(sid: str,
         critique=critique_text,
         final_answer=meta.get("final_answer") or "",
         models=dict(models),
+        # 2026-08-02: restore the sandbox roots the original run used.
+        # A follow-up merges the parent's ``extra_roots`` with its own,
+        # so before metadata.json carried them a disk-reopened parent
+        # contributed nothing and the follow-up silently ran with cwd
+        # alone — the same blindness the linter drop caused, arriving
+        # by a different route. Empty for sessions written before this
+        # landed; re-pass ``--add-dir`` on those.
+        extra_roots=list(meta.get("extra_roots") or []),
+        extra_roots_display=list(meta.get("extra_roots_display") or []),
+        cwd_display=meta.get("cwd_display") or str(cwd),
         parent_sid=meta.get("parent_sid"),
         # Consultancy anchor recovered from metadata (None on pre-
         # review-loop sessions → resolver treats the sid as its own

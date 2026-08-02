@@ -78,6 +78,14 @@ release with the auto-generated source archive
   **warning** naming the roots it tried, at both the researcher and
   synthesizer boundaries.
 
+- **Disk-reopened sessions restore their roots.** A follow-up merges
+  the parent's `extra_roots` with its own, and a parent reopened from
+  disk — which is every parent after an engine restart or an idle reap
+  — contributed nothing, because `_load_session_from_artifacts` had no
+  roots to read. Now that `metadata.json` carries them, it does. Empty
+  for sessions written before 2026-08-02: re-pass `--add-dir` when
+  following up on one.
+
 - **Allowed roots in `metadata.json`** — `extra_roots`, `cwd_display`,
   `extra_roots_display`. Their absence made a reopened session's
   `extra_roots = None` look like evidence the roots had been dropped,

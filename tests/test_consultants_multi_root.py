@@ -96,5 +96,63 @@ class TestRunnerInputMerge(unittest.TestCase):
         self.assertEqual(merged, _merge_extra_roots(parent_extras, follow_extras))
 
 
+class TestDiskReopenRestoresRoots(unittest.TestCase):
+    """A disk-reopened parent must contribute its ``extra_roots`` to a
+    follow-up.
+
+    A follow-up merges the parent's roots with its own. Before
+    metadata.json carried them (2026-08-02), a parent reopened from
+    disk — which is every parent after an engine restart or an idle
+    reap — contributed nothing, so the follow-up silently ran with cwd
+    alone. Same blindness as the ``extra_roots`` channel drop, arriving
+    by a different route.
+    """
+
+    def _reopen(self, meta_extra: dict):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from consultants.engine import storage
+        from consultants.server.app import _load_session_from_artifacts
+
+        with tempfile.TemporaryDirectory() as td:
+            cwd = Path(td)
+            sid = "csl-2026-08-02-reopen"
+            sdir = cwd / ".claude-hooks" / "consultants" / sid
+            sdir.mkdir(parents=True)
+            meta = {
+                "session_id": sid, "question": "q", "models": {},
+                "topology": "council", "effort": "high",
+                "final_answer": "a", "turns": [],
+                "duration_seconds": 1.0, "status": "completed",
+                "created": "2026-08-02T07:00:00", "cwd": str(cwd),
+            }
+            meta.update(meta_extra)
+            (sdir / storage.METADATA_FILENAME).write_text(
+                json.dumps(meta))
+            return _load_session_from_artifacts(sid, cwd), str(cwd)
+
+    def test_roots_are_restored_from_metadata(self):
+        state, _ = self._reopen({
+            "extra_roots": ["/srv/real/a", "/srv/real/b"],
+            "extra_roots_display": ["/shared/a", "/shared/b"],
+            "cwd_display": "/shared/proj",
+        })
+        self.assertEqual(state.extra_roots, ["/srv/real/a", "/srv/real/b"])
+        self.assertEqual(state.extra_roots_display,
+                         ["/shared/a", "/shared/b"])
+        self.assertEqual(state.cwd_display, "/shared/proj")
+
+    def test_pre_2026_08_metadata_reopens_with_empty_roots(self):
+        # Sessions written before the fields existed must reopen
+        # cleanly rather than raise — they just carry nothing, and the
+        # follow-up has to re-pass --add-dir.
+        state, cwd = self._reopen({})
+        self.assertEqual(state.extra_roots, [])
+        self.assertEqual(state.extra_roots_display, [])
+        self.assertEqual(state.cwd_display, cwd)
+
+
 if __name__ == "__main__":
     unittest.main()
