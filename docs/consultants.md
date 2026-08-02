@@ -448,6 +448,44 @@ positive cap aborts the *wait* only — the run keeps going server-side).
 This is the verb the Workflow driver builds on (see **Adversarial
 review** below).
 
+### Pre-flight — the run refuses if it can't read the files
+
+Before a single token is spent, the engine extracts every `path.ext`
+and `path.ext:line` the question names and checks each against the
+session's allowed roots (`--cwd` plus every `--add-dir`). Three
+outcomes:
+
+| Verdict | When | Effect |
+|---|---|---|
+| readable | resolves under some root | run proceeds |
+| creatable | file missing, its directory resolves | run proceeds ("write me `pkg/new.py`" must not be blocked) |
+| unreachable | neither the file nor its directory resolves | counted |
+
+The run is **refused** only when the question names paths and *none*
+of them are readable — the wrong-roots signature. A minority of
+unreachable paths logs a warning and continues, because one bad path
+among good ones is a typo, not a misconfigured sandbox. The refusal
+is immediate, costs nothing, and names the paths, the roots that were
+searched, and the fix:
+
+```
+pre-flight refused: none of the 3 file(s) this question names are
+readable under the session's allowed roots.
+Unreachable: eval/scorers.py, a2at/tools_dataset.py, netconfig/generate.py
+Roots searched:
+  - /srv/.../backup_models
+Nothing was spent. Re-run with the right roots — put the subject repo
+in --cwd and pass secondary trees with --add-dir.
+```
+
+This exists because a council that cannot see its subject does not
+fail. It answers confidently from nothing, and the only tell is a wall
+of `[unverified — file not found]` annotations at the very end — 55
+minutes of cloud inference later, in the case that prompted it.
+
+The same check runs on every follow-up: a follow-up can name files the
+original never did, and can add roots of its own.
+
 ---
 
 ## Follow-ups — the v1.1 headline feature

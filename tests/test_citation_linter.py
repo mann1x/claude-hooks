@@ -21,8 +21,11 @@ import unittest
 from pathlib import Path
 
 from consultants.engine.citation_linter import (
+    UNRESOLVED_REASON,
+    CitationIssue,
     extract_citations,
     lint_answer,
+    root_misconfiguration_hint,
     verify_citation,
 )
 
@@ -609,6 +612,73 @@ class TestGraphFastPath(unittest.TestCase):
             self.assertEqual(len(issues), 1)
             self.assertIn("no neighbour", issues[0].replacement)
             self.assertIn("line is in outsider", annotated)
+
+# --------------------------------------------------------------- #
+# root_misconfiguration_hint — telling "wrong roots" from "made up".
+# --------------------------------------------------------------- #
+
+class TestRootMisconfigurationHint(unittest.TestCase):
+    """An unresolvable cite is annotated identically whether the model
+    invented the file or the file is real and sitting under a root the
+    run never received. Those need opposite responses.
+
+    The discriminator is the ratio: fabrication happens in ones and
+    twos among cites that check out, while a broken root list takes
+    down nearly everything at once. csl-2026-08-02-0532-d737 came back
+    12-for-12 unverified against code the researcher had genuinely
+    read, and was nearly filed as hallucination.
+    """
+
+    def _issue(self, match, reason=UNRESOLVED_REASON):
+        return CitationIssue(
+            original_match=match, replacement=match + " [unverified]",
+            reason=reason, path=match.split(":")[0],
+            line_start=1, line_end=None,
+        )
+
+    def test_all_cites_unresolvable_produces_a_hint(self):
+        text = "see a/x.py:1 and b/y.py:2 and c/z.py:3"
+        issues = [self._issue("a/x.py:1"), self._issue("b/y.py:2"),
+                  self._issue("c/z.py:3")]
+        hint = root_misconfiguration_hint(text, issues, ["/only/root"])
+        self.assertIsNotNone(hint)
+        self.assertIn("3/3", hint)
+        self.assertIn("/only/root", hint)
+
+    def test_a_minority_of_misses_produces_no_hint(self):
+        # One bad cite among four is ordinary model error.
+        text = "a/x.py:1 b/y.py:2 c/z.py:3 d/w.py:4"
+        hint = root_misconfiguration_hint(
+            text, [self._issue("a/x.py:1")], ["/root"])
+        self.assertIsNone(hint)
+
+    def test_too_few_cites_produces_no_hint(self):
+        # One wrong cite out of one says nothing about the roots.
+        text = "only a/x.py:1 here"
+        hint = root_misconfiguration_hint(
+            text, [self._issue("a/x.py:1")], ["/root"])
+        self.assertIsNone(hint)
+
+    def test_other_failure_reasons_do_not_count(self):
+        # Line-beyond-EOF means the file was FOUND — that is a model
+        # error, and counting it would fire the roots warning on a
+        # perfectly-configured run.
+        text = "a/x.py:1 b/y.py:2 c/z.py:3"
+        issues = [self._issue(m, reason="line 9 > file_lines=4")
+                  for m in ("a/x.py:1", "b/y.py:2", "c/z.py:3")]
+        self.assertIsNone(
+            root_misconfiguration_hint(text, issues, ["/root"]))
+
+    def test_no_issues_produces_no_hint(self):
+        self.assertIsNone(root_misconfiguration_hint(
+            "a/x.py:1 b/y.py:2 c/z.py:3", [], ["/root"]))
+
+    def test_empty_roots_are_named_explicitly(self):
+        text = "a/x.py:1 b/y.py:2 c/z.py:3"
+        issues = [self._issue(m) for m in
+                  ("a/x.py:1", "b/y.py:2", "c/z.py:3")]
+        hint = root_misconfiguration_hint(text, issues, [])
+        self.assertIn("(none)", hint)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -935,6 +935,12 @@ def build_council_graph(deps: GraphDeps,
                             "question": state.get("question"),
                             "plan": state.get("plan", ""),
                             "cwd": state.get("cwd"),
+                            # Sends carry ONLY the keys in this dict — a
+                            # lane never sees a global channel it was not
+                            # handed. ``extra_roots`` must ride along or
+                            # the lane's citation lint runs with cwd alone
+                            # and calls every --add-dir cite unverified.
+                            "extra_roots": list(state.get("extra_roots") or []),
                             "effort": state.get("effort"),
                             "models": state.get("models", {}),
                             "topology": state.get("topology"),
@@ -985,6 +991,9 @@ def build_council_graph(deps: GraphDeps,
                         "question": state.get("question"),
                         "plan": state.get("plan", ""),
                         "cwd": state.get("cwd"),
+                        # Carried explicitly: a Send lane sees only the
+                        # keys in its own dict (see the researcher fanout).
+                        "extra_roots": list(state.get("extra_roots") or []),
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),
@@ -1182,6 +1191,9 @@ def build_council_graph(deps: GraphDeps,
                     {
                         "question": state.get("question"),
                         "cwd": state.get("cwd"),
+                        # Carried explicitly: a Send lane sees only the
+                        # keys in its own dict (see the researcher fanout).
+                        "extra_roots": list(state.get("extra_roots") or []),
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),
@@ -1335,6 +1347,9 @@ def build_council_graph(deps: GraphDeps,
                         "question": state.get("question"),
                         "plan": state.get("plan", ""),
                         "cwd": state.get("cwd"),
+                        # Carried explicitly: a Send lane sees only the
+                        # keys in its own dict (see the researcher fanout).
+                        "extra_roots": list(state.get("extra_roots") or []),
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),
@@ -1509,6 +1524,9 @@ def build_council_graph(deps: GraphDeps,
                         "question": state.get("question"),
                         "plan": state.get("plan", ""),
                         "cwd": state.get("cwd"),
+                        # Carried explicitly: a Send lane sees only the
+                        # keys in its own dict (see the researcher fanout).
+                        "extra_roots": list(state.get("extra_roots") or []),
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),

@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import time
 import unittest
+from pathlib import Path
 
 from consultants.engine.state_v2 import (
-    CouncilStateV2,                 # noqa: F401  (import smoke)
+    CouncilStateV2,
     Doc,
     InterruptState,
     RuntimeControl,                 # noqa: F401
@@ -220,6 +221,73 @@ class TestInterruptState(unittest.TestCase):
             posted_at=1.0,
         )
         self.assertEqual(intr.payload, {})
+
+
+# --------------------------------------------------------------- #
+# extra_roots — the 2026-08-02 channel-drop regression.
+# --------------------------------------------------------------- #
+
+class TestExtraRootsChannel(unittest.TestCase):
+    """``extra_roots`` must be a declared channel, and every Send
+    payload must carry it.
+
+    LangGraph builds its channels from ``CouncilStateV2`` and silently
+    drops any key of the invoke input that isn't one of them. Between
+    2026-05-18 and 2026-08-02 ``extra_roots`` was written into the
+    initial state by the runner and declared nowhere, so it reached no
+    node: ``state.get("extra_roots")`` was ``None`` in every council
+    run, and the citation linter verified cites against ``[cwd]``
+    alone. Every citation under an ``--add-dir`` root came back
+    "file not found in any allowed_root" — a fully-grounded answer
+    that read as fabricated, after 55 minutes of cloud inference.
+
+    Nothing raised, nothing logged, and each individual link in the
+    chain looked correct in isolation. These two tests are the pins
+    that make the next such drop fail loudly in CI instead.
+    """
+
+    def test_extra_roots_is_a_declared_channel(self):
+        self.assertIn("extra_roots", CouncilStateV2.__annotations__)
+
+    def test_every_send_payload_carrying_cwd_also_carries_extra_roots(self):
+        # A Send delivers ONLY the keys in its own dict — a fanout lane
+        # never inherits a global channel. So declaring the channel is
+        # necessary but not sufficient: each payload has to pass it
+        # along or the lane's own citation lint runs blind.
+        import ast
+
+        repo_root = Path(__file__).resolve().parent.parent
+        src = (repo_root / "consultants" / "engine" / "graph.py").read_text()
+        tree = ast.parse(src)
+
+        checked = 0
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "Send"):
+                continue
+            for arg in node.args:
+                if not isinstance(arg, ast.Dict):
+                    continue
+                keys = {
+                    k.value for k in arg.keys
+                    if isinstance(k, ast.Constant)
+                }
+                if "cwd" not in keys:
+                    continue
+                checked += 1
+                self.assertIn(
+                    "extra_roots", keys,
+                    f"Send payload at graph.py:{node.lineno} passes cwd "
+                    f"but not extra_roots — this lane's citation lint "
+                    f"will run against cwd alone",
+                )
+        self.assertGreaterEqual(
+            checked, 5,
+            "expected at least 5 Send payloads carrying cwd; the "
+            "walk found fewer, so this test is no longer covering "
+            "the fanout paths it was written for",
+        )
 
 
 if __name__ == "__main__":

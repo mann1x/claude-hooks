@@ -1769,6 +1769,17 @@ def researcher_node(state: dict, *,
                         for i in issues
                     ),
                 )
+                from consultants.engine.citation_linter import (
+                    root_misconfiguration_hint,
+                )
+                hint = root_misconfiguration_hint(
+                    text_in, issues, roots,
+                )
+                if hint:
+                    log.warning(
+                        "researcher citation lint sid=%s lane=%s "
+                        "round=%s: %s", sid, lane_idx, this_round, hint,
+                    )
             return linted_text
         except Exception:  # pragma: no cover — defensive
             log.exception(
@@ -2833,6 +2844,12 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                         for i in issues
                     ),
                 )
+                from consultants.engine.citation_linter import (
+                    root_misconfiguration_hint,
+                )
+                hint = root_misconfiguration_hint(text, issues, roots)
+                if hint:
+                    log.warning("synthesizer citation lint: %s", hint)
                 text = linted_text
     except Exception:  # pragma: no cover - defensive
         log.exception(

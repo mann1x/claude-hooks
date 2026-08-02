@@ -309,3 +309,50 @@ class TestSessionsIndex:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("not json")
         assert sessions_index.load_index(tmp_path) == []
+
+
+# ----------------------- allowed roots in metadata ---------------- #
+
+class TestRootsInMetadata:
+    """``extra_roots`` / ``cwd_display`` / ``extra_roots_display`` land
+    in metadata.json.
+
+    Added 2026-08-02. Their absence is what made the
+    csl-2026-08-02-0532-d737 post-mortem read a reopened session's
+    ``extra_roots = None`` as evidence the roots had been dropped —
+    when the field was simply never persisted. That false lead cost an
+    investigation round on the way to a real bug. With the roots on
+    disk, "the roots were wrong" and "the model made it up" are
+    distinguishable after the fact.
+    """
+
+    def test_roots_round_trip_through_metadata_json(self):
+        result = _make_result(
+            extra_roots=["/srv/real/a", "/srv/real/b"],
+            cwd_display="/shared/proj",
+            extra_roots_display=["/shared/a", "/shared/b"],
+        )
+        payload = json.loads(storage.render_metadata(result))
+        assert payload["extra_roots"] == ["/srv/real/a", "/srv/real/b"]
+        assert payload["cwd_display"] == "/shared/proj"
+        assert payload["extra_roots_display"] == ["/shared/a", "/shared/b"]
+
+    def test_defaults_are_empty_not_absent(self):
+        # An empty list and a missing key read very differently in a
+        # post-mortem: one says "no extra roots", the other says
+        # "this version didn't record them".
+        payload = json.loads(storage.render_metadata(_make_result()))
+        assert payload["extra_roots"] == []
+        assert payload["extra_roots_display"] == []
+        assert payload["cwd_display"] is None
+
+    def test_front_matter_stays_list_free(self):
+        # summary.md's YAML is a hand-rolled, deliberately narrow
+        # subset with no list emitter. Adding list fields to
+        # ConsultationResult must not leak into it.
+        text = storage.render_summary(_make_result(
+            extra_roots=["/srv/real/a"],
+            extra_roots_display=["/shared/a"],
+        ))
+        front = text.split("---")[1]
+        assert "extra_roots" not in front

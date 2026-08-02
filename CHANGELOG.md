@@ -43,6 +43,39 @@ release with the auto-generated source archive
 
 ### Added
 
+- **Pre-flight path check (`consultants/engine/preflight.py`).** Before
+  a token is spent, the engine resolves every `path.ext[:line]` the
+  question names against `[cwd, *extra_roots]` and refuses to start
+  when *none* of them are readable. A council that can't see its
+  subject doesn't fail — it answers confidently from nothing, and the
+  only signal arrives 55 minutes later as a wall of `[unverified]`
+  annotations. The check is a handful of `stat` calls against files the
+  question already named.
+
+  Refusal is deliberately narrow. A file that is missing but whose
+  *directory* resolves is `creatable` ("write me `pkg/new.py`"), and a
+  minority of unreachable paths warns rather than blocks — only "the
+  question names paths and not one of them is readable" is the
+  wrong-roots signature. The message names the paths, the roots that
+  were searched, and the fix. Runs on follow-ups too, since a follow-up
+  can name new files and add roots of its own. A pre-flight that itself
+  raises never blocks a run: it exists to save money, not to become a
+  new way for runs to die.
+
+- **`root_misconfiguration_hint()`** in the citation linter. An
+  unresolvable cite is annotated identically whether the model invented
+  the file or the file is real and sitting under a root the run never
+  received — and those need opposite responses. When ≥90% of at least
+  three distinct citations resolve under no root, the linter now logs a
+  **warning** naming the roots it tried, at both the researcher and
+  synthesizer boundaries.
+
+- **Allowed roots in `metadata.json`** — `extra_roots`, `cwd_display`,
+  `extra_roots_display`. Their absence made a reopened session's
+  `extra_roots = None` look like evidence the roots had been dropped,
+  when the field was simply never persisted. summary.md's front matter
+  is untouched: that writer is a deliberately list-free YAML subset.
+
 - **Tool addendum for tooled roles.** The first live bench recorded
   **zero** tool calls in 18 tooled trials: the surface was live and the
   model declined it every time, because each role's system prompt
@@ -79,6 +112,28 @@ release with the auto-generated source archive
   run concurrently and cloud latency cannot drift between them.
 
 ### Fixed
+
+- **`extra_roots` never reached the council.** LangGraph builds its
+  channels from `CouncilStateV2` and silently drops any input key that
+  isn't one of them. `extra_roots` was written into the initial state
+  by the runner on 2026-05-18 and declared nowhere, so
+  `state.get("extra_roots")` was `None` in every node of every run
+  since. The citation linter therefore verified against `[cwd]` alone,
+  and every cite under an `--add-dir` root came back `[unverified —
+  file not found]`.
+
+  Nothing raised and nothing logged. Each link in the chain — CLI,
+  app, runner, node, linter — is correct in isolation, which is what
+  made csl-2026-08-02-0532-d737 read as a hallucinating council after
+  55 minutes of cloud inference: the tool sandbox takes its roots from
+  `GraphDeps`, not from state, so the researcher had genuinely read
+  every file it cited.
+
+  Declaring the channel is necessary but not sufficient — a `Send`
+  delivers only the keys in its own dict, so all five fanout payloads
+  now carry `extra_roots` explicitly. Two regression pins: the channel
+  must be declared, and every `Send` payload passing `cwd` must pass
+  `extra_roots` too (AST walk over `graph.py`).
 
 - **Consultants service mode was reverted by every deploy.** The mode
   has two records: `[service].mode` in

@@ -403,6 +403,24 @@ class CouncilStateV2(TypedDict, total=False):
     # ---- inputs (set at session start, never overwritten) ----
     question: str
     cwd: str
+    # Additional sandbox roots — the CLI's ``--add-dir``, unioned with
+    # the auto-discovered ones, realpath'd (see
+    # ``claude_hooks.allowed_roots``). The nodes that verify citations
+    # read these off state as ``[cwd, *extra_roots]``.
+    #
+    # It MUST be declared here. LangGraph builds its channels from
+    # this schema and silently drops any input key that isn't one, so
+    # an undeclared field reaches no node and reads back as ``None``
+    # — no error, no warning, and every link in the chain that
+    # *writes* it looks correct under inspection. That is exactly what
+    # happened between 2026-05-18 (when runner.py started setting
+    # ``initial["extra_roots"]``) and 2026-08-02: the citation linter
+    # ran with ``[cwd]`` alone and annotated every cite under an
+    # ``--add-dir`` root as "file not found in any allowed_root",
+    # while the tool sandbox — which takes its roots from GraphDeps,
+    # not from state — read those same files without complaint. A
+    # fully-grounded answer came back looking fabricated.
+    extra_roots: list[str]
     models: dict[str, str]
     topology: str
     effort: str

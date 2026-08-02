@@ -97,6 +97,22 @@ class ConsultationResult:
     # instead of walking parent_sid pointers. ``None`` on pre-review-
     # loop sessions; the resolver falls back to the sid itself then.
     root_sid: Optional[str] = None
+    # 2026-08-02: the sandbox roots the run actually used. Persisted
+    # because their absence is what made the csl-2026-08-02-0532-d737
+    # post-mortem read a reopened session's ``extra_roots = None`` as
+    # evidence the roots had been dropped, when the field was simply
+    # never written — a false lead on the way to a real bug. With
+    # these in metadata.json, "the roots were wrong" and "the model
+    # made it up" are distinguishable after the fact.
+    #
+    # ``*_display`` hold the pre-realpath user-facing forms
+    # (``/shared/dev/x`` rather than
+    # ``/srv/dev-disk-by-label-opt/dev/x``); empty when the caller
+    # didn't supply them. Not emitted into summary.md's front matter —
+    # that writer is a deliberately list-free YAML subset.
+    extra_roots: list[str] = field(default_factory=list)
+    cwd_display: Optional[str] = None
+    extra_roots_display: list[str] = field(default_factory=list)
 
 
 # ----------------------- YAML front-matter writer -------------------- #

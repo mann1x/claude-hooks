@@ -163,6 +163,20 @@ _PATH_RE = (
 )
 CITATION_RE = re.compile(_PATH_RE)
 
+#: The ``reason`` on an issue whose path resolved under no allowed
+#: root. Named because :func:`root_misconfiguration_hint` counts it —
+#: it is the one failure mode that is far more often an infrastructure
+#: problem than a model one.
+UNRESOLVED_REASON = "file not found in any allowed_root"
+
+#: Below this many distinct citations, a high miss ratio says nothing
+#: — one wrong cite out of one is a normal model error.
+_HINT_MIN_CITES = 3
+
+#: At or above this share of unresolvable cites, the roots are the
+#: likelier explanation than the model.
+_HINT_RATIO = 0.9
+
 
 @dataclass(frozen=True)
 class CitationIssue:
@@ -239,7 +253,7 @@ def verify_citation(
         return CitationIssue(
             original_match=full_cite,
             replacement=f"{full_cite} [unverified — file not found]",
-            reason="file not found in any allowed_root",
+            reason=UNRESOLVED_REASON,
             path=path,
             line_start=line_start,
             line_end=line_end,
@@ -295,6 +309,54 @@ def verify_citation(
             line_end=line_end,
         )
     return None
+
+
+def root_misconfiguration_hint(
+    answer_text: str,
+    issues: Sequence[CitationIssue],
+    allowed_roots: Sequence[str],
+) -> Optional[str]:
+    """Return a warning message when the citations look like a *roots*
+    problem rather than a model problem, else ``None``.
+
+    A citation that resolves under no allowed root is annotated
+    identically whether the model invented the file or the file is
+    real and sitting under a root the run never received. Those two
+    cases need opposite responses, and the annotation alone cannot
+    tell them apart — the csl-2026-08-02-0532-d737 consultancy came
+    back with 12/12 cites marked unverified against a codebase the
+    researcher had genuinely read, and was nearly reported as
+    hallucination.
+
+    The discriminator is the ratio. A model that fabricates does it in
+    ones and twos among cites that check out; a broken root list takes
+    down nearly everything at once. So: at least
+    ``_HINT_MIN_CITES`` distinct citations, of which at least
+    ``_HINT_RATIO`` resolve nowhere.
+
+    The message names the roots that *were* tried, because the next
+    question an operator asks is always "which roots?".
+    """
+    distinct = {c[0] for c in extract_citations(answer_text)}
+    if len(distinct) < _HINT_MIN_CITES:
+        return None
+    unresolved = {
+        i.original_match for i in issues
+        if i.reason == UNRESOLVED_REASON
+    }
+    if not unresolved:
+        return None
+    ratio = len(unresolved) / len(distinct)
+    if ratio < _HINT_RATIO:
+        return None
+    roots_txt = ", ".join(str(r) for r in allowed_roots) or "(none)"
+    return (
+        f"{len(unresolved)}/{len(distinct)} distinct citations "
+        f"({ratio:.0%}) resolved under NO allowed root. At this rate "
+        f"the root list is the likelier fault, not the model — check "
+        f"that every --add-dir reached the run. Roots tried: "
+        f"{roots_txt}"
+    )
 
 
 def lint_answer(
@@ -784,4 +846,6 @@ __all__ = [
     "extract_citations",
     "verify_citation",
     "lint_answer",
+    "root_misconfiguration_hint",
+    "UNRESOLVED_REASON",
 ]

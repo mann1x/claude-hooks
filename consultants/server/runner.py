@@ -69,6 +69,32 @@ def make_runner(*, ollama_base_url: str):
         # auto-discovery by the HTTP layer). Empty tuple → tool layer
         # falls back to the bare ``execute`` fast path.
         extra_roots = tuple(runner_input.get("extra_roots") or ())
+        # Display forms (pre-realpath, e.g. ``/shared/dev/x``) for the
+        # log line and for metadata.json. Resolved here rather than
+        # inside the ``if extra_roots:`` log block below so the
+        # artifact writer can read them unconditionally.
+        cwd_display: str = runner_input.get("cwd_display") or cwd
+        extra_roots_display = tuple(
+            runner_input.get("extra_roots_display") or extra_roots
+        )
+        if len(extra_roots_display) != len(extra_roots):
+            extra_roots_display = extra_roots
+
+        # Pre-flight, before a single token is spent: can this run
+        # actually read the files the question is about? A council
+        # that can't doesn't fail — it answers confidently from
+        # nothing and the only tell is a wall of "[unverified — file
+        # not found]" at the end, 55 minutes later. See
+        # :mod:`consultants.engine.preflight` for why "none of them
+        # resolve" is the blocking condition and "some" only warns.
+        if _preflight_refused(
+            state, question, cwd=cwd, extra_roots=extra_roots,
+            cwd_display=cwd_display,
+            extra_roots_display=extra_roots_display,
+            label="council",
+        ):
+            return
+
         enabled = tuple(cc.enabled_roles(cfg))
 
         # Effort-based critic strategy:
@@ -231,14 +257,8 @@ def make_runner(*, ollama_base_url: str):
             # paths) when available so /shared/dev/<x> shows in the log
             # instead of /srv/dev-disk-by-label-opt/dev/<x>. Falls back to
             # realpath rendering when the upstream didn't pass display info
-            # (legacy / disk-reopened sessions).
-            cwd_display = runner_input.get("cwd_display") or cwd
-            extra_roots_display = tuple(
-                runner_input.get("extra_roots_display")
-                or extra_roots
-            )
-            if len(extra_roots_display) != len(extra_roots):
-                extra_roots_display = extra_roots
+            # (legacy / disk-reopened sessions). Both resolved at the top
+            # of this function.
             log.info(
                 "consultants sid=%s allowed roots:\n%s",
                 state.sid,
@@ -446,6 +466,9 @@ def make_runner(*, ollama_base_url: str):
             retries_by_role=dict(final_state.get(
                 "retries_by_role") or {}),
             root_sid=getattr(state, "root_sid", None) or state.sid,
+            extra_roots=list(extra_roots),
+            cwd_display=cwd_display,
+            extra_roots_display=list(extra_roots_display),
         )
         storage.write_consultation(result, cwd=Path(cwd))
 
@@ -545,6 +568,21 @@ def make_follow_up_runner(*, ollama_base_url: str):
                 seen.add(r)
                 merged.append(r)
         extra_roots = tuple(merged)
+
+        # Pre-flight before anything is built. Placed above the
+        # recorder and the chat clients so a refusal costs nothing and
+        # leaves no half-open transcript.db behind. A follow-up can
+        # name files the original never did and can add roots of its
+        # own, so the check runs again rather than inheriting the
+        # parent's verdict. Display forms aren't resolved this early —
+        # the realpaths are what the search actually used, which is
+        # the honest thing to print in a refusal anyway.
+        if _preflight_refused(
+            state, question, cwd=cwd, extra_roots=extra_roots,
+            cwd_display=cwd, extra_roots_display=extra_roots,
+            label="council follow-up",
+        ):
+            return
 
         # Topology: researcher + synthesizer always; critic only at
         # high/max effort (matches the main runner's gate). x-tiers
@@ -669,9 +707,14 @@ def make_follow_up_runner(*, ollama_base_url: str):
             cfg.roles["synthesizer"].extra_models or []
         )
 
+        # Display forms, resolved unconditionally so the artifact
+        # writer below can persist them even when this follow-up added
+        # no extra roots (the log block only fires when it did).
+        cwd_display_fu: str = runner_input.get("cwd_display") or cwd
+        extra_roots_display_fu: tuple[str, ...] = ()
+
         if extra_roots:
             # 2026-05-18: render display form like run_council does.
-            cwd_display_fu = runner_input.get("cwd_display") or cwd
             # ``extra_roots`` here is the parent ∪ follow-up merged
             # realpath list. Build the parallel display form from the
             # follow-up's body-extras-display and the parent's stored
@@ -920,6 +963,9 @@ def make_follow_up_runner(*, ollama_base_url: str):
                 "retries_by_role") or {}),
             parent_sid=state.parent_sid,
             root_sid=getattr(state, "root_sid", None) or state.sid,
+            extra_roots=list(extra_roots),
+            cwd_display=cwd_display_fu,
+            extra_roots_display=list(extra_roots_display_fu),
         )
         storage.write_consultation(result, cwd=Path(cwd))
 
@@ -1395,6 +1441,50 @@ def _finalize_recorder(recorder, *, status: str,
         recorder.close()
     except Exception as exc:  # pragma: no cover
         log.warning("recorder.close raised: %s", exc)
+
+
+def _preflight_refused(state, question: str, *, cwd: str,
+                       extra_roots: tuple, cwd_display: str,
+                       extra_roots_display: tuple,
+                       label: str) -> bool:
+    """Run the path pre-flight; on a blocking verdict mark the session
+    failed, write the artifacts, and return True so the caller returns
+    without spending anything.
+
+    Never raises: a pre-flight that itself breaks must not be able to
+    stop a run that would otherwise have worked — the check exists to
+    save money, not to become a new failure mode.
+    """
+    try:
+        from consultants.engine.preflight import check_question_paths
+        pf = check_question_paths(
+            question, roots=[cwd, *extra_roots],
+        )
+    except Exception:  # pragma: no cover — defensive
+        log.exception("preflight raised; continuing without it")
+        return False
+
+    if not pf.blocking:
+        warn = pf.warning()
+        if warn:
+            log.warning("%s sid=%s preflight: %s",
+                        label, state.sid, warn)
+        return False
+
+    msg = pf.message(
+        display_roots=[cwd_display, *extra_roots_display],
+    )
+    log.error("%s sid=%s %s", label, state.sid, msg)
+    state.status = "failed"
+    state.error = msg
+    state.finished_at = time.time()
+    for r in list(state.progress):
+        state.progress[r] = "done"
+    try:
+        _write_failed_artifacts(state, cwd, question, RuntimeError(msg))
+    except Exception:  # pragma: no cover — defensive
+        log.exception("preflight failed-artifact write failed")
+    return True
 
 
 def _write_failed_artifacts(state, cwd: str, question: str,
