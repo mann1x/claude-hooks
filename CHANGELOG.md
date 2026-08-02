@@ -109,6 +109,23 @@ release with the auto-generated source archive
   for two months. The regression test now requires **every** key any
   Send payload passes to be a declared channel.
 
+- **Audit: `/cancel` and `/interrupt` are advisory, and now say so.**
+  `POST /cancel` carried a comment claiming "nodes consult this at
+  entry and exit early". No node does — nothing in
+  `consultants/engine/` reads `cancel_requested` or `pause_requested`,
+  and none of the four `should_interrupt_*` policies has a caller
+  outside its own tests. On a run that is mid-graph, a keep-partial
+  cancel records the request and the run streams to completion. The
+  response now reports `stops_the_run` (true only for
+  `--discard-partial`, which closes the session and *is* what the
+  runner's wait loops break on), the CLI prints a note when it is
+  false, and `interrupt_policy`'s module docstring states which of its
+  four decision points are unimplemented and which two were solved
+  another way — tool permission by `tool_approval`'s per-lane park,
+  the adversary checkpoint by the runner's. No behaviour change; the
+  point is that "cancelled" and "asked to cancel" stop reading the
+  same.
+
 - **`events --milestones` / `--kinds`.** The unfiltered SSE stream is
   dominated by `llm_call` and `tool_call` records — hundreds per
   council, each a full payload — which makes it unusable as a monitor

@@ -1,5 +1,30 @@
 """Centralized HITL (human-in-the-loop) interrupt-policy decisions.
 
+.. warning::
+
+   **AUDIT 2026-08-02 — none of the four policies below has a caller.**
+   Every ``should_interrupt_*`` function is exercised only by its unit
+   tests; no node in ``consultants/engine/`` consults one, and nothing
+   reads ``runtime_control.pause_requested`` or ``cancel_requested``.
+   The prose below describes a design, not the running system. Two of
+   the four decision points were since solved a different way and the
+   difference is deliberate, not an oversight:
+
+   * *Tool permission* (#3) is handled by
+     :mod:`consultants.engine.tool_approval`, which parks the calling
+     lane inside its tool executor rather than interrupting the graph.
+     A graph-level interrupt would idle every x-tier sibling to wait on
+     one lane's write. See the SUPERSEDED note on
+     :func:`should_interrupt_on_tool_permission`.
+   * The *adversary checkpoint* uses the same park-poll-deadline shape
+     in the runner (``_await_adversary_ack``).
+
+   #1, #2 and #4 remain unimplemented: ``review_before_synthesis``,
+   the low-confidence pause, and ``POST /interrupt`` are advisory —
+   they record a request that no node acts on. Wire them or delete
+   them; leaving them looking implemented is how ``/cancel`` came to
+   carry a comment asserting behaviour that did not exist.
+
 The actual ``interrupt()`` call from ``langgraph.types`` is per-node
 (it has to be — only the node knows what payload to pose to the
 user), but **whether to call it** is a policy question that benefits

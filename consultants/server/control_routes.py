@@ -767,11 +767,25 @@ def register_control_routes(app: "FastAPI") -> None:
             discard_partial=discard, reason=reason,
         )
         # If the run is still going, flip cancel_requested on
-        # runtime_control. Nodes consult this at entry and exit
-        # early. We don't have RunControl.request_drain on a sync
-        # CompiledStateGraph — the cooperative flag is the
-        # mechanism. For tests + future async work, this is the
-        # extension point.
+        # runtime_control.
+        #
+        # AUDIT 2026-08-02 — this comment used to claim "nodes consult
+        # this at entry and exit early". No node does. Nothing in
+        # ``consultants/engine/`` reads ``cancel_requested`` or
+        # ``pause_requested``; both are written and never read. So on a
+        # graph that is mid-invoke, cancel is a *record* that someone
+        # asked, not a stop: the flag is set, the adversary checkpoint
+        # is released, and the run streams to completion. The two
+        # things that do take effect immediately are
+        # ``discard_partial`` (closes the session, which the wait loops
+        # break on) and the checkpoint release below.
+        #
+        # A node-entry check is the honest mechanism and the extension
+        # point is here — but it means touching all eight node bodies,
+        # so it is deliberately not smuggled in with the approval
+        # channel. The response now reports ``stops_the_run`` so a
+        # caller isn't told a request was honoured when it was only
+        # recorded.
         if (getattr(s, "status", "") == "running"
                 and getattr(s, "_compiled", None) is not None
                 and getattr(s, "_thread_config", None) is not None):
@@ -802,6 +816,11 @@ def register_control_routes(app: "FastAPI") -> None:
             "ok": True,
             "discard_partial": discard,
             "applied": _serialize_for_json(req.state_delta),
+            # False whenever the graph is mid-invoke and the caller
+            # didn't ask to discard: the flag is recorded, the run
+            # finishes. Reported rather than inferred so "cancelled"
+            # and "asked to cancel" don't read the same.
+            "stops_the_run": bool(discard),
         }
 
     # -------------------- GET /events (SSE) -------------------- #

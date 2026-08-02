@@ -545,6 +545,28 @@ class TestCancel(unittest.TestCase):
         r = c.post("/v1/consult/csl-cl/cancel", json={})
         self.assertEqual(r.status_code, 410)
 
+    def test_reports_that_a_plain_cancel_does_not_stop_the_run(self):
+        # No node reads ``cancel_requested`` (audit 2026-08-02), so a
+        # cancel without ``discard_partial`` records the request and the
+        # run streams to completion. Saying so is the point: a caller
+        # told "ok" would otherwise believe the run had been stopped.
+        c, app = _client()
+        _install_session(app, "csl-c2", compiled=_FakeCompiledGraph())
+        r = c.post(
+            "/v1/consult/csl-c2/cancel", json={"discard_partial": False},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.json()["stops_the_run"])
+
+    def test_discard_partial_does_stop_the_run(self):
+        c, app = _client()
+        _install_session(app, "csl-c3", compiled=_FakeCompiledGraph())
+        r = c.post(
+            "/v1/consult/csl-c3/cancel", json={"discard_partial": True},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["stops_the_run"])
+
 
 # ============================================================== #
 # GET /events (SSE) — light coverage; the heavy SSE plumbing tests

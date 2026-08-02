@@ -1326,7 +1326,16 @@ def cmd_adversary_ack(args, base: str) -> int:
 def cmd_cancel(args, base: str) -> int:
     """POST /v1/consult/<sid>/cancel — flip cancel_requested.
     ``--keep-partial`` is the default; pass ``--discard-partial`` to
-    delete the checkpoint file too."""
+    delete the checkpoint file too.
+
+    Note what the default does *not* do: no node reads
+    ``cancel_requested`` (audit 2026-08-02), so on a run that is
+    mid-graph a keep-partial cancel records the request and the run
+    streams to completion. ``--discard-partial`` closes the session,
+    which the runner's wait loops do break on. The response carries
+    ``stops_the_run`` so the distinction is visible rather than
+    inferred.
+    """
     body = {
         "discard_partial": bool(args.discard_partial),
         "reason": args.reason or "user-cancel",
@@ -1334,6 +1343,13 @@ def cmd_cancel(args, base: str) -> int:
     out = _http("POST",
                 f"{base}/v1/consult/{args.sid}/cancel", body=body)
     print(json.dumps({"ok": True, **out}, indent=2))
+    if not out.get("stops_the_run", True):
+        print(
+            "note: cancel recorded, but the run is not stopped — no node "
+            "acts on the flag. Use --discard-partial to close the "
+            "session.",
+            file=sys.stderr,
+        )
     return 0
 
 

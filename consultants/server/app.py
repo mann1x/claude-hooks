@@ -33,7 +33,12 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
+
+if TYPE_CHECKING:  # pragma: no cover — the runtime import is lazy, in
+    # ``build_app``, so the module still imports without fastapi. This
+    # only teaches the checker what the string annotation refers to.
+    from fastapi import FastAPI
 
 from consultants import config as cc
 from consultants.engine import sessions_index, storage
