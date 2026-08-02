@@ -35,6 +35,8 @@ import pathlib
 import re
 import unittest
 
+import pytest
+
 REPO = pathlib.Path(__file__).resolve().parent.parent
 DEPLOY = REPO / "scripts" / "deploy.py"
 VERIFY = REPO / "scripts" / "verify_deploy.py"
@@ -198,15 +200,6 @@ class TestTheRoutineIsWrittenDown(unittest.TestCase):
         )
 
 
-#: Skills known to ship without YAML frontmatter. Without ``name:`` /
-#: ``description:`` a file cannot appear in the skill listing at all, so
-#: these are effectively un-invokable — pre-existing debt, found
-#: 2026-08-02 while auditing the deploy path and deliberately NOT fixed
-#: in the same change. The allowlist exists so the debt is visible and
-#: cannot grow: a new skill missing frontmatter fails the suite.
-_NO_FRONTMATTER_DEBT = {"consolidate", "reflect"}
-
-
 def _skill_frontmatter(src: pathlib.Path) -> str | None:
     text = src.read_text(encoding="utf-8")
     if not text.startswith("---\n"):
@@ -215,47 +208,66 @@ def _skill_frontmatter(src: pathlib.Path) -> str | None:
     return parts[1] if len(parts) > 2 else None
 
 
-class TestSkillsInRepoAreWellFormed(unittest.TestCase):
-    """Cheap guard so the thing being synced is loadable at all."""
+def _skills() -> list[pathlib.Path]:
+    return sorted((REPO / ".claude" / "skills").glob("*/SKILL.md"))
 
-    def test_no_new_skill_ships_without_frontmatter(self):
-        offenders = {
-            src.parent.name
-            for src in sorted((REPO / ".claude" / "skills").glob("*/SKILL.md"))
-            if _skill_frontmatter(src) is None
-        }
-        new = offenders - _NO_FRONTMATTER_DEBT
+
+class TestSkillsInRepoAreWellFormed(unittest.TestCase):
+    """The frontmatter is the whole interface: without a parseable
+    ``name:`` / ``description:`` a skill either never appears in the
+    listing, or appears with the wrong description and is therefore
+    never chosen. Neither failure says anything at runtime."""
+
+    def test_every_skill_has_frontmatter(self):
+        missing = [s.parent.name for s in _skills()
+                   if _skill_frontmatter(s) is None]
         self.assertEqual(
-            new, set(),
-            f"skill(s) without YAML frontmatter: {sorted(new)} — without "
+            missing, [],
+            f"skill(s) without YAML frontmatter: {missing} — without "
             "name:/description: they never appear in the skill listing",
         )
 
-    def test_the_debt_list_does_not_outlive_the_debt(self):
-        # When one is fixed, drop it from the allowlist rather than
-        # leaving a stale exemption that would hide a regression.
-        offenders = {
-            src.parent.name
-            for src in sorted((REPO / ".claude" / "skills").glob("*/SKILL.md"))
-            if _skill_frontmatter(src) is None
-        }
-        stale = _NO_FRONTMATTER_DEBT - offenders
-        self.assertEqual(
-            stale, set(),
-            f"{sorted(stale)} now has frontmatter — remove it from "
-            "_NO_FRONTMATTER_DEBT",
+    def test_the_frontmatter_actually_parses_as_yaml(self):
+        """Regex-checking ``^name:`` is not enough, and this is why.
+
+        On 2026-08-02 three skills — including ``consultants`` — carried
+        a description containing ``": "`` unquoted. That is not a valid
+        plain YAML scalar, so the block failed to parse and the
+        description silently fell back to the file's H1. The skill still
+        listed, with the wrong summary: the one string that decides
+        whether the skill gets chosen at all.
+        """
+        yaml = pytest.importorskip(
+            "yaml",
+            reason="PyYAML (requirements-dev.txt) is needed to parse "
+                   "skill frontmatter; without it this check is blind",
         )
+        for src in _skills():
+            head = _skill_frontmatter(src)
+            self.assertIsNotNone(head, f"{src.parent.name}: no frontmatter")
+            try:
+                data = yaml.safe_load(head)
+            except Exception as e:  # noqa: BLE001 — report which and why
+                self.fail(f"{src.parent.name}: frontmatter is not valid "
+                          f"YAML ({type(e).__name__}: {e}). A description "
+                          "containing ': ' must be quoted.")
+            self.assertIsInstance(
+                data, dict, f"{src.parent.name}: frontmatter is not a mapping")
+            for key in ("name", "description"):
+                self.assertTrue(
+                    isinstance(data.get(key), str) and data[key].strip(),
+                    f"{src.parent.name}: frontmatter has no usable {key}:",
+                )
 
     def test_skill_dir_name_matches_the_declared_name(self):
         # A mismatch installs under one name and is invoked under
         # another — the skill silently never loads.
-        for src in sorted((REPO / ".claude" / "skills").glob("*/SKILL.md")):
+        for src in _skills():
             head = _skill_frontmatter(src)
-            if head is None:
-                continue
+            self.assertIsNotNone(head, f"{src.parent.name}: no frontmatter")
             m = re.search(r"^name:\s*(\S+)", head, re.M)
             self.assertIsNotNone(m, f"{src.parent.name}: no name:")
             self.assertEqual(
-                m.group(1), src.parent.name,
+                m.group(1).strip('"\''), src.parent.name,
                 f"{src.parent.name}: frontmatter name is {m.group(1)!r}",
             )

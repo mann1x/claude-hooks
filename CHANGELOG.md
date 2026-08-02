@@ -175,10 +175,22 @@ release with the auto-generated source archive
   which command to use. Adding a new class of deployable artifact means
   adding it to that test first.
 
-  Also found while auditing: `consolidate` and `reflect` ship without
-  YAML frontmatter, so they cannot appear in the skill listing at all.
-  Recorded as an explicit allowlist rather than fixed in the same
-  change — the list makes the debt visible and stops it growing.
+- **Skill frontmatter: two missing, three unparseable.** `consolidate`
+  and `reflect` shipped with no YAML frontmatter at all, so they could
+  not appear in the skill listing. Adding it exposed the larger problem:
+  a description containing an unquoted `": "` is not a valid plain YAML
+  scalar, so the block failed to parse and the description silently fell
+  back to the file's H1. `consultants` had carried that defect too —
+  meaning the one string that decides whether the council skill is ever
+  chosen was being replaced by "`/consultants — multi-agent council
+  dispatcher`". All descriptions are quoted now.
+
+  The completeness test was complicit: it regexed `^name:` and saw
+  nothing wrong. It **parses** the frontmatter now and requires a usable
+  `name` and `description`, which is the check that would have caught
+  all three. `PyYAML` is declared in `requirements-dev.txt` — it was
+  present on both hosts but undeclared, so a clean checkout would have
+  quietly lost the check.
 
 - **`/cancel` and `/interrupt` actually stop the run now.** Yesterday's
   audit found both were advisory: they set a flag on `runtime_control`

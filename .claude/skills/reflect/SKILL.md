@@ -1,3 +1,8 @@
+---
+name: reflect
+description: "Memory pattern synthesis: read recent memories across the configured providers, group them by observation type (fix, preference, decision, gotcha), ask a model to name the recurring patterns, and append the resulting rules to ~/.claude/CLAUDE.md. Runs `python -m claude_hooks.reflect`, with `--dry-run` to see the rules without writing them. Use when the user asks to reflect on, synthesize or review recent learnings, after a long session with many fixes or decisions, or as periodic (weekly) distillation."
+---
+
 # /reflect — Memory Pattern Synthesis
 
 Analyze recent Qdrant memories for recurring patterns and generate CLAUDE.md rules.

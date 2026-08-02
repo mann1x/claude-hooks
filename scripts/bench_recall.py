@@ -165,7 +165,10 @@ def _overlap_at_k(baseline: list[str], candidate: list[str], k: int) -> float:
     """Jaccard overlap of top-k contents (normalized whitespace)."""
     if not baseline or not candidate:
         return 0.0
-    norm = lambda xs: {" ".join(x.split()) for x in xs[:k]}
+
+    def norm(xs: list[str]) -> set[str]:
+        return {" ".join(x.split()) for x in xs[:k]}
+
     b, c = norm(baseline), norm(candidate)
     inter = len(b & c)
     return round(inter / max(1, k), 3)

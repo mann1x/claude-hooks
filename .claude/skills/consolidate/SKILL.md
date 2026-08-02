@@ -1,3 +1,8 @@
+---
+name: consolidate
+description: "Memory-store cleanup: find near-duplicate memories, compress old entries, and prune stale ones across the configured providers (pgvector / sqlite_vec / Qdrant / Memory KG). Runs `python -m claude_hooks.consolidate`, with `--dry-run` to preview counts without modifying anything. Use when the user asks to clean up, deduplicate or consolidate memories, when recall keeps returning redundant near-identical hits, or as periodic (monthly) maintenance to keep the store lean."
+---
+
 # /consolidate — Memory Cleanup
 
 Find duplicate memories, compress old entries, and prune stale ones.
