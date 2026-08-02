@@ -310,8 +310,54 @@ class SessionState:
         # cancel or pause has actually been requested, so an untouched
         # run's status stays byte-identical.
         if self._run_control is not None:
-            out.update(self._run_control.snapshot())
+            snap = self._run_control.snapshot()
+            if snap.get("pause_state") == "pending":
+                # RunControl knows a pause is registered but not why
+                # nothing has taken it. This object is the only one
+                # holding both halves, so the correlation belongs here.
+                snap.update(self._pause_blockers())
+            out.update(snap)
         return out
+
+    def _pause_blockers(self) -> dict:
+        """Why a registered pause hasn't parked anything yet.
+
+        A pause takes effect where the next node *enters*. When the
+        runner is already sitting in one of its own waits, no node
+        enters — and the pause reads as "requested, nothing happened",
+        which is the shape of every bug in this release. Name the wait
+        instead, and say what clears it.
+        """
+        blockers: list[dict] = []
+        deadline = self._checkpoint_deadline_ts
+        if deadline is not None or self._adversary_checkpoint_active:
+            blockers.append({
+                "what": "adversary_checkpoint",
+                "deadline_ts": deadline,
+                "clears_with": "adversary-ack (or resume, which does both)",
+            })
+        if self._tool_approvals is not None:
+            parked = self._tool_approvals.pending_public()
+            if parked:
+                blockers.append({
+                    "what": "tool_approval",
+                    "requests": [p["request_id"] for p in parked],
+                    "deadline_ts": min(
+                        (p["deadline_ts"] for p in parked), default=None),
+                    "clears_with": "tool-ack --allow|--deny",
+                })
+        if not blockers:
+            # Nothing is holding the runner: a node is simply mid-call
+            # and will hit the gate when it finishes.
+            return {"pause_blocked_by": None}
+        return {
+            "pause_blocked_by": blockers,
+            "pause_note": (
+                "the pause is registered but no node can reach it while "
+                + ", ".join(b["what"] for b in blockers)
+                + " is outstanding"
+            ),
+        }
 
     def bump_activity(self) -> None:
         """Defer the idle reaper. Called on every poll, follow-up

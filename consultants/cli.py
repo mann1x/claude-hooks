@@ -1303,6 +1303,26 @@ def cmd_pause(args, base: str) -> int:
             "finishing.",
             file=sys.stderr,
         )
+    else:
+        blockers = out.get("pause_blocked_by")
+        if blockers:
+            names = ", ".join(b.get("what", "?") for b in blockers)
+            clears = "; ".join(
+                b.get("clears_with", "") for b in blockers if b.get("clears_with")
+            )
+            print(
+                f"note: pause is PENDING, not in effect — no node can "
+                f"reach it while {names} is outstanding. Clear it with: "
+                f"{clears}. Until then the run is waiting, not paused.",
+                file=sys.stderr,
+            )
+        elif out.get("pause_state") == "pending":
+            print(
+                "note: pause is PENDING — it takes effect where the "
+                "next node enters, so a node already mid-call finishes "
+                "first. Watch status for pause_state=parked.",
+                file=sys.stderr,
+            )
     return 0
 
 

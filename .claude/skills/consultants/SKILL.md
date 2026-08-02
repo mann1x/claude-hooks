@@ -283,14 +283,17 @@ you**, and either one means "answer me":
   you how many lanes one answer releases. Details in
   [Subflow I](#subflow-i--tool-surface).
 
-- `paused` — someone called `pause`. The node that entered next is
-  parked; its x-tier siblings keep running. Release with
-  `claude-consultants resume <sid>`. `paused: true` with an empty
-  `paused_roles` just means no node has reached the gate yet — if it
-  stays that way, look at `adversary_checkpoint_deadline_ts` in the
-  same payload: the runner parks there for up to 30 minutes before the
-  synthesizer and no node enters meanwhile. One `resume` releases both
-  and says so (`pause_release+adversary_ack`).
+- `paused` — someone called `pause`. Read **`pause_state`** with it,
+  never `paused` alone: `parked` means a node is blocked right now
+  (`paused_roles` names it, and its x-tier siblings keep running);
+  `pending` means the request is registered and nothing has stopped
+  yet. `pending` for a few seconds is normal — a pause lands at a node
+  boundary. `pending` for longer means something is holding the runner,
+  and `pause_blocked_by` names it plus the verb that clears it (the
+  adversary checkpoint, or a parked `ask_human` approval). Relay that
+  to the user rather than reporting the run as paused. One `resume`
+  releases the pause and the checkpoint together
+  (`pause_release+adversary_ack`).
 - `cancel_requested` — the run is draining. Every remaining node skips
   and the run ends with status `cancelled` and **no final answer**.
   Don't wait for one.

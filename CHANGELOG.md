@@ -182,6 +182,20 @@ release with the auto-generated source archive
     already spent everything up to that point and abandoning the run
     would waste it.
 
+  **`pause_state` distinguishes "registered" from "in effect".**
+  `paused: true` conflated the two, and a pause lands at a node
+  *boundary* — so when the runner is already sitting in one of its own
+  waits, nothing enters and the pause reads as "requested, nothing
+  happened". `pending` vs `parked` says which, `paused_roles` names the
+  blocked node, and `pause_blocked_by` names the wait that is holding
+  it — the adversary checkpoint (up to 30 min before the synthesizer)
+  or a parked `ask_human` approval — each with the verb that clears it.
+  `POST /interrupt` returns the same fields at request time, because
+  `{"ok": true}` alone reads as "the run has stopped", and the CLI
+  prints the blocker rather than leaving a human to infer it from a
+  second endpoint. `pause_blocked_by: null` is its own answer: nothing
+  is holding the runner, a node is just mid-call.
+
   Two bugs the first live run found, both fixed before this shipped:
   `/resume` tested `_adversary_checkpoint_active` before the pause, and
   since that flag spans the whole runner-owned window it kept answering

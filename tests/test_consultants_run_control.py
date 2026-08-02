@@ -415,6 +415,42 @@ class TestGraphDepsWiring(unittest.TestCase):
                 "a _wrap site does not install the cancel/pause gate")
 
 
+class TestPauseStateIsExplicit(unittest.TestCase):
+    """``paused: true`` conflated "registered" with "something stopped".
+
+    A run can sit registered-but-not-parked for half an hour while the
+    runner is inside the adversary checkpoint (observed on
+    ``csl-2026-08-02-1054-38cf``), and reading that as "paused" is how a
+    pause looks like it did nothing.
+    """
+
+    def test_a_fresh_pause_is_pending(self):
+        rc = RunControl("csl-x")
+        rc.request_pause("hold")
+        assert rc.snapshot()["pause_state"] == "pending"
+        assert "paused_roles" not in rc.snapshot()
+
+    def test_it_becomes_parked_once_a_node_reaches_the_gate(self):
+        rc = RunControl("csl-x", pause_timeout_s=20.0)
+        rc.request_pause("hold")
+        threading.Thread(target=lambda: rc.check("researcher"),
+                         daemon=True).start()
+        deadline = time.time() + 5
+        while time.time() < deadline and not rc.paused_roles:
+            time.sleep(0.01)
+        snap = rc.snapshot()
+        assert snap["pause_state"] == "parked"
+        assert snap["paused_roles"] == ["researcher"]
+        rc.release_pause()
+
+    def test_no_pause_state_when_nothing_is_paused(self):
+        # Parity: the key must not appear on an untouched run.
+        rc = RunControl("csl-x")
+        assert "pause_state" not in rc.snapshot()
+        rc.request_cancel()
+        assert "pause_state" not in rc.snapshot()
+
+
 class TestPauseDeadlineIsMeasuredFromTheRequest(unittest.TestCase):
     """Observed live on ``csl-2026-08-02-1042-1036``.
 

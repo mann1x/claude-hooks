@@ -561,13 +561,40 @@ already advertising.
 and the parked roles) only once something has been requested, so an
 untouched run's payload is unchanged.
 
-**`paused: true` with an empty `paused_roles` is normal, briefly** — the
-pause is registered and the next node to enter will take it. If it stays
-that way, check `adversary_checkpoint_deadline_ts` in the same payload:
-the runner parks there for up to 30 minutes before the synthesizer, and
-no node enters during that window, so a pause issued into it looks like
-nothing happened. `resume` releases both at once and reports
-`pause_release+adversary_ack`. `cancel` cuts through either.
+**`pause_state` says whether anything has actually stopped.** `paused:
+true` on its own conflated two situations that could not be more
+different to a caller waiting on one:
+
+| `pause_state` | meaning |
+|---|---|
+| `pending` | the request is registered; the next node to *enter* will take it. Nothing has stopped yet. |
+| `parked` | a node is blocked right now — `paused_roles` names it. |
+
+A pause takes effect at a node boundary, so `pending` is normal for a
+few seconds while a node finishes its current call. It is *not* normal
+for half an hour — and when the runner is sitting in one of its own
+waits, no node enters at all. `pause_blocked_by` names that wait rather
+than leaving you to infer it:
+
+```json
+{"paused": true, "pause_state": "pending",
+ "pause_blocked_by": [{"what": "adversary_checkpoint",
+                       "deadline_ts": 1785662684.0,
+                       "clears_with": "adversary-ack (or resume, which does both)"}],
+ "pause_note": "the pause is registered but no node can reach it while adversary_checkpoint is outstanding"}
+```
+
+Two waits can hold it: the **adversary checkpoint** (up to 30 minutes
+before the synthesizer) and a **parked `ask_human` tool approval**. Both
+are reported, with the verb that clears each. `pause_blocked_by: null`
+means nothing is holding the runner — a node is simply mid-call and will
+hit the gate when it finishes.
+
+The same fields come back from `POST /interrupt` itself, at the moment
+the caller is looking, because `{"ok": true}` alone reads as "the run
+has stopped" when it has not. `resume` releases the pause and the
+checkpoint together and reports `pause_release+adversary_ack`; `cancel`
+cuts through either.
 
 ### Relative paths reach every root, not just `--cwd`
 

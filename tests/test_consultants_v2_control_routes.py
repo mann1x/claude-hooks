@@ -513,6 +513,88 @@ class TestResume(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_FASTAPI, "fastapi not installed")
+class TestPendingPauseIsExplicit(unittest.TestCase):
+    """A pause takes effect where the next node *enters*. When the
+    runner is already inside one of its own waits, no node enters — and
+    the pause reads as "requested, nothing happened", which is the shape
+    of every bug in this release. Observed on
+    ``csl-2026-08-02-1054-38cf``: the adversary checkpoint opened four
+    seconds before the pause, and status showed ``paused: true`` with no
+    parked role and no reason.
+    """
+
+    def test_interrupt_reports_pending_at_request_time(self):
+        c, app = _client()
+        _install_session(app, "csl-i1", compiled=_FakeCompiledGraph())
+        r = c.post("/v1/consult/csl-i1/interrupt", json={})
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertTrue(body["paused"])
+        # "ok: true" alone reads as "the run has stopped". It has not.
+        self.assertEqual(body["pause_state"], "pending")
+
+    def test_the_adversary_checkpoint_is_named_as_the_blocker(self):
+        c, app = _client()
+        s = _install_session(app, "csl-i2", compiled=_FakeCompiledGraph())
+        s._checkpoint_deadline_ts = 9999.0
+        r = c.post("/v1/consult/csl-i2/interrupt", json={})
+        blockers = r.json()["pause_blocked_by"]
+        self.assertEqual(blockers[0]["what"], "adversary_checkpoint")
+        self.assertEqual(blockers[0]["deadline_ts"], 9999.0)
+        self.assertIn("adversary-ack", blockers[0]["clears_with"])
+
+    def test_a_parked_tool_approval_is_named_too(self):
+        c, app = _client()
+        s = _install_session(app, "csl-i3", compiled=_FakeCompiledGraph())
+        s.tool_approvals.open(
+            tool="read_file", level="ask_human", arguments="{}",
+            cwd="/p", reason="r", timeout_s=600,
+        )
+        r = c.post("/v1/consult/csl-i3/interrupt", json={})
+        whats = [b["what"] for b in r.json()["pause_blocked_by"]]
+        self.assertIn("tool_approval", whats)
+
+    def test_nothing_blocking_reports_no_blocker(self):
+        # A node is simply mid-call and will hit the gate when it
+        # finishes — different from "something is holding the runner".
+        c, app = _client()
+        _install_session(app, "csl-i4", compiled=_FakeCompiledGraph())
+        r = c.post("/v1/consult/csl-i4/interrupt", json={})
+        self.assertIsNone(r.json()["pause_blocked_by"])
+        self.assertNotIn("pause_note", r.json())
+
+    def test_status_carries_the_blocker_while_it_stays_pending(self):
+        c, app = _client()
+        s = _install_session(app, "csl-i5", compiled=_FakeCompiledGraph())
+        s._checkpoint_deadline_ts = 9999.0
+        s.run_control.request_pause("hold")
+        out = s.public_dict()
+        self.assertEqual(out["pause_state"], "pending")
+        self.assertEqual(out["pause_blocked_by"][0]["what"],
+                         "adversary_checkpoint")
+        self.assertIn("no node can reach it", out["pause_note"])
+
+    def test_a_parked_pause_does_not_report_blockers(self):
+        # Once a node is parked there is nothing left to explain.
+        c, app = _client()
+        s = _install_session(app, "csl-i6", compiled=_FakeCompiledGraph())
+        s._checkpoint_deadline_ts = 9999.0
+        s.run_control.request_pause("hold")
+        s.run_control.paused_roles.append("synthesizer")
+        out = s.public_dict()
+        self.assertEqual(out["pause_state"], "parked")
+        self.assertNotIn("pause_blocked_by", out)
+
+    def test_an_untouched_run_gains_no_pause_keys(self):
+        # Parity, again: default status must be byte-identical.
+        c, app = _client()
+        s = _install_session(app, "csl-i7", compiled=_FakeCompiledGraph())
+        out = s.public_dict()
+        for key in ("paused", "pause_state", "pause_blocked_by",
+                    "pause_note"):
+            self.assertNotIn(key, out)
+
+
 class TestResumeReleasesAPause(unittest.TestCase):
     """``_adversary_checkpoint_active`` spans the whole runner-owned
     window, so it can still be set long after the checkpoint was acked.

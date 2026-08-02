@@ -588,16 +588,24 @@ def register_control_routes(app: "FastAPI") -> None:
         _safe_apply_state_delta(s, delta)
         paused = s.run_control.request_pause(reason)
         s.bump_activity()
-        return {
+        snap = s.run_control.snapshot()
+        out = {
             "ok": True,
             "applied": _serialize_for_json(delta),
             # False when the run is already cancelling — pausing a run
             # that is draining would park a node that should be
             # finishing.
             "paused": bool(paused),
-            "pause_deadline_ts": s.run_control.snapshot().get(
-                "pause_deadline_ts"),
+            # "pending" until a node reaches the gate. Reported at
+            # request time because this is the moment the caller is
+            # looking, and "ok: true" on its own reads as "the run has
+            # stopped" when it has not yet.
+            "pause_state": snap.get("pause_state"),
+            "pause_deadline_ts": snap.get("pause_deadline_ts"),
         }
+        if paused:
+            out.update(s._pause_blockers())
+        return out
 
     # -------------------- POST /resume ------------------------- #
     @app.post("/v1/consult/{sid}/resume")

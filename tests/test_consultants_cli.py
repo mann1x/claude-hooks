@@ -997,6 +997,51 @@ class TestEventsMilestoneFilter:
         assert args.kinds is None
 
 
+class TestPauseVerbReportsPendingVsInEffect:
+    """The CLI is where a human learns whether their pause did
+    anything. ``{"ok": true}`` on its own reads as "the run stopped"."""
+
+    def _run(self, response):
+        import consultants.cli as CLI
+        args = CLI.build_parser().parse_args(["pause", "csl-x"])
+        orig = CLI._http
+        CLI._http = lambda *a, **kw: response
+        try:
+            import io
+            import contextlib
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                args.fn(args, "http://127.0.0.1:38095")
+            return err.getvalue()
+        finally:
+            CLI._http = orig
+
+    def test_names_the_blocker_when_the_pause_cannot_land(self):
+        err = self._run({
+            "paused": True, "pause_state": "pending",
+            "pause_blocked_by": [{
+                "what": "adversary_checkpoint",
+                "clears_with": "adversary-ack (or resume, which does both)",
+            }],
+        })
+        assert "PENDING" in err
+        assert "adversary_checkpoint" in err
+        assert "adversary-ack" in err
+
+    def test_says_pending_even_with_nothing_blocking(self):
+        err = self._run({"paused": True, "pause_state": "pending"})
+        assert "PENDING" in err
+        assert "next node enters" in err
+
+    def test_a_parked_pause_needs_no_caveat(self):
+        err = self._run({"paused": True, "pause_state": "parked"})
+        assert err.strip() == ""
+
+    def test_a_refused_pause_says_why(self):
+        err = self._run({"paused": False})
+        assert "already cancelling" in err
+
+
 class TestToolAckVerb:
     """``tool-ack`` — the CLI surface of the M-A approval channel."""
 

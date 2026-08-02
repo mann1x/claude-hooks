@@ -173,6 +173,16 @@ class RunControl:
             if self._paused:
                 out["paused"] = True
                 out["pause_reason"] = self._pause_reason
+                # ``paused`` alone conflates two very different
+                # situations, and the difference is what a caller
+                # actually wants to know: has anything stopped yet?
+                # ``pending`` means the request is registered and the
+                # next node to enter will take it; ``parked`` means a
+                # node is blocked right now. A run can sit in
+                # ``pending`` for half an hour when the runner is inside
+                # the adversary checkpoint, and reading that as "paused"
+                # is how a pause looks like it did nothing.
+                out["pause_state"] = "parked" if self.paused_roles else "pending"
                 if self._paused_at is not None:
                     out["paused_at"] = self._paused_at
                     out["pause_deadline_ts"] = (
