@@ -106,6 +106,34 @@ def _ollama_messages(messages: list[dict]) -> list[dict]:
     return out
 
 
+def _context_length_from_show(data: dict) -> Optional[int]:
+    """Pull the context window out of an ``/api/show`` response.
+
+    Ollama namespaces it by architecture — ``gemma4.context_length``,
+    ``qwen3.context_length``, … — so the key cannot be hardcoded; match
+    on the suffix instead. Returns ``None`` when the endpoint does not
+    advertise one, which several cloud builds do not.
+
+    ``None`` is deliberately not "assume 4096". A wrong small guess
+    would trim prompts that fit perfectly well, and the failure mode
+    this whole change exists to kill is exactly that class: acting on a
+    number nobody verified.
+    """
+    info = data.get("model_info")
+    if not isinstance(info, dict):
+        return None
+    for key, value in info.items():
+        if not key.endswith(".context_length"):
+            continue
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            return n
+    return None
+
+
 class ChatClient:
     def __init__(self, base_url: str, *, timeout_s: float = DEFAULT_TIMEOUT_S,
                  max_retries: int = DEFAULT_MAX_RETRIES,
@@ -149,6 +177,13 @@ class ChatClient:
         # second call. ``None`` value = probe is unknown / failed and
         # we should fall back to the reactive (400-based) path.
         self._probed_think: dict[str, Optional[bool]] = {}
+        # Per-model context window in tokens, learned from the SAME
+        # ``/api/show`` response as the think probe (``model_info``
+        # carries ``<arch>.context_length``). ``None`` = unknown, which
+        # callers must treat as "do not guess" rather than as a small
+        # default — inventing a limit is how a fitting prompt gets
+        # needlessly trimmed.
+        self._context_length: dict[str, Optional[int]] = {}
 
     def reset_inference_timer(self) -> None:
         """Reset the per-trial inference-time accumulators.
@@ -189,6 +224,14 @@ class ChatClient:
             )
             self._probed_think[model] = None
             return None
+        # The same response carries the context window under
+        # ``model_info["<arch>.context_length"]`` (e.g.
+        # ``gemma4.context_length: 262144``). Harvest it here rather
+        # than in a second round-trip: the probe is already cached per
+        # model, and a separate call would double the /api/show traffic
+        # for information that arrived in the first one.
+        self._context_length[model] = _context_length_from_show(data)
+
         # /api/show returns ``{"capabilities": ["completion", "tools",
         # "thinking", "vision", ...]}`` on supported builds. Some
         # cloud builds omit the field entirely; treat that as unknown.
@@ -206,6 +249,26 @@ class ChatClient:
                 model, caps,
             )
         return supports
+
+    def context_length(self, model: str) -> Optional[int]:
+        """Context window for ``model`` in tokens, or ``None``.
+
+        Reads the value ``/api/show`` advertises, probing once per model
+        and caching for the client's lifetime. ``None`` means the
+        endpoint did not say — callers must treat that as "unknown", not
+        as a small default, because inventing a limit trims prompts that
+        would have fit.
+
+        The window is not the same thing as the *output* budget: on the
+        `:cloud` models a 49k prompt against a 262k window still came
+        back truncated, so this is a necessary input to a budget
+        decision, never sufficient on its own.
+        """
+        if model not in self._context_length:
+            # Populates both caches; the think verdict is a side effect
+            # we already wanted.
+            self._probe_supports_think(model)
+        return self._context_length.get(model)
 
     def chat(self, payload: dict) -> dict:
         """POST /api/chat with the supplied (OpenAI-shape) payload.
@@ -636,7 +699,32 @@ class ChatClient:
                 tc2["function"] = clean_fn
                 normalized.append(tc2)
             msg["tool_calls"] = normalized
-        finish_reason = "tool_calls" if tool_calls else "stop"
+        # Ollama's terminal signal is ``done_reason``: "stop" for a
+        # natural end, "length" when generation was CUT because it hit
+        # the output limit. This used to be hardcoded::
+        #
+        #     finish_reason = "tool_calls" if tool_calls else "stop"
+        #
+        # which destroyed the only evidence that an answer was
+        # truncated. A cut completion became indistinguishable from a
+        # finished one, so a half-written answer was stored, marked
+        # ``status: completed`` with ``error: null``, and handed to the
+        # user as final. That is exactly what happened to
+        # csl-2026-08-12-0831-905a, whose xhigh adversarial audit ended
+        # mid-token (``...count the **presence** of $\\text{``) after
+        # 43 minutes and 2.8M prompt tokens.
+        #
+        # ``caliber_proxy/ollama.py`` has always done this correctly;
+        # this translator — the one every consultants role uses — did
+        # not. Two translators, one right.
+        done_reason = data.get("done_reason") or "stop"
+        # A tool-call turn keeps reporting "tool_calls" because the
+        # agent loop branches on exactly that value to decide whether to
+        # keep looping. The truncation signal is NOT folded into it —
+        # it is carried alongside in ``done_reason`` so a detector can
+        # act on a truncated tool-call turn (whose arguments may well be
+        # half-written) without changing loop control flow.
+        finish_reason = "tool_calls" if tool_calls else done_reason
         # Track per-call usage so the caller can read it without
         # re-walking the response.
         prompt_tokens = int(data.get("prompt_eval_count") or 0)
@@ -649,12 +737,16 @@ class ChatClient:
             "choices": [{
                 "message": msg,
                 "finish_reason": finish_reason,
+                # Verbatim, always, even when finish_reason had to say
+                # "tool_calls" for the loop's benefit.
+                "done_reason": done_reason,
             }],
             "usage": {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
             },
+            "done_reason": done_reason,
         }
 
 

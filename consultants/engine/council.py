@@ -39,6 +39,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from claude_hooks import truncation
+from consultants.engine import budget
 from consultants.engine.storage import RoleTurn
 
 log = logging.getLogger("consultants.engine.council")
@@ -965,17 +967,23 @@ def route_after_critic(state: dict) -> str:
 
 # ----------------------- chat helper ------------------------------ #
 
-def _extract_text(response: dict) -> str:
-    """Pull the assistant text out of a chat-completion response.
-    Also tolerates the Ollama-native shape in case a caller passes
-    an un-translated response."""
+def _raw_text(response: dict) -> str:
+    """The assistant text exactly as returned, whitespace intact.
+    Tolerates the Ollama-native shape in case a caller passes an
+    un-translated response."""
     if "choices" in response:
         choices = response.get("choices") or []
         if choices:
             msg = choices[0].get("message") or {}
-            return (msg.get("content") or "").strip()
+            return msg.get("content") or ""
+        return ""
     msg = response.get("message") or {}
-    return (msg.get("content") or "").strip()
+    return msg.get("content") or ""
+
+
+def _extract_text(response: dict) -> str:
+    """Pull the assistant text out of a chat-completion response."""
+    return _raw_text(response).strip()
 
 
 def _usage_from(response: dict) -> tuple[int, int]:
@@ -984,6 +992,21 @@ def _usage_from(response: dict) -> tuple[int, int]:
         int(u.get("prompt_tokens") or u.get("prompt_eval_count") or 0),
         int(u.get("completion_tokens") or u.get("eval_count") or 0),
     )
+
+
+#: How many times a cut-off answer may be continued. Each continuation
+#: is a fresh call whose prompt carries the partial answer, so the cost
+#: is real; two is enough to recover a synthesizer that overran its
+#: budget without letting a model that cannot stop bill indefinitely.
+MAX_CONTINUATIONS = 2
+
+_CONTINUE_INSTRUCTION = (
+    "Your previous message was cut off by the output limit before you "
+    "finished. Continue from exactly where it stopped — resume "
+    "mid-sentence if that is where it ended. Do not repeat any text you "
+    "already produced, do not restate the question, and do not open with "
+    "a preamble; the two halves will be concatenated verbatim."
+)
 
 
 def _single_shot(chat_client, model: str, messages: list[dict],
@@ -999,41 +1022,107 @@ def _single_shot(chat_client, model: str, messages: list[dict],
     row. ``role`` is required for recording — pass it from the
     caller's node identity. Errors are re-raised after recording so
     the existing tombstone branches still fire.
+
+    Three things happen around the call itself (2026-08-12):
+
+    * the model's real context window is probed and an explicit
+      ``num_predict`` is sent, so the output ceiling is ours rather
+      than an unseen provider default;
+    * a history that no longer leaves room to answer is compacted;
+    * a completion the backend cut short is **continued** rather than
+      returned as-is. Continuation is the only response that preserves
+      the work: the alternative for a synthesizer that spent 43
+      minutes of council output is to hand back a third of an answer
+      or to throw all of it away.
+
+    Token counts returned are summed across continuations, so a
+    caller's accounting stays true.
     """
-    payload = {
-        "model": model,
-        "messages": messages,
-        "stream": False,
-        "think": think,
-    }
-    t0 = time.monotonic()
-    try:
-        response = chat_client.chat(payload)
-    except Exception as exc:
+    convo = list(messages)
+    plan = budget.plan(chat_client, model, convo)
+    if plan.needs_compaction:
+        log.warning("role=%s: %s — compacting history", role, plan.detail)
+        convo, changed = budget.compact_messages(
+            convo,
+            keep_tokens=max(
+                0, (plan.context_length or 0)
+                - budget.TARGET_OUTPUT_TOKENS
+                - budget.WINDOW_MARGIN_TOKENS),
+        )
+        if changed:
+            plan = budget.plan(chat_client, model, convo)
+
+    text_parts: list[str] = []
+    total_pt = total_ct = 0
+
+    for attempt in range(MAX_CONTINUATIONS + 1):
+        payload = {
+            "model": model,
+            "messages": convo,
+            "stream": False,
+            "think": think,
+            "options": {"num_predict": plan.output_tokens},
+        }
+        t0 = time.monotonic()
+        try:
+            response = chat_client.chat(payload)
+        except Exception as exc:
+            if recorder is not None and role is not None:
+                try:
+                    recorder.record_llm(
+                        role=role, round=round, lane_idx=lane_idx,
+                        model=model, request=payload, response=None,
+                        duration_ms=int((time.monotonic() - t0) * 1000),
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                except Exception:  # pragma: no cover — must not mask
+                    log.exception("recorder.record_llm raised; ignored")
+            raise
+        dt_ms = int((time.monotonic() - t0) * 1000)
+        pt, ct = _usage_from(response)
+        total_pt += pt
+        total_ct += ct
         if recorder is not None and role is not None:
             try:
                 recorder.record_llm(
                     role=role, round=round, lane_idx=lane_idx, model=model,
-                    request=payload, response=None,
-                    duration_ms=int((time.monotonic() - t0) * 1000),
-                    error=f"{type(exc).__name__}: {exc}",
+                    request=payload, response=response,
+                    prompt_tokens=pt, completion_tokens=ct,
+                    duration_ms=dt_ms,
                 )
-            except Exception:  # pragma: no cover — recorder must not mask
+            except Exception:  # pragma: no cover
                 log.exception("recorder.record_llm raised; ignored")
-        raise
-    dt_ms = int((time.monotonic() - t0) * 1000)
-    pt, ct = _usage_from(response)
-    if recorder is not None and role is not None:
-        try:
-            recorder.record_llm(
-                role=role, round=round, lane_idx=lane_idx, model=model,
-                request=payload, response=response,
-                prompt_tokens=pt, completion_tokens=ct,
-                duration_ms=dt_ms,
+
+        # Raw, unstripped: a continuation resumes mid-word, so stripping
+        # each part before joining would fuse the last word of one onto
+        # the first of the next. The join is stripped once, at the end.
+        text_parts.append(_raw_text(response))
+
+        cut = truncation.classify(response, role=role or "", model=model)
+        if cut is None:
+            break
+        if attempt == MAX_CONTINUATIONS:
+            log.error(
+                "role=%s: still truncated after %d continuation(s) — "
+                "returning the partial answer; the run will be marked "
+                "failed. %s", role, MAX_CONTINUATIONS, cut.detail,
             )
-        except Exception:  # pragma: no cover
-            log.exception("recorder.record_llm raised; ignored")
-    return (_extract_text(response), pt, ct)
+            break
+        log.warning(
+            "role=%s: %s — continuing (%d/%d)",
+            role, cut.detail, attempt + 1, MAX_CONTINUATIONS,
+        )
+        # The partial becomes context for its own continuation. Joining
+        # without a separator is deliberate: the model was told to
+        # resume mid-sentence, so any inserted whitespace would land in
+        # the middle of a word.
+        convo = convo + [
+            {"role": "assistant", "content": "".join(text_parts)},
+            {"role": "user", "content": _CONTINUE_INSTRUCTION},
+        ]
+        plan = budget.plan(chat_client, model, convo)
+
+    return ("".join(text_parts).strip(), total_pt, total_ct)
 
 
 # ====================================================================== #
@@ -2334,27 +2423,18 @@ def researcher_node(state: dict, *,
             ),
         }]
         try:
-            fb_t0 = time.monotonic()
-            fb_payload = {
-                "model": model,
-                "messages": summary_msgs,
-                "stream": False,
-                "think": think,
-            }
-            follow_up = chat_client.chat(fb_payload)
-            text2 = _extract_text(follow_up)
-            pt2, ct2 = _usage_from(follow_up)
-            if recorder is not None:
-                try:
-                    recorder.record_llm(
-                        role="researcher", round=this_round,
-                        lane_idx=lane_idx, model=model,
-                        request=fb_payload, response=follow_up,
-                        prompt_tokens=pt2, completion_tokens=ct2,
-                        duration_ms=int((time.monotonic() - fb_t0) * 1000),
-                    )
-                except Exception:  # pragma: no cover
-                    log.exception("recorder.record_llm (fallback) raised; ignored")
+            # Via _single_shot rather than chat_client.chat directly:
+            # this call *is* the lane's report when it fires, so it
+            # needs the same output budget, history compaction,
+            # continuation-on-truncation and recording as any other
+            # role's call. It used to be the one hand-rolled backend
+            # call in the engine, and a hand-rolled call is exactly
+            # where a fix like this gets forgotten.
+            text2, pt2, ct2 = _single_shot(
+                chat_client, model, summary_msgs, think=think,
+                recorder=recorder, role="researcher",
+                round=this_round, lane_idx=lane_idx,
+            )
             pt += pt2
             ct += ct2
             if text2.strip():

@@ -156,6 +156,19 @@ class MessageRecorder:
         self._all_conns: list[sqlite3.Connection] = []
         self._closed = False
         self._meta_written = False
+        # Truncation tally. Every role's every LLM call — single-shot
+        # and agent-loop iteration alike — passes through record_llm,
+        # which makes this the one place that sees them all. Guarded by
+        # ``_lock`` because council lanes record from worker threads.
+        self._truncations_by_role: dict[str, int] = {}
+        self._truncations: list[dict] = []
+        # Whether each role's *most recent* completion was cut. This is
+        # the question that decides pass/fail, and it is a different
+        # question from the tally above: a cut completion that the
+        # continuation loop then finished is a fact worth recording and
+        # a poor reason to fail a 40-minute council. Only an unrecovered
+        # cut — the role's last word, still mid-sentence — is a failure.
+        self._last_call_truncated: dict[str, bool] = {}
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         # Open the primary connection eagerly so schema + meta land
@@ -286,6 +299,10 @@ class MessageRecorder:
             ),
         )
         conn.commit()
+        trunc = self._note_truncation(
+            response, role=role, round=round, lane_idx=lane_idx,
+            model=model,
+        )
         # Narrow mirror for SSE consumers.
         self._emit_runtime_event(
             kind="llm_call",
@@ -299,8 +316,77 @@ class MessageRecorder:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "error": error,
+                "truncated": trunc.kind if trunc else None,
             },
         )
+
+    # ------------------------------------------------------------------ #
+    # Truncation tally (2026-08-12)
+    # ------------------------------------------------------------------ #
+
+    def _note_truncation(self, response, *, role: str, round: int,
+                         lane_idx, model):
+        """Classify one response and tally it if it was cut short.
+
+        Placed in ``record_llm`` rather than at the role nodes because
+        this is the only function every role's every call reaches —
+        single-shot roles, agent-loop iterations, and the tooled
+        ``tool_executor``/``coder`` lanes all funnel here. Wiring the
+        check at the nodes would mean N chances to forget one, and the
+        incident this exists to prevent was precisely a role whose
+        truncation nobody was looking for.
+
+        Never raises: a detector that can sink a run is worse than the
+        blindness it replaces.
+        """
+        try:
+            from claude_hooks.truncation import classify
+            trunc = classify(response, role=role, model=model or "")
+        except Exception:  # pragma: no cover — detector must not mask
+            log.exception("truncation.classify raised; ignored")
+            return None
+        if trunc is None:
+            with self._lock:
+                self._last_call_truncated[role] = False
+            return None
+        with self._lock:
+            self._truncations_by_role[role] = (
+                self._truncations_by_role.get(role, 0) + 1)
+            self._last_call_truncated[role] = True
+            entry = trunc.public_dict()
+            entry.update({"round": round, "lane_idx": lane_idx})
+            self._truncations.append(entry)
+        log.warning(
+            "TRUNCATED completion: role=%s model=%s round=%s lane=%s "
+            "kind=%s — %s",
+            role, model, round, lane_idx, trunc.kind, trunc.detail,
+        )
+        try:
+            self._emit_runtime_event(
+                kind="truncation", role=role, round=round,
+                lane_idx=lane_idx, payload=entry,
+            )
+        except Exception:  # pragma: no cover
+            log.exception("truncation runtime event failed; ignored")
+        return trunc
+
+    def truncations_by_role(self) -> dict[str, int]:
+        """Per-role count of completions detected as cut short."""
+        with self._lock:
+            return dict(self._truncations_by_role)
+
+    def truncations(self) -> list[dict]:
+        """Full detail of every truncation seen, in observation order."""
+        with self._lock:
+            return list(self._truncations)
+
+    def unrecovered_truncations(self) -> list[str]:
+        """Roles whose most recent completion was still cut short —
+        i.e. the continuation loop ran out of attempts, or never ran.
+        These are the ones that made it into the deliverable."""
+        with self._lock:
+            return sorted(r for r, cut in self._last_call_truncated.items()
+                          if cut)
 
     def record_tool(
         self,

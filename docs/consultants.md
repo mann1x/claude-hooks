@@ -1011,6 +1011,78 @@ gives you the raw expensive work — uncombined but readable.
 
 ---
 
+## Truncated output — detection, continuation, and honest status
+
+A council answer that stops mid-sentence used to be indistinguishable
+from one that finished. Session `csl-2026-08-12-0831-905a` — 43
+minutes, 113 LLM calls, 2.86M prompt tokens — returned a
+655-character final answer ending `...count the **presence** of
+$\text{`, wrote it to `summary.md`, and recorded `status: completed,
+error: null`. The pipeline had no opinion about it because nothing in
+the pipeline was looking.
+
+**What went wrong.** Ollama reports the terminal condition in
+`done_reason`: `stop` for a natural end, `length` when generation hit
+its output limit. The translator every consultants role goes through
+computed `finish_reason = "tool_calls" if tool_calls else "stop"` —
+discarding the field. On top of that, no role sent `num_predict`, so
+the actual output ceiling was whatever the provider defaulted to. The
+prompt used 168k of a 262k window, so nothing but an unseen output cap
+could have stopped it.
+
+**What happens now**, in order:
+
+1. **The budget is explicit.** Before each call the engine probes the
+   model's real context window (`/api/show` →
+   `model_info["<arch>.context_length"]`, cached per model) and sends
+   a `num_predict` sized to fit it. An unknown window still gets an
+   explicit budget — the point is to override a default we cannot see,
+   and not knowing the window doesn't change that. It is never
+   *guessed*: assuming 4096 for a model with a 1M window would compact
+   away most of a council's evidence.
+
+2. **An over-full history is compacted.** When the prompt no longer
+   leaves room to answer, the middle of the history is elided behind a
+   visible marker; the system prompt, the original question, and the
+   most recent exchanges survive. The marker is deliberate — a model
+   that knows its history was abridged reasons about the gap
+   differently from one that believes it has the whole record.
+
+3. **A cut answer is continued.** The partial is fed back with a
+   resume-from-here instruction and the halves are concatenated
+   verbatim. Bounded at 2 continuations. Tool-call turns are never
+   continued: half-written arguments are a different problem, already
+   handled by the arg-parse guard.
+
+4. **What is left is reported.** Every truncation is tallied per role
+   into `metadata.json`'s `truncations_by_role` and a `truncated:`
+   line in `summary.md`'s front matter. If the *deliverable* is still
+   short after continuation, the run is `failed` with an explanatory
+   error — never `completed`.
+
+A truncation the continuation loop rescued shows up in the tally but
+does **not** fail the run. Both facts matter: the count says the
+budget was tight, and the pass says the answer is whole.
+
+### Reading it
+
+```bash
+jq '.truncations_by_role' .claude-hooks/consultants/<sid>/metadata.json
+# {}                      -> nothing was cut
+# {"synthesizer": 1}      -> cut once; check status to see if it recovered
+```
+
+```sql
+-- transcript.db: the per-call detail, including the tail that was cut
+SELECT ts, role, payload FROM runtime_events WHERE kind = 'truncation';
+```
+
+If you see repeated truncations on one role, the question is too broad
+for that model's output budget, not too hard — narrow the ask or move
+the role to a model with a larger window (`/consultants config`).
+
+---
+
 ## Configuration
 
 `/consultants config` walks you through every config knob via

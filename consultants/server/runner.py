@@ -467,6 +467,16 @@ def make_runner(*, ollama_base_url: str):
                 len(state.run_control.skipped),
             )
 
+        # A cut-off deliverable is a failure even when every node
+        # returned cleanly (2026-08-12). Only promoted to "failed" from
+        # "completed": a cancelled or already-failed run keeps its own,
+        # more specific verdict.
+        truncations, trunc_error = _truncation_verdict(
+            recorder, final_state.get("final_answer", "") or "")
+        if trunc_error and terminal_status == "completed":
+            terminal_status = "failed"
+            node_error = trunc_error
+
         # Persist artifacts.
         result = storage.ConsultationResult(
             session_id=state.sid,
@@ -489,6 +499,7 @@ def make_runner(*, ollama_base_url: str):
                 "total_completion_tokens") or 0),
             retries_by_role=dict(final_state.get(
                 "retries_by_role") or {}),
+            truncations_by_role=truncations,
             root_sid=getattr(state, "root_sid", None) or state.sid,
             extra_roots=list(extra_roots),
             cwd_display=cwd_display,
@@ -985,6 +996,12 @@ def make_follow_up_runner(*, ollama_base_url: str):
                 len(state.run_control.skipped),
             )
 
+        truncations, trunc_error = _truncation_verdict(
+            recorder, final_state.get("final_answer", "") or "")
+        if trunc_error and terminal_status == "completed":
+            terminal_status = "failed"
+            node_error = trunc_error
+
         # Persist artifacts for the FOLLOW-UP (its own sid + dir).
         # parent_sid is recorded in metadata so the chain is
         # reconstructable from disk.
@@ -1009,6 +1026,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
                 "total_completion_tokens") or 0),
             retries_by_role=dict(final_state.get(
                 "retries_by_role") or {}),
+            truncations_by_role=truncations,
             parent_sid=state.parent_sid,
             root_sid=getattr(state, "root_sid", None) or state.sid,
             extra_roots=list(extra_roots),
@@ -1061,6 +1079,73 @@ def make_follow_up_runner(*, ollama_base_url: str):
         _populate_role_messages(state, recorder)
 
     return run_follow_up
+
+
+def _truncation_verdict(recorder, final_answer: str) -> tuple[dict, Optional[str]]:
+    """Return ``(truncations_by_role, error)`` for a finished run.
+
+    ``error`` is non-None only when the **deliverable** was cut — the
+    synthesizer's completion, or a ``final_answer`` that ends inside a
+    construct it opened. A researcher whose intermediate output got
+    clipped is worth recording and worth a log line, but the council
+    still produced a whole answer from what it had; failing the run
+    over it would throw away good work.
+
+    A truncated final answer, by contrast, must never reach the caller
+    as ``status: completed, error: null``. That is exactly what
+    csl-2026-08-12-0831-905a did: 43 minutes and 2.86M prompt tokens
+    distilled into 655 characters ending ``of $\\text{``, filed as a
+    success. Surfacing it as a failure costs the user a re-run;
+    concealing it cost them a decision made on a third of an audit.
+    """
+    counts: dict = {}
+    unrecovered: list[str] = []
+    if recorder is not None:
+        try:
+            counts = recorder.truncations_by_role()
+            unrecovered = recorder.unrecovered_truncations()
+        except Exception:  # pragma: no cover — never sink a finished run
+            log.exception("recorder truncation query raised; ignored")
+            counts, unrecovered = {}, []
+
+    reasons: list[str] = []
+    for role in ("synthesizer", "refuter"):
+        # Counts alone would fail runs the continuation loop rescued:
+        # a synthesizer that overran its budget once and then finished
+        # produced a whole answer, and reporting that as a failure
+        # would discard 40 minutes of correct work. Only the role's
+        # *last* completion being cut means the deliverable is short.
+        if role in unrecovered:
+            reasons.append(
+                f"the {role}'s final completion was cut short and "
+                f"could not be continued")
+    if not reasons and final_answer:
+        # Structural backstop: covers a backend that reported a clean
+        # stop, and covers a recorder that failed to construct (the
+        # counts are then empty and prove nothing).
+        try:
+            from claude_hooks.truncation import unterminated_construct
+            construct = unterminated_construct(final_answer)
+        except Exception:  # pragma: no cover
+            construct = None
+        if construct:
+            reasons.append(f"the final answer ends inside an {construct}")
+
+    if not reasons:
+        if counts:
+            log.warning(
+                "council: %d role completion(s) were cut short but were "
+                "continued to completion: %s", sum(counts.values()), counts,
+            )
+        return counts, None
+
+    error = (
+        "truncated output: " + "; ".join(reasons)
+        + ". The answer is incomplete — re-run, or ask a narrower "
+          "question so the response fits the model's output budget."
+    )
+    log.error("council: %s", error)
+    return counts, error
 
 
 def _build_recorder(*, sid: str, cwd: str, question: str,

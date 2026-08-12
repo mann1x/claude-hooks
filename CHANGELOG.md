@@ -16,6 +16,84 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed
+
+- **A truncated council answer no longer reports itself as a finished
+  one.** Session `csl-2026-08-12-0831-905a` — an `xhigh` adversarial
+  audit, 43 minutes, 113 LLM calls, 2.86M prompt tokens — produced a
+  **655-character** final answer that stopped mid-token at
+  `...count the **presence** of $\text{`, wrote it to `summary.md`,
+  and recorded `status: completed, error: null`. The critic in the
+  same run was cut the same way. Nothing in the pipeline noticed,
+  because nothing in the pipeline was looking.
+
+  The root cause was one line of translation.
+  `ChatClient._from_ollama` computed
+  `finish_reason = "tool_calls" if tool_calls else "stop"`, discarding
+  Ollama's `done_reason` — the field that distinguishes a natural end
+  (`stop`) from a generation that hit its output limit (`length`).
+  The evidence was destroyed one layer below anything that could act
+  on it, which is why the run's own record shows a clean stop.
+  (`caliber_proxy/ollama.py` had always mapped it correctly; the
+  translator every consultants role actually uses did not.) The
+  contributing cause was that no role sent `num_predict`, so the
+  output ceiling was a provider default we neither set nor observed —
+  with 94k tokens of context window still free, an unseen output cap
+  is the only thing that could have stopped generation.
+
+  Fixed in four layers, each of which alone would have prevented the
+  incident:
+
+  - **Preserved.** `_from_ollama` now carries `done_reason` through
+    verbatim and reports it as `finish_reason` on non-tool turns.
+    Tool turns still report `tool_calls`, so every tooled role's
+    routing is unchanged.
+  - **Detected.** New `claude_hooks/truncation.py` classifies a
+    response as `reported` (the backend said `length`) or
+    `structural` (the text stops inside a backtick, `$…$`, `**…**`,
+    LaTeX group, or code fence it opened). The structural check is
+    the audit on the authoritative one: replayed against the two
+    incident artifacts *with their recorded `"stop"` intact*, it
+    catches both.
+  - **Recovered.** A cut answer is **continued** — the partial is fed
+    back with a resume-from-here instruction and the halves are
+    concatenated verbatim — in `council._single_shot` (planner,
+    researcher, critic, refuter, synthesizer, and the researcher's
+    summary fallback) and in `agent_loop.runner` (tool_executor,
+    coder, plus /get-advice and caliber). Bounded at 2 continuations;
+    `LoopConfig.max_answer_continuations = 0` restores the old
+    behavior. Tool-call turns are never continued — half-written
+    arguments are the existing arg-parse guard's job.
+  - **Reported.** `MessageRecorder.record_llm` — the one function
+    every role's every call reaches — tallies truncations per role
+    into `metadata.json`'s new `truncations_by_role` and a
+    `truncated:` line in `summary.md`'s front matter. A deliverable
+    still short after recovery now fails the run with an explanatory
+    error instead of `completed`. A truncation the continuation loop
+    *rescued* is recorded but does not fail the run: discarding 40
+    minutes of correct work over a recovered overrun would be its own
+    kind of wrong answer.
+
+- **Every role now asks the endpoint how big its context is and spends
+  it deliberately.** New `consultants/engine/budget.py` probes the
+  model's real window via `/api/show`'s architecture-namespaced
+  `model_info["<arch>.context_length"]` (gemma4 262144,
+  deepseek-v4-flash 1048576, glm-5.2 1000000, minimax-m3 524288 —
+  cached per model), sends an explicit `num_predict`, and **compacts**
+  a history that no longer leaves room to answer, keeping the system
+  prompt, the original question, and the most recent exchanges while
+  eliding the middle behind a visible marker. An unknown window is
+  treated as unknown, never as a default: guessing 4096 for a model
+  with a 1M window would compact away most of a council's evidence.
+
+- **The store reaper refuses a truncated distillation.** It deletes
+  research originals once the durable project-namespace write
+  succeeds, so accepting a half-written summary traded real records
+  for a fragment of a summary of them — the one irreversible outcome
+  in the reaper. Its output cap also rose 1500 → 2400 tokens, because
+  800 words of technical prose with file paths runs past 1500 and the
+  rubric, not the ceiling, should be what stops it.
+
 ### Changed
 
 - **`[tools] all_roles` now defaults to ON** — planner, critic,

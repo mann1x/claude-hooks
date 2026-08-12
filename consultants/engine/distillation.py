@@ -34,6 +34,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+from claude_hooks import truncation
+
 log = logging.getLogger("consultants.engine.distillation")
 
 
@@ -317,15 +319,37 @@ class Distiller:
                 payload = {
                     "model": model,
                     "messages": messages,
-                    # Short max_tokens — the rubric caps output at
-                    # ~800 words. Letting the model run unbounded
-                    # would waste tokens and dilute the summary.
-                    "max_tokens": 1500,
+                    # Bounded on purpose — the rubric caps output at
+                    # ~800 words and letting the model run unbounded
+                    # would dilute the summary. 2400 rather than the
+                    # original 1500 because 800 words of technical
+                    # prose with file paths and identifiers runs well
+                    # past 1500 tokens, so the old cap could cut a
+                    # compliant answer; the rubric, not the ceiling,
+                    # should be what stops it.
+                    "max_tokens": 2400,
                     "temperature": 0.3,
                     "stream": False,
                 }
                 resp = client.chat(payload)
                 content = _extract_response_text(resp)
+                cut = truncation.classify(resp, text=content, model=model)
+                if cut is not None:
+                    # Refuse a half-written summary. This path deletes
+                    # the research originals once the durable write
+                    # succeeds, so accepting a truncated distillation
+                    # would trade real records for a fragment of a
+                    # summary of them — the one irreversible outcome in
+                    # the reaper. Raising here keeps the originals.
+                    last_err = DistillationFailed(
+                        f"model {model!r} returned a truncated summary "
+                        f"({cut.detail})",
+                    )
+                    log.warning(
+                        "distillation: %s produced a truncated summary; "
+                        "originals kept. %s", model, cut.detail,
+                    )
+                    continue
                 if content and content.strip():
                     return content.strip()
                 last_err = DistillationFailed(

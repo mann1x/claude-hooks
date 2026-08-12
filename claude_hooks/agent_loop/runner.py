@@ -23,6 +23,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from claude_hooks import truncation
+
 log = logging.getLogger("claude_hooks.agent_loop")
 
 
@@ -65,6 +67,14 @@ class LoopConfig:
     force_first_retry_enabled: bool = True
     force_first_retry_message: str = DEFAULT_FORCE_FIRST_RETRY_MESSAGE
 
+    # A final answer the backend cut short is continued rather than
+    # returned half-written (2026-08-12). Each continuation is one more
+    # call, so this is bounded; 0 restores the pre-fix behavior of
+    # accepting whatever arrived. Only the *answer* turn is continued —
+    # a truncated tool-call turn is discarded by the existing arg-parse
+    # guard, which is the correct handling for half-written arguments.
+    max_answer_continuations: int = 2
+
 
 # Type aliases.
 ToolExecutor = Callable[[str, str, str], str]
@@ -88,6 +98,104 @@ PreseedBuilder = Callable[[str], Optional[tuple[list[dict], str, str]]]
 # tool_executor raised.
 OnIter = Callable[[int, dict, dict, int], None]
 OnTool = Callable[[str, str, str, int, Optional[str]], None]
+
+
+CONTINUE_ANSWER_INSTRUCTION = (
+    "Your previous message was cut off by the output limit before you "
+    "finished. Continue from exactly where it stopped — resume "
+    "mid-sentence if that is where it ended. Do not repeat any text you "
+    "already produced and do not open with a preamble; the two halves "
+    "will be concatenated verbatim."
+)
+
+
+def _answer_text(response: dict) -> str:
+    choices = response.get("choices") or []
+    if not choices:
+        return ""
+    return (choices[0].get("message") or {}).get("content") or ""
+
+
+def _continue_truncated_answer(final: dict, payload: dict, chat_fn: ChatFn,
+                               config: "LoopConfig",
+                               on_iter: "Optional[OnIter]",
+                               iter_idx: int) -> dict:
+    """Finish an answer the backend cut mid-generation.
+
+    Returns a response dict whose text is the concatenation of the
+    partial and its continuations, with usage summed. When nothing was
+    truncated — the overwhelming majority of turns — this returns
+    ``final`` unchanged and costs one dict inspection.
+
+    Only the answer turn reaches here. A truncated *tool-call* turn is
+    a different problem (half-written arguments) already handled by the
+    arg-parse guard in ``execute_tool_calls``, and continuing one would
+    mean asking a model to resume a JSON literal.
+    """
+    budget = getattr(config, "max_answer_continuations", 0) or 0
+    if budget <= 0:
+        return final
+
+    parts = [_answer_text(final)]
+    total_prompt = int((final.get("usage") or {}).get("prompt_tokens") or 0)
+    total_completion = int(
+        (final.get("usage") or {}).get("completion_tokens") or 0)
+    messages = list(payload.get("messages") or [])
+    result = final
+
+    for n in range(budget):
+        cut = truncation.classify(result)
+        if cut is None:
+            break
+        log.warning(
+            "agent loop: answer truncated on iter %d (%s) — "
+            "continuing (%d/%d)", iter_idx, cut.detail, n + 1, budget,
+        )
+        messages = messages + [
+            {"role": "assistant", "content": "".join(parts)},
+            {"role": "user", "content": CONTINUE_ANSWER_INSTRUCTION},
+        ]
+        cont_payload = dict(payload)
+        cont_payload["messages"] = messages
+        # Tools stay off for a continuation: the model already decided
+        # it was answering, and re-offering tools invites it to restart
+        # the investigation instead of finishing the sentence.
+        cont_payload.pop("tools", None)
+        cont_payload.pop("tool_choice", None)
+        t0 = time.monotonic()
+        result = chat_fn(cont_payload)
+        if on_iter is not None:
+            try:
+                on_iter(iter_idx, cont_payload, result,
+                        int((time.monotonic() - t0) * 1000))
+            except Exception:
+                log.exception("on_iter callback raised; ignored")
+        parts.append(_answer_text(result))
+        usage = result.get("usage") or {}
+        total_prompt += int(usage.get("prompt_tokens") or 0)
+        total_completion += int(usage.get("completion_tokens") or 0)
+    else:
+        if truncation.classify(result) is not None:
+            log.error(
+                "agent loop: answer still truncated after %d "
+                "continuation(s); returning the partial", budget,
+            )
+
+    if len(parts) == 1:
+        return final
+
+    merged = dict(result)
+    choices = [dict(c) for c in (merged.get("choices") or [{}])]
+    msg = dict(choices[0].get("message") or {})
+    msg["content"] = "".join(parts)
+    choices[0]["message"] = msg
+    merged["choices"] = choices
+    merged["usage"] = {
+        **(merged.get("usage") or {}),
+        "prompt_tokens": total_prompt,
+        "completion_tokens": total_completion,
+    }
+    return merged
 
 
 def merge_tools(existing: Optional[list[dict]],
@@ -311,6 +419,8 @@ def run_loop(
                     },
                 ]
                 continue
+            final = _continue_truncated_answer(
+                final, payload, chat_fn, config, on_iter, i)
             break
         has_called_tool = True
 
