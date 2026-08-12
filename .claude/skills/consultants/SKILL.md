@@ -1569,6 +1569,28 @@ new model qualifies, **append** its score to the baselines ledger
   Surface plainly and offer `/consultants followup <failed_sid>`
   to chain off the failed session (researcher + critic work is
   usually salvageable).
+- **`status: failed` with an `error` beginning `truncated output:`**
+  → the council's answer was cut off by the model's output limit and
+  the engine could not finish it after two continuation attempts.
+  This failure is different from the others in one important way:
+  **the partial answer is real work, not garbage.** Do not discard it.
+
+  Show the user what did arrive, say plainly that it stops early, and
+  offer the two fixes that actually work:
+
+  1. `/consultants followup <sid> "continue the answer from where it
+     stopped"` — cheapest; research and critique are already warm.
+  2. Re-ask a narrower question. Repeated truncation on the same role
+     means the ask is too broad for that model's output budget, not
+     too hard for the model.
+
+  Also mention `/consultants config` if it keeps happening on one
+  role — a model with a larger window is the durable fix. Check
+  `truncations_by_role` in `metadata.json` to see which role it was.
+
+  A run that shows counts in `truncations_by_role` but `status:
+  completed` was **cut and then recovered**: the answer is whole, the
+  counts only say the budget was tight. Report it as a success.
 
 ## Reference
 
