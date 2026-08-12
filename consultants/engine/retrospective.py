@@ -52,7 +52,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from claude_hooks import capped_thinking, token_calib
+from claude_hooks import budget_projection, capped_thinking, token_calib
 
 log = logging.getLogger("consultants.engine.retrospective")
 
@@ -66,14 +66,25 @@ COMPACTION_BUDGET_LADDER = (0.33, 0.4, 0.45, 0.5, 0.55)
 #: The summary's share of the combined budget. It writes first.
 SUMMARY_BUDGET_SHARE = 0.7
 
-#: The retrospective is written second and takes what the summary left,
-#: so its cap is a range rather than a number: a summary that used its
-#: whole 70% leaves the floor, one that came in at half leaves the
-#: ceiling. What it must not do is expand to fill the room — the
-#: instruction to be terse is in the prompt, and this is only the wall
-#: behind it.
+#: The retrospective's ceiling. It must not expand to fill the room —
+#: the instruction to be terse is in the prompt, and this is only the
+#: wall behind it.
 THINKING_BUDGET_MAX_SHARE = 0.5
-THINKING_BUDGET_MIN_SHARE = 0.2
+
+#: There is deliberately **no floor**.
+#:
+#: The fork guarantees the retrospective a fifth of the combined budget
+#: whatever the summary spent. This repo does not, by policy: the
+#: summary writes first and the retrospective is capped at what is left
+#: to reach the target. The summary is *expected* to leave enough room,
+#: and when it does not, the retrospective is what gets sacrificed.
+#:
+#: The reasoning is about which half is load-bearing. The summary is the
+#: only record of what happened — lose it and the next turn cannot
+#: continue the work at all. The retrospective improves how the work is
+#: done. Guaranteeing it a floor means taking that floor from the
+#: summary, which trades a complete hand-over note for an assessment of
+#: a hand-over that no longer says enough to act on.
 
 #: Floor for either phase. Below this there is no point making the call.
 MIN_PHASE_OUTPUT_TOKENS = 512
@@ -88,6 +99,10 @@ MAX_OUTCOME_CHARS = 200
 #: How much of one message survives into the summary's input.
 MAX_MESSAGE_CHARS = 2_000
 
+#: Floor on a phase's input budget. Below this the projection has
+#: nothing left to work with and would drop the span entirely.
+MIN_INPUT_TOKENS = 1_500
+
 #: The largest share of the compaction target either phase's **input**
 #: may occupy.
 #:
@@ -99,9 +114,13 @@ MAX_MESSAGE_CHARS = 2_000
 #: reads the transcript to describe it, and a description written from a
 #: request the model refused is worth nothing.
 #:
-#: When the span is too big, the **most recent** turns are kept: they are
-#: the ones "in progress" and "next" are written from, and the oldest
-#: turns are the ones a previous digest already covers.
+#: Reaching that budget is :mod:`claude_hooks.budget_projection`'s job,
+#: not a character cap's. A cap can sever an assistant's tool call from
+#: the result that answers it, which is not a smaller conversation but an
+#: invalid one; the projection drops in tool-pair closures and protects
+#: the turn in flight. Each phase projects separately because they want
+#: opposite things from the same messages — the summary sheds reasoning,
+#: the retrospective sheds tool-result text.
 MAX_INPUT_SHARE_OF_TARGET = 0.5
 
 
@@ -139,11 +158,15 @@ def resolve_thinking_max_tokens(budgets: OutputBudgets,
     Measured against what the summary actually **cost**, not what it was
     allowed: writing them in this order is what lets an economical
     summary buy the retrospective room rather than wasting it.
+
+    Returns 0 when the summary consumed the whole budget. The caller
+    skips the phase rather than making a call that cannot produce
+    anything usable — see :data:`THINKING_BUDGET_MAX_SHARE` for why the
+    retrospective is the half that gets sacrificed.
     """
     combined = budgets.combined_tokens
     remaining = combined - max(0, summary_tokens)
-    return max(int(combined * THINKING_BUDGET_MIN_SHARE),
-               min(int(combined * THINKING_BUDGET_MAX_SHARE), remaining))
+    return max(0, min(int(combined * THINKING_BUDGET_MAX_SHARE), remaining))
 
 
 # --------------------------------------------------------------------- #
@@ -327,31 +350,7 @@ def _truncate(text: str, limit: int) -> str:
     return text[:limit] + f" […{len(text) - limit} more chars]"
 
 
-def _keep_recent_chars(blocks: list[str], max_chars: Optional[int],
-                       separator: str) -> str:
-    """Join blocks newest-first until the budget runs out, then restore
-    order. An elision note is prepended when anything was dropped, so
-    the model is not left to infer that it has the whole span."""
-    if not blocks:
-        return ""
-    joined = separator.join(blocks)
-    if max_chars is None or len(joined) <= max_chars:
-        return joined
-    kept: list[str] = []
-    spent = 0
-    for block in reversed(blocks):
-        if kept and spent + len(block) > max_chars:
-            break
-        kept.insert(0, block)
-        spent += len(block)
-    omitted = len(blocks) - len(kept)
-    note = (f"[{omitted} earlier turn(s) omitted here — they did not fit "
-            f"this pass. Assess what you can see.]")
-    return separator.join([note] + kept)
-
-
-def serialize_reasoning_with_outcomes(
-        messages: list[dict], *, max_chars: Optional[int] = None) -> str:
+def serialize_reasoning_with_outcomes(messages: list[dict]) -> str:
     """Render the discarded reasoning against what it produced.
 
     The retrospective's whole value is the **pairing**. Reasoning on its
@@ -395,7 +394,7 @@ def serialize_reasoning_with_outcomes(
         if calls:
             lines.append("Then called:\n" + "\n".join(calls))
         turns.append("\n".join(lines))
-    return _keep_recent_chars(turns, max_chars, "\n\n").strip()
+    return "\n\n".join(turns).strip()
 
 
 def _reasoning_cost_label(message: dict, thinking: str) -> str:
@@ -414,8 +413,7 @@ def _reasoning_cost_label(message: dict, thinking: str) -> str:
     return f" (~{tokens:,} tokens)"
 
 
-def serialize_conversation(messages: list[dict], *,
-                           max_chars: Optional[int] = None) -> str:
+def serialize_conversation(messages: list[dict]) -> str:
     """The discarded span as the summary phase sees it.
 
     Reasoning is deliberately **excluded**: the summariser is reading
@@ -442,13 +440,12 @@ def serialize_conversation(messages: list[dict], *,
         if calls:
             piece += f" (called: {', '.join(calls)})"
         lines.append(piece)
-    return _keep_recent_chars(lines, max_chars, "\n").strip()
+    return "\n".join(lines).strip()
 
 
 def build_summary_prompt(messages: list[dict], *,
                          previous_summary: Optional[str] = None,
-                         template: Optional[str] = None,
-                         max_input_chars: Optional[int] = None) -> str:
+                         template: Optional[str] = None) -> str:
     ops = collect_file_ops(messages)
     read = ", ".join(ops.read) or "none"
     edited = ", ".join(ops.edited) or "none"
@@ -462,16 +459,13 @@ def build_summary_prompt(messages: list[dict], *,
     if (previous_summary or "").strip():
         parts.append("Previous summary:\n" + previous_summary.strip())
     parts.append("Conversation:\n"
-                 + (serialize_conversation(messages,
-                                           max_chars=max_input_chars)
-                    or "(empty)"))
+                 + (serialize_conversation(messages) or "(empty)"))
     return "\n\n".join(parts)
 
 
 def build_retrospective_prompt(messages: list[dict], *,
                                previous_retrospective: Optional[str] = None,
-                               template: Optional[str] = None,
-                               max_input_chars: Optional[int] = None) -> str:
+                               template: Optional[str] = None) -> str:
     parts = [template or DEFAULT_THINKING_COMPACTION_PROMPT]
     if (previous_retrospective or "").strip():
         parts.append(
@@ -479,8 +473,7 @@ def build_retrospective_prompt(messages: list[dict], *,
             "forward what still holds, revise what does not, and do not "
             "simply restate it:\n" + previous_retrospective.strip())
     parts.append("Your reasoning and what it produced:\n"
-                 + (serialize_reasoning_with_outcomes(
-                     messages, max_chars=max_input_chars) or "(none)"))
+                 + (serialize_reasoning_with_outcomes(messages) or "(none)"))
     return "\n\n".join(parts)
 
 
@@ -539,6 +532,18 @@ def _call(chat_client: Any, model: str, system: str, user: str,
     return text, tokens
 
 
+def _log_projection(phase: str, result) -> None:
+    """Say what the projection had to do to make the span fit.
+
+    A projection that silently changed its input would make a bad digest
+    indistinguishable from a bad summariser.
+    """
+    if result.status != "ok":
+        log.warning("%s input projection %s", phase, result.summary_line())
+    elif result.degraded:
+        log.info("%s input projection %s", phase, result.summary_line())
+
+
 def write(dropped_messages: list[dict], *, chat_client: Any, model: str,
           target_tokens: int, generation: int = 1,
           previous: Optional[Digest] = None) -> Digest:
@@ -561,38 +566,64 @@ def write(dropped_messages: list[dict], *, chat_client: Any, model: str,
 
     budgets = resolve_output_budgets(target_tokens=target_tokens,
                                      generation=generation)
-    # Bound the *input* as well as the output. A digest that overflows
+    # Bound the *input* as well as the output — a digest that overflows
     # the window is a digest that never arrives, and the span being
-    # dropped is by definition the part that did not fit.
-    max_input_chars = max(
-        4_000,
-        int(target_tokens * MAX_INPUT_SHARE_OF_TARGET
-            * token_calib.chars_per_token(model)))
+    # dropped is by definition the part that did not fit. Each phase
+    # gets its own projection because they want opposite things from the
+    # same messages: the summary sheds reasoning and keeps the
+    # transcript, the retrospective sheds tool-result text and keeps the
+    # reasoning.
+    input_budget = max(MIN_INPUT_TOKENS,
+                       int(target_tokens * MAX_INPUT_SHARE_OF_TARGET))
 
+    summary_view = budget_projection.project(
+        dropped_messages, target_tokens=input_budget,
+        policy_intent="summary_input", model=model)
+    _log_projection("summary", summary_view)
     summary, summary_tokens = _call(
         chat_client, model, SUMMARY_SYSTEM_PROMPT,
         build_summary_prompt(
-            dropped_messages,
-            previous_summary=previous.summary if previous else None,
-            max_input_chars=max_input_chars),
+            summary_view.messages,
+            previous_summary=previous.summary if previous else None),
         budgets.summary_max_tokens)
 
     retrospective = ""
-    reasoning = serialize_reasoning_with_outcomes(dropped_messages)
-    if reasoning:
-        if not summary_tokens and summary:
-            # No usage reported: charge the summary at its estimated cost
-            # rather than at zero, or the retrospective is handed the
-            # whole combined budget on a phase that already spent some.
-            summary_tokens = token_calib.estimate_tokens(len(summary), model)
+    if not summary_tokens and summary:
+        # No usage reported: charge the summary at its estimated cost
+        # rather than at zero, or the retrospective is handed the whole
+        # combined budget on a phase that already spent some of it.
+        summary_tokens = token_calib.estimate_tokens(len(summary), model)
+
+    retro_budget = resolve_thinking_max_tokens(budgets, summary_tokens)
+    retro_view = budget_projection.project(
+        dropped_messages, target_tokens=input_budget,
+        policy_intent="retrospective_input", model=model)
+    reasoning = serialize_reasoning_with_outcomes(retro_view.messages)
+
+    if not reasoning:
+        # Nothing to assess. Asking anyway produces a model inventing an
+        # assessment of work it cannot see.
+        pass
+    elif retro_budget < MIN_PHASE_OUTPUT_TOKENS:
+        # The policy in force: the summary writes first and takes what it
+        # needs, and when it leaves too little the retrospective is what
+        # gets sacrificed. Logged rather than silent — an assessment that
+        # was never attempted should not look like one that came back
+        # empty.
+        log.info(
+            "retrospective skipped: the summary spent %d of a %d budget, "
+            "leaving %d — below the %d floor for a usable assessment",
+            summary_tokens, budgets.combined_tokens, retro_budget,
+            MIN_PHASE_OUTPUT_TOKENS)
+    else:
+        _log_projection("retrospective", retro_view)
         retrospective, _ = _call(
             chat_client, model, RETROSPECTIVE_SYSTEM_PROMPT,
             build_retrospective_prompt(
-                dropped_messages,
+                retro_view.messages,
                 previous_retrospective=(previous.retrospective
-                                        if previous else None),
-                max_input_chars=max_input_chars),
-            resolve_thinking_max_tokens(budgets, summary_tokens))
+                                        if previous else None)),
+            retro_budget)
         if retrospective and capped_thinking.is_degenerate_note(retrospective):
             log.warning("retrospective degenerated into repetition; dropping "
                         "it — a looping assessment reads as many findings")
@@ -665,7 +696,7 @@ def previous_digest(messages: list[dict]) -> Optional[Digest]:
 
 __all__ = [
     "COMPACTION_BUDGET_LADDER", "SUMMARY_BUDGET_SHARE",
-    "THINKING_BUDGET_MAX_SHARE", "THINKING_BUDGET_MIN_SHARE",
+    "THINKING_BUDGET_MAX_SHARE", "MAX_INPUT_SHARE_OF_TARGET",
     "DEFAULT_COMPACTION_PROMPT", "DEFAULT_THINKING_COMPACTION_PROMPT",
     "OutputBudgets", "Digest", "FileOps",
     "resolve_output_budgets", "resolve_thinking_max_tokens",

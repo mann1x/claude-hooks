@@ -81,14 +81,32 @@ class TestBudgetLadder(unittest.TestCase):
         frugal = retro.resolve_thinking_max_tokens(b, 100)
         self.assertGreater(frugal, lavish)
 
-    def test_retrospective_has_a_floor_and_a_ceiling(self):
+    def test_retrospective_has_a_ceiling(self):
+        """It must not expand to fill the room; the instruction to be
+        terse is in the prompt and this is the wall behind it."""
         b = retro.resolve_output_budgets(target_tokens=100_000)
-        self.assertGreaterEqual(
-            retro.resolve_thinking_max_tokens(b, 10 ** 9),
-            int(b.combined_tokens * retro.THINKING_BUDGET_MIN_SHARE))
         self.assertLessEqual(
             retro.resolve_thinking_max_tokens(b, 0),
             int(b.combined_tokens * retro.THINKING_BUDGET_MAX_SHARE))
+
+    def test_retrospective_has_no_floor(self):
+        """Policy: the summary writes first and takes what it needs; when
+        it leaves too little, the retrospective is what gets sacrificed.
+        The summary is the only record of what happened — losing it
+        means the next turn cannot continue the work at all."""
+        b = retro.resolve_output_budgets(target_tokens=100_000)
+        self.assertEqual(retro.resolve_thinking_max_tokens(b, 10 ** 9), 0)
+
+    def test_a_summary_that_spent_everything_leaves_nothing(self):
+        b = retro.resolve_output_budgets(target_tokens=100_000)
+        self.assertEqual(
+            retro.resolve_thinking_max_tokens(b, b.combined_tokens), 0)
+
+    def test_what_is_left_is_exactly_the_remainder(self):
+        b = retro.resolve_output_budgets(target_tokens=100_000)
+        spent = int(b.combined_tokens * 0.9)
+        self.assertEqual(retro.resolve_thinking_max_tokens(b, spent),
+                         b.combined_tokens - spent)
 
     def test_tiny_targets_still_get_a_usable_floor(self):
         b = retro.resolve_output_budgets(target_tokens=10)
@@ -408,50 +426,77 @@ if __name__ == "__main__":
 class TestInputIsBounded(unittest.TestCase):
     """A digest that overflows the window is a digest that never
     arrives — and the span being dropped is by definition the part that
-    did not fit."""
+    did not fit. Bounding is the projection's job, not a character
+    cap's: a cap can sever a tool call from its result."""
 
     def _big_span(self):
         msgs = []
         for i in range(60):
             msgs.append(_turn(f"reasoning turn {i} " * 300,
                               [("read_file", f"m{i}.py")]))
-            msgs.append(_result("tc0", "x" * 4000))
+            msgs.append(_result(f"tc{i}", "x" * 4000))
         return msgs
-
-    def test_retrospective_input_is_capped(self):
-        full = retro.build_retrospective_prompt(self._big_span())
-        capped = retro.build_retrospective_prompt(
-            self._big_span(), max_input_chars=20_000)
-        self.assertGreater(len(full), len(capped))
-        self.assertLess(len(capped), 30_000)
-
-    def test_summary_input_is_capped(self):
-        capped = retro.build_summary_prompt(
-            self._big_span(), max_input_chars=10_000)
-        self.assertLess(len(capped), 20_000)
-
-    def test_the_most_recent_turns_are_the_ones_kept(self):
-        """They are what 'in progress' and 'next' are written from; the
-        oldest are what a previous digest already covers."""
-        text = retro.serialize_reasoning_with_outcomes(
-            self._big_span(), max_chars=20_000)
-        self.assertIn("reasoning turn 59", text)
-        self.assertNotIn("reasoning turn 0 ", text)
-
-    def test_omission_is_announced(self):
-        text = retro.serialize_reasoning_with_outcomes(
-            self._big_span(), max_chars=20_000)
-        self.assertIn("turn(s) omitted", text)
-
-    def test_a_span_that_fits_is_untouched(self):
-        small = [_turn("brief reasoning", [("grep", "x")])]
-        self.assertEqual(
-            retro.serialize_reasoning_with_outcomes(small, max_chars=100_000),
-            retro.serialize_reasoning_with_outcomes(small))
 
     def test_write_bounds_both_phases(self):
         client = _Client("s", "r")
         retro.write(self._big_span(), chat_client=client, model="m",
                     target_tokens=8_000)
+        self.assertEqual(len(client.payloads), 2)
         for payload in client.payloads:
-            self.assertLess(len(payload["messages"][1]["content"]), 30_000)
+            prompt = payload["messages"][1]["content"]
+            self.assertLess(len(prompt), 40_000)
+
+    def test_each_phase_sheds_what_the_other_needs(self):
+        """They want opposite things from the same messages: the summary
+        sheds reasoning and keeps the transcript, the retrospective sheds
+        tool-result text and keeps the reasoning."""
+        client = _Client("s", "r")
+        retro.write(self._big_span(), chat_client=client, model="m",
+                    target_tokens=8_000)
+        summary_prompt, retro_prompt = (
+            p["messages"][1]["content"] for p in client.payloads)
+        self.assertNotIn("reasoning turn", summary_prompt)
+        self.assertIn("reasoning turn", retro_prompt)
+
+    def test_a_span_that_fits_is_untouched(self):
+        small = [_turn("brief reasoning", [("grep", "x")])]
+        client = _Client("s", "r")
+        retro.write(small, chat_client=client, model="m",
+                    target_tokens=200_000)
+        self.assertIn("brief reasoning", client.payloads[1]["messages"][1]
+                      ["content"])
+
+
+class TestSummaryFirstPolicy(unittest.TestCase):
+    """Summary writes first and takes what it needs; if it leaves too
+    little, the retrospective is what gets sacrificed."""
+
+    def _span(self):
+        return [_turn("I ruled out the tokenizer.",
+                      [("read_file", "eval.py")], output_tokens=800),
+                _result("tc0", "120 lines")]
+
+    def test_a_greedy_summary_sacrifices_the_retrospective(self):
+        client = _Client("a very long summary", "never asked for",
+                         tokens=10 ** 6)
+        d = retro.write(self._span(), chat_client=client, model="m",
+                        target_tokens=50_000)
+        self.assertEqual(d.summary, "a very long summary")
+        self.assertEqual(d.retrospective, "")
+        self.assertEqual(len(client.payloads), 1)
+
+    def test_an_economical_summary_leaves_room(self):
+        client = _Client("terse", "the retrospective", tokens=50)
+        d = retro.write(self._span(), chat_client=client, model="m",
+                        target_tokens=50_000)
+        self.assertEqual(d.retrospective, "the retrospective")
+        self.assertEqual(len(client.payloads), 2)
+
+    def test_the_summary_survives_either_way(self):
+        """It is the load-bearing half: lose it and the next turn cannot
+        continue the work at all."""
+        for tokens in (50, 10 ** 6):
+            client = _Client("THE SUMMARY", "r", tokens=tokens)
+            d = retro.write(self._span(), chat_client=client, model="m",
+                            target_tokens=50_000)
+            self.assertEqual(d.summary, "THE SUMMARY")

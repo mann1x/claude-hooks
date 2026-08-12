@@ -1192,6 +1192,32 @@ how a long run degrades). The retrospective is then sized from what the
 summary actually cost, so an economical summary buys it room. Each
 digest chains into the next, which revises rather than restates it.
 
+**The summary writes first and takes what it needs; the retrospective
+is capped at what is left to reach the target.** There is no guaranteed
+floor for it: when the summary spends the budget, the retrospective is
+skipped and the skip is logged. The summary is the only record of *what
+happened* — lose it and the next turn cannot continue the work at all,
+whereas the retrospective improves how the work is done.
+
+```
+retrospective skipped: the summary spent 2604 of a 2640 budget,
+leaving 36 — below the 512 floor for a usable assessment
+```
+
+The digest's **input** is bounded too, by a projection rather than a
+character cap (`claude_hooks/budget_projection.py`). A cap can sever an
+assistant's tool call from the result answering it, which is not a
+smaller conversation but an invalid one. The projection degrades in a
+fixed order — reasoning per intent, then text truncation newest-first,
+then whole messages oldest-first **in tool-pair closures** — and never
+drops the first or latest typed user message or the turn in flight. It
+reports what it did:
+
+```
+summary input projection ok: ~7865 tok (33 dropped_field)
+retrospective input projection ok: ~9555 tok (40 dropped_message, 64 truncated_text)
+```
+
 If either phase fails or comes back empty, compaction still happens and
 falls back to the bare elision note — a digest that cannot be written
 must never block the compaction it was meant to enrich.

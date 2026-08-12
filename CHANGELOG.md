@@ -137,12 +137,28 @@ release with the auto-generated source archive
   run in the fork with a perfectly good retrospective inside a schema
   error.
 
-  One bound is ours rather than the fork's: the digest's **input** is
-  capped at half the compaction target. The first end-to-end run
-  serialized 61 dropped messages into 51,442 characters — ~17k tokens
-  against a 24k window, before either phase's own output — so the digest
-  could overflow the window it exists to relieve. It now keeps the most
-  recent turns and says how many it omitted.
+  The digest's **input** is bounded too, at half the compaction target,
+  because a digest that overflows the window is a digest that never
+  arrives — the first end-to-end run serialized 61 dropped messages into
+  ~17k tokens against a 24k window, before either phase's own output.
+  Reaching that budget is `claude_hooks/budget_projection.py`'s job:
+  reasoning per intent, then unsafe blocks, then text truncation
+  newest-first, then whole messages oldest-first **in tool-pair
+  closures**, never touching the first or latest typed user message or
+  the turn in flight. Each phase projects separately because they want
+  opposite things from the same span — the summary sheds reasoning and
+  keeps the transcript, the retrospective sheds tool-result text and
+  keeps the reasoning. A projection that cannot reach its target says
+  so rather than returning something over budget as if it were fine.
+
+  **Policy: the summary writes first and the retrospective takes what is
+  left to reach the target.** Unlike the fork, there is no guaranteed
+  floor for the retrospective — the summary is expected to leave room,
+  and when it does not, the retrospective is what gets sacrificed and
+  the skip is logged. The summary is the only record of *what happened*;
+  lose it and the next turn cannot continue the work at all, whereas the
+  retrospective improves how the work is done. Guaranteeing it a floor
+  means taking that floor from the summary.
 
 
 ### Fixed
