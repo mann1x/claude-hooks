@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from claude_hooks import capped_thinking, token_calib, truncation
-from consultants.engine import budget
+from consultants.engine import budget, retrospective
 from consultants.engine.storage import RoleTurn
 
 log = logging.getLogger("consultants.engine.council")
@@ -1069,22 +1069,35 @@ def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
         keep = plan.trigger_tokens or max(
             0, (plan.context_length or 0)
             - budget.MAX_OUTPUT_TOKENS - budget.WINDOW_MARGIN_TOKENS)
+        previous = retrospective.previous_digest(messages)
+
+        def _marker(dropped_msgs: list[dict], generation: int) -> dict:
+            """Two passes over the span being dropped, then the message
+            that replaces it.
+
+            Runs inside compaction rather than after it because this is
+            the only moment the discarded turns still exist: once
+            ``compact_messages`` returns they are gone, and a summary
+            written from what survived would describe the wrong thing.
+            """
+            digest = retrospective.write(
+                dropped_msgs, chat_client=chat_client, model=model,
+                target_tokens=keep, generation=generation,
+                previous=previous)
+            if digest.empty:
+                log.warning(
+                    "role=%s: compaction digest came back empty (%s); the "
+                    "elided span leaves only the marker",
+                    role, digest.stand_down or "both phases silent")
+                return None
+            return retrospective.render_marker(digest, len(dropped_msgs))
+
         result = budget.compact_messages(
-            messages, keep_tokens=keep, context_length=plan.context_length)
+            messages, keep_tokens=keep, context_length=plan.context_length,
+            model=model, make_marker=_marker)
         if result.changed:
             messages = result.messages
             plan = budget.plan(chat_client, model, messages)
-            if result.reclaimed_thinking:
-                # Recorded, not yet distilled: the reasoning of the turns
-                # being dropped is exactly what a retrospective would be
-                # written from. Surfacing the count keeps the loss
-                # visible until that second pass exists.
-                log.info(
-                    "role=%s: compaction reclaimed %d reasoning block(s) "
-                    "(~%d chars) from the elided span",
-                    role, len(result.reclaimed_thinking),
-                    sum(len(t) for t in result.reclaimed_thinking),
-                )
     token_calib.note_output_cap(plan.cap_report(), model)
     return messages, plan
 

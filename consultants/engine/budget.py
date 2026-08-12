@@ -370,6 +370,14 @@ class CompactionResult:
     dropped: int = 0
     generation: int = 1
     reclaimed_thinking: list[str] = field(default_factory=list)
+    #: The elided messages themselves, in order. What a retrospective is
+    #: written from: the reasoning alone reads as a plan and every plan
+    #: reads as sound, so the tool calls and their outcomes have to
+    #: travel with it.
+    dropped_messages: list[dict] = field(default_factory=list)
+    #: Where the marker sits in ``messages``, so a caller that writes a
+    #: digest can replace it without re-deriving the layout.
+    marker_index: Optional[int] = None
 
     def __iter__(self):
         """Backwards compatibility with the ``(messages, changed)``
@@ -380,7 +388,8 @@ class CompactionResult:
 def compact_messages(messages: list[dict], *, keep_tokens: int,
                      keep_recent: int = 4,
                      context_length: Optional[int] = None,
-                     model: str = "") -> CompactionResult:
+                     model: str = "",
+                     make_marker: Optional[Any] = None) -> CompactionResult:
     """Drop from the middle until the history fits ``keep_tokens``.
 
     What survives:
@@ -399,11 +408,13 @@ def compact_messages(messages: list[dict], *, keep_tokens: int,
     history reasons differently about gaps in it than one that believes
     it has the whole record.
 
-    Any reasoning carried by the dropped messages is returned in
-    ``reclaimed_thinking`` rather than discarded, so a caller that wants
-    to distil it into a retrospective has it. Compaction is the right
-    place to reclaim reasoning: it is where the turns that produced it
-    are going away.
+    The dropped messages are returned rather than discarded, so a
+    caller can distil them into a summary and a retrospective —
+    compaction is the right place to do that, because it is where the
+    turns that produced them are going away. ``make_marker`` lets that
+    caller supply the replacement message; the default is the bare
+    elision note, which carries the fact of the loss but none of its
+    content.
     """
     if not messages:
         return CompactionResult(messages, False)
@@ -448,17 +459,26 @@ def compact_messages(messages: list[dict], *, keep_tokens: int,
     generation = 1 + sum(
         1 for m in messages
         if m.get("_compaction_marker") and m.get("role") == "system")
-    marker = {
-        "role": "system",
-        "_compaction_marker": True,
-        "content": (
-            f"[{dropped} earlier message(s) elided to fit the model's "
-            f"context window. The instructions above and the most recent "
-            f"exchanges below are intact; intermediate working notes are "
-            f"not. Say so if the elided span is load-bearing for your "
-            f"answer rather than inferring what it contained.]"
-        ),
-    }
+    marker = None
+    if make_marker is not None:
+        try:
+            marker = make_marker(dropped_msgs, generation)
+        except Exception:  # pragma: no cover — a digest must not block
+            log.exception("marker factory raised; falling back to the bare "
+                          "elision note")
+            marker = None
+    if marker is None:
+        marker = {
+            "role": "system",
+            "_compaction_marker": True,
+            "content": (
+                f"[{dropped} earlier message(s) elided to fit the model's "
+                f"context window. The instructions above and the most recent "
+                f"exchanges below are intact; intermediate working notes are "
+                f"not. Say so if the elided span is load-bearing for your "
+                f"answer rather than inferring what it contained.]"
+            ),
+        }
     out = head + [marker] + tail
     log.warning(
         "compacted history (gen %d): %d -> %d messages "
@@ -469,7 +489,9 @@ def compact_messages(messages: list[dict], *, keep_tokens: int,
     )
     return CompactionResult(out, True, dropped=dropped,
                             generation=generation,
-                            reclaimed_thinking=reclaimed)
+                            reclaimed_thinking=reclaimed,
+                            dropped_messages=list(dropped_msgs),
+                            marker_index=len(head))
 
 
 __all__ = ["Budget", "CompactionResult", "estimate_tokens",

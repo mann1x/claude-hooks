@@ -99,6 +99,52 @@ release with the auto-generated source archive
   note at all leaves the turn to re-derive — the behaviour this improves
   on rather than one it breaks.
 
+- **Two-phase compaction** (`consultants/engine/retrospective.py`),
+  completing the port. Compaction used to replace the elided span with a
+  marker counting how many messages it dropped — honest, and carrying
+  nothing. Every finding, every dead end, every stretch of reasoning in
+  that span was simply gone, and a role that continues with no memory of
+  having been wrong makes the same mistakes in the same order.
+
+  Now two passes run over the span while it still exists, using the
+  fork's prompts:
+
+  - **Summary** — the hand-over note. Goal, done, in progress, ruled
+    out, key facts, next. Specifics on purpose: an over-long note costs
+    a little context, a vague one costs the whole investigation. Written
+    from the transcript with reasoning *excluded*.
+  - **Retrospective** — the honest assessment of method: what worked,
+    what did not and its failure mode, where the time went, what to do
+    differently. Written from the discarded *reasoning*, paired with
+    what each stretch produced — reasoning on its own reads as a plan
+    and every plan reads as sound; it is the outcome beside it that
+    shows which ones were. Tool results are reduced to a verdict
+    (`applied`, `refused as an unchanged repeat`, `failed: …`), because
+    a retrospective about method has no use for a file's contents and
+    the results are most of the bytes. Turns carry their reasoning cost
+    in tokens — the one thing a model cannot infer from reading its own
+    thinking back is that the stretch which felt thorough was the turn
+    that spent eighteen thousand tokens for one refused call.
+
+  The summary writes first against 70% of a combined budget that grows
+  with **generation** (0.33 → 0.55 of the compaction target across five
+  compactions, then flat); the retrospective is then sized from what the
+  summary *actually* cost, so an economical summary buys it room. Each
+  digest is chained into the next, which revises rather than restates
+  it. Both are placed as **plain text**, never as a reasoning block —
+  reasoning parts are only valid on an assistant message and this is the
+  message that replaces the transcript, a distinction that killed a live
+  run in the fork with a perfectly good retrospective inside a schema
+  error.
+
+  One bound is ours rather than the fork's: the digest's **input** is
+  capped at half the compaction target. The first end-to-end run
+  serialized 61 dropped messages into 51,442 characters — ~17k tokens
+  against a 24k window, before either phase's own output — so the digest
+  could overflow the window it exists to relieve. It now keeps the most
+  recent turns and says how many it omitted.
+
+
 ### Fixed
 
 - **A truncated council answer no longer reports itself as a finished

@@ -1137,6 +1137,65 @@ read as thirty things it thought, and no note simply returns the
 pre-existing behaviour of re-deriving. Set
 `LoopConfig.capped_thinking_enabled = False` to disable it entirely.
 
+### What a compaction leaves behind
+
+Compaction used to replace the elided messages with a marker counting
+them. That is honest and carries nothing: every finding, every dead end
+and every stretch of reasoning in that span was gone, and a role that
+continues with no memory of having been wrong makes the same mistakes in
+the same order.
+
+Two passes now run over the span while it still exists — that moment is
+the only one where those turns are still available — and both land in
+the marker:
+
+```
+Retrospective on the work this summary replaces — your own assessment,
+carried forward:
+
+## What did not
+Re-reading the same three files after each failed grep. The file was
+never the problem; the aggregation order was.
+...
+
+Context summary:
+
+## Goal
+Find where the metric drops rows before normalisation.
+## Ruled out
+The tokenizer (eval.py:88 counts rows, not tokens).
+...
+
+[61 earlier message(s) were elided to fit the model's context window...]
+```
+
+The **summary** is the hand-over note — goal, done, in progress, ruled
+out, key facts, next — written from the transcript with reasoning
+excluded. The **retrospective** is the assessment of *method*, written
+from the discarded reasoning paired with what each stretch produced.
+That pairing is the point: reasoning on its own reads as a plan, and
+every plan reads as sound; the outcome beside it shows which ones were.
+Tool results are reduced to a verdict (`applied`, `refused as an
+unchanged repeat`, `failed: …`), and each turn carries its reasoning
+cost in tokens — the one thing a model cannot infer from re-reading its
+own thinking is that the stretch which felt thorough was the turn that
+spent eighteen thousand tokens for one refused call.
+
+The retrospective comes first because it is what should be read first:
+how the work went, before what the work was.
+
+Budgets: the summary writes first against 70% of a combined budget that
+grows with **generation** (0.33 → 0.55 of the compaction target across
+five compactions, then flat — a fifth compaction is carrying everything
+the task has learned, and holding it to a first compaction's budget is
+how a long run degrades). The retrospective is then sized from what the
+summary actually cost, so an economical summary buys it room. Each
+digest chains into the next, which revises rather than restates it.
+
+If either phase fails or comes back empty, compaction still happens and
+falls back to the bare elision note — a digest that cannot be written
+must never block the compaction it was meant to enrich.
+
 ---
 
 ## Configuration
