@@ -295,3 +295,22 @@ def tmp_claude_home(tmp_path, monkeypatch):
     fake_home.mkdir()
     redirect_home(monkeypatch, fake_home)
     return fake_home
+
+
+@pytest.fixture(autouse=True)
+def _reset_token_calibration():
+    """Clear measured chars-per-token ratios between tests.
+
+    Autouse and unconditional. The calibration in
+    ``claude_hooks.token_calib`` is process-global by design — it has to
+    outlive a single request to be worth anything — which is exactly what
+    lets one test's fake token counts skew the next test's estimate. That
+    is not hypothetical: a `_single_shot` test recording
+    ``prompt_tokens=10`` against a 700-character request taught the ratio
+    0.07 chars/token, and a later budget assertion then failed by 2x with
+    nothing in its own body to explain it.
+    """
+    from claude_hooks import token_calib
+    token_calib.reset_calibration()
+    yield
+    token_calib.reset_calibration()

@@ -39,7 +39,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from claude_hooks import truncation
+from claude_hooks import capped_thinking, token_calib, truncation
 from consultants.engine import budget
 from consultants.engine.storage import RoleTurn
 
@@ -1009,6 +1009,86 @@ _CONTINUE_INSTRUCTION = (
 )
 
 
+def _observe_usage(messages: list[dict], response: dict,
+                   prompt_tokens: int, completion_tokens: int,
+                   model: str) -> None:
+    """Feed a real provider count back into the token ratios.
+
+    Two separate calibrations, because prompt and reasoning do not
+    tokenize alike and averaging them is what makes an estimate wrong in
+    the direction that lets a request be built too large:
+
+    * the **prompt** ratio, from the serialized request against
+      ``prompt_eval_count``, with the reasoning characters charged at
+      their own rate first so the two halves don't both account for the
+      same characters;
+    * the **reasoning** ratio, but only from a turn that was mostly
+      reasoning — a turn that was mostly a tool call would teach it
+      about JSON.
+
+    Never raises: calibration is an optimisation, and a run that dies
+    because it tried to get smarter about tokens is a worse outcome than
+    one that stays on the conservative default.
+    """
+    try:
+        chars, reasoning_chars = token_calib.measure_request_chars(messages)
+        token_calib.observe_request_tokens(
+            chars, prompt_tokens, reasoning_chars, model)
+        if completion_tokens > 0:
+            msg = ((response.get("choices") or [{}])[0].get("message") or {})
+            thinking = capped_thinking.thinking_text(msg)
+            produced = capped_thinking.produced_characters(msg)
+            # "Mostly reasoning" — the caller's judgement, per
+            # observe_thinking_tokens' contract.
+            if thinking and produced and len(thinking) / produced >= 0.6:
+                token_calib.observe_thinking_tokens(
+                    len(thinking), completion_tokens, model)
+    except Exception:  # pragma: no cover — never sink a call
+        log.debug("token calibration failed; staying on defaults",
+                  exc_info=True)
+
+
+def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
+                      role: Optional[str] = None
+                      ) -> tuple[list[dict], "budget.Budget"]:
+    """Size the next call, compacting the history first if it no longer
+    leaves room to answer.
+
+    Re-planned after compacting rather than assumed: the whole point of
+    dropping messages is that the budget changes, and a plan computed
+    against the pre-compaction history would hand back the number the
+    compaction was supposed to fix.
+
+    The cap that wins is recorded on the process-wide calibration state
+    so a later reader — the truncation verdict, a post-mortem — can ask
+    what limited the reply rather than inferring it.
+    """
+    plan = budget.plan(chat_client, model, messages)
+    if plan.needs_compaction:
+        log.warning("role=%s: %s — compacting history", role, plan.detail)
+        keep = plan.trigger_tokens or max(
+            0, (plan.context_length or 0)
+            - budget.MAX_OUTPUT_TOKENS - budget.WINDOW_MARGIN_TOKENS)
+        result = budget.compact_messages(
+            messages, keep_tokens=keep, context_length=plan.context_length)
+        if result.changed:
+            messages = result.messages
+            plan = budget.plan(chat_client, model, messages)
+            if result.reclaimed_thinking:
+                # Recorded, not yet distilled: the reasoning of the turns
+                # being dropped is exactly what a retrospective would be
+                # written from. Surfacing the count keeps the loss
+                # visible until that second pass exists.
+                log.info(
+                    "role=%s: compaction reclaimed %d reasoning block(s) "
+                    "(~%d chars) from the elided span",
+                    role, len(result.reclaimed_thinking),
+                    sum(len(t) for t in result.reclaimed_thinking),
+                )
+    token_calib.note_output_cap(plan.cap_report(), model)
+    return messages, plan
+
+
 def _single_shot(chat_client, model: str, messages: list[dict],
                  *, think: Any = True,
                  recorder=None, role: Optional[str] = None,
@@ -1038,19 +1118,8 @@ def _single_shot(chat_client, model: str, messages: list[dict],
     Token counts returned are summed across continuations, so a
     caller's accounting stays true.
     """
-    convo = list(messages)
-    plan = budget.plan(chat_client, model, convo)
-    if plan.needs_compaction:
-        log.warning("role=%s: %s — compacting history", role, plan.detail)
-        convo, changed = budget.compact_messages(
-            convo,
-            keep_tokens=max(
-                0, (plan.context_length or 0)
-                - budget.TARGET_OUTPUT_TOKENS
-                - budget.WINDOW_MARGIN_TOKENS),
-        )
-        if changed:
-            plan = budget.plan(chat_client, model, convo)
+    convo, plan = _plan_and_compact(chat_client, model, list(messages),
+                                    role=role)
 
     text_parts: list[str] = []
     total_pt = total_ct = 0
@@ -1082,6 +1151,12 @@ def _single_shot(chat_client, model: str, messages: list[dict],
         pt, ct = _usage_from(response)
         total_pt += pt
         total_ct += ct
+        # Calibrate on what this request actually cost. The estimate that
+        # sized the budget was a guess about how this content tokenizes;
+        # the provider just answered the question. Cheap, and it is the
+        # difference between a ratio that drifts 1.7x high all session and
+        # one that converges after the first call.
+        _observe_usage(convo, response, pt, ct, model)
         if recorder is not None and role is not None:
             try:
                 recorder.record_llm(
@@ -1120,7 +1195,27 @@ def _single_shot(chat_client, model: str, messages: list[dict],
             {"role": "assistant", "content": "".join(text_parts)},
             {"role": "user", "content": _CONTINUE_INSTRUCTION},
         ]
-        plan = budget.plan(chat_client, model, convo)
+        # What capped the turn decides what happens next.
+        #
+        # A **window-bound** cap is compaction's to fix: the history has
+        # grown past the point where a full answer fits beside it, and
+        # the continuation needs that room back. A cap that came from our
+        # own request or the model is not — shrinking the history cannot
+        # raise it, so compacting there would spend the transcript to
+        # leave the continuation facing the same ceiling with less of the
+        # work it was doing. The fork measured exactly that: a
+        # 48,508-token request compacted against a 110,000-token window
+        # when the cap that ended the turn was the caller's own 32,000.
+        #
+        # Note what is deliberately *not* done here. The fork gives a
+        # truncated turn **less** to spend on its retry, because it
+        # discards the half-written reply and regenerates — a smaller
+        # budget is what makes the second attempt fit. This is a
+        # continuation, not a regeneration: the partial is kept and the
+        # model writes only what is left, so cutting the budget each time
+        # would make each continuation shorter than the last and turn a
+        # bounded recovery into a guaranteed failure.
+        convo, plan = _plan_and_compact(chat_client, model, convo, role=role)
 
     return ("".join(text_parts).strip(), total_pt, total_ct)
 

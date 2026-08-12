@@ -16,6 +16,89 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added
+
+- **Measured token accounting, ported from the Cline fork**
+  (`mann1x/cline`, `sdk/packages/shared/src/llms/tokens.ts` and
+  `extensions/context/`). New `claude_hooks/token_calib.py` replaces the
+  flat `CHARS_PER_TOKEN = 3.0` that `budget.py` shipped with:
+
+  - **Two ratios, not one.** A serialized request is mostly JSON, code
+    and tool output (3.8–4.4 chars/token); reasoning is prose the model
+    wrote for itself (~2.7). Averaging them works only while the mix
+    holds still, and it does not — in the fork's live transcript
+    reasoning moved between 32% and 61% of the content, every turn. Each
+    departure becomes error, and it is **not symmetric**: a
+    reasoning-heavy request is *under*counted, the direction that lets a
+    request be built too large.
+  - **Live calibration.** The first real `prompt_eval_count` replaces
+    the guess; later ones are EWMA-smoothed. Verified against the
+    production endpoint: a council-shaped prompt (prose plus 60
+    serialized grep hits) estimated at 1,747 tokens by the flat ratio and
+    cost 2,167 — a **19% undercount** — and one calibration call brought
+    the estimate to 2,168. Observed ratios outside `[1.2, 16]` are
+    rejected as broken measurements; the ceiling has to clear Gemma-4's
+    measured **8.26** on serialized JSON, which an earlier ceiling of 8
+    discarded along with every later observation.
+  - **Per model**, unlike the fork. Its sessions run one model at a
+    time; the council runs N concurrently under x-tier fanout, and a
+    blended ratio would describe neither.
+
+- **Output-cap attribution.** `OutputCapReport.window_bound`
+  distinguishes a truncation the *window* caused from one our own
+  `num_predict` or the model's ceiling caused. They look identical —
+  same `done_reason`, same half-written message — and want opposite
+  responses: the first is compaction's to fix, and compacting for the
+  second spends the transcript to leave the retry facing the same
+  ceiling with less of the work it was doing. The fork measured exactly
+  that: a 48,508-token request compacted against a 110,000-token window
+  when the cap that ended the turn was the caller's own 32,000.
+
+- **Reservations sized from measurement, not from ceilings.**
+  `num_predict` is a ceiling, not a forecast, and reserving all of it
+  takes the whole cap out of the prompt budget on every turn — 21% of a
+  110k window held permanently for an output that almost never arrives.
+  Once a run has turns to learn from, the reservation follows their
+  high-water mark (×1.5). The recency floor now scales **sub-linearly**
+  with the window (20,000 tokens at 128k, ~79,000 at 1M) instead of
+  being a flat message count that is right for exactly one window size.
+  And the compaction trigger now asks whether the prompt *and a full
+  answer* fit, not merely whether the prompt does — the fork measured a
+  110k window that allowed a 99k transcript, then found itself 11k short
+  and sent no cap at all, and the turn died on the output limit with
+  compaction still reporting room.
+
+- **Capped-thinking retrospect notes** (`claude_hooks/capped_thinking.py`).
+  A model that hits its thinking budget does not stop reasoning — it
+  stops mid-sentence and, on the next turn, starts the same reasoning
+  from the beginning. In this repo the loss was **total**: the agent
+  loop stripped `thinking` / `reasoning` / `reasoning_content` from
+  every assistant message before resending it, so a researcher that
+  reasoned to its budget on iteration 1 began iteration 2 with no record
+  of having reasoned at all. Now that turn's reasoning is condensed —
+  for the next request only — into a short first-person note of what it
+  settled, what it ruled out, and what its tool call returned, and that
+  note goes back into the reasoning channel in place of the transcript.
+
+  The budget compared against is **our own `num_predict`**, which the
+  2026-08-12 truncation fix made exact: Ollama counts thinking tokens
+  toward it, so sending an explicit budget is what turns "the model
+  reasoned too long" from an invisible provider default into a number we
+  know. Detection is two-signal — the model's own out-of-budget message
+  from `/api/show` when it declares one (direct evidence, no threshold),
+  or measured thinking tokens within 90% of the budget. *Measured*, not
+  estimated: the fork's first version compared a request-wide estimate
+  against a budget in the model's own tokens, so a turn that spent all
+  16,000 of its allowance measured as ~10,300 and never crossed the
+  line — the cap fired on nearly 300 requests in one session and the
+  detector saw none of them.
+
+  A note that degenerates into repetition is dropped rather than used:
+  it lands in the thinking channel *as the model's own reasoning*, so
+  thirty near-identical lines read as thirty things it thought, and no
+  note at all leaves the turn to re-derive — the behaviour this improves
+  on rather than one it breaks.
+
 ### Fixed
 
 - **A truncated council answer no longer reports itself as a finished

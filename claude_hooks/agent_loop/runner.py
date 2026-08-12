@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from claude_hooks import truncation
+from claude_hooks import capped_thinking, truncation
 
 log = logging.getLogger("claude_hooks.agent_loop")
 
@@ -67,6 +67,17 @@ class LoopConfig:
     force_first_retry_enabled: bool = True
     force_first_retry_message: str = DEFAULT_FORCE_FIRST_RETRY_MESSAGE
 
+    # Reasoning a budget cut short is condensed into a note rather than
+    # dropped, so the next iteration continues instead of re-deriving.
+    # False restores the pre-fix behavior of discarding it.
+    capped_thinking_enabled: bool = True
+    #: Fallback budget when the request carries no ``num_predict`` of its
+    #: own. Usually unnecessary — the request's own budget is exact.
+    thinking_budget_tokens: Optional[int] = None
+    #: The model's declared out-of-budget message, from ``/api/show``.
+    #: When present it is direct evidence and needs no threshold.
+    thinking_budget_message: Optional[str] = None
+
     # A final answer the backend cut short is continued rather than
     # returned half-written (2026-08-12). Each continuation is one more
     # call, so this is bounded; 0 restores the pre-fix behavior of
@@ -107,6 +118,75 @@ CONTINUE_ANSWER_INSTRUCTION = (
     "already produced and do not open with a preamble; the two halves "
     "will be concatenated verbatim."
 )
+
+
+class _ChatFnClient:
+    """Adapts a bare ``chat_fn`` to the ``.chat(payload)`` shape the
+    condenser expects. The condensation runs against the same endpoint
+    and model as the turn it is condensing, which is the only pairing
+    that needs no configuration to be correct."""
+
+    def __init__(self, chat_fn: "ChatFn") -> None:
+        self._chat_fn = chat_fn
+
+    def chat(self, payload: dict) -> dict:
+        return self._chat_fn(payload)
+
+
+def _capped_thinking_note(msg: dict, response: dict, payload: dict,
+                          config: "LoopConfig", chat_fn: "ChatFn", *,
+                          iteration: int) -> Optional[str]:
+    """A note replacing the reasoning of a turn the budget cut short.
+
+    ``None`` — the common case — means the turn reasoned within its
+    budget and its thinking is simply dropped, as before.
+
+    The budget compared against is **our own** ``num_predict``. Ollama
+    counts thinking tokens toward it, so a role that reasons at length
+    can spend the whole allowance before writing any content. That risk
+    is created by sending an explicit budget at all, which this repo
+    started doing on 2026-08-12 — before that the ceiling was an unseen
+    provider default and equally uncontrollable, just invisible. Knowing
+    the number is what makes the detection exact rather than a guess.
+    """
+    if getattr(config, "capped_thinking_enabled", True) is not True:
+        return None
+    budget = (payload.get("options") or {}).get("num_predict")
+    completion_tokens = int(
+        (response.get("usage") or {}).get("completion_tokens") or 0)
+    capped, stand_down = capped_thinking.detect(
+        msg,
+        budget_tokens=budget or getattr(config, "thinking_budget_tokens", None),
+        budget_message=getattr(config, "thinking_budget_message", None),
+        completion_tokens=completion_tokens,
+    )
+    if capped is None:
+        if stand_down not in ("turn-did-not-reason", "reasoning-within-budget"):
+            log.debug("capped-thinking stood down on iter %d: %s",
+                      iteration, stand_down)
+        return None
+
+    log.info(
+        "capped thinking on iter %d (%s): %d reasoning tok of a %s budget "
+        "— condensing rather than discarding",
+        iteration, capped.evidence, capped.thinking_tokens, budget,
+    )
+    note, reason = capped_thinking.condense(
+        capped,
+        chat_client=_ChatFnClient(chat_fn),
+        model=payload.get("model") or "",
+        tool_outcomes=[
+            {"name": (tc.get("function") or {}).get("name"),
+             "input": (tc.get("function") or {}).get("arguments"),
+             "result": "(pending — results follow this message)"}
+            for tc in (msg.get("tool_calls") or [])
+        ],
+    )
+    if note is None:
+        log.info("capped-thinking produced no usable note (%s); the turn "
+                 "will re-derive", reason)
+        return None
+    return capped_thinking.as_thinking_block(note)
 
 
 def _answer_text(response: dict) -> str:
@@ -451,8 +531,21 @@ def run_loop(
         clean_msg = dict(msg)
         clean_msg["content"] = None
         clean_msg["tool_calls"] = tool_calls
-        for k in ("thinking", "reasoning", "reasoning_content"):
+        # The reasoning does not survive as-is: providers reject a
+        # replayed thinking block, and seventeen thousand tokens of
+        # interrupted rambling is not something a model continues from
+        # anyway. But dropping it outright is what makes a turn that
+        # reasoned to its budget start the same reasoning from scratch
+        # on the next iteration — observed as the same ground covered a
+        # dozen times, each pass ending at the same cap. When the cap
+        # is what ended it, a short note of what it settled goes back in
+        # its place; otherwise it goes, as before.
+        note = _capped_thinking_note(
+            msg, final, payload, config, chat_fn, iteration=i)
+        for k in capped_thinking.token_calib.REASONING_KEYS:
             clean_msg.pop(k, None)
+        if note:
+            clean_msg["content"] = note
         payload["messages"] = list(payload["messages"]) + [clean_msg]
         payload["messages"].extend(
             execute_tool_calls(

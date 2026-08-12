@@ -134,6 +134,47 @@ def _context_length_from_show(data: dict) -> Optional[int]:
     return None
 
 
+#: Where a model's thinking-budget message can be declared. Ollama
+#: surfaces a Modelfile's parameters under several shapes depending on
+#: build, so all of them are checked rather than guessed between.
+_BUDGET_MESSAGE_KEYS = (
+    "thinking_budget_message", "think_budget_message",
+    "reasoning_budget_message",
+)
+
+
+def _budget_message_from_show(data: dict) -> Optional[str]:
+    """The model's own "you have run out of thinking budget" message.
+
+    A model that hits its thinking cap does not stop reasoning — it stops
+    mid-sentence. Ollama appends the message the Modelfile declares, so
+    finding that message at the *end* of a think is direct evidence the
+    budget, rather than the model, ended it.
+
+    Returns ``None`` when the model declares none, which is most of them.
+    ``None`` means "no marker to look for", not "no cap": the
+    proximity ratio in :mod:`claude_hooks.capped_thinking` still applies.
+    """
+    for container in (data.get("parameters"), data.get("model_info"),
+                      data.get("details")):
+        if isinstance(container, dict):
+            for key in _BUDGET_MESSAGE_KEYS:
+                value = container.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+        elif isinstance(container, str):
+            # ``parameters`` arrives as a flat text blob on some builds:
+            # one ``key value`` pair per line, values often quoted.
+            for line in container.splitlines():
+                parts = line.strip().split(None, 1)
+                if len(parts) != 2:
+                    continue
+                key, value = parts[0], parts[1].strip().strip('"')
+                if key in _BUDGET_MESSAGE_KEYS and value:
+                    return value
+    return None
+
+
 class ChatClient:
     def __init__(self, base_url: str, *, timeout_s: float = DEFAULT_TIMEOUT_S,
                  max_retries: int = DEFAULT_MAX_RETRIES,
@@ -184,6 +225,10 @@ class ChatClient:
         # default — inventing a limit is how a fitting prompt gets
         # needlessly trimmed.
         self._context_length: dict[str, Optional[int]] = {}
+        # Same lifecycle as ``_context_length``: populated by the one
+        # ``/api/show`` probe, ``None`` for a model that declares no
+        # thinking-budget message.
+        self._budget_message: dict[str, Optional[str]] = {}
 
     def reset_inference_timer(self) -> None:
         """Reset the per-trial inference-time accumulators.
@@ -231,6 +276,10 @@ class ChatClient:
         # model, and a separate call would double the /api/show traffic
         # for information that arrived in the first one.
         self._context_length[model] = _context_length_from_show(data)
+        # Same response, same reasoning: the thinking-budget message is
+        # declared in the Modelfile and arrives here, so harvest it on
+        # the probe we were already making.
+        self._budget_message[model] = _budget_message_from_show(data)
 
         # /api/show returns ``{"capabilities": ["completion", "tools",
         # "thinking", "vision", ...]}`` on supported builds. Some
@@ -269,6 +318,19 @@ class ChatClient:
             # we already wanted.
             self._probe_supports_think(model)
         return self._context_length.get(model)
+
+    def thinking_budget_message(self, model: str) -> Optional[str]:
+        """The model's own out-of-thinking-budget message, or ``None``.
+
+        Used to tell a think that ended because the model was finished
+        from one that ended because the budget was. There is no guessing
+        at the wording: either the model declares it via ``/api/show`` or
+        there is no marker to find, and the detector falls back to the
+        proximity ratio alone.
+        """
+        if model not in self._budget_message:
+            self._probe_supports_think(model)
+        return self._budget_message.get(model)
 
     def chat(self, payload: dict) -> dict:
         """POST /api/chat with the supplied (OpenAI-shape) payload.

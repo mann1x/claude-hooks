@@ -1081,6 +1081,62 @@ If you see repeated truncations on one role, the question is too broad
 for that model's output budget, not too hard — narrow the ask or move
 the role to a model with a larger window (`/consultants config`).
 
+### How the budget is sized
+
+The numbers behind steps 1 and 2 are ported from the Cline fork
+(`mann1x/cline`), where each was derived from a live failure rather than
+chosen. Three things are worth knowing when reading a log line:
+
+**Token counts are measured, not assumed.** Prompt text and reasoning
+text do not tokenize alike — serialized JSON and tool output run 3.8–4.4
+characters per token, reasoning prose runs near 2.7 — so they are
+counted separately, and both ratios calibrate against the provider's own
+`prompt_eval_count` after the first call. Measured on this host: a
+council-shaped prompt that the old flat ratio put at 1,747 tokens
+actually cost 2,167, a 19% *under*count, which is the direction that
+lets a request be built too large. One call brought it to 2,168.
+Calibration is per model — x-tier fanout runs several at once, and a
+blended ratio would describe none of them.
+
+**A cap is attributed, not just noticed.** `window_bound` says whether
+the ceiling came from the context window or from our own `num_predict`.
+Only the first is something compaction can fix; compacting for the
+second spends the history and leaves the retry facing the same ceiling
+with less to work from.
+
+**Reservations follow what turns cost.** `num_predict` is a ceiling, not
+a forecast. Before a run has turns to measure, a quarter of the window
+is held back; after two, the reservation follows their high-water mark
+×1.5. This is why the same model can show a different trigger point on
+two different questions.
+
+### Thinking is condensed, not discarded
+
+A role that reasons past its budget used to lose that reasoning
+entirely — the agent loop stripped every `thinking` block before
+resending the message, so the next iteration started the same reasoning
+from scratch. It now leaves itself a short first-person note of what it
+settled and what it ruled out, which goes back into the reasoning
+channel in its place.
+
+You will see this in the log as:
+
+```
+capped thinking on iter 2 (cap-proximity): 4,180 reasoning tok of a
+4,096 budget — condensing rather than discarding
+```
+
+`cap-proximity` means measured thinking tokens reached 90% of the
+budget; `budget-message` means the model declared its own out-of-budget
+message via `/api/show` and it appeared at the end of the think, which
+is direct evidence and needs no threshold.
+
+The note is dropped rather than used if it degenerates into repetition —
+it lands as the model's own reasoning, so thirty near-identical lines
+read as thirty things it thought, and no note simply returns the
+pre-existing behaviour of re-deriving. Set
+`LoopConfig.capped_thinking_enabled = False` to disable it entirely.
+
 ---
 
 ## Configuration
