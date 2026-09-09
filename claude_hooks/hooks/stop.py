@@ -156,6 +156,22 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     if not summary:
         return _with_update_notice(None, config)
 
+    # Bound what we hand the embedder. Recall has clamped its queries
+    # since v1.x (``max_query_chars``); the store path never did, and the
+    # asymmetry is what let background stores dominate a shared embedder.
+    # Embed latency is steeply superlinear in payload size -- measured on
+    # solidpc's CPU llamafile: 500 ch = 0.7 s, 4 k = 6.0 s, 12 k = 27 s,
+    # 30 k > 87 s -- while stored turn summaries ran p50 2.9 KB. So this
+    # is not a safety valve like ``max_chars`` (the context-overflow
+    # guard); it is a latency budget, and it has to bite at the common
+    # case to be worth anything.
+    #
+    # Clamping the summary itself rather than only the embedded text is
+    # deliberate: content and vector must describe the same thing, or
+    # recall scores a document the store never held. The cost is real --
+    # a clamped turn recalls on less text -- which is why it is a knob.
+    summary = _clamp_for_store(summary, hook_cfg)
+
     # NOTE: We deliberately DO NOT append OpenWolf cerebrum/buglog
     # contents to per-turn stores. Doing so duplicated the same
     # ~3KB boilerplate into every stored turn, which:
@@ -607,6 +623,41 @@ def _is_noteworthy(transcript: Optional[list[dict]]) -> bool:
     # Path 2: trivial-tool turn upgraded by diagnostic reasoning.
     blob = "\n".join(asst_text_parts).lower()
     return any(m in blob for m in _REASONING_MARKERS)
+
+
+# Latency budget for a stored turn summary, in characters. 2000 sits
+# just under the knee of the embedder's cost curve (~2.7 s vs ~4.4 s at
+# the observed p50 of 2.9 KB) while leaving a summary long enough to
+# carry a prompt, a result and a file list. Raise it for recall quality,
+# lower it for turnaround; <= 0 disables the clamp entirely, matching
+# the convention used by ``max_query_chars`` and ``ef_search``.
+DEFAULT_MAX_STORE_CHARS = 2000
+
+
+def _clamp_for_store(summary: str, hook_cfg: dict) -> str:
+    """Bound a turn summary to ``hooks.stop.max_store_chars``.
+
+    Reuses :func:`recall.clamp_query` rather than a plain slice so the
+    tail survives: a turn's outcome lives at the end, and a head-only
+    truncation would store every summary's preamble and drop the result
+    it exists to record.
+    """
+    raw = hook_cfg.get("max_store_chars", DEFAULT_MAX_STORE_CHARS)
+    try:
+        max_chars = int(raw)
+    except (TypeError, ValueError):
+        log.warning("invalid max_store_chars %r, using %d",
+                    raw, DEFAULT_MAX_STORE_CHARS)
+        max_chars = DEFAULT_MAX_STORE_CHARS
+
+    from claude_hooks.recall import clamp_query
+
+    clamped = clamp_query(summary, max_chars)
+    if len(clamped) != len(summary):
+        log.info("summary clamped for store: %d -> %d chars "
+                 "(max_store_chars=%d)",
+                 len(summary), len(clamped), max_chars)
+    return clamped
 
 
 def _build_summary(

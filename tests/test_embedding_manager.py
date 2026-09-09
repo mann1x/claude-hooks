@@ -201,7 +201,11 @@ class TestBuildCmd:
         assert "--port" in cmd and "38199" in cmd
         assert "--embedding" in cmd
         assert "--pooling" in cmd and "last" in cmd
-        assert "--ctx-size" in cmd and "16384" in cmd
+        # ctx_size is per *slot*; llama.cpp's --ctx-size is the total KV
+        # budget split across --parallel, so it is scaled by the slot
+        # count. Default n_parallel is 3 -> 16384 * 3.
+        assert "--ctx-size" in cmd and "49152" in cmd
+        assert "--parallel" in cmd and "3" in cmd
         # CPU mode injects --gpu disable, NOT -ngl
         assert "--gpu" in cmd and "disable" in cmd
         assert "-ngl" not in cmd

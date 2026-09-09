@@ -272,6 +272,35 @@ respawns transparently — clients see one cold-start latency
 
 Tune via `cfg["embedding"]["idle_timeout_seconds"]`.
 
+### Concurrency: `n_parallel` (slots)
+
+The embedder is **one shared service with two callers of very
+different urgency**:
+
+| caller | on the critical path? | typical cost |
+|---|---|---|
+| interactive recall (`UserPromptSubmit`) | yes — bounded by a hook timeout | ~5 s at the 3.5 KB query clamp |
+| detached turn-store (`Stop`) | no — nobody waits on it | ~5 s at the 2 KB store clamp |
+
+With a single slot the second blocks the first, and the user pays
+for a background write. `embedding.n_parallel` (default **3**) sets
+`--parallel`, so a store no longer sits in front of a recall.
+
+**`ctx_size` is per slot.** llama.cpp's `--ctx-size` is a *total* KV
+budget divided across `--parallel`, so the manager spawns with
+`ctx_size * n_parallel`. Passing it unscaled would shrink every
+individual embed's window as you raise concurrency — trading a
+visible queue for invisible truncation, which is the worse trade.
+Budget RAM accordingly: 3 slots × 16 k ctx ≈ 3× the KV cache.
+
+> **Do not set this to 1**, and do not "fix" it by passing
+> `--parallel` to the running llamafile. The daemon rebuilds the argv
+> on every respawn, so a hand-set flag survives only until the next
+> idle reap — and its loss is silent, showing up as gradually slower
+> turns rather than an error. It belongs in config. Changing it
+> requires a **daemon restart**, not just an embedder reap: the
+> daemon reads `cfg["embedding"]` at startup.
+
 ### GPU vs CPU
 
 - **`mode: "auto"`** (default) — spawn with `-ngl 99`; the APE

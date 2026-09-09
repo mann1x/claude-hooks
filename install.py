@@ -3858,6 +3858,12 @@ def _setup_llamafile_engine(
         "host": host,
         "port": int(existing.get("port") or 38092),
         "ctx_size": int(ctx_size),
+        # Concurrent embed slots. Preserved from the existing config,
+        # defaulting to 3 — never silently reset to 1. This block is
+        # rebuilt from scratch on every install.py run and only the keys
+        # named here survive, which is exactly how the slot count was
+        # lost before (solidpc 2026-09-09). See EmbeddingConfig.n_parallel.
+        "n_parallel": int(existing.get("n_parallel") or 3),
         "pooling": "last",
         "mode": mode,
         "idle_timeout_seconds": float(

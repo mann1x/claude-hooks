@@ -235,6 +235,50 @@ drift generic.
 A clamp logs at INFO (`query clamped for recall: 46604 -> 3338 chars`),
 so thin recall on a long prompt is explainable rather than mysterious.
 
+### The store side needed the same budget — `max_store_chars`
+
+Clamping recall alone left the asymmetry that actually hurt: recall and
+the `Stop` hook's turn-store hit the **same single embedder**, and only
+one of them budgeted its payload. Background stores are not on anyone's
+critical path, but they occupy the embedder, so an unbounded store
+delays the recall queued behind it.
+
+Measured on solidpc's CPU llamafile, the cost curve is steep enough
+that payload size is the only lever that matters:
+
+| payload | embed |
+|---|---|
+| 500 chars | 0.7 s |
+| 4 000 chars | 6.0 s |
+| 12 000 chars | 27 s |
+| 30 000 chars | > 87 s |
+
+Against that, stored turn summaries measured **p50 2.9 KB** — squarely
+in the expensive region. `hooks.stop.max_store_chars` (default **2000**,
+`<= 0` disables) reuses `clamp_query`, so a stored summary keeps both
+ends: a turn's *outcome* is at the bottom, and a head-only cut would
+preserve every summary's preamble while dropping the result it exists
+to record.
+
+Two things this is **not**:
+
+- Not `embedder_options.max_chars`. That is the 30 k context-overflow
+  guard — a safety valve three orders of magnitude away from where the
+  latency bites. A latency budget has to cut the *common* case.
+- Not a text-only trim. The summary itself is clamped, so the stored
+  content and its vector describe the same document; embedding a
+  shortened text while storing the full one would have recall scoring a
+  document the store never held.
+
+The trade is real and that is why it is a knob: a clamped turn recalls
+on less text. Raise it for recall quality, lower it for turnaround.
+Clamps log at INFO (`summary clamped for store: 4402 -> 2000 chars`).
+
+See also `embedding.n_parallel` in
+[`llamafile-integration.md`](llamafile-integration.md) — the other half
+of the same problem, from the concurrency side rather than the payload
+side.
+
 ## Failure modes
 
 The whole HyDE step is best-effort:

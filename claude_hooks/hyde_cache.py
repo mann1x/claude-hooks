@@ -12,10 +12,13 @@ Cache shape:
 - TTL:  default 24 h (configurable). Past TTL is treated as miss.
 - Cap:  default 200 entries. LRU eviction when exceeded.
 
-Atomicity: writes go to ``<path>.tmp`` then ``os.replace``. Concurrent
-hook invocations may stomp on each other's writes — last-writer wins,
-which is fine because each entry is independent. We never corrupt the
-file even when two hooks race.
+Atomicity: writes go through :func:`claude_hooks._atomic.write_text_atomic`
+— a temp file unique to the writer, then ``os.replace``. Concurrent hook
+invocations may stomp on each other's writes — last-writer wins, which is
+fine because each entry is independent. We never corrupt the file even
+when two hooks race. (A shared ``<path>.tmp`` was *not* fine: the racers
+clobbered one another's temp file and all but one lost their update to
+ENOENT, silently re-paying for cloud HyDE calls already made.)
 
 Stdlib-only. No dependency.
 """
@@ -24,10 +27,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Optional
+
+from claude_hooks._atomic import write_text_atomic
 
 log = logging.getLogger("claude_hooks.hyde_cache")
 
@@ -57,11 +61,10 @@ def _load(path: Path) -> dict:
 
 def _save(path: Path, data: dict) -> None:
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, separators=(",", ":"))
-        os.replace(tmp, path)
+        # Unique temp file per writer -- a shared "<path>.tmp" meant
+        # concurrent sessions dropped cache entries and re-paid for
+        # cloud HyDE calls they had already made. See claude_hooks._atomic.
+        write_text_atomic(path, json.dumps(data, separators=(",", ":")))
     except OSError as exc:
         log.debug("hyde cache save failed: %s", exc)
 

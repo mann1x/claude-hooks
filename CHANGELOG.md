@@ -16,6 +16,60 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed
+
+- **The embedder served one request at a time, so background stores sat
+  in front of the user.** The llamafile embedder is a single shared
+  service with two callers of very different urgency: detached turn-
+  stores that nobody waits on, and interactive recall on the
+  `UserPromptSubmit` critical path under a hook timeout. It ran with one
+  slot, so a 5–6 s store blocked the recall behind it. `--parallel` is
+  now a first-class config key (`embedding.n_parallel`, default **3**).
+
+  The reason this is a *fix* and not a tuning knob is that it had been
+  raised before — twice — by passing `--parallel` to the running
+  llamafile by hand. The daemon rebuilds the argv on every respawn, so
+  each time the setting survived only until the next idle reap, and its
+  disappearance looked like nothing at all: no error, no restart, just
+  gradually slower turns. It is now pinned in three places that each
+  independently defaulted it back to 1 — the dataclass default, the
+  config reader (`or 3`, so a wiped key does not read as one slot), and
+  the `install.py` block rebuild, which keeps only the keys it names.
+  `tests/test_embedder_slots.py` covers all three.
+
+  `ctx_size` is now explicitly **per slot**: llama.cpp's `--ctx-size` is
+  a total KV budget divided across `--parallel`, so it is scaled by the
+  slot count on spawn. Passing it unscaled would have traded queueing
+  for a silently smaller window on every embed — a truncated vector
+  looks exactly like a good one.
+
+- **The store path had no payload budget, and embed latency is
+  superlinear.** Recall has clamped its queries since v1.x
+  (`max_query_chars`); the store side never did. Measured on solidpc's
+  CPU llamafile: 500 chars = 0.7 s, 4 k = 6.0 s, 12 k = 27 s, 30 k >
+  87 s, against stored turn summaries with a p50 of 2.9 KB. New
+  `hooks.stop.max_store_chars` (default **2000**, `<= 0` disables)
+  bounds the summary via `recall.clamp_query`, so both ends survive —
+  a turn's outcome is at the end, and a head-only cut would store every
+  preamble and drop the result it exists to record. Note this is not
+  `embedder_options.max_chars`: that is the 30 k context-overflow guard,
+  three orders of magnitude away from where the cost bites.
+
+  The summary itself is clamped, not just the embedded text, so content
+  and vector keep describing the same document.
+
+- **Concurrent writers silently lost cache updates** (`decay`,
+  `hyde_cache`). Both derived their temp file from the destination
+  (`<path>.tmp`), so racing sessions clobbered each other's temp file
+  and every loser failed its `os.replace` with `[Errno 2]`. Both call
+  sites swallow `OSError` by design, so the update just vanished: decay
+  history was being dropped and the HyDE cache kept re-paying for cloud
+  calls it had already made (~28 occurrences in two days on solidpc).
+  New `claude_hooks/_atomic.py` gives each writer a unique temp file in
+  the destination's directory. Last-writer-wins is the correct
+  semantics here — every writer holds a complete document, so an update
+  can be superseded but never torn.
+
 ### Added
 
 - **Measured token accounting, ported from the Cline fork**

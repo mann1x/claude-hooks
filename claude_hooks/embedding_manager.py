@@ -98,11 +98,35 @@ class EmbeddingConfig:
     host: str = "127.0.0.1"
     port: int = 38092
 
-    # Effective context size; must match what the LlamafileEmbedder /
-    # CompositeEmbedder primary expects. The composite shipped with
-    # claude-hooks is built with --ctx-size 16384 baked in but the
-    # `--ctx-size` CLI flag still takes precedence.
+    # Effective context size **per slot**; must match what the
+    # LlamafileEmbedder / CompositeEmbedder primary expects. The
+    # composite shipped with claude-hooks is built with --ctx-size 16384
+    # baked in but the `--ctx-size` CLI flag still takes precedence.
+    #
+    # NOTE the per-slot framing: llama.cpp's ``--ctx-size`` is the
+    # *total* KV budget, divided evenly across ``--parallel`` slots. So
+    # ``_build_cmd`` passes ``ctx_size * n_parallel``. Were ctx_size
+    # taken as the total instead, raising n_parallel would silently
+    # shrink every individual embed's window — turning a concurrency
+    # win into truncated vectors, which is the failure mode that looks
+    # like success.
     ctx_size: int = 16384
+
+    # Number of llama.cpp server slots, i.e. how many embeds run
+    # concurrently. **Do not lower this to 1.** The embedder serves two
+    # callers with very different urgency: background turn-stores
+    # (detached, nobody waiting) and interactive recall on the
+    # UserPromptSubmit critical path (bounded by a hook timeout). With
+    # one slot a 5-6 s background store sits directly in front of the
+    # user's recall. Raised to 3 on solidpc 2026-09-09 after the store
+    # gate was measured queueing p50 14.5 s / p90 39 s.
+    #
+    # This has been lost twice by being set on the running llamafile by
+    # hand rather than in config — the daemon rebuilds the argv on every
+    # respawn, so a manual `--parallel` survives only until the next
+    # idle reap. It is a *default* here as well as a config key so that
+    # a wiped or hand-trimmed config still gets 3.
+    n_parallel: int = 3
 
     # Pooling mode; qwen3-embedding wants ``last``.
     pooling: str = "last"
@@ -275,6 +299,10 @@ class EmbeddingManager:
                 f"llamafile not found at {self.cfg.llamafile_path!r}; "
                 "the install may have been interrupted."
             )
+        # See EmbeddingConfig.ctx_size: llama.cpp splits --ctx-size
+        # across --parallel slots, so the total has to be scaled to keep
+        # each slot at the configured per-slot window.
+        slots = max(1, int(self.cfg.n_parallel))
         cmd = [
             self.cfg.llamafile_path,
             "--server",
@@ -282,7 +310,8 @@ class EmbeddingManager:
             "--port", str(self.cfg.port),
             "--embedding",
             "--pooling", self.cfg.pooling,
-            "--ctx-size", str(self.cfg.ctx_size),
+            "--ctx-size", str(self.cfg.ctx_size * slots),
+            "--parallel", str(slots),
         ]
         if self.cfg.model_gguf:
             # Custom GGUF path. The slim binary needs ``-m`` to find
@@ -606,6 +635,10 @@ def config_from_dict(cfg: dict) -> EmbeddingConfig:
         host=str(e.get("host") or "127.0.0.1"),
         port=int(e.get("port") or 38092),
         ctx_size=int(e.get("ctx_size") or 16384),
+        # ``or 3`` deliberately: a config carrying 0 (or the key wiped
+        # by an install.py run that predates it) gets the working
+        # default rather than a single-slot embedder.
+        n_parallel=int(e.get("n_parallel") or 3),
         pooling=str(e.get("pooling") or "last"),
         mode=str(e.get("mode") or "auto"),
         vram_budget_mb=int(e.get("vram_budget_mb") or _DEFAULT_VRAM_BUDGET_MB),
