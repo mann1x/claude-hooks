@@ -45,9 +45,14 @@ release with the auto-generated source archive
 
 - **The store path had no payload budget, and embed latency is
   superlinear.** Recall has clamped its queries since v1.x
-  (`max_query_chars`); the store side never did. Measured on solidpc's
-  CPU llamafile: 500 chars = 0.7 s, 4 k = 6.0 s, 12 k = 27 s, 30 k >
-  87 s, against stored turn summaries with a p50 of 2.9 KB. New
+  (`max_query_chars`); the store side never did. On solidpc's CPU
+  llamafile with realistic prose: ~0.75 s at 500 chars, ~3.2 s at 2 k,
+  ~8 s at 4 k, consistent with the v1.14.0 isolated-instance figure of
+  12.7 s at 5 k — against stored turn summaries with a p50 of 2.9 KB.
+  (Char count is only a proxy for tokens: density moves the ratio ~3×
+  between prose and base64, and a repeated-character payload merges into
+  a handful of BPE tokens, so it reads far faster than real text and
+  must not be used to derive this curve.) New
   `hooks.stop.max_store_chars` (default **2000**, `<= 0` disables)
   bounds the summary via `recall.clamp_query`, so both ends survive —
   a turn's outcome is at the end, and a head-only cut would store every

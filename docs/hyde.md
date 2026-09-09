@@ -243,15 +243,31 @@ one of them budgeted its payload. Background stores are not on anyone's
 critical path, but they occupy the embedder, so an unbounded store
 delays the recall queued behind it.
 
-Measured on solidpc's CPU llamafile, the cost curve is steep enough
-that payload size is the only lever that matters:
+Measured on solidpc's CPU llamafile with realistic prose, the cost
+curve is steep enough that payload size is the only lever that matters:
 
 | payload | embed |
 |---|---|
-| 500 chars | 0.7 s |
-| 4 000 chars | 6.0 s |
-| 12 000 chars | 27 s |
-| 30 000 chars | > 87 s |
+| 500 chars | ~0.75 s |
+| 2 000 chars | ~3.2 s |
+| 4 000 chars | ~8 s |
+| 5 000 chars | 12.7 s (isolated instance, v1.14.0) |
+
+> Two traps when re-deriving this curve, both of which produce
+> confident-looking numbers that are wrong by multiples:
+>
+> - **Characters are a proxy; tokens are the cost.** Density moves the
+>   ratio ~3× (prose ~3.2 chars/token, base64 ~1.35), so the same
+>   `max_store_chars` buys very different amounts of work.
+> - **Never use a repeated-character payload.** `"x" * n` collapses into
+>   a handful of BPE tokens and times ~25 % fast at 4 k and far more at
+>   the top end. Likewise, re-sending an identical payload measures
+>   llamafile's prompt cache, not the model — the second call returns in
+>   tens of milliseconds.
+>
+> And measure on an **isolated** llamafile, never the production one:
+> on a host with live sessions the shared embedder is serving their
+> recalls and stores too, which moved repeat measurements here by 2-5×.
 
 Against that, stored turn summaries measured **p50 2.9 KB** — squarely
 in the expensive region. `hooks.stop.max_store_chars` (default **2000**,

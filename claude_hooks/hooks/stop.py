@@ -159,12 +159,20 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     # Bound what we hand the embedder. Recall has clamped its queries
     # since v1.x (``max_query_chars``); the store path never did, and the
     # asymmetry is what let background stores dominate a shared embedder.
-    # Embed latency is steeply superlinear in payload size -- measured on
-    # solidpc's CPU llamafile: 500 ch = 0.7 s, 4 k = 6.0 s, 12 k = 27 s,
-    # 30 k > 87 s -- while stored turn summaries ran p50 2.9 KB. So this
-    # is not a safety valve like ``max_chars`` (the context-overflow
+    # Embed latency is steeply superlinear in payload size. On solidpc's
+    # CPU llamafile, with realistic prose: ~0.75 s at 500 chars, ~3.2 s
+    # at 2 k, ~8 s at 4 k (and the v1.14.0 isolated-instance figure of
+    # 12.7 s at 5 k) -- while stored turn summaries ran p50 2.9 KB. So
+    # this is not a safety valve like ``max_chars`` (the context-overflow
     # guard); it is a latency budget, and it has to bite at the common
     # case to be worth anything.
+    #
+    # Char count is a proxy, not the cost: tokens are. Density swings the
+    # ratio by ~3x (prose ~3.2 chars/token, base64 ~1.35), so the same
+    # budget buys very different amounts of work. Do not re-derive this
+    # curve with a repeated-character payload -- ``"x" * n`` merges into
+    # a handful of BPE tokens and reads ~25% fast at 4 k, far more at the
+    # top end.
     #
     # Clamping the summary itself rather than only the embedded text is
     # deliberate: content and vector must describe the same thing, or
