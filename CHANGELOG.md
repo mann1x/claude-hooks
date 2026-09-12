@@ -16,6 +16,35 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added
+
+- **Memory deletion over MCP** — `pgvector-delete` / `sqlite-vec-delete`
+  (both catalogs go 8 → 9 tools). The stores were append-only from the
+  outside: both providers have had `delete_by_hashes` since the M14 TTL
+  work, but its only caller was the consultants reaper, so a wrong
+  memory could be recalled forever and removed by nothing.
+
+  Adding the tool required fixing the read path first. `Memory` carries
+  no primary key, and `recall` never selected `content_hash`, so a
+  client had nothing to name — a delete tool you cannot aim. Recall and
+  hybrid recall on **both** providers now surface the row's hash as
+  `metadata["_hash"]`, rendered by the shared formatter as `id=<hex>`
+  in each hit's header. (The hybrid paths already keyed their RRF
+  fusion by that hash; they were discarding it at the output step.)
+
+  `delete_by_hashes` gains an explicit `tables` argument. Its default
+  stays primary-table-only because that is what the TTL reaper means by
+  delete, and widening it silently would have changed reaping semantics
+  — `content_hash` is content-derived, so the same text legitimately
+  exists in both `memories_*` and `kg_observations_*`. The MCP tool
+  passes the tables `recall` searches instead, because a delete that
+  cannot reach a row the user can plainly see is a delete that reports
+  success and changes nothing.
+
+  Malformed ids are rejected and named rather than coerced, and a
+  delete that matched no row says so — "deleted 0" and "your id was
+  garbage" are different answers, and neither gets rounded up to "ok".
+
 ### Fixed
 
 - **The embedder served one request at a time, so background stores sat

@@ -161,7 +161,7 @@ class SqliteVecProvider(Provider):
         try:
             cur = self._conn.execute(  # type: ignore[union-attr]
                 f"""
-                SELECT m.content, m.metadata, v.distance
+                SELECT m.content, m.metadata, v.distance, m.content_hash
                 FROM {table}_vec v
                 JOIN {table} m ON m.rowid = v.rowid
                 WHERE v.embedding MATCH ?
@@ -175,12 +175,16 @@ class SqliteVecProvider(Provider):
             log.warning("sqlite_vec query failed: %s", e)
             return []
         result: list[Memory] = []
-        for content, meta_json, distance in rows:
+        for content, meta_json, distance, chash in rows:
             try:
                 meta = json.loads(meta_json) if meta_json else {}
             except json.JSONDecodeError:
                 meta = {}
             meta["_distance"] = distance
+            # The row's stable handle — what delete_by_hashes takes.
+            # Without it a recalled memory can be read but never named.
+            if chash:
+                meta["_hash"] = bytes(chash).hex()
             # Surface the source table so MCP formatters can render
             # ``[memory dist=0.5]`` instead of the ``[? dist=0.5]``
             # placeholder. sqlite_vec only ever queries one table, so
@@ -347,8 +351,15 @@ class SqliteVecProvider(Provider):
             log.warning("sqlite_vec refresh_expires_at failed: %s", e)
             raise
 
-    def delete_by_hashes(self, hashes: list) -> int:
+    def delete_by_hashes(self, hashes: list, tables: Optional[list] = None) -> int:
         """Hard-delete rows by ``content_hash``. Returns count deleted.
+
+        ``tables`` exists for signature parity with the pgvector
+        provider so shared callers (the MCP delete tool) need no
+        per-backend branch. This provider searches exactly one table,
+        so the argument is validated and otherwise inert — accepting it
+        and ignoring the distinction is honest here, whereas silently
+        accepting a table name it would never touch is not.
 
         Cascades to the ``_vec`` virtual table because both share
         the same ``rowid`` and SQLite's INSERT/DELETE triggers on
@@ -362,6 +373,12 @@ class SqliteVecProvider(Provider):
             return 0
         self._ensure_ready()
         table = _safe_table(self.options.get("table") or "memory")
+        if tables is not None and table not in [
+            t for t in tables if isinstance(t, str)
+        ]:
+            # Caller scoped the delete to tables this backend does not
+            # own. Deleting anyway would be worse than deleting nothing.
+            return 0
         # Filter to non-empty bytes; SQLite IN-list with NULLs would
         # quietly drop matches.
         hashes = [bytes(h) for h in hashes if h]
@@ -470,10 +487,12 @@ class SqliteVecProvider(Provider):
             entry["_score"] = s
 
         ranked = sorted(
-            fused.values(), key=lambda e: e["_score"], reverse=True,
+            fused.items(), key=lambda kv: kv[1]["_score"], reverse=True,
         )[:k]
         out: list[Memory] = []
-        for e in ranked:
+        # Items, not values: the fusion key is the content_hash, which
+        # is the handle a caller needs to delete a hit.
+        for chash, e in ranked:
             try:
                 meta = json.loads(e["metadata"]) if e["metadata"] else {}
             except json.JSONDecodeError:
@@ -484,6 +503,8 @@ class SqliteVecProvider(Provider):
                 meta["_distance"] = e["vec_distance"]
             meta["_vec_rank"] = e["vec_rank"]
             meta["_kw_rank"] = e["kw_rank"]
+            if chash:
+                meta["_hash"] = bytes(chash).hex()
             out.append(Memory(text=e["content"], metadata=meta))
         return out
 

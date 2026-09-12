@@ -35,7 +35,12 @@ from typing import Any, Optional
 
 from claude_hooks.config import load_config
 from claude_hooks.dispatcher import build_providers
-from claude_hooks.mcp_format import format_kg_nodes, format_memories
+from claude_hooks.mcp_format import (
+    format_delete_result,
+    format_kg_nodes,
+    format_memories,
+    parse_hashes,
+)
 from claude_hooks.providers.base import Provider
 from claude_hooks.providers.sqlite_vec import SqliteVecProvider
 
@@ -112,6 +117,35 @@ def _tool_catalog() -> list[dict]:
             "name": "sqlite-vec-count",
             "description": "Count rows in the configured primary memories table.",
             "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "sqlite-vec-delete",
+            "description": (
+                "Permanently delete memories by id. Ids are the "
+                "'id=<hex>' values shown in sqlite-vec-find / "
+                "sqlite-vec-find-hybrid results. THIS IS IRREVERSIBLE — "
+                "there is no undo and no tombstone. Reports ids that "
+                "matched nothing rather than silently succeeding."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "content_hash hex ids from a find result.",
+                    },
+                    "tables": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional. Restrict deletion to these tables. "
+                            "This backend serves a single table."
+                        ),
+                    },
+                },
+                "required": ["ids"],
+            },
         },
         {
             "name": "sqlite-vec-kg-search",
@@ -284,6 +318,15 @@ class McpServer:
             return f"stored 1 memory ({len(content)} chars)"
         if name == "sqlite-vec-count":
             return f"primary table count: {self.provider.count()}"
+        if name == "sqlite-vec-delete":
+            ids = args.get("ids") or []
+            hashes, rejected = parse_hashes(ids)
+            tables = args.get("tables")
+            deleted = self.provider.delete_by_hashes(
+                hashes,
+                tables=list(tables) if tables is not None else None,
+            ) if hashes else 0
+            return format_delete_result(deleted, len(hashes), rejected)
         if name == "sqlite-vec-kg-search":
             q = str(args.get("query") or "")
             k = int(args.get("k") or 5)

@@ -98,12 +98,13 @@ class TestToolsList:
         resp = server.handle(_request("tools/list"))
         tools = resp["result"]["tools"]
         names = {t["name"] for t in tools}
-        # Full parity with pgvector-mcp's eight tools.
+        # Full parity with pgvector-mcp's nine tools.
         assert names == {
             "sqlite-vec-find",
             "sqlite-vec-find-hybrid",
             "sqlite-vec-store",
             "sqlite-vec-count",
+            "sqlite-vec-delete",
             "sqlite-vec-kg-search",
             "sqlite-vec-kg-create",
             "sqlite-vec-kg-observe",

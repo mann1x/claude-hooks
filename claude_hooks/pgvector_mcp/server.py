@@ -111,6 +111,38 @@ def _tool_catalog() -> list[dict]:
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
+            "name": "pgvector-delete",
+            "description": (
+                "Permanently delete memories by id. Ids are the "
+                "'id=<hex>' values shown in pgvector-find / "
+                "pgvector-find-hybrid results. THIS IS IRREVERSIBLE — "
+                "there is no undo and no tombstone. Searches the same "
+                "tables find searches, so anything you can recall you "
+                "can delete. Reports ids that matched nothing rather "
+                "than silently succeeding."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "content_hash hex ids from a find result.",
+                    },
+                    "tables": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional. Restrict deletion to these tables "
+                            "(e.g. the '_table' of the hit you mean). "
+                            "Defaults to every table find searches."
+                        ),
+                    },
+                },
+                "required": ["ids"],
+            },
+        },
+        {
             "name": "pgvector-kg-search",
             "description": (
                 "Search KG entities by name (trigram) and observation content "
@@ -281,6 +313,20 @@ class McpServer:
             return f"stored 1 memory ({len(content)} chars)"
         if name == "pgvector-count":
             return f"primary table count: {self.provider.count()}"
+        if name == "pgvector-delete":
+            ids = args.get("ids") or []
+            hashes, rejected = _parse_hashes(ids)
+            # Default to every table find searches, so "I can see it but
+            # I can't delete it" cannot happen. The provider's own
+            # default is primary-only, which is what the TTL reaper
+            # wants — a different caller with a different meaning.
+            tables = args.get("tables")
+            if tables is None:
+                tables = self.provider._resolve_tables()
+            deleted = self.provider.delete_by_hashes(
+                hashes, tables=list(tables)
+            ) if hashes else 0
+            return _format_delete_result(deleted, len(hashes), rejected)
         if name == "pgvector-kg-search":
             q = str(args.get("query") or "")
             k = int(args.get("k") or 5)
@@ -307,6 +353,8 @@ class McpServer:
 # this file unchanged.
 from claude_hooks.mcp_format import format_memories as _format_memories  # noqa: E402
 from claude_hooks.mcp_format import format_kg_nodes as _format_kg_nodes  # noqa: E402
+from claude_hooks.mcp_format import parse_hashes as _parse_hashes  # noqa: E402
+from claude_hooks.mcp_format import format_delete_result as _format_delete_result  # noqa: E402
 
 
 def serve_stdio(provider: Optional[Provider] = None) -> int:

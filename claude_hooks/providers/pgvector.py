@@ -252,8 +252,14 @@ class PgvectorProvider(Provider):
                     # kg_observations tables don't carry a metadata column;
                     # synthesise one so the result row shape stays uniform.
                     metadata_expr = "metadata" if "kg_observations" not in t else "'{}'::jsonb AS metadata"
+                    # content_hash comes back with every row because it is
+                    # the only stable handle a caller has on a memory: it
+                    # is what delete_by_hashes takes, and without it a
+                    # recalled memory can be read but never named. Both
+                    # the primary and kg_observations tables carry it.
                     cur.execute(
-                        f"SELECT content, {metadata_expr}, embedding <=> %s AS distance, %s AS _src "
+                        f"SELECT content, {metadata_expr}, embedding <=> %s AS distance, "
+                        f"%s AS _src, content_hash "
                         f"FROM {t} ORDER BY distance LIMIT %s",
                         (vec_literal, t, k),
                     )
@@ -270,10 +276,12 @@ class PgvectorProvider(Provider):
                 continue
         rows.sort(key=lambda r: r[2])
         result: list[Memory] = []
-        for content, meta, distance, src in rows[:k]:
+        for content, meta, distance, src, chash in rows[:k]:
             meta = dict(meta) if meta else {}
             meta["_distance"] = distance
             meta["_table"] = src
+            if chash:
+                meta["_hash"] = bytes(chash).hex()
             result.append(Memory(text=content, metadata=meta))
         # #218: close read-only transaction before returning.
         self._read_only_finish()
@@ -466,31 +474,50 @@ class PgvectorProvider(Provider):
                     pass
                 raise
 
-    def delete_by_hashes(self, hashes: list) -> int:
-        """Hard-delete rows by ``content_hash``. Returns count
-        deleted.
+    def delete_by_hashes(self, hashes: list, tables: Optional[list] = None) -> int:
+        """Hard-delete rows by ``content_hash``. Returns count deleted.
 
         Empty input is a no-op. Postgres doesn't have a 999-param
         limit like SQLite, but the daemon batches in pages of 500
         anyway for predictable transaction sizes.
+
+        ``tables`` defaults to the **primary table only**, which is what
+        the TTL reaper — this method's original and long-standing caller
+        — means by "delete". Widening that default would have changed
+        reaping semantics silently, since ``content_hash`` is derived
+        from content and the same text can legitimately exist in both
+        ``memories_*`` and ``kg_observations_*``.
+
+        Callers that delete something a user *recalled* should instead
+        pass the tables recall searches (``_resolve_tables()``), because
+        recall spans ``additional_tables`` and a delete that doesn't is
+        a delete the user watches fail on a row they can plainly see.
+        ``Memory.metadata["_table"]`` names the row's own table exactly.
         """
         if not hashes:
             return 0
         with self._lock:
             self._ensure_ready()
-            table = _safe_table(
-                self.options.get("table") or "claude_hooks_memory"
-            )
+            if tables is None:
+                targets = [_safe_table(
+                    self.options.get("table") or "claude_hooks_memory"
+                )]
+            else:
+                allowed = set(self._resolve_tables())
+                targets = [_safe_table(t) for t in tables
+                           if isinstance(t, str) and t in allowed]
             hashes = [bytes(h) for h in hashes if h]
-            if not hashes:
+            if not hashes or not targets:
                 return 0
+            deleted = 0
             try:
                 with self._conn.cursor() as cur:  # type: ignore[union-attr]
-                    cur.execute(
-                        f"DELETE FROM {table} WHERE content_hash = ANY(%s)",
-                        (hashes,),
-                    )
-                    deleted = int(cur.rowcount or 0)
+                    for table in targets:
+                        cur.execute(
+                            f"DELETE FROM {table} WHERE content_hash = ANY(%s)",
+                            (hashes,),
+                        )
+                        deleted += int(cur.rowcount or 0)
                     self._conn.commit()  # type: ignore[union-attr]
                     return deleted
             except Exception as e:
@@ -1027,9 +1054,14 @@ def _recall_hybrid_unlocked(
             s += (1.0 - alpha) * (1.0 / (rrf_k + entry["kw_rank"]))
         entry["_score"] = s
 
-    ranked = sorted(fused.values(), key=lambda e: e["_score"], reverse=True)[:k]
+    # Iterate items, not values: the fusion key already carries the
+    # content_hash hex, which is the handle a caller needs to delete a
+    # hit. Recomputing it from the content would re-derive something we
+    # are already holding, and would diverge if the hashing ever changes.
+    ranked = sorted(fused.items(), key=lambda kv: kv[1]["_score"],
+                    reverse=True)[:k]
     out: list[Memory] = []
-    for e in ranked:
+    for (_tbl, hash_hex), e in ranked:
         meta = e["metadata"]
         meta["_table"] = e["table"]
         meta["_score"] = e["_score"]
@@ -1037,6 +1069,8 @@ def _recall_hybrid_unlocked(
             meta["_distance"] = e["vec_distance"]
         meta["_vec_rank"] = e["vec_rank"]
         meta["_kw_rank"] = e["kw_rank"]
+        if hash_hex:
+            meta["_hash"] = hash_hex
         out.append(Memory(text=e["content"], metadata=meta))
     # #218: close the read-only transaction before returning. Both
     # the vector ranking SELECT and the BM25 SELECT above leave the
