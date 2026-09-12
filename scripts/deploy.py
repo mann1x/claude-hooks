@@ -88,6 +88,37 @@ class Step:
         print(f"    FAIL: {msg}")
 
 
+def _hook_python() -> str:
+    """The interpreter the hooks actually run under.
+
+    ``bin/_resolve_python.sh`` picks this for every shim; deploy has to
+    agree with it, because verifying under a different interpreter
+    verifies a different system. Running the verifier with
+    ``sys.executable`` meant a deploy launched as ``python3
+    scripts/deploy.py`` checked a stock system Python with no
+    ``psycopg`` — reporting "0 memories, backend unreachable" against a
+    perfectly healthy store, and passing or failing depending on how the
+    operator happened to invoke the script.
+    """
+    env = os.environ.get("CLAUDE_HOOKS_PY")
+    if env and os.access(env, os.X_OK):
+        return env
+    home = Path.home()
+    cands = [
+        REPO / ".venv" / "bin" / "python",
+        REPO / ".venv" / "bin" / "python.exe",
+        REPO / ".venv" / "Scripts" / "python.exe",
+    ]
+    for conda in ("anaconda3", "miniconda3", "Miniconda3", "Anaconda3"):
+        base = home / conda / "envs" / "claude-hooks"
+        cands += [base / "bin" / "python", base / "bin" / "python.exe",
+                  base / "Scripts" / "python.exe", base / "python.exe"]
+    for c in cands:
+        if c.is_file() and os.access(c, os.X_OK):
+            return str(c)
+    return sys.executable
+
+
 def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
 
@@ -383,7 +414,13 @@ def step_verify(dry: bool) -> Step:
     if not script.is_file():
         s.fail("scripts/verify_deploy.py missing")
         return s
-    r = subprocess.run([sys.executable, str(script)], text=True)
+    py = _hook_python()
+    if py != sys.executable:
+        s.note(f"using {py}")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(REPO)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+    r = subprocess.run([py, str(script)], text=True, env=env)
     if r.returncode != 0:
         s.fail("verification failed — see the checks above")
     else:

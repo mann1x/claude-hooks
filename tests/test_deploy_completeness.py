@@ -113,6 +113,21 @@ class TestEveryArtifactClassIsDeployed(unittest.TestCase):
         self.assertIn("_respawn_embedder", src)
         self.assertIn("embedding_ensure", src)
 
+    def test_verification_runs_under_the_hooks_interpreter(self):
+        """Verifying with whatever interpreter launched the deploy
+        verifies a *different system*. `python3 scripts/deploy.py` ran
+        the checks under a stock system Python with no psycopg, which
+        reported "0 memories — backend unreachable" against a healthy
+        store: the same deploy passed or failed depending on how it was
+        invoked."""
+        src = _src(DEPLOY)
+        self.assertIn("def _hook_python", src)
+        self.assertRegex(
+            src, r"subprocess\.run\(\[py,",
+            "step_verify must run verify_deploy.py with _hook_python(), "
+            "not sys.executable",
+        )
+
     def test_the_verifier_checks_the_embedder_too(self):
         """Deploy's claim that it brought the embedder back is worth
         exactly as much as the check that confirms it."""

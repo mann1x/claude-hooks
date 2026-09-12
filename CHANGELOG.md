@@ -52,6 +52,18 @@ release with the auto-generated source archive
 
 ### Fixed
 
+- **Deploy verified the wrong system.** `scripts/deploy.py` ran
+  `verify_deploy.py` with `sys.executable`, so a deploy launched as
+  `python3 scripts/deploy.py` checked a stock system Python — no
+  `psycopg`, therefore "provider pgvector reports 0 memories — empty
+  corpus or unreachable backend" and "store backend reachable: psycopg
+  not installed", against a store that was fine. The same deploy passed
+  or failed depending on how the operator happened to invoke it. Deploy
+  now resolves the interpreter the hooks actually run under, matching
+  `bin/_resolve_python.sh` (`CLAUDE_HOOKS_PY` → repo `.venv` → the
+  `claude-hooks` conda env → `sys.executable`), and says which one it
+  used.
+
 - **Deploy left the embedder down.** Restarting `claude-hooks-daemon`
   takes its managed llamafile child with it, and the embedder is
   spawn-on-demand — so nothing brings it back until *this* host next
