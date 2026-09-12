@@ -52,6 +52,26 @@ release with the auto-generated source archive
 
 ### Fixed
 
+- **The daemon could not start at all on Windows** — and had not been,
+  silently. `DEFAULT_PORT` 47018 sits inside a Hyper-V/WinNAT reserved
+  range on pandorum (`47013-47112`, part of a near-continuous block from
+  46913 to 48384), so every bind failed with `WinError 10013`. Hooks
+  fell back to per-invocation processes and the Windows canary was
+  exercising no daemon code whatsoever. Those ranges are re-reserved at
+  boot, so moving to another fixed port only relocates the failure.
+
+  The daemon now falls back to an OS-assigned port (bind 0) when its
+  first choice is refused, and publishes the result to
+  `~/.claude/claude-hooks-daemon.port`. `daemon_client` and
+  `claude-hooks-daemon-ctl` read it and fall back to `DEFAULT_PORT` when
+  it is absent, unreadable, or out of range. Resolution is **per call**,
+  not at import, so a long-lived process follows the daemon across a
+  restart; an explicit `--port` still wins. The file is removed on clean
+  shutdown — a stale one from a crash costs a client one failed connect,
+  the same outcome as no file at all. `ctl --port` no longer defaults to
+  the literal, which had it report `NOT RESPONDING` against a healthy
+  daemon that had bound elsewhere.
+
 - **sqlite_vec deletes leaked their embeddings** (schema v3). Only the
   FTS5 mirror had a delete trigger; `<table>_vec` had none, resting on
   an assumption that never held — that sharing a `rowid` makes a DELETE

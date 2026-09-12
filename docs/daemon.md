@@ -27,6 +27,49 @@ stop`, …), the client returns `None` and the shim falls back to
 in-process dispatch silently. The daemon is **strictly optional** —
 nothing breaks without it, you just lose the latency savings.
 
+### Which port (v1.14.1+)
+
+`DEFAULT_PORT` (47018) is a wish, not a guarantee. On Windows,
+Hyper-V / WinNAT reserve large TCP ranges at boot; binding inside one
+fails with `WinError 10013` ("forbidden by its access permissions").
+On pandorum 47018 sat inside a reserved `47013-47112` — part of a
+near-continuous block from 46913 to 48384 — so the daemon could never
+start there, silently, for as long as that was true. Hooks fell back to
+per-invocation processes and the Windows canary exercised no daemon
+code at all.
+
+Relocating to another fixed port only moves the failure: the ranges are
+re-reserved at each boot. So the daemon takes what it can get and says
+where it landed:
+
+1. bind `DEFAULT_PORT`;
+2. on any `OSError`, rebind to port **0** and let the OS choose;
+3. write the bound port to `~/.claude/claude-hooks-daemon.port`.
+
+Clients (`daemon_client`, `claude-hooks-daemon-ctl`) read that file and
+fall back to `DEFAULT_PORT` when it is absent or unreadable. Resolution
+happens **per call**, not at import, so a long-lived process follows the
+daemon across a restart onto a different port.
+
+Check with:
+
+```bash
+cat ~/.claude/claude-hooks-daemon.port     # empty/absent => on DEFAULT_PORT
+claude-hooks-daemon-ctl status             # reports the port it found
+```
+
+The file is written after a successful bind and removed on clean
+shutdown, so its presence means "a daemon bound this port", not "a
+daemon is alive" — a crash leaves it behind. That is harmless: a client
+that tries a stale port fails to connect and falls back, exactly as if
+the file were absent. Passing `--port` explicitly always wins.
+
+On Windows, list the reserved ranges with:
+
+```
+netsh interface ipv4 show excludedportrange protocol=tcp
+```
+
 ## Responsibilities
 
 The daemon owns three things in a single process:

@@ -40,7 +40,12 @@ from typing import Optional
 # Late imports to avoid pulling install.py at module-level — install.py
 # triggers conda detection which is slow and irrelevant for status.
 from claude_hooks import daemon_client
-from claude_hooks.daemon import DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SECRET_PATH
+from claude_hooks.daemon import (
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    DEFAULT_SECRET_PATH,
+    resolve_port,
+)
 
 
 _GRACEFUL_STOP_TIMEOUT = 5.0   # seconds to wait for ping to drop after stop
@@ -324,8 +329,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--host", default=DEFAULT_HOST,
                     help=f"daemon host (default {DEFAULT_HOST})")
-    ap.add_argument("--port", type=int, default=DEFAULT_PORT,
-                    help=f"daemon port (default {DEFAULT_PORT})")
+    # No literal default: the daemon may have bound elsewhere (Windows
+    # reserved ranges), and pinning DEFAULT_PORT here would make `status`
+    # report NOT RESPONDING against a perfectly healthy daemon.
+    ap.add_argument("--port", type=int, default=None,
+                    help=(f"daemon port (default: the port file, "
+                          f"else {DEFAULT_PORT})"))
     ap.add_argument("--secret", type=Path, default=DEFAULT_SECRET_PATH,
                     help="path to the daemon's HMAC secret file")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -341,6 +350,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
+    if args.port is None:
+        args.port = resolve_port()
     common = {
         "host": args.host, "port": args.port, "secret_path": args.secret,
     }
