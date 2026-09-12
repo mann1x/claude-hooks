@@ -65,7 +65,14 @@ release with the auto-generated source archive
   common case, one round trip), fatal where one is configured and will
   not come up, because deploy knocked it over and deferring the failure
   to the next recall is how it stayed invisible. `verify_deploy.py`
-  gains a matching `embedder` check.
+  gains an `embedder` check that **performs a real embed** through
+  each provider's own embedder rather than reading the local
+  daemon's manager state — counting rows proves the database is
+  reachable and proves nothing about recall, and on a LAN consumer
+  the thing that can break is on another host entirely. A `None`
+  from `embed_for_store` is a FAIL there: it soft-fails by design so
+  a store never dies on it, and that silence is exactly what makes a
+  dead embedder look like an empty corpus.
 
 - **The daemon could not start at all on Windows** — and had not been,
   silently. `DEFAULT_PORT` 47018 sits inside a Hyper-V/WinNAT reserved

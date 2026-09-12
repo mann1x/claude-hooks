@@ -176,6 +176,84 @@ class TestEmbedderRespawn(unittest.TestCase):
         self.assertFalse(s.ok)
 
 
+class TestEmbedderVerification(unittest.TestCase):
+    """Counting rows proves the database is reachable and proves nothing
+    about recall — every recall embeds its query first."""
+
+    def _verify(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_verify_mod", VERIFY)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    class _Prov:
+        name = "pgvector"
+
+        def __init__(self, vec, emb):
+            self._vec, self._embedder = vec, emb
+
+        def embed_for_store(self, content):
+            if isinstance(self._vec, Exception):
+                raise self._vec
+            return self._vec
+
+    class _Emb:
+        url = "http://192.168.178.2:38092/embedding"
+
+    def _run(self, provider):
+        mod = self._verify()
+        r = mod.Results(quiet=True)
+        with patch("claude_hooks.dispatcher.build_providers",
+                   return_value=[provider]), \
+             patch("claude_hooks.config.load_config", return_value={}):
+            mod.check_embedder(r)
+        return mod, r
+
+    def test_a_working_embedder_passes_and_names_its_target(self):
+        mod, r = self._run(self._Prov([0.1] * 1024, self._Emb()))
+        self.assertEqual(r.failed, 0)
+        self.assertTrue(any("1024" in d for _, _, d in r.rows))
+        self.assertTrue(any("38092" in d for _, _, d in r.rows))
+
+    def test_a_silent_none_is_a_failure(self):
+        """``embed_for_store`` soft-fails to None so a store never dies
+        on it. For a verifier that silence is the entire finding: recall
+        degrades to 0 hits, which looks exactly like an empty corpus."""
+        mod, r = self._run(self._Prov(None, self._Emb()))
+        self.assertEqual(r.failed, 1)
+
+    def test_a_raising_embedder_is_a_failure(self):
+        mod, r = self._run(self._Prov(OSError("connection refused"), self._Emb()))
+        self.assertEqual(r.failed, 1)
+
+    def test_server_side_embedding_is_not_a_finding(self):
+        """Qdrant and Memory KG embed server-side — there is no local
+        embedder to be down, so silence there means nothing."""
+        mod, r = self._run(self._Prov(None, None))
+        self.assertEqual(r.failed, 0)
+
+    def test_the_probe_runs_before_the_attribute_is_read(self):
+        """Providers build their embedder lazily inside _ensure_ready,
+        so inspecting first reports 'no embedder' for every provider
+        that has one."""
+        order = []
+
+        class Lazy(self._Prov):
+            def __init__(self):
+                self._embedder = None
+
+            def embed_for_store(self, content):
+                order.append("probe")
+                self._embedder = TestEmbedderVerification._Emb()
+                return [0.0] * 8
+
+        mod, r = self._run(Lazy())
+        self.assertEqual(order, ["probe"])
+        self.assertEqual(r.failed, 0)
+        self.assertTrue(any("8-dim" in d for _, _, d in r.rows))
+
+
 class TestDeployDiscoversRatherThanHardcodes(unittest.TestCase):
     """A hardcoded list is how the *next* artifact gets forgotten."""
 

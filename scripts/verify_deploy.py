@@ -234,40 +234,60 @@ def check_providers(r: Results) -> None:
 
 
 def check_embedder(r: Results) -> None:
-    """Is the daemon-managed embedder actually up?
+    """Can this host actually turn text into a vector?
 
-    Not cosmetic: the embedder is spawn-on-demand, and a restart of
-    ``claude-hooks-daemon`` takes it down. A host that consumes it over
-    the LAN cannot respawn what it does not supervise, so its recall
-    silently degrades to ``0 hits`` — indistinguishable from an empty
-    corpus. ``deploy.py`` re-ensures it; this confirms the claim rather
-    than trusting it.
+    ``check_providers`` counts rows, which proves the database is
+    reachable and proves nothing about recall: every recall embeds the
+    query first, and an embedder that cannot answer degrades recall to
+    ``0 hits`` — the same output as an empty corpus, with no error. So
+    this probes the embedder each provider really uses, rather than the
+    one the local daemon happens to supervise. The distinction matters
+    on a host that consumes another host's embedder over the LAN
+    (``daemon_ensure=false``): nothing is managed here, and the thing
+    that can break is somewhere else entirely.
     """
     print("embedder")
     try:
-        from claude_hooks import daemon_client
+        from claude_hooks.config import load_config as load_hooks_config
+        from claude_hooks.dispatcher import build_providers
+        from claude_hooks.embedders import NullEmbedder
     except Exception as e:
-        r.add(WARN, "embedder", f"client unavailable: {type(e).__name__}")
-        return
-    if not daemon_client.ping(timeout=1.5):
-        r.add(WARN, "embedder", "no daemon on this host")
+        r.add(WARN, "embedder", f"import failed: {type(e).__name__}: {e}")
         return
     try:
-        st = daemon_client.embedding_status(timeout=5.0) or {}
+        providers = build_providers(load_hooks_config())
     except Exception as e:
-        r.add(FAIL, "embedder status", f"{type(e).__name__}: {e}")
+        r.add(WARN, "embedder", f"providers unavailable: {type(e).__name__}")
         return
-    if st.get("available") is False:
-        r.add(PASS, "embedder", f"not managed here ({st.get('reason', 'n/a')})")
-    elif st.get("alive"):
-        r.add(PASS, "embedder", f"alive on port {st.get('port')} "
-                                f"({st.get('mode')})")
-    else:
-        # Managed here and down. Spawn-on-demand means this is legal,
-        # but it is also exactly what a LAN client sees as an outage.
-        r.add(WARN, "embedder",
-              "managed here but not running — a LAN consumer sees 0 hits "
-              "until something local triggers a spawn")
+
+    probed = False
+    for p in providers:
+        # Probe first: providers build their embedder lazily inside
+        # ``_ensure_ready``, so inspecting the attribute beforehand
+        # reports "no embedder" for every provider that has one.
+        try:
+            vec = p.embed_for_store("verify_deploy embedder probe")
+        except Exception as e:
+            probed = True
+            r.add(FAIL, f"embedder {p.name}", f"{type(e).__name__}: {e}")
+            continue
+        emb = getattr(p, "_embedder", None)
+        if emb is None or isinstance(emb, NullEmbedder):
+            # Qdrant / Memory KG embed server-side — nothing local to
+            # break, and nothing this probe can say about them.
+            continue
+        probed = True
+        target = getattr(emb, "url", None) or type(emb).__name__
+        if vec:
+            r.add(PASS, f"embedder {p.name}", f"{len(vec)}-dim via {target}")
+        else:
+            # embed_for_store soft-fails to None so a store never dies
+            # on it. Here that silence is the whole finding.
+            r.add(FAIL, f"embedder {p.name}",
+                  f"cannot embed via {target} — recall returns 0 hits, "
+                  f"which is indistinguishable from an empty corpus")
+    if not probed:
+        r.add(PASS, "embedder", "no client-side embedder on this host")
 
 
 def check_version(r: Results) -> None:
