@@ -121,13 +121,26 @@ class TestShippedConfigs:
     """The committed example is what a new host starts from; the live
     config is what this host actually runs."""
 
-    @pytest.mark.parametrize("name", ["claude-hooks.example.json",
-                                      "claude-hooks.json"])
-    def test_config_declares_three_slots(self, name):
-        path = REPO / "config" / name
-        if not path.exists():          # live config is gitignored
-            pytest.skip(f"{name} not present")
-        emb = json.loads(path.read_text()).get("embedding")
-        if emb is None:
-            pytest.skip(f"{name} has no embedding block")
+    def test_committed_example_declares_three_slots(self):
+        """The example is what a new host starts from, and it is
+        committed — so it can be pinned literally."""
+        emb = json.loads(
+            (REPO / "config" / "claude-hooks.example.json").read_text()
+        ).get("embedding")
+        assert emb is not None
         assert emb.get("n_parallel") == 3
+
+    def test_this_hosts_config_resolves_to_three_slots(self):
+        """The live config is gitignored and host-specific: pandorum's
+        predates the key entirely and reads its embeds off solidpc's
+        LAN engine. Pinning the literal key there fails for a config
+        that behaves correctly, so assert the *effective* value — which
+        is what the daemon actually spawns with, and which still fails
+        loudly if someone writes n_parallel: 1."""
+        path = REPO / "config" / "claude-hooks.json"
+        if not path.exists():
+            pytest.skip("live config not present")
+        cfg = json.loads(path.read_text())
+        if not (cfg.get("embedding") or {}):
+            pytest.skip("no embedding block")
+        assert em.config_from_dict(cfg).n_parallel == 3

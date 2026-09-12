@@ -34,9 +34,43 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 from pathlib import Path
 
 __all__ = ["write_text_atomic"]
+
+# Windows only. POSIX ``rename(2)`` is atomic against concurrent
+# renames; Windows ``MoveFileEx`` is not, and fails ERROR_ACCESS_DENIED
+# (PermissionError, errno 13) when another writer holds the destination
+# open for even an instant — which is exactly what a storm of
+# last-writer-wins updates looks like. The condition is transient: the
+# other replace completes, its handle closes, and the next attempt
+# succeeds. Antivirus and search indexers open files behind our back and
+# produce the same error, so this is not purely a self-contention guard.
+#
+# ~0.6 s of total patience across 12 tries, which is far longer than any
+# observed collision and still short enough that a genuinely locked file
+# fails inside a hook's timeout budget rather than hanging it.
+_REPLACE_ATTEMPTS = 12
+_REPLACE_BACKOFF_S = 0.01
+_REPLACE_BACKOFF_MAX_S = 0.1
+
+
+def _replace_with_retry(tmp: Path, dest: Path) -> None:
+    """``os.replace`` with a bounded retry on Windows sharing errors."""
+    delay = _REPLACE_BACKOFF_S
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(tmp, dest)
+            return
+        except PermissionError:
+            # On POSIX this is a real permission problem and retrying
+            # only delays the report; there is no sharing-violation
+            # equivalent to wait out.
+            if os.name != "nt" or attempt == _REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, _REPLACE_BACKOFF_MAX_S)
 
 
 def write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None:
@@ -56,7 +90,7 @@ def write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None
     try:
         with os.fdopen(fd, "w", encoding=encoding) as f:
             f.write(text)
-        os.replace(tmp, path)
+        _replace_with_retry(tmp, path)
     except BaseException:
         # A unique name means a failed attempt leaves unique litter, so
         # unlike the shared-name version this cleanup actually matters.
