@@ -70,7 +70,11 @@ release with the auto-generated source archive
   shutdown — a stale one from a crash costs a client one failed connect,
   the same outcome as no file at all. `ctl --port` no longer defaults to
   the literal, which had it report `NOT RESPONDING` against a healthy
-  daemon that had bound elsewhere.
+  daemon that had bound elsewhere, and `ctl start` re-resolves on every
+  poll of its wait loop rather than once before spawning — it is waiting
+  for the process that writes the port file, so a single up-front
+  resolution reads the pre-start value and reports "did not come up" for
+  a daemon that came up fine on another port.
 
 - **sqlite_vec deletes leaked their embeddings** (schema v3). Only the
   FTS5 mirror had a delete trigger; `<table>_vec` had none, resting on

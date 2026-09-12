@@ -51,6 +51,12 @@ fall back to `DEFAULT_PORT` when it is absent or unreadable. Resolution
 happens **per call**, not at import, so a long-lived process follows the
 daemon across a restart onto a different port.
 
+`ctl start` re-resolves on *every* poll of its wait loop, not once
+before spawning. It is waiting for a process that has not written its
+port yet — resolving up front reads the value from before the start, so
+`start` would report "did not come up" for a daemon that came up fine
+somewhere else. (It did, on pandorum, the first time it worked.)
+
 Check with:
 
 ```bash

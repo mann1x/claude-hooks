@@ -154,3 +154,74 @@ class TestCtlFollowsTheDaemon:
         from claude_hooks.daemon_ctl import _build_parser
         args = _build_parser().parse_args(["status"])
         assert args.port is None
+
+    def test_start_waits_on_the_port_the_daemon_publishes(
+        self, port_file, tmp_path, monkeypatch,
+    ):
+        """`start` reported "did not come up" for a daemon that had come
+        up perfectly — it polled the port resolved *before* the spawn,
+        and the port file is written by the process it is waiting for.
+        """
+        from claude_hooks import daemon_ctl
+        monkeypatch.setattr(daemon_ctl, "resolve_port",
+                            lambda: daemon.resolve_port(port_file))
+        monkeypatch.setattr(daemon_ctl, "_detect_entry", lambda: "unit test")
+
+        def spawn():
+            daemon.write_port_file(49152, port_file)   # daemon picks its port
+
+        monkeypatch.setattr(daemon_ctl, "_platform_start", spawn)
+        monkeypatch.setattr(
+            daemon_client, "ping",
+            lambda **kw: kw["port"] == 49152,
+        )
+        rc = daemon_ctl.cmd_start(
+            host="127.0.0.1", secret_path=tmp_path / "s", wait=2.0,
+        )
+        assert rc == 0
+
+    def test_start_honours_an_explicit_port_while_waiting(
+        self, port_file, tmp_path, monkeypatch,
+    ):
+        """--port is an instruction, not a hint: don't drift onto the
+        port file mid-wait."""
+        from claude_hooks import daemon_ctl
+        monkeypatch.setattr(daemon_ctl, "resolve_port",
+                            lambda: daemon.resolve_port(port_file))
+        monkeypatch.setattr(daemon_ctl, "_detect_entry", lambda: "unit test")
+        monkeypatch.setattr(daemon_ctl, "_platform_start",
+                            lambda: daemon.write_port_file(49152, port_file))
+        seen = set()
+
+        def ping(**kw):
+            seen.add(kw["port"])
+            return False
+
+        monkeypatch.setattr(daemon_client, "ping", ping)
+        rc = daemon_ctl.cmd_start(
+            host="127.0.0.1", port=40404, secret_path=tmp_path / "s", wait=0.6,
+        )
+        assert rc == 1
+        assert seen == {40404}
+
+    def test_wait_returns_the_port_it_found(self, port_file, tmp_path, monkeypatch):
+        from claude_hooks import daemon_ctl
+        monkeypatch.setattr(daemon_ctl, "resolve_port",
+                            lambda: daemon.resolve_port(port_file))
+        daemon.write_port_file(49152, port_file)
+        monkeypatch.setattr(daemon_client, "ping",
+                            lambda **kw: kw["port"] == 49152)
+        assert daemon_ctl._wait_for_ping(
+            host="127.0.0.1", port=None, secret_path=tmp_path / "s",
+            timeout=1.0,
+        ) == 49152
+
+    def test_wait_returns_none_on_timeout(self, port_file, tmp_path, monkeypatch):
+        from claude_hooks import daemon_ctl
+        monkeypatch.setattr(daemon_ctl, "resolve_port",
+                            lambda: daemon.resolve_port(port_file))
+        monkeypatch.setattr(daemon_client, "ping", lambda **kw: False)
+        assert daemon_ctl._wait_for_ping(
+            host="127.0.0.1", port=None, secret_path=tmp_path / "s",
+            timeout=0.4,
+        ) is None
