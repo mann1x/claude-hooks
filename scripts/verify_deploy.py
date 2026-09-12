@@ -233,6 +233,43 @@ def check_providers(r: Results) -> None:
             r.add(PASS, f"provider {p.name}", f"{n} memories")
 
 
+def check_embedder(r: Results) -> None:
+    """Is the daemon-managed embedder actually up?
+
+    Not cosmetic: the embedder is spawn-on-demand, and a restart of
+    ``claude-hooks-daemon`` takes it down. A host that consumes it over
+    the LAN cannot respawn what it does not supervise, so its recall
+    silently degrades to ``0 hits`` — indistinguishable from an empty
+    corpus. ``deploy.py`` re-ensures it; this confirms the claim rather
+    than trusting it.
+    """
+    print("embedder")
+    try:
+        from claude_hooks import daemon_client
+    except Exception as e:
+        r.add(WARN, "embedder", f"client unavailable: {type(e).__name__}")
+        return
+    if not daemon_client.ping(timeout=1.5):
+        r.add(WARN, "embedder", "no daemon on this host")
+        return
+    try:
+        st = daemon_client.embedding_status(timeout=5.0) or {}
+    except Exception as e:
+        r.add(FAIL, "embedder status", f"{type(e).__name__}: {e}")
+        return
+    if st.get("available") is False:
+        r.add(PASS, "embedder", f"not managed here ({st.get('reason', 'n/a')})")
+    elif st.get("alive"):
+        r.add(PASS, "embedder", f"alive on port {st.get('port')} "
+                                f"({st.get('mode')})")
+    else:
+        # Managed here and down. Spawn-on-demand means this is legal,
+        # but it is also exactly what a LAN client sees as an outage.
+        r.add(WARN, "embedder",
+              "managed here but not running — a LAN consumer sees 0 hits "
+              "until something local triggers a spawn")
+
+
 def check_version(r: Results) -> None:
     print("version")
     try:
@@ -325,6 +362,7 @@ def main() -> int:
     else:
         check_version(r)
         check_providers(r)
+        check_embedder(r)
         check_skills(r)
         check_store(r)
 

@@ -37,7 +37,11 @@ What it does, in order:
    ``~/.claude/skills/``. Only ones already installed: skills are opt-in
    per host and ``install.py`` is the thing that offers new ones.
 4. **Services** — restart every *active* long-running unit that
-   references this repo, at whichever scope (user / system) it lives in.
+   references this repo, at whichever scope (user / system) it lives in,
+   then re-ensure the daemon-managed embedder, which the daemon restart
+   takes down with it and nothing brings back until the next local
+   embedding request (a LAN client cannot make one — it does not
+   supervise the process).
 5. **Verify** — run ``verify_deploy.py`` and adopt its exit code.
 
 Usage::
@@ -313,7 +317,57 @@ def step_services(dry: bool, skip: bool) -> Step:
             s.note(f"{unit} ({scope}) — restarted")
         else:
             s.fail(f"{unit} ({scope}) did NOT come back up")
+    if dry:
+        s.note("[dry-run] would re-ensure the daemon-managed embedder")
+    else:
+        _respawn_embedder(s)
     return s
+
+
+def _respawn_embedder(s: Step) -> None:
+    """Bring the daemon-managed llamafile back after a daemon restart.
+
+    Restarting ``claude-hooks-daemon`` takes its managed embedding
+    child with it, and the embedder is spawn-on-demand: nothing brings
+    it back until something on *this* host asks for an embedding. That
+    is fine locally — the first recall pays a 3 s spawn. It is not fine
+    for a host that consumes this one's embedder over the LAN
+    (``daemon_ensure=false``), because it cannot spawn what it does not
+    supervise: its recall returns ``0 hits`` with a connection refused,
+    which reads as an empty corpus rather than an outage. Observed on
+    pandorum immediately after a solidpc deploy on 2026-09-12.
+
+    So deploy restores what deploy took down. Hosts with no embedding
+    manager configured — the common case — answer ``available: False``
+    and cost one round trip.
+    """
+    try:
+        sys.path.insert(0, str(REPO))
+        from claude_hooks import daemon_client
+    except Exception as e:                    # pragma: no cover — import guard
+        s.note(f"embedder: skipped ({type(e).__name__})")
+        return
+
+    if not daemon_client.ping(timeout=1.5):
+        s.note("embedder: no daemon on this host — nothing to respawn")
+        return
+    try:
+        res = daemon_client.embedding_ensure() or {}
+    except Exception as e:
+        s.fail(f"embedder: ensure raised {type(e).__name__}: {e}")
+        return
+
+    if res.get("ready"):
+        s.note("embedder: ready on port {} ({})".format(
+            res.get("port"), "spawned" if res.get("spawned") else "already up"))
+    elif res.get("available") is False:
+        # Not configured here, or a remote/primary embedder is in use.
+        s.note(f"embedder: not managed here ({res.get('reason', 'n/a')})")
+    else:
+        # Configured and it would not come up. Deploy knocked it over,
+        # so deploy owns the failure rather than deferring it to the
+        # next recall.
+        s.fail(f"embedder: did not come back up — {res}")
 
 
 # --------------------------------------------------------------------- #

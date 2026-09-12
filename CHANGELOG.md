@@ -52,6 +52,21 @@ release with the auto-generated source archive
 
 ### Fixed
 
+- **Deploy left the embedder down.** Restarting `claude-hooks-daemon`
+  takes its managed llamafile child with it, and the embedder is
+  spawn-on-demand — so nothing brings it back until *this* host next
+  asks for an embedding. Locally that costs one 3 s spawn. For a host
+  consuming the embedder over the LAN (`daemon_ensure=false`) it is an
+  outage it cannot end: it does not supervise the process, so its recall
+  returns `0 hits` with a connection refused, which reads as an empty
+  corpus rather than a failure. Observed on pandorum straight after a
+  solidpc deploy. `scripts/deploy.py` now re-ensures the embedder at the
+  end of the service step — advisory where no embedder is managed (the
+  common case, one round trip), fatal where one is configured and will
+  not come up, because deploy knocked it over and deferring the failure
+  to the next recall is how it stayed invisible. `verify_deploy.py`
+  gains a matching `embedder` check.
+
 - **The daemon could not start at all on Windows** — and had not been,
   silently. `DEFAULT_PORT` 47018 sits inside a Hyper-V/WinNAT reserved
   range on pandorum (`47013-47112`, part of a near-continuous block from

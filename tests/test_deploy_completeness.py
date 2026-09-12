@@ -35,6 +35,7 @@ import pathlib
 import re
 import sys
 import unittest
+from unittest.mock import patch
 
 import pytest
 
@@ -99,6 +100,80 @@ class TestEveryArtifactClassIsDeployed(unittest.TestCase):
         src = _src(DEPLOY)
         self.assertIn("def step_verify", src)
         self.assertIn("verify_deploy.py", src)
+
+    def test_the_daemon_managed_embedder_is_brought_back(self):
+        """Restarting the daemon kills its llamafile child, and the
+        embedder is spawn-on-demand — so nothing restores it until this
+        host next asks for an embedding. A LAN client consuming it
+        (``daemon_ensure=false``) never can: it does not supervise the
+        process, and its recall degrades to ``0 hits``, which reads as
+        an empty corpus rather than an outage. Deploy restores what
+        deploy took down."""
+        src = _src(DEPLOY)
+        self.assertIn("_respawn_embedder", src)
+        self.assertIn("embedding_ensure", src)
+
+    def test_the_verifier_checks_the_embedder_too(self):
+        """Deploy's claim that it brought the embedder back is worth
+        exactly as much as the check that confirms it."""
+        src = _src(VERIFY)
+        self.assertIn("def check_embedder", src)
+        self.assertIn("check_embedder(r)", src)
+
+
+class TestEmbedderRespawn(unittest.TestCase):
+    """The respawn must be advisory where the embedder isn't ours, and
+    blocking where it is."""
+
+    def _step(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_deploy_mod", DEPLOY)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod, mod.Step("services")
+
+    def test_no_daemon_is_not_a_failure(self):
+        mod, s = self._step()
+        with patch("claude_hooks.daemon_client.ping", return_value=False):
+            mod._respawn_embedder(s)
+        self.assertTrue(s.ok)
+
+    def test_unconfigured_manager_is_not_a_failure(self):
+        """Most hosts do not run a llamafile at all."""
+        mod, s = self._step()
+        with patch("claude_hooks.daemon_client.ping", return_value=True), \
+             patch("claude_hooks.daemon_client.embedding_ensure",
+                   return_value={"available": False, "reason": "not configured"}):
+            mod._respawn_embedder(s)
+        self.assertTrue(s.ok)
+
+    def test_ready_is_reported_with_its_port(self):
+        mod, s = self._step()
+        with patch("claude_hooks.daemon_client.ping", return_value=True), \
+             patch("claude_hooks.daemon_client.embedding_ensure",
+                   return_value={"ready": True, "port": 38092, "spawned": True}):
+            mod._respawn_embedder(s)
+        self.assertTrue(s.ok)
+        self.assertTrue(any("38092" in n for n in s.notes))
+
+    def test_a_configured_embedder_that_wont_start_fails_the_deploy(self):
+        """Deploy knocked it over, so deploy owns the failure — deferring
+        it to the next recall is how it became invisible in the first
+        place."""
+        mod, s = self._step()
+        with patch("claude_hooks.daemon_client.ping", return_value=True), \
+             patch("claude_hooks.daemon_client.embedding_ensure",
+                   return_value={"ready": False}):
+            mod._respawn_embedder(s)
+        self.assertFalse(s.ok)
+
+    def test_a_raising_client_fails_loudly_rather_than_passing_quietly(self):
+        mod, s = self._step()
+        with patch("claude_hooks.daemon_client.ping", return_value=True), \
+             patch("claude_hooks.daemon_client.embedding_ensure",
+                   side_effect=OSError("socket gone")):
+            mod._respawn_embedder(s)
+        self.assertFalse(s.ok)
 
 
 class TestDeployDiscoversRatherThanHardcodes(unittest.TestCase):
