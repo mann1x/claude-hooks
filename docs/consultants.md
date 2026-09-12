@@ -317,6 +317,23 @@ claude-consultants config set-service-mode smart-start
 The CLI prints an exact follow-up command (re-run install.py to
 install/uninstall the service unit, then restart the daemon).
 
+**Which file owns the mode.** `[service].mode` in
+`~/.claude/consultants-config.toml` is the single source of truth —
+the engine reads it, and `set-service-mode` (and the `/consultants
+config` menu) writes it. `hooks.consultants.smart_start.enabled` in
+`config/claude-hooks.json` is a *mirror* install.py keeps for its own
+task-registration and restart logic; you never edit it by hand. Every
+install run reconciles the mirror to the TOML before it does anything
+else, including on a `--non-interactive` deploy and on a run where you
+decline the "Refresh /consultants engine deps?" prompt. If the two ever
+disagree the installer prints a `[drift]` line saying which value it
+adopted.
+
+Before 2026-08-01 the installer resolved the mode from the mirror and
+never read the TOML, so a mode set with `set-service-mode` was reverted
+by the next deploy that got past the refresh prompt — pandorum ran
+smart-start for two months with a config file that said `always-on`.
+
 ---
 
 ## Effort tiers
@@ -430,6 +447,185 @@ wait with `--wait-timeout <s>` (default 0 = wait indefinitely; a
 positive cap aborts the *wait* only — the run keeps going server-side).
 This is the verb the Workflow driver builds on (see **Adversarial
 review** below).
+
+### Pre-flight — the run refuses if it can't read the files
+
+Before a single token is spent, the engine extracts every `path.ext`
+and `path.ext:line` the question names and checks each against the
+session's allowed roots (`--cwd` plus every `--add-dir`). Three
+outcomes:
+
+| Verdict | When | Effect |
+|---|---|---|
+| readable | resolves under some root | run proceeds |
+| creatable | file missing, its directory resolves | run proceeds ("write me `pkg/new.py`" must not be blocked) |
+| unreachable | neither the file nor its directory resolves | counted |
+
+The run is **refused** only when the question names paths and *none*
+of them are readable — the wrong-roots signature. A minority of
+unreachable paths logs a warning and continues, because one bad path
+among good ones is a typo, not a misconfigured sandbox. The refusal
+is immediate, costs nothing, and names the paths, the roots that were
+searched, and the fix:
+
+```
+pre-flight refused: none of the 3 file(s) this question names are
+readable under the session's allowed roots.
+Unreachable: eval/scorers.py, a2at/tools_dataset.py, netconfig/generate.py
+Roots searched:
+  - /srv/.../backup_models
+Nothing was spent. Either the roots are wrong — put the subject repo
+in --cwd and pass secondary trees with --add-dir — or every path named
+is one that doesn't exist yet, in which case create the directory (or
+name one file that does exist) and re-run.
+```
+
+The second reading is the known conservative case: a greenfield ask
+that names *only* files under a directory that doesn't exist yet
+(`mypkg/__init__.py`, `mypkg/core.py`) looks identical to wrong roots.
+Naming one existing file — which such a question almost always does,
+if only as the pattern to follow — clears it. So does the explicit
+override:
+
+```
+claude-consultants consult --skip-preflight --message "…"
+claude-consultants follow-up <sid> --skip-preflight --message "…"
+```
+
+The skip is logged as a warning on the engine, not applied silently:
+someone reading a run full of `[unverified]` cites has to be able to
+tell "the guard was off" from "the guard passed". It is a cost guard,
+not a security boundary — the tool sandbox still confines every read
+to the allowed roots either way.
+
+### Cancel and pause actually stop the run
+
+`POST /cancel` (`claude-consultants cancel <sid>`) and `POST /interrupt`
+(`pause`) took effect on 2026-08-02. Before that they set a flag on
+`runtime_control` that nothing read — and simply teaching a node to read
+it would not have worked either, which is the part worth knowing:
+
+> A graph already inside `invoke` carries its channel values in memory
+> through the superstep. `update_state` writes a checkpoint the running
+> invocation never re-reads. A node consulting
+> `runtime_control.cancel_requested` would have seen `False` for the
+> whole run.
+
+So the control travels **out-of-band**, on a `RunControl` object on the
+SessionState that the node gate reads directly — the same shape as the
+adversary ack and the tool-approval broker, the two cross-thread
+controls that already worked. The gate is installed at
+`build_council_graph`'s single `_wrap` choke point, so every node has it
+and a node added later cannot forget it.
+
+| | cancel | pause |
+|---|---|---|
+| effect | remaining nodes skip; graph drains to END | next node to enter parks |
+| granularity | whole run | one node's worker thread — x-tier siblings keep running |
+| on timeout | n/a | **resumes** |
+| release | — | `resume` (mode `pause_release`) |
+
+**A cancelled run has no synthesized answer.** The synthesizer is a node
+like any other, and running it would be spending after you said stop.
+Terminal status is `cancelled`, not `completed`, and partial state is
+kept unless you pass `--discard-partial`. "Stop and synthesize what you
+have" would be a different verb; it does not exist yet.
+
+**Cancel skips, it never raises.** An exception would abort the stream
+mid-superstep and lose exactly the partial state `--keep-partial` exists
+to preserve.
+
+**Pause resumes on timeout; a tool approval denies on timeout.** The
+opposite defaults are deliberate. An unanswered spend approval must not
+authorize spend. An unanswered pause has already spent everything up to
+that point, and abandoning the run would waste it — so the safe default
+is to carry on, after `DEFAULT_PAUSE_TIMEOUT_S` (1800 s).
+
+`resume` picks its mode server-side from what is actually parked:
+`pause_release`, `adversary_ack`, both (`pause_release+adversary_ack`),
+or `scheduled` for a real LangGraph interrupt. Everything but
+`scheduled` avoids re-entering the graph — the runner still owns the
+stream, and re-invoking would double-resume a live invocation. A pause
+is checked first and both are released when both are set:
+`_adversary_checkpoint_active` spans the whole runner-owned window, so
+it can still be set long after the checkpoint was acked, and testing it
+first swallowed the pause release entirely.
+
+The pause deadline is measured from when the pause was **requested**,
+not from when a node reaches the gate — a node can enter minutes later
+(the checkpoint above will do it), and restarting the clock at park time
+would leave a node blocked past the `pause_deadline_ts` that `status` is
+already advertising.
+
+`status` grows `cancel_requested` / `paused` (with `pause_deadline_ts`
+and the parked roles) only once something has been requested, so an
+untouched run's payload is unchanged.
+
+**`pause_state` says whether anything has actually stopped.** `paused:
+true` on its own conflated two situations that could not be more
+different to a caller waiting on one:
+
+| `pause_state` | meaning |
+|---|---|
+| `pending` | the request is registered; the next node to *enter* will take it. Nothing has stopped yet. |
+| `parked` | a node is blocked right now — `paused_roles` names it. |
+
+A pause takes effect at a node boundary, so `pending` is normal for a
+few seconds while a node finishes its current call. It is *not* normal
+for half an hour — and when the runner is sitting in one of its own
+waits, no node enters at all. `pause_blocked_by` names that wait rather
+than leaving you to infer it:
+
+```json
+{"paused": true, "pause_state": "pending",
+ "pause_blocked_by": [{"what": "adversary_checkpoint",
+                       "deadline_ts": 1785662684.0,
+                       "clears_with": "adversary-ack (or resume, which does both)"}],
+ "pause_note": "the pause is registered but no node can reach it while adversary_checkpoint is outstanding"}
+```
+
+Two waits can hold it: the **adversary checkpoint** (up to 30 minutes
+before the synthesizer) and a **parked `ask_human` tool approval**. Both
+are reported, with the verb that clears each. `pause_blocked_by: null`
+means nothing is holding the runner — a node is simply mid-call and will
+hit the gate when it finishes.
+
+The same fields come back from `POST /interrupt` itself, at the moment
+the caller is looking, because `{"ok": true}` alone reads as "the run
+has stopped" when it has not. `resume` releases the pause and the
+checkpoint together and reports `pause_release+adversary_ack`; `cancel`
+cuts through either.
+
+### Relative paths reach every root, not just `--cwd`
+
+The file tools resolve a relative path against the primary `--cwd`
+first and, only if nothing exists there, against each `--add-dir` root
+in configuration order. `glob` fans out the same way. Hits under
+`--cwd` render cwd-relative as before; hits under an extra root render
+absolute, which is the handle `read_file` needs.
+
+This closes an asymmetry that cost a full run. Before, a relative path
+was joined to `--cwd` and nowhere else, so an `--add-dir` root was
+reachable only by an absolute path the model didn't have — while the
+citation linter, which always searched every root, resolved the same
+path fine. A question naming `eval/scorers.py:600` would pass
+pre-flight (the file *is* readable under some root), then have every
+`read_file` and `glob` come back empty, and the council would
+confidently report the file absent. When a relative path is missing
+everywhere, the error now names the roots it tried, so "doesn't exist"
+and "not under any root I can see" stop reading the same.
+
+Where a relative path exists under more than one root, the primary
+`--cwd` wins and extra roots break ties in the order they were passed
+— deterministic, and unchanged for the single-root case.
+
+This exists because a council that cannot see its subject does not
+fail. It answers confidently from nothing, and the only tell is a wall
+of `[unverified — file not found]` annotations at the very end — 55
+minutes of cloud inference later, in the case that prompted it.
+
+The same check runs on every follow-up: a follow-up can name files the
+original never did, and can add roots of its own.
 
 ---
 
@@ -815,6 +1011,219 @@ gives you the raw expensive work — uncombined but readable.
 
 ---
 
+## Truncated output — detection, continuation, and honest status
+
+A council answer that stops mid-sentence used to be indistinguishable
+from one that finished. Session `csl-2026-08-12-0831-905a` — 43
+minutes, 113 LLM calls, 2.86M prompt tokens — returned a
+655-character final answer ending `...count the **presence** of
+$\text{`, wrote it to `summary.md`, and recorded `status: completed,
+error: null`. The pipeline had no opinion about it because nothing in
+the pipeline was looking.
+
+**What went wrong.** Ollama reports the terminal condition in
+`done_reason`: `stop` for a natural end, `length` when generation hit
+its output limit. The translator every consultants role goes through
+computed `finish_reason = "tool_calls" if tool_calls else "stop"` —
+discarding the field. On top of that, no role sent `num_predict`, so
+the actual output ceiling was whatever the provider defaulted to. The
+prompt used 168k of a 262k window, so nothing but an unseen output cap
+could have stopped it.
+
+**What happens now**, in order:
+
+1. **The budget is explicit.** Before each call the engine probes the
+   model's real context window (`/api/show` →
+   `model_info["<arch>.context_length"]`, cached per model) and sends
+   a `num_predict` sized to fit it. An unknown window still gets an
+   explicit budget — the point is to override a default we cannot see,
+   and not knowing the window doesn't change that. It is never
+   *guessed*: assuming 4096 for a model with a 1M window would compact
+   away most of a council's evidence.
+
+2. **An over-full history is compacted.** When the prompt no longer
+   leaves room to answer, the middle of the history is elided behind a
+   visible marker; the system prompt, the original question, and the
+   most recent exchanges survive. The marker is deliberate — a model
+   that knows its history was abridged reasons about the gap
+   differently from one that believes it has the whole record.
+
+3. **A cut answer is continued.** The partial is fed back with a
+   resume-from-here instruction and the halves are concatenated
+   verbatim. Bounded at 2 continuations. Tool-call turns are never
+   continued: half-written arguments are a different problem, already
+   handled by the arg-parse guard.
+
+4. **What is left is reported.** Every truncation is tallied per role
+   into `metadata.json`'s `truncations_by_role` and a `truncated:`
+   line in `summary.md`'s front matter. If the *deliverable* is still
+   short after continuation, the run is `failed` with an explanatory
+   error — never `completed`.
+
+A truncation the continuation loop rescued shows up in the tally but
+does **not** fail the run. Both facts matter: the count says the
+budget was tight, and the pass says the answer is whole.
+
+### Reading it
+
+```bash
+jq '.truncations_by_role' .claude-hooks/consultants/<sid>/metadata.json
+# {}                      -> nothing was cut
+# {"synthesizer": 1}      -> cut once; check status to see if it recovered
+```
+
+```sql
+-- transcript.db: the per-call detail, including the tail that was cut
+SELECT ts, role, payload FROM runtime_events WHERE kind = 'truncation';
+```
+
+If you see repeated truncations on one role, the question is too broad
+for that model's output budget, not too hard — narrow the ask or move
+the role to a model with a larger window (`/consultants config`).
+
+### How the budget is sized
+
+The numbers behind steps 1 and 2 are ported from the Cline fork
+(`mann1x/cline`), where each was derived from a live failure rather than
+chosen. Three things are worth knowing when reading a log line:
+
+**Token counts are measured, not assumed.** Prompt text and reasoning
+text do not tokenize alike — serialized JSON and tool output run 3.8–4.4
+characters per token, reasoning prose runs near 2.7 — so they are
+counted separately, and both ratios calibrate against the provider's own
+`prompt_eval_count` after the first call. Measured on this host: a
+council-shaped prompt that the old flat ratio put at 1,747 tokens
+actually cost 2,167, a 19% *under*count, which is the direction that
+lets a request be built too large. One call brought it to 2,168.
+Calibration is per model — x-tier fanout runs several at once, and a
+blended ratio would describe none of them.
+
+**A cap is attributed, not just noticed.** `window_bound` says whether
+the ceiling came from the context window or from our own `num_predict`.
+Only the first is something compaction can fix; compacting for the
+second spends the history and leaves the retry facing the same ceiling
+with less to work from.
+
+**Reservations follow what turns cost.** `num_predict` is a ceiling, not
+a forecast. Before a run has turns to measure, a quarter of the window
+is held back; after two, the reservation follows their high-water mark
+×1.5. This is why the same model can show a different trigger point on
+two different questions.
+
+### Thinking is condensed, not discarded
+
+A role that reasons past its budget used to lose that reasoning
+entirely — the agent loop stripped every `thinking` block before
+resending the message, so the next iteration started the same reasoning
+from scratch. It now leaves itself a short first-person note of what it
+settled and what it ruled out, which goes back into the reasoning
+channel in its place.
+
+You will see this in the log as:
+
+```
+capped thinking on iter 2 (cap-proximity): 4,180 reasoning tok of a
+4,096 budget — condensing rather than discarding
+```
+
+`cap-proximity` means measured thinking tokens reached 90% of the
+budget; `budget-message` means the model declared its own out-of-budget
+message via `/api/show` and it appeared at the end of the think, which
+is direct evidence and needs no threshold.
+
+The note is dropped rather than used if it degenerates into repetition —
+it lands as the model's own reasoning, so thirty near-identical lines
+read as thirty things it thought, and no note simply returns the
+pre-existing behaviour of re-deriving. Set
+`LoopConfig.capped_thinking_enabled = False` to disable it entirely.
+
+### What a compaction leaves behind
+
+Compaction used to replace the elided messages with a marker counting
+them. That is honest and carries nothing: every finding, every dead end
+and every stretch of reasoning in that span was gone, and a role that
+continues with no memory of having been wrong makes the same mistakes in
+the same order.
+
+Two passes now run over the span while it still exists — that moment is
+the only one where those turns are still available — and both land in
+the marker:
+
+```
+Retrospective on the work this summary replaces — your own assessment,
+carried forward:
+
+## What did not
+Re-reading the same three files after each failed grep. The file was
+never the problem; the aggregation order was.
+...
+
+Context summary:
+
+## Goal
+Find where the metric drops rows before normalisation.
+## Ruled out
+The tokenizer (eval.py:88 counts rows, not tokens).
+...
+
+[61 earlier message(s) were elided to fit the model's context window...]
+```
+
+The **summary** is the hand-over note — goal, done, in progress, ruled
+out, key facts, next — written from the transcript with reasoning
+excluded. The **retrospective** is the assessment of *method*, written
+from the discarded reasoning paired with what each stretch produced.
+That pairing is the point: reasoning on its own reads as a plan, and
+every plan reads as sound; the outcome beside it shows which ones were.
+Tool results are reduced to a verdict (`applied`, `refused as an
+unchanged repeat`, `failed: …`), and each turn carries its reasoning
+cost in tokens — the one thing a model cannot infer from re-reading its
+own thinking is that the stretch which felt thorough was the turn that
+spent eighteen thousand tokens for one refused call.
+
+The retrospective comes first because it is what should be read first:
+how the work went, before what the work was.
+
+Budgets: the summary writes first against 70% of a combined budget that
+grows with **generation** (0.33 → 0.55 of the compaction target across
+five compactions, then flat — a fifth compaction is carrying everything
+the task has learned, and holding it to a first compaction's budget is
+how a long run degrades). The retrospective is then sized from what the
+summary actually cost, so an economical summary buys it room. Each
+digest chains into the next, which revises rather than restates it.
+
+**The summary writes first and takes what it needs; the retrospective
+is capped at what is left to reach the target.** There is no guaranteed
+floor for it: when the summary spends the budget, the retrospective is
+skipped and the skip is logged. The summary is the only record of *what
+happened* — lose it and the next turn cannot continue the work at all,
+whereas the retrospective improves how the work is done.
+
+```
+retrospective skipped: the summary spent 2604 of a 2640 budget,
+leaving 36 — below the 512 floor for a usable assessment
+```
+
+The digest's **input** is bounded too, by a projection rather than a
+character cap (`claude_hooks/budget_projection.py`). A cap can sever an
+assistant's tool call from the result answering it, which is not a
+smaller conversation but an invalid one. The projection degrades in a
+fixed order — reasoning per intent, then text truncation newest-first,
+then whole messages oldest-first **in tool-pair closures** — and never
+drops the first or latest typed user message or the turn in flight. It
+reports what it did:
+
+```
+summary input projection ok: ~7865 tok (33 dropped_field)
+retrospective input projection ok: ~9555 tok (40 dropped_message, 64 truncated_text)
+```
+
+If either phase fails or comes back empty, compaction still happens and
+falls back to the bare elision note — a digest that cannot be written
+must never block the compaction it was meant to enrich.
+
+---
+
 ## Configuration
 
 `/consultants config` walks you through every config knob via
@@ -848,13 +1257,68 @@ hand-editable if you prefer.
 | `store.ttl.jitter_pct` | store | #215 cohort spread — at write time `expires_at += ttl * uniform(-jitter, +jitter)`. Stops N sessions from expiring on the same reaper tick. Default 0.1 (±10 %). |
 | `store.distillation.enabled` | store | Master switch for Caliber-style summarization at expiry. M14 default = `true`. |
 | `store.distillation.model` | store | Primary distiller LLM. Default `gemma4:31b-cloud` (M11c-2 tool_executor winner). |
-| `store.distillation.fallback_models` | store | Tried in order on primary failure. Default `["glm-5.1:cloud"]`. |
+| `store.distillation.fallback_models` | store | Tried in order on primary failure. Default `["glm-5.2:cloud"]`. |
 | `store.distillation.sweep_interval_seconds` | store | Reaper cadence. Minimum 30 s; default 3600 (1 h). |
 | `store.distillation.min_entries_per_distillation` | store | Cost gate — research groups below this delete without an LLM call. Default 3. |
 | `store.distillation.max_session_entries` | store | Per-prompt truncation cap. Default 50 (~30 k tokens at `gemma4:31b-cloud`'s 32 k ctx). |
 | `store.distillation.max_groups_per_sweep` | store | #215 cap on **successful** distillations per tick. Cost-gate skips + tool_results deletes don't burn the budget. Default 5; `0` = uncapped. |
 | `store.distillation.pace_seconds_between_distillations` | store | #215 inter-call sleep (0.5 s sliced for shutdown). Default 5 s. |
 | `coder_limits.max_file_bytes` / `max_total_bytes` / `max_files` | role | Sandbox caps for the opt-in `coder` role. Defaults 50 KB / 1 MB / 16. |
+| `tools.enabled` | tools | Master switch for the composable tool registry. Default `true`. `false` restores the fixed pre-registry surface. |
+| `tools.all_roles` | tools | Give planner / critic / meta_critic / synthesizer / adversary the same tools the researcher has. **Default `true` since 2026-08-01** — measured cheaper *and* more accurate (see below). |
+| `tools.git` | tools | Read-only git history tools: `git_history` ("when did this regress?", wraps `git log -L`), `git_log` / `git_blame` / `git_diff` / `git_show`. Default `false` — safe, but five more schemas on every prompt on every lane. |
+| `tools.default_level` | tools | Fallback permission rung for a tool no provider or override names: `auto` / `ask_assistant` / `ask_human` / `deny`. Default `auto`. |
+| `tools.approval_timeout_s` | tools | Seconds a parked `ask_human` tool call waits before it is **denied**. Default `600`, **minimum `180`**. `ask_assistant` never parks, and a call covered by a standing grant never parks either. |
+| `tools.permissions` | tools | Per-tool rung overrides, `[tools.permissions]`. |
+
+### Tool surface — why `all_roles` is on
+
+Until 2026-08-01 only the **researcher** could call tools. Every other
+role reasoned about the researcher's text without any way to check it —
+which is why the CitationLinter had to exist at all.
+
+`all_roles` landed **off**, gated on a measurement, on the theory that
+it changed cost and not correctness. Both halves of that theory were
+wrong. The record is in
+[`benchmarks/consultants/results/2026-08-01/`](../benchmarks/consultants/results/2026-08-01/).
+
+**It is cheaper.** Three paired trials at `effort=high`, each arm in
+its own project, both arms of a trial run concurrently so cloud latency
+could not drift between them:
+
+| metric | all_roles off | all_roles on | delta |
+|---|---|---|---|
+| prompt tokens | 186,309 `[158,794–210,185]` | 129,514 `[102,216–149,424]` | **−30%** |
+| completion tokens | 12,160 `[11,664–12,952]` | 10,535 `[9,562–11,365]` | **−13%** |
+| LLM calls | 18 | 19 | +8% |
+| wall | 1,922 s | 1,938 s | +0.8% |
+
+The ranges **do not overlap** — the off arm's cheapest trial cost more
+than the on arm's most expensive. The saving comes from the *planner*,
+not the critic: a tooled planner (1.0 → 3.3 calls) grounds its plan in
+the code, and the researcher then converges in ~2 fewer iterations
+(14.7 → 12.7). A tool loop resends its whole history each iteration, so
+the iterations removed are the most expensive ones.
+
+**It is more accurate — when there is something to catch.** Driving the
+critic directly against research carrying planted false claims (n=72):
+100% caught tooled vs 0% untooled, 100% precision, zero silent
+corrections. A separate full-council run with a deliberately stale
+design doc found *no* correctness difference, and the reason is worth
+knowing: the researcher read the stale doc and cross-checked it against
+the code anyway. The researcher has tools in both arms, so a stale doc
+next to readable code does not produce wrong research. **The
+correctness benefit is real but conditional** — it needs research that
+is actually wrong, which a tooled researcher rarely produces.
+
+**Turning it off** is supported and tested:
+
+```bash
+claude-consultants config set-tools --all-roles false --cwd "$(pwd)"
+```
+
+Worth knowing before you do: the cost argument for turning it off did
+not survive measurement.
 
 ### CLI
 
@@ -898,7 +1362,7 @@ claude-consultants config set-store-ttl --refresh-on-read false --jitter-pct 0.0
 
 # Distillation knobs (M14 sweep + #215 pacing)
 claude-consultants config set-store-distillation --enabled true \
-    --model gemma4:31b-cloud --add-fallback-model glm-5.1:cloud
+    --model gemma4:31b-cloud --add-fallback-model glm-5.2:cloud
 claude-consultants config set-store-distillation --sweep-interval-seconds 1800 \
     --min-entries-per-distillation 5
 claude-consultants config set-store-distillation --max-groups-per-sweep 3 \
@@ -908,6 +1372,104 @@ claude-consultants config set-store-distillation --max-groups-per-sweep 3 \
 claude-consultants config coder set python --primary glm-5.1:cloud \
     --fallback kimi-k2.6:cloud
 claude-consultants config coder set-default --primary glm-5.1:cloud
+
+# Tool surface (registry / uniform role access / git history / rungs)
+claude-consultants config set-tools --all-roles false   # researcher-only
+claude-consultants config set-tools --git true          # git history tools
+claude-consultants config set-tools --default-level auto
+claude-consultants config set-tools --permission write_file ask_assistant
+```
+
+**The approval channel (M-A, wired 2026-08-02).** The two `ask_*`
+rungs behave differently on purpose:
+
+| rung | behaviour |
+|---|---|
+| `ask_assistant` | **auto-approves and never stalls.** Records a `tool_approval_auto` event so the call is visible and the rung can be tightened afterwards. A round-trip per write per lane would burn tokens for a verdict that is yes by construction. |
+| `ask_human` | **parks the lane** — the only rung that can stall, which is why it is reserved for spend. Blocks inside the tool executor, so N×M x-tier siblings keep running. |
+
+A parked call surfaces two ways: `status <sid>` grows a
+`pending_tool_approvals` array (present **only** while parked), and the
+event stream emits `awaiting_tool_approval` (kept by `--milestones`).
+Each carries `request_id`, `tool`, `arguments`, `cwd`, `reason` and
+`deadline_ts` — the plan's rule that "an approver cannot judge
+`sh -c "..."` on its own".
+
+Answer it:
+
+```
+claude-consultants tool-ack <sid> --allow
+claude-consultants tool-ack <sid> --deny --reason "not worth the spend"
+claude-consultants tool-ack <sid> --allow --request-id tap-3
+```
+
+`--allow` / `--deny` is required — there is no default verdict.
+`--request-id` is optional and answers the oldest pending request when
+omitted.
+
+**Answer the class, not the call.** A per-call verdict does not survive
+council scale. The first live run parked four `read_file` requests in
+90 seconds — three of them the same file, from three x-tier researcher
+lanes — and what nobody answers is *denied* at the deadline, so a queue
+you can't keep up with is a run that quietly degrades. Two mechanisms:
+
+*Coalescing* is automatic. Concurrent lanes asking the identical
+question join one request; `waiters: 3` on the entry says how many
+lanes one answer releases. Authorization is per **council**, so it does
+not matter which role asked.
+
+*Standing grants* are the answer's scope:
+
+```
+claude-consultants tool-ack <sid> --allow --all-of-tool
+claude-consultants tool-ack <sid> --allow --all-matching 'src/**'
+claude-consultants tool-ack <sid> --deny  --all-matching '*.env'
+```
+
+`--all-of-tool` covers every future call to that tool; `--all-matching`
+covers calls whose target matches the glob (matched against `path` /
+`file` / `file_path` / `root` / `dir` / `pattern`, whichever the call
+carries — a call with no establishable target never matches a glob
+rule). Installing a rule also **releases the already-parked requests it
+matches**, so siblings don't sit out the deadline for a decision that
+has been made. Active rules appear in `status` under
+`tool_approval_grants`; a later rule overrides an earlier one, so a
+blanket allow can be narrowed by a specific deny mid-run. A standing
+*deny* is worth having on its own: it stops a model that keeps retrying
+a forbidden path from parking a lane on every attempt.
+
+If a run needs standing grants to stay tolerable, the rung is usually
+wrong. `ask_human` is for spend and irreversibility; reads, greps and
+sandboxed writes belong on `auto` or `ask_assistant`, which give the
+audit trail without the stall.
+
+**Timeout denies**, after `tools.approval_timeout_s` (default 600 s,
+minimum 180 s, `set-tools --approval-timeout`). The floor is there
+because a shorter deadline is un-answerable rather than strict: the
+request has to be polled, relayed to a person and decided, and Claude
+Code's own turn latency eats most of a minute before anyone has read
+the tool name. A deadline nobody can meet is `deny` that also costs the
+wall-clock — and against a council that runs 30–60 minutes, three
+minutes is not a meaningful delay. `set-tools` rejects a lower value;
+a hand-edited TOML is raised to the floor with a warning rather than
+taking the council down over it. The lane gets `error: tool 'X' was not
+approved`, the model reroutes, and the council finishes degraded with
+the denial recorded. This is the plan's decision-table row 7: absence
+of an approver never authorizes spend. A denial is always a tool-result
+string, never an exception — a refused tool teaches the model to try
+another route rather than crashing the lane.
+
+None of this is reachable on a default config: every built-in and git
+tool declares `auto`, `default_level` is `auto`, and nothing is pinned,
+so the gate stays a dict lookup that never touches the channel.
+
+**Not yet implemented:** the plan's "keep it resumable" refinement — a
+late approval re-running *that lane* from a durable checkpoint. Today a
+timed-out lane reroutes and the run finishes degraded.
+
+```
+claude-consultants config set-tools --clear-permission write_file
+claude-consultants config set-tools --enabled false     # pre-registry surface
 
 # Discover what's available
 claude-consultants config list-models

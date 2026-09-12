@@ -160,6 +160,8 @@ def cmd_consult(args, base: str) -> int:
         # unions them with settings-file auto-discovery and stores the
         # result on the session record so follow-ups inherit.
         body["extra_roots"] = list(args.add_dir)
+    if getattr(args, "skip_preflight", False):
+        body["skip_preflight"] = True
     # --trace / --no-trace are deprecated in v1.1 (the JSONL trace
     # was replaced by the per-session transcript.db). The flag is
     # still accepted but no longer forwarded to the engine; warn
@@ -275,6 +277,8 @@ def cmd_follow_up(args, base: str) -> int:
         # entries. The engine merges the two lists (parent first, then
         # this turn's, dedup'd) before running the executor.
         body["extra_roots"] = list(args.add_dir)
+    if getattr(args, "skip_preflight", False):
+        body["skip_preflight"] = True
     # Consultancy review loop: ``--allow-extra [N]`` / ``--force`` is
     # the over-cap approval carrier. In the Claude Code harness the
     # skill re-issues the followup with this flag after the user
@@ -547,6 +551,16 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
             }
             for r in cc.ROLES
         },
+        # M-A: the tool surface. Same rule as the store block below —
+        # every knob `set-tools` can mutate must be visible here, or the
+        # skill's dialog cannot show the user what they are changing.
+        "tools": {
+            "enabled": cfg.tools.enabled,
+            "git": cfg.tools.git,
+            "all_roles": cfg.tools.all_roles,
+            "default_level": cfg.tools.default_level,
+            "permissions": dict(cfg.tools.permissions),
+        },
         # M8 + M14 (#220): expose the cross-session store block so
         # `config show` reveals the same knobs that `set-store{,-ttl,
         # -distillation}` mutate. The skill renders this; the test
@@ -809,6 +823,31 @@ def cmd_config_set_store(args, base: str) -> int:
             add_enable_at_effort=args.add_effort,
             remove_enable_at_effort=args.remove_effort,
             clear_enable_at_efforts=bool(args.clear_efforts),
+            **_resolve_active_scope(args),
+        )
+    except ValueError as e:
+        raise CLIError(str(e), exit_code=2) from None
+    return _emit_config(cfg, args)
+
+
+def cmd_config_set_tools(args, base: str) -> int:
+    """``config set-tools`` — the [tools] block (M-A tool surface)."""
+    try:
+        perm = None
+        if args.permission:
+            if len(args.permission) != 2:
+                raise ValueError(
+                    "--permission takes exactly two values: TOOL LEVEL")
+            perm = (args.permission[0], args.permission[1])
+        cfg = cc.set_tools(
+            enabled=_parse_cli_bool(args.enabled, flag="--enabled"),
+            git=_parse_cli_bool(args.git, flag="--git"),
+            all_roles=_parse_cli_bool(args.all_roles, flag="--all-roles"),
+            default_level=args.default_level,
+            approval_timeout_s=args.approval_timeout,
+            set_permission=perm,
+            clear_permission=args.clear_permission,
+            clear_all_permissions=bool(args.clear_permissions),
             **_resolve_active_scope(args),
         )
     except ValueError as e:
@@ -1243,21 +1282,63 @@ def cmd_control(args, base: str) -> int:
 
 
 def cmd_pause(args, base: str) -> int:
-    """POST /v1/consult/<sid>/interrupt — flip pause_requested.
-    ``pause`` is the friendlier verb name; the HTTP route is
-    ``/interrupt`` because that matches LangGraph's terminology."""
+    """POST /v1/consult/<sid>/interrupt — park the run at the next node
+    boundary. ``pause`` is the friendlier verb name; the HTTP route is
+    ``/interrupt`` because that matches LangGraph's terminology.
+
+    The pause takes effect where the *next* node enters, not mid-call:
+    a node already inside an LLM round finishes it first. Release with
+    ``resume``; if nobody does, the pause expires and the run continues
+    rather than being abandoned — everything up to that point is
+    already paid for.
+    """
     body = {"reason": args.reason or "user-pause"}
     out = _http("POST",
                 f"{base}/v1/consult/{args.sid}/interrupt", body=body)
     print(json.dumps({"ok": True, **out}, indent=2))
+    if out.get("paused") is False:
+        print(
+            "note: not paused — the run is already cancelling. Pausing "
+            "a draining run would park a node that should be "
+            "finishing.",
+            file=sys.stderr,
+        )
+    else:
+        blockers = out.get("pause_blocked_by")
+        if blockers:
+            names = ", ".join(b.get("what", "?") for b in blockers)
+            clears = "; ".join(
+                b.get("clears_with", "") for b in blockers if b.get("clears_with")
+            )
+            print(
+                f"note: pause is PENDING, not in effect — no node can "
+                f"reach it while {names} is outstanding. Clear it with: "
+                f"{clears}. Until then the run is waiting, not paused.",
+                file=sys.stderr,
+            )
+        elif out.get("pause_state") == "pending":
+            print(
+                "note: pause is PENDING — it takes effect where the "
+                "next node enters, so a node already mid-call finishes "
+                "first. Watch status for pause_state=parked.",
+                file=sys.stderr,
+            )
     return 0
 
 
 def cmd_resume(args, base: str) -> int:
-    """POST /v1/consult/<sid>/resume — clear the interrupt and
-    re-enter via Command(resume=value). The actual graph re-invoke
-    runs on the server's executor pool; this returns 200 with a
-    ``mode: scheduled`` payload and the caller polls /state."""
+    """POST /v1/consult/<sid>/resume — release a pause, or re-enter a
+    LangGraph interrupt via Command(resume=value).
+
+    Three modes, decided server-side by what is actually parked:
+    ``pause_release`` (a node parked by ``pause`` — releasing the flag
+    IS the resume, since the node is blocked in its own worker thread),
+    ``adversary_ack`` (the engine's pre-synthesis checkpoint), and
+    ``scheduled`` (a real graph interrupt; the re-invoke runs on the
+    server's executor pool and the caller polls /state). The first two
+    never re-enter the graph — the runner still owns the stream, and
+    re-invoking it would double-resume a live invocation.
+    """
     value: Any = None
     if args.value:
         try:
@@ -1287,7 +1368,16 @@ def cmd_adversary_ack(args, base: str) -> int:
 def cmd_cancel(args, base: str) -> int:
     """POST /v1/consult/<sid>/cancel — flip cancel_requested.
     ``--keep-partial`` is the default; pass ``--discard-partial`` to
-    delete the checkpoint file too."""
+    delete the checkpoint file too.
+
+    Note what the default does *not* do: no node reads
+    ``cancel_requested`` (audit 2026-08-02), so on a run that is
+    mid-graph a keep-partial cancel records the request and the run
+    streams to completion. ``--discard-partial`` closes the session,
+    which the runner's wait loops do break on. The response carries
+    ``stops_the_run`` so the distinction is visible rather than
+    inferred.
+    """
     body = {
         "discard_partial": bool(args.discard_partial),
         "reason": args.reason or "user-cancel",
@@ -1295,6 +1385,97 @@ def cmd_cancel(args, base: str) -> int:
     out = _http("POST",
                 f"{base}/v1/consult/{args.sid}/cancel", body=body)
     print(json.dumps({"ok": True, **out}, indent=2))
+    if not out.get("stops_the_run", True):
+        print(
+            "note: nothing left to stop — the run is no longer "
+            "executing. The cancel is recorded.",
+            file=sys.stderr,
+        )
+    elif out.get("final_answer_expected") is False:
+        print(
+            "note: the run will drain within a node boundary and has "
+            "NO synthesized answer — the synthesizer is a node like "
+            "any other, and running it would spend after you said "
+            "stop. Partial state is kept unless --discard-partial.",
+            file=sys.stderr,
+        )
+    return 0
+
+
+#: Event kinds worth a human's attention. ``llm_call`` / ``tool_call``
+#: are the bulk of the stream — a single ``xhigh`` council emits
+#: hundreds, each with a full payload — and reading them is how the
+#: consumer loses the events that actually demand a response. These
+#: are the ones that mark a state change.
+_MILESTONE_KINDS = (
+    "node_enter", "node_exit", "awaiting_adversary",
+    "adversary_resumed", "interrupt", "error", "complete", "lifecycle",
+    # M-A approval channel. ``awaiting_tool_approval`` is the one event
+    # in the stream that BLOCKS a lane until someone answers, so it must
+    # never be filtered out of the monitor view.
+    "awaiting_tool_approval", "tool_approval_resolved",
+    "tool_approval_auto",
+)
+
+
+def _compact_event_line(event_type: str, data: dict) -> str:
+    """One line per event: time, kind, and only the fields that
+    distinguish this event from the next one of the same kind."""
+    import datetime as _dt
+
+    ts = data.get("ts")
+    when = ""
+    if isinstance(ts, (int, float)):
+        when = _dt.datetime.fromtimestamp(ts).strftime("%H:%M:%S") + " "
+    bits = []
+    for key in ("role", "round", "lane_idx", "status", "reason",
+                "final_answer_present", "deadline_ts", "timeout_s",
+                # approval-channel fields: an operator staring at a
+                # parked lane needs the tool, the id to ack, and the
+                # verdict once it lands.
+                "tool", "level", "request_id", "resolution", "allowed"):
+        val = data.get(key)
+        if val not in (None, ""):
+            bits.append(f"{key}={val}")
+    return f"{when}{event_type:<18} " + " ".join(bits)
+
+
+def cmd_tool_ack(args, base: str) -> int:
+    """``tool-ack <sid> --allow|--deny`` — answer a parked ``ask_human``
+    tool-approval request.
+
+    There is deliberately no default verdict: guessing either way is
+    the failure the channel exists to prevent, so ``--allow`` /
+    ``--deny`` is a required, mutually-exclusive pair.
+
+    ``--all-of-tool`` / ``--all-matching <glob>`` answer for a class of
+    calls instead of one. The rule is session-scoped — authorization is
+    per council, so every role and x-tier lane inherits it — and it
+    releases the already-parked requests it matches. Answer one call at
+    a time on a wide council and the queue outruns you: the first live
+    run parked four ``read_file`` requests in 90 seconds.
+    """
+    body: dict = {"allow": bool(args.allow)}
+    if args.request_id:
+        body["request_id"] = args.request_id
+    if args.reason:
+        body["reason"] = args.reason
+    if args.all_matching:
+        body["scope"] = "glob"
+        body["pattern"] = args.all_matching
+    elif args.all_of_tool:
+        body["scope"] = "tool"
+    out = _http("POST", f"{base}/v1/consult/{args.sid}/tool-ack",
+                body=body)
+    print(json.dumps({"ok": True, **out}, indent=2))
+    still = out.get("pending") or []
+    if still and not (args.all_matching or args.all_of_tool):
+        print(
+            f"note: {len(still)} request(s) still parked. "
+            "--all-of-tool or --all-matching '<glob>' answers the class "
+            "instead of one call at a time.",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -1304,7 +1485,18 @@ def cmd_events(args, base: str) -> int:
     Streams indefinitely (until the session terminates or the user
     hits ^C). The endpoint supports Last-Event-ID resume; pass
     ``--since`` to skip events older than the given id.
+
+    By default the raw SSE records are printed verbatim, which is what
+    a machine consumer wants and what a human consumer drowns in. Pass
+    ``--milestones`` (or ``--kinds a,b``) to filter to state changes
+    and render one compact line each — the form in which "the council
+    is waiting for you" is actually visible.
     """
+    kinds: Optional[set] = None
+    if getattr(args, "kinds", None):
+        kinds = {k.strip() for k in args.kinds.split(",") if k.strip()}
+    elif getattr(args, "milestones", False):
+        kinds = set(_MILESTONE_KINDS)
     headers = {}
     if args.since:
         headers["Last-Event-ID"] = str(int(args.since))
@@ -1326,6 +1518,30 @@ def cmd_events(args, base: str) -> int:
     # Read line-by-line and pretty-print each event block. SSE
     # records are separated by a blank line, so we accumulate
     # lines until we see one.
+    def _emit(record_lines: list[str]) -> None:
+        if kinds is None:
+            print("\n".join(record_lines))
+            print()  # blank line separator in the CLI output
+            return
+        event_type = ""
+        payload: dict = {}
+        for ln in record_lines:
+            if ln.startswith("event:"):
+                event_type = ln[len("event:"):].strip()
+            elif ln.startswith("data:"):
+                try:
+                    payload = json.loads(ln[len("data:"):].strip())
+                except (ValueError, TypeError):
+                    payload = {}
+        # ``kind`` inside the payload is authoritative when present —
+        # the SSE ``event:`` name is derived from it but a few
+        # lifecycle records carry a coarser type.
+        kind = payload.get("kind") or event_type
+        if kind not in kinds and event_type not in kinds:
+            return
+        print(_compact_event_line(kind or event_type, payload),
+              flush=True)
+
     try:
         record_lines: list[str] = []
         while True:
@@ -1335,8 +1551,7 @@ def cmd_events(args, base: str) -> int:
             line = raw.decode("utf-8", errors="replace").rstrip("\n")
             if line == "":
                 if record_lines:
-                    print("\n".join(record_lines))
-                    print()  # blank line separator in the CLI output
+                    _emit(record_lines)
                     record_lines = []
                 continue
             record_lines.append(line)
@@ -1544,6 +1759,18 @@ def build_parser() -> argparse.ArgumentParser:
             "follow-ups inherit."
         ),
     )
+    c.add_argument(
+        "--skip-preflight", dest="skip_preflight", action="store_true",
+        help=(
+            "Start even when none of the files the question names are "
+            "readable under the session's roots. The pre-flight exists "
+            "because a council that cannot see its subject answers "
+            "confidently from nothing and only shows it 55 minutes "
+            "later; skip it when the question is greenfield (every path "
+            "it names is one you want created) and you know the roots "
+            "are right."
+        ),
+    )
     # M5: --wait turns the otherwise-async consult into a blocking call —
     # POST, then poll until terminal, then print the RESULT (same shape
     # as `result`) instead of the initial run record. Removes the
@@ -1612,6 +1839,18 @@ def build_parser() -> argparse.ArgumentParser:
             "tool sandbox. Merged with the parent's extra_roots "
             "(parent first, then this turn, dedup'd) before the "
             "executor runs."
+        ),
+    )
+    fu.add_argument(
+        "--skip-preflight", dest="skip_preflight", action="store_true",
+        help=(
+            "Start even when none of the files the question names are "
+            "readable under the session's roots. The pre-flight exists "
+            "because a council that cannot see its subject answers "
+            "confidently from nothing and only shows it 55 minutes "
+            "later; skip it when the question is greenfield (every path "
+            "it names is one you want created) and you know the roots "
+            "are right."
         ),
     )
     fu.add_argument(
@@ -1838,12 +2077,62 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Human-readable cancel reason (logged).")
     can.set_defaults(fn=cmd_cancel)
 
+    # tool-ack — answer a parked ask_human tool approval (M-A).
+    ta = sub.add_parser(
+        "tool-ack",
+        help="Approve or deny a parked tool call awaiting approval.",
+    )
+    ta.add_argument("sid")
+    grp = ta.add_mutually_exclusive_group(required=True)
+    grp.add_argument("--allow", dest="allow", action="store_true",
+                     help="Approve the parked call.")
+    grp.add_argument("--deny", dest="allow", action="store_false",
+                     help="Refuse it. The lane gets an error string and "
+                          "reroutes; it does not crash.")
+    ta.add_argument("--request-id", dest="request_id", default=None,
+                    help="Which request to answer. Omit to answer the "
+                         "oldest pending one (the common case of a "
+                         "single parked call).")
+    ta.add_argument("--reason", default=None,
+                    help="Recorded with the decision for the "
+                         "post-mortem.")
+    scope_grp = ta.add_mutually_exclusive_group()
+    scope_grp.add_argument(
+        "--all-of-tool", dest="all_of_tool", action="store_true",
+        help="Apply the verdict to EVERY future call to this tool in "
+             "this council, and release the parked ones it covers.",
+    )
+    scope_grp.add_argument(
+        "--all-matching", dest="all_matching", default=None,
+        metavar="GLOB",
+        help="Apply the verdict to calls to this tool whose target "
+             "matches GLOB (e.g. 'src/**', '*.py'). Session-scoped: "
+             "every role and x-tier lane inherits it.",
+    )
+    ta.set_defaults(fn=cmd_tool_ack)
+
     # events — SSE stream.
     ev = sub.add_parser(
         "events",
         help="Tail the SSE event stream for a session.",
     )
     ev.add_argument("sid")
+    ev.add_argument(
+        "--milestones", action="store_true",
+        help=(
+            "Filter to state-change events (node_enter / node_exit / "
+            "awaiting_adversary / interrupt / error / complete) and "
+            "render one compact line each. The unfiltered stream is "
+            "dominated by llm_call and tool_call records — hundreds "
+            "per council — which is how a human consumer misses the "
+            "events that need an answer."
+        ),
+    )
+    ev.add_argument(
+        "--kinds", default=None, metavar="A,B",
+        help=("Comma-separated event kinds to keep (implies the "
+              "compact renderer). Overrides --milestones."),
+    )
     ev.add_argument(
         "--since", type=int,
         help="Resume from this event_id (Last-Event-ID).",
@@ -1999,6 +2288,54 @@ def build_parser() -> argparse.ArgumentParser:
     _add_scope_args(css)
     css.set_defaults(fn=cmd_config_set_store)
 
+    ctl = cfg_sub.add_parser(
+        "set-tools",
+        help=("Configure the [tools] block — which tools the council can "
+              "reach and what each one needs to run."),
+    )
+    ctl.add_argument("--enabled",
+                     help="true|false — the composable tool registry. "
+                          "false restores the fixed builtin surface.")
+    ctl.add_argument("--git",
+                     help="true|false — read-only git history tools: "
+                          "git_history (\"when did this regress?\" via "
+                          "git log -L), git_log / blame / diff / show.")
+    ctl.add_argument("--all-roles", dest="all_roles",
+                     help="true|false — give every role the same tools as "
+                          "the researcher (planner / critic / meta_critic / "
+                          "synthesizer / adversary). Costs one LLM call per "
+                          "tool iteration per role per lane.")
+    ctl.add_argument("--default-level", dest="default_level",
+                     choices=cc.VALID_PERMISSION_LEVELS,
+                     help="Rung for a tool nothing else names. "
+                          "auto runs silently; ask_assistant routes to "
+                          "the assistant; ask_human needs a person; "
+                          "deny refuses.")
+    ctl.add_argument("--approval-timeout", dest="approval_timeout",
+                     type=float, default=None, metavar="SECONDS",
+                     help="How long a parked ask_human tool call waits "
+                          "before it is DENIED (default 600, minimum "
+                          "180). Only ask_human parks — ask_assistant "
+                          "auto-approves per the ladder — so this is "
+                          "the spend gate. Timeout denies on purpose: "
+                          "absence of an approver never authorizes "
+                          "spend. The floor exists because a shorter "
+                          "deadline is un-answerable once poll latency "
+                          "and a human decision are in the loop, and a "
+                          "deadline nobody can meet is 'deny' that also "
+                          "costs the wall-clock.")
+    ctl.add_argument("--permission", nargs=2, metavar=("TOOL", "LEVEL"),
+                     help="Pin one tool to a rung, e.g. "
+                          "--permission git_diff auto.")
+    ctl.add_argument("--clear-permission", dest="clear_permission",
+                     metavar="TOOL",
+                     help="Drop one tool's pin (back to its default).")
+    ctl.add_argument("--clear-permissions", dest="clear_permissions",
+                     action="store_true",
+                     help="Drop every per-tool pin.")
+    _add_scope_args(ctl)
+    ctl.set_defaults(fn=cmd_config_set_tools)
+
     cst = cfg_sub.add_parser(
         "set-store-ttl",
         help=("Configure the [store.ttl] block: per-namespace TTL, "
@@ -2115,7 +2452,7 @@ def build_parser() -> argparse.ArgumentParser:
     cset.add_argument("language",
                       help="Language id (e.g. python, csharp, cpp).")
     cset.add_argument("--primary",
-                      help="Primary model tag (e.g. glm-5.1:cloud).")
+                      help="Primary model tag (e.g. glm-5.2:cloud).")
     cset.add_argument("--fallback", default=None,
                       help="Fallback model tag. Empty string clears "
                            "the failover model on an existing entry.")

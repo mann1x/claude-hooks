@@ -39,6 +39,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from claude_hooks import capped_thinking, token_calib, truncation
+from consultants.engine import budget, retrospective
 from consultants.engine.storage import RoleTurn
 
 log = logging.getLogger("consultants.engine.council")
@@ -965,17 +967,23 @@ def route_after_critic(state: dict) -> str:
 
 # ----------------------- chat helper ------------------------------ #
 
-def _extract_text(response: dict) -> str:
-    """Pull the assistant text out of a chat-completion response.
-    Also tolerates the Ollama-native shape in case a caller passes
-    an un-translated response."""
+def _raw_text(response: dict) -> str:
+    """The assistant text exactly as returned, whitespace intact.
+    Tolerates the Ollama-native shape in case a caller passes an
+    un-translated response."""
     if "choices" in response:
         choices = response.get("choices") or []
         if choices:
             msg = choices[0].get("message") or {}
-            return (msg.get("content") or "").strip()
+            return msg.get("content") or ""
+        return ""
     msg = response.get("message") or {}
-    return (msg.get("content") or "").strip()
+    return msg.get("content") or ""
+
+
+def _extract_text(response: dict) -> str:
+    """Pull the assistant text out of a chat-completion response."""
+    return _raw_text(response).strip()
 
 
 def _usage_from(response: dict) -> tuple[int, int]:
@@ -984,6 +992,114 @@ def _usage_from(response: dict) -> tuple[int, int]:
         int(u.get("prompt_tokens") or u.get("prompt_eval_count") or 0),
         int(u.get("completion_tokens") or u.get("eval_count") or 0),
     )
+
+
+#: How many times a cut-off answer may be continued. Each continuation
+#: is a fresh call whose prompt carries the partial answer, so the cost
+#: is real; two is enough to recover a synthesizer that overran its
+#: budget without letting a model that cannot stop bill indefinitely.
+MAX_CONTINUATIONS = 2
+
+_CONTINUE_INSTRUCTION = (
+    "Your previous message was cut off by the output limit before you "
+    "finished. Continue from exactly where it stopped — resume "
+    "mid-sentence if that is where it ended. Do not repeat any text you "
+    "already produced, do not restate the question, and do not open with "
+    "a preamble; the two halves will be concatenated verbatim."
+)
+
+
+def _observe_usage(messages: list[dict], response: dict,
+                   prompt_tokens: int, completion_tokens: int,
+                   model: str) -> None:
+    """Feed a real provider count back into the token ratios.
+
+    Two separate calibrations, because prompt and reasoning do not
+    tokenize alike and averaging them is what makes an estimate wrong in
+    the direction that lets a request be built too large:
+
+    * the **prompt** ratio, from the serialized request against
+      ``prompt_eval_count``, with the reasoning characters charged at
+      their own rate first so the two halves don't both account for the
+      same characters;
+    * the **reasoning** ratio, but only from a turn that was mostly
+      reasoning — a turn that was mostly a tool call would teach it
+      about JSON.
+
+    Never raises: calibration is an optimisation, and a run that dies
+    because it tried to get smarter about tokens is a worse outcome than
+    one that stays on the conservative default.
+    """
+    try:
+        chars, reasoning_chars = token_calib.measure_request_chars(messages)
+        token_calib.observe_request_tokens(
+            chars, prompt_tokens, reasoning_chars, model)
+        if completion_tokens > 0:
+            msg = ((response.get("choices") or [{}])[0].get("message") or {})
+            thinking = capped_thinking.thinking_text(msg)
+            produced = capped_thinking.produced_characters(msg)
+            # "Mostly reasoning" — the caller's judgement, per
+            # observe_thinking_tokens' contract.
+            if thinking and produced and len(thinking) / produced >= 0.6:
+                token_calib.observe_thinking_tokens(
+                    len(thinking), completion_tokens, model)
+    except Exception:  # pragma: no cover — never sink a call
+        log.debug("token calibration failed; staying on defaults",
+                  exc_info=True)
+
+
+def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
+                      role: Optional[str] = None
+                      ) -> tuple[list[dict], "budget.Budget"]:
+    """Size the next call, compacting the history first if it no longer
+    leaves room to answer.
+
+    Re-planned after compacting rather than assumed: the whole point of
+    dropping messages is that the budget changes, and a plan computed
+    against the pre-compaction history would hand back the number the
+    compaction was supposed to fix.
+
+    The cap that wins is recorded on the process-wide calibration state
+    so a later reader — the truncation verdict, a post-mortem — can ask
+    what limited the reply rather than inferring it.
+    """
+    plan = budget.plan(chat_client, model, messages)
+    if plan.needs_compaction:
+        log.warning("role=%s: %s — compacting history", role, plan.detail)
+        keep = plan.trigger_tokens or max(
+            0, (plan.context_length or 0)
+            - budget.MAX_OUTPUT_TOKENS - budget.WINDOW_MARGIN_TOKENS)
+        previous = retrospective.previous_digest(messages)
+
+        def _marker(dropped_msgs: list[dict], generation: int) -> dict:
+            """Two passes over the span being dropped, then the message
+            that replaces it.
+
+            Runs inside compaction rather than after it because this is
+            the only moment the discarded turns still exist: once
+            ``compact_messages`` returns they are gone, and a summary
+            written from what survived would describe the wrong thing.
+            """
+            digest = retrospective.write(
+                dropped_msgs, chat_client=chat_client, model=model,
+                target_tokens=keep, generation=generation,
+                previous=previous)
+            if digest.empty:
+                log.warning(
+                    "role=%s: compaction digest came back empty (%s); the "
+                    "elided span leaves only the marker",
+                    role, digest.stand_down or "both phases silent")
+                return None
+            return retrospective.render_marker(digest, len(dropped_msgs))
+
+        result = budget.compact_messages(
+            messages, keep_tokens=keep, context_length=plan.context_length,
+            model=model, make_marker=_marker)
+        if result.changed:
+            messages = result.messages
+            plan = budget.plan(chat_client, model, messages)
+    token_calib.note_output_cap(plan.cap_report(), model)
+    return messages, plan
 
 
 def _single_shot(chat_client, model: str, messages: list[dict],
@@ -999,41 +1115,495 @@ def _single_shot(chat_client, model: str, messages: list[dict],
     row. ``role`` is required for recording — pass it from the
     caller's node identity. Errors are re-raised after recording so
     the existing tombstone branches still fire.
+
+    Three things happen around the call itself (2026-08-12):
+
+    * the model's real context window is probed and an explicit
+      ``num_predict`` is sent, so the output ceiling is ours rather
+      than an unseen provider default;
+    * a history that no longer leaves room to answer is compacted;
+    * a completion the backend cut short is **continued** rather than
+      returned as-is. Continuation is the only response that preserves
+      the work: the alternative for a synthesizer that spent 43
+      minutes of council output is to hand back a third of an answer
+      or to throw all of it away.
+
+    Token counts returned are summed across continuations, so a
+    caller's accounting stays true.
     """
-    payload = {
-        "model": model,
-        "messages": messages,
-        "stream": False,
-        "think": think,
-    }
-    t0 = time.monotonic()
-    try:
-        response = chat_client.chat(payload)
-    except Exception as exc:
+    convo, plan = _plan_and_compact(chat_client, model, list(messages),
+                                    role=role)
+
+    text_parts: list[str] = []
+    total_pt = total_ct = 0
+
+    for attempt in range(MAX_CONTINUATIONS + 1):
+        payload = {
+            "model": model,
+            "messages": convo,
+            "stream": False,
+            "think": think,
+            "options": {"num_predict": plan.output_tokens},
+        }
+        t0 = time.monotonic()
+        try:
+            response = chat_client.chat(payload)
+        except Exception as exc:
+            if recorder is not None and role is not None:
+                try:
+                    recorder.record_llm(
+                        role=role, round=round, lane_idx=lane_idx,
+                        model=model, request=payload, response=None,
+                        duration_ms=int((time.monotonic() - t0) * 1000),
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                except Exception:  # pragma: no cover — must not mask
+                    log.exception("recorder.record_llm raised; ignored")
+            raise
+        dt_ms = int((time.monotonic() - t0) * 1000)
+        pt, ct = _usage_from(response)
+        total_pt += pt
+        total_ct += ct
+        # Calibrate on what this request actually cost. The estimate that
+        # sized the budget was a guess about how this content tokenizes;
+        # the provider just answered the question. Cheap, and it is the
+        # difference between a ratio that drifts 1.7x high all session and
+        # one that converges after the first call.
+        _observe_usage(convo, response, pt, ct, model)
         if recorder is not None and role is not None:
             try:
                 recorder.record_llm(
                     role=role, round=round, lane_idx=lane_idx, model=model,
-                    request=payload, response=None,
-                    duration_ms=int((time.monotonic() - t0) * 1000),
-                    error=f"{type(exc).__name__}: {exc}",
+                    request=payload, response=response,
+                    prompt_tokens=pt, completion_tokens=ct,
+                    duration_ms=dt_ms,
                 )
-            except Exception:  # pragma: no cover — recorder must not mask
+            except Exception:  # pragma: no cover
                 log.exception("recorder.record_llm raised; ignored")
-        raise
-    dt_ms = int((time.monotonic() - t0) * 1000)
-    pt, ct = _usage_from(response)
-    if recorder is not None and role is not None:
-        try:
-            recorder.record_llm(
-                role=role, round=round, lane_idx=lane_idx, model=model,
-                request=payload, response=response,
-                prompt_tokens=pt, completion_tokens=ct,
-                duration_ms=dt_ms,
+
+        # Raw, unstripped: a continuation resumes mid-word, so stripping
+        # each part before joining would fuse the last word of one onto
+        # the first of the next. The join is stripped once, at the end.
+        text_parts.append(_raw_text(response))
+
+        cut = truncation.classify(response, role=role or "", model=model)
+        if cut is None:
+            break
+        if attempt == MAX_CONTINUATIONS:
+            log.error(
+                "role=%s: still truncated after %d continuation(s) — "
+                "returning the partial answer; the run will be marked "
+                "failed. %s", role, MAX_CONTINUATIONS, cut.detail,
             )
-        except Exception:  # pragma: no cover
-            log.exception("recorder.record_llm raised; ignored")
-    return (_extract_text(response), pt, ct)
+            break
+        log.warning(
+            "role=%s: %s — continuing (%d/%d)",
+            role, cut.detail, attempt + 1, MAX_CONTINUATIONS,
+        )
+        # The partial becomes context for its own continuation. Joining
+        # without a separator is deliberate: the model was told to
+        # resume mid-sentence, so any inserted whitespace would land in
+        # the middle of a word.
+        convo = convo + [
+            {"role": "assistant", "content": "".join(text_parts)},
+            {"role": "user", "content": _CONTINUE_INSTRUCTION},
+        ]
+        # What capped the turn decides what happens next.
+        #
+        # A **window-bound** cap is compaction's to fix: the history has
+        # grown past the point where a full answer fits beside it, and
+        # the continuation needs that room back. A cap that came from our
+        # own request or the model is not — shrinking the history cannot
+        # raise it, so compacting there would spend the transcript to
+        # leave the continuation facing the same ceiling with less of the
+        # work it was doing. The fork measured exactly that: a
+        # 48,508-token request compacted against a 110,000-token window
+        # when the cap that ended the turn was the caller's own 32,000.
+        #
+        # Note what is deliberately *not* done here. The fork gives a
+        # truncated turn **less** to spend on its retry, because it
+        # discards the half-written reply and regenerates — a smaller
+        # budget is what makes the second attempt fit. This is a
+        # continuation, not a regeneration: the partial is kept and the
+        # model writes only what is left, so cutting the budget each time
+        # would make each continuation shorter than the last and turn a
+        # bounded recovery into a guaranteed failure.
+        convo, plan = _plan_and_compact(chat_client, model, convo, role=role)
+
+    return ("".join(text_parts).strip(), total_pt, total_ct)
+
+
+# ====================================================================== #
+# M-B: uniform role tool access
+# ====================================================================== #
+# Before M-B the researcher was the only default role that could call a
+# tool. planner / critic / meta_critic / synthesizer / adversary each ran
+# through ``_single_shot`` — one call, no tools — so they could reason
+# about the researcher's text but never check it.
+#
+# That is why the CitationLinter had to exist. The 2026-05-18 forensic
+# (csl-2026-05-18-1031-9e3b) traced a fabricated filename to a researcher
+# lane with zero tool calls; the critic could not verify it because the
+# critic had no way to look. A critic that can ``read_file`` checks the
+# claim directly instead of inheriting it.
+#
+# Cost is the reason this is opt-in rather than simply switched on. A
+# single-shot role costs exactly one LLM call; a tooled role costs one
+# per iteration, and critic fans out per lane at the x-tiers, so the
+# multiplier is roles × lanes × iterations. The caps below are therefore
+# deliberately tighter than the researcher's: these roles are meant to
+# *check* a handful of specific claims, not to conduct research. If a
+# critic needs eight tool calls to form a verdict, the plan was wrong.
+ROLE_TOOL_MAX_ITERATIONS = 4
+ROLE_TOOL_MAX_CALLS_PER_TURN = 4
+#: Strip tools after this many iterations so a role always produces text.
+ROLE_TOOL_FORCE_ANSWER_AFTER = 3
+
+
+# ---------------------------------------------------------------------- #
+# The tool addendum — why wiring alone was not enough
+# ---------------------------------------------------------------------- #
+# The first live M-B bench (2026-08-01, gemma4:31b-cloud, 18 tooled
+# trials) recorded **zero tool calls**. The surface was live — 11 specs
+# in every payload, the registry answering correctly when called
+# directly — and the model declined it every single time.
+#
+# The cause is in the prompts. Each role's system prompt predates the
+# tool surface and describes a job that does not involve looking at
+# anything. CRITIC_SYSTEM is the sharpest case: it frames the job as a
+# routing decision ("is more research needed?") and then says "Default
+# to ready unless you can name a concrete missing fact… each extra
+# round costs another full agent loop". A model reading that has been
+# told, in effect, that investigating is expensive and the safe answer
+# is yes. ADVERSARY_SYSTEM is the most ironic: it is explicitly asked to
+# catch "fabricated or mis-attributed `path:line` citations" while
+# having no way to check one, so it can only judge whether a claim was
+# *reported*, never whether the report was *true*.
+#
+# So the addendum is not decoration around the plumbing; it is the half
+# that makes the plumbing reachable. It is appended to the system
+# message only when a role is actually handed tools, which keeps the
+# default-config prompt byte-identical (cohort-2 parity) and means a
+# role can never be told about a tool it cannot call.
+
+#: What each role should *do* with a tool, in its own terms. Generic
+#: encouragement ("you may use tools") loses to a role prompt that
+#: already told the model not to bother, so each entry names the
+#: specific move and, where the base prompt pushes the other way,
+#: overrides it explicitly.
+_ROLE_TOOL_DIRECTIVE: dict[str, str] = {
+    "planner": (
+        "You may call these tools yourself before writing the plan. Use "
+        "them sparingly and only to make steps concrete: confirm a file "
+        "or symbol you are about to point the researcher at actually "
+        "exists, rather than inferring it from a plausible name. A plan "
+        "step aimed at a file that is not there costs a full research "
+        "round to discover."
+    ),
+    "critic": (
+        "You may call these tools to CHECK the researcher's claims, not "
+        "merely to judge whether more research is wanted. This changes "
+        "what counts as a concrete missing fact: a load-bearing "
+        "`path:line` you looked up and could NOT confirm is concrete — "
+        "name it. Verifying a citation costs one cheap tool call, not "
+        "another research round, so the 'each extra round is expensive' "
+        "caution above does not apply to checking. Spot-check the cites "
+        "the answer will rest on; do not re-verify everything.\n"
+        "CHECK EQUALITY, NOT EXISTENCE. Finding the symbol is not "
+        "confirming the claim. When a report asserts a VALUE "
+        "(`MAX_ATTEMPTS = 5`), a LINE (`foo.py:12`), a SIGNATURE, or a "
+        "RETURN, read it and compare the two. `grep` returning a hit "
+        "tells you the name exists and nothing more — a wrong constant "
+        "and a wrong line number both survive a grep that 'succeeds'.\n"
+        "NEVER SILENTLY CORRECT. If what you read differs from what a "
+        "report claimed, that discrepancy IS your finding — do not "
+        "quietly use the right value and call the report accurate. "
+        "Report it, attributed to the report it came from by the "
+        "`RESEARCHER REPORT (round N)` header above it, in a block "
+        "after your justification:\n"
+        "  CORRECTIONS:\n"
+        "  - report N: claimed <X> — actual <Y> (`path:line`)\n"
+        "Omit the block entirely when you corrected nothing; do not "
+        "write `CORRECTIONS: none`.\n"
+        "A correction is NOT grounds for `needs_more_research`. You "
+        "already have the right answer — emitting `ready` WITH a "
+        "CORRECTIONS block is the cheap outcome and the expected one. "
+        "Re-route only when a fact is missing that you could not "
+        "resolve yourself."
+    ),
+    "meta_critic": (
+        "You may call these tools to settle a disagreement between "
+        "critics rather than picking a side on plausibility. When "
+        "critics disagree about a fact in the code, look it up — a "
+        "verified answer beats a weighed one.\n"
+        "CARRY EVERY CORRECTION FORWARD. Your consolidated verdict "
+        "REPLACES the individual critics' — anything you drop is lost "
+        "before the synthesizer sees it. If any critic emitted a "
+        "`CORRECTIONS:` block, merge them all into one block in your "
+        "own output, keeping the `report N: claimed <X> — actual <Y>` "
+        "attribution. Dedupe identical corrections; when two critics "
+        "correct the same fact differently, verify it yourself and "
+        "emit the checked value."
+    ),
+    "synthesizer": (
+        "You may call these tools to verify a citation before relaying "
+        "it. Cheapest use: when you are about to emit a `path:line` "
+        "that only one researcher reported, confirm it. Do not conduct "
+        "new research — the research phase is over.\n"
+        "HONOUR THE CRITIC'S CORRECTIONS. When the critic's verdict "
+        "carries a `CORRECTIONS:` block, each line supersedes the "
+        "researcher report it names: relay the corrected value or "
+        "line, never the superseded one, and do not average or hedge "
+        "between them. The critic read the file; the report did not. "
+        "You need not re-verify a corrected fact, and you need not "
+        "mention that a correction happened — the user wants the "
+        "answer, not the council's process."
+    ),
+    "adversary": (
+        "You may call these tools to CHECK the citations you are asked "
+        "to refute. Until now you could only judge whether a claim was "
+        "reported by a researcher; you can now judge whether the report "
+        "was true. Look up the answer's load-bearing `path:line` cites: "
+        "a cite that does not resolve, or resolves to something other "
+        "than what the answer claims, is exactly the fabricated or "
+        "mis-attributed citation this role exists to surface. A claim "
+        "you verified and found correct is NOT a refutation — do not "
+        "flag it.\n"
+        "CHECK EQUALITY, NOT EXISTENCE, and never silently correct. "
+        "A cite that resolves to a real file at a real line can still "
+        "be wrong about the value, the line, or the signature — "
+        "compare what the answer says against what you read. If they "
+        "differ, that IS the refutation; quote both. Finding the right "
+        "value and letting the wrong one stand is the failure this "
+        "role exists to prevent."
+    ),
+}
+
+
+def _tool_names(tool_specs: Optional[list[dict]]) -> tuple[str, ...]:
+    """Names from OpenAI-shape specs, order preserved, dupes dropped."""
+    out: list[str] = []
+    for spec in tool_specs or []:
+        try:
+            name = ((spec.get("function") or {}).get("name")
+                    or spec.get("name") or "")
+        except AttributeError:  # pragma: no cover — malformed spec
+            continue
+        if name and name not in out:
+            out.append(str(name))
+    return tuple(out)
+
+
+def build_tool_addendum(role: Optional[str],
+                        tool_specs: Optional[list[dict]]) -> str:
+    """The block appended to a role's system prompt when it has tools.
+
+    Returns ``""`` when the role has no tools or none is known for the
+    role, so callers can append unconditionally. The tool list is
+    derived from the specs actually in the payload rather than written
+    out in prose — a hardcoded list silently goes stale the moment a
+    provider is enabled, which is how the researcher ended up being
+    told about six tools while eleven were on offer.
+    """
+    names = _tool_names(tool_specs)
+    directive = _ROLE_TOOL_DIRECTIVE.get(role or "")
+    if not names or not directive:
+        return ""
+    return ("\n\nTOOLS AVAILABLE TO YOU: " + ", ".join(names) + ".\n"
+            + directive
+            + "\nCite what you verify as `path:line`. If a tool call "
+            "fails or returns nothing, say so rather than assuming the "
+            "claim is false — absence of a result is not evidence.")
+
+
+def _builtin_tool_names() -> tuple[str, ...]:
+    """The six tools RESEARCHER_SYSTEM and the tool-plan prompt spell
+    out in prose. Read from the provider rather than re-typed, because
+    a second hardcoded list is how the first one went stale."""
+    try:
+        from claude_hooks.caliber_proxy.tools import openai_tool_specs
+        return _tool_names(openai_tool_specs())
+    except Exception:  # pragma: no cover — package always present
+        log.exception("could not resolve builtin tool names")
+        return ()
+
+
+def build_extra_tools_note(tool_specs: Optional[list[dict]]) -> str:
+    """Announce tools the prose enumeration does not mention.
+
+    ``RESEARCHER_SYSTEM`` and the tool-plan prompt name their six tools
+    inline, and a model generally works from that list rather than from
+    the schema array. So enabling a provider — git, later MCP or shell —
+    puts tools in the payload that the role has effectively been told do
+    not exist. Rather than rewriting the prose (which would change the
+    default prompt byte-for-byte and invalidate the M11c corpus), name
+    only the *difference*, and only when there is one.
+    """
+    extras = [n for n in _tool_names(tool_specs)
+              if n not in _builtin_tool_names()]
+    if not extras:
+        return ""
+    return ("\n\nALSO AVAILABLE (beyond the tools listed above): "
+            + ", ".join(extras) + ". Same citation rules apply.")
+
+
+def _with_extra_tools_note(messages: list[dict],
+                           tool_specs: Optional[list[dict]]) -> list[dict]:
+    """Copy of ``messages`` with :func:`build_extra_tools_note` appended
+    to the LAST system turn. Byte-identical when there are no extras."""
+    note = build_extra_tools_note(tool_specs)
+    if not note:
+        return messages
+    out = [dict(m) for m in messages]
+    for m in reversed(out):
+        if m.get("role") == "system":
+            m["content"] = (m.get("content") or "") + note
+            break
+    return out
+
+
+def _with_tool_addendum(messages: list[dict], role: Optional[str],
+                        tool_specs: Optional[list[dict]]) -> list[dict]:
+    """Copy ``messages`` with the addendum appended to the system turn.
+
+    Never mutates the caller's list: the same message list is reused
+    across x-tier lanes, and appending in place would compound the
+    addendum once per lane.
+    """
+    add = build_tool_addendum(role, tool_specs)
+    if not add:
+        return messages
+    out = [dict(m) for m in messages]
+    for m in out:
+        if m.get("role") == "system":
+            m["content"] = (m.get("content") or "") + add
+            return out
+    # No system turn (shouldn't happen for these roles) — prepend one
+    # rather than dropping the directive on the floor.
+    return [{"role": "system", "content": add.lstrip("\n")}] + out
+
+
+def _role_turn(chat_client, model: str, messages: list[dict],
+               *, think: Any = True,
+               recorder=None, role: Optional[str] = None,
+               round: int = 1,
+               lane_idx: Optional[int] = None,
+               tool_specs: Optional[list[dict]] = None,
+               tool_executor=None,
+               cwd: str = "",
+               loop_runner=None) -> tuple[str, int, int]:
+    """One role turn, returning ``(text, prompt_tokens, completion_tokens)``.
+
+    Runs a tool loop when ``tool_specs`` **and** ``tool_executor`` are
+    both supplied; otherwise delegates to :func:`_single_shot`
+    unchanged. The default path is therefore byte-identical to pre-M-B
+    behaviour — the loop is reachable only when the graph deliberately
+    hands a role its tools.
+
+    Failures fall back to a single shot rather than propagating. A role
+    that cannot run its tool loop should still deliver its verdict:
+    losing the critic entirely because the loop misbehaved is strictly
+    worse than a critic that reasons without having looked.
+    """
+    if not tool_specs or tool_executor is None:
+        return _single_shot(
+            chat_client, model, messages, think=think,
+            recorder=recorder, role=role, round=round, lane_idx=lane_idx,
+        )
+
+    if loop_runner is None:
+        try:
+            from claude_hooks.agent_loop.runner import run_loop
+            loop_runner = run_loop
+        except Exception:  # pragma: no cover — claude_hooks always present
+            log.exception("agent_loop unavailable; %s falls back to "
+                          "a single shot", role)
+            return _single_shot(
+                chat_client, model, messages, think=think,
+                recorder=recorder, role=role, round=round,
+                lane_idx=lane_idx,
+            )
+
+    on_iter_cb = on_tool_cb = None
+    if recorder is not None and role is not None:
+        def _on_iter(_idx: int, req: dict, resp: dict, dt_ms: int) -> None:
+            pt_l, ct_l = _usage_from(resp)
+            try:
+                recorder.record_llm(
+                    role=role, round=round, lane_idx=lane_idx, model=model,
+                    request=req, response=resp, prompt_tokens=pt_l,
+                    completion_tokens=ct_l, duration_ms=dt_ms,
+                )
+            except Exception:  # pragma: no cover
+                log.exception("recorder.record_llm raised; ignored")
+
+        def _on_tool(name: str, args: str, output: str,
+                     dt_ms: int, err: Optional[str]) -> None:
+            try:
+                recorder.record_tool(
+                    role=role, round=round, lane_idx=lane_idx, tool=name,
+                    args=args, output=output, duration_ms=dt_ms, error=err,
+                )
+            except Exception:  # pragma: no cover
+                log.exception("recorder.record_tool raised; ignored")
+
+        on_iter_cb, on_tool_cb = _on_iter, _on_tool
+
+    # Applied here, past every fallback branch: a role that ends up in
+    # ``_single_shot`` must never see a directive about tools it will
+    # not be offered.
+    payload = {"model": model,
+               "messages": _with_tool_addendum(messages, role, tool_specs),
+               "stream": False, "think": think}
+    try:
+        from claude_hooks.agent_loop.runner import LoopConfig
+        cfg = LoopConfig(
+            max_iterations=ROLE_TOOL_MAX_ITERATIONS,
+            max_tool_calls_per_turn=ROLE_TOOL_MAX_CALLS_PER_TURN,
+            force_answer_after=ROLE_TOOL_FORCE_ANSWER_AFTER,
+            tools_available=True,
+            think=think,
+            # These roles are handed a full brief and must be free to
+            # answer immediately. Forcing a first tool call would make
+            # a critic that has nothing to verify burn a call proving it.
+            force_first_tool_call=False,
+        )
+        loop_kwargs = dict(config=cfg, tool_specs=tool_specs,
+                           chat_fn=chat_client.chat,
+                           tool_executor=tool_executor)
+        if on_iter_cb is not None:
+            try:
+                import inspect
+                sig = inspect.signature(loop_runner)
+                if "on_iter" in sig.parameters:
+                    loop_kwargs["on_iter"] = on_iter_cb
+                if "on_tool" in sig.parameters:
+                    loop_kwargs["on_tool"] = on_tool_cb
+            except (TypeError, ValueError):
+                pass
+        final = loop_runner(payload, cwd, **loop_kwargs)
+    except Exception as e:
+        log.warning("%s tool loop failed (%s); falling back to a single "
+                    "shot", role, e)
+        return _single_shot(
+            chat_client, model, messages, think=think,
+            recorder=recorder, role=role, round=round, lane_idx=lane_idx,
+        )
+
+    text = _extract_text(final)
+    pt, ct = _usage_from(final)
+    if not text.strip():
+        # Same failure the researcher hit in the 2026-05-07 audit: the
+        # loop can exhaust its iterations mid-tool-call and return no
+        # prose. A role that returns "" is a silent hole downstream, so
+        # spend one tool-free call to get its actual answer.
+        log.warning("%s: empty text after tool loop; forcing a "
+                    "tool-free summary call", role)
+        return _single_shot(
+            chat_client, model, messages, think=think,
+            recorder=recorder, role=role, round=round, lane_idx=lane_idx,
+        )
+    return (text, pt, ct)
 
 
 def _compose_degraded_answer(state: dict, *, error: str) -> str:
@@ -1135,7 +1705,9 @@ def _compose_degraded_answer(state: dict, *, error: str) -> str:
 
 def planner_node(state: dict, *, chat_client, model: str,
                  think: Any = True, recorder=None,
-                 coder_enabled: bool = False) -> dict:
+                 coder_enabled: bool = False,
+                 tool_specs: Optional[list[dict]] = None,
+                 tool_executor=None, cwd: str = "") -> dict:
     t0 = time.monotonic()
     _emit_started("planner", round=1, model=model)
     if recorder is not None:
@@ -1173,9 +1745,10 @@ def planner_node(state: dict, *, chat_client, model: str,
                             + PLANNER_CODER_GATE_BLOCK,
             }
     try:
-        plan, pt, ct = _single_shot(
+        plan, pt, ct = _role_turn(
             chat_client, model, msgs, think=think,
             recorder=recorder, role="planner", round=1,
+            tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
         )
     except Exception as e:
         log.exception("planner_node failed: %s", e)
@@ -1393,6 +1966,17 @@ def researcher_node(state: dict, *,
                         for i in issues
                     ),
                 )
+                from consultants.engine.citation_linter import (
+                    root_misconfiguration_hint,
+                )
+                hint = root_misconfiguration_hint(
+                    text_in, issues, roots,
+                )
+                if hint:
+                    log.warning(
+                        "researcher citation lint sid=%s lane=%s "
+                        "round=%s: %s", sid, lane_idx, this_round, hint,
+                    )
             return linted_text
         except Exception:  # pragma: no cover — defensive
             log.exception(
@@ -1613,6 +2197,12 @@ def researcher_node(state: dict, *,
             build_tool_plan_user_appendix(prior_for_round)
             if report_mode else RESEARCHER_PLAN_MODE_BLOCK
         )
+        if not report_mode:
+            # PLAN mode ends with an "Available tools:" enumeration that
+            # feeds ``suggested_tools``. Left stale, a provider-supplied
+            # tool can never be suggested, so the executor never sees an
+            # intent shaped for it. Empty on the default surface.
+            appendix = appendix + build_extra_tools_note(tool_specs)
         msgs = list(msgs)
         msgs[-1] = dict(msgs[-1])
         msgs[-1]["content"] = msgs[-1]["content"] + (
@@ -1755,7 +2345,10 @@ def researcher_node(state: dict, *,
 
     payload = {
         "model": model,
-        "messages": msgs,
+        # RESEARCHER_SYSTEM enumerates its six tools in prose; anything
+        # a provider adds beyond those has to be announced or the role
+        # never learns it exists. No-op on the default surface.
+        "messages": _with_extra_tools_note(msgs, tool_specs),
         "stream": False,
     }
 
@@ -1938,27 +2531,18 @@ def researcher_node(state: dict, *,
             ),
         }]
         try:
-            fb_t0 = time.monotonic()
-            fb_payload = {
-                "model": model,
-                "messages": summary_msgs,
-                "stream": False,
-                "think": think,
-            }
-            follow_up = chat_client.chat(fb_payload)
-            text2 = _extract_text(follow_up)
-            pt2, ct2 = _usage_from(follow_up)
-            if recorder is not None:
-                try:
-                    recorder.record_llm(
-                        role="researcher", round=this_round,
-                        lane_idx=lane_idx, model=model,
-                        request=fb_payload, response=follow_up,
-                        prompt_tokens=pt2, completion_tokens=ct2,
-                        duration_ms=int((time.monotonic() - fb_t0) * 1000),
-                    )
-                except Exception:  # pragma: no cover
-                    log.exception("recorder.record_llm (fallback) raised; ignored")
+            # Via _single_shot rather than chat_client.chat directly:
+            # this call *is* the lane's report when it fires, so it
+            # needs the same output budget, history compaction,
+            # continuation-on-truncation and recording as any other
+            # role's call. It used to be the one hand-rolled backend
+            # call in the engine, and a hand-rolled call is exactly
+            # where a fix like this gets forgotten.
+            text2, pt2, ct2 = _single_shot(
+                chat_client, model, summary_msgs, think=think,
+                recorder=recorder, role="researcher",
+                round=this_round, lane_idx=lane_idx,
+            )
             pt += pt2
             ct += ct2
             if text2.strip():
@@ -2020,7 +2604,9 @@ def researcher_node(state: dict, *,
 
 
 def critic_node(state: dict, *, chat_client, model: str,
-                think: Any = True, recorder=None) -> dict:
+                think: Any = True, recorder=None,
+                tool_specs: Optional[list[dict]] = None,
+                tool_executor=None, cwd: str = "") -> dict:
     rounds_used_pre = int(state.get("research_rounds_used") or 0)
     # Phase 10: per-lane multi-model fan-out for critics. Same shape
     # as researcher's model_override path. lane_idx propagates from
@@ -2053,11 +2639,12 @@ def critic_node(state: dict, *, chat_client, model: str,
     )
     t0 = time.monotonic()
     try:
-        text, pt, ct = _single_shot(
+        text, pt, ct = _role_turn(
             chat_client, model, msgs, think=think,
             recorder=recorder, role="critic",
             round=max(rounds_used_pre, 1),
             lane_idx=lane_idx,
+            tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
         )
     except Exception as e:
         log.exception("critic_node failed: %s", e)
@@ -2148,7 +2735,9 @@ def critic_node(state: dict, *, chat_client, model: str,
 
 
 def meta_critic_node(state: dict, *, chat_client, model: str,
-                     think: Any = True, recorder=None) -> dict:
+                     think: Any = True, recorder=None,
+                     tool_specs: Optional[list[dict]] = None,
+                     tool_executor=None, cwd: str = "") -> dict:
     """Phase 10: synthesize the C parallel-critic verdicts at xmax
     into one final decision. Reads the C critic critiques from the
     additive ``turns`` list (filtering by ``role == 'critic'`` and
@@ -2197,10 +2786,11 @@ def meta_critic_node(state: dict, *, chat_client, model: str,
     )
     t0 = time.monotonic()
     try:
-        text, pt, ct = _single_shot(
+        text, pt, ct = _role_turn(
             chat_client, model, msgs, think=think,
             recorder=recorder, role="meta_critic",
             round=this_round,
+            tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
         )
     except Exception as e:
         log.exception("meta_critic_node failed: %s", e)
@@ -2275,7 +2865,9 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                      self_critic: bool = False,
                      recorder=None,
                      prior_messages: Optional[list[dict]] = None,
-                     fallback_models: Optional[list[str]] = None) -> dict:
+                     fallback_models: Optional[list[str]] = None,
+                     tool_specs: Optional[list[dict]] = None,
+                     tool_executor=None, cwd: str = "") -> dict:
     _emit_started("synthesizer", round=1, model=model)
     if recorder is not None:
         try:
@@ -2349,14 +2941,14 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
     text: Optional[str] = None
     pt = ct = 0
     last_exc: Optional[Exception] = None
-    used_model: str = model
     for attempt_idx, try_model in enumerate(models_to_try):
         try:
-            text, pt, ct = _single_shot(
+            text, pt, ct = _role_turn(
                 chat_client, try_model, msgs, think=think,
                 recorder=recorder, role="synthesizer", round=1,
+                tool_specs=tool_specs, tool_executor=tool_executor,
+                cwd=cwd,
             )
-            used_model = try_model
             if attempt_idx > 0:
                 log.warning(
                     "synthesizer fell back from %s to %s on attempt %d/%d",
@@ -2440,6 +3032,12 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
                         for i in issues
                     ),
                 )
+                from consultants.engine.citation_linter import (
+                    root_misconfiguration_hint,
+                )
+                hint = root_misconfiguration_hint(text, issues, roots)
+                if hint:
+                    log.warning("synthesizer citation lint: %s", hint)
                 text = linted_text
     except Exception:  # pragma: no cover - defensive
         log.exception(
@@ -2472,7 +3070,9 @@ def synthesizer_node(state: dict, *, chat_client, model: str,
 
 def adversary_node(state: dict, *, chat_client, model: str,
                    think: Any = True, strictness: str = "normal",
-                   recorder=None) -> dict:
+                   recorder=None,
+                   tool_specs: Optional[list[dict]] = None,
+                   tool_executor=None, cwd: str = "") -> dict:
     """M3: post-synthesis red team. Reads the synthesizer's
     ``final_answer`` and the upstream evidence, emits a ``REFUTATION``
     block, and — when it finds real problems — annotates the
@@ -2502,9 +3102,10 @@ def adversary_node(state: dict, *, chat_client, model: str,
     )
     t0 = time.monotonic()
     try:
-        text, pt, ct = _single_shot(
+        text, pt, ct = _role_turn(
             chat_client, model, msgs, think=think,
             recorder=recorder, role="adversary", round=1,
+            tool_specs=tool_specs, tool_executor=tool_executor, cwd=cwd,
         )
     except Exception as e:
         log.exception("adversary_node failed: %s", e)

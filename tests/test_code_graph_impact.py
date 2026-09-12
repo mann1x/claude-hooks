@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 from pathlib import Path
@@ -11,7 +10,6 @@ import pytest
 
 from claude_hooks.code_graph.builder import build_graph
 from claude_hooks.code_graph.changes import (
-    BlastEntry,
     blast_radius,
     format_blast_radius_report,
     git_changed_files,

@@ -1,6 +1,6 @@
 ---
 name: consultants
-description: Multi-agent council engine (v2: planner → researcher → critic → synthesizer, plus opt-in tool_executor + coder; CitationLinter verifies every path:line). Default verb is `ask <question>` (also implicit — `/consultants <question>` works). Subcommands — `ask` runs a fresh council on a question; `followup [sid] <question>` iterates on a prior consult (warm reuse of plan/research/critic); `list` shows past sessions; `show <sid>` re-reads a stored summary; `accept <sid>` marks a consultancy reviewed/done; `config [args...]` walks the role/model/effort/service-mode/followup-limit dialog. After every council answer Claude runs a review loop (mirroring /get-advice): it critiques the result and either accepts it or auto-issues a bounded follow-up (capped by `max_followups`, default 4; asks you to allow more past the cap). Use when a question benefits from independent specialist agents working in parallel — design audits, release-notes validation, complex bug triage, refactor risk analysis. For single-shot questions use /get-advice instead.
+description: "Multi-agent council engine (v2: planner → researcher → critic → synthesizer, plus opt-in tool_executor + coder; CitationLinter verifies every path:line). Default verb is `ask <question>` (also implicit — `/consultants <question>` works). Subcommands — `ask` runs a fresh council on a question; `followup [sid] <question>` iterates on a prior consult (warm reuse of plan/research/critic); `list` shows past sessions; `show <sid>` re-reads a stored summary; `accept <sid>` marks a consultancy reviewed/done; `config [args...]` walks the role/model/effort/service-mode/followup-limit dialog. After every council answer Claude runs a review loop (mirroring /get-advice): it critiques the result and either accepts it or auto-issues a bounded follow-up (capped by `max_followups`, default 4; asks you to allow more past the cap). Use when a question benefits from independent specialist agents working in parallel — design audits, release-notes validation, complex bug triage, refactor risk analysis. For single-shot questions use /get-advice instead."
 ---
 
 # /consultants — multi-agent council dispatcher
@@ -106,20 +106,10 @@ authoritative `consultancy` block — read this, don't infer:
   "effective_cap": 4}
 ```
 
-**While the run is `running`, monitor progress on one of two channels**
-(step 4 of the [ask flow](#ask--run-a-fresh-council-consultation) shows
-both, with examples):
-
-- **`claude-consultants events <sid>`** — live **SSE stream** over the
-  engine's `GET /v1/consult/{sid}/events` endpoint. One JSON event per
-  role transition (`node_enter` / `node_exit`), LLM call (`llm_call`), or
-  tool call (`tool_call`) as it happens, ending with a **`complete`**
-  event carrying `{sid, status, final_answer_present}` — that's your
-  canonical "council is done" signal. Preferred for real-time visibility.
-  See the [events subsection](#events--live-monitor-sse-stream).
-- **`claude-consultants status <sid>`** — coarse poll (~10 s cadence).
-  Returns `{status, progress, consultancy, ...}`. Use when a periodic
-  "is it done yet?" check is all you need.
+**While the run is `running`, wait for it with ONE long-lived waiter**
+— never a foreground poll loop. See [Waiting for a
+run](#4-wait-for-the-run--the-only-three-patterns) for the three
+supported patterns and the anti-pattern they replace.
 
 **When the council finishes**, do NOT silently present the answer — the
 consultancy is in `ready_to_review`. Enter the [Review
@@ -134,10 +124,10 @@ trust `consultancy.status` over your own memory of where you were.
 
 ## ask — run a fresh council consultation
 
-A consultation typically takes 1–5 minutes (longer for `high` or
-`max` effort). Keep the user productive during that time: poll
-status periodically, surface per-role progress on visible
-transitions, only block when the synthesizer's answer arrives.
+A consultation takes minutes to tens of minutes (33 min is normal at
+`xhigh`). Start ONE long-lived waiter (step 4), tell the user what you
+kicked off, and keep them productive while it runs — never sit in a
+foreground poll loop, and never re-check on your own cadence.
 
 ### 1. Read engine settings
 
@@ -204,6 +194,12 @@ claude-consultants follow-up <parent_sid> --message "<focused>" \
   --cwd "$(pwd)" --add-dir /opt/llama.cpp
 ```
 
+Paths in the question may be written relative to *any* root — the file
+tools try `--cwd` first, then each `--add-dir` in order — so you do not
+need to rewrite `eval/scorers.py` as an absolute path before asking.
+Do still pass the root: a path with no root that contains it is what
+pre-flight refuses on.
+
 Returns:
 
 ```json
@@ -214,43 +210,139 @@ Returns:
 Save the `sid`. Tell the user briefly you've kicked off the council
 and will surface progress.
 
-### 4. Monitor progress
+### 4. Wait for the run — the only three patterns
 
-Two channels are available — pick one; the consultancy lifecycle is in
-the [overview](#how-a-consultation-works).
+A council takes **minutes to tens of minutes** (33 min is normal at
+`xhigh`). One Bash tool call is bounded by a timeout far shorter than
+that, so the waiting has to live somewhere that outlasts a single
+foreground call.
 
-**Live SSE stream — preferred for real-time visibility:**
+**Never do this.** It is the most common failure mode, it burns a full
+tool timeout, and it never sees the run finish:
+
+```bash
+# ANTI-PATTERN. Do not write this.
+for i in 1 2 3 4 5 6; do
+  s=$(claude-consultants status <sid> | jq -r .status)
+  case "$s" in completed*|failed*) break;; esac
+  sleep 45
+done
+```
+
+Six iterations at 45 s is 4.5 minutes against a 33-minute run: it
+always exits still `running`, you learn nothing, and repeating it
+spends the consultation's whole wall-clock on tool calls. `jq` is also
+not guaranteed to be installed — the examples here use `python3 -c`.
+
+Pick a pattern by whether the run can pause for you:
+
+#### A. Adversary checkpoint OFF → `--wait`, backgrounded
+
+`consult` and `follow-up` both accept `--wait`: the CLI blocks
+server-side until the run is terminal, then prints the **result** JSON
+(`{"ok": true, "summary_markdown": …}`), exiting 1 on failure.
+
+Issue it as a **background** Bash call (`run_in_background: true`).
+The harness notifies you when the process exits, so there is no
+polling and completion cannot be missed:
 
 ```
-claude-consultants events <sid>
+claude-consultants consult --wait --message "<framing>" --cwd "$(pwd)"
 ```
 
-Wraps `GET /v1/consult/{sid}/events`. Each role transition
-(`node_enter` / `node_exit`), LLM call (`llm_call`), and tool call
-(`tool_call`) lands as one JSON event as it happens, with a heartbeat
-every 15 s through quiet research rounds. The stream ends with a
-**`complete`** event carrying `{sid, status, final_answer_present}` —
-that's your trigger to move to step 5. Use `--since <event_id>` to
-resume from a known point (e.g. after a network blip or across a
-compaction boundary). The events subsection below has the wire format.
+`--wait-timeout <s>` bounds the client only; the run continues
+server-side if the wait gives up.
 
-**Coarse status poll — use when a periodic check is enough:**
+#### B. Adversary checkpoint ON → wait for terminal *or* pause
 
-```
+`--wait` would sit through the entire checkpoint (up to
+`adversary_checkpoint_timeout_s`, default 30 min) without telling you
+it wants an answer. Launch without `--wait`, then run **one**
+backgrounded loop that exits on either signal:
+
+```bash
+while :; do
+  claude-consultants status <sid> > /tmp/st.json
+  python3 -c "import json,sys; d=json.load(open('/tmp/st.json')); sys.exit(0 if d.get('status')!='running' or d.get('adversary_checkpoint_deadline_ts') or d.get('pending_tool_approvals') else 3)" && break
+  sleep 20
+done
 claude-consultants status <sid>
 ```
 
-Returns `{status, progress, consultancy, duration_seconds, ...}`.
-Cadence: **~10 s between polls**, no faster. States:
+Two fields appear in `status` **only while something is waiting on
+you**, and either one means "answer me":
 
-- `running` — `progress` shows per-role state. Continue answering
-  the user; the consultation runs in the background.
-- `completed` — move to step 5.
-- `failed` — `error` carries the detail; jump to failure handling.
+- `adversary_checkpoint_deadline_ts` — the engine paused before
+  synthesis for an assistant-authored challenge. Write it, then
+  release with `claude-consultants adversary-ack <sid>`. Details in
+  [Adversarial review](#adversarial-review).
+- `pending_tool_approvals` — a lane is parked on an `ask_human` tool
+  call. Answer with `claude-consultants tool-ack <sid> --allow|--deny`,
+  and prefer `--all-of-tool` / `--all-matching '<glob>'` so the next
+  lane doesn't park on the same question. `waiters` on an entry tells
+  you how many lanes one answer releases. Details in
+  [Subflow I](#subflow-i--tool-surface).
 
-Either way, surface role transitions in plain language ("Planner done;
-researcher mid-investigation, 3 tool calls so far") — one line per
-visible transition, no spam.
+- `paused` — someone called `pause`. Read **`pause_state`** with it,
+  never `paused` alone: `parked` means a node is blocked right now
+  (`paused_roles` names it, and its x-tier siblings keep running);
+  `pending` means the request is registered and nothing has stopped
+  yet. `pending` for a few seconds is normal — a pause lands at a node
+  boundary. `pending` for longer means something is holding the runner,
+  and `pause_blocked_by` names it plus the verb that clears it (the
+  adversary checkpoint, or a parked `ask_human` approval). Relay that
+  to the user rather than reporting the run as paused. One `resume`
+  releases the pause and the checkpoint together
+  (`pause_release+adversary_ack`).
+- `cancel_requested` — the run is draining. Every remaining node skips
+  and the run ends with status `cancelled` and **no final answer**.
+  Don't wait for one.
+
+Each carries the wall-clock at which the engine gives up, and the three
+deadlines resolve differently — check which one you are looking at
+before telling the user what happens if they do nothing:
+
+| signal | on timeout |
+|---|---|
+| `adversary_checkpoint_deadline_ts` | auto-resumes |
+| `pending_tool_approvals[].deadline_ts` | **denied** |
+| `pause_deadline_ts` | **resumes** |
+
+The pause resumes and the approval denies for the same reason from
+opposite ends: an unanswered spend approval must not authorize spend,
+while an unanswered pause has already spent everything up to that point
+and abandoning the run would waste it.
+
+#### C. Live visibility wanted → `events --milestones`, backgrounded
+
+```
+claude-consultants events <sid> --milestones
+```
+
+**Always pass `--milestones`.** The unfiltered stream is dominated by
+`llm_call` and `tool_call` records — hundreds per council, each with a
+full payload — and it is unusable as a monitor: the one event that
+needs an answer scrolls past inside thousands of lines. `--milestones`
+keeps only state changes and renders one compact line each:
+
+```
+07:30:07 node_enter         role=researcher round=1 lane_idx=0
+07:31:09 node_exit          role=researcher round=1 lane_idx=0
+07:56:42 awaiting_adversary reason=adversary_checkpoint timeout_s=1800.0
+08:03:35 complete           status=completed final_answer_present=True
+```
+
+`complete` is the canonical done signal; `awaiting_adversary` is the
+"answer me" signal. Backgrounded, the stream's exit *is* the
+completion notification. `--kinds a,b` narrows further; `--since
+<event_id>` resumes after a blip or across a compaction boundary.
+
+**In all three cases**: start the waiter, tell the user what you
+kicked off, and get on with other work. Do not re-check on your own
+cadence — the notification is the signal. When you do have progress
+(pattern C, or the status you read on exit), surface transitions in
+plain language: "Planner done; researcher mid-investigation, 3 tool
+calls so far." One line per transition, no spam.
 
 ### 5. Fetch the result
 
@@ -348,9 +440,11 @@ Optional `--effort ...` to override the tier for this follow-up
  "status": "running", "status_url": "/v1/consult/csl-..."}
 ```
 
-### 4. Poll + fetch (same as ask)
+### 4. Wait + fetch (same as ask)
 
-`status <new_sid>` until `completed`, then `result <new_sid>`.
+Wait with one of the [three patterns](#4-wait-for-the-run--the-only-three-patterns)
+— `follow-up --wait` backgrounded is the default — then
+`result <new_sid>`. Never a foreground `for`/`sleep` poll loop.
 Print `summary_markdown` verbatim. Use an extended footer to thread
 the lineage:
 
@@ -423,7 +517,9 @@ focused follow-up and loop back to step 1:
 claude-consultants follow-up <sid> --message "<specific clarifying question>" --cwd "$(pwd)"
 ```
 
-Poll `status <new_sid>` to `completed`, fetch `result <new_sid>`, and
+Wait for `<new_sid>` the same way you waited for the parent
+([three patterns](#4-wait-for-the-run--the-only-three-patterns)),
+fetch `result <new_sid>`, and
 **return to step 1** on the new answer. Do this WITHOUT asking the user
 each round — that's the whole point of the bounded auto-loop.
 
@@ -648,7 +744,7 @@ per-language entry the same way. The routes only matter when
 
 ### 2. Top-level menu (loop until Done)
 
-The menu has seven areas; AskUserQuestion caps at 4 options, so
+The menu has eight areas; AskUserQuestion caps at 4 options, so
 present it in rounds — round 1 offers the first three plus **More…**,
 and **More…** opens the next batch (ending with **Done**):
 
@@ -665,6 +761,8 @@ and **More…** opens the next batch (ending with **Done**):
    skeptic-panel `verify_budget` — see Subflow G
 7. **Config scope** — choose user-global vs per-project and flip the
    per-project `override_user_global` directive — see Subflow H
+8. **Tool surface** — which tools the council can reach and what each
+   one needs before it runs — see Subflow I
 
 Loop back to step 1 after each successful change; exit on **Done**.
 
@@ -914,6 +1012,201 @@ Always surface which scope a change landed in — read
 
 ---
 
+### Subflow I — Tool surface
+
+Read the `tools` block from `config show`:
+
+```
+Tool surface
+  registry:      on
+  git history:   off
+  all roles:     on    (planner/critic/meta_critic/synth/adversary)
+  default rung:  auto
+  approval wait: 600s  (ask_human only; timeout denies)
+  pinned:        (none)
+```
+
+AskUserQuestion the sub-action:
+
+- **Toggle git history tools** →
+  `config set-tools --git true|false --cwd "$(pwd)"`.
+
+  Say what it buys, because the name undersells it:
+  > Adds `git_history` — "when did this regress, and why?" — plus
+  > `git_log` / `git_blame` / `git_diff` / `git_show`. All read-only.
+  > `git_history` wraps `git log -L`, so it answers from the history
+  > of *specific lines or a function*, not the whole file.
+
+  It ships **off**: the tools are read-only and safe, but they add
+  five schemas to every prompt on every lane, which is a
+  default-behaviour change. Turning it on is the operator's call.
+
+- **Uniform role access** →
+  `config set-tools --all-roles true|false --cwd "$(pwd)"`.
+
+  > planner, critic, meta_critic, synthesizer and adversary get the
+  > same tool surface the researcher has — so a critic can `read_file`
+  > a citation instead of taking the researcher's word for it, and
+  > reports a `CORRECTIONS:` block when the two disagree.
+
+  It ships **on** since 2026-08-01. It was gated off pending a
+  measurement, on the theory that it changed cost and not correctness;
+  the measurement said the opposite on both counts
+  (`benchmarks/consultants/results/2026-08-01/`):
+
+  - **Cheaper.** −30% prompt / −13% completion at `effort=high`, with
+    non-overlapping ranges across three paired trials. The saving comes
+    from the *planner*: it grounds the plan in the code, and the
+    researcher then converges in ~2 fewer iterations. A tool loop
+    resends its history every iteration, so the iterations removed are
+    the most expensive ones.
+  - **More accurate.** Against research with planted false claims, the
+    tooled critic caught 100% vs 0% untooled, with no false positives.
+
+  If an operator asks to turn it **off**, that is supported and the
+  path is tested — but say what they give up, and that the cost
+  argument for turning it off did not survive measurement.
+
+- **Pin a tool's permission** → AskUserQuestion the tool, then the
+  rung, then
+  `config set-tools --permission <tool> <level> --cwd "$(pwd)"`.
+
+  Explain the rungs in cost terms, not just safety terms:
+
+  | rung | who approves | when to use it |
+  |---|---|---|
+  | `auto` | nobody — it just runs | reads and non-destructive work. Routing these through an approver burns tokens for nothing |
+  | `ask_assistant` | Claude, which auto-approves and may escalate | writes, builds |
+  | `ask_human` | you, and only you | anything that spends money |
+  | `deny` | — | refused outright |
+
+- **Change the default rung** →
+  `config set-tools --default-level <level> --cwd "$(pwd)"`. This is
+  the rung for a tool nothing else names. Warn before setting it above
+  `auto`: it applies to *every* tool, including `grep` and
+  `read_file`, so a council would pay an approval round-trip per read.
+
+- **Change the approval deadline** →
+  `config set-tools --approval-timeout <seconds> --cwd "$(pwd)"`
+  (default 600, **minimum 180**). How long a parked `ask_human` call
+  waits before it is **denied**. Only `ask_human` parks, so this is the
+  spend gate. Denying on timeout is deliberate: absence of an approver
+  never authorizes spend. The floor exists because a shorter deadline
+  is un-answerable rather than strict — the request has to be polled,
+  relayed to the user and decided, and turn latency alone eats most of
+  a minute. Against a council that runs 30–60 minutes, three minutes
+  costs nothing.
+
+- **Clear pins** → `config set-tools --clear-permissions --cwd "$(pwd)"`.
+
+- **Disable the registry** → `config set-tools --enabled false`. Falls
+  back to the fixed six built-in tools. Offer this only as a
+  troubleshooting step.
+
+#### When a tool asks for approval
+
+Since 2026-08-02 the two `ask_*` rungs behave differently, and the
+difference is the whole design:
+
+- **`ask_assistant` never stalls.** It auto-approves, records a
+  `tool_approval_auto` event, and the lane continues. You see that the
+  call happened and can tighten the rung afterwards; you are not asked
+  to bless each one. Making it stall would burn a round-trip per write
+  per lane for a verdict that is yes by construction.
+- **`ask_human` parks the lane** and is the only rung that can. The
+  lane blocks inside its tool executor — its N×M x-tier siblings keep
+  running — until someone answers or the deadline passes.
+
+**Detecting a parked call.** Two signals, same as the adversary
+checkpoint:
+
+- `status <sid>` grows a `pending_tool_approvals` array **only while a
+  call is parked**. Each entry carries `request_id`, `tool`,
+  `arguments`, `cwd`, `reason` and `deadline_ts`.
+- The events stream emits `awaiting_tool_approval`, which
+  `--milestones` always keeps.
+
+Pattern B in [Wait for the run](#4-wait-for-the-run--the-only-three-patterns)
+already exits on either signal; extend its check to
+`pending_tool_approvals` when a run can reach an `ask_human` rung.
+
+**Answering.**
+
+```
+claude-consultants tool-ack <sid> --allow
+claude-consultants tool-ack <sid> --deny --reason "not worth the spend"
+claude-consultants tool-ack <sid> --allow --request-id tap-3
+```
+
+`--allow` / `--deny` is required and mutually exclusive — there is no
+default verdict, because guessing either way is the failure the channel
+exists to prevent. Omit `--request-id` to answer the oldest pending
+request, which is the common case of exactly one parked call.
+
+**Answer the class, not the call.** A council is wide: the first live
+run parked four `read_file` requests in 90 seconds, three of them the
+same file from three x-tier researcher lanes. One-at-a-time answers do
+not keep up, and what does not get answered is **denied** at the
+deadline — so a queue you can't keep up with is a run that quietly
+degrades. Two flags fix that, and you should reach for them by default
+rather than after the third prompt:
+
+```
+claude-consultants tool-ack <sid> --allow --all-of-tool
+claude-consultants tool-ack <sid> --allow --all-matching 'src/**'
+claude-consultants tool-ack <sid> --deny --all-matching '*.env'
+```
+
+The rule is **per council** — every role and every x-tier lane inherits
+it — and installing one immediately releases the parked requests it
+matches, so the siblings already waiting don't sit out the deadline for
+a decision that has been made. `status` shows the active rules under
+`tool_approval_grants`. A later rule overrides an earlier one, so a
+blanket allow can be narrowed by a specific deny without restarting.
+
+When you put the request to the user, propose the scope with it rather
+than asking four times:
+
+> The council wants to read `src/config.py` (3 lanes are waiting on
+> it). Allow **all reads under `src/**`** for this council, allow just
+> this file, or deny?
+
+Identical concurrent calls are already coalesced into one request —
+`waiters: 3` on the entry tells you how many lanes one answer releases.
+
+**Do not answer an `ask_human` yourself.** The rung exists because a
+person decides; `ask_assistant` is the rung that delegates to you. Show
+the user the tool, its arguments, the root it would run in, the reason
+it tripped the rung, and how long until it auto-denies — then ask.
+
+**But most calls should never reach a human.** `ask_human` is for spend
+and irreversibility — renting a GPU, pushing a branch, calling a paid
+API. Reads, greps, globs and sandboxed writes belong on `auto` or
+`ask_assistant`, which give you the audit trail without the stall. If a
+run is producing a steady stream of approval requests, the rung is
+wrong, not the workflow: say so, and offer
+
+```
+claude-consultants config set-tools --permission read_file ask_assistant --cwd "$(pwd)"
+```
+
+rather than shepherding the queue for the rest of the council.
+
+**If nobody answers**, the call is denied at the deadline and the lane
+gets `error: tool 'X' was not approved`. The council finishes degraded
+with the denial on the record rather than spending money nobody
+approved. Say so when you relay the answer: a result produced without a
+tool the council wanted is a weaker result, and the user should know
+which one it was.
+
+**If a tool is refused mid-council** you will see an
+`error: tool 'X' was not approved` result in the transcript rather
+than a crash — that is by design, so the model reroutes. If it happens
+repeatedly, the pin is probably too strict for the question being
+asked; say so rather than letting the council grind.
+
+---
+
 ---
 
 ## Coder role (opt-in, off by default)
@@ -1091,10 +1384,18 @@ consumer is notified without having to ``/state``-poll.
 
 ``--since <event_id>`` (sent as ``Last-Event-ID``) replays the stream
 from a known point — useful when reconnecting after a network blip or
-across a compaction boundary. The CLI prints one block per event; you
-can also hit the HTTP endpoint directly (``curl -N
-$endpoint/v1/consult/<sid>/events``) when you want to consume it
-without the CLI wrapper.
+across a compaction boundary.
+
+**Pass ``--milestones`` whenever a human (or you) is the consumer.**
+Unfiltered, the CLI prints every raw SSE record including every
+``llm_call`` and ``tool_call`` — hundreds per council, each a full
+payload — which is unreadable as a monitor and buries the
+``awaiting_adversary`` event that needs an answer. ``--milestones``
+keeps state changes only and prints one compact line each;
+``--kinds a,b`` narrows further. The raw form is for machine
+consumers: hit the HTTP endpoint directly (``curl -N
+$endpoint/v1/consult/<sid>/events``) when you want to parse it
+yourself.
 
 ### When to autonomously call these
 
@@ -1268,6 +1569,28 @@ new model qualifies, **append** its score to the baselines ledger
   Surface plainly and offer `/consultants followup <failed_sid>`
   to chain off the failed session (researcher + critic work is
   usually salvageable).
+- **`status: failed` with an `error` beginning `truncated output:`**
+  → the council's answer was cut off by the model's output limit and
+  the engine could not finish it after two continuation attempts.
+  This failure is different from the others in one important way:
+  **the partial answer is real work, not garbage.** Do not discard it.
+
+  Show the user what did arrive, say plainly that it stops early, and
+  offer the two fixes that actually work:
+
+  1. `/consultants followup <sid> "continue the answer from where it
+     stopped"` — cheapest; research and critique are already warm.
+  2. Re-ask a narrower question. Repeated truncation on the same role
+     means the ask is too broad for that model's output budget, not
+     too hard for the model.
+
+  Also mention `/consultants config` if it keeps happening on one
+  role — a model with a larger window is the durable fix. Check
+  `truncations_by_role` in `metadata.json` to see which role it was.
+
+  A run that shows counts in `truncations_by_role` but `status:
+  completed` was **cut and then recovered**: the answer is whole, the
+  counts only say the budget was tight. Report it as a success.
 
 ## Reference
 

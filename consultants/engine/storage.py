@@ -85,6 +85,16 @@ class ConsultationResult:
     total_completion_tokens: int = 0
     # Per-role retry counts (cloud flaps).
     retries_by_role: dict[str, int] = field(default_factory=dict)
+    # 2026-08-12: per-role count of completions the backend cut short
+    # (``done_reason: length``) or that ended inside an unterminated
+    # construct. Empty on a clean run. This exists because
+    # csl-2026-08-12-0831-905a shipped a 655-character final answer
+    # ending mid-token as ``status: completed, error: null`` — the
+    # translator had hardcoded ``finish_reason="stop"``, so a cut
+    # completion and a finished one were byte-identical in the record.
+    # A count that is present and zero is a claim; a field that does
+    # not exist is not even that.
+    truncations_by_role: dict[str, int] = field(default_factory=dict)
     # Live-session iteration: when set, this consultation is a
     # follow-up that reused parent_sid's plan + research + warm
     # ChatClients. The chain is reconstructable by walking
@@ -97,6 +107,22 @@ class ConsultationResult:
     # instead of walking parent_sid pointers. ``None`` on pre-review-
     # loop sessions; the resolver falls back to the sid itself then.
     root_sid: Optional[str] = None
+    # 2026-08-02: the sandbox roots the run actually used. Persisted
+    # because their absence is what made the csl-2026-08-02-0532-d737
+    # post-mortem read a reopened session's ``extra_roots = None`` as
+    # evidence the roots had been dropped, when the field was simply
+    # never written — a false lead on the way to a real bug. With
+    # these in metadata.json, "the roots were wrong" and "the model
+    # made it up" are distinguishable after the fact.
+    #
+    # ``*_display`` hold the pre-realpath user-facing forms
+    # (``/shared/dev/x`` rather than
+    # ``/srv/dev-disk-by-label-opt/dev/x``); empty when the caller
+    # didn't supply them. Not emitted into summary.md's front matter —
+    # that writer is a deliberately list-free YAML subset.
+    extra_roots: list[str] = field(default_factory=list)
+    cwd_display: Optional[str] = None
+    extra_roots_display: list[str] = field(default_factory=list)
 
 
 # ----------------------- YAML front-matter writer -------------------- #
@@ -135,6 +161,13 @@ def _yaml_front_matter(result: ConsultationResult) -> str:
     lines.append(f"status: {_yaml_str(result.status)}")
     if result.error:
         lines.append(f"error: {_yaml_str(result.error)}")
+    if result.truncations_by_role:
+        # A reader who opens summary.md and never looks at metadata.json
+        # still needs to know the text below may stop mid-sentence.
+        # Scalar, not a list: this writer is a list-free YAML subset.
+        lines.append("truncated: {}".format(_yaml_str(", ".join(
+            f"{role}={n}"
+            for role, n in sorted(result.truncations_by_role.items())))))
     if result.cwd:
         lines.append(f"cwd: {_yaml_str(result.cwd)}")
     if result.parent_sid:

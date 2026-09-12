@@ -23,7 +23,7 @@ Constants live here so a single repo-wide change updates both callers.
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from typing import Optional
 
 
 # --- Defaults (tunable via env, see ``proxy_retry_config``) -------- #

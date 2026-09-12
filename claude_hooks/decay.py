@@ -15,11 +15,10 @@ import hashlib
 import json
 import logging
 import math
-import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
+from claude_hooks._atomic import write_text_atomic
 from claude_hooks.config import expand_user_path
 from claude_hooks.providers.base import Memory
 
@@ -137,12 +136,12 @@ def _load_history(path: Path) -> dict:
 
 
 def _save_history(path: Path, entries: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     data = {"version": 1, "entries": entries}
-    tmp = path.with_suffix(path.suffix + ".tmp")
     try:
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        os.replace(tmp, path)
+        # Unique temp file per writer: several sessions end turns at
+        # once and a shared "<path>.tmp" made all but one lose their
+        # update to ENOENT. See claude_hooks._atomic.
+        write_text_atomic(path, json.dumps(data, indent=2))
     except OSError as e:
         log.warning("failed to save decay history: %s", e)
 

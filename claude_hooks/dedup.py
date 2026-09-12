@@ -12,7 +12,7 @@ import difflib
 import logging
 from typing import Optional
 
-from claude_hooks.providers.base import Memory, Provider
+from claude_hooks.providers.base import Provider
 
 log = logging.getLogger("claude_hooks.dedup")
 

@@ -319,10 +319,45 @@ Tools exposed (visible after Claude Code restart as
 | `pgvector-find-hybrid` | RRF blend of vector + BM25 keyword (best for factual queries) |
 | `pgvector-store` | Insert one memory; idempotent on content_hash |
 | `pgvector-count` | Row count of the configured primary table |
+| `pgvector-delete` *(v1.14.1+)* | Permanently delete memories by id. **Irreversible** |
 | `pgvector-kg-search` | Search KG entities by name (trigram) + observations (hybrid) |
 | `pgvector-kg-create` | Bulk-create entities; idempotent on name |
 | `pgvector-kg-observe` | Add observations to existing entities |
 | `pgvector-kg-relate` | Create relations between entities |
+
+##### Deleting a memory
+
+`find` and `find-hybrid` render each hit's `content_hash` as
+`id=<hex>` in the result header. That id is the only stable handle on a
+row — `Memory` carries no primary key — so deletion is a two-step:
+recall the memory, then pass its id.
+
+```
+pgvector-find        {"query": "the wrong fact", "k": 5}
+  → [memories_qwen3 dist=0.11 id=725d75cf...] the wrong fact ...
+pgvector-delete      {"ids": ["725d75cf..."]}
+  → deleted 1 memory (1 id requested)
+```
+
+Three things worth knowing:
+
+- **It is irreversible.** No tombstone, no undo. The row and its vector
+  are gone.
+- **It reaches as far as recall does.** By default the tool deletes
+  across every table `find` searches, including `kg_observations_*`.
+  The provider method's own default is primary-table-only — that is
+  what the TTL reaper means by delete — so the two callers differ
+  deliberately. Pass `tables` to narrow it (the hit's `_table` names
+  its own).
+- **Misses are reported.** `deleted 0 ... 1 id matched no row` means
+  the id was stale, already deleted, or from a different store. It does
+  not get rounded up to success.
+
+There is still **no update path**. Correcting a memory means delete +
+store, and note the ordering trap: `store` is idempotent on
+`content_hash` and the Stop-hook store path dedups at 0.85 cosine, so a
+correction that closely resembles the memory it replaces can be
+rejected as a near-duplicate if you store before deleting.
 
 #### Manual install / pip path
 

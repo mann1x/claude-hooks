@@ -20,7 +20,7 @@ import io
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:

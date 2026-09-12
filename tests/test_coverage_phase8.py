@@ -24,9 +24,8 @@ import time
 import unittest
 from copy import deepcopy
 from datetime import datetime, timezone
-from io import BytesIO
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -35,10 +34,8 @@ from claude_hooks.config import DEFAULT_CONFIG
 from claude_hooks.hooks import pre_tool_use, stop
 from claude_hooks.mcp_client import McpError
 from claude_hooks.providers import (
-    REGISTRY,
     Memory,
     MemoryKgProvider,
-    Provider,
     QdrantProvider,
     ServerCandidate,
     get_provider_class,
@@ -263,7 +260,6 @@ class TestMemoryKgStore:
         preferred over the result text when present — `forwarder` is a
         better topic identifier than `drain-pool-remoteprotocolerror` for
         future search_nodes() queries."""
-        from claude_hooks.providers import memory_kg as mk
         p = self._make()
         with patch.object(p, "_client") as mc:
             mc.return_value.call_tool.return_value = {}

@@ -53,7 +53,6 @@ def mock_ollama_generate(
     :param target: dotted module path that imports ``urllib.request``.
     :param fail: if True, ``urlopen`` raises ConnectionRefusedError.
     """
-    import urllib.error
 
     if fail:
         side_effect = ConnectionRefusedError("simulated")

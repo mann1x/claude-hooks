@@ -162,6 +162,13 @@ RECOMMENDED_STALL_THRESHOLDS_BY_MODEL: dict[str, StallThresholds] = {
     "glm-5.1:cloud": StallThresholds(
         stall_threshold_s=90.0, hard_cap_s=300.0,
     ),
+    # Inherited from glm-5.1, NOT re-measured. The 5.1 row above is a
+    # real M11a measurement; this one is a succession default so 5.2
+    # gets sane thresholds instead of falling through to the generic
+    # floor. Re-run the stall bench to earn a measured row.
+    "glm-5.2:cloud": StallThresholds(
+        stall_threshold_s=90.0, hard_cap_s=300.0,
+    ),
     "kimi-k2.6:cloud": StallThresholds(
         stall_threshold_s=390.0, hard_cap_s=540.0,
     ),

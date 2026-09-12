@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -63,7 +62,7 @@ def recall_context(cwd: str) -> Optional[str]:
     bugs = _recent_bugs(wd / "buglog.json", limit=5)
     if bugs:
         lines = [f"- **{b['id']}** {b.get('file','?')}: {b.get('error_message','?')} → {b.get('fix','?')}" for b in bugs]
-        parts.append(f"**Recent bugs (this project)**\n" + "\n".join(lines))
+        parts.append("**Recent bugs (this project)**\n" + "\n".join(lines))
 
     if not parts:
         return None

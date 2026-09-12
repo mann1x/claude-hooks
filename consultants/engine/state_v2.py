@@ -229,11 +229,23 @@ class InterruptState:
 
 
 class RuntimeControl(TypedDict, total=False):
-    """Per-session mutable knobs. Every node consults this at entry
-    and honors the live values rather than the boot-time effort tier.
+    """Per-session mutable knobs, read by nodes at entry.
     Reduced with ``merge_runtime_control`` so ``graph.update_state(...,
     {"runtime_control": {"max_rounds": 5}})`` merges into existing
     fields instead of clobbering them.
+
+    .. note::
+
+       A mutation applied with ``update_state`` reaches a node on the
+       *next* invocation, not the running one: a graph already inside
+       ``invoke`` carries its channel values in memory through the
+       superstep and never re-reads the checkpoint. That is why
+       ``cancel_requested`` / ``pause_requested`` below are declared but
+       **advisory** — they are the durable record of a request, while
+       the control that actually reaches a running node travels
+       out-of-band via :class:`consultants.engine.run_control.RunControl`
+       on the SessionState. Anything added here that must take effect
+       mid-run needs the same treatment.
 
     All fields optional; ``runtime_control_defaults`` (in
     ``engine/control.py``, M2) seeds boot-time values from the
@@ -269,6 +281,12 @@ class RuntimeControl(TypedDict, total=False):
     # ---- xauto book-keeping ----
     xauto_tier: Literal["xmedium", "xhigh", "xmax"]
     xauto_escalations: int
+    # ---- cooperative run control (advisory record; see the class
+    # note above — the live path is RunControl on the SessionState) ----
+    cancel_requested: bool
+    cancel_reason: str
+    pause_requested: bool
+    pause_reason: str
 
 
 def merge_runtime_control(left: Optional[RuntimeControl],
@@ -403,6 +421,24 @@ class CouncilStateV2(TypedDict, total=False):
     # ---- inputs (set at session start, never overwritten) ----
     question: str
     cwd: str
+    # Additional sandbox roots — the CLI's ``--add-dir``, unioned with
+    # the auto-discovered ones, realpath'd (see
+    # ``claude_hooks.allowed_roots``). The nodes that verify citations
+    # read these off state as ``[cwd, *extra_roots]``.
+    #
+    # It MUST be declared here. LangGraph builds its channels from
+    # this schema and silently drops any input key that isn't one, so
+    # an undeclared field reaches no node and reads back as ``None``
+    # — no error, no warning, and every link in the chain that
+    # *writes* it looks correct under inspection. That is exactly what
+    # happened between 2026-05-18 (when runner.py started setting
+    # ``initial["extra_roots"]``) and 2026-08-02: the citation linter
+    # ran with ``[cwd]`` alone and annotated every cite under an
+    # ``--add-dir`` root as "file not found in any allowed_root",
+    # while the tool sandbox — which takes its roots from GraphDeps,
+    # not from state — read those same files without complaint. A
+    # fully-grounded answer came back looking fabricated.
+    extra_roots: list[str]
     models: dict[str, str]
     topology: str
     effort: str

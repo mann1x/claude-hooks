@@ -25,7 +25,7 @@ env.
 from __future__ import annotations
 
 import json
-import os
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -44,6 +44,8 @@ from .engine.coder_defaults import (
     RECOMMENDED_CODER_ROUTES_BY_LANGUAGE,
 )
 from .engine.state_v2 import CoderLanguageRoute
+
+log = logging.getLogger("consultants.config")
 
 
 # ----------------------- defaults ----------------------------------- #
@@ -244,7 +246,8 @@ DEFAULT_THINK_BY_ROLE: dict[str, Any] = {
 #
 # - ``tool_executor`` → ``gemma4:31b-cloud`` per the user's
 #   observation + the M11c bench (pending).
-# - ``coder`` → ``glm-5.1:cloud`` per the 2026-05-16 M11b run
+# - ``coder`` → ``glm-5.2:cloud`` (succession from the
+#   2026-05-16 M11b winner glm-5.1; see MODEL_SUCCESSIONS)
 #   (suite v1.0 rubric winner: pass=100%, avg_quality=4.88,
 #   median_tokens=1841, median_wall=4.9 s). The constant lives in
 #   ``consultants/engine/coder_defaults.py`` and is sourced from
@@ -500,7 +503,7 @@ StoreReaperThread` finds expiring research rows, it groups them by
 
     - ``model = "gemma4:31b-cloud"`` — the M11c-2 tool_executor
       winner; already trusted in the council pipeline.
-    - ``fallback_models = ["glm-5.1:cloud"]`` — caliber-init
+    - ``fallback_models = ["glm-5.2:cloud"]`` — caliber-init
       fallback model; ~64k context window comfortable for prompt
       overflow.
     - ``sweep_interval_seconds = 3600`` — hourly. Cheap on a
@@ -528,7 +531,7 @@ StoreReaperThread` finds expiring research rows, it groups them by
     """
     enabled: bool = True
     model: str = "gemma4:31b-cloud"
-    fallback_models: tuple[str, ...] = ("glm-5.1:cloud",)
+    fallback_models: tuple[str, ...] = ("glm-5.2:cloud",)
     sweep_interval_seconds: float = 3600.0
     min_entries_per_distillation: int = 3
     max_session_entries: int = 50
@@ -631,6 +634,78 @@ class StoreConfig:
 
 
 @dataclass
+class ToolsConfig:
+    """M-A: the council's tool surface and its permission ladder.
+
+    See ``docs/PLAN-council-tool-surface.md``. Every tool the council
+    can reach is composed here and dispatched through one gate, so a
+    provider added later inherits approval and denial without its own
+    plumbing.
+
+    ``git`` defaults **off** deliberately, mirroring how ``store``
+    landed: scaffold disabled, validated live, flipped on in a later
+    change. The tools themselves are read-only and carry no new risk
+    surface, but turning them on adds five schemas to every prompt on
+    every lane, which is a default-behaviour change and therefore an
+    M12 parity concern. One config command flips it.
+
+    ``permissions`` maps a tool name to a rung:
+    ``auto`` / ``ask_assistant`` / ``ask_human`` / ``deny``. An invalid
+    value is refused at dispatch rather than coerced — a typo must
+    never silently produce an ungated tool.
+    """
+
+    #: Master switch for the registry. False keeps the pre-M-A path.
+    enabled: bool = True
+    #: M-C git history provider (git_history / log / blame / diff / show).
+    git: bool = False
+    #: M-B: give every role the same tool access, not just the
+    #: researcher.
+    #:
+    #: Flip history:
+    #: - 2026-08-01, landed False. The cost argument was that a
+    #:   single-shot role costs one LLM call and a tooled one costs one
+    #:   per iteration, with critic fanning out per lane at the
+    #:   x-tiers — multiplier roles x lanes x iterations.
+    #: - 2026-08-01, flipped True after both bench tiers.
+    #:   Tier 1 (critic driven directly against planted-false research,
+    #:   n=72): 100% recall vs 0% untooled, 100% precision, zero silent
+    #:   corrections. Tier 2 (full council, n=3 per arm, paired
+    #:   concurrent): -30% prompt tokens, -13% completion, ranges
+    #:   NON-OVERLAPPING — the off arm's cheapest trial cost more than
+    #:   the on arm's most expensive.
+    #:
+    #: The cost argument was simply wrong, and the reason is worth
+    #: keeping: a tooled *planner* grounds its plan in the code, and
+    #: the researcher then converges in ~2 fewer iterations. A tool
+    #: loop resends its history each iteration, so the iterations
+    #: removed are the most expensive ones. The knob pays for itself
+    #: through the planner, not the critic.
+    #: See benchmarks/consultants/results/2026-08-01/.
+    all_roles: bool = True
+    #: Fallback rung for a tool no provider or override names.
+    default_level: str = "auto"
+    #: Per-tool overrides, ``[tools.permissions]``.
+    permissions: dict = field(default_factory=dict)
+    #: Seconds a parked ``ask_human`` call waits before it is DENIED.
+    #: Only ``ask_human`` can stall (``ask_assistant`` auto-approves per
+    #: the ladder), so this is the spend-approval deadline. Timeout
+    #: denies on purpose: absence of an approver never authorizes spend.
+    approval_timeout_s: float = 600.0
+
+
+#: Floor for :attr:`ToolsConfig.approval_timeout_s`. A value below this
+#: is un-answerable in practice rather than strict: the request has to
+#: reach the assistant through a poll, be relayed to a person, and get a
+#: decision back, and Claude Code's own turn latency eats most of a
+#: minute before anyone has read the tool name. A deadline nobody can
+#: meet is ``deny`` with extra steps — and worse than ``deny``, because
+#: it also spends the wall-clock. Against a council that runs 30–60
+#: minutes, three minutes is not a meaningful delay.
+MIN_APPROVAL_TIMEOUT_S = 180.0
+
+
+@dataclass
 class CoderLimitsConfig:
     """M10: per-session sandbox caps for the coder role.
 
@@ -681,6 +756,7 @@ class ConsultantsConfig:
     checkpointer: CheckpointerConfig = field(default_factory=CheckpointerConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     store: StoreConfig = field(default_factory=StoreConfig)
+    tools: ToolsConfig = field(default_factory=ToolsConfig)
     coder_limits: CoderLimitsConfig = field(
         default_factory=CoderLimitsConfig,
     )
@@ -907,6 +983,48 @@ def _merge_layer(base: ConsultantsConfig, raw: dict) -> ConsultantsConfig:
                 bool(rt["interrupt_on_low_confidence"])
 
     # store (M8)
+    tl = raw.get("tools") or {}
+    if isinstance(tl, dict):
+        if "enabled" in tl:
+            base.tools.enabled = bool(tl["enabled"])
+        if "git" in tl:
+            base.tools.git = bool(tl["git"])
+        if "all_roles" in tl:
+            base.tools.all_roles = bool(tl["all_roles"])
+        if "default_level" in tl and isinstance(tl["default_level"], str):
+            base.tools.default_level = (
+                tl["default_level"].strip() or base.tools.default_level)
+        if "approval_timeout_s" in tl:
+            raw_to = tl["approval_timeout_s"]
+            if (isinstance(raw_to, (int, float))
+                    and not isinstance(raw_to, bool) and raw_to > 0):
+                # A hand-edited TOML below the floor is raised to it and
+                # logged rather than rejected — refusing the whole config
+                # over one short deadline would take the council down for
+                # a value we can safely correct. The setter still errors,
+                # because there the operator is right there to be told.
+                if float(raw_to) < MIN_APPROVAL_TIMEOUT_S:
+                    log.warning(
+                        "[tools] approval_timeout_s=%gs is below the %gs "
+                        "floor and is un-answerable in practice; using "
+                        "%gs. Use permission level 'deny' if you mean "
+                        "deny.",
+                        float(raw_to), MIN_APPROVAL_TIMEOUT_S,
+                        MIN_APPROVAL_TIMEOUT_S,
+                    )
+                    raw_to = MIN_APPROVAL_TIMEOUT_S
+                base.tools.approval_timeout_s = float(raw_to)
+        perms = tl.get("permissions")
+        if isinstance(perms, dict):
+            # Values are NOT validated here on purpose. The gate refuses
+            # an unknown rung at dispatch with a message naming the tool
+            # and the source; silently dropping a bad value at load time
+            # would leave the operator believing a restriction is in
+            # force when it is not.
+            base.tools.permissions = {
+                str(k): v for k, v in perms.items()
+            }
+
     st = raw.get("store") or {}
     if isinstance(st, dict):
         if "enabled" in st:
@@ -1204,6 +1322,40 @@ def _render(cfg: ConsultantsConfig, *,
              "self-rates below confidence_target")
     L.append("interrupt_on_low_confidence = "
              f"{'true' if cfg.runtime.interrupt_on_low_confidence else 'false'}")
+    L.append("")
+    L.append("[tools]")
+    L.append("# The council's tool surface (M-A). Every tool is dispatched")
+    L.append("# through one permission gate; see docs/PLAN-council-tool-surface.md")
+    L.append("# enabled = false restores the pre-M-A fixed builtin surface.")
+    L.append(f"enabled = {'true' if cfg.tools.enabled else 'false'}")
+    L.append("# git: read-only history tools — git_history (\"when did this")
+    L.append("#   regress?\" via git log -L), git_log / blame / diff / show.")
+    L.append(f"git = {'true' if cfg.tools.git else 'false'}")
+    L.append("# all_roles: give planner / critic / meta_critic /")
+    L.append("#   synthesizer / adversary the same tools the researcher")
+    L.append("#   has. On by default since 2026-08-01: measured -30%")
+    L.append("#   prompt / -13% completion tokens at effort=high, and")
+    L.append("#   100% vs 0% detection of false research claims.")
+    L.append(f"all_roles = {'true' if cfg.tools.all_roles else 'false'}")
+    L.append("# default_level: auto | ask_assistant | ask_human | deny")
+    L.append(f"default_level = {_toml_str(cfg.tools.default_level)}")
+    L.append("# approval_timeout_s: how long a parked ask_human tool")
+    L.append("#   call waits before it is DENIED. ask_assistant never")
+    L.append("#   parks (it auto-approves), so this is the spend gate.")
+    L.append(f"#   Minimum {MIN_APPROVAL_TIMEOUT_S:g}s — a shorter deadline is")
+    L.append("#   un-answerable once poll latency and a human decision")
+    L.append("#   are in the loop. Use level 'deny' if you mean deny.")
+    L.append(f"approval_timeout_s = {cfg.tools.approval_timeout_s:g}")
+    if cfg.tools.permissions:
+        L.append("")
+        L.append("[tools.permissions]")
+        for k in sorted(cfg.tools.permissions):
+            L.append(f"{_toml_str(k)} = {_toml_str(str(cfg.tools.permissions[k]))}")
+    else:
+        L.append("")
+        L.append("# [tools.permissions]")
+        L.append('# "git_diff" = "auto"')
+        L.append('# "some_tool" = "ask_assistant"')
     L.append("")
     L.append("[store]")
     L.append("# Long-term memory BaseStore for cross-lane / cross-session recall.")
@@ -1839,6 +1991,88 @@ def set_override_user_global(enabled: bool, *,
 # installer can drive them programmatically.
 
 VALID_STORE_BACKENDS: tuple[str, ...] = ("memory", "pgvector", "sqlite_vec")
+
+#: The permission ladder, mirrored from
+#: ``claude_hooks.tool_registry.policy.LEVELS``. Duplicated rather than
+#: imported so ``consultants.config`` stays importable without
+#: ``claude_hooks`` on the path — the same reason ``interrupt_policy``
+#: avoids its LangGraph import. ``test_tool_registry`` pins the two
+#: lists together so they cannot drift.
+VALID_PERMISSION_LEVELS: tuple[str, ...] = (
+    "auto", "ask_assistant", "ask_human", "deny",
+)
+
+
+def set_tools(
+    *,
+    enabled: Optional[bool] = None,
+    git: Optional[bool] = None,
+    all_roles: Optional[bool] = None,
+    default_level: Optional[str] = None,
+    approval_timeout_s: Optional[float] = None,
+    set_permission: Optional[tuple] = None,
+    clear_permission: Optional[str] = None,
+    clear_all_permissions: bool = False,
+    scope: str = "user",
+    cwd: Optional[Path] = None,
+) -> ConsultantsConfig:
+    """Mutate the ``[tools]`` block and persist.
+
+    Same "pass None to leave unchanged" contract as ``set_role`` and
+    ``set_store``. ``set_permission`` takes a ``(tool, level)`` pair.
+
+    Levels ARE validated here, unlike at load time: a value typed at the
+    CLI can be rejected immediately with the valid list, whereas a value
+    already sitting in a file is better refused loudly at dispatch than
+    silently dropped at load.
+    """
+    cfg = load_config(cwd=cwd)
+    if enabled is not None:
+        cfg.tools.enabled = bool(enabled)
+    if git is not None:
+        cfg.tools.git = bool(git)
+    if all_roles is not None:
+        cfg.tools.all_roles = bool(all_roles)
+    if approval_timeout_s is not None:
+        if float(approval_timeout_s) <= 0:
+            raise ValueError(
+                "approval_timeout_s must be > 0 — a zero or negative "
+                "deadline denies every parked call before an approver "
+                "can see it, which is 'deny' with extra steps"
+            )
+        if float(approval_timeout_s) < MIN_APPROVAL_TIMEOUT_S:
+            raise ValueError(
+                f"approval_timeout_s must be >= {MIN_APPROVAL_TIMEOUT_S:g} "
+                "— a shorter deadline is un-answerable in practice: the "
+                "request has to be polled, relayed to a person and "
+                "decided, and Claude Code's turn latency alone eats most "
+                "of a minute. Against a 30-60 minute council, three "
+                "minutes costs nothing. Use 'deny' if you mean deny."
+            )
+        cfg.tools.approval_timeout_s = float(approval_timeout_s)
+    if default_level is not None:
+        lvl = default_level.strip()
+        if lvl not in VALID_PERMISSION_LEVELS:
+            raise ValueError(
+                f"invalid permission level {lvl!r}. Valid: "
+                f"{', '.join(VALID_PERMISSION_LEVELS)}")
+        cfg.tools.default_level = lvl
+    if set_permission is not None:
+        tool, lvl = set_permission
+        tool = str(tool).strip()
+        lvl = str(lvl).strip()
+        if not tool:
+            raise ValueError("tool name must be non-empty")
+        if lvl not in VALID_PERMISSION_LEVELS:
+            raise ValueError(
+                f"invalid permission level {lvl!r}. Valid: "
+                f"{', '.join(VALID_PERMISSION_LEVELS)}")
+        cfg.tools.permissions[tool] = lvl
+    if clear_permission:
+        cfg.tools.permissions.pop(str(clear_permission).strip(), None)
+    if clear_all_permissions:
+        cfg.tools.permissions = {}
+    return _save_after_change(cfg, scope=scope, cwd=cwd)
 
 
 def _normalize_ttl_days(val: Optional[float]) -> Optional[float]:

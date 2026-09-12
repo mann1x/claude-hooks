@@ -50,6 +50,11 @@ Thumbs.db
 # under docs/benchmarks/<host>/ are committed deliberately as audit
 # data; the per-session live artifacts under .claude-hooks/ are not.
 .claude-hooks/consultants/
+# ...and the same artifacts wherever they land. The rule above is
+# anchored to the repo root by its embedded slash, so a council run
+# inside a bench fixture (which is what fixtures/*/ are FOR) wrote
+# transcript.db + WAL + SHM into version control's view.
+**/.claude-hooks/consultants/
 # The active per-project /consultants config carries host-specific
 # secrets (e.g. the pgvector DSN), so it stays local. The committed
 # `.claude-hooks/consultants.example.toml` template is the shareable
@@ -75,6 +80,16 @@ graphify-out/.code-graph-build.lock
 # sweep them into a feature commit.
 /bench-*.json
 /config/claude-hooks.json.bak-*
+# install.py and the deploy script keep a dated backup of the live
+# config before each upgrade. They are host state, and they accumulate
+# one per release — useful locally, noise in the history.
+/config/claude-hooks.json.pre-*
+/.claude-hooks/*.bak-*
+/.claude-hooks/*.pre-*
+# One-off local scratch: captured pytest output and the ad-hoc
+# regression-matrix launch payloads (session ids + curl bodies).
+/.claude-hooks/linux_full_*.txt
+/.claude-hooks/regression-matrix-*/
 /modelfiles/
 
 # Vendored llamafile binaries + composite artifacts. The binary
@@ -101,6 +116,12 @@ vendor/llamafile/dist/*.llamafile
 benchmarks/consultants/results/**/*
 !benchmarks/consultants/results/**/
 !benchmarks/consultants/results/**/report.md
+# A per-date README is the interpretation of a run set — which run is
+# citable, which is superseded and why. The reports alone don't carry
+# that, and a superseded number with no note beside it is worse than
+# no number.
+!benchmarks/consultants/results/**/README.md
+!benchmarks/consultants/results/**/NOTES.md
 !benchmarks/consultants/results/**/report-by-language.md
 !benchmarks/consultants/results/**/smoke-report.md
 !benchmarks/consultants/results/**/quota.md

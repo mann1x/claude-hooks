@@ -14,7 +14,6 @@ and runs ``pip install -e .`` on accept. Covered branches:
 """
 from __future__ import annotations
 
-import subprocess
 import sys
 import unittest
 from pathlib import Path

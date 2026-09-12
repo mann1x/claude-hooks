@@ -50,7 +50,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Iterable, Iterator, Optional
+from typing import Iterator, Optional
 
 log = logging.getLogger("migrate_to_pgvector")
 

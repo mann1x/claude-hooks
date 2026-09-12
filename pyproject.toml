@@ -72,6 +72,46 @@ markers = [
     "parity: v1 behavior-parity regression suite (M12). Run with `pytest -m parity` to exercise only the default-config gate.",
 ]
 
+[tool.ruff]
+# Matches ``requires-python``. Without it ruff infers a target from the
+# environment, so the same file can lint differently on two machines.
+target-version = "py310"
+# The house style wraps narrow. This is NOT enforced (E501 is not
+# selected) because the existing tree has ~2700 lines over 79 and
+# turning it on would bury real findings under a style backlog. It is
+# here so ``ruff format`` and editors agree on the intent, and so the
+# number is written down rather than folklore.
+line-length = 79
+extend-exclude = [
+    ".wolf",
+    "vendor",
+    "graphify-out",
+    # Model-generated bench fixtures: linting them would measure the
+    # models under test, not this codebase.
+    "benchmarks/consultants/questions/*/[a-z]*-oracle.py",
+]
+
+[tool.ruff.lint]
+# Ruff's default set (E4/E7/E9 + F). Deliberately not widened here:
+# the repo has been linted against exactly this for its whole history,
+# so it is the set every existing file is already clean against. Adding
+# families (I, B, UP, …) is a separate, reviewable change — do it one
+# family at a time with its own cleanup commit, not as a side effect of
+# writing this file.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests reach the package by inserting the repo root on sys.path before
+# importing it, which is import-not-at-top by construction.
+#
+# Tests additionally use compact fixture setup
+# (``d = tmp / "x"; d.mkdir()``) — a deliberate convention, one line per
+# fixture fact, ~70 occurrences.
+"tests/*" = ["E402", "E702"]
+"benchmarks/*" = ["E402"]
+"scripts/*" = ["E402"]
+"install.py" = ["E402"]
+
 [tool.coverage.run]
 source = ["claude_hooks"]
 branch = true

@@ -77,8 +77,21 @@ class TestStallDefaultsScaffoldShape(unittest.TestCase):
             "deepseek-v4-flash:cloud",
             "gemini-3-flash-preview:cloud",
         }
+        # Every measured model must still be present. Extra keys are
+        # allowed only when they are declared successors (2026-08-01:
+        # glm-5.2 inherits glm-5.1's thresholds rather than falling
+        # through to the generic floor) — a succession row is not a
+        # measurement and must never displace one.
+        from consultants.engine.coder_defaults import MODEL_SUCCESSIONS
+        actual = set(sd.RECOMMENDED_STALL_THRESHOLDS_BY_MODEL.keys())
+        self.assertTrue(
+            expected_models <= actual,
+            f"measured rows dropped: {expected_models - actual}")
+        for extra in actual - expected_models:
+            self.assertIn(extra, set(MODEL_SUCCESSIONS.values()),
+                          f"{extra} is neither measured nor a successor")
         self.assertEqual(
-            set(sd.RECOMMENDED_STALL_THRESHOLDS_BY_MODEL.keys()),
+            actual - set(MODEL_SUCCESSIONS.values()),
             expected_models,
         )
 

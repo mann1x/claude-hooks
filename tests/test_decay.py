@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
-from claude_hooks import decay
 from claude_hooks.decay import (
     _frequency_boost,
     _load_history,

@@ -40,7 +40,12 @@ from typing import Optional
 # Late imports to avoid pulling install.py at module-level — install.py
 # triggers conda detection which is slow and irrelevant for status.
 from claude_hooks import daemon_client
-from claude_hooks.daemon import DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SECRET_PATH
+from claude_hooks.daemon import (
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    DEFAULT_SECRET_PATH,
+    resolve_port,
+)
 
 
 _GRACEFUL_STOP_TIMEOUT = 5.0   # seconds to wait for ping to drop after stop
@@ -121,7 +126,8 @@ def _platform_log_command() -> Optional[list[str]]:
 # ===================================================================== #
 # Verbs
 # ===================================================================== #
-def cmd_status(*, host: str, port: int, secret_path: Path) -> int:
+def cmd_status(*, host: str, port: Optional[int] = None,
+               secret_path: Path) -> int:
     """Report whether the daemon is alive and the autostart entry exists.
 
     Exit codes::
@@ -130,6 +136,7 @@ def cmd_status(*, host: str, port: int, secret_path: Path) -> int:
       1   not responding but autostart is installed
       2   not responding and no autostart entry — daemon was never installed
     """
+    port = port if port is not None else resolve_port()
     alive = daemon_client.ping(
         host=host, port=port, secret_path=Path(secret_path),
     )
@@ -155,13 +162,18 @@ def cmd_status(*, host: str, port: int, secret_path: Path) -> int:
     return 2
 
 
-def cmd_start(*, host: str, port: int, secret_path: Path,
+def cmd_start(*, host: str, port: Optional[int] = None, secret_path: Path,
               wait: float = _RESTART_PING_TIMEOUT) -> int:
-    """Idempotent start. If already responding, do nothing and return 0."""
+    """Idempotent start. If already responding, do nothing and return 0.
+
+    ``port=None`` follows the port file; an explicit port is honoured
+    as-is, including while waiting.
+    """
+    at = port if port is not None else resolve_port()
     if daemon_client.ping(
-        host=host, port=port, secret_path=Path(secret_path), timeout=1.5,
+        host=host, port=at, secret_path=Path(secret_path), timeout=1.5,
     ):
-        print(f"daemon: already responding on {host}:{port}")
+        print(f"daemon: already responding on {host}:{at}")
         return 0
 
     if not _detect_entry():
@@ -171,17 +183,23 @@ def cmd_start(*, host: str, port: int, secret_path: Path,
 
     print("daemon: starting via platform manager...")
     _platform_start()
-    if _wait_for_ping(host=host, port=port, secret_path=Path(secret_path),
-                     timeout=wait):
-        print(f"daemon: responding on {host}:{port}")
+    live = _wait_for_ping(host=host, port=port, secret_path=Path(secret_path),
+                          timeout=wait)
+    if live:
+        print(f"daemon: responding on {host}:{live}")
         return 0
     print(f"daemon: did not come up within {wait:.0f}s", file=sys.stderr)
     return 1
 
 
-def cmd_stop(*, host: str, port: int, secret_path: Path,
+def cmd_stop(*, host: str, port: Optional[int] = None, secret_path: Path,
              wait: float = _GRACEFUL_STOP_TIMEOUT) -> int:
-    """Graceful first (HMAC ``_shutdown``), force second (platform End)."""
+    """Graceful first (HMAC ``_shutdown``), force second (platform End).
+
+    Resolved once: we are talking to a daemon that already exists, and
+    it is not going to move while we shut it down.
+    """
+    port = port if port is not None else resolve_port()
     spath = Path(secret_path)
     alive = daemon_client.ping(
         host=host, port=port, secret_path=spath, timeout=1.5,
@@ -212,7 +230,8 @@ def cmd_stop(*, host: str, port: int, secret_path: Path,
     return 1
 
 
-def cmd_restart(*, host: str, port: int, secret_path: Path) -> int:
+def cmd_restart(*, host: str, port: Optional[int] = None,
+                secret_path: Path) -> int:
     """Stop (idempotent) then start. Skips the stop when daemon isn't up."""
     rc_stop = cmd_stop(host=host, port=port, secret_path=secret_path)
     if rc_stop != 0:
@@ -288,17 +307,31 @@ def _platform_start() -> None:
         print(f"  [!!] platform start failed: {e}", file=sys.stderr)
 
 
-def _wait_for_ping(*, host: str, port: int, secret_path: Path,
-                   timeout: float, interval: float = 0.25) -> bool:
-    """Poll ping until True or timeout. Returns final state."""
+def _wait_for_ping(*, host: str, port: Optional[int], secret_path: Path,
+                   timeout: float, interval: float = 0.25) -> Optional[int]:
+    """Poll ping until it answers or the timeout expires.
+
+    Returns the port it answered on, or ``None``.
+
+    ``port=None`` means "wherever the daemon ends up", and the port is
+    re-resolved on every attempt. That matters because this is the loop
+    that waits for a *starting* daemon, and the port file it reads is
+    written by the very process it is waiting for: resolving once up
+    front reads the value from before the start. On a host where the
+    daemon cannot have the default port — Windows reserves ranges, and
+    they move at every boot — that means polling a port nothing will
+    ever listen on, then reporting a failure for a daemon that came up
+    fine somewhere else.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
+        at = port if port is not None else resolve_port()
         if daemon_client.ping(
-            host=host, port=port, secret_path=secret_path, timeout=0.5,
+            host=host, port=at, secret_path=secret_path, timeout=0.5,
         ):
-            return True
+            return at
         time.sleep(interval)
-    return False
+    return None
 
 
 def _wait_for_ping_gone(*, host: str, port: int, secret_path: Path,
@@ -324,8 +357,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--host", default=DEFAULT_HOST,
                     help=f"daemon host (default {DEFAULT_HOST})")
-    ap.add_argument("--port", type=int, default=DEFAULT_PORT,
-                    help=f"daemon port (default {DEFAULT_PORT})")
+    # No literal default: the daemon may have bound elsewhere (Windows
+    # reserved ranges), and pinning DEFAULT_PORT here would make `status`
+    # report NOT RESPONDING against a perfectly healthy daemon.
+    ap.add_argument("--port", type=int, default=None,
+                    help=(f"daemon port (default: the port file, "
+                          f"else {DEFAULT_PORT})"))
     ap.add_argument("--secret", type=Path, default=DEFAULT_SECRET_PATH,
                     help="path to the daemon's HMAC secret file")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -341,6 +378,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
+    # Deliberately left unresolved: each command resolves at the point
+    # it needs a port, because `start` has to re-resolve while waiting.
     common = {
         "host": args.host, "port": args.port, "secret_path": args.secret,
     }

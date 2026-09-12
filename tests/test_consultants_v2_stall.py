@@ -21,7 +21,6 @@ import threading
 import time
 import unittest
 
-from consultants.engine import stall
 from consultants.engine.stall import (
     CancelledByOrchestrator,
     HardCapExceeded,

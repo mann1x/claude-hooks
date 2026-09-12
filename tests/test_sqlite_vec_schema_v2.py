@@ -69,7 +69,7 @@ def _migrate_to_v1_only(conn: sqlite3.Connection, *, table: str) -> None:
     existing v1.7.0 .db that hasn't seen the M14 column yet.
 
     We can't just call ``migrate_schema`` because it now goes all
-    the way to ``LATEST_VERSION`` (2). So we replay the v0→v1 steps
+    the way to ``LATEST_VERSION`` (3). So we replay the v0→v1 steps
     directly and stamp the version row at 1 by hand.
     """
     from claude_hooks.providers.sqlite_vec_schema import (
@@ -101,7 +101,7 @@ class TestFreshMigrationV2(unittest.TestCase):
         )
         v = migrate_schema(self.conn, embedding_dim=4, table="memory")
         self.assertEqual(v, LATEST_VERSION)
-        self.assertEqual(v, 2)
+        self.assertEqual(v, 3)
 
     def test_fresh_creates_expires_at_column(self):
         from claude_hooks.providers.sqlite_vec_schema import migrate_schema
@@ -150,8 +150,8 @@ class TestUpgradeFromV1ToV2(unittest.TestCase):
         v = migrate_schema(
             self.conn, embedding_dim=4, table="memory",
         )
-        self.assertEqual(v, 2)
-        self.assertEqual(_read_version(self.conn), 2)
+        self.assertEqual(v, 3)
+        self.assertEqual(_read_version(self.conn), 3)
         self.assertIn(
             "expires_at", _table_columns(self.conn, "memory"),
         )
@@ -293,7 +293,8 @@ class TestSecondTableInMigratedDb(unittest.TestCase):
         # One shared on-disk db file, mirroring how two providers in the
         # same process share ``cfg...sqlite_vec_path``. (``:memory:``
         # would also work, but on-disk matches the real failure mode.)
-        import tempfile, os
+        import tempfile
+        import os
         self._tmp = tempfile.mkdtemp(prefix="ch-schema-test-")
         self._path = os.path.join(self._tmp, "shared.db")
         self.conn = _conn(self._path)

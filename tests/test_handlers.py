@@ -8,10 +8,8 @@ wiring is also covered here under TestStopStoreHandler.
 
 from __future__ import annotations
 
-import json
 from unittest.mock import patch
 
-import pytest
 
 from claude_hooks.hooks import session_end, session_start, stop, user_prompt_submit
 

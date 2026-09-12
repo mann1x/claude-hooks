@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
-import hashlib
 import json
 import logging
 import os
@@ -54,7 +53,6 @@ import socket
 import subprocess
 import sys
 import time
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -85,7 +83,7 @@ DEFAULT_OLLAMA_BASE = "http://192.168.178.2:11433"
 # deepseek-v4-flash which is known weak at multi-tool chains in
 # our trace data. The cohort can be overridden via --models.
 DEFAULT_MODELS: tuple[str, ...] = (
-    "glm-5.1:cloud",
+    "glm-5.2:cloud",
     "kimi-k2.6:cloud",
     "gemma4:31b-cloud",
     "qwen3-coder-next:cloud",

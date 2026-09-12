@@ -38,6 +38,16 @@ class FakePgvectorProvider:
         self.kg_observe_calls: list[list[dict]] = []
         self.kg_relate_calls: list[list[dict]] = []
         self.recall_raises: Optional[Exception] = None
+        self.delete_calls: list[tuple[list, Optional[list]]] = []
+        self.delete_returns = 0
+        self.tables = ["memories_qwen3", "kg_observations_qwen3"]
+
+    def _resolve_tables(self) -> list[str]:
+        return list(self.tables)
+
+    def delete_by_hashes(self, hashes: list, tables: Optional[list] = None) -> int:
+        self.delete_calls.append((list(hashes), tables))
+        return self.delete_returns
 
     def recall(self, query: str, k: int = 5) -> list[Memory]:
         self.recall_calls.append((query, k))
@@ -127,18 +137,30 @@ class TestToolsList:
         resp = server.handle(_request("tools/list"))
         tools = resp["result"]["tools"]
         names = {t["name"] for t in tools}
-        # All eight expected tools are present.
+        # Exact, not a subset: sqlite-vec-mcp pins the same catalog by
+        # equality, and "full pgvector-mcp parity" is only an invariant
+        # if adding a tool on one side fails on the other.
         expected = {
             "pgvector-find",
             "pgvector-find-hybrid",
             "pgvector-store",
             "pgvector-count",
+            "pgvector-delete",
+            "pgvector-list",
+            "pgvector-replace",
+            "pgvector-expiring",
+            "pgvector-refresh-ttl",
+            "pgvector-kg-delete-entities",
+            "pgvector-kg-delete-observations",
+            "pgvector-kg-delete-relations",
+            "pgvector-kg-read-graph",
+            "pgvector-kg-open-nodes",
             "pgvector-kg-search",
             "pgvector-kg-create",
             "pgvector-kg-observe",
             "pgvector-kg-relate",
         }
-        assert expected <= names
+        assert names == expected
 
     def test_each_tool_has_required_fields(self, server):
         tools = server.handle(_request("tools/list"))["result"]["tools"]
@@ -359,7 +381,6 @@ class TestHttpTransport:
 
     @pytest.fixture
     def http_server(self):
-        import socket
         import threading
         from http.server import ThreadingHTTPServer
         from claude_hooks.pgvector_mcp.server import McpServer, _build_http_handler

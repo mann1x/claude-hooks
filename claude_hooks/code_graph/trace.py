@@ -26,9 +26,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import Optional
 
-from claude_hooks.code_graph.impact import callees_of
 
 log = logging.getLogger("claude_hooks.code_graph.trace")
 

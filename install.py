@@ -44,7 +44,6 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from claude_hooks.config import (
-    DEFAULT_CONFIG,
     default_config_path,
     load_config,
     save_config,
@@ -977,6 +976,8 @@ def _write_proxy_task_xml(
         arguments=_xml_escape(arguments),
         workdir=_xml_escape(workdir),
     )
+    import tempfile  # noqa: PLC0415 -- Windows-only path
+
     fd, path = tempfile.mkstemp(prefix="claude-hooks-proxy-", suffix=".xml")
     os.close(fd)
     p = Path(path)
@@ -1709,7 +1710,7 @@ def _verify_and_start_daemon() -> bool:
         print(f"       systemctl status {_DAEMON_UNIT} -l")
         print(f"       journalctl -u {_DAEMON_UNIT} -e --no-pager")
     else:
-        print(f"       launchctl print gui/$(id -u)/com.claude-hooks.daemon")
+        print("       launchctl print gui/$(id -u)/com.claude-hooks.daemon")
     return False
 
 
@@ -1741,7 +1742,7 @@ def _install_daemon_systemd(
         else:
             print(f"  · leaving {_DAEMON_UNIT} as-is -- verifying it's responding")
             if _wait_for_daemon(timeout=5.0):
-                print(f"  · daemon responding on 127.0.0.1:47018")
+                print("  · daemon responding on 127.0.0.1:47018")
             else:
                 print(
                     "  [!!] daemon not responding. Try: "
@@ -2371,8 +2372,8 @@ def _service_state_report(*, dry_run: bool,
         print(f"  [!] claude-hooks-consultants:   {actual_label} "
               f"on 127.0.0.1:{found_port}, but claude-hooks.json "
               f"is configured for {expected_label}.")
-        print(f"        Re-run install.py to align the service mode "
-              f"or run claude-consultants config set-service-mode.")
+        print("        Re-run install.py to align the service mode "
+              "or run claude-consultants config set-service-mode.")
     # Orphan / duplicate scan
     if os.name == "nt":
         procs = _find_claude_hooks_pythonw_processes()
@@ -2505,21 +2506,146 @@ def _restart_claude_hooks_daemon() -> None:
     # Verify the daemon came back. Cold-start can take a few seconds
     # (secret-file creation, port bind, embedding-manager init).
     if _wait_for_daemon(timeout=timeout):
-        print(f"  claude-hooks-daemon: restarted + responding on 127.0.0.1:47018")
+        print("  claude-hooks-daemon: restarted + responding on 127.0.0.1:47018")
     else:
         print(f"  [!!] claude-hooks-daemon: restarted but not responding "
               f"within {timeout:.0f} s. Check logs at "
               f"~/.claude/claude-hooks-daemon.log")
 
 
+#: The consultants engine's own config file. This is the file the
+#: **operator** edits — directly, via ``claude-consultants config
+#: set-service-mode``, or via the ``/consultants config`` menu — and
+#: the only one the running engine reads. ``config/claude-hooks.json``'s
+#: ``hooks.consultants.smart_start.enabled`` is a *mirror* of
+#: ``[service].mode`` here, maintained for the installer's own
+#: task-registration and restart logic.
+def _user_consultants_config_path() -> Path:
+    return Path.home() / ".claude" / "consultants-config.toml"
+
+
+def _read_user_consultants_service_mode(
+        path: Optional[Path] = None) -> Optional[str]:
+    """Return ``[service].mode`` from the user-global consultants TOML.
+
+    ``None`` when the file is absent, unreadable, or holds a mode we
+    don't recognise — every caller treats that as "no opinion" and
+    falls back to the installer-side mirror.
+
+    Deliberately stdlib-and-direct rather than going through the
+    consultants env's ``load_config`` (see
+    :func:`_read_consultants_config_service_mode`): the service mode
+    decides which *host-wide* task/unit gets registered, so the
+    user-global file is the right layer to read — a per-project
+    ``.claude-hooks/consultants.toml`` override must not change which
+    service this host runs. It also has to work before (and without)
+    the consultants env existing.
+    """
+    p = path or _user_consultants_config_path()
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    mode: Optional[str] = None
+    try:
+        import tomllib
+    except ImportError:  # py3.10 — no stdlib TOML reader
+        tomllib = None  # type: ignore[assignment]
+    if tomllib is not None:
+        try:
+            svc = tomllib.loads(text).get("service") or {}
+            if isinstance(svc, dict):
+                mode = svc.get("mode")
+        except Exception:
+            mode = None
+    if mode is None:
+        # Fallback: scan the ``[service]`` table only, so a ``mode =``
+        # key from some other section can't be mistaken for this one.
+        import re
+        table = re.search(r"^\[service\]\s*$(.*?)(?=^\[|\Z)", text,
+                          re.M | re.S)
+        if table:
+            m = re.search(r'^\s*mode\s*=\s*"([^"]+)"', table.group(1), re.M)
+            if m:
+                mode = m.group(1)
+    return mode if mode in ("always-on", "smart-start") else None
+
+
+def _reconcile_consultants_service_mode(
+        cfg: dict, cfg_path: Path, *, dry_run: bool) -> Optional[str]:
+    """Adopt the engine TOML's ``[service].mode`` into the installer's
+    JSON mirror, and return the reconciled mode.
+
+    The 2026-08 pandorum bug: the operator sets the mode with
+    ``claude-consultants config set-service-mode`` (or the
+    ``/consultants config`` menu), which writes the TOML and *only* the
+    TOML. install.py read the mirror in ``config/claude-hooks.json``,
+    never the TOML, so the next deploy resolved the stale mirror value,
+    registered the task for it, and wrote that value straight back over
+    the operator's choice — a silent revert on every deploy, with the
+    repair path (``_detect_consultants_config_drift`` + the mode
+    prompt + the TOML sync) sitting *behind* the "Refresh /consultants
+    engine deps? [y/N]" gate that a routine deploy answers no to.
+
+    Resolution rule: **the TOML wins.** It is the operator-facing knob
+    and the only file the engine itself reads; the mirror exists to
+    serve the installer. Reconciling here — before the refresh gate,
+    before the mode prompt — means a skipped refresh and a
+    ``--non-interactive`` deploy both keep the operator's choice
+    instead of overwriting it.
+
+    Returns ``None`` when the TOML has no usable opinion (fresh host,
+    unreadable file); callers then fall back to the mirror as before.
+    """
+    toml_mode = _read_user_consultants_service_mode()
+    if toml_mode is None:
+        return None
+    mirror_mode = _detect_consultants_service_mode(cfg)
+    if toml_mode == mirror_mode:
+        return toml_mode
+
+    print(f"    [drift] {_user_consultants_config_path().name} says "
+          f"service mode = {toml_mode!r}; the installer's mirror in "
+          f"config/claude-hooks.json said {mirror_mode!r}.")
+    print(f"            Adopting {toml_mode!r} — the engine's own file "
+          f"is authoritative. Change it with "
+          f"`claude-consultants config set-service-mode <mode>`.")
+    if dry_run:
+        print("    [dry-run] Would update hooks.consultants.smart_start"
+              ".enabled to match.")
+        return toml_mode
+
+    smart = (cfg.setdefault("hooks", {})
+                .setdefault("consultants", {})
+                .setdefault("smart_start", {}))
+    smart["enabled"] = (toml_mode == "smart-start")
+    try:
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(json.dumps(cfg, indent=2) + "\n",
+                            encoding="utf-8")
+    except OSError as e:
+        print(f"    [warn] could not write the service-mode mirror to "
+              f"{cfg_path}: {e}")
+    return toml_mode
+
+
 def _detect_consultants_service_mode(cfg: dict) -> str:
     """Determine the currently-configured consultants service mode.
 
     Reads ``hooks.consultants.smart_start.enabled`` from
-    ``config/claude-hooks.json`` (the canonical installer-side
-    record). Returns ``"smart-start"`` if enabled, ``"always-on"``
-    otherwise — matching the default service-mode prompt branch in
-    ``_setup_consultants_engine``.
+    ``config/claude-hooks.json`` — the installer-side *mirror*, not
+    the source of truth. Returns ``"smart-start"`` if enabled,
+    ``"always-on"`` otherwise — matching the default service-mode
+    prompt branch in ``_setup_consultants_engine``.
+
+    The authoritative value is ``[service].mode`` in the engine's own
+    ``~/.claude/consultants-config.toml``;
+    :func:`_reconcile_consultants_service_mode` runs first and brings
+    the mirror in line with it, so by the time anything calls this the
+    two agree. Read the mirror rather than the TOML directly here
+    because every caller already holds ``cfg``, and because the mirror
+    is what the Windows task/port lookup was built around.
 
     Used by the post-install restart logic so it talks to the RIGHT
     schtasks task + port, not the always-on defaults. Pre-#223 the
@@ -3135,9 +3261,9 @@ def _validate_sqlite_vec_only(cfg: dict) -> None:
     print(f"  db_path      : {expanded}")
     db_file = Path(expanded)
     if not db_file.exists():
-        print(f"  [!!] db file does not exist; nothing to validate. "
-              f"Run a full re-install or write the first recall/store "
-              f"to lazily create it.")
+        print("  [!!] db file does not exist; nothing to validate. "
+              "Run a full re-install or write the first recall/store "
+              "to lazily create it.")
         return
     print(f"  db file size : {db_file.stat().st_size:,} bytes")
 
@@ -3254,7 +3380,7 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
         # _validate_qdrant_embedding / _validate_memory_kg_embedding
         # pattern from v1.4. Default V so the lowest-impact action
         # is the easy one.
-        print(f"  Currently configured: enabled, DSN set, launcher at")
+        print("  Currently configured: enabled, DSN set, launcher at")
         print(f"  {launcher_path}")
         choice = input(
             "  [V]alidate only / [R]e-install / [S]kip? [V/r/s]: "
@@ -3343,7 +3469,7 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
     table_name = (cfg.get("providers") or {}).get("pgvector", {}).get("table") or "memories_qwen3"
     if not _pgvector_tables_present(dsn, table_name):
         if non_interactive:
-            print(f"  Tables missing -> auto-initializing qwen3 + KG schema...")
+            print("  Tables missing -> auto-initializing qwen3 + KG schema...")
             do_init = True
         else:
             ans = input(
@@ -3399,14 +3525,14 @@ def _setup_pgvector_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) -> N
     # 5. Register in ~/.claude.json mcpServers (root level so it's
     # visible to every project -- this is the user-installed shape).
     if dry_run:
-        print(f"  [dry-run] Would register mcpServers.pgvector in ~/.claude.json")
+        print("  [dry-run] Would register mcpServers.pgvector in ~/.claude.json")
     else:
         _register_pgvector_mcp_in_claude_json(launcher_path)
         print(f"  ~/.claude.json: registered mcpServers.pgvector -> {launcher_path}")
 
-    print(f"  Done. After Claude Code restart, tools surface as:")
-    print(f"    mcp__pgvector__pgvector-find / -find-hybrid / -store / -count")
-    print(f"    mcp__pgvector__pgvector-kg-search / -kg-create / -kg-observe / -kg-relate")
+    print("  Done. After Claude Code restart, tools surface as:")
+    print("    mcp__pgvector__pgvector-find / -find-hybrid / -store / -count")
+    print("    mcp__pgvector__pgvector-kg-search / -kg-create / -kg-observe / -kg-relate")
 
 
 # ===================================================================== #
@@ -3553,7 +3679,7 @@ def _download_composite_llamafile(
         return False
 
     if sha256:
-        print(f"  Verifying SHA256...", end=" ", flush=True)
+        print("  Verifying SHA256...", end=" ", flush=True)
         if not _verify_sha256(target, sha256):
             print("FAILED")
             print(f"  Removing corrupted artifact at {target}")
@@ -3720,8 +3846,8 @@ def _setup_llamafile_engine(
                 lan_ip = "<this-host-LAN-IP>"
             port = int(existing.get("port") or 38092)
             print(f"    LAN URL  : http://{lan_ip}:{port}/embedding")
-            print(f"             Paste this URL into other hosts' "
-                  f"`providers.<pg|sqlite_vec>.embedder_options.url`.")
+            print("             Paste this URL into other hosts' "
+                  "`providers.<pg|sqlite_vec>.embedder_options.url`.")
         else:
             host = "127.0.0.1"
 
@@ -3732,6 +3858,12 @@ def _setup_llamafile_engine(
         "host": host,
         "port": int(existing.get("port") or 38092),
         "ctx_size": int(ctx_size),
+        # Concurrent embed slots. Preserved from the existing config,
+        # defaulting to 3 — never silently reset to 1. This block is
+        # rebuilt from scratch on every install.py run and only the keys
+        # named here survive, which is exactly how the slot count was
+        # lost before (solidpc 2026-09-09). See EmbeddingConfig.n_parallel.
+        "n_parallel": int(existing.get("n_parallel") or 3),
         "pooling": "last",
         "mode": mode,
         "idle_timeout_seconds": float(
@@ -4672,7 +4804,7 @@ def _setup_sqlite_vec_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) ->
     if install_launcher:
         if dry_run:
             print(f"  [dry-run] Would write launcher: {launcher_path}")
-            print(f"  [dry-run] Would register mcpServers.sqlite_vec in ~/.claude.json")
+            print("  [dry-run] Would register mcpServers.sqlite_vec in ~/.claude.json")
         else:
             _write_sqlite_vec_launcher(launcher_path, py=py, repo=str(HERE))
             print(f"  Launcher: {launcher_path}")
@@ -4684,8 +4816,8 @@ def _setup_sqlite_vec_mcp(cfg: dict, *, non_interactive: bool, dry_run: bool) ->
         print(f"  Launcher validate: {'OK' if ok else 'FAIL'}")
 
     print(f"  Done. sqlite_vec.enabled = True, db_path = {db_path}")
-    print(f"  After Claude Code restart, tools surface as:")
-    print(f"    mcp__sqlite_vec__sqlite-vec-find / -store / -count")
+    print("  After Claude Code restart, tools surface as:")
+    print("    mcp__sqlite_vec__sqlite-vec-find / -store / -count")
 
 
 def _pgvector_launcher_path() -> Path:
@@ -4733,7 +4865,7 @@ def _write_pgvector_launcher(path: Path, *, py: str, repo: str) -> None:
     # other tools without an absolute path.
     if str(path.parent) not in (os.environ.get("PATH") or "").split(os.pathsep):
         print(f"  [!] {path.parent} is not in PATH -- only Claude Code can find it (absolute path).")
-        print(f"      Add to PATH if you want Cursor/Codex/etc. to spawn `pgvector-mcp` by name.")
+        print("      Add to PATH if you want Cursor/Codex/etc. to spawn `pgvector-mcp` by name.")
 
 
 def _sqlite_vec_launcher_path() -> Path:
@@ -4775,7 +4907,7 @@ def _write_sqlite_vec_launcher(path: Path, *, py: str, repo: str) -> None:
         path.chmod(0o755)
     if str(path.parent) not in (os.environ.get("PATH") or "").split(os.pathsep):
         print(f"  [!] {path.parent} is not in PATH -- only Claude Code can find it (absolute path).")
-        print(f"      Add to PATH if you want Cursor/Codex/etc. to spawn `sqlite-vec-mcp` by name.")
+        print("      Add to PATH if you want Cursor/Codex/etc. to spawn `sqlite-vec-mcp` by name.")
 
 
 def _validate_sqlite_vec_launcher(launcher_path: Path) -> bool:
@@ -5029,9 +5161,9 @@ def _install_bin_shim_wrappers(repo_path: Path, *, dry_run: bool) -> None:
         _ensure_windows_user_path_includes(wrapper_dir)
     else:
         print(f"  [!] {wrapper_dir} is not in PATH for this shell.")
-        print(f"      To enable bare-name skill CLIs (claude-consultants, claude-advisor, ...):")
-        print(f'        echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.bashrc  # or ~/.zshrc')
-        print(f"      Then open a new shell (or restart Claude Code).")
+        print("      To enable bare-name skill CLIs (claude-consultants, claude-advisor, ...):")
+        print('        echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.bashrc  # or ~/.zshrc')
+        print("      Then open a new shell (or restart Claude Code).")
 
 
 def _read_windows_user_path() -> Optional[str]:
@@ -5088,7 +5220,7 @@ def _ensure_windows_user_path_includes(wrapper_dir: Path) -> None:
         return
     new_path = (target + ";" + cur) if cur else target
     if len(new_path) > 16384:
-        print(f"  [warn] User PATH would exceed 16 KB; refusing to extend it.")
+        print("  [warn] User PATH would exceed 16 KB; refusing to extend it.")
         print(f"         Add manually if you need it: {wrapper_dir}")
         return
     try:
@@ -5115,7 +5247,7 @@ def _ensure_windows_user_path_includes(wrapper_dir: Path) -> None:
     except Exception:
         pass
     print(f"  [ok] Prepended {wrapper_dir} to User PATH (HKCU\\Environment).")
-    print(f"       Open a new shell or restart Claude Code to pick it up.")
+    print("       Open a new shell or restart Claude Code to pick it up.")
 
 
 def _remove_bin_shim_wrappers(*, dry_run: bool) -> int:
@@ -5897,9 +6029,9 @@ def _ensure_code_graph_extras(*, non_interactive: bool, dry_run: bool) -> None:
         if non_interactive:
             print("    --non-interactive: installing...")
         else:
-            ans = input(f"    Install? [Y/n]: ").strip().lower()
+            ans = input("    Install? [Y/n]: ").strip().lower()
             if ans not in ("", "y", "yes"):
-                print(f"    Skipped. To install later:")
+                print("    Skipped. To install later:")
                 print(f"      {py} -m pip install {pkg_list}")
                 print(f"      # or via the extra: pip install 'claude-hooks[{extra['config_extra']}]'")
                 continue
@@ -5923,9 +6055,9 @@ def _check_conda_env(*, non_interactive: bool, dry_run: bool) -> None:
 
     if conda_py.exists():
         if in_conda:
-            print(f"Conda env:      claude-hooks (active)")
+            print("Conda env:      claude-hooks (active)")
         else:
-            print(f"Conda env:      claude-hooks (exists, not active)")
+            print("Conda env:      claude-hooks (exists, not active)")
         print(f"Hook runtime:   {conda_py}")
         return
 
@@ -5935,22 +6067,22 @@ def _check_conda_env(*, non_interactive: bool, dry_run: bool) -> None:
     if not conda_bin:
         print("  conda not found on this system -- skipping env setup.")
         print("  Hooks will fall back to system python3.\n")
-        print(f"Hook runtime:   system python3")
+        print("Hook runtime:   system python3")
         return
 
     if non_interactive:
         print("  --non-interactive: skipping env creation.")
-        print(f"Hook runtime:   system python3")
+        print("Hook runtime:   system python3")
         return
 
     ans = input("  Create conda env 'claude-hooks' (Python 3.11) and install deps? [Y/n]: ").strip().lower()
     if ans not in ("", "y", "yes"):
-        print(f"Hook runtime:   system python3")
+        print("Hook runtime:   system python3")
         return
 
     if dry_run:
         print("  [dry-run] Would create conda env and install requirements.")
-        print(f"Hook runtime:   system python3")
+        print("Hook runtime:   system python3")
         return
 
     print("  Creating conda env 'claude-hooks'...")
@@ -5960,7 +6092,7 @@ def _check_conda_env(*, non_interactive: bool, dry_run: bool) -> None:
     )
     if rc.returncode != 0:
         print(f"  conda create failed:\n{rc.stderr[-300:]}")
-        print(f"Hook runtime:   system python3")
+        print("Hook runtime:   system python3")
         return
 
     # Install requirements into the new env.
@@ -5976,11 +6108,11 @@ def _check_conda_env(*, non_interactive: bool, dry_run: bool) -> None:
             )
 
     if conda_py.exists():
-        print(f"  Done -- conda env ready.")
+        print("  Done -- conda env ready.")
         print(f"Hook runtime:   {conda_py}")
     else:
         print(f"  Warning: env created but python not found at {conda_py}")
-        print(f"Hook runtime:   system python3")
+        print("Hook runtime:   system python3")
 
 
 def _is_claude_hooks_pip_installed(py_path: Path) -> bool:
@@ -6033,21 +6165,21 @@ def _offer_pip_install_editable(
         return
 
     if _is_claude_hooks_pip_installed(conda_py):
-        print(f"\n==> Package: claude-hooks already pip-installed in conda env")
+        print("\n==> Package: claude-hooks already pip-installed in conda env")
         return
 
-    print(f"\n==> Package: claude-hooks NOT pip-installed in conda env")
+    print("\n==> Package: claude-hooks NOT pip-installed in conda env")
     print(f"    Env python: {conda_py}")
     print(f"    Repo:       {HERE}")
-    print(f"    Without this, ``python -m claude_hooks.<module>`` from a")
-    print(f"    manually-activated env fails. The bin/ shims work either")
-    print(f"    way (PYTHONPATH via _resolve_python.sh in v1.10.0+); this")
-    print(f"    is polish — useful for direct env-activated invocations")
-    print(f"    and IDE / tool integrations.")
+    print("    Without this, ``python -m claude_hooks.<module>`` from a")
+    print("    manually-activated env fails. The bin/ shims work either")
+    print("    way (PYTHONPATH via _resolve_python.sh in v1.10.0+); this")
+    print("    is polish — useful for direct env-activated invocations")
+    print("    and IDE / tool integrations.")
 
     if non_interactive:
-        print(f"    --non-interactive: skipping pip install -e .")
-        print(f"    Run install.py interactively to opt in, or:")
+        print("    --non-interactive: skipping pip install -e .")
+        print("    Run install.py interactively to opt in, or:")
         print(f"      {conda_py} -m pip install -e {HERE}")
         return
 
@@ -6083,8 +6215,8 @@ def _offer_pip_install_editable(
         tail = (rc.stderr or rc.stdout or "").splitlines()[-5:]
         for line in tail:
             print(f"      {line}")
-        print(f"    The shims and hooks still work without this — pip-install")
-        print(f"    is polish, not blocking. You can retry manually:")
+        print("    The shims and hooks still work without this — pip-install")
+        print("    is polish, not blocking. You can retry manually:")
         print(f"      {conda_py} -m pip install -e {HERE}")
 
 
@@ -6114,6 +6246,17 @@ def _install_consultants(cfg: dict, cfg_path: Path, *,
         print(f"      {consultants_py}")
     else:
         print(f"    {CONSULTANTS_ENV_NAME} env not found.")
+
+    # Service-mode reconciliation runs BEFORE the refresh gate below.
+    # A routine deploy answers "n" to "Refresh deps?" (the pip install
+    # is slow), and every piece of mode handling — the drift detector,
+    # the prompt, the TOML sync — used to sit behind that gate. So a
+    # host whose mode was set with `claude-consultants config
+    # set-service-mode` kept the mirror it started with, and the next
+    # deploy that *did* go through the gate wrote the stale mirror back
+    # over the operator's choice. See
+    # :func:`_reconcile_consultants_service_mode`.
+    _reconcile_consultants_service_mode(cfg, cfg_path, dry_run=dry_run)
 
     # Decide whether to (re)install. In non-interactive mode, only
     # update the existing env; never create a new one without consent.
@@ -6243,10 +6386,10 @@ def _install_consultants(cfg: dict, cfg_path: Path, *,
         )
     except Exception as e:
         print(f"    [warn] consultants store config setup failed: {e}")
-        print(f"           consultants daemon will fall back to "
-              f"sqlite_vec at ~/.claude/consultants-store.db "
-              f"without an embedder — store calls will fail until "
-              f"you hand-edit ~/.claude/consultants-config.toml.")
+        print("           consultants daemon will fall back to "
+              "sqlite_vec at ~/.claude/consultants-store.db "
+              "without an embedder — store calls will fail until "
+              "you hand-edit ~/.claude/consultants-config.toml.")
 
     # Consultancy review loop (mirrors /get-advice): optionally tune
     # the followup cap + per-approval grant size at install time. The
@@ -6490,7 +6633,7 @@ def _customize_consultants_store_knobs(*, non_interactive: bool
         if 0.0 <= val <= 1.0:
             ttl_over["jitter_pct"] = val
         else:
-            print(f"    [warn] jitter_pct out of range — kept default")
+            print("    [warn] jitter_pct out of range — kept default")
 
     print("    [store.distillation] — semantic-memory consolidation")
     changed, val = _ask_optional_bool(
@@ -6506,7 +6649,7 @@ def _customize_consultants_store_knobs(*, non_interactive: bool
     if changed and val is not None and val >= 30.0:
         distill_over["sweep_interval_seconds"] = float(val)
     elif changed:
-        print(f"    [warn] sweep_interval_seconds < 30 — kept default")
+        print("    [warn] sweep_interval_seconds < 30 — kept default")
     changed, val = _ask_optional_int(
         "Minimum entries to trigger distillation", default=3)
     if changed and val is not None and val >= 1:
@@ -6899,7 +7042,7 @@ def _lsp_print_row(name: str, st) -> None:
         # label survive in every console encoding.
         print(f"    [!!]  {label:32} on disk, not on PATH "
               f"({st.on_disk_path})")
-        print(f"          -> restart your shell to pick up updated PATH")
+        print("          -> restart your shell to pick up updated PATH")
         return
 
     suffix = "MISSING"
@@ -7353,7 +7496,7 @@ def _setup_consultants_store(cfg: dict, *, consultants_py: Path,
         print(f"           {proc.stderr.strip()[-300:]}")
         return
     path = proc.stdout.strip() or "~/.claude/consultants-config.toml"
-    print(f"    Consultants store wired:")
+    print("    Consultants store wired:")
     print(f"      backend  = {chosen_backend}")
     print(f"      embedder = {embedder_name}")
     if chosen_backend == "pgvector":
@@ -8238,7 +8381,7 @@ def pick_provider(cls, report: DetectionReport, non_interactive: bool) -> Option
     label = cls.display_name
     print(f"\n--- {label} ---")
     if not cands:
-        print(f"  No candidates detected.")
+        print("  No candidates detected.")
         if non_interactive:
             return None
         url = input(f"  Enter MCP URL for {label} (or empty to skip): ").strip()
@@ -8252,15 +8395,15 @@ def pick_provider(cls, report: DetectionReport, non_interactive: bool) -> Option
         print(f"  Found: '{c.server_key}' -> {c.url}  ({c.notes})")
         if non_interactive:
             return c
-        ans = input(f"  Use this? [Y/n]: ").strip().lower()
+        ans = input("  Use this? [Y/n]: ").strip().lower()
         if ans in ("", "y", "yes"):
             return c
         return None
-    print(f"  Multiple candidates:")
+    print("  Multiple candidates:")
     for i, c in enumerate(cands, 1):
         print(f"    [{i}] '{c.server_key}' -> {c.url}  ({c.source}, {c.confidence})")
     if non_interactive:
-        print(f"  --non-interactive set; picking the first.")
+        print("  --non-interactive set; picking the first.")
         return cands[0]
     while True:
         ans = input(f"  Pick one [1-{len(cands)}] or 0 to skip: ").strip()
@@ -8998,7 +9141,7 @@ def _ensure_marketplace() -> None:
     # Fix stale plugin install paths (e.g. Linux paths on Windows or vice versa).
     _fix_plugin_paths()
 
-    print(f"\n       To add marketplace in Claude Code: /plugin marketplace add MadAppGang/claude-code")
+    print("\n       To add marketplace in Claude Code: /plugin marketplace add MadAppGang/claude-code")
 
 
 def _skill_state(
@@ -9127,7 +9270,7 @@ def _install_skills(
             print(f"  [!!]   /{spec.name:20} installed BUT dep missing: {st['dep_label']}")
             if non_interactive:
                 # Non-interactive never destroys.
-                print(f"         --non-interactive: keeping (re-run interactively to remove)")
+                print("         --non-interactive: keeping (re-run interactively to remove)")
                 summary_kept.append(spec)
                 continue
             ans = input(
@@ -9136,7 +9279,7 @@ def _install_skills(
             if ans in ("y", "yes"):
                 actions_remove.append(spec)
             else:
-                print(f"         Kept (use re-run to remove later).")
+                print("         Kept (use re-run to remove later).")
                 summary_kept.append(spec)
             continue
 
@@ -9149,7 +9292,7 @@ def _install_skills(
             if non_interactive:
                 # Non-interactive never auto-installs new skills (would
                 # silently grow the surface on scripted-stdin deploys).
-                print(f"         --non-interactive: skipping (re-run interactively to install)")
+                print("         --non-interactive: skipping (re-run interactively to install)")
                 continue
             ans = input(
                 f"         Install /{spec.name}? [y/N]: "
@@ -9157,7 +9300,7 @@ def _install_skills(
             if ans in ("y", "yes"):
                 actions_install.append(spec)
             else:
-                print(f"         Skipped.")
+                print("         Skipped.")
             continue
 
         # ── Case B: deps OK + installed → prompt KEEP, default Y
@@ -9258,12 +9401,12 @@ def _setup_episodic(cfg: dict, cfg_path: Path, args, *, dry_run: bool) -> None:
         ep_cfg["server_host"] = default_host
         ep_cfg["server_port"] = default_port
 
-        print(f"  Mode:   server")
+        print("  Mode:   server")
         print(f"  Bind:   {default_host}:{default_port}")
         print(f"  Binary: {shutil.which('episodic-memory')}")
         if not dry_run:
             save_config(cfg, cfg_path)
-            print(f"  Config updated: episodic.mode = server")
+            print("  Config updated: episodic.mode = server")
         # Offer systemd service install (Linux only).
         if os.name != "nt":
             _install_episodic_systemd(
@@ -9276,10 +9419,10 @@ def _setup_episodic(cfg: dict, cfg_path: Path, args, *, dry_run: bool) -> None:
         server_url = args.episodic_client.rstrip("/")
         ep_cfg["mode"] = "client"
         ep_cfg["server_url"] = server_url
-        print(f"  Mode:       client")
+        print("  Mode:       client")
         print(f"  Server URL: {server_url}")
         # Test connectivity.
-        print(f"  Testing connection...", end=" ")
+        print("  Testing connection...", end=" ")
         try:
             import urllib.request
             req = urllib.request.Request(
@@ -9291,11 +9434,11 @@ def _setup_episodic(cfg: dict, cfg_path: Path, args, *, dry_run: bool) -> None:
                 print(f"OK (archive: {data.get('archive', '?')})")
         except Exception as e:
             print(f"UNREACHABLE ({e})")
-            print(f"  Warning: server not reachable. Transcripts will be pushed when it's up.")
+            print("  Warning: server not reachable. Transcripts will be pushed when it's up.")
         print(f"  SessionEnd hook will push transcripts to {server_url}/ingest")
         if not dry_run:
             save_config(cfg, cfg_path)
-            print(f"  Config updated: episodic.mode = client")
+            print("  Config updated: episodic.mode = client")
 
     elif current_mode != "off":
         print(f"\n==> Episodic memory: {current_mode.upper()} mode (already configured)")
@@ -9303,7 +9446,7 @@ def _setup_episodic(cfg: dict, cfg_path: Path, args, *, dry_run: bool) -> None:
             print(f"  Server URL: {ep_cfg.get('server_url', '?')}")
     else:
         # Not configured -- mention availability.
-        print(f"\n  Episodic memory: not configured (use --episodic-server or --episodic-client URL)")
+        print("\n  Episodic memory: not configured (use --episodic-server or --episodic-client URL)")
 
 
 def _fix_plugin_paths() -> None:
@@ -9404,12 +9547,12 @@ def _install_episodic_systemd(host: str, port: int, *, non_interactive: bool, dr
             ans = input("  Start the service now? [Y/n]: ").strip().lower()
             if ans in ("", "y", "yes") and not dry_run:
                 subprocess.run(["systemctl", "start", SYSTEMD_UNIT])
-                print(f"  Service started.")
+                print("  Service started.")
         return
 
-    print(f"\n  Install as systemd service?")
-    print(f"    - Starts on boot (after network)")
-    print(f"    - Restarts on failure (30s delay, max 5 in 5min)")
+    print("\n  Install as systemd service?")
+    print("    - Starts on boot (after network)")
+    print("    - Restarts on failure (30s delay, max 5 in 5min)")
     print(f"    - Logs via journalctl -u {SYSTEMD_UNIT}")
     if non_interactive:
         print("  --non-interactive: skipping service install.")
@@ -9441,7 +9584,7 @@ def _install_episodic_systemd(host: str, port: int, *, non_interactive: bool, dr
 
     subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
     subprocess.run(["systemctl", "enable", SYSTEMD_UNIT], capture_output=True)
-    print(f"  Enabled at boot.")
+    print("  Enabled at boot.")
 
     subprocess.run(["systemctl", "start", SYSTEMD_UNIT], capture_output=True)
     time.sleep(1)
@@ -9450,7 +9593,7 @@ def _install_episodic_systemd(host: str, port: int, *, non_interactive: bool, dr
         capture_output=True,
     )
     if rc.returncode == 0:
-        print(f"  Service started successfully.")
+        print("  Service started successfully.")
         print(f"  Logs: journalctl -u {SYSTEMD_UNIT} -f")
     else:
         print(f"  [!!] Service failed to start. Check: journalctl -u {SYSTEMD_UNIT}")
@@ -9536,7 +9679,7 @@ def _prompt_env_vars(
 
     env = settings.setdefault("env", {})
     if not isinstance(env, dict):
-        print(f"  [!!] Existing settings.json 'env' is not an object -- aborting.")
+        print("  [!!] Existing settings.json 'env' is not an object -- aborting.")
         return
     for k, v in to_set.items():
         env[k] = v

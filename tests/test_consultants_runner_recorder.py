@@ -13,9 +13,7 @@ end-to-end run on solidpc post-deploy).
 from __future__ import annotations
 
 import sqlite3
-from pathlib import Path
 
-import pytest
 
 from consultants import config as cc
 from consultants.engine import storage

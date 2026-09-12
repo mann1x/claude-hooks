@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Optional
 
 
 @dataclass
@@ -212,6 +212,47 @@ class Provider(ABC):
     def kg_search_nodes(self, query: str, k: int = 5) -> list[dict]:
         raise NotImplementedError(
             f"{self.name} does not implement kg_search_nodes"
+        )
+
+    # Removal + enumeration (v1.14.1+). Without these the graph is
+    # append-only and unlistable: a wrong entity can be created and
+    # searched forever but never removed, and the only way to find out
+    # what it holds is to guess names at kg_search_nodes.
+
+    def kg_delete_entities(self, names: list) -> dict:
+        raise NotImplementedError(
+            f"{self.name} does not implement kg_delete_entities"
+        )
+
+    def kg_delete_observations(self, items: list) -> int:
+        raise NotImplementedError(
+            f"{self.name} does not implement kg_delete_observations"
+        )
+
+    def kg_delete_relations(self, relations: list) -> int:
+        raise NotImplementedError(
+            f"{self.name} does not implement kg_delete_relations"
+        )
+
+    def kg_read_graph(self, limit: int = 100) -> list[dict]:
+        raise NotImplementedError(
+            f"{self.name} does not implement kg_read_graph"
+        )
+
+    def kg_open_nodes(self, names: list) -> list[dict]:
+        raise NotImplementedError(
+            f"{self.name} does not implement kg_open_nodes"
+        )
+
+    def list_memories(self, limit: int = 20, offset: int = 0,
+                      table: Optional[str] = None) -> list[Memory]:
+        """Page through stored memories without a query.
+
+        Default raises: a provider that cannot enumerate must say so
+        rather than return ``[]``, which reads as "the store is empty".
+        """
+        raise NotImplementedError(
+            f"{self.name} does not implement list_memories"
         )
 
     def recall_hybrid(self, query: str, k: int = 5,

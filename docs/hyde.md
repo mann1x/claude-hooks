@@ -190,6 +190,111 @@ soon as the primary answers (~0-4 s); the long cap only bites when the cloud
 primary actually stalls. If you lower `hyde_timeout`, you can lower the caps to
 match; if you raise it, raise the caps too.
 
+### The "recall overhead" term is only bounded by `max_query_chars`
+
+The inequality above quietly assumes recall overhead is a small constant.
+Until v1.14.1 it wasn't: nothing capped the *length* of the query, so the
+term scaled with whatever the user pasted. `min_prompt_chars` was the only
+length check in the pipeline, and neither `max_total_chars` (which bounds
+the injected **output**) nor `hyde_ground_max_chars` (which bounds the
+**grounding memories**) touches the prompt.
+
+That made a large prompt a total recall loss, and a silent one. Step 1 of
+`run_recall` embeds the raw query *before* HyDE is reached, so the timeout
+was rarely HyDE's fault at all. Measured on solidpc against the CPU
+llamafile embedder:
+
+| query | embed | vs the 65 s cap |
+|---|---|---|
+| 1 000 chars | 1.4 s | fine |
+| 5 000 chars | 9.0 s | fine |
+| 16 000 chars | 67.6 s | **blown** |
+| 30 000 chars (embedder `max_chars`) | ~300 s | blown 5× over |
+
+The embedder's own timeout is **180 s**, far above the hook cap, so it
+never gives up first — Claude Code SIGTERMs the hook and discards the
+output. You lose the entire recall for that turn and see only
+`hook timed out after 65s`.
+
+`max_query_chars` (default **3500**, `0` disables) closes it, sized for
+the worst of the density range rather than for average prose: ~1 100
+tokens of prose at 3.2 chars/token, ~2 600 tokens of base64 at 1.35 —
+both comfortably inside 65 s even on pandorum (~2× slower).
+
+The clamp is deliberately not `query[:3500]`. A long prompt carries its
+framing at the top and its actual ask at the bottom, with pasted bulk in
+between, so it keeps **both ends** (65 % head / 35 % tail joined by `…`),
+cuts on paragraph → line → sentence → word boundaries rather than
+mid-word, and **squeezes** long fenced blocks to their opening lines
+instead of dropping them — for "here is the traceback, what is it?" the
+exception line at the top of the block is the highest-signal string in
+the prompt. Dropping the middle also helps recall *quality*: a 20 KB
+query collapses into one mushy centroid vector whose nearest neighbours
+drift generic.
+
+A clamp logs at INFO (`query clamped for recall: 46604 -> 3338 chars`),
+so thin recall on a long prompt is explainable rather than mysterious.
+
+### The store side needed the same budget — `max_store_chars`
+
+Clamping recall alone left the asymmetry that actually hurt: recall and
+the `Stop` hook's turn-store hit the **same single embedder**, and only
+one of them budgeted its payload. Background stores are not on anyone's
+critical path, but they occupy the embedder, so an unbounded store
+delays the recall queued behind it.
+
+Measured on solidpc's CPU llamafile with realistic prose, the cost
+curve is steep enough that payload size is the only lever that matters:
+
+| payload | embed |
+|---|---|
+| 500 chars | ~0.75 s |
+| 2 000 chars | ~3.2 s |
+| 4 000 chars | ~8 s |
+| 5 000 chars | 12.7 s (isolated instance, v1.14.0) |
+
+> Two traps when re-deriving this curve, both of which produce
+> confident-looking numbers that are wrong by multiples:
+>
+> - **Characters are a proxy; tokens are the cost.** Density moves the
+>   ratio ~3× (prose ~3.2 chars/token, base64 ~1.35), so the same
+>   `max_store_chars` buys very different amounts of work.
+> - **Never use a repeated-character payload.** `"x" * n` collapses into
+>   a handful of BPE tokens and times ~25 % fast at 4 k and far more at
+>   the top end. Likewise, re-sending an identical payload measures
+>   llamafile's prompt cache, not the model — the second call returns in
+>   tens of milliseconds.
+>
+> And measure on an **isolated** llamafile, never the production one:
+> on a host with live sessions the shared embedder is serving their
+> recalls and stores too, which moved repeat measurements here by 2-5×.
+
+Against that, stored turn summaries measured **p50 2.9 KB** — squarely
+in the expensive region. `hooks.stop.max_store_chars` (default **2000**,
+`<= 0` disables) reuses `clamp_query`, so a stored summary keeps both
+ends: a turn's *outcome* is at the bottom, and a head-only cut would
+preserve every summary's preamble while dropping the result it exists
+to record.
+
+Two things this is **not**:
+
+- Not `embedder_options.max_chars`. That is the 30 k context-overflow
+  guard — a safety valve three orders of magnitude away from where the
+  latency bites. A latency budget has to cut the *common* case.
+- Not a text-only trim. The summary itself is clamped, so the stored
+  content and its vector describe the same document; embedding a
+  shortened text while storing the full one would have recall scoring a
+  document the store never held.
+
+The trade is real and that is why it is a knob: a clamped turn recalls
+on less text. Raise it for recall quality, lower it for turnaround.
+Clamps log at INFO (`summary clamped for store: 4402 -> 2000 chars`).
+
+See also `embedding.n_parallel` in
+[`llamafile-integration.md`](llamafile-integration.md) — the other half
+of the same problem, from the concurrency side rather than the payload
+side.
+
 ## Failure modes
 
 The whole HyDE step is best-effort:

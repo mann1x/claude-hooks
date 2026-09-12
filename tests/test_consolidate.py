@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from claude_hooks import consolidate as con_mod
 from claude_hooks.providers.base import Memory
@@ -59,7 +58,38 @@ class TestConsolidateMerge:
             "state_file": str(state),
         })
         result = con_mod.consolidate(cfg, [p1, p2], dry_run=True)
+        # FakeProvider has no delete_by_hashes, so the pair is found but
+        # cannot be acted on. It counts as skipped, NOT merged: before
+        # v1.14.1 `merged` reported candidates, so a run that changed
+        # nothing still announced merges.
+        assert result.merged == 0
+        assert result.skipped >= 1
+
+    def test_merge_deletes_the_duplicate_when_the_provider_can(
+            self, base_config, fake_provider, tmp_path):
+        dup = "the same long text appears twice in the recall set"
+        deleted: list = []
+
+        def _make(name, mems):
+            p = fake_provider(name=name, recall_returns=mems)
+            p.delete_by_hashes = lambda hashes, tables=None: (
+                deleted.extend(hashes) or len(hashes))
+            return p
+
+        a = Memory(text=dup, metadata={"_hash": "aa"})
+        b = Memory(text=dup + " more text here", metadata={"_hash": "bb"})
+        p1 = _make("p1", [a, Memory(text="one", metadata={}),
+                          Memory(text="two", metadata={}),
+                          Memory(text="three", metadata={})])
+        p2 = _make("p2", [b])
+        cfg = base_config(consolidate={
+            "enabled": True, "merge_similarity_threshold": 0.5,
+            "state_file": str(tmp_path / "s.json"),
+        })
+        result = con_mod.consolidate(cfg, [p1, p2])
         assert result.merged >= 1
+        # The shorter of the pair is the one that goes.
+        assert bytes.fromhex("aa") in deleted
 
     def test_writes_state_file_when_not_dry_run(self, base_config, fake_provider, tmp_path):
         state = tmp_path / "state.json"

@@ -14,7 +14,6 @@ GPU fallback scoped per-label, and Windows detach kwargs.
 
 from __future__ import annotations
 
-import socket
 import subprocess
 import sys
 import time

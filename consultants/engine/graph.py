@@ -31,10 +31,31 @@ from __future__ import annotations
 import logging
 import operator
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Callable, Optional, TypedDict
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    Callable,
+    Optional,
+    TypedDict,
+)
+
+if TYPE_CHECKING:
+    # The CouncilStateV2 schema below refers to these by quoted
+    # forward-ref so the module stays importable without pulling in
+    # state_v2 at load time (see the note on ``tool_plan_item``). The
+    # quotes alone leave the names genuinely undefined — a type checker
+    # cannot resolve them and ``get_type_hints()`` would raise — so
+    # bind them here, where the cost is zero at runtime.
+    from consultants.engine.state_v2 import (  # noqa: F401
+        CoderArtifact,
+        CoderTaskItem,
+        Doc,
+        ToolPlanItem,
+        ToolResult,
+    )
 
 from consultants.engine import council
-from consultants.config import ROLES
 
 
 # ----------------------- state schema --------------------------- #
@@ -50,6 +71,17 @@ from consultants.config import ROLES
 class CouncilState(TypedDict, total=False):
     question: str
     cwd: str
+    # Additional sandbox roots (CLI ``--add-dir``, realpath'd). The
+    # citation verifiers read ``[cwd, *extra_roots]`` off state.
+    #
+    # THIS is the schema every ``StateGraph`` in this module compiles
+    # against — ``CouncilStateV2`` in ``state_v2.py`` is the not-yet-
+    # adopted successor and declaring a channel there does nothing for
+    # production. The 2026-08-02 fix declared it in V2 only, so the
+    # key kept being stripped exactly as the comment above this class
+    # warns, and a follow-up whose roots were logged correctly by the
+    # runner still linted against cwd alone.
+    extra_roots: list[str]
     models: dict
     topology: str
     effort: str
@@ -85,6 +117,14 @@ class CouncilState(TypedDict, total=False):
     # on the single-researcher path used by critic re-routes.
     plan_item: Optional[str]
     lane_idx: Optional[int]
+    #: #103: which researcher lane emitted the tool plan this
+    #: tool_executor lane is serving, so its ToolResult routes back to
+    #: that lane and not a sibling's. Declared even though a Send
+    #: payload reaches its node unfiltered (unlike the top-level
+    #: ``invoke`` input, which IS filtered by this schema): relying on
+    #: that asymmetry is how ``extra_roots`` went missing for two
+    #: months. Anything the graph passes around is a channel.
+    parent_lane_idx: Optional[int]
     model_override: Optional[str]
     # M6: per-lane Send-injected payload for the tool_executor node.
     # Carries exactly one ToolPlanItem the lane will execute. The
@@ -169,6 +209,29 @@ log = logging.getLogger("consultants.engine.graph")
 # Knobs are bundled into a dataclass so the caller (server / cli)
 # constructs it once and graph.py doesn't grow a 12-arg signature.
 
+#: Roles that ran a single tool-free call before M-B. ``researcher`` is
+#: absent because its tool loop predates this gate and is wired directly.
+TOOLABLE_ROLES: tuple[str, ...] = (
+    "planner", "critic", "meta_critic", "synthesizer", "adversary",
+)
+
+
+def _tools_for(deps: "GraphDeps", role: str) -> dict:
+    """Kwargs handing ``role`` its tools, or an empty dict.
+
+    Returning ``{}`` rather than ``tool_specs=None`` matters: the node
+    signatures default these to None, so an ungated role is called with
+    exactly the argument list it had before M-B.
+    """
+    if role not in (deps.tooled_roles or ()):
+        return {}
+    if not deps.tool_specs or deps.tool_executor is None:
+        return {}
+    return {"tool_specs": deps.tool_specs,
+            "tool_executor": deps.tool_executor,
+            "cwd": deps.cwd}
+
+
 @dataclass
 class GraphDeps:
     """All non-state inputs the council nodes need.
@@ -191,6 +254,12 @@ class GraphDeps:
     cwd: str
     tool_executor: Optional[Callable[..., str]] = None
     tool_specs: list[dict] = field(default_factory=list)
+    # M-B: roles that receive ``tool_specs`` + ``tool_executor``.
+    # ``researcher`` is not listed because its tool loop is wired
+    # directly rather than through this gate. Empty (the default)
+    # reproduces pre-M-B behaviour exactly: every role here runs a
+    # single tool-free call.
+    tooled_roles: tuple[str, ...] = ()
     grounding_msgs: list[dict] = field(default_factory=list)
     think_by_role: dict[str, Any] = field(default_factory=dict)
     # When ``True``, the synthesizer takes on critic duty inside its
@@ -280,6 +349,21 @@ class GraphDeps:
     # is in ``enabled_roles``; ``normal`` is inert (the default-shape
     # prompt) so a build without the role is unaffected.
     adversary_strictness: str = "normal"
+    # Cooperative cancel / pause (2026-08-02). A
+    # :class:`consultants.engine.run_control.RunControl` living on the
+    # SessionState, read by the node gate in ``_wrap``. Out-of-band on
+    # purpose: a mid-invoke graph never re-reads its own channels, so a
+    # flag on ``runtime_control`` is unreadable rather than merely
+    # unread. ``None`` — every caller that builds a graph without a
+    # session — leaves every node byte-identical to pre-gate.
+    run_control: Optional[Any] = None
+    # Called with (kind, payload) for gate events (``node_cancelled`` /
+    # ``awaiting_resume`` / ``resumed``). The runner passes a recorder
+    # bridge; ``None`` means the gate still works, silently.
+    run_control_emit: Optional[Callable[[str, dict], None]] = None
+    # Returns True once the session is gone, so a parked node doesn't
+    # hold a thread on a reaped run.
+    run_control_is_closed: Optional[Callable[[], bool]] = None
 
 
 # ----------------------- node wrappers --------------------------- #
@@ -310,6 +394,7 @@ def _wrap_planner(deps: GraphDeps):
             think=_think_for(deps, "planner"),
             recorder=deps.recorder,
             coder_enabled=coder_on,
+            **_tools_for(deps, "planner"),
         )
     return _node
 
@@ -349,6 +434,7 @@ def _wrap_critic(deps: GraphDeps):
             model=deps.models["critic"],
             think=_think_for(deps, "critic"),
             recorder=deps.recorder,
+            **_tools_for(deps, "critic"),
         )
     return _node
 
@@ -555,6 +641,7 @@ def _wrap_synthesizer(deps: GraphDeps):
             recorder=deps.recorder,
             prior_messages=deps.prior_messages_by_role.get("synthesizer"),
             fallback_models=list(deps.synthesizer_fallback_models),
+            **_tools_for(deps, "synthesizer"),
         )
     return _node
 
@@ -571,6 +658,7 @@ def _wrap_adversary(deps: GraphDeps):
             think=_think_for(deps, "adversary"),
             strictness=deps.adversary_strictness,
             recorder=deps.recorder,
+            **_tools_for(deps, "adversary"),
         )
     return _node
 
@@ -587,6 +675,7 @@ def _wrap_meta_critic(deps: GraphDeps):
             model=deps.models["critic"],
             think=_think_for(deps, "critic"),
             recorder=deps.recorder,
+            **_tools_for(deps, "meta_critic"),
         )
     return _node
 
@@ -741,6 +830,18 @@ def build_council_graph(deps: GraphDeps,
         raise ValueError("synthesizer must be enabled")
 
     def _wrap(role: str, fn):
+        # The single choke point every council node passes through, and
+        # therefore where the cancel / pause gate belongs: all eight
+        # node bodies get it untouched, and a node added later cannot
+        # forget it. Gate goes INSIDE the tracer so a skipped node is
+        # still traced as having been entered and skipped.
+        if deps.run_control is not None:
+            from consultants.engine.run_control import gate_node
+            fn = gate_node(
+                fn, role=role, run_control=deps.run_control,
+                emit=deps.run_control_emit,
+                is_closed=deps.run_control_is_closed,
+            )
         if tracer is None:
             return fn
         from consultants.engine.trace import traced_node
@@ -880,6 +981,12 @@ def build_council_graph(deps: GraphDeps,
                             "question": state.get("question"),
                             "plan": state.get("plan", ""),
                             "cwd": state.get("cwd"),
+                            # Sends carry ONLY the keys in this dict — a
+                            # lane never sees a global channel it was not
+                            # handed. ``extra_roots`` must ride along or
+                            # the lane's citation lint runs with cwd alone
+                            # and calls every --add-dir cite unverified.
+                            "extra_roots": list(state.get("extra_roots") or []),
                             "effort": state.get("effort"),
                             "models": state.get("models", {}),
                             "topology": state.get("topology"),
@@ -930,6 +1037,9 @@ def build_council_graph(deps: GraphDeps,
                         "question": state.get("question"),
                         "plan": state.get("plan", ""),
                         "cwd": state.get("cwd"),
+                        # Carried explicitly: a Send lane sees only the
+                        # keys in its own dict (see the researcher fanout).
+                        "extra_roots": list(state.get("extra_roots") or []),
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),
@@ -1127,6 +1237,9 @@ def build_council_graph(deps: GraphDeps,
                     {
                         "question": state.get("question"),
                         "cwd": state.get("cwd"),
+                        # Carried explicitly: a Send lane sees only the
+                        # keys in its own dict (see the researcher fanout).
+                        "extra_roots": list(state.get("extra_roots") or []),
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),
@@ -1280,6 +1393,9 @@ def build_council_graph(deps: GraphDeps,
                         "question": state.get("question"),
                         "plan": state.get("plan", ""),
                         "cwd": state.get("cwd"),
+                        # Carried explicitly: a Send lane sees only the
+                        # keys in its own dict (see the researcher fanout).
+                        "extra_roots": list(state.get("extra_roots") or []),
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),
@@ -1351,15 +1467,10 @@ def build_council_graph(deps: GraphDeps,
     # at session start; the escalator node short-circuits to {}
     # (no mutation) when state.effort != "xauto", so wiring it
     # unconditionally is safe and avoids a topology-time branch.
-    xauto_active = "xauto" == (
-        # cfg.effort isn't directly visible here, but the deps
-        # carries it indirectly via state at run time. We always
-        # wire the node when there's a critic; the node itself
-        # honors the is_xauto_run guard.
-        # (Could be plumbed via deps for a topology-time check,
-        # but the runtime guard is cheaper and equivalent.)
-        "xauto"  # placeholder — actual gating is at the node body
-    )
+    # (There was a ``xauto_active = "xauto" == "xauto"`` placeholder
+    # here — always True, never read. The gating it described really
+    # does live in the node body's is_xauto_run guard, so the variable
+    # was documentation pretending to be code.)
     use_escalator = ("critic" in enabled) and "researcher" in enabled
     if use_escalator:
         sg.add_node(
@@ -1459,6 +1570,9 @@ def build_council_graph(deps: GraphDeps,
                         "question": state.get("question"),
                         "plan": state.get("plan", ""),
                         "cwd": state.get("cwd"),
+                        # Carried explicitly: a Send lane sees only the
+                        # keys in its own dict (see the researcher fanout).
+                        "extra_roots": list(state.get("extra_roots") or []),
                         "effort": state.get("effort"),
                         "models": state.get("models", {}),
                         "topology": state.get("topology"),
@@ -1566,6 +1680,18 @@ def build_follow_up_graph(deps: GraphDeps,
         raise ValueError("researcher must be enabled for follow-up")
 
     def _wrap(role: str, fn):
+        # The single choke point every council node passes through, and
+        # therefore where the cancel / pause gate belongs: all eight
+        # node bodies get it untouched, and a node added later cannot
+        # forget it. Gate goes INSIDE the tracer so a skipped node is
+        # still traced as having been entered and skipped.
+        if deps.run_control is not None:
+            from consultants.engine.run_control import gate_node
+            fn = gate_node(
+                fn, role=role, run_control=deps.run_control,
+                emit=deps.run_control_emit,
+                is_closed=deps.run_control_is_closed,
+            )
         if tracer is None:
             return fn
         from consultants.engine.trace import traced_node

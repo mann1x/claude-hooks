@@ -15,17 +15,17 @@ Test layout:
 """
 from __future__ import annotations
 
-import os
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
 
 from consultants.engine.citation_linter import (
-    CITATION_RE,
+    UNRESOLVED_REASON,
     CitationIssue,
     extract_citations,
     lint_answer,
+    root_misconfiguration_hint,
     verify_citation,
 )
 
@@ -612,6 +612,139 @@ class TestGraphFastPath(unittest.TestCase):
             self.assertEqual(len(issues), 1)
             self.assertIn("no neighbour", issues[0].replacement)
             self.assertIn("line is in outsider", annotated)
+
+# --------------------------------------------------------------- #
+# root_misconfiguration_hint — telling "wrong roots" from "made up".
+# --------------------------------------------------------------- #
+
+class TestRootMisconfigurationHint(unittest.TestCase):
+    """An unresolvable cite is annotated identically whether the model
+    invented the file or the file is real and sitting under a root the
+    run never received. Those need opposite responses.
+
+    The discriminator is the ratio: fabrication happens in ones and
+    twos among cites that check out, while a broken root list takes
+    down nearly everything at once. csl-2026-08-02-0532-d737 came back
+    12-for-12 unverified against code the researcher had genuinely
+    read, and was nearly filed as hallucination.
+    """
+
+    def _issue(self, match, reason=UNRESOLVED_REASON):
+        return CitationIssue(
+            original_match=match, replacement=match + " [unverified]",
+            reason=reason, path=match.split(":")[0],
+            line_start=1, line_end=None,
+        )
+
+    def test_all_cites_unresolvable_produces_a_hint(self):
+        text = "see a/x.py:1 and b/y.py:2 and c/z.py:3"
+        issues = [self._issue("a/x.py:1"), self._issue("b/y.py:2"),
+                  self._issue("c/z.py:3")]
+        hint = root_misconfiguration_hint(text, issues, ["/only/root"])
+        self.assertIsNotNone(hint)
+        self.assertIn("3/3", hint)
+        self.assertIn("/only/root", hint)
+
+    def test_a_minority_of_misses_produces_no_hint(self):
+        # One bad cite among four is ordinary model error.
+        text = "a/x.py:1 b/y.py:2 c/z.py:3 d/w.py:4"
+        hint = root_misconfiguration_hint(
+            text, [self._issue("a/x.py:1")], ["/root"])
+        self.assertIsNone(hint)
+
+    def test_too_few_cites_produces_no_hint(self):
+        # One wrong cite out of one says nothing about the roots.
+        text = "only a/x.py:1 here"
+        hint = root_misconfiguration_hint(
+            text, [self._issue("a/x.py:1")], ["/root"])
+        self.assertIsNone(hint)
+
+    def test_other_failure_reasons_do_not_count(self):
+        # Line-beyond-EOF means the file was FOUND — that is a model
+        # error, and counting it would fire the roots warning on a
+        # perfectly-configured run.
+        text = "a/x.py:1 b/y.py:2 c/z.py:3"
+        issues = [self._issue(m, reason="line 9 > file_lines=4")
+                  for m in ("a/x.py:1", "b/y.py:2", "c/z.py:3")]
+        self.assertIsNone(
+            root_misconfiguration_hint(text, issues, ["/root"]))
+
+    def test_no_issues_produces_no_hint(self):
+        self.assertIsNone(root_misconfiguration_hint(
+            "a/x.py:1 b/y.py:2 c/z.py:3", [], ["/root"]))
+
+    def test_empty_roots_are_named_explicitly(self):
+        text = "a/x.py:1 b/y.py:2 c/z.py:3"
+        issues = [self._issue(m) for m in
+                  ("a/x.py:1", "b/y.py:2", "c/z.py:3")]
+        hint = root_misconfiguration_hint(text, issues, [])
+        self.assertIn("(none)", hint)
+
+
+class TestAbsolutePathCitations(unittest.TestCase):
+    """Absolute cites must survive extraction intact.
+
+    csl-2026-08-02-0730-bb5b cited real files by absolute path and came
+    back 7-for-7 "file not found in any allowed_root". The cause was in
+    this regex, not in the roots: the ``(?<![/:])`` guard refused to
+    start a match at the leading ``/`` and at every ``/`` after it, so
+    the first viable position was one character INTO the first segment.
+    ``/shared/dev/x/eval/y.py:12`` was extracted as
+    ``hared/dev/x/eval/y.py`` — unresolvable by construction, and
+    indistinguishable in the output from a fabricated filename.
+    """
+
+    def test_absolute_path_extracted_whole(self):
+        got = extract_citations(
+            "see /shared/dev/an-finetune/eval/run_v9_a2a.sh:44-49")
+        self.assertEqual(
+            got,
+            [("/shared/dev/an-finetune/eval/run_v9_a2a.sh:44-49",
+              "/shared/dev/an-finetune/eval/run_v9_a2a.sh", 44, 49)],
+        )
+
+    def test_absolute_path_does_not_lose_its_first_character(self):
+        # The exact shape of the bug, pinned by name.
+        (_, path, _, _) = extract_citations("/shared/dev/x/eval/y.py:12")[0]
+        self.assertTrue(path.startswith("/shared/"), path)
+
+    def test_absolute_and_relative_cites_coexist(self):
+        got = [c[1] for c in
+               extract_citations("see /a/b/c.py:1 and rel/d.py:2")]
+        self.assertEqual(got, ["/a/b/c.py", "rel/d.py"])
+
+    def test_absolute_cite_verifies_against_the_real_file(self, ):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "pkg" / "mod.py"
+            f.parent.mkdir(parents=True)
+            f.write_text("a\nb\nc\n")
+            text = f"look at {f}:2"
+            annotated, issues = lint_answer(text, allowed_roots=[td])
+            self.assertEqual(issues, [], annotated)
+            self.assertEqual(annotated, text)
+
+    def test_url_is_not_mistaken_for_a_citation(self):
+        # Pre-existing sibling of the same bug: the guard blocked the
+        # "/" boundaries of a URL but not one char into the host, so
+        # "ithub.com/x/blob/main/foo.py:123" matched out of a github
+        # link and was reported as a fabricated cite.
+        self.assertEqual(
+            extract_citations(
+                "docs: https://github.com/x/blob/main/foo.py:123"),
+            [],
+        )
+
+    def test_url_and_real_cite_in_the_same_sentence(self):
+        got = [c[1] for c in extract_citations(
+            "see http://h/a/b.py:9 and rel/d.py:2")]
+        self.assertEqual(got, ["rel/d.py"])
+
+    def test_url_cite_is_not_annotated_by_lint_answer(self):
+        text = "docs: https://github.com/x/blob/main/foo.py:123"
+        annotated, issues = lint_answer(text, allowed_roots=["/tmp"])
+        self.assertEqual(issues, [])
+        self.assertEqual(annotated, text)
 
 
 if __name__ == "__main__":  # pragma: no cover

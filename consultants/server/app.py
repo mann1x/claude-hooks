@@ -25,7 +25,6 @@ gone (e.g. after a service restart).
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import threading
@@ -34,7 +33,12 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
+
+if TYPE_CHECKING:  # pragma: no cover — the runtime import is lazy, in
+    # ``build_app``, so the module still imports without fastapi. This
+    # only teaches the checker what the string annotation refers to.
+    from fastapi import FastAPI
 
 from consultants import config as cc
 from consultants.engine import sessions_index, storage
@@ -48,14 +52,9 @@ log = logging.getLogger("consultants.server")
 # (app imports control_routes at app-build time).
 from consultants.server.control import (  # noqa: E402
     Injection,
-    INJECT_STATUS_APPLIED,
     INJECT_STATUS_FAILED,
     INJECT_STATUS_PENDING,
-    INJECT_STATUS_REJECTED,
-    ROUTED_BEST_EFFORT_CAP_REACHED,
-    ROUTED_IN_PLACE,
     ROUTED_QUEUED,
-    ROUTED_REWOUND_TO_RESEARCHER,
 )
 
 
@@ -237,6 +236,34 @@ class SessionState:
     # path for the WHOLE time the runner owns the graph. Set + cleared by
     # the runner under ``_inject_lock``.
     _adversary_checkpoint_active: bool = field(default=False, repr=False)
+    # M-A approval channel: parked ``ask_human`` tool calls for this
+    # session. Its own lock lives inside the broker — the runner's lane
+    # threads open + wait, the POST /tool-ack handler resolves, exactly
+    # the cross-thread shape as the adversary ack above.
+    _tool_approvals: Any = field(default=None, repr=False)
+    # Cooperative cancel / pause. Third member of the same family as
+    # the two above, and for the same reason: a mid-invoke graph never
+    # re-reads its own channels, so a control that must reach a running
+    # node has to travel outside LangGraph.
+    _run_control: Any = field(default=None, repr=False)
+
+    @property
+    def tool_approvals(self):
+        """Lazily built so every construction path gets one without
+        touching its call site (SessionState is instantiated in the
+        consult route, the follow-up route, and the disk-reopen path)."""
+        if self._tool_approvals is None:
+            from consultants.engine.tool_approval import ToolApprovalBroker
+            self._tool_approvals = ToolApprovalBroker(self.sid)
+        return self._tool_approvals
+
+    @property
+    def run_control(self):
+        """Lazily built, same reasoning as :attr:`tool_approvals`."""
+        if self._run_control is None:
+            from consultants.engine.run_control import RunControl
+            self._run_control = RunControl(self.sid)
+        return self._run_control
 
     def public_dict(self) -> dict:
         out = {
@@ -266,7 +293,71 @@ class SessionState:
         if self._checkpoint_deadline_ts is not None:
             out["adversary_checkpoint_deadline_ts"] = \
                 self._checkpoint_deadline_ts
+        # Same parity discipline as the checkpoint deadline: the key
+        # appears ONLY while a tool call is actually parked, so a
+        # default run's status response is byte-identical to pre-M-A.
+        if self._tool_approvals is not None:
+            pending = self._tool_approvals.pending_public()
+            if pending:
+                out["pending_tool_approvals"] = pending
+            grants = self._tool_approvals.grants_public()
+            if grants:
+                # What has already been answered for a whole class of
+                # calls. Shown so the approver can see why later calls
+                # sailed through, and narrow the rule if it was too wide.
+                out["tool_approval_grants"] = grants
+        # Same parity discipline again: ``snapshot()`` is empty unless a
+        # cancel or pause has actually been requested, so an untouched
+        # run's status stays byte-identical.
+        if self._run_control is not None:
+            snap = self._run_control.snapshot()
+            if snap.get("pause_state") == "pending":
+                # RunControl knows a pause is registered but not why
+                # nothing has taken it. This object is the only one
+                # holding both halves, so the correlation belongs here.
+                snap.update(self._pause_blockers())
+            out.update(snap)
         return out
+
+    def _pause_blockers(self) -> dict:
+        """Why a registered pause hasn't parked anything yet.
+
+        A pause takes effect where the next node *enters*. When the
+        runner is already sitting in one of its own waits, no node
+        enters — and the pause reads as "requested, nothing happened",
+        which is the shape of every bug in this release. Name the wait
+        instead, and say what clears it.
+        """
+        blockers: list[dict] = []
+        deadline = self._checkpoint_deadline_ts
+        if deadline is not None or self._adversary_checkpoint_active:
+            blockers.append({
+                "what": "adversary_checkpoint",
+                "deadline_ts": deadline,
+                "clears_with": "adversary-ack (or resume, which does both)",
+            })
+        if self._tool_approvals is not None:
+            parked = self._tool_approvals.pending_public()
+            if parked:
+                blockers.append({
+                    "what": "tool_approval",
+                    "requests": [p["request_id"] for p in parked],
+                    "deadline_ts": min(
+                        (p["deadline_ts"] for p in parked), default=None),
+                    "clears_with": "tool-ack --allow|--deny",
+                })
+        if not blockers:
+            # Nothing is holding the runner: a node is simply mid-call
+            # and will hit the gate when it finishes.
+            return {"pause_blocked_by": None}
+        return {
+            "pause_blocked_by": blockers,
+            "pause_note": (
+                "the pause is registered but no node can reach it while "
+                + ", ".join(b["what"] for b in blockers)
+                + " is outstanding"
+            ),
+        }
 
     def bump_activity(self) -> None:
         """Defer the idle reaper. Called on every poll, follow-up
@@ -665,6 +756,11 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             "trace": trace_flag,
             "extra_roots": session_extra_roots,
             "extra_roots_display": session_extra_roots_display,
+            # Operator override for the path pre-flight (see
+            # ``consultants.engine.preflight``). Honoured verbatim —
+            # the check is a cost guard, not a security boundary; the
+            # tool sandbox still confines every read to the roots.
+            "skip_preflight": bool(body.get("skip_preflight")),
         }
 
         # Hand off to the executor. The runner mutates ``state`` and
@@ -896,6 +992,11 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             "extra_roots": followup_body_extras,
             # Parallel pre-realpath display form of the body extras.
             "extra_roots_display": list(followup_body_extras),
+            # Operator override for the path pre-flight (see
+            # ``consultants.engine.preflight``). Honoured verbatim —
+            # the check is a cost guard, not a security boundary; the
+            # tool sandbox still confines every read to the roots.
+            "skip_preflight": bool(body.get("skip_preflight")),
         }
         future = app.state.executor.submit(
             _run_with_state, app, app.state.run_follow_up, child,
@@ -1310,6 +1411,16 @@ def _load_session_from_artifacts(sid: str,
         critique=critique_text,
         final_answer=meta.get("final_answer") or "",
         models=dict(models),
+        # 2026-08-02: restore the sandbox roots the original run used.
+        # A follow-up merges the parent's ``extra_roots`` with its own,
+        # so before metadata.json carried them a disk-reopened parent
+        # contributed nothing and the follow-up silently ran with cwd
+        # alone — the same blindness the linter drop caused, arriving
+        # by a different route. Empty for sessions written before this
+        # landed; re-pass ``--add-dir`` on those.
+        extra_roots=list(meta.get("extra_roots") or []),
+        extra_roots_display=list(meta.get("extra_roots_display") or []),
+        cwd_display=meta.get("cwd_display") or str(cwd),
         parent_sid=meta.get("parent_sid"),
         # Consultancy anchor recovered from metadata (None on pre-
         # review-loop sessions → resolver treats the sid as its own

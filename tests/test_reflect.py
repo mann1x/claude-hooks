@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
 
-import pytest
 
 from claude_hooks import reflect as reflect_mod
 from claude_hooks.providers.base import Memory

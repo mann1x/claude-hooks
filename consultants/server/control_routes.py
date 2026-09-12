@@ -38,7 +38,6 @@ Tests live in ``tests/test_consultants_v2_control_routes.py``.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 from typing import TYPE_CHECKING, Any, Optional
@@ -571,14 +570,42 @@ def register_control_routes(app: "FastAPI") -> None:
     # -------------------- POST /interrupt ---------------------- #
     @app.post("/v1/consult/{sid}/interrupt")
     def interrupt_(sid: str, body: Optional[dict] = None) -> dict:
+        """Pause the run at the next node boundary.
+
+        The state delta below is kept as the *record* of the request.
+        The delta alone never paused anything — a graph that is already
+        inside ``invoke`` carries its channels in memory and never
+        re-reads the checkpoint ``update_state`` writes — so the pause
+        that actually takes effect is the out-of-band one on
+        ``run_control``. The next node to enter parks inside its own
+        worker thread, which means its x-tier siblings keep running;
+        pausing the graph instead would idle the whole fanout.
+        """
         s = _require_live_session(app, sid)
         body = body or {}
-        delta = build_interrupt_delta(
-            reason=str(body.get("reason") or "user-pause"),
-        )
+        reason = str(body.get("reason") or "user-pause")
+        delta = build_interrupt_delta(reason=reason)
         _safe_apply_state_delta(s, delta)
+        paused = s.run_control.request_pause(reason)
         s.bump_activity()
-        return {"ok": True, "applied": _serialize_for_json(delta)}
+        snap = s.run_control.snapshot()
+        out = {
+            "ok": True,
+            "applied": _serialize_for_json(delta),
+            # False when the run is already cancelling — pausing a run
+            # that is draining would park a node that should be
+            # finishing.
+            "paused": bool(paused),
+            # "pending" until a node reaches the gate. Reported at
+            # request time because this is the moment the caller is
+            # looking, and "ok: true" on its own reads as "the run has
+            # stopped" when it has not yet.
+            "pause_state": snap.get("pause_state"),
+            "pause_deadline_ts": snap.get("pause_deadline_ts"),
+        }
+        if paused:
+            out.update(s._pause_blockers())
+        return out
 
     # -------------------- POST /resume ------------------------- #
     @app.post("/v1/consult/{sid}/resume")
@@ -603,16 +630,43 @@ def register_control_routes(app: "FastAPI") -> None:
         # what closes the post-ack re-stream double-resume window. Read
         # under the lock so the check races neither the runner's set nor
         # its clear.
+        #
+        # A node parked on ``POST /interrupt`` is checked FIRST, and
+        # ``_adversary_checkpoint_active`` is why: that flag spans the
+        # whole runner-owned window, so it can still be set long after
+        # the checkpoint itself was acked. Testing it first swallowed
+        # the pause release — observed live on
+        # ``csl-2026-08-02-1042-1036``, where /resume returned
+        # ``adversary_ack`` while the synthesizer stayed parked with no
+        # way to free it. ``run_control.paused`` is the precise
+        # condition: true only while a pause is actually outstanding.
+        #
+        # Both can be set at once, and then both get released — the ack
+        # is idempotent, and returning after only one would leave the
+        # run blocked on the other.
+        released_pause = s.run_control.paused
+        if released_pause:
+            # The parked node is blocked inside its own worker thread,
+            # so releasing the flag IS the entire resume; nothing
+            # re-enters the graph.
+            s.run_control.release_pause(by="resume")
         with s._inject_lock:
             checkpoint_active = bool(
                 getattr(s, "_adversary_checkpoint_active", False))
         if checkpoint_active:
             s.ack_adversary()
+        if released_pause or checkpoint_active:
             s.bump_activity()
+            modes = []
+            if released_pause:
+                modes.append("pause_release")
+            if checkpoint_active:
+                modes.append("adversary_ack")
             return {
                 "ok": True,
-                "mode": "adversary_ack",
-                "acked": True,
+                "mode": "+".join(modes),
+                "resumed": bool(released_pause),
+                "acked": bool(checkpoint_active),
                 "checkpoint_open": getattr(
                     s, "_checkpoint_deadline_ts", None) is not None,
             }
@@ -699,6 +753,79 @@ def register_control_routes(app: "FastAPI") -> None:
             "deadline_ts": deadline,
         }
 
+    # -------------------- POST /tool-ack ----------------------- #
+    @app.post("/v1/consult/{sid}/tool-ack")
+    def tool_ack(sid: str, body: Optional[dict] = None) -> dict:
+        """M-A: answer a parked ``ask_human`` tool-approval request.
+
+        Body: ``{"allow": true|false, "request_id": "tap-N"?,
+        "reason": "..."?, "scope": "once"|"tool"|"glob"?,
+        "pattern": "src/**"?}``. ``allow`` is REQUIRED — there is no
+        default verdict, because guessing either way is the failure this
+        channel exists to prevent. ``request_id`` is optional; omitted,
+        it answers the oldest pending request, which is the common case
+        of exactly one parked call.
+
+        ``scope`` answers for a *class* of calls rather than one:
+        ``"tool"`` covers every future call to the same tool, ``"glob"``
+        covers calls whose target matches ``pattern`` (default: the
+        answered call's own target). The rule is session-scoped —
+        authorization is per council, so every role and every x-tier
+        lane inherits it — and installing one also releases the parked
+        requests it already matches. Without this the rung floods: three
+        researcher lanes reading the same file produced three requests
+        in the same second on the first live run.
+
+        Like /adversary-ack this does not touch the graph: the lane is
+        blocked inside its tool executor, so resolving the request is
+        the whole resume. Answering when nothing is pending returns
+        ``resolved: false`` rather than erroring — a duplicate ack after
+        a timeout is a harmless no-op, and the timeout has already
+        denied.
+        """
+        body = body or {}
+        if "allow" not in body:
+            raise HTTPException(400, "tool-ack requires 'allow'")
+        allow = bool(body.get("allow"))
+        request_id = body.get("request_id")
+        if request_id is not None and not isinstance(request_id, str):
+            raise HTTPException(400, "request_id must be a string")
+        scope = str(body.get("scope") or "once")
+        if scope not in ("once", "tool", "glob"):
+            raise HTTPException(
+                400, "scope must be one of: once, tool, glob")
+        pattern = str(body.get("pattern") or "")
+        if scope == "glob" and pattern and any(
+                c in pattern for c in ("\n", "\r")):
+            raise HTTPException(400, "pattern must be a single line")
+        # NOT ``_require_live_session``: that also demands the live
+        # graph handles, and this verb never touches the graph. The
+        # parked lane is blocked inside its tool executor, so resolving
+        # the request is the entire resume. Requiring ``_compiled``
+        # here would 503 an ack that is perfectly answerable.
+        s = _require_session(app, sid)
+        if getattr(s, "closed", False):
+            raise HTTPException(_HTTP_GONE, f"session closed: {sid}")
+        req = s.tool_approvals.resolve(
+            request_id, allow=allow,
+            by=str(body.get("reason") or "assistant"),
+            scope=scope, pattern=pattern,
+        )
+        s.bump_activity()
+        if req is None:
+            return {
+                "ok": True, "resolved": False,
+                "reason": "no matching pending approval request",
+                "pending": s.tool_approvals.pending_public(),
+                "grants": s.tool_approvals.grants_public(),
+            }
+        return {
+            "ok": True, "resolved": True,
+            "request": req.public_dict(),
+            "pending": s.tool_approvals.pending_public(),
+            "grants": s.tool_approvals.grants_public(),
+        }
+
     # -------------------- POST /cancel ------------------------- #
     @app.post("/v1/consult/{sid}/cancel")
     def cancel(sid: str, body: Optional[dict] = None) -> dict:
@@ -716,16 +843,26 @@ def register_control_routes(app: "FastAPI") -> None:
         req = build_cancel_request(
             discard_partial=discard, reason=reason,
         )
-        # If the run is still going, flip cancel_requested on
-        # runtime_control. Nodes consult this at entry and exit
-        # early. We don't have RunControl.request_drain on a sync
-        # CompiledStateGraph — the cooperative flag is the
-        # mechanism. For tests + future async work, this is the
-        # extension point.
+        # The state delta is the *record* of the request. It is not
+        # what stops the run, and the difference is the whole reason
+        # cancel was a no-op until 2026-08-02: a graph already inside
+        # ``invoke`` carries its channels in memory for the superstep,
+        # so the checkpoint ``update_state`` writes is never re-read. A
+        # node consulting ``runtime_control.cancel_requested`` would
+        # have seen False for the entire run.
+        #
+        # What actually stops it is ``run_control`` — a plain threading
+        # object on the SessionState that the node gate reads directly,
+        # the same out-of-band shape as the adversary ack and the
+        # tool-approval broker. Every remaining node becomes a no-op
+        # and the graph drains to END, keeping the partial state that
+        # ``--keep-partial`` exists to preserve.
         if (getattr(s, "status", "") == "running"
                 and getattr(s, "_compiled", None) is not None
                 and getattr(s, "_thread_config", None) is not None):
             _safe_apply_state_delta(s, req.state_delta)
+        running = getattr(s, "status", "") == "running"
+        cancelled_now = s.run_control.request_cancel(reason)
         # M2: release the adversary checkpoint so the runner thread isn't
         # blocked for up to the full timeout on a session being
         # cancelled. The wait loop breaks on this ack (and on ``closed``
@@ -752,6 +889,17 @@ def register_control_routes(app: "FastAPI") -> None:
             "ok": True,
             "discard_partial": discard,
             "applied": _serialize_for_json(req.state_delta),
+            # True once the node gate is wired: the remaining nodes
+            # skip and the run drains. Still reported rather than
+            # assumed — on a run that already finished there is
+            # nothing left to stop, and "cancelled" should not read the
+            # same as "asked to cancel".
+            "stops_the_run": bool(discard or running),
+            "cancel_accepted": bool(cancelled_now),
+            # A cancelled run has no synthesized answer: the
+            # synthesizer is a node like any other, and running it
+            # would be spending after the caller said stop.
+            "final_answer_expected": False if running else None,
         }
 
     # -------------------- GET /events (SSE) -------------------- #

@@ -14,7 +14,6 @@ the main ``claude-hooks`` env.
 
 from __future__ import annotations
 
-import time
 import unittest
 # Module-level imports so TypedDict forward-ref evaluation (used by
 # langgraph's StateGraph schema introspection) can resolve names
@@ -135,7 +134,6 @@ class TestDynamicInterruptPolicy(unittest.TestCase):
 
     def test_dynamic_interrupt_with_command_resume(self):
         from consultants.engine.interrupt_policy import (
-            InterruptDecision,
             should_interrupt_on_low_confidence,
         )
 

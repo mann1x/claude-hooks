@@ -44,7 +44,6 @@ import sqlite3
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Optional
 
 
 _LEGACY_TRACE_DIR = Path(os.path.expanduser("~/.claude/consultants-traces"))

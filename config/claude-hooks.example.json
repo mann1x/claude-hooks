@@ -168,7 +168,15 @@
       "default). Set to 0.0.0.0 to expose the embedder on the LAN so",
       "other hosts can use it as a remote primary. WARNING: the",
       "/embedding endpoint has NO authentication — only opt in on a",
-      "trusted LAN. install.py asks during the llamafile sub-dialog."
+      "trusted LAN. install.py asks during the llamafile sub-dialog.",
+      "n_parallel (v1.14.1+): concurrent embed slots. The embedder is one",
+      "service serving two callers — interactive recall on the",
+      "UserPromptSubmit critical path, and detached turn-stores nobody",
+      "waits on. At 1 slot a background store blocks the user's recall",
+      "behind it. Do NOT lower to 1, and do not set --parallel by hand on",
+      "the running llamafile: the daemon rebuilds argv on every respawn.",
+      "ctx_size is PER SLOT — llama.cpp divides --ctx-size across slots,",
+      "so the spawn scales it (3 x 16384). Budget RAM accordingly."
     ],
     "enabled": false,
     "llamafile_path": "vendor/llamafile/dist/qwen3-embedding-0.6b-16k.llamafile",
@@ -176,6 +184,7 @@
     "host": "127.0.0.1",
     "port": 38092,
     "ctx_size": 16384,
+    "n_parallel": 3,
     "pooling": "last",
     "mode": "auto",
     "idle_timeout_seconds": 3600,
@@ -185,6 +194,7 @@
     "user_prompt_submit": {
       "enabled": true,
       "min_prompt_chars": 30,
+      "max_query_chars": 3500,
       "include_providers": [
         "qdrant",
         "memory_kg"

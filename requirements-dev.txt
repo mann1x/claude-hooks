@@ -9,3 +9,22 @@ coverage>=7.0
 # path; without the plugin the oracle subprocess errors out on
 # the unknown flag.
 pytest-timeout>=2.0
+# pytest-asyncio: no test in ``tests/`` needs it today — the one async
+# test class is a ``unittest.IsolatedAsyncioTestCase``, which unittest
+# drives natively. Listed so the main env matches the floor in
+# ``consultants/pyproject.toml``'s ``[test]`` extra, and so an
+# ``async def test_`` written as a plain pytest function doesn't
+# silently no-op (pytest skips it with a warning when the plugin is
+# absent) on whichever host happens not to have it.
+pytest-asyncio>=0.24
+# PyYAML: used by ``tests/test_deploy_completeness.py`` to *parse* skill
+# frontmatter rather than regex it. That distinction is the point — on
+# 2026-08-02 three skills (including ``consultants``) carried an
+# unquoted description containing ``": "``, which is not a valid plain
+# YAML scalar. The block failed to parse and the description silently
+# fell back to the file's H1: the skill still listed, with the wrong
+# summary, and the summary is the one string that decides whether the
+# skill is ever chosen. A regex on ``^name:`` saw nothing wrong.
+# Present in both hosts' envs already; declared so a clean checkout
+# doesn't lose the check.
+PyYAML>=6.0

@@ -15,7 +15,6 @@ fast on every CI matrix. Covers:
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import sys
 import tempfile
@@ -34,7 +33,6 @@ except ImportError:
 
 
 from claude_hooks.embedders import Embedder
-from claude_hooks.providers._content_hash import content_hash
 
 
 class _DeterministicEmbedder(Embedder):

@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import logging
 import signal
-import socket
 import sys
 import threading
 import time
@@ -52,7 +51,6 @@ def _now_iso() -> str:
 # (request-body parser extensions) without guessing the schema.
 # After the quota is hit further requests are ignored.
 import os
-import threading
 _DUMP_LOCK = threading.Lock()
 _DUMP_REMAINING = int(os.environ.get("CLAUDE_HOOKS_PROXY_DUMP_COUNT", "3"))
 

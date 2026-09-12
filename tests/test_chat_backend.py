@@ -12,7 +12,6 @@ Covers the four units of v1.5 module 4:
 
 from __future__ import annotations
 
-import io
 import json
 import socket
 import unittest

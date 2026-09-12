@@ -1,0 +1,454 @@
+"""Deploy must stay complete — the enforcement layer, not a unit test.
+
+On 2026-08-02 ``~/.claude/skills/consultants/SKILL.md`` was found still
+at its **21 May** content: 791 lines against the repo's 1591. Ten weeks
+of sessions had been loading half a skill — no wait patterns, no review
+loop, no ``accept`` / ``tool-ack`` verbs — while the engine underneath
+had moved several releases on. Nothing surfaced it, because a stale
+skill does not error. It just instructs the model to drive something
+that no longer exists.
+
+The cause was a *routine*: "deploy" meant ``pip install -e .`` plus a
+service restart, which makes the engine current and touches nothing
+else. Skills are not loaded by any service, so they fell outside the
+definition and drifted silently.
+
+A routine cannot be trusted to stay complete, so these tests hold the
+line instead:
+
+* every deployable artifact class is handled by ``scripts/deploy.py``
+* every one is *checked* by ``scripts/verify_deploy.py``
+* the deploy script discovers rather than hardcodes, so the next
+  artifact of an existing class is picked up automatically
+* a failed step can never be reported as a successful deploy
+* both systemd scopes are searched, because this host splits them
+* ``CLAUDE.md`` tells the next session to use the script
+
+Adding a new class of deployable artifact means adding it here first.
+That is the point.
+"""
+
+from __future__ import annotations
+
+import ast
+import pathlib
+import re
+import sys
+import unittest
+from unittest.mock import patch
+
+import pytest
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
+DEPLOY = REPO / "scripts" / "deploy.py"
+VERIFY = REPO / "scripts" / "verify_deploy.py"
+
+
+def _src(p: pathlib.Path) -> str:
+    return p.read_text(encoding="utf-8")
+
+
+class TestDeployScriptExists(unittest.TestCase):
+    def test_there_is_a_single_deploy_entry_point(self):
+        self.assertTrue(
+            DEPLOY.is_file(),
+            "scripts/deploy.py is the only supported deploy path; an "
+            "ad-hoc 'pip install + restart' is what let a skill go stale "
+            "for ten weeks",
+        )
+
+    def test_it_parses(self):
+        ast.parse(_src(DEPLOY))
+
+    @unittest.skipIf(sys.platform == "win32",
+                     "POSIX exec bits do not exist on Windows; the script "
+                     "is invoked as `python scripts/deploy.py` there")
+    def test_it_is_executable(self):
+        self.assertTrue(DEPLOY.stat().st_mode & 0o111,
+                        "scripts/deploy.py should be chmod +x")
+
+    def test_it_has_a_shebang(self):
+        # The portable half of the same claim: on Windows the exec bit
+        # is meaningless, but a missing shebang breaks ./scripts/deploy.py
+        # on every POSIX host regardless of mode.
+        self.assertTrue(
+            _src(DEPLOY).startswith("#!/usr/bin/env python3"),
+            "scripts/deploy.py needs a python3 shebang",
+        )
+
+
+class TestEveryArtifactClassIsDeployed(unittest.TestCase):
+    """Each class below drifts silently when skipped — none of them
+    raises at runtime when it is behind."""
+
+    def test_packages(self):
+        self.assertIn("pip", _src(DEPLOY))
+        self.assertIn("install", _src(DEPLOY))
+
+    def test_skills(self):
+        src = _src(DEPLOY)
+        self.assertIn("def step_skills", src)
+        self.assertIn(".claude", src)
+        self.assertIn("SKILL.md", src)
+
+    def test_services(self):
+        src = _src(DEPLOY)
+        self.assertIn("def step_services", src)
+        self.assertIn("systemctl", src)
+
+    def test_verification_is_a_step_not_a_suggestion(self):
+        src = _src(DEPLOY)
+        self.assertIn("def step_verify", src)
+        self.assertIn("verify_deploy.py", src)
+
+    def test_the_daemon_managed_embedder_is_brought_back(self):
+        """Restarting the daemon kills its llamafile child, and the
+        embedder is spawn-on-demand — so nothing restores it until this
+        host next asks for an embedding. A LAN client consuming it
+        (``daemon_ensure=false``) never can: it does not supervise the
+        process, and its recall degrades to ``0 hits``, which reads as
+        an empty corpus rather than an outage. Deploy restores what
+        deploy took down."""
+        src = _src(DEPLOY)
+        self.assertIn("_respawn_embedder", src)
+        self.assertIn("embedding_ensure", src)
+
+    def test_verification_runs_under_the_hooks_interpreter(self):
+        """Verifying with whatever interpreter launched the deploy
+        verifies a *different system*. `python3 scripts/deploy.py` ran
+        the checks under a stock system Python with no psycopg, which
+        reported "0 memories — backend unreachable" against a healthy
+        store: the same deploy passed or failed depending on how it was
+        invoked."""
+        src = _src(DEPLOY)
+        self.assertIn("def _hook_python", src)
+        self.assertRegex(
+            src, r"subprocess\.run\(\[py,",
+            "step_verify must run verify_deploy.py with _hook_python(), "
+            "not sys.executable",
+        )
+
+    def test_the_verifier_checks_the_embedder_too(self):
+        """Deploy's claim that it brought the embedder back is worth
+        exactly as much as the check that confirms it."""
+        src = _src(VERIFY)
+        self.assertIn("def check_embedder", src)
+        self.assertIn("check_embedder(r)", src)
+
+
+class TestEmbedderRespawn(unittest.TestCase):
+    """The respawn must be advisory where the embedder isn't ours, and
+    blocking where it is."""
+
+    def _step(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_deploy_mod", DEPLOY)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod, mod.Step("services")
+
+    def test_no_daemon_is_not_a_failure(self):
+        mod, s = self._step()
+        with patch("claude_hooks.daemon_client.ping", return_value=False):
+            mod._respawn_embedder(s)
+        self.assertTrue(s.ok)
+
+    def test_unconfigured_manager_is_not_a_failure(self):
+        """Most hosts do not run a llamafile at all."""
+        mod, s = self._step()
+        with patch("claude_hooks.daemon_client.ping", return_value=True), \
+             patch("claude_hooks.daemon_client.embedding_ensure",
+                   return_value={"available": False, "reason": "not configured"}):
+            mod._respawn_embedder(s)
+        self.assertTrue(s.ok)
+
+    def test_ready_is_reported_with_its_port(self):
+        mod, s = self._step()
+        with patch("claude_hooks.daemon_client.ping", return_value=True), \
+             patch("claude_hooks.daemon_client.embedding_ensure",
+                   return_value={"ready": True, "port": 38092, "spawned": True}):
+            mod._respawn_embedder(s)
+        self.assertTrue(s.ok)
+        self.assertTrue(any("38092" in n for n in s.notes))
+
+    def test_a_configured_embedder_that_wont_start_fails_the_deploy(self):
+        """Deploy knocked it over, so deploy owns the failure — deferring
+        it to the next recall is how it became invisible in the first
+        place."""
+        mod, s = self._step()
+        with patch("claude_hooks.daemon_client.ping", return_value=True), \
+             patch("claude_hooks.daemon_client.embedding_ensure",
+                   return_value={"ready": False}):
+            mod._respawn_embedder(s)
+        self.assertFalse(s.ok)
+
+    def test_a_raising_client_fails_loudly_rather_than_passing_quietly(self):
+        mod, s = self._step()
+        with patch("claude_hooks.daemon_client.ping", return_value=True), \
+             patch("claude_hooks.daemon_client.embedding_ensure",
+                   side_effect=OSError("socket gone")):
+            mod._respawn_embedder(s)
+        self.assertFalse(s.ok)
+
+
+class TestEmbedderVerification(unittest.TestCase):
+    """Counting rows proves the database is reachable and proves nothing
+    about recall — every recall embeds its query first."""
+
+    def _verify(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_verify_mod", VERIFY)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    class _Prov:
+        name = "pgvector"
+
+        def __init__(self, vec, emb):
+            self._vec, self._embedder = vec, emb
+
+        def embed_for_store(self, content):
+            if isinstance(self._vec, Exception):
+                raise self._vec
+            return self._vec
+
+    class _Emb:
+        url = "http://192.168.178.2:38092/embedding"
+
+    def _run(self, provider):
+        mod = self._verify()
+        r = mod.Results(quiet=True)
+        with patch("claude_hooks.dispatcher.build_providers",
+                   return_value=[provider]), \
+             patch("claude_hooks.config.load_config", return_value={}):
+            mod.check_embedder(r)
+        return mod, r
+
+    def test_a_working_embedder_passes_and_names_its_target(self):
+        mod, r = self._run(self._Prov([0.1] * 1024, self._Emb()))
+        self.assertEqual(r.failed, 0)
+        self.assertTrue(any("1024" in d for _, _, d in r.rows))
+        self.assertTrue(any("38092" in d for _, _, d in r.rows))
+
+    def test_a_silent_none_is_a_failure(self):
+        """``embed_for_store`` soft-fails to None so a store never dies
+        on it. For a verifier that silence is the entire finding: recall
+        degrades to 0 hits, which looks exactly like an empty corpus."""
+        mod, r = self._run(self._Prov(None, self._Emb()))
+        self.assertEqual(r.failed, 1)
+
+    def test_a_raising_embedder_is_a_failure(self):
+        mod, r = self._run(self._Prov(OSError("connection refused"), self._Emb()))
+        self.assertEqual(r.failed, 1)
+
+    def test_server_side_embedding_is_not_a_finding(self):
+        """Qdrant and Memory KG embed server-side — there is no local
+        embedder to be down, so silence there means nothing."""
+        mod, r = self._run(self._Prov(None, None))
+        self.assertEqual(r.failed, 0)
+
+    def test_the_probe_runs_before_the_attribute_is_read(self):
+        """Providers build their embedder lazily inside _ensure_ready,
+        so inspecting first reports 'no embedder' for every provider
+        that has one."""
+        order = []
+
+        class Lazy(self._Prov):
+            def __init__(self):
+                self._embedder = None
+
+            def embed_for_store(self, content):
+                order.append("probe")
+                self._embedder = TestEmbedderVerification._Emb()
+                return [0.0] * 8
+
+        mod, r = self._run(Lazy())
+        self.assertEqual(order, ["probe"])
+        self.assertEqual(r.failed, 0)
+        self.assertTrue(any("8-dim" in d for _, _, d in r.rows))
+
+
+class TestDeployDiscoversRatherThanHardcodes(unittest.TestCase):
+    """A hardcoded list is how the *next* artifact gets forgotten."""
+
+    def test_skills_are_globbed_not_listed(self):
+        src = _src(DEPLOY)
+        self.assertRegex(
+            src, r"glob\(\s*[\"']\*/SKILL\.md[\"']\s*\)",
+            "deploy.py must glob the skills directory; naming skills "
+            "individually means a new one is missed",
+        )
+
+    def test_no_skill_is_named_literally_in_the_deploy_logic(self):
+        # The docstring may cite the incident by name; the code may not
+        # branch on one.
+        tree = ast.parse(_src(DEPLOY))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            body = ast.get_source_segment(_src(DEPLOY), node) or ""
+            # Strip the function docstring before looking.
+            if ast.get_docstring(node):
+                body = body.replace(ast.get_docstring(node), "")
+            self.assertNotIn(
+                "consultants/SKILL", body,
+                f"{node.name} hardcodes a specific skill",
+            )
+
+    def test_envs_are_discovered(self):
+        src = _src(DEPLOY)
+        self.assertIn("def _envs_with_package", src)
+
+    def test_units_are_discovered_from_unit_files(self):
+        src = _src(DEPLOY)
+        self.assertIn("def _repo_units", src)
+        self.assertIn(".service", src)
+
+    def test_both_systemd_scopes_are_searched(self):
+        # This host splits them: the consultants engine is a --user unit
+        # while daemon / proxy / dashboard are system units. Knowing about
+        # one scope leaves the other running old code.
+        src = _src(DEPLOY)
+        self.assertIn("/etc/systemd/system", src)
+        self.assertIn("systemd/user", src)
+        self.assertIn('"--user"', src)
+
+
+class TestNoPartialSuccess(unittest.TestCase):
+    """A deploy that reports success while one artifact class is behind
+    is precisely the failure this replaces."""
+
+    def test_a_failed_step_fails_the_deploy(self):
+        src = _src(DEPLOY)
+        self.assertIn("DEPLOY FAILED", src)
+        self.assertRegex(src, r"failed\s*=\s*\[.*not s\.ok")
+
+    def test_verification_is_skipped_when_a_step_failed(self):
+        # Verifying a deploy that did not happen would report a green
+        # check on a stale host.
+        self.assertIn("SKIPPED (an earlier step failed)", _src(DEPLOY))
+
+    def test_exit_code_is_nonzero_on_failure(self):
+        self.assertRegex(_src(DEPLOY), r"DEPLOY FAILED[\s\S]{0,120}return 1")
+
+
+class TestVerifierCoversTheSameClasses(unittest.TestCase):
+    """Deploying and verifying must not disagree about what matters."""
+
+    def test_verifier_checks_skills(self):
+        self.assertIn("def check_skills", _src(VERIFY))
+
+    def test_a_stale_skill_is_a_FAIL_not_a_warning(self):
+        # WARN would scroll past. This is the exact condition that went
+        # unnoticed for ten weeks.
+        src = _src(VERIFY)
+        block = src[src.index("def check_skills"):]
+        block = block[:block.index("def main")]
+        self.assertRegex(
+            block, r"r\.add\(FAIL,\s*[\"']skills STALE",
+            "a stale skill must FAIL verification, not warn",
+        )
+
+    def test_verifier_runs_skills_by_default(self):
+        src = _src(VERIFY)
+        main = src[src.index("def main"):]
+        self.assertIn("check_skills(r)", main)
+
+    def test_verifier_still_checks_the_store_and_version(self):
+        main = _src(VERIFY)[_src(VERIFY).index("def main"):]
+        for fn in ("check_store(r)", "check_version(r)", "check_providers(r)"):
+            self.assertIn(fn, main)
+
+
+class TestTheRoutineIsWrittenDown(unittest.TestCase):
+    """The root cause was a habit in an assistant's head. The fix has to
+    live somewhere a fresh session reads."""
+
+    def test_claude_md_names_the_deploy_script(self):
+        text = (REPO / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "scripts/deploy.py", text,
+            "CLAUDE.md must tell the next session that deploy means "
+            "scripts/deploy.py, or the ad-hoc routine comes back",
+        )
+
+    def test_claude_md_says_deploy_is_full_deploy(self):
+        text = (REPO / "CLAUDE.md").read_text(encoding="utf-8").lower()
+        self.assertTrue(
+            "full deploy" in text,
+            "CLAUDE.md must state that deploy is a full deploy",
+        )
+
+
+def _skill_frontmatter(src: pathlib.Path) -> str | None:
+    text = src.read_text(encoding="utf-8")
+    if not text.startswith("---\n"):
+        return None
+    parts = text.split("---", 2)
+    return parts[1] if len(parts) > 2 else None
+
+
+def _skills() -> list[pathlib.Path]:
+    return sorted((REPO / ".claude" / "skills").glob("*/SKILL.md"))
+
+
+class TestSkillsInRepoAreWellFormed(unittest.TestCase):
+    """The frontmatter is the whole interface: without a parseable
+    ``name:`` / ``description:`` a skill either never appears in the
+    listing, or appears with the wrong description and is therefore
+    never chosen. Neither failure says anything at runtime."""
+
+    def test_every_skill_has_frontmatter(self):
+        missing = [s.parent.name for s in _skills()
+                   if _skill_frontmatter(s) is None]
+        self.assertEqual(
+            missing, [],
+            f"skill(s) without YAML frontmatter: {missing} — without "
+            "name:/description: they never appear in the skill listing",
+        )
+
+    def test_the_frontmatter_actually_parses_as_yaml(self):
+        """Regex-checking ``^name:`` is not enough, and this is why.
+
+        On 2026-08-02 three skills — including ``consultants`` — carried
+        a description containing ``": "`` unquoted. That is not a valid
+        plain YAML scalar, so the block failed to parse and the
+        description silently fell back to the file's H1. The skill still
+        listed, with the wrong summary: the one string that decides
+        whether the skill gets chosen at all.
+        """
+        yaml = pytest.importorskip(
+            "yaml",
+            reason="PyYAML (requirements-dev.txt) is needed to parse "
+                   "skill frontmatter; without it this check is blind",
+        )
+        for src in _skills():
+            head = _skill_frontmatter(src)
+            self.assertIsNotNone(head, f"{src.parent.name}: no frontmatter")
+            try:
+                data = yaml.safe_load(head)
+            except Exception as e:  # noqa: BLE001 — report which and why
+                self.fail(f"{src.parent.name}: frontmatter is not valid "
+                          f"YAML ({type(e).__name__}: {e}). A description "
+                          "containing ': ' must be quoted.")
+            self.assertIsInstance(
+                data, dict, f"{src.parent.name}: frontmatter is not a mapping")
+            for key in ("name", "description"):
+                self.assertTrue(
+                    isinstance(data.get(key), str) and data[key].strip(),
+                    f"{src.parent.name}: frontmatter has no usable {key}:",
+                )
+
+    def test_skill_dir_name_matches_the_declared_name(self):
+        # A mismatch installs under one name and is invoked under
+        # another — the skill silently never loads.
+        for src in _skills():
+            head = _skill_frontmatter(src)
+            self.assertIsNotNone(head, f"{src.parent.name}: no frontmatter")
+            m = re.search(r"^name:\s*(\S+)", head, re.M)
+            self.assertIsNotNone(m, f"{src.parent.name}: no name:")
+            self.assertEqual(
+                m.group(1).strip('"\''), src.parent.name,
+                f"{src.parent.name}: frontmatter name is {m.group(1)!r}",
+            )

@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import io
 import json
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -257,10 +256,6 @@ class TestMainRejectsMangledProject(unittest.TestCase):
         We don't want to break that flow by overzealous validation.
         Just verify the validation isn't applied — we don't run the
         full daemon since that'd block."""
-        from claude_hooks.lsp_engine.__main__ import (
-            _resolve_user_project,
-            _validate_project_path,
-        )
         # The validation is only called in main() conditional on
         # ``args.subcommand != "daemon"``. Confirm via source-
         # inspection that the guard exists.

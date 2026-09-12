@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import io
 import json
-import socket
-import threading
 import time
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
@@ -924,3 +922,214 @@ class TestTopLevelErrors:
     def test_consult_requires_message(self):
         with pytest.raises(SystemExit):
             cli.main(["consult"])
+
+
+# ---------------- events --milestones (2026-08-02) ---------------- #
+
+class TestEventsMilestoneFilter:
+    """``events --milestones`` — the unfiltered SSE stream is unusable
+    as a monitor.
+
+    A single xhigh council emits hundreds of ``llm_call`` /
+    ``tool_call`` records, each a full payload. The consumer that has
+    to notice ``awaiting_adversary`` (the engine is paused, waiting for
+    an assistant-authored challenge) never sees it in that volume. The
+    filter keeps state changes and renders one line each.
+    """
+
+    def test_llm_and_tool_calls_are_not_milestones(self):
+        from consultants.cli import _MILESTONE_KINDS
+        assert "llm_call" not in _MILESTONE_KINDS
+        assert "tool_call" not in _MILESTONE_KINDS
+
+    def test_the_signals_that_need_a_response_are_milestones(self):
+        from consultants.cli import _MILESTONE_KINDS
+        for kind in ("awaiting_adversary", "complete", "error",
+                     "node_enter", "node_exit"):
+            assert kind in _MILESTONE_KINDS
+
+    def test_compact_line_names_role_round_and_lane(self):
+        from consultants.cli import _compact_event_line
+        line = _compact_event_line(
+            "node_enter",
+            {"ts": 1785647084.0, "role": "researcher",
+             "round": 1, "lane_idx": 0},
+        )
+        assert "node_enter" in line
+        assert "role=researcher" in line
+        assert "round=1" in line
+        assert "lane_idx=0" in line
+
+    def test_compact_line_surfaces_the_checkpoint_timeout(self):
+        # The operator's next question at a pause is "how long do I
+        # have before it auto-resumes?"
+        from consultants.cli import _compact_event_line
+        line = _compact_event_line(
+            "awaiting_adversary",
+            {"ts": 1785647084.0, "reason": "adversary_checkpoint",
+             "timeout_s": 1800.0},
+        )
+        assert "awaiting_adversary" in line
+        assert "timeout_s=1800.0" in line
+
+    def test_compact_line_survives_a_payload_without_ts(self):
+        from consultants.cli import _compact_event_line
+        line = _compact_event_line(
+            "complete", {"status": "completed",
+                         "final_answer_present": True})
+        assert "status=completed" in line
+
+    def test_flags_parse(self):
+        from consultants.cli import build_parser
+        args = build_parser().parse_args(
+            ["events", "csl-x", "--milestones"])
+        assert args.milestones
+        args = build_parser().parse_args(
+            ["events", "csl-x", "--kinds", "complete,error"])
+        assert args.kinds == "complete,error"
+
+    def test_default_is_unfiltered(self):
+        # Machine consumers parse the raw records; don't change what
+        # they get without a flag.
+        from consultants.cli import build_parser
+        args = build_parser().parse_args(["events", "csl-x"])
+        assert not args.milestones
+        assert args.kinds is None
+
+
+class TestPauseVerbReportsPendingVsInEffect:
+    """The CLI is where a human learns whether their pause did
+    anything. ``{"ok": true}`` on its own reads as "the run stopped"."""
+
+    def _run(self, response):
+        import consultants.cli as CLI
+        args = CLI.build_parser().parse_args(["pause", "csl-x"])
+        orig = CLI._http
+        CLI._http = lambda *a, **kw: response
+        try:
+            import io
+            import contextlib
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                args.fn(args, "http://127.0.0.1:38095")
+            return err.getvalue()
+        finally:
+            CLI._http = orig
+
+    def test_names_the_blocker_when_the_pause_cannot_land(self):
+        err = self._run({
+            "paused": True, "pause_state": "pending",
+            "pause_blocked_by": [{
+                "what": "adversary_checkpoint",
+                "clears_with": "adversary-ack (or resume, which does both)",
+            }],
+        })
+        assert "PENDING" in err
+        assert "adversary_checkpoint" in err
+        assert "adversary-ack" in err
+
+    def test_says_pending_even_with_nothing_blocking(self):
+        err = self._run({"paused": True, "pause_state": "pending"})
+        assert "PENDING" in err
+        assert "next node enters" in err
+
+    def test_a_parked_pause_needs_no_caveat(self):
+        err = self._run({"paused": True, "pause_state": "parked"})
+        assert err.strip() == ""
+
+    def test_a_refused_pause_says_why(self):
+        err = self._run({"paused": False})
+        assert "already cancelling" in err
+
+
+class TestToolAckVerb:
+    """``tool-ack`` — the CLI surface of the M-A approval channel."""
+
+    def _body_for(self, argv):
+        import consultants.cli as CLI
+        args = CLI.build_parser().parse_args(argv)
+        captured = {}
+
+        def _fake_http(method, url, body=None, **kw):
+            captured["method"] = method
+            captured["url"] = url
+            captured["body"] = body
+            return {"resolved": True}
+
+        orig = CLI._http
+        CLI._http = _fake_http
+        try:
+            args.fn(args, "http://127.0.0.1:38095")
+        finally:
+            CLI._http = orig
+        return captured
+
+    def test_allow_posts_true(self):
+        got = self._body_for(["tool-ack", "csl-x", "--allow"])
+        assert got["method"] == "POST"
+        assert got["url"].endswith("/v1/consult/csl-x/tool-ack")
+        assert got["body"] == {"allow": True}
+
+    def test_deny_posts_false(self):
+        got = self._body_for(["tool-ack", "csl-x", "--deny"])
+        assert got["body"] == {"allow": False}
+
+    def test_request_id_and_reason_are_forwarded(self):
+        got = self._body_for([
+            "tool-ack", "csl-x", "--deny",
+            "--request-id", "tap-7", "--reason", "too expensive"])
+        assert got["body"] == {
+            "allow": False, "request_id": "tap-7",
+            "reason": "too expensive"}
+
+    def test_a_verdict_is_required(self):
+        # No default: guessing either way is the failure the channel
+        # exists to prevent.
+        import consultants.cli as CLI
+        with pytest.raises(SystemExit):
+            CLI.build_parser().parse_args(["tool-ack", "csl-x"])
+
+    def test_allow_and_deny_are_mutually_exclusive(self):
+        import consultants.cli as CLI
+        with pytest.raises(SystemExit):
+            CLI.build_parser().parse_args(
+                ["tool-ack", "csl-x", "--allow", "--deny"])
+
+    def test_all_of_tool_sends_scope_tool(self):
+        got = self._body_for(["tool-ack", "csl-x", "--allow",
+                              "--all-of-tool"])
+        assert got["body"] == {"allow": True, "scope": "tool"}
+
+    def test_all_matching_sends_the_glob(self):
+        got = self._body_for(["tool-ack", "csl-x", "--allow",
+                              "--all-matching", "src/**"])
+        assert got["body"] == {
+            "allow": True, "scope": "glob", "pattern": "src/**"}
+
+    def test_scope_flags_are_mutually_exclusive(self):
+        import consultants.cli as CLI
+        with pytest.raises(SystemExit):
+            CLI.build_parser().parse_args(
+                ["tool-ack", "csl-x", "--allow", "--all-of-tool",
+                 "--all-matching", "src/**"])
+
+    def test_default_ack_sends_no_scope(self):
+        # Parity: answering one call must not silently widen.
+        got = self._body_for(["tool-ack", "csl-x", "--allow"])
+        assert "scope" not in got["body"]
+
+    def test_approval_events_are_milestones(self):
+        # The one event in the stream that BLOCKS a lane must never be
+        # filtered out of the monitor view.
+        from consultants.cli import _MILESTONE_KINDS
+        assert "awaiting_tool_approval" in _MILESTONE_KINDS
+        assert "tool_approval_resolved" in _MILESTONE_KINDS
+
+    def test_compact_line_shows_tool_and_request_id(self):
+        from consultants.cli import _compact_event_line
+        line = _compact_event_line("awaiting_tool_approval", {
+            "ts": 1785654000.0, "tool": "rent_pod", "level": "ask_human",
+            "request_id": "tap-1", "deadline_ts": 1785654600.0})
+        assert "tool=rent_pod" in line
+        assert "request_id=tap-1" in line
+        assert "level=ask_human" in line

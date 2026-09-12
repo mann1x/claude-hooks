@@ -27,7 +27,15 @@ from claude_hooks.get_advice import (
     config as advisor_config,
     state as advisor_state,
 )
-from claude_hooks.get_advice.chat_client import ChatClient, make_agent_chat_client
+from claude_hooks.get_advice.chat_client import (  # noqa: F401
+    # ChatClient is not referenced in this module, but the test suite
+    # patches ``cli.ChatClient`` — this module is the patch namespace,
+    # so the name has to exist on it. Removing it as "unused" fails as
+    # an AttributeError at patch time, which reads like a test bug
+    # rather than a lint one.
+    ChatClient,
+    make_agent_chat_client,
+)
 from claude_hooks.get_advice.ctx_probe import base_url_default, probe_max_ctx
 
 log = logging.getLogger("claude_hooks.get_advice")

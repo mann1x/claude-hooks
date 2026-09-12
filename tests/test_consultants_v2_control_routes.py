@@ -21,8 +21,8 @@ from __future__ import annotations
 
 import time
 import unittest
-from dataclasses import dataclass, field
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Optional
 
 
 try:
@@ -513,6 +513,128 @@ class TestResume(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_FASTAPI, "fastapi not installed")
+class TestPendingPauseIsExplicit(unittest.TestCase):
+    """A pause takes effect where the next node *enters*. When the
+    runner is already inside one of its own waits, no node enters — and
+    the pause reads as "requested, nothing happened", which is the shape
+    of every bug in this release. Observed on
+    ``csl-2026-08-02-1054-38cf``: the adversary checkpoint opened four
+    seconds before the pause, and status showed ``paused: true`` with no
+    parked role and no reason.
+    """
+
+    def test_interrupt_reports_pending_at_request_time(self):
+        c, app = _client()
+        _install_session(app, "csl-i1", compiled=_FakeCompiledGraph())
+        r = c.post("/v1/consult/csl-i1/interrupt", json={})
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertTrue(body["paused"])
+        # "ok: true" alone reads as "the run has stopped". It has not.
+        self.assertEqual(body["pause_state"], "pending")
+
+    def test_the_adversary_checkpoint_is_named_as_the_blocker(self):
+        c, app = _client()
+        s = _install_session(app, "csl-i2", compiled=_FakeCompiledGraph())
+        s._checkpoint_deadline_ts = 9999.0
+        r = c.post("/v1/consult/csl-i2/interrupt", json={})
+        blockers = r.json()["pause_blocked_by"]
+        self.assertEqual(blockers[0]["what"], "adversary_checkpoint")
+        self.assertEqual(blockers[0]["deadline_ts"], 9999.0)
+        self.assertIn("adversary-ack", blockers[0]["clears_with"])
+
+    def test_a_parked_tool_approval_is_named_too(self):
+        c, app = _client()
+        s = _install_session(app, "csl-i3", compiled=_FakeCompiledGraph())
+        s.tool_approvals.open(
+            tool="read_file", level="ask_human", arguments="{}",
+            cwd="/p", reason="r", timeout_s=600,
+        )
+        r = c.post("/v1/consult/csl-i3/interrupt", json={})
+        whats = [b["what"] for b in r.json()["pause_blocked_by"]]
+        self.assertIn("tool_approval", whats)
+
+    def test_nothing_blocking_reports_no_blocker(self):
+        # A node is simply mid-call and will hit the gate when it
+        # finishes — different from "something is holding the runner".
+        c, app = _client()
+        _install_session(app, "csl-i4", compiled=_FakeCompiledGraph())
+        r = c.post("/v1/consult/csl-i4/interrupt", json={})
+        self.assertIsNone(r.json()["pause_blocked_by"])
+        self.assertNotIn("pause_note", r.json())
+
+    def test_status_carries_the_blocker_while_it_stays_pending(self):
+        c, app = _client()
+        s = _install_session(app, "csl-i5", compiled=_FakeCompiledGraph())
+        s._checkpoint_deadline_ts = 9999.0
+        s.run_control.request_pause("hold")
+        out = s.public_dict()
+        self.assertEqual(out["pause_state"], "pending")
+        self.assertEqual(out["pause_blocked_by"][0]["what"],
+                         "adversary_checkpoint")
+        self.assertIn("no node can reach it", out["pause_note"])
+
+    def test_a_parked_pause_does_not_report_blockers(self):
+        # Once a node is parked there is nothing left to explain.
+        c, app = _client()
+        s = _install_session(app, "csl-i6", compiled=_FakeCompiledGraph())
+        s._checkpoint_deadline_ts = 9999.0
+        s.run_control.request_pause("hold")
+        s.run_control.paused_roles.append("synthesizer")
+        out = s.public_dict()
+        self.assertEqual(out["pause_state"], "parked")
+        self.assertNotIn("pause_blocked_by", out)
+
+    def test_an_untouched_run_gains_no_pause_keys(self):
+        # Parity, again: default status must be byte-identical.
+        c, app = _client()
+        s = _install_session(app, "csl-i7", compiled=_FakeCompiledGraph())
+        out = s.public_dict()
+        for key in ("paused", "pause_state", "pause_blocked_by",
+                    "pause_note"):
+            self.assertNotIn(key, out)
+
+
+class TestResumeReleasesAPause(unittest.TestCase):
+    """``_adversary_checkpoint_active`` spans the whole runner-owned
+    window, so it can still be set long after the checkpoint was acked.
+    Testing it before the pause swallowed the release — observed live on
+    ``csl-2026-08-02-1042-1036``, where /resume kept answering
+    ``adversary_ack`` while the synthesizer stayed parked with nothing
+    able to free it."""
+
+    def test_a_pause_is_released(self):
+        c, app = _client()
+        s = _install_session(app, "csl-p1", compiled=_FakeCompiledGraph())
+        s.run_control.request_pause("hold")
+        r = c.post("/v1/consult/csl-p1/resume", json={})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["mode"], "pause_release")
+        self.assertTrue(r.json()["resumed"])
+        self.assertFalse(s.run_control.paused)
+
+    def test_a_pause_is_released_even_while_the_adversary_window_is_open(self):
+        c, app = _client()
+        s = _install_session(app, "csl-p2", compiled=_FakeCompiledGraph())
+        s.run_control.request_pause("hold")
+        s._adversary_checkpoint_active = True
+        r = c.post("/v1/consult/csl-p2/resume", json={})
+        self.assertEqual(r.status_code, 200)
+        # BOTH released — returning after only one leaves the run
+        # blocked on the other.
+        self.assertEqual(r.json()["mode"], "pause_release+adversary_ack")
+        self.assertFalse(s.run_control.paused)
+
+    def test_the_adversary_ack_alone_still_works(self):
+        c, app = _client()
+        s = _install_session(app, "csl-p3", compiled=_FakeCompiledGraph())
+        s._adversary_checkpoint_active = True
+        r = c.post("/v1/consult/csl-p3/resume", json={})
+        self.assertEqual(r.json()["mode"], "adversary_ack")
+        self.assertTrue(r.json()["acked"])
+        self.assertFalse(r.json()["resumed"])
+
+
 class TestCancel(unittest.TestCase):
 
     def test_flips_cancel_requested_on_running(self):
@@ -544,6 +666,53 @@ class TestCancel(unittest.TestCase):
         _install_session(app, "csl-cl", closed=True)
         r = c.post("/v1/consult/csl-cl/cancel", json={})
         self.assertEqual(r.status_code, 410)
+
+    def test_a_plain_cancel_now_stops_the_run(self):
+        # Before the node gate was wired this reported False: the flag
+        # was set and the run streamed to completion anyway. It stops
+        # now, and the response says so.
+        c, app = _client()
+        s = _install_session(app, "csl-c2", compiled=_FakeCompiledGraph())
+        r = c.post(
+            "/v1/consult/csl-c2/cancel", json={"discard_partial": False},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["stops_the_run"])
+        self.assertTrue(r.json()["cancel_accepted"])
+        # And the mechanism that does it is out-of-band, not the delta.
+        self.assertTrue(s.run_control.cancelled)
+
+    def test_cancel_promises_no_final_answer(self):
+        # The synthesizer is a node like any other; running it would be
+        # spending after the caller said stop.
+        c, app = _client()
+        _install_session(app, "csl-c4", compiled=_FakeCompiledGraph())
+        r = c.post("/v1/consult/csl-c4/cancel", json={})
+        self.assertFalse(r.json()["final_answer_expected"])
+
+    def test_a_second_cancel_is_not_accepted_twice(self):
+        c, app = _client()
+        _install_session(app, "csl-c5", compiled=_FakeCompiledGraph())
+        c.post("/v1/consult/csl-c5/cancel", json={})
+        r = c.post("/v1/consult/csl-c5/cancel", json={})
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.json()["cancel_accepted"])
+        self.assertTrue(r.json()["stops_the_run"])
+
+    def test_a_finished_run_reports_nothing_left_to_stop(self):
+        c, app = _client()
+        _install_session(app, "csl-c6", status="completed")
+        r = c.post("/v1/consult/csl-c6/cancel", json={})
+        self.assertFalse(r.json()["stops_the_run"])
+
+    def test_discard_partial_does_stop_the_run(self):
+        c, app = _client()
+        _install_session(app, "csl-c3", compiled=_FakeCompiledGraph())
+        r = c.post(
+            "/v1/consult/csl-c3/cancel", json={"discard_partial": True},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["stops_the_run"])
 
 
 # ============================================================== #
@@ -665,3 +834,159 @@ class TestEvents(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ============================================================== #
+# POST /tool-ack — the M-A approval channel's HTTP surface
+# ============================================================== #
+
+
+@unittest.skipUnless(HAVE_FASTAPI, "fastapi not installed")
+class TestToolAck(unittest.TestCase):
+    """Answering a parked ``ask_human`` tool call.
+
+    The lane is blocked inside its tool executor, so resolving the
+    request IS the resume — nothing re-invokes the graph, exactly like
+    /adversary-ack.
+    """
+
+    def _park(self, app, sid="csl-1"):
+        s = _install_session(app, sid)
+        req, _created = s.tool_approvals.open(
+            tool="rent_pod", level="ask_human",
+            arguments='{"gpu": "h100"}', cwd="/proj",
+            reason="spends money", timeout_s=600,
+        )
+        return s, req
+
+    def test_allow_resolves_the_request(self):
+        c, app = _client()
+        _s, req = self._park(app)
+        r = c.post("/v1/consult/csl-1/tool-ack", json={"allow": True})
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertTrue(body["resolved"])
+        self.assertEqual(body["request"]["request_id"], req.request_id)
+        self.assertEqual(body["request"]["resolution"], "allowed")
+        self.assertEqual(body["pending"], [])
+
+    def test_deny_resolves_the_request(self):
+        c, app = _client()
+        self._park(app)
+        r = c.post("/v1/consult/csl-1/tool-ack", json={"allow": False})
+        self.assertEqual(r.json()["request"]["resolution"], "denied")
+
+    def test_allow_is_required(self):
+        # No default verdict: guessing either way is the failure this
+        # channel exists to prevent.
+        c, app = _client()
+        self._park(app)
+        r = c.post("/v1/consult/csl-1/tool-ack", json={})
+        self.assertEqual(r.status_code, 400)
+
+    def test_targets_a_specific_request_id(self):
+        c, app = _client()
+        s, first = self._park(app)
+        second, _ = s.tool_approvals.open(
+            tool="other", level="ask_human", arguments="", cwd="/proj",
+            reason="r", timeout_s=600,
+        )
+        r = c.post("/v1/consult/csl-1/tool-ack",
+                   json={"allow": True, "request_id": second.request_id})
+        self.assertEqual(r.json()["request"]["tool"], "other")
+        self.assertEqual([p["request_id"] for p in r.json()["pending"]],
+                         [first.request_id])
+
+    def test_scope_tool_grants_the_whole_tool(self):
+        c, app = _client()
+        s, _req = self._park(app)
+        r = c.post("/v1/consult/csl-1/tool-ack",
+                   json={"allow": True, "scope": "tool"})
+        self.assertEqual(r.status_code, 200)
+        grants = r.json()["grants"]
+        self.assertEqual(grants[0]["scope"], "tool")
+        self.assertEqual(grants[0]["tool"], "rent_pod")
+        # Session-scoped: authorization is per council, so a later call
+        # from any role inherits it.
+        self.assertIsNotNone(
+            s.tool_approvals.matching_grant("rent_pod", "{}"))
+
+    def test_scope_glob_releases_matching_parked_siblings(self):
+        c, app = _client()
+        s = _install_session(app, "csl-g")
+        first, _ = s.tool_approvals.open(
+            tool="read_file", level="ask_human",
+            arguments='{"path": "src/a.py"}', cwd="/proj",
+            reason="r", timeout_s=600,
+        )
+        s.tool_approvals.open(
+            tool="read_file", level="ask_human",
+            arguments='{"path": "src/b.py"}', cwd="/proj",
+            reason="r", timeout_s=600,
+        )
+        outside, _ = s.tool_approvals.open(
+            tool="read_file", level="ask_human",
+            arguments='{"path": "vendor/c.py"}', cwd="/proj",
+            reason="r", timeout_s=600,
+        )
+        r = c.post("/v1/consult/csl-g/tool-ack",
+                   json={"allow": True, "scope": "glob",
+                         "pattern": "src/**",
+                         "request_id": first.request_id})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual([p["request_id"] for p in r.json()["pending"]],
+                         [outside.request_id])
+
+    def test_rejects_an_unknown_scope(self):
+        c, app = _client()
+        self._park(app)
+        r = c.post("/v1/consult/csl-1/tool-ack",
+                   json={"allow": True, "scope": "everything"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_default_scope_installs_no_grant(self):
+        # Parity: the plain ack must not silently widen.
+        c, app = _client()
+        self._park(app)
+        r = c.post("/v1/consult/csl-1/tool-ack", json={"allow": True})
+        self.assertEqual(r.json()["grants"], [])
+
+    def test_acking_nothing_is_a_no_op_not_an_error(self):
+        # A duplicate ack after a timeout already denied must not 500.
+        c, app = _client()
+        _install_session(app, "csl-1")
+        r = c.post("/v1/consult/csl-1/tool-ack", json={"allow": True})
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.json()["resolved"])
+
+    def test_404_on_unknown_session(self):
+        c, _app = _client()
+        r = c.post("/v1/consult/missing/tool-ack", json={"allow": True})
+        self.assertEqual(r.status_code, 404)
+
+    def test_status_surfaces_the_pending_request(self):
+        # The signal a monitor polls for — same discipline as
+        # adversary_checkpoint_deadline_ts: present only while parked.
+        c, app = _client()
+        self._park(app)
+        body = c.get("/v1/consult/csl-1").json()
+        self.assertIn("pending_tool_approvals", body)
+        self.assertEqual(body["pending_tool_approvals"][0]["tool"],
+                         "rent_pod")
+        self.assertEqual(body["pending_tool_approvals"][0]["level"],
+                         "ask_human")
+
+    def test_status_omits_the_key_when_nothing_is_parked(self):
+        # M12 parity: a default run's status response must be
+        # byte-identical to pre-M-A.
+        c, app = _client()
+        _install_session(app, "csl-1")
+        self.assertNotIn("pending_tool_approvals",
+                         c.get("/v1/consult/csl-1").json())
+
+    def test_status_omits_the_key_again_after_the_ack(self):
+        c, app = _client()
+        self._park(app)
+        c.post("/v1/consult/csl-1/tool-ack", json={"allow": True})
+        self.assertNotIn("pending_tool_approvals",
+                         c.get("/v1/consult/csl-1").json())

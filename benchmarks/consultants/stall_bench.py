@@ -31,9 +31,8 @@ import os
 import statistics
 import sys
 import time
-from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Optional
 
 from benchmarks.consultants.harness import (
     HARNESS_VERSION,
@@ -46,7 +45,6 @@ from benchmarks.consultants.harness import (
     load_suite_manifest,
 )
 from benchmarks.consultants.stall_capture import (
-    CallTiming,
     TimingCaptureChat,
     aggregate_calls,
 )
@@ -68,7 +66,7 @@ DEFAULT_OLLAMA_BASE = "http://192.168.178.2:11433"
 # gemini-3-flash-preview that triggered the 2026-05-15 audit
 # pathology.
 DEFAULT_MODELS: tuple[str, ...] = (
-    "glm-5.1:cloud",
+    "glm-5.2:cloud",
     "kimi-k2.6:cloud",
     "gemma4:31b-cloud",
     "qwen3-coder-next:cloud",

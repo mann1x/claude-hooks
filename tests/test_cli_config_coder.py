@@ -130,7 +130,7 @@ class TestHandlers(unittest.TestCase):
         self.assertIn("routes_by_language", body["coder"])
         # Seeded defaults present:
         self.assertEqual(
-            body["coder"]["default_route"]["primary"], "glm-5.1:cloud",
+            body["coder"]["default_route"]["primary"], "glm-5.2:cloud",
         )
         self.assertEqual(
             body["coder"]["routes_by_language"]["csharp"]["primary"],

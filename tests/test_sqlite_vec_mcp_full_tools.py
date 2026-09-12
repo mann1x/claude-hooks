@@ -7,7 +7,6 @@ the count-words-in-response sanity checks.
 
 from __future__ import annotations
 
-import json
 
 import pytest
 

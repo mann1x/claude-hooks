@@ -30,19 +30,16 @@ def make_runner(*, ollama_base_url: str):
     """
     # Lazy imports — none of these are present in the main test env.
     from claude_hooks.allowed_roots import (
-        discover_allowed_roots,
-        discover_allowed_roots_with_display,
         render_for_log,
     )
-    from claude_hooks.get_advice.chat_client import ChatClient, make_agent_chat_client
-    from claude_hooks.caliber_proxy.tools import (
-        openai_tool_specs, make_executor,
-    )
+    from claude_hooks.get_advice.chat_client import make_agent_chat_client
     from claude_hooks.caliber_proxy.prompt import build_grounding_messages
-    from consultants.engine.graph import GraphDeps, build_council_graph
-    from consultants.engine.recorder import MessageRecorder, RecorderMeta
+    from consultants.server.tool_surface import build_tool_surface
+    from consultants.engine.graph import (
+        TOOLABLE_ROLES, GraphDeps, build_council_graph,
+    )
     from consultants.engine.trace import (
-        Tracer, TracedChat, traced_tool, traced_node,
+        Tracer, TracedChat, traced_tool,
     )
     # #214: Default to an in-memory checkpointer so the M9 control
     # surface (state / cancel / inject / pause / resume) works in
@@ -72,6 +69,33 @@ def make_runner(*, ollama_base_url: str):
         # auto-discovery by the HTTP layer). Empty tuple → tool layer
         # falls back to the bare ``execute`` fast path.
         extra_roots = tuple(runner_input.get("extra_roots") or ())
+        # Display forms (pre-realpath, e.g. ``/shared/dev/x``) for the
+        # log line and for metadata.json. Resolved here rather than
+        # inside the ``if extra_roots:`` log block below so the
+        # artifact writer can read them unconditionally.
+        cwd_display: str = runner_input.get("cwd_display") or cwd
+        extra_roots_display = tuple(
+            runner_input.get("extra_roots_display") or extra_roots
+        )
+        if len(extra_roots_display) != len(extra_roots):
+            extra_roots_display = extra_roots
+
+        # Pre-flight, before a single token is spent: can this run
+        # actually read the files the question is about? A council
+        # that can't doesn't fail — it answers confidently from
+        # nothing and the only tell is a wall of "[unverified — file
+        # not found]" at the end, 55 minutes later. See
+        # :mod:`consultants.engine.preflight` for why "none of them
+        # resolve" is the blocking condition and "some" only warns.
+        if _preflight_refused(
+            state, question, cwd=cwd, extra_roots=extra_roots,
+            cwd_display=cwd_display,
+            extra_roots_display=extra_roots_display,
+            label="council",
+            skip=bool(runner_input.get("skip_preflight")),
+        ):
+            return
+
         enabled = tuple(cc.enabled_roles(cfg))
 
         # Effort-based critic strategy:
@@ -234,14 +258,8 @@ def make_runner(*, ollama_base_url: str):
             # paths) when available so /shared/dev/<x> shows in the log
             # instead of /srv/dev-disk-by-label-opt/dev/<x>. Falls back to
             # realpath rendering when the upstream didn't pass display info
-            # (legacy / disk-reopened sessions).
-            cwd_display = runner_input.get("cwd_display") or cwd
-            extra_roots_display = tuple(
-                runner_input.get("extra_roots_display")
-                or extra_roots
-            )
-            if len(extra_roots_display) != len(extra_roots):
-                extra_roots_display = extra_roots
+            # (legacy / disk-reopened sessions). Both resolved at the top
+            # of this function.
             log.info(
                 "consultants sid=%s allowed roots:\n%s",
                 state.sid,
@@ -267,15 +285,32 @@ def make_runner(*, ollama_base_url: str):
             )
             consultants_store = None
 
+        # M-A: compose the tool surface from [tools] config. Returns the
+        # same (specs, executor) shape the fixed builtin surface did, so
+        # nothing downstream of GraphDeps knows a registry exists.
+        _tool_specs, _tool_executor, _tool_registry = build_tool_surface(
+            cfg, extra_roots=extra_roots,
+            approval_fn=_make_tool_approval_fn(
+                state, recorder, cfg, cwd, log_label="council"),
+        )
+        # M-B: which roles get those tools. Empty unless [tools]
+        # all_roles is on, which keeps the default graph pre-M-B.
+        _tooled_roles = (
+            TOOLABLE_ROLES
+            if getattr(getattr(cfg, "tools", None), "all_roles", False)
+            else ()
+        )
+
         deps = GraphDeps(
             chat_clients=chat_clients,
             models=models,
             enabled_roles=enabled,
             cwd=cwd,
             tool_executor=traced_tool(
-                make_executor(extra_roots), tracer=tracer,
+                _tool_executor, tracer=tracer,
             ),
-            tool_specs=openai_tool_specs(),
+            tool_specs=_tool_specs,
+            tooled_roles=_tooled_roles,
             grounding_msgs=grounding_msgs,
             think_by_role=think_by_role,
             synthesizer_self_critic=synthesizer_self_critic,
@@ -300,6 +335,14 @@ def make_runner(*, ollama_base_url: str):
             # M3: strictness dial for the opt-in adversary refuter.
             adversary_strictness=getattr(cfg, "adversary_strictness",
                                          "normal"),
+            # Cooperative cancel / pause. Out-of-band by necessity: a
+            # mid-invoke graph never re-reads its own channels, so the
+            # flag has to reach the node gate off the SessionState.
+            run_control=state.run_control,
+            run_control_emit=_make_run_control_emit(
+                state, recorder, log_label="council"),
+            run_control_is_closed=lambda: bool(
+                getattr(state, "closed", False)),
         )
         # #314: ALWAYS compile with interrupt_before=["synthesizer"].
         # The pause before the final-answer node is the window where a
@@ -410,6 +453,29 @@ def make_runner(*, ollama_base_url: str):
         node_error = final_state.get("error")
         node_failed = final_state.get("_role_failed")
         terminal_status = "failed" if node_error else "completed"
+        # A cancelled run drained rather than finished. Reporting it as
+        # "completed" would be the same lie the flag itself used to
+        # tell: there is no synthesized answer, because the synthesizer
+        # is a node like any other and running it would be spending
+        # after the user said stop.
+        if state.run_control is not None and state.run_control.cancelled:
+            terminal_status = "cancelled"
+            log.warning(
+                "council: run cancelled (%s) - %d node(s) skipped, "
+                "partial state kept",
+                state.run_control.cancel_reason,
+                len(state.run_control.skipped),
+            )
+
+        # A cut-off deliverable is a failure even when every node
+        # returned cleanly (2026-08-12). Only promoted to "failed" from
+        # "completed": a cancelled or already-failed run keeps its own,
+        # more specific verdict.
+        truncations, trunc_error = _truncation_verdict(
+            recorder, final_state.get("final_answer", "") or "")
+        if trunc_error and terminal_status == "completed":
+            terminal_status = "failed"
+            node_error = trunc_error
 
         # Persist artifacts.
         result = storage.ConsultationResult(
@@ -433,7 +499,11 @@ def make_runner(*, ollama_base_url: str):
                 "total_completion_tokens") or 0),
             retries_by_role=dict(final_state.get(
                 "retries_by_role") or {}),
+            truncations_by_role=truncations,
             root_sid=getattr(state, "root_sid", None) or state.sid,
+            extra_roots=list(extra_roots),
+            cwd_display=cwd_display,
+            extra_roots_display=list(extra_roots_display),
         )
         storage.write_consultation(result, cwd=Path(cwd))
 
@@ -502,19 +572,16 @@ def make_follow_up_runner(*, ollama_base_url: str):
     parent was reaped between completion and follow-up).
     """
     from claude_hooks.allowed_roots import (
-        discover_allowed_roots,
-        discover_allowed_roots_with_display,
         render_for_log,
     )
-    from claude_hooks.get_advice.chat_client import ChatClient, make_agent_chat_client
-    from claude_hooks.caliber_proxy.tools import (
-        openai_tool_specs, make_executor,
-    )
+    from claude_hooks.get_advice.chat_client import make_agent_chat_client
     from claude_hooks.caliber_proxy.prompt import build_grounding_messages
-    from consultants.engine.graph import GraphDeps, build_follow_up_graph
-    from consultants.engine.recorder import MessageRecorder, RecorderMeta
+    from consultants.server.tool_surface import build_tool_surface
+    from consultants.engine.graph import (
+        TOOLABLE_ROLES, GraphDeps, build_follow_up_graph,
+    )
     from consultants.engine.trace import (
-        Tracer, TracedChat, traced_tool, traced_node,
+        Tracer, TracedChat, traced_tool,
     )
 
     def run_follow_up(state, runner_input: dict) -> None:
@@ -536,6 +603,22 @@ def make_follow_up_runner(*, ollama_base_url: str):
                 seen.add(r)
                 merged.append(r)
         extra_roots = tuple(merged)
+
+        # Pre-flight before anything is built. Placed above the
+        # recorder and the chat clients so a refusal costs nothing and
+        # leaves no half-open transcript.db behind. A follow-up can
+        # name files the original never did and can add roots of its
+        # own, so the check runs again rather than inheriting the
+        # parent's verdict. Display forms aren't resolved this early —
+        # the realpaths are what the search actually used, which is
+        # the honest thing to print in a refusal anyway.
+        if _preflight_refused(
+            state, question, cwd=cwd, extra_roots=extra_roots,
+            cwd_display=cwd, extra_roots_display=extra_roots,
+            label="council follow-up",
+            skip=bool(runner_input.get("skip_preflight")),
+        ):
+            return
 
         # Topology: researcher + synthesizer always; critic only at
         # high/max effort (matches the main runner's gate). x-tiers
@@ -660,9 +743,14 @@ def make_follow_up_runner(*, ollama_base_url: str):
             cfg.roles["synthesizer"].extra_models or []
         )
 
+        # Display forms, resolved unconditionally so the artifact
+        # writer below can persist them even when this follow-up added
+        # no extra roots (the log block only fires when it did).
+        cwd_display_fu: str = runner_input.get("cwd_display") or cwd
+        extra_roots_display_fu: tuple[str, ...] = ()
+
         if extra_roots:
             # 2026-05-18: render display form like run_council does.
-            cwd_display_fu = runner_input.get("cwd_display") or cwd
             # ``extra_roots`` here is the parent ∪ follow-up merged
             # realpath list. Build the parallel display form from the
             # follow-up's body-extras-display and the parent's stored
@@ -714,15 +802,32 @@ def make_follow_up_runner(*, ollama_base_url: str):
             )
             consultants_store_followup = None
 
+        # M-A: compose the tool surface from [tools] config. Returns the
+        # same (specs, executor) shape the fixed builtin surface did, so
+        # nothing downstream of GraphDeps knows a registry exists.
+        _tool_specs, _tool_executor, _tool_registry = build_tool_surface(
+            cfg, extra_roots=extra_roots,
+            approval_fn=_make_tool_approval_fn(
+                state, recorder, cfg, cwd, log_label="council follow-up"),
+        )
+        # M-B: which roles get those tools. Empty unless [tools]
+        # all_roles is on, which keeps the default graph pre-M-B.
+        _tooled_roles = (
+            TOOLABLE_ROLES
+            if getattr(getattr(cfg, "tools", None), "all_roles", False)
+            else ()
+        )
+
         deps = GraphDeps(
             chat_clients=chat_clients,
             models=models,
             enabled_roles=enabled_t,
             cwd=cwd,
             tool_executor=traced_tool(
-                make_executor(extra_roots), tracer=tracer,
+                _tool_executor, tracer=tracer,
             ),
-            tool_specs=openai_tool_specs(),
+            tool_specs=_tool_specs,
+            tooled_roles=_tooled_roles,
             grounding_msgs=grounding_msgs,
             think_by_role=think_by_role,
             synthesizer_self_critic=False,  # follow-ups never
@@ -744,6 +849,14 @@ def make_follow_up_runner(*, ollama_base_url: str):
             coder_default_route=coder_default_route_fu,
             adversary_strictness=getattr(cfg, "adversary_strictness",
                                          "normal"),
+            # Cooperative cancel / pause. Out-of-band by necessity: a
+            # mid-invoke graph never re-reads its own channels, so the
+            # flag has to reach the node gate off the SessionState.
+            run_control=state.run_control,
+            run_control_emit=_make_run_control_emit(
+                state, recorder, log_label="council follow-up"),
+            run_control_is_closed=lambda: bool(
+                getattr(state, "closed", False)),
         )
         # #214/M9 parity fix: follow-ups MUST attach a checkpointer
         # too. run_council does (line ~319) but run_follow_up did not,
@@ -869,6 +982,25 @@ def make_follow_up_runner(*, ollama_base_url: str):
         node_error = final_state.get("error")
         node_failed = final_state.get("_role_failed")
         terminal_status = "failed" if node_error else "completed"
+        # A cancelled run drained rather than finished. Reporting it as
+        # "completed" would be the same lie the flag itself used to
+        # tell: there is no synthesized answer, because the synthesizer
+        # is a node like any other and running it would be spending
+        # after the user said stop.
+        if state.run_control is not None and state.run_control.cancelled:
+            terminal_status = "cancelled"
+            log.warning(
+                "council follow-up: run cancelled (%s) - %d node(s) skipped, "
+                "partial state kept",
+                state.run_control.cancel_reason,
+                len(state.run_control.skipped),
+            )
+
+        truncations, trunc_error = _truncation_verdict(
+            recorder, final_state.get("final_answer", "") or "")
+        if trunc_error and terminal_status == "completed":
+            terminal_status = "failed"
+            node_error = trunc_error
 
         # Persist artifacts for the FOLLOW-UP (its own sid + dir).
         # parent_sid is recorded in metadata so the chain is
@@ -894,8 +1026,12 @@ def make_follow_up_runner(*, ollama_base_url: str):
                 "total_completion_tokens") or 0),
             retries_by_role=dict(final_state.get(
                 "retries_by_role") or {}),
+            truncations_by_role=truncations,
             parent_sid=state.parent_sid,
             root_sid=getattr(state, "root_sid", None) or state.sid,
+            extra_roots=list(extra_roots),
+            cwd_display=cwd_display_fu,
+            extra_roots_display=list(extra_roots_display_fu),
         )
         storage.write_consultation(result, cwd=Path(cwd))
 
@@ -943,6 +1079,73 @@ def make_follow_up_runner(*, ollama_base_url: str):
         _populate_role_messages(state, recorder)
 
     return run_follow_up
+
+
+def _truncation_verdict(recorder, final_answer: str) -> tuple[dict, Optional[str]]:
+    """Return ``(truncations_by_role, error)`` for a finished run.
+
+    ``error`` is non-None only when the **deliverable** was cut — the
+    synthesizer's completion, or a ``final_answer`` that ends inside a
+    construct it opened. A researcher whose intermediate output got
+    clipped is worth recording and worth a log line, but the council
+    still produced a whole answer from what it had; failing the run
+    over it would throw away good work.
+
+    A truncated final answer, by contrast, must never reach the caller
+    as ``status: completed, error: null``. That is exactly what
+    csl-2026-08-12-0831-905a did: 43 minutes and 2.86M prompt tokens
+    distilled into 655 characters ending ``of $\\text{``, filed as a
+    success. Surfacing it as a failure costs the user a re-run;
+    concealing it cost them a decision made on a third of an audit.
+    """
+    counts: dict = {}
+    unrecovered: list[str] = []
+    if recorder is not None:
+        try:
+            counts = recorder.truncations_by_role()
+            unrecovered = recorder.unrecovered_truncations()
+        except Exception:  # pragma: no cover — never sink a finished run
+            log.exception("recorder truncation query raised; ignored")
+            counts, unrecovered = {}, []
+
+    reasons: list[str] = []
+    for role in ("synthesizer", "refuter"):
+        # Counts alone would fail runs the continuation loop rescued:
+        # a synthesizer that overran its budget once and then finished
+        # produced a whole answer, and reporting that as a failure
+        # would discard 40 minutes of correct work. Only the role's
+        # *last* completion being cut means the deliverable is short.
+        if role in unrecovered:
+            reasons.append(
+                f"the {role}'s final completion was cut short and "
+                f"could not be continued")
+    if not reasons and final_answer:
+        # Structural backstop: covers a backend that reported a clean
+        # stop, and covers a recorder that failed to construct (the
+        # counts are then empty and prove nothing).
+        try:
+            from claude_hooks.truncation import unterminated_construct
+            construct = unterminated_construct(final_answer)
+        except Exception:  # pragma: no cover
+            construct = None
+        if construct:
+            reasons.append(f"the final answer ends inside an {construct}")
+
+    if not reasons:
+        if counts:
+            log.warning(
+                "council: %d role completion(s) were cut short but were "
+                "continued to completion: %s", sum(counts.values()), counts,
+            )
+        return counts, None
+
+    error = (
+        "truncated output: " + "; ".join(reasons)
+        + ". The answer is incomplete — re-run, or ask a narrower "
+          "question so the response fits the model's output budget."
+    )
+    log.error("council: %s", error)
+    return counts, error
 
 
 def _build_recorder(*, sid: str, cwd: str, question: str,
@@ -1371,6 +1574,134 @@ def _finalize_recorder(recorder, *, status: str,
         recorder.close()
     except Exception as exc:  # pragma: no cover
         log.warning("recorder.close raised: %s", exc)
+
+
+def _make_run_control_emit(state, recorder, *, log_label: str):
+    """Bridge the cancel/pause gate's events onto the recorder.
+
+    Same discipline as ``_make_tool_approval_fn``'s emitter: the
+    recorder row is the load-bearing path because ``GET /events``
+    replays rows, so a consumer that attaches late still sees that a
+    node parked. Failing to record must never break the gate — the run
+    control owns the decision regardless of who is listening.
+    """
+    def _emit(kind: str, payload: dict) -> None:
+        if recorder is None or not hasattr(recorder, "record_event"):
+            return
+        body = dict(payload)
+        body.setdefault("kind", kind)
+        body.setdefault("sid", getattr(state, "sid", ""))
+        body.setdefault("ts", time.time())
+        try:
+            recorder.record_event(kind=kind, payload=body)
+        except Exception:  # pragma: no cover — defensive
+            log.exception("%s: record_event(%s) failed", log_label, kind)
+    return _emit
+
+
+def _make_tool_approval_fn(state, recorder, cfg, cwd: str,
+                           *, log_label: str):
+    """Build the ``approval_fn`` the tool registry calls on an ``ask_*``.
+
+    Without one the registry refuses every gated call — correct, but
+    silent, and it was the last unwired piece of M-A
+    (``docs/PLAN-council-tool-surface.md``). ``ask_assistant``
+    auto-approves per the plan's ladder; ``ask_human`` parks the lane
+    and denies on timeout, because absence of a human never authorizes
+    spend.
+    """
+    from consultants.engine.tool_approval import (
+        DEFAULT_APPROVAL_TIMEOUT_S, ApprovalContext, make_approval_fn,
+    )
+
+    tools_cfg = getattr(cfg, "tools", None)
+    timeout_s = float(getattr(
+        tools_cfg, "approval_timeout_s", DEFAULT_APPROVAL_TIMEOUT_S)
+        if tools_cfg is not None else DEFAULT_APPROVAL_TIMEOUT_S)
+
+    def _emit(kind: str, payload: dict) -> None:
+        # The recorder row is the load-bearing path, exactly as in
+        # ``_record_awaiting_adversary``: GET /events replays recorder
+        # rows, so a consumer that reconnects (or attaches late) still
+        # sees the parked request via Last-Event-ID. Failing to record
+        # must never break the run — the runner owns the deadline
+        # regardless of who is listening.
+        if recorder is None or not hasattr(recorder, "record_event"):
+            return
+        body = dict(payload)
+        body.setdefault("kind", kind)
+        body.setdefault("sid", getattr(state, "sid", ""))
+        body.setdefault("ts", time.time())
+        try:
+            recorder.record_event(kind=kind, payload=body)
+        except Exception:  # pragma: no cover — defensive
+            log.exception("%s: record_event(%s) failed", log_label, kind)
+
+    ctx = ApprovalContext(
+        broker=state.tool_approvals,
+        cwd=cwd,
+        timeout_s=timeout_s,
+        emit=_emit,
+        is_closed=lambda: bool(getattr(state, "closed", False)),
+    )
+    return make_approval_fn(ctx)
+
+
+def _preflight_refused(state, question: str, *, cwd: str,
+                       extra_roots: tuple, cwd_display: str,
+                       extra_roots_display: tuple,
+                       label: str, skip: bool = False) -> bool:
+    """Run the path pre-flight; on a blocking verdict mark the session
+    failed, write the artifacts, and return True so the caller returns
+    without spending anything.
+
+    ``skip=True`` (the CLI's ``--skip-preflight``) bypasses the check
+    entirely, for the greenfield ask whose every named path is one the
+    asker wants created — indistinguishable from wrong roots by
+    inspection alone. It is a cost guard, not a security boundary: the
+    tool sandbox still confines every read to the allowed roots.
+
+    Never raises: a pre-flight that itself breaks must not be able to
+    stop a run that would otherwise have worked — the check exists to
+    save money, not to become a new failure mode.
+    """
+    if skip:
+        # --skip-preflight. Logged, not silent: the next person reading
+        # a run full of "[unverified]" cites needs to know the guard
+        # was turned off rather than that it passed.
+        log.warning("%s sid=%s preflight SKIPPED by request",
+                    label, state.sid)
+        return False
+    try:
+        from consultants.engine.preflight import check_question_paths
+        pf = check_question_paths(
+            question, roots=[cwd, *extra_roots],
+        )
+    except Exception:  # pragma: no cover — defensive
+        log.exception("preflight raised; continuing without it")
+        return False
+
+    if not pf.blocking:
+        warn = pf.warning()
+        if warn:
+            log.warning("%s sid=%s preflight: %s",
+                        label, state.sid, warn)
+        return False
+
+    msg = pf.message(
+        display_roots=[cwd_display, *extra_roots_display],
+    )
+    log.error("%s sid=%s %s", label, state.sid, msg)
+    state.status = "failed"
+    state.error = msg
+    state.finished_at = time.time()
+    for r in list(state.progress):
+        state.progress[r] = "done"
+    try:
+        _write_failed_artifacts(state, cwd, question, RuntimeError(msg))
+    except Exception:  # pragma: no cover — defensive
+        log.exception("preflight failed-artifact write failed")
+    return True
 
 
 def _write_failed_artifacts(state, cwd: str, question: str,

@@ -115,13 +115,38 @@ The installer:
     harm than good in our field tests (see
     [env-vars.md](env-vars.md) for verdicts).
 
-### Verify
+### Redeploying — one command, always
 
-Run the post-deploy check on **every** host you deployed to:
+For an *update* to an already-installed host, do not hand-roll
+`pip install -e . && systemctl restart …`. Use:
 
 ```bash
-python scripts/verify_deploy.py          # all checks
-python scripts/verify_deploy.py --store  # consultants store only
+python scripts/deploy.py            # full deploy, gated on verification
+python scripts/deploy.py --dry-run  # show every action, change nothing
+```
+
+It refreshes the editable installs, **syncs `.claude/skills/` into
+`~/.claude/skills/`**, restarts every active unit that references the
+repo at **both** systemd scopes, and then runs `verify_deploy.py`. Any
+failed step fails the whole deploy.
+
+The skills step is the one that motivated the script. On 2026-08-02 the
+installed `consultants/SKILL.md` was found still at its 21 May content —
+791 lines against the repo's 1591 — because the hand-rolled routine made
+the *engine* current and nothing else. No service loads a skill (Claude
+Code reads it at session start), so it drifted for ten weeks without a
+single error. **Restart the Claude Code session after a skill change**;
+a running session keeps the copy it loaded at start.
+
+### Verify
+
+Run the post-deploy check on **every** host you deployed to (`deploy.py`
+runs it for you; this is for checking a host you did not just deploy):
+
+```bash
+python scripts/verify_deploy.py           # all checks
+python scripts/verify_deploy.py --store   # consultants store only
+python scripts/verify_deploy.py --skills  # installed skills vs repo
 ```
 
 Exit code is 0 when everything passed, 1 if anything failed. Expected
@@ -129,9 +154,11 @@ output on a healthy host:
 
 ```
 version
-  [  ok] claude_hooks importable — v1.13.0
+  [  ok] claude_hooks importable — v1.14.0
 memory providers
-  [  ok] provider pgvector — 6079 memories
+  [  ok] provider pgvector — 6297 memories
+skills
+  [  ok] skills in sync — 10 up to date
 consultants store
   [  ok] store config file — ~/.claude/consultants-config.toml + .claude-hooks/consultants.toml
   [  ok] store.backend — pgvector
@@ -149,6 +176,13 @@ like* success:
   the connection-recovery fix, a long-lived process holding a dead
   connection returned exactly that — an empty answer indistinguishable
   from an empty corpus.
+- **`skills STALE`** is a **failure**, not a warning, and it compares
+  content rather than presence. An installed-but-old `SKILL.md` is a
+  session running instructions that do not match the engine they drive,
+  and nothing inside the session ever says so. It is a FAIL because a
+  warning would scroll past — which is how the 21 May copy survived ten
+  weeks. `skills not installed` stays a warning: skills are opt-in per
+  host and `install.py` is what offers a new one.
 
 > **Where the store config lives.** Not in `config/claude-hooks.json` —
 > reading `store` from there returns `None` on every host, healthy or

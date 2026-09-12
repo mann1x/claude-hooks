@@ -82,6 +82,71 @@ log = logging.getLogger("claude_hooks.daemon")
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 47018
 DEFAULT_SECRET_PATH = Path.home() / ".claude" / "claude-hooks-daemon-secret"
+
+# Where the daemon publishes the port it actually bound.
+#
+# ``DEFAULT_PORT`` is a wish, not a guarantee. On Windows, Hyper-V /
+# WinNAT reserve large TCP ranges at boot and binding inside one fails
+# with WinError 10013 ("forbidden by its access permissions") — on
+# pandorum 47018 sat inside a reserved 47013-47112, and the ranges move
+# between reboots, so no fixed port is reliably safe. The daemon
+# therefore falls back to an OS-assigned port and records the result
+# here; clients read this file before falling back to DEFAULT_PORT.
+#
+# The file is written after a successful bind and removed on clean
+# shutdown, so its presence means "a daemon bound this port", not "a
+# daemon is alive" — a crash leaves it behind. That is fine: a client
+# that tries a stale port fails to connect and falls back, which is the
+# same outcome as no file at all.
+DEFAULT_PORT_FILE = Path.home() / ".claude" / "claude-hooks-daemon.port"
+
+
+def write_port_file(port: int, path: Optional[Path] = None) -> None:
+    """Publish the bound port. Best-effort: never fatal to serving.
+
+    ``path`` resolves at call time rather than binding DEFAULT_PORT_FILE
+    as a default argument — a default is captured at import, so the
+    constant could never be redirected afterwards and every caller
+    would silently keep writing the original location.
+    """
+    path = path or DEFAULT_PORT_FILE
+    try:
+        from claude_hooks._atomic import write_text_atomic
+        write_text_atomic(path, f"{int(port)}\n")
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("could not write daemon port file %s: %s", path, e)
+
+
+def read_port_file(path: Optional[Path] = None) -> Optional[int]:
+    """The port a daemon last bound, or None if unreadable/absent."""
+    path = path or DEFAULT_PORT_FILE
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    try:
+        port = int(raw)
+    except ValueError:
+        return None
+    return port if 0 < port < 65536 else None
+
+
+def clear_port_file(path: Optional[Path] = None) -> None:
+    """Remove the port file on clean shutdown."""
+    path = path or DEFAULT_PORT_FILE
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as e:  # pragma: no cover - defensive
+        log.debug("could not remove daemon port file: %s", e)
+
+
+def resolve_port(path: Optional[Path] = None) -> int:
+    """Port a client should try first: the published one, else the default."""
+    return read_port_file(path or DEFAULT_PORT_FILE) or DEFAULT_PORT
+
+
 DEFAULT_REPLAY_WINDOW_SECONDS = 60
 PROTOCOL_VERSION = 1
 
@@ -476,12 +541,34 @@ def serve(
     except Exception as e:
         log.debug("could not load config for manager(s): %s", e)
 
-    server = DaemonServer(
-        host, port,
-        secret=secret, replay_window=replay_window,
-        embedding_manager=embedding_mgr,
-        chat_model_manager=chat_mgr,
-    )
+    def _build(p: int) -> DaemonServer:
+        return DaemonServer(
+            host, p,
+            secret=secret, replay_window=replay_window,
+            embedding_manager=embedding_mgr,
+            chat_model_manager=chat_mgr,
+        )
+
+    try:
+        server = _build(port)
+    except OSError as e:
+        # Port 0 asks the OS for any free port. This is the only
+        # reliable answer on Windows, where reserved ranges move
+        # between reboots (WinError 10013) — picking another fixed
+        # port just relocates the same failure. Clients find us via
+        # the port file, so a non-default port costs nothing.
+        log.warning(
+            "cannot bind %s:%d (%s) — falling back to an OS-assigned port",
+            host, port, e,
+        )
+        try:
+            server = _build(0)
+        except OSError:
+            log.error("daemon could not bind any port on %s", host)
+            raise
+
+    port = int(server.server_address[1])
+    write_port_file(port)
     log.info("claude-hooks-daemon listening on %s:%d", host, port)
     if embedding_mgr is not None:
         embedding_mgr.start_reaper()
@@ -522,6 +609,10 @@ def serve(
         log.info("shutting down on Ctrl-C")
     finally:
         server.server_close()
+        # Retract the advertisement before anything slow: a client that
+        # reads a stale port only wastes a connect attempt, but it does
+        # so on the hook critical path.
+        clear_port_file()
         if embedding_mgr is not None:
             try:
                 embedding_mgr.shutdown()

@@ -37,7 +37,6 @@ from consultants.engine.coder_defaults import (
     RECOMMENDED_CODER_DEFAULT_ROUTE,
     RECOMMENDED_CODER_ROUTES_BY_LANGUAGE,
 )
-from consultants.engine.state_v2 import CoderLanguageRoute
 
 from tests._parity_helpers import (
     V2_OPT_IN_EVENT_KINDS,
@@ -295,6 +294,152 @@ class TestOptInsOffByDefault(unittest.TestCase):
                 "q?", "p", ["r"], ["v"],
                 strictness="normal", adversarial_focus=""),
         )
+
+    # ----- M-A / M-C (tool registry + git provider) -------------- #
+
+    def test_git_tools_off_by_default(self):
+        # M-C: the git history provider is read-only and carries no new
+        # risk surface, but turning it on adds five schemas to every
+        # prompt on every lane — a default-behaviour change. It lands
+        # disabled and gets flipped after a live smoke, exactly how
+        # ``store`` was handled (scaffold off → validated → M14 on).
+        self.assertFalse(self.cfg.tools.git)
+
+    def test_uniform_role_tools_on_by_default(self):
+        # M-B flip history:
+        # - 2026-08-01: landed False on the cost argument (one LLM call
+        #   per tool iteration per role per lane, critic fanning out
+        #   per lane at the x-tiers).
+        # - 2026-08-01: flipped True. Both bench tiers cleared, and the
+        #   cost argument turned out to be backwards —
+        #   benchmarks/consultants/results/2026-08-01/ measured -30%
+        #   prompt / -13% completion at effort=high with
+        #   NON-OVERLAPPING ranges, because a tooled planner shortens
+        #   the researcher loop by more than the other roles add.
+        # Same gate discipline as tool_executor, opposite outcome:
+        # that one was measured and flipped back OFF.
+        self.assertTrue(self.cfg.tools.all_roles)
+
+    def test_permission_ladder_never_fires_on_the_default_surface(self):
+        # M-A cohort-2 entry for the approval channel (2026-08-02).
+        # The channel now parks an ``ask_human`` call and denies it on
+        # timeout — a behaviour change that must be unreachable by
+        # default. Two conditions make it so: the fallback rung is
+        # ``auto``, and nothing is pinned to an ``ask_*`` rung. If
+        # either drifts, a default run gains a way to stall for ten
+        # minutes on a tool call nobody is watching for.
+        self.assertEqual(self.cfg.tools.default_level, "auto")
+        self.assertEqual(self.cfg.tools.permissions, {})
+
+    def test_every_default_tool_declares_auto(self):
+        # The other half: a provider could ship a tool whose own
+        # declared level is ask_*, which the gate honours without any
+        # config change. "The gate must be cheap on the common path"
+        # only holds while every default tool is auto.
+        from claude_hooks.tool_registry import BuiltinToolProvider
+        provider = BuiltinToolProvider(())
+        for spec in provider.specs():
+            name = (spec.get("function") or {}).get("name")
+            self.assertEqual(
+                provider.default_level(name), "auto",
+                f"builtin tool {name!r} defaults to a gated rung; a "
+                f"default council run would now need an approver",
+            )
+
+    def test_approval_timeout_default_is_ten_minutes(self):
+        # Only reachable once someone opts into ask_human, but pin it:
+        # the value is the spend-approval deadline, and shortening it
+        # silently converts "waiting for a person" into "denied".
+        self.assertEqual(self.cfg.tools.approval_timeout_s, 600.0)
+
+    def test_default_graph_hands_every_toolable_role_its_tools(self):
+        # The knob's runtime consequence, post-flip. Each toolable role
+        # must receive all three kwargs; a role silently missing them
+        # is the M-B knob being a no-op for that role, which is exactly
+        # how the first live bench read 0 tool calls.
+        from consultants.engine.graph import (
+            TOOLABLE_ROLES, GraphDeps, _tools_for,
+        )
+        from consultants.server.tool_surface import build_tool_surface
+        specs, executor, _reg = build_tool_surface(self.cfg)
+        deps = GraphDeps(chat_clients={}, models={}, enabled_roles=(),
+                         cwd="/p", tool_specs=specs,
+                         tool_executor=executor,
+                         tooled_roles=TOOLABLE_ROLES)
+        for role in TOOLABLE_ROLES:
+            got = _tools_for(deps, role)
+            self.assertEqual(sorted(got),
+                             ["cwd", "tool_executor", "tool_specs"], role)
+
+    def test_a_role_without_a_tool_directive_would_be_a_silent_noop(self):
+        # Now that the knob is on by default, a toolable role with no
+        # entry in _ROLE_TOOL_DIRECTIVE gets tools it is never told
+        # about — indistinguishable from the feature not working, and
+        # the exact failure the 2026-08-01 baseline run recorded (0
+        # tool calls across 18 tooled trials).
+        from consultants.engine import council
+        from consultants.engine.graph import TOOLABLE_ROLES
+        for role in TOOLABLE_ROLES:
+            self.assertIn(role, council._ROLE_TOOL_DIRECTIVE, role)
+
+    def test_default_permission_level_is_auto(self):
+        # M-A: the ladder's cheap rung. If this ever defaulted to an
+        # ask_* level, every grep in every lane would pay an approval
+        # round-trip — the exact cost the ``auto`` rung exists to avoid.
+        self.assertEqual(self.cfg.tools.default_level, "auto")
+        self.assertEqual(self.cfg.tools.permissions, {})
+
+    def test_default_tool_surface_is_byte_identical_to_pre_registry(self):
+        # M-A is a refactor, not a capability change: with default
+        # config the composed surface must equal what the two hardcoded
+        # ``openai_tool_specs()`` call sites produced. Anything else
+        # re-shapes every researcher prompt and invalidates the M11c
+        # benchmark corpus.
+        from claude_hooks.caliber_proxy.tools import openai_tool_specs
+        from consultants.server.tool_surface import build_tool_surface
+        specs, _executor, _registry = build_tool_surface(self.cfg)
+        self.assertEqual(specs, openai_tool_specs())
+
+    def test_default_surface_adds_no_extra_tools_note(self):
+        # The prompt half of the same guarantee. RESEARCHER_SYSTEM and
+        # the tool-plan prompt enumerate their six tools in prose; the
+        # note names only what a provider adds *beyond* that list, so on
+        # the default surface it must be empty and every researcher /
+        # tool_executor prompt stays byte-identical.
+        from claude_hooks.caliber_proxy.tools import openai_tool_specs
+        from consultants.engine import council
+        from consultants.server.tool_surface import build_tool_surface
+        specs, _e, _r = build_tool_surface(self.cfg)
+        self.assertEqual(council.build_extra_tools_note(specs), "")
+        self.assertEqual(council.build_extra_tools_note(openai_tool_specs()),
+                         "")
+        msgs = [{"role": "system", "content": "S"},
+                {"role": "user", "content": "U"}]
+        self.assertIs(council._with_extra_tools_note(msgs, specs), msgs)
+
+    def test_tool_addendum_is_unreachable_with_default_tooled_roles(self):
+        # The addendum exists to make the M-B knob actually change
+        # behaviour (the 2026-08-01 bench measured 0 tool calls without
+        # it). It must remain unreachable while the knob is off — the
+        # gate is ``_tools_for`` returning {}, so no toolable role is
+        # ever handed the tool_specs the addendum keys on.
+        from consultants.engine.graph import (
+            TOOLABLE_ROLES, GraphDeps, _tools_for,
+        )
+        deps = GraphDeps(chat_clients={}, models={}, enabled_roles=(),
+                         cwd="/p", tool_specs=[{"x": 1}],
+                         tool_executor=lambda *a: "")
+        for role in TOOLABLE_ROLES:
+            self.assertNotIn("tool_specs", _tools_for(deps, role), role)
+
+    def test_registry_is_not_shared_between_sessions(self):
+        # The gate carries per-session taint, which is sticky. A shared
+        # registry would leak that into the next consultation — and in
+        # the wrong direction, since taint never clears.
+        from consultants.server.tool_surface import build_tool_surface
+        _s1, _e1, r1 = build_tool_surface(self.cfg)
+        _s2, _e2, r2 = build_tool_surface(self.cfg)
+        self.assertIsNot(r1, r2)
 
     # ----- M1 (checkpointer) ------------------------------------ #
 

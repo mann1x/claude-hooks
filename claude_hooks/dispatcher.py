@@ -17,7 +17,7 @@ import json
 import logging
 import sys
 import traceback
-from typing import Any, Optional
+from typing import Optional
 
 from claude_hooks.config import expand_user_path, load_config, project_disabled
 from claude_hooks.providers import (

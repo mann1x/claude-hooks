@@ -66,11 +66,10 @@ from __future__ import annotations
 
 import ast
 import logging
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Optional, Sequence
 
 # How far back from a cite to scan the answer for a "claimed symbol"
 # referenced in backticks. 80 chars covers natural-language patterns
@@ -136,6 +135,7 @@ log = logging.getLogger("consultants.engine.citation_linter")
 #   path/to/foo.py:123-145
 #   src/x/y/file.ts:42
 #   consultants/engine/store_reaper.py:128
+#   /abs/path/to/foo.py:123
 #
 # Excludes:
 #   - URLs (https://github.com/.../blob/main/foo.py:123) — the
@@ -145,16 +145,28 @@ log = logging.getLogger("consultants.engine.citation_linter")
 #     uses backticks for inline code, and a backtick-wrapped cite
 #     still needs verification.
 #
-# Path component: one or more path segments separated by ``/``,
-# each segment a non-empty run of word chars, dots, dashes, and
-# underscores. Final segment ends with an extension (``.\w+``).
-# Line: 1+ digits, optionally a ``-`` + 1+ digits range.
+# Path component: an optional leading ``/``, then one or more path
+# segments separated by ``/``, each segment a non-empty run of word
+# chars, dots, dashes, and underscores. Final segment ends with an
+# extension (``.\w+``). Line: 1+ digits, optionally a ``-`` + 1+ digits.
+#
+# The leading ``/`` is captured deliberately (2026-08-02). Without it
+# the ``(?<![/:])`` guard below refused to start a match at the ``/``
+# AND at every segment boundary after it, so the first position that
+# could match was one character INTO the first segment:
+# ``/shared/dev/x/eval/y.py:12`` was extracted as
+# ``hared/dev/x/eval/y.py`` — a path that resolves nowhere, by
+# construction. An answer citing absolute paths therefore came back
+# 100% "file not found in any allowed_root" no matter how correct it
+# was. The guard still runs (URLs are still excluded) — it just now
+# has a ``/``-anchored alternative to succeed at.
 # ---------------------------------------------------------------- #
 
 _PATH_SEGMENT = r"[A-Za-z0-9_][A-Za-z0-9_.\-]*"
 _PATH_RE = (
     r"(?<![/:])"                       # not after `/` or `:` (avoid URLs/paths-of-paths)
     r"(?P<path>"
+    r"/?"                              # optional absolute-path anchor
     rf"(?:{_PATH_SEGMENT}/)+"          # at least one directory segment
     rf"{_PATH_SEGMENT}\.\w+"           # final segment with extension
     r")"
@@ -163,6 +175,20 @@ _PATH_RE = (
     r"(?:-(?P<line_end>\d+))?"
 )
 CITATION_RE = re.compile(_PATH_RE)
+
+#: The ``reason`` on an issue whose path resolved under no allowed
+#: root. Named because :func:`root_misconfiguration_hint` counts it —
+#: it is the one failure mode that is far more often an infrastructure
+#: problem than a model one.
+UNRESOLVED_REASON = "file not found in any allowed_root"
+
+#: Below this many distinct citations, a high miss ratio says nothing
+#: — one wrong cite out of one is a normal model error.
+_HINT_MIN_CITES = 3
+
+#: At or above this share of unresolvable cites, the roots are the
+#: likelier explanation than the model.
+_HINT_RATIO = 0.9
 
 
 @dataclass(frozen=True)
@@ -187,6 +213,21 @@ class CitationIssue:
 # Public API.
 # ---------------------------------------------------------------- #
 
+#: A scheme prefix in the text just before a match means the "path" is
+#: really a URL tail. The ``(?<![/:])`` guard in ``_PATH_RE`` cannot
+#: express this: it blocks a match at the ``/`` boundaries of
+#: ``https://host/a/b.py:1`` but not one character INTO the host, so
+#: ``ithub.com/x/foo.py:123`` matched out of a github URL and was then
+#: reported as a fabricated cite. Checked as a bounded backscan.
+_URL_TAIL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]*://\S*$")
+_URL_BACKSCAN_CHARS = 200
+
+
+def _is_url_tail(text: str, start: int) -> bool:
+    """True when the match at ``start`` is inside a URL."""
+    return bool(_URL_TAIL_RE.search(text[max(0, start - _URL_BACKSCAN_CHARS):start]))
+
+
 def extract_citations(
     text: str,
 ) -> list[tuple[str, str, int, Optional[int]]]:
@@ -199,6 +240,8 @@ def extract_citations(
     """
     out: list[tuple[str, str, int, Optional[int]]] = []
     for m in CITATION_RE.finditer(text):
+        if _is_url_tail(text, m.start()):
+            continue
         path = m.group("path")
         line_start = int(m.group("line_start"))
         line_end_str = m.group("line_end")
@@ -240,7 +283,7 @@ def verify_citation(
         return CitationIssue(
             original_match=full_cite,
             replacement=f"{full_cite} [unverified — file not found]",
-            reason="file not found in any allowed_root",
+            reason=UNRESOLVED_REASON,
             path=path,
             line_start=line_start,
             line_end=line_end,
@@ -298,6 +341,54 @@ def verify_citation(
     return None
 
 
+def root_misconfiguration_hint(
+    answer_text: str,
+    issues: Sequence[CitationIssue],
+    allowed_roots: Sequence[str],
+) -> Optional[str]:
+    """Return a warning message when the citations look like a *roots*
+    problem rather than a model problem, else ``None``.
+
+    A citation that resolves under no allowed root is annotated
+    identically whether the model invented the file or the file is
+    real and sitting under a root the run never received. Those two
+    cases need opposite responses, and the annotation alone cannot
+    tell them apart — the csl-2026-08-02-0532-d737 consultancy came
+    back with 12/12 cites marked unverified against a codebase the
+    researcher had genuinely read, and was nearly reported as
+    hallucination.
+
+    The discriminator is the ratio. A model that fabricates does it in
+    ones and twos among cites that check out; a broken root list takes
+    down nearly everything at once. So: at least
+    ``_HINT_MIN_CITES`` distinct citations, of which at least
+    ``_HINT_RATIO`` resolve nowhere.
+
+    The message names the roots that *were* tried, because the next
+    question an operator asks is always "which roots?".
+    """
+    distinct = {c[0] for c in extract_citations(answer_text)}
+    if len(distinct) < _HINT_MIN_CITES:
+        return None
+    unresolved = {
+        i.original_match for i in issues
+        if i.reason == UNRESOLVED_REASON
+    }
+    if not unresolved:
+        return None
+    ratio = len(unresolved) / len(distinct)
+    if ratio < _HINT_RATIO:
+        return None
+    roots_txt = ", ".join(str(r) for r in allowed_roots) or "(none)"
+    return (
+        f"{len(unresolved)}/{len(distinct)} distinct citations "
+        f"({ratio:.0%}) resolved under NO allowed root. At this rate "
+        f"the root list is the likelier fault, not the model — check "
+        f"that every --add-dir reached the run. Roots tried: "
+        f"{roots_txt}"
+    )
+
+
 def lint_answer(
     answer_text: str,
     *,
@@ -348,6 +439,8 @@ def lint_answer(
     # Re-scan with positions so the symbol-proximity check can see
     # the context of each cite.
     for m in CITATION_RE.finditer(answer_text):
+        if _is_url_tail(answer_text, m.start()):
+            continue
         full_match = m.group(0)
         path = m.group("path")
         line_start = int(m.group("line_start"))
@@ -785,4 +878,6 @@ __all__ = [
     "extract_citations",
     "verify_citation",
     "lint_answer",
+    "root_misconfiguration_hint",
+    "UNRESOLVED_REASON",
 ]

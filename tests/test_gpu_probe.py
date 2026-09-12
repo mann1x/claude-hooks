@@ -12,7 +12,6 @@ import json
 import subprocess
 from unittest.mock import patch, MagicMock
 
-import pytest
 
 from claude_hooks import gpu_probe
 

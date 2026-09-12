@@ -233,6 +233,63 @@ def check_providers(r: Results) -> None:
             r.add(PASS, f"provider {p.name}", f"{n} memories")
 
 
+def check_embedder(r: Results) -> None:
+    """Can this host actually turn text into a vector?
+
+    ``check_providers`` counts rows, which proves the database is
+    reachable and proves nothing about recall: every recall embeds the
+    query first, and an embedder that cannot answer degrades recall to
+    ``0 hits`` — the same output as an empty corpus, with no error. So
+    this probes the embedder each provider really uses, rather than the
+    one the local daemon happens to supervise. The distinction matters
+    on a host that consumes another host's embedder over the LAN
+    (``daemon_ensure=false``): nothing is managed here, and the thing
+    that can break is somewhere else entirely.
+    """
+    print("embedder")
+    try:
+        from claude_hooks.config import load_config as load_hooks_config
+        from claude_hooks.dispatcher import build_providers
+        from claude_hooks.embedders import NullEmbedder
+    except Exception as e:
+        r.add(WARN, "embedder", f"import failed: {type(e).__name__}: {e}")
+        return
+    try:
+        providers = build_providers(load_hooks_config())
+    except Exception as e:
+        r.add(WARN, "embedder", f"providers unavailable: {type(e).__name__}")
+        return
+
+    probed = False
+    for p in providers:
+        # Probe first: providers build their embedder lazily inside
+        # ``_ensure_ready``, so inspecting the attribute beforehand
+        # reports "no embedder" for every provider that has one.
+        try:
+            vec = p.embed_for_store("verify_deploy embedder probe")
+        except Exception as e:
+            probed = True
+            r.add(FAIL, f"embedder {p.name}", f"{type(e).__name__}: {e}")
+            continue
+        emb = getattr(p, "_embedder", None)
+        if emb is None or isinstance(emb, NullEmbedder):
+            # Qdrant / Memory KG embed server-side — nothing local to
+            # break, and nothing this probe can say about them.
+            continue
+        probed = True
+        target = getattr(emb, "url", None) or type(emb).__name__
+        if vec:
+            r.add(PASS, f"embedder {p.name}", f"{len(vec)}-dim via {target}")
+        else:
+            # embed_for_store soft-fails to None so a store never dies
+            # on it. Here that silence is the whole finding.
+            r.add(FAIL, f"embedder {p.name}",
+                  f"cannot embed via {target} — recall returns 0 hits, "
+                  f"which is indistinguishable from an empty corpus")
+    if not probed:
+        r.add(PASS, "embedder", "no client-side embedder on this host")
+
+
 def check_version(r: Results) -> None:
     print("version")
     try:
@@ -242,18 +299,91 @@ def check_version(r: Results) -> None:
         r.add(FAIL, "claude_hooks importable", str(e))
 
 
+# --------------------------------------------------------------------- #
+# Skills
+# --------------------------------------------------------------------- #
+def check_skills(r: Results) -> None:
+    """Compare the in-repo SKILL.md files with the installed ones.
+
+    Added 2026-08-02 after ``~/.claude/skills/consultants/SKILL.md`` was
+    found still at its **21 May** content — 791 lines against the repo's
+    1591. Every session since had been loading half a skill: no wait
+    patterns, no review loop, no ``accept`` / ``tool-ack`` verbs. It
+    failed the way everything in this release failed, by looking fine.
+
+    The cause is a deploy routine, not a bug. ``pip install -e .`` plus a
+    service restart makes the *engine* current, and that is what "deploy"
+    had come to mean. A skill is not loaded by the service — Claude Code
+    reads it at session start — so it sat outside the definition and
+    drifted for ten weeks unnoticed. Checking it here makes the deploy
+    step mechanical instead of remembered.
+
+    ``install.py`` is the thing that syncs them; this only reports.
+    """
+    print("skills")
+    repo_skills = REPO / ".claude" / "skills"
+    user_skills = Path(os.path.expanduser("~/.claude/skills"))
+    if not repo_skills.is_dir():
+        r.add(WARN, "skills", f"no in-repo skills dir at {repo_skills}")
+        return
+    if not user_skills.is_dir():
+        r.add(WARN, "skills", f"nothing installed at {user_skills}")
+        return
+
+    stale: list[str] = []
+    missing: list[str] = []
+    ok = 0
+    for src in sorted(repo_skills.glob("*/SKILL.md")):
+        name = src.parent.name
+        dst = user_skills / name / "SKILL.md"
+        if not dst.is_file():
+            # Not an error: skills are opt-in per host, and install.py
+            # never auto-installs a new one.
+            missing.append(name)
+            continue
+        try:
+            same = (src.read_text(encoding="utf-8")
+                    == dst.read_text(encoding="utf-8"))
+        except OSError as e:
+            r.add(FAIL, f"skill /{name}", f"unreadable: {e}")
+            continue
+        if same:
+            ok += 1
+        else:
+            src_n = len(src.read_text(encoding="utf-8").splitlines())
+            dst_n = len(dst.read_text(encoding="utf-8").splitlines())
+            stale.append(f"{name} (installed {dst_n} lines, repo {src_n})")
+
+    if ok:
+        r.add(PASS, "skills in sync", f"{ok} up to date")
+    if missing:
+        r.add(WARN, "skills not installed",
+              ", ".join(missing) + " — opt-in; `python3 install.py` offers them")
+    if stale:
+        # FAIL, not WARN: a stale skill is a session running instructions
+        # that do not match the engine it is driving, and nothing in the
+        # session surfaces the mismatch.
+        r.add(FAIL, "skills STALE",
+              "; ".join(stale) + " — run `python3 install.py` to sync")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--store", action="store_true", help="store checks only")
+    ap.add_argument("--skills", action="store_true", help="skill checks only")
     ap.add_argument("--quiet", action="store_true", help="show only failures")
     a = ap.parse_args()
 
     r = Results(quiet=a.quiet)
     if a.store:
         check_store(r)
+    elif a.skills:
+        check_skills(r)
     else:
         check_version(r)
         check_providers(r)
+        check_embedder(r)
+        check_skills(r)
         check_store(r)
 
     failed = r.failed

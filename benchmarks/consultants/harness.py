@@ -720,6 +720,9 @@ _COST_COEFFS: dict[str, tuple[int, int, int]] = {
     "kimi-k2.6:cloud":               (5, 8000, 1500),
     "qwen3-next:cloud":              (5, 8000, 1500),
     "glm-5.1:cloud":                 (5, 8000, 1400),
+    # Succession default (see coder_defaults.MODEL_SUCCESSIONS);
+    # reuses 5.1's observed shape until 5.2 has its own run.
+    "glm-5.2:cloud":                 (5, 8000, 1400),
     "gemma4:31b-cloud":              (4, 6500, 1200),
     "deepseek-v4-pro:cloud":         (6, 9000, 1800),
     "gemini-3-flash-preview:cloud":  (6, 9000, 2000),

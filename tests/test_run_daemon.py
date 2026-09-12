@@ -13,13 +13,11 @@ Two surfaces to exercise:
 """
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:

@@ -16,6 +16,1045 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added
+
+- **The memory stores became administrable.** Both MCP catalogs go
+  9 → 18 tools. The audit behind this found one theme repeated at every
+  layer: the read side and the write side disagreed about what was
+  reachable. Search could find KG entities nothing could remove, recall
+  spanned tables delete did not, and `count` reported 9 380 memories
+  that nothing could page through.
+
+  - **KG removal** — `kg-delete-entities` / `-observations` /
+    `-relations` on both providers. Entity deletion cascades, and the
+    tool reports the blast radius rather than the entity count alone:
+    on pgvector `kg_entities` is shared across *every* embedding
+    namespace, so removing one entity takes its observations out of
+    `kg_observations_{arctic,minilm,nomic,qwen3}` together — including a
+    corpus being kept as a rollback. Delete shapes mirror their create
+    counterparts exactly, so the call that made a thing removes it.
+  - **KG enumeration** — `kg-read-graph` (entities with observation and
+    relation counts) and `kg-open-nodes` (exact-name detail). Search
+    answers "what matches this", which cannot answer "what is in here",
+    and a fuzzy hit on a *neighbour* is how the wrong node gets edited.
+  - **`list`** — paged, newest-first, no query, ids included. A memory
+    you cannot find is one you cannot correct.
+  - **`replace`** — ordered delete-then-store. The reverse order can be
+    rejected: `store` is idempotent on `content_hash` and the Stop-hook
+    path dedups at 0.85 cosine, so a correction resembling what it
+    corrects could be dropped as a near-duplicate, leaving the wrong
+    memory in place. Reports when the id matched nothing instead of
+    silently degrading into a plain store.
+  - **`expiring` / `refresh-ttl`** — the M14 TTL machinery had existed
+    since v1.8 with exactly one caller (the consultants reaper). Now
+    inspectable: `expiring` shows what the reaper would take without
+    taking it.
+
+### Fixed
+
+- **Deploy verified the wrong system.** `scripts/deploy.py` ran
+  `verify_deploy.py` with `sys.executable`, so a deploy launched as
+  `python3 scripts/deploy.py` checked a stock system Python — no
+  `psycopg`, therefore "provider pgvector reports 0 memories — empty
+  corpus or unreachable backend" and "store backend reachable: psycopg
+  not installed", against a store that was fine. The same deploy passed
+  or failed depending on how the operator happened to invoke it. Deploy
+  now resolves the interpreter the hooks actually run under, matching
+  `bin/_resolve_python.sh` (`CLAUDE_HOOKS_PY` → repo `.venv` → the
+  `claude-hooks` conda env → `sys.executable`), and says which one it
+  used.
+
+- **Deploy left the embedder down.** Restarting `claude-hooks-daemon`
+  takes its managed llamafile child with it, and the embedder is
+  spawn-on-demand — so nothing brings it back until *this* host next
+  asks for an embedding. Locally that costs one 3 s spawn. For a host
+  consuming the embedder over the LAN (`daemon_ensure=false`) it is an
+  outage it cannot end: it does not supervise the process, so its recall
+  returns `0 hits` with a connection refused, which reads as an empty
+  corpus rather than a failure. Observed on pandorum straight after a
+  solidpc deploy. `scripts/deploy.py` now re-ensures the embedder at the
+  end of the service step — advisory where no embedder is managed (the
+  common case, one round trip), fatal where one is configured and will
+  not come up, because deploy knocked it over and deferring the failure
+  to the next recall is how it stayed invisible. `verify_deploy.py`
+  gains an `embedder` check that **performs a real embed** through
+  each provider's own embedder rather than reading the local
+  daemon's manager state — counting rows proves the database is
+  reachable and proves nothing about recall, and on a LAN consumer
+  the thing that can break is on another host entirely. A `None`
+  from `embed_for_store` is a FAIL there: it soft-fails by design so
+  a store never dies on it, and that silence is exactly what makes a
+  dead embedder look like an empty corpus.
+
+- **The daemon could not start at all on Windows** — and had not been,
+  silently. `DEFAULT_PORT` 47018 sits inside a Hyper-V/WinNAT reserved
+  range on pandorum (`47013-47112`, part of a near-continuous block from
+  46913 to 48384), so every bind failed with `WinError 10013`. Hooks
+  fell back to per-invocation processes and the Windows canary was
+  exercising no daemon code whatsoever. Those ranges are re-reserved at
+  boot, so moving to another fixed port only relocates the failure.
+
+  The daemon now falls back to an OS-assigned port (bind 0) when its
+  first choice is refused, and publishes the result to
+  `~/.claude/claude-hooks-daemon.port`. `daemon_client` and
+  `claude-hooks-daemon-ctl` read it and fall back to `DEFAULT_PORT` when
+  it is absent, unreadable, or out of range. Resolution is **per call**,
+  not at import, so a long-lived process follows the daemon across a
+  restart; an explicit `--port` still wins. The file is removed on clean
+  shutdown — a stale one from a crash costs a client one failed connect,
+  the same outcome as no file at all. `ctl --port` no longer defaults to
+  the literal, which had it report `NOT RESPONDING` against a healthy
+  daemon that had bound elsewhere, and `ctl start` re-resolves on every
+  poll of its wait loop rather than once before spawning — it is waiting
+  for the process that writes the port file, so a single up-front
+  resolution reads the pre-start value and reports "did not come up" for
+  a daemon that came up fine on another port.
+
+- **sqlite_vec deletes leaked their embeddings** (schema v3). Only the
+  FTS5 mirror had a delete trigger; `<table>_vec` had none, resting on
+  an assumption that never held — that sharing a `rowid` makes a DELETE
+  propagate. vec0 is a virtual table: nothing cascades into it. Every
+  removal since v1 kept its vector, the TTL reaper's included. Searches
+  inner-join through the base table so orphans never surfaced as wrong
+  results; the visible cost was unbounded index growth. The quiet cost
+  is worse — SQLite re-issues a freed `max(rowid)`, so a stale vector
+  ends up answering for the next row that inherits its id, and in
+  testing the collision surfaced as a `UNIQUE constraint failed` on the
+  *next insert*. Adds `<table>_vec_ad` plus a one-shot sweep of
+  existing orphans, both idempotent.
+
+- **sqlite_vec ran with foreign keys off.** The pragma is
+  connection-scoped and defaults to OFF; `sqlite_vec_schema` set it for
+  the migration and its comment claimed the provider re-ran it in
+  `_ensure_ready`, which it never did. Every live connection therefore
+  had `ON DELETE CASCADE` inert — KG entity deletion would have orphaned
+  observations and relations, invisible to `kg_search_nodes` (which
+  joins through `kg_entities`) but still on disk.
+
+- **`consolidate.py` reported work it had not done.** `merged` counted
+  *candidates* and merged nothing; every compression ran an LLM call
+  over each memory above 1 000 chars and discarded the result — never
+  stored, original never removed; `pruned` was never incremented at
+  all. A run that changed nothing announced `merged=12 compressed=8`.
+  It now actually merges (keeping the longer of a near-duplicate pair),
+  compresses (store-then-delete, both halves or neither), and prunes
+  lapsed TTLs — and where a provider cannot delete it counts the work
+  as `skipped` rather than done, because storing a summary beside its
+  original grows the corpus the pass exists to shrink. `_pull_all` now
+  stamps `source_provider`, without which multi-provider runs could not
+  attribute a memory to a store and skipped everything.
+
+### Added
+
+- **Memory deletion over MCP** — `pgvector-delete` / `sqlite-vec-delete`
+  (both catalogs go 8 → 9 tools). The stores were append-only from the
+  outside: both providers have had `delete_by_hashes` since the M14 TTL
+  work, but its only caller was the consultants reaper, so a wrong
+  memory could be recalled forever and removed by nothing.
+
+  Adding the tool required fixing the read path first. `Memory` carries
+  no primary key, and `recall` never selected `content_hash`, so a
+  client had nothing to name — a delete tool you cannot aim. Recall and
+  hybrid recall on **both** providers now surface the row's hash as
+  `metadata["_hash"]`, rendered by the shared formatter as `id=<hex>`
+  in each hit's header. (The hybrid paths already keyed their RRF
+  fusion by that hash; they were discarding it at the output step.)
+
+  `delete_by_hashes` gains an explicit `tables` argument. Its default
+  stays primary-table-only because that is what the TTL reaper means by
+  delete, and widening it silently would have changed reaping semantics
+  — `content_hash` is content-derived, so the same text legitimately
+  exists in both `memories_*` and `kg_observations_*`. The MCP tool
+  passes the tables `recall` searches instead, because a delete that
+  cannot reach a row the user can plainly see is a delete that reports
+  success and changes nothing.
+
+  Malformed ids are rejected and named rather than coerced, and a
+  delete that matched no row says so — "deleted 0" and "your id was
+  garbage" are different answers, and neither gets rounded up to "ok".
+
+### Fixed
+
+- **The embedder served one request at a time, so background stores sat
+  in front of the user.** The llamafile embedder is a single shared
+  service with two callers of very different urgency: detached turn-
+  stores that nobody waits on, and interactive recall on the
+  `UserPromptSubmit` critical path under a hook timeout. It ran with one
+  slot, so a 5–6 s store blocked the recall behind it. `--parallel` is
+  now a first-class config key (`embedding.n_parallel`, default **3**).
+
+  The reason this is a *fix* and not a tuning knob is that it had been
+  raised before — twice — by passing `--parallel` to the running
+  llamafile by hand. The daemon rebuilds the argv on every respawn, so
+  each time the setting survived only until the next idle reap, and its
+  disappearance looked like nothing at all: no error, no restart, just
+  gradually slower turns. It is now pinned in three places that each
+  independently defaulted it back to 1 — the dataclass default, the
+  config reader (`or 3`, so a wiped key does not read as one slot), and
+  the `install.py` block rebuild, which keeps only the keys it names.
+  `tests/test_embedder_slots.py` covers all three.
+
+  `ctx_size` is now explicitly **per slot**: llama.cpp's `--ctx-size` is
+  a total KV budget divided across `--parallel`, so it is scaled by the
+  slot count on spawn. Passing it unscaled would have traded queueing
+  for a silently smaller window on every embed — a truncated vector
+  looks exactly like a good one.
+
+- **The store path had no payload budget, and embed latency is
+  superlinear.** Recall has clamped its queries since v1.x
+  (`max_query_chars`); the store side never did. On solidpc's CPU
+  llamafile with realistic prose: ~0.75 s at 500 chars, ~3.2 s at 2 k,
+  ~8 s at 4 k, consistent with the v1.14.0 isolated-instance figure of
+  12.7 s at 5 k — against stored turn summaries with a p50 of 2.9 KB.
+  (Char count is only a proxy for tokens: density moves the ratio ~3×
+  between prose and base64, and a repeated-character payload merges into
+  a handful of BPE tokens, so it reads far faster than real text and
+  must not be used to derive this curve.) New
+  `hooks.stop.max_store_chars` (default **2000**, `<= 0` disables)
+  bounds the summary via `recall.clamp_query`, so both ends survive —
+  a turn's outcome is at the end, and a head-only cut would store every
+  preamble and drop the result it exists to record. Note this is not
+  `embedder_options.max_chars`: that is the 30 k context-overflow guard,
+  three orders of magnitude away from where the cost bites.
+
+  The summary itself is clamped, not just the embedded text, so content
+  and vector keep describing the same document.
+
+- **Concurrent writers silently lost cache updates** (`decay`,
+  `hyde_cache`). Both derived their temp file from the destination
+  (`<path>.tmp`), so racing sessions clobbered each other's temp file
+  and every loser failed its `os.replace` with `[Errno 2]`. Both call
+  sites swallow `OSError` by design, so the update just vanished: decay
+  history was being dropped and the HyDE cache kept re-paying for cloud
+  calls it had already made (~28 occurrences in two days on solidpc).
+  New `claude_hooks/_atomic.py` gives each writer a unique temp file in
+  the destination's directory. Last-writer-wins is the correct
+  semantics here — every writer holds a complete document, so an update
+  can be superseded but never torn.
+
+### Added
+
+- **Measured token accounting, ported from the Cline fork**
+  (`mann1x/cline`, `sdk/packages/shared/src/llms/tokens.ts` and
+  `extensions/context/`). New `claude_hooks/token_calib.py` replaces the
+  flat `CHARS_PER_TOKEN = 3.0` that `budget.py` shipped with:
+
+  - **Two ratios, not one.** A serialized request is mostly JSON, code
+    and tool output (3.8–4.4 chars/token); reasoning is prose the model
+    wrote for itself (~2.7). Averaging them works only while the mix
+    holds still, and it does not — in the fork's live transcript
+    reasoning moved between 32% and 61% of the content, every turn. Each
+    departure becomes error, and it is **not symmetric**: a
+    reasoning-heavy request is *under*counted, the direction that lets a
+    request be built too large.
+  - **Live calibration.** The first real `prompt_eval_count` replaces
+    the guess; later ones are EWMA-smoothed. Verified against the
+    production endpoint: a council-shaped prompt (prose plus 60
+    serialized grep hits) estimated at 1,747 tokens by the flat ratio and
+    cost 2,167 — a **19% undercount** — and one calibration call brought
+    the estimate to 2,168. Observed ratios outside `[1.2, 16]` are
+    rejected as broken measurements; the ceiling has to clear Gemma-4's
+    measured **8.26** on serialized JSON, which an earlier ceiling of 8
+    discarded along with every later observation.
+  - **Per model**, unlike the fork. Its sessions run one model at a
+    time; the council runs N concurrently under x-tier fanout, and a
+    blended ratio would describe neither.
+
+- **Output-cap attribution.** `OutputCapReport.window_bound`
+  distinguishes a truncation the *window* caused from one our own
+  `num_predict` or the model's ceiling caused. They look identical —
+  same `done_reason`, same half-written message — and want opposite
+  responses: the first is compaction's to fix, and compacting for the
+  second spends the transcript to leave the retry facing the same
+  ceiling with less of the work it was doing. The fork measured exactly
+  that: a 48,508-token request compacted against a 110,000-token window
+  when the cap that ended the turn was the caller's own 32,000.
+
+- **Reservations sized from measurement, not from ceilings.**
+  `num_predict` is a ceiling, not a forecast, and reserving all of it
+  takes the whole cap out of the prompt budget on every turn — 21% of a
+  110k window held permanently for an output that almost never arrives.
+  Once a run has turns to learn from, the reservation follows their
+  high-water mark (×1.5). The recency floor now scales **sub-linearly**
+  with the window (20,000 tokens at 128k, ~79,000 at 1M) instead of
+  being a flat message count that is right for exactly one window size.
+  And the compaction trigger now asks whether the prompt *and a full
+  answer* fit, not merely whether the prompt does — the fork measured a
+  110k window that allowed a 99k transcript, then found itself 11k short
+  and sent no cap at all, and the turn died on the output limit with
+  compaction still reporting room.
+
+- **Capped-thinking retrospect notes** (`claude_hooks/capped_thinking.py`).
+  A model that hits its thinking budget does not stop reasoning — it
+  stops mid-sentence and, on the next turn, starts the same reasoning
+  from the beginning. In this repo the loss was **total**: the agent
+  loop stripped `thinking` / `reasoning` / `reasoning_content` from
+  every assistant message before resending it, so a researcher that
+  reasoned to its budget on iteration 1 began iteration 2 with no record
+  of having reasoned at all. Now that turn's reasoning is condensed —
+  for the next request only — into a short first-person note of what it
+  settled, what it ruled out, and what its tool call returned, and that
+  note goes back into the reasoning channel in place of the transcript.
+
+  The budget compared against is **our own `num_predict`**, which the
+  2026-08-12 truncation fix made exact: Ollama counts thinking tokens
+  toward it, so sending an explicit budget is what turns "the model
+  reasoned too long" from an invisible provider default into a number we
+  know. Detection is two-signal — the model's own out-of-budget message
+  from `/api/show` when it declares one (direct evidence, no threshold),
+  or measured thinking tokens within 90% of the budget. *Measured*, not
+  estimated: the fork's first version compared a request-wide estimate
+  against a budget in the model's own tokens, so a turn that spent all
+  16,000 of its allowance measured as ~10,300 and never crossed the
+  line — the cap fired on nearly 300 requests in one session and the
+  detector saw none of them.
+
+  A note that degenerates into repetition is dropped rather than used:
+  it lands in the thinking channel *as the model's own reasoning*, so
+  thirty near-identical lines read as thirty things it thought, and no
+  note at all leaves the turn to re-derive — the behaviour this improves
+  on rather than one it breaks.
+
+- **Two-phase compaction** (`consultants/engine/retrospective.py`),
+  completing the port. Compaction used to replace the elided span with a
+  marker counting how many messages it dropped — honest, and carrying
+  nothing. Every finding, every dead end, every stretch of reasoning in
+  that span was simply gone, and a role that continues with no memory of
+  having been wrong makes the same mistakes in the same order.
+
+  Now two passes run over the span while it still exists, using the
+  fork's prompts:
+
+  - **Summary** — the hand-over note. Goal, done, in progress, ruled
+    out, key facts, next. Specifics on purpose: an over-long note costs
+    a little context, a vague one costs the whole investigation. Written
+    from the transcript with reasoning *excluded*.
+  - **Retrospective** — the honest assessment of method: what worked,
+    what did not and its failure mode, where the time went, what to do
+    differently. Written from the discarded *reasoning*, paired with
+    what each stretch produced — reasoning on its own reads as a plan
+    and every plan reads as sound; it is the outcome beside it that
+    shows which ones were. Tool results are reduced to a verdict
+    (`applied`, `refused as an unchanged repeat`, `failed: …`), because
+    a retrospective about method has no use for a file's contents and
+    the results are most of the bytes. Turns carry their reasoning cost
+    in tokens — the one thing a model cannot infer from reading its own
+    thinking back is that the stretch which felt thorough was the turn
+    that spent eighteen thousand tokens for one refused call.
+
+  The summary writes first against 70% of a combined budget that grows
+  with **generation** (0.33 → 0.55 of the compaction target across five
+  compactions, then flat); the retrospective is then sized from what the
+  summary *actually* cost, so an economical summary buys it room. Each
+  digest is chained into the next, which revises rather than restates
+  it. Both are placed as **plain text**, never as a reasoning block —
+  reasoning parts are only valid on an assistant message and this is the
+  message that replaces the transcript, a distinction that killed a live
+  run in the fork with a perfectly good retrospective inside a schema
+  error.
+
+  The digest's **input** is bounded too, at half the compaction target,
+  because a digest that overflows the window is a digest that never
+  arrives — the first end-to-end run serialized 61 dropped messages into
+  ~17k tokens against a 24k window, before either phase's own output.
+  Reaching that budget is `claude_hooks/budget_projection.py`'s job:
+  reasoning per intent, then unsafe blocks, then text truncation
+  newest-first, then whole messages oldest-first **in tool-pair
+  closures**, never touching the first or latest typed user message or
+  the turn in flight. Each phase projects separately because they want
+  opposite things from the same span — the summary sheds reasoning and
+  keeps the transcript, the retrospective sheds tool-result text and
+  keeps the reasoning. A projection that cannot reach its target says
+  so rather than returning something over budget as if it were fine.
+
+  **Policy: the summary writes first and the retrospective takes what is
+  left to reach the target.** Unlike the fork, there is no guaranteed
+  floor for the retrospective — the summary is expected to leave room,
+  and when it does not, the retrospective is what gets sacrificed and
+  the skip is logged. The summary is the only record of *what happened*;
+  lose it and the next turn cannot continue the work at all, whereas the
+  retrospective improves how the work is done. Guaranteeing it a floor
+  means taking that floor from the summary.
+
+
+### Fixed
+
+- **A truncated council answer no longer reports itself as a finished
+  one.** Session `csl-2026-08-12-0831-905a` — an `xhigh` adversarial
+  audit, 43 minutes, 113 LLM calls, 2.86M prompt tokens — produced a
+  **655-character** final answer that stopped mid-token at
+  `...count the **presence** of $\text{`, wrote it to `summary.md`,
+  and recorded `status: completed, error: null`. The critic in the
+  same run was cut the same way. Nothing in the pipeline noticed,
+  because nothing in the pipeline was looking.
+
+  The root cause was one line of translation.
+  `ChatClient._from_ollama` computed
+  `finish_reason = "tool_calls" if tool_calls else "stop"`, discarding
+  Ollama's `done_reason` — the field that distinguishes a natural end
+  (`stop`) from a generation that hit its output limit (`length`).
+  The evidence was destroyed one layer below anything that could act
+  on it, which is why the run's own record shows a clean stop.
+  (`caliber_proxy/ollama.py` had always mapped it correctly; the
+  translator every consultants role actually uses did not.) The
+  contributing cause was that no role sent `num_predict`, so the
+  output ceiling was a provider default we neither set nor observed —
+  with 94k tokens of context window still free, an unseen output cap
+  is the only thing that could have stopped generation.
+
+  Fixed in four layers, each of which alone would have prevented the
+  incident:
+
+  - **Preserved.** `_from_ollama` now carries `done_reason` through
+    verbatim and reports it as `finish_reason` on non-tool turns.
+    Tool turns still report `tool_calls`, so every tooled role's
+    routing is unchanged.
+  - **Detected.** New `claude_hooks/truncation.py` classifies a
+    response as `reported` (the backend said `length`) or
+    `structural` (the text stops inside a backtick, `$…$`, `**…**`,
+    LaTeX group, or code fence it opened). The structural check is
+    the audit on the authoritative one: replayed against the two
+    incident artifacts *with their recorded `"stop"` intact*, it
+    catches both.
+  - **Recovered.** A cut answer is **continued** — the partial is fed
+    back with a resume-from-here instruction and the halves are
+    concatenated verbatim — in `council._single_shot` (planner,
+    researcher, critic, refuter, synthesizer, and the researcher's
+    summary fallback) and in `agent_loop.runner` (tool_executor,
+    coder, plus /get-advice and caliber). Bounded at 2 continuations;
+    `LoopConfig.max_answer_continuations = 0` restores the old
+    behavior. Tool-call turns are never continued — half-written
+    arguments are the existing arg-parse guard's job.
+  - **Reported.** `MessageRecorder.record_llm` — the one function
+    every role's every call reaches — tallies truncations per role
+    into `metadata.json`'s new `truncations_by_role` and a
+    `truncated:` line in `summary.md`'s front matter. A deliverable
+    still short after recovery now fails the run with an explanatory
+    error instead of `completed`. A truncation the continuation loop
+    *rescued* is recorded but does not fail the run: discarding 40
+    minutes of correct work over a recovered overrun would be its own
+    kind of wrong answer.
+
+- **Every role now asks the endpoint how big its context is and spends
+  it deliberately.** New `consultants/engine/budget.py` probes the
+  model's real window via `/api/show`'s architecture-namespaced
+  `model_info["<arch>.context_length"]` (gemma4 262144,
+  deepseek-v4-flash 1048576, glm-5.2 1000000, minimax-m3 524288 —
+  cached per model), sends an explicit `num_predict`, and **compacts**
+  a history that no longer leaves room to answer, keeping the system
+  prompt, the original question, and the most recent exchanges while
+  eliding the middle behind a visible marker. An unknown window is
+  treated as unknown, never as a default: guessing 4096 for a model
+  with a 1M window would compact away most of a council's evidence.
+
+- **The store reaper refuses a truncated distillation.** It deletes
+  research originals once the durable project-namespace write
+  succeeds, so accepting a half-written summary traded real records
+  for a fragment of a summary of them — the one irreversible outcome
+  in the reaper. Its output cap also rose 1500 → 2400 tokens, because
+  800 words of technical prose with file paths runs past 1500 and the
+  rubric, not the ceiling, should be what stops it.
+
+### Changed
+
+- **`[tools] all_roles` now defaults to ON** — planner, critic,
+  meta_critic, synthesizer and adversary get the same tool surface the
+  researcher has. It landed OFF pending a measurement, on the theory
+  that it changed cost and not correctness. The measurement said the
+  opposite on both counts
+  ([`benchmarks/consultants/results/2026-08-01/`](benchmarks/consultants/results/2026-08-01/)):
+
+  - **Cheaper.** −30% prompt / −13% completion tokens at
+    `effort=high` across three paired trials, with **non-overlapping**
+    ranges — the off arm's cheapest trial cost more than the on arm's
+    most expensive. The saving comes from the *planner*, not the
+    critic: a tooled planner grounds its plan in the code, and the
+    researcher then converges in ~2 fewer iterations. A tool loop
+    resends its whole history each iteration, so the iterations
+    removed are the most expensive ones.
+  - **More accurate.** Against research carrying planted false claims,
+    the tooled critic caught **100%** vs **0%** untooled (n=72), with
+    100% precision and zero silent corrections.
+
+  Same gate discipline as `tool_executor`, opposite outcome: that one
+  was measured and flipped back off. Turn this off per project with
+  `claude-consultants config set-tools --all-roles false`.
+
+### Added
+
+- **The approval channel — M-A's last unwired piece.** The permission
+  ladder has been enforced at dispatch since the registry landed, but
+  the runner passed no `approval_fn`, so `ToolRegistry` refused every
+  `ask_*` call for want of somewhere to route it. A documented config
+  value (`set-tools --permission write_file ask_assistant`) silently
+  meant "deny". `consultants/engine/tool_approval.py` is the channel,
+  and the two rungs behave as `docs/PLAN-council-tool-surface.md`
+  decided:
+
+  - **`ask_assistant` auto-approves and never stalls.** The plan is
+    explicit that it is "auto-approve with discretion, not wait for a
+    verdict" — a round-trip per write per lane would burn tokens for a
+    verdict that is yes by construction. What it buys over `auto` is
+    the audit trail: a `tool_approval_auto` event the assistant sees.
+  - **`ask_human` parks the lane** and is the only rung that can,
+    which is why the plan reserves it for spend. `POST /tool-ack` and
+    `claude-consultants tool-ack <sid> --allow|--deny` answer it;
+    `status` grows `pending_tool_approvals` and the stream emits
+    `awaiting_tool_approval` while one is open.
+  - **Timeout denies** after `tools.approval_timeout_s` (default 600,
+    minimum **180**, `set-tools --approval-timeout`). The floor is
+    there because a shorter deadline is un-answerable rather than
+    strict: the request has to be polled, relayed to a person and
+    decided, and Claude Code's own turn latency eats most of a minute
+    before anyone has read the tool name. A deadline nobody can meet is
+    `deny` that also costs the wall-clock, and against a 30–60 minute
+    council three minutes is not a delay. `set-tools` rejects a lower
+    value; a hand-edited TOML is raised to the floor with a warning
+    rather than taking the council down over it. Decision-table row 7: absence of
+    an approver never authorizes spend. The lane gets an `error:` tool
+    result and reroutes — never an exception, so a denial teaches the
+    model another route rather than crashing the lane.
+
+  **A per-call verdict does not survive council scale**, which the
+  first live run made obvious: four `read_file` requests in 90 seconds,
+  three of them the same file from three x-tier researcher lanes. Since
+  an unanswered request is *denied* at the deadline, a queue nobody can
+  keep up with is a run that quietly degrades — worse than `deny`,
+  because it costs the wall-clock too. Two mechanisms, both keyed on
+  the fact that authorization is per **council**, not per role:
+
+  - **Coalescing.** Concurrent lanes asking the identical question join
+    one request; `waiters` says how many lanes one answer releases.
+  - **Standing grants.** `tool-ack --all-of-tool` /
+    `--all-matching '<glob>'` answer the class instead of the instance,
+    and installing one releases the parked requests it already matches
+    — otherwise "allow all reads under `src/**`" would still leave
+    three lanes waiting out the deadline. Rules show in `status` under
+    `tool_approval_grants`; a later rule overrides an earlier one, so a
+    blanket allow can be narrowed mid-run. Standing *denies* are
+    expressible too, which stops a model retrying a forbidden path from
+    parking a lane on every attempt.
+
+  Neither widens anything by default: a plain `tool-ack` installs no
+  rule, and a glob rule never matches a call whose target can't be
+  established.
+
+  **Per-lane parking, verified rather than argued.** The plan called
+  lane-scoped suspension the largest piece of M-A because a
+  graph-level pause would idle every sibling on exactly the x-tier
+  runs that matter most. Blocking inside the tool executor gets it for
+  free — LangGraph runs sync nodes on its own worker threads — and a
+  test drives the real `CouncilState` graph with three Send lanes to
+  prove one parking while two finish.
+
+  Unchanged on a default config, with a cohort-2 parity test for each
+  condition that keeps it so: every built-in tool declares `auto`,
+  `default_level` is `auto`, and nothing is pinned. Not implemented:
+  the plan's "keep it resumable" refinement (a late approval re-running
+  that lane from a durable checkpoint); a timed-out lane reroutes and
+  the run finishes degraded.
+
+- **Relative paths reach every allowed root.** The file tools joined a
+  relative path to the primary `--cwd` and nowhere else, so an
+  `--add-dir` root was reachable only by an absolute path the model
+  didn't have — while the citation linter, which always searched every
+  root, resolved the same path fine. A question naming
+  `eval/scorers.py:600` passed pre-flight (the file *is* readable under
+  some root), then had every `read_file`, `list_files` and `glob` come
+  back empty, and the council reported the file absent. Observed live
+  in `csl-2026-08-02-0847-e4e2`, which spent a full run concluding a
+  file did not exist while holding a reader that could open it.
+
+  Resolution now falls back through the extra roots in configuration
+  order, and `glob` fans out with a shared entry budget. `--cwd` stays
+  authoritative, so a relative path that already resolved still refers
+  to the same file. When one is missing everywhere the error names the
+  roots it tried — "doesn't exist" and "not under any root I can see"
+  should not read the same.
+
+- **`parent_lane_idx` is now a declared channel.** It was passed in
+  Send payloads and read by `tool_executor` while declared nowhere. It
+  worked — a Send payload reaches its node unfiltered, unlike the
+  top-level `invoke` input, which is filtered by the schema — but
+  relying on that asymmetry is exactly how `extra_roots` went missing
+  for two months. The regression test now requires **every** key any
+  Send payload passes to be a declared channel.
+
+- **Deploy is a full deploy — `scripts/deploy.py`.** The installed
+  `~/.claude/skills/consultants/SKILL.md` was found still at its **21
+  May** content: 791 lines against the repo's 1591. Ten weeks of
+  sessions had been loading half a skill — no wait patterns, no review
+  loop, no `accept` / `tool-ack` verbs — while the engine underneath
+  moved three releases on. Nothing surfaced it, because a stale skill
+  does not error; it just instructs the model to drive something that
+  no longer exists.
+
+  The cause was a routine, not a bug. "Deploy" had come to mean
+  `pip install -e . && systemctl restart <service>`, which makes the
+  *engine* current and touches nothing else. No service loads a skill —
+  Claude Code reads it at session start — so it sat outside the
+  definition and drifted silently. Every artifact that drifts has that
+  property: nothing at runtime complains when it is behind.
+
+  `scripts/deploy.py` is now the only supported path. It discovers
+  rather than hardcodes (envs, units and skills are all globbed, so the
+  next artifact of an existing class is picked up automatically),
+  searches **both** systemd scopes — this host splits them, the
+  consultants engine is a `--user` unit while daemon/proxy/dashboard are
+  system units — and gates on `verify_deploy.py`. A failed step fails
+  the whole deploy: a partial deploy reporting success is the exact
+  failure it replaces.
+
+  `verify_deploy.py` grows a **skills** check that compares content, not
+  presence, and reports a stale skill as **FAIL** rather than WARN — a
+  warning would scroll past, which is how the May copy survived ten
+  weeks. `tests/test_deploy_completeness.py` enforces that every
+  artifact class is both deployed and verified, that the script cannot
+  hardcode a skill name, and that CLAUDE.md still tells the next session
+  which command to use. Adding a new class of deployable artifact means
+  adding it to that test first.
+
+- **Skill frontmatter: two missing, three unparseable.** `consolidate`
+  and `reflect` shipped with no YAML frontmatter at all, so they could
+  not appear in the skill listing. Adding it exposed the larger problem:
+  a description containing an unquoted `": "` is not a valid plain YAML
+  scalar, so the block failed to parse and the description silently fell
+  back to the file's H1. `consultants` had carried that defect too —
+  meaning the one string that decides whether the council skill is ever
+  chosen was being replaced by "`/consultants — multi-agent council
+  dispatcher`". All descriptions are quoted now.
+
+  The completeness test was complicit: it regexed `^name:` and saw
+  nothing wrong. It **parses** the frontmatter now and requires a usable
+  `name` and `description`, which is the check that would have caught
+  all three. `PyYAML` is declared in `requirements-dev.txt` — it was
+  present on both hosts but undeclared, so a clean checkout would have
+  quietly lost the check.
+
+- **`/cancel` and `/interrupt` actually stop the run now.** Yesterday's
+  audit found both were advisory: they set a flag on `runtime_control`
+  that no node read. The fix is not "make a node read the flag" —
+  that would not have worked either, and why is the whole design. A
+  graph already inside `invoke` carries its channel values in memory
+  through the superstep; `update_state` writes a checkpoint the running
+  invocation never re-reads. A node consulting
+  `runtime_control.cancel_requested` would have seen `False` for the
+  entire run. The flag was **unreadable**, not merely unread.
+
+  So the control travels out-of-band, on a new `RunControl` object on
+  the SessionState that the node gate reads directly — the same shape
+  as the adversary ack and the tool-approval broker, the two
+  cross-thread controls in this codebase that already worked. The gate
+  goes in `build_council_graph`'s single `_wrap` choke point, so all
+  eight node bodies get it untouched and a node added later cannot
+  forget it. A structural test requires **both** `_wrap` sites (council
+  and follow-up) to install it, because a gate in only one is a run
+  that stops being cancellable after the first follow-up.
+
+  - **Cancel** makes every remaining node a no-op and the graph drains
+    to END. It **skips, it never raises** — an exception would abort
+    the stream mid-superstep and lose exactly the partial state
+    `--keep-partial` exists to preserve. Terminal status is
+    `cancelled`, and a cancelled run has **no synthesized answer**: the
+    synthesizer is a node like any other, and running it would be
+    spending after the caller said stop.
+  - **Pause** parks the next node to enter *inside its own worker
+    thread*, so x-tier siblings keep running — a graph-level pause
+    would idle the whole fanout on exactly the runs where the fanout is
+    the point. Released by `resume`, which now picks its mode from what
+    is actually parked (`pause_release` / `adversary_ack` /
+    `scheduled`); the first two never re-enter the graph, because the
+    runner still owns the stream and re-invoking would double-resume a
+    live invocation.
+  - **Pause resumes on timeout while a tool approval denies on
+    timeout.** Opposite defaults on purpose: an unanswered spend
+    approval must not authorize spend, but an unanswered pause has
+    already spent everything up to that point and abandoning the run
+    would waste it.
+
+  **`pause_state` distinguishes "registered" from "in effect".**
+  `paused: true` conflated the two, and a pause lands at a node
+  *boundary* — so when the runner is already sitting in one of its own
+  waits, nothing enters and the pause reads as "requested, nothing
+  happened". `pending` vs `parked` says which, `paused_roles` names the
+  blocked node, and `pause_blocked_by` names the wait that is holding
+  it — the adversary checkpoint (up to 30 min before the synthesizer)
+  or a parked `ask_human` approval — each with the verb that clears it.
+  `POST /interrupt` returns the same fields at request time, because
+  `{"ok": true}` alone reads as "the run has stopped", and the CLI
+  prints the blocker rather than leaving a human to infer it from a
+  second endpoint. `pause_blocked_by: null` is its own answer: nothing
+  is holding the runner, a node is just mid-call.
+
+  Two bugs the first live run found, both fixed before this shipped:
+  `/resume` tested `_adversary_checkpoint_active` before the pause, and
+  since that flag spans the whole runner-owned window it kept answering
+  `adversary_ack` while the synthesizer stayed parked with nothing able
+  to free it — the pause is checked first now, and both are released
+  when both are set. And the pause deadline is measured from when the
+  pause was *requested*, not from when a node reaches the gate: the
+  pause landed at 10:43 and the synthesizer parked at 10:49, so
+  measuring from park time left the node waiting past the
+  `pause_deadline_ts` that `status` was already advertising.
+
+  `RuntimeControl` still declares `cancel_requested` / `pause_requested`
+  as the durable record of the request, now with a class note saying
+  they are advisory and that anything added there which must take
+  effect mid-run needs the same out-of-band treatment.
+
+- **Audit: how `/cancel` and `/interrupt` were found, and now say so.**
+  `POST /cancel` carried a comment claiming "nodes consult this at
+  entry and exit early". No node does — nothing in
+  `consultants/engine/` reads `cancel_requested` or `pause_requested`,
+  and none of the four `should_interrupt_*` policies has a caller
+  outside its own tests. On a run that is mid-graph, a keep-partial
+  cancel records the request and the run streams to completion. The
+  response now reports `stops_the_run` (true only for
+  `--discard-partial`, which closes the session and *is* what the
+  runner's wait loops break on), the CLI prints a note when it is
+  false, and `interrupt_policy`'s module docstring states which of its
+  four decision points are unimplemented and which two were solved
+  another way — tool permission by `tool_approval`'s per-lane park,
+  the adversary checkpoint by the runner's. No behaviour change; the
+  point is that "cancelled" and "asked to cancel" stop reading the
+  same.
+
+- **`events --milestones` / `--kinds`.** The unfiltered SSE stream is
+  dominated by `llm_call` and `tool_call` records — hundreds per
+  council, each a full payload — which makes it unusable as a monitor
+  and buries the one event that needs an answer
+  (`awaiting_adversary`). `--milestones` keeps state changes and
+  renders one compact line each. Default output is unchanged for
+  machine consumers.
+
+- **Pre-flight path check (`consultants/engine/preflight.py`).** Before
+  a token is spent, the engine resolves every `path.ext[:line]` the
+  question names against `[cwd, *extra_roots]` and refuses to start
+  when *none* of them are readable. A council that can't see its
+  subject doesn't fail — it answers confidently from nothing, and the
+  only signal arrives 55 minutes later as a wall of `[unverified]`
+  annotations. The check is a handful of `stat` calls against files the
+  question already named.
+
+  Refusal is deliberately narrow. A file that is missing but whose
+  *directory* resolves is `creatable` ("write me `pkg/new.py`"), and a
+  minority of unreachable paths warns rather than blocks — only "the
+  question names paths and not one of them is readable" is the
+  wrong-roots signature. The message names the paths, the roots that
+  were searched, and the fix. Runs on follow-ups too, since a follow-up
+  can name new files and add roots of its own. A pre-flight that itself
+  raises never blocks a run: it exists to save money, not to become a
+  new way for runs to die.
+
+  `--skip-preflight` (on `consult` and `follow-up`) is the override for
+  the one case the check cannot distinguish: a greenfield ask whose
+  every named path is one the asker wants created. Logged as a warning
+  rather than applied silently, so a run full of `[unverified]` cites
+  can be told from one where the guard simply passed. It is a cost
+  guard, not a security boundary — the tool sandbox confines every read
+  to the allowed roots either way.
+
+- **`root_misconfiguration_hint()`** in the citation linter. An
+  unresolvable cite is annotated identically whether the model invented
+  the file or the file is real and sitting under a root the run never
+  received — and those need opposite responses. When ≥90% of at least
+  three distinct citations resolve under no root, the linter now logs a
+  **warning** naming the roots it tried, at both the researcher and
+  synthesizer boundaries.
+
+- **Disk-reopened sessions restore their roots.** A follow-up merges
+  the parent's `extra_roots` with its own, and a parent reopened from
+  disk — which is every parent after an engine restart or an idle reap
+  — contributed nothing, because `_load_session_from_artifacts` had no
+  roots to read. Now that `metadata.json` carries them, it does. Empty
+  for sessions written before 2026-08-02: re-pass `--add-dir` when
+  following up on one.
+
+- **Allowed roots in `metadata.json`** — `extra_roots`, `cwd_display`,
+  `extra_roots_display`. Their absence made a reopened session's
+  `extra_roots = None` look like evidence the roots had been dropped,
+  when the field was simply never persisted. summary.md's front matter
+  is untouched: that writer is a deliberately list-free YAML subset.
+
+- **Tool addendum for tooled roles.** The first live bench recorded
+  **zero** tool calls in 18 tooled trials: the surface was live and the
+  model declined it every time, because each role's system prompt
+  predates the tool surface and describes a job involving no looking.
+  `CRITIC_SYSTEM` was the sharpest case — it frames the job as routing
+  and says "default to ready … each extra round costs another full
+  agent loop", which reads as *investigating is expensive*.
+  `build_tool_addendum()` appends a per-role directive to the system
+  turn, and only when the role is actually handed tools, so an
+  unequipped role is never told about tools it cannot call.
+
+- **`CORRECTIONS:` channel (v1.3 directives).** Roles are told to check
+  **equality, not existence** — a grep that "succeeds" survives both a
+  wrong constant and a wrong line number — and never to correct
+  silently. A discrepancy is reported in a `CORRECTIONS:` block
+  attributed to the `RESEARCHER REPORT (round N)` header the
+  synthesizer also sees. A correction is explicitly *not* grounds for
+  another research round. The channel is wired end to end: the
+  synthesizer honours it, and the **meta-critic** merges every critic's
+  block into its own — without that last hop the feature would work at
+  low effort and silently degrade at exactly the x-tiers running the
+  most lanes.
+
+- **`build_extra_tools_note()`.** `RESEARCHER_SYSTEM` and the tool-plan
+  prompt enumerate their six tools in prose, and a model works from
+  that list rather than the schema array — so enabling the git provider
+  put five tools in the payload the role had effectively been told did
+  not exist. The note names only the *difference*, derived from the
+  live specs.
+
+- **M-B bench** (`benchmarks/consultants/role_tools_bench.py`) — Tier 1
+  drives `critic_node` against a planted-claim corpus; Tier 2 runs a
+  full-council cost A/B with each arm in its own project so the two can
+  run concurrently and cloud latency cannot drift between them.
+
+### Fixed
+
+- **The citation linter mangled every absolute path.** Its regex
+  guarded against URLs with `(?<![/:])`, which also refused to start a
+  match at the leading `/` of an absolute path *and* at every `/`
+  after it — so the first viable position was one character into the
+  first segment. `/shared/dev/x/eval/y.py:12` was extracted as
+  `hared/dev/x/eval/y.py`, unresolvable by construction. An answer
+  citing real files by absolute path came back 100% `[unverified —
+  file not found in any allowed_root]` no matter how correct it was,
+  and read exactly like a fabricated filename. The same hole let
+  `ithub.com/x/blob/main/foo.py:123` match out of a github URL and be
+  reported as a fabricated cite; URL tails are now filtered by a
+  bounded backscan instead of by a lookbehind that cannot express it.
+
+- **`extra_roots` was declared in the wrong schema.** The 2026-08-02
+  fix added the channel to `CouncilStateV2`, but every `StateGraph` in
+  `graph.py` compiles `CouncilState` — V2 is the not-yet-adopted
+  successor. The key kept being stripped, and the regression test was
+  green the whole time because it asserted on V2. The channel is now
+  declared where the graph actually compiles it, and the test resolves
+  the schema **structurally**: it parses `graph.py`, finds whatever
+  class each `StateGraph(...)` is given, and requires `extra_roots` in
+  that class.
+
+- **`extra_roots` never reached the council.** LangGraph builds its
+  channels from `CouncilStateV2` and silently drops any input key that
+  isn't one of them. `extra_roots` was written into the initial state
+  by the runner on 2026-05-18 and declared nowhere, so
+  `state.get("extra_roots")` was `None` in every node of every run
+  since. The citation linter therefore verified against `[cwd]` alone,
+  and every cite under an `--add-dir` root came back `[unverified —
+  file not found]`.
+
+  Nothing raised and nothing logged. Each link in the chain — CLI,
+  app, runner, node, linter — is correct in isolation, which is what
+  made csl-2026-08-02-0532-d737 read as a hallucinating council after
+  55 minutes of cloud inference: the tool sandbox takes its roots from
+  `GraphDeps`, not from state, so the researcher had genuinely read
+  every file it cited.
+
+  Declaring the channel is necessary but not sufficient — a `Send`
+  delivers only the keys in its own dict, so all five fanout payloads
+  now carry `extra_roots` explicitly. Two regression pins: the channel
+  must be declared, and every `Send` payload passing `cwd` must pass
+  `extra_roots` too (AST walk over `graph.py`).
+
+- **Consultants service mode was reverted by every deploy.** The mode
+  has two records: `[service].mode` in
+  `~/.claude/consultants-config.toml`, which the engine reads and
+  `claude-consultants config set-service-mode` writes, and
+  `hooks.consultants.smart_start.enabled` in
+  `config/claude-hooks.json`, which install.py uses to pick the task to
+  register and the port to health-check. install.py only ever read the
+  second one, so a mode set through the documented CLI was invisible to
+  it and got written back to the stale value on the next deploy — and
+  the repair path (drift detector, mode prompt, TOML sync) sat *behind*
+  the "Refresh /consultants engine deps? [y/N]" gate that a routine
+  deploy answers no to, so nothing self-healed either. pandorum ran
+  smart-start for two months with a config file that said `always-on`.
+
+  `_reconcile_consultants_service_mode()` now adopts the TOML's value
+  into the mirror at the top of the consultants section, before the
+  refresh gate and before the prompt — the TOML wins, because it is the
+  operator-facing knob and the only file the engine itself reads. It
+  reads the file directly (stdlib, scoped to the `[service]` table,
+  with a scan fallback if `tomllib` chokes on an unrelated hand-edit)
+  so it works without the consultants env, and reads the *user-global*
+  file specifically: which service a host registers is a host-wide
+  decision that a per-project `.claude-hooks/consultants.toml` must not
+  change.
+
+- **`tests/test_install_robustness.py` could not run on its own.** Its
+  `install_mod` fixture didn't register the module in `sys.modules`
+  before executing it, and install.py is `from __future__ import
+  annotations`, so `@dataclasses.dataclass` had no module namespace to
+  resolve its string annotations against. All 76 tests errored at setup
+  unless an alphabetically-earlier test module had already done `import
+  install` — passing in the full suite, failing in isolation.
+
+- **`install.py`: `NameError` on the Windows proxy scheduled-task
+  install path.** `_write_proxy_task_xml` called `tempfile.mkstemp`
+  with no `tempfile` in scope; the file's two other `import tempfile`
+  are function-local to different functions.
+
+- **Dead code with misleading comments.** `graph.py` carried
+  `xauto_active = "xauto" == "xauto"` — always True, never read, with a
+  six-line comment describing gating that really lives in the escalator
+  node's `is_xauto_run` guard (verified: `next_escalation()`
+  short-circuits, the node returns `{}`, and
+  `tests/test_consultants_v2_escalation.py` pins it). Also
+  `pgvector.py` capturing a rowcount delta it never used, and
+  `council.py` tracking `used_model` and never reading it.
+
+- **`.gitignore` anchoring.** `.claude-hooks/consultants/` has an
+  embedded slash, so it only ever matched at the repo root — a council
+  run inside a bench fixture wrote `transcript.db` plus WAL/SHM
+  sidecars into version control's view. Now `**/`-prefixed too.
+
+### Tooling
+
+- **Ruff config** in `pyproject.toml` — `target-version` pinned to the
+  `requires-python` floor and the default `E4/E7/E9/F` selection made
+  explicit rather than inherited from whichever ruff is installed.
+  `line-length = 79` is recorded but `E501` is deliberately *not*
+  selected: ~2700 lines exceed it, so enforcing it today is a style
+  backlog rather than a lint. Repo-wide findings went 472 → 63.
+
+### Added (earlier in this cycle)
+
+- **Composable council tool surface with a permission gate (M-A) + git
+  history tools (M-C).** First two milestones of
+  [`docs/PLAN-council-tool-surface.md`](docs/PLAN-council-tool-surface.md).
+
+  `claude_hooks/tool_registry/` adds a `ToolProvider` ABC (shaped like
+  the memory-backend `Provider` ABC, so it is one idiom rather than
+  two), a `ToolRegistry` that merges providers into one schema list and
+  one dispatch path, and a `PolicyGate` that runs on **every** call.
+  Wiring the gate at dispatch rather than inside each provider is the
+  point: a provider added later inherits approval, denial and audit
+  without knowing the gate exists.
+
+  The ladder has four rungs — `auto` (nobody approves; reads run
+  silently, because routing a `grep` through an approver burns tokens
+  for nothing), `ask_assistant` (writes/builds), `ask_human` (spend
+  only), `deny`. Taint escalates every *effectful* tool one rung for
+  the rest of a session once untrusted external content is consumed;
+  read-only tools are exempt, which is what keeps the common path free.
+  Escalation is implemented against `ToolSpec.read_only` rather than
+  against "shell" specifically, so a future effectful tool is covered
+  the day it lands. With only the read-only built-ins wired, taint has
+  no observable effect yet — correct, not a gap.
+
+  Everything fails closed: an invalid rung in config is refused at
+  dispatch (naming the tool and the source) rather than coerced to
+  `auto`; a caller with no approval channel refuses `ask_*` rather than
+  running it; a provider whose `specs()` raises offers no tools instead
+  of taking down the council. Refusals are returned as `error: ...`
+  tool results, matching `caliber_proxy.tools.execute`, so the model
+  reroutes instead of the lane dying.
+
+  M-C adds `GitToolProvider`: `git_history`, `git_log`, `git_blame`,
+  `git_diff`, `git_show`. `git_history` is the one that matters — it
+  wraps `git log -L`, so it answers "when did this regress, and why?"
+  from the history of a *specific function or line range* rather than
+  the whole file, in one call instead of four. Read-only by
+  construction, not by intent: every invocation is a fixed `argv` built
+  from an allowlist of observation-only subcommands, so the
+  "read-only is undecidable from a command string" problem that makes
+  the shell provider hard does not arise. Confined to the same roots as
+  the path tools, output capped, revisions rejected if they could be
+  read as flags.
+
+  Configurable from both surfaces per the project rule: a `[tools]`
+  block, `claude-consultants config set-tools`, and Subflow I in the
+  `/consultants config` menu. Git tools ship **off** — read-only and
+  safe, but five more schemas on every prompt on every lane is a
+  default-behaviour change, so it lands disabled and gets flipped after
+  a live smoke, exactly how `store` was handled. Default config
+  produces a surface byte-identical to the previous hardcoded
+  `openai_tool_specs()` call sites; four new M12 cohort-2 parity tests
+  pin that.
+
+- **Uniform role tool access (M-B, opt-in via `[tools] all_roles`).**
+  Before this, the researcher was the only default role that could call
+  a tool: planner, critic, meta_critic, synthesizer and adversary each
+  ran one tool-free call through `_single_shot`, so they could reason
+  about the researcher's text but never check it. That is the structural
+  reason the CitationLinter had to exist — the 2026-05-18 forensic
+  traced a fabricated filename to a researcher lane with zero tool
+  calls, and the critic could not catch it because the critic had no way
+  to look. A critic that can `read_file` verifies the claim instead of
+  inheriting it.
+
+  New `council._role_turn()` runs a tool loop when both `tool_specs` and
+  `tool_executor` are supplied and delegates to `_single_shot`
+  otherwise, so the ungated path is unchanged. `GraphDeps.tooled_roles`
+  decides which roles get them; it is empty by default, and
+  `_tools_for()` returns `{}` rather than `tool_specs=None` so an
+  ungated role is called with exactly its pre-M-B argument list.
+
+  Caps are deliberately tighter than the researcher's (4 iterations, 4
+  calls per turn, tools stripped after 3): these roles are meant to
+  check a handful of specific claims, not to conduct research. The first
+  tool call is **not** forced, so a critic with nothing to verify can
+  answer immediately rather than burning a call proving it. Every
+  failure in the tool path — loop exception, empty final text, missing
+  `agent_loop` — degrades to a single shot, because losing a critic's
+  verdict to a misbehaving loop is worse than a critic that reasons
+  without having looked.
+
+  **Off by default, and the reason is cost rather than risk**: a
+  single-shot role is one LLM call, a tooled role is one per iteration,
+  and critic fans out per lane at the x-tiers, so the multiplier is
+  roles × lanes × iterations. It ships disabled pending an M11c-style
+  before/after measurement, the same gate discipline that governed
+  `tool_executor`. Two new M12 cohort-2 parity tests pin the default and
+  its runtime consequence.
+
+### Fixed
+
+- **Recall queries are now bounded (`max_query_chars`, default 3500).**
+  Nothing capped the *length* of a recall query: `min_prompt_chars` was
+  the only length check in the pipeline, and neither `max_total_chars`
+  (which bounds the injected **output**) nor `hyde_ground_max_chars`
+  (which bounds the **grounding memories**) touches the prompt. A pasted
+  diagnosis or log dump therefore went to the embedder in full.
+
+  The failure was total and silent. Step 1 of `run_recall` embeds the raw
+  query *before* HyDE is reached, and the embedder's own timeout (180 s)
+  sits well above the `UserPromptSubmit` hook cap (65 s) — so the embedder
+  never gave up first, Claude Code SIGTERMed the hook and discarded the
+  output. The entire recall for that turn was lost, surfacing only as
+  `hook timed out after 65s`. Measured on solidpc against the CPU
+  llamafile embedder: 5 000 chars 9.0 s, 16 000 chars 67.6 s, and the
+  30 000-char embedder `max_chars` ceiling permitted roughly 300 s. So
+  ~15 KB was already fatal on solidpc and ~8 KB on pandorum (~2× slower).
+
+  3 500 is sized for the worst of the density range rather than for
+  average prose: ~1 100 tokens of prose at 3.2 chars/token, ~2 600 tokens
+  of base64 at 1.35, both comfortably inside the cap on either host. The
+  clamp applies once at the top of `run_recall`, so it bounds both
+  consumers of the query — the embed **and** HyDE's chat prefill — rather
+  than one call site that the next addition would silently escape. `0`
+  disables it; the fast path for an ordinary prompt is a single `len()`.
+
+  `clamp_query` is deliberately not `query[:3500]`. A long prompt carries
+  its framing at the top and its actual ask at the bottom with pasted bulk
+  in between, so the clamp keeps **both ends** (65 % head / 35 % tail
+  joined by `…`), cuts on paragraph → line → sentence → word boundaries
+  rather than mid-word (a mangled trailing token is pure noise in the
+  vector), and **squeezes** long fenced blocks to their opening lines
+  instead of dropping them — for "here is the traceback, what is it?" the
+  exception line at the top of the block is the highest-signal string in
+  the prompt, and dropping the block would discard exactly what the user
+  wants matched. Cutting the middle also helps recall *quality*, not only
+  latency: a 20 KB query collapses into one mushy centroid vector whose
+  nearest neighbours drift generic. Against the longest real prompt in
+  the originating session — 46 604 chars — this yields 3 338 chars, about
+  84 s of embed reduced to about 6 s. A clamp logs at INFO so thin recall
+  on a long prompt is explainable. See
+  [`docs/hyde.md`](docs/hyde.md) "The 'recall overhead' term is only
+  bounded by `max_query_chars`".
+
 ## [1.14.0] — 2026-07-30
 
 

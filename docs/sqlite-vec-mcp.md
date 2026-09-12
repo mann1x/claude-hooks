@@ -18,6 +18,7 @@ Eight tools in v1.7+ — full parity with
 | `sqlite-vec-find-hybrid` *(v1.7+)* | `SqliteVecProvider.recall_hybrid(query, k, alpha)` | RRF blend of vector cosine + BM25 (FTS5). `alpha=0.5` default. |
 | `sqlite-vec-store` | `SqliteVecProvider.store(content, metadata)` | v1.7+ is idempotent on `content_hash`. SQLite serialises writers, so concurrent stores from multiple MCP clients will queue rather than collide. |
 | `sqlite-vec-count` | `SqliteVecProvider.count()` | Row count in the configured primary table. |
+| `sqlite-vec-delete` *(v1.14.1+)* | `delete_by_hashes(ids)` | Permanently delete by the `id=<hex>` shown in find results. **Irreversible** — no undo, no tombstone. Cascades to the `_vec` and `_fts` mirrors. Ids that match nothing are reported, not swallowed. |
 | `sqlite-vec-kg-search` *(v1.7+)* | `kg_search_nodes(query, k)` | Three-pass: name fuzzy (FTS5 trigram) → observation hybrid → observation fill. |
 | `sqlite-vec-kg-create` *(v1.7+)* | `kg_create_entities(entities)` | Bulk-create, idempotent on `name`. |
 | `sqlite-vec-kg-observe` *(v1.7+)* | `kg_add_observations(items)` | Embeds + inserts, idempotent on `(entity_id, content_hash)`. |

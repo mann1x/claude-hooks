@@ -31,9 +31,9 @@ from typing import Optional
 
 from claude_hooks.daemon import (
     DEFAULT_HOST,
-    DEFAULT_PORT,
     DEFAULT_SECRET_PATH,
     PROTOCOL_VERSION,
+    resolve_port,
     sign_request,
 )
 
@@ -62,7 +62,7 @@ def call(
     payload: dict,
     *,
     host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    port: Optional[int] = None,
     secret_path: Path = DEFAULT_SECRET_PATH,
     timeout: float = 10.0,
 ) -> Optional[dict]:
@@ -77,6 +77,14 @@ def call(
     Callers can distinguish "daemon unavailable, run inline" (None)
     from "daemon answered but rejected the request" (dict with ok=False).
     """
+    # ``None`` means "wherever the daemon actually is". Resolved per
+    # call, not at import: the daemon may bind a different port after a
+    # restart (Windows reserved ranges move between reboots), and a
+    # module-level default would pin whatever was true when the first
+    # hook in this process imported us.
+    if port is None:
+        port = resolve_port()
+
     secret = _read_secret(Path(secret_path))
     if secret is None:
         log.debug("daemon secret not present at %s — fallback", secret_path)
@@ -139,7 +147,7 @@ def call(
 def ping(
     *,
     host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    port: Optional[int] = None,
     secret_path: Path = DEFAULT_SECRET_PATH,
     timeout: float = 2.0,
 ) -> bool:
@@ -157,7 +165,7 @@ def ping(
 def shutdown(
     *,
     host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    port: Optional[int] = None,
     secret_path: Path = DEFAULT_SECRET_PATH,
     timeout: float = 2.0,
 ) -> bool:
@@ -196,7 +204,7 @@ def shutdown(
 def embedding_ensure(
     *,
     host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    port: Optional[int] = None,
     secret_path: Path = DEFAULT_SECRET_PATH,
     timeout: float = 60.0,
 ) -> Optional[dict]:
@@ -227,7 +235,7 @@ def embedding_ensure(
 def embedding_status(
     *,
     host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    port: Optional[int] = None,
     secret_path: Path = DEFAULT_SECRET_PATH,
     timeout: float = 5.0,
 ) -> Optional[dict]:
@@ -251,7 +259,7 @@ def embedding_status(
 def embedding_shutdown(
     *,
     host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    port: Optional[int] = None,
     secret_path: Path = DEFAULT_SECRET_PATH,
     timeout: float = 15.0,
 ) -> bool:
@@ -291,7 +299,7 @@ def chat_model_ensure(
     label: str,
     *,
     host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    port: Optional[int] = None,
     secret_path: Path = DEFAULT_SECRET_PATH,
     timeout: float = 120.0,
 ) -> Optional[dict]:
@@ -323,7 +331,7 @@ def chat_model_status(
     label: Optional[str] = None,
     *,
     host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    port: Optional[int] = None,
     secret_path: Path = DEFAULT_SECRET_PATH,
     timeout: float = 5.0,
 ) -> Optional[dict]:
@@ -355,7 +363,7 @@ def chat_model_shutdown(
     label: Optional[str] = None,
     *,
     host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    port: Optional[int] = None,
     secret_path: Path = DEFAULT_SECRET_PATH,
     timeout: float = 15.0,
 ) -> Optional[dict]:
@@ -386,7 +394,7 @@ def chat_model_shutdown(
 def chat_model_gc(
     *,
     host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    port: Optional[int] = None,
     secret_path: Path = DEFAULT_SECRET_PATH,
     timeout: float = 30.0,
 ) -> Optional[dict]:

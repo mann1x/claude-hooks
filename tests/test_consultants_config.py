@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -74,14 +73,16 @@ class TestDefaults:
     def test_coder_default_model_is_rubric_winner(self):
         # M11b 2026-05-16 baseline crowned ``glm-5.1:cloud`` as
         # the coder rubric winner (pass=100%, avg_quality=4.88,
-        # median_tokens=1841). The constant lives in
-        # consultants.engine.coder_defaults so future re-baselines
-        # are a single-file edit + a CHANGELOG / baselines-ledger
-        # row. See docs/consultants-skill-eval-baselines.md.
+        # median_tokens=1841). 2026-08-01 routes the declared
+        # successor ``glm-5.2:cloud`` instead — the SCORE is
+        # inherited, not re-measured, which is exactly what
+        # coder_defaults.MODEL_SUCCESSIONS records. The cohort
+        # lists stay frozen at the tags that actually ran.
+        # See docs/consultants-skill-eval-baselines.md.
         from consultants.engine.coder_defaults import RECOMMENDED_CODER_MODEL
         cfg = cc.ConsultantsConfig()
         assert cfg.roles["coder"].model == RECOMMENDED_CODER_MODEL
-        assert RECOMMENDED_CODER_MODEL == "glm-5.1:cloud"
+        assert RECOMMENDED_CODER_MODEL == "glm-5.2:cloud"
 
     def test_coder_limits_defaults(self):
         # M10: 50 KB per file, 1 MB total, 16 files max — the
@@ -820,3 +821,176 @@ class TestSetOverrideUserGlobal:
         cfg = cc.load_config(cwd=tmp_path)
         assert cfg.effort == "max"
         assert cfg.roles["planner"].model == "proj-pl"
+
+
+# ----------------------- set-tools (M-A) -------------------------- #
+
+class TestSetTools:
+    """The ``[tools]`` block: what the council can reach, and what each
+    tool needs before it runs.
+
+    Every test pins **cwd as well as home**. ``isolated_home`` alone is
+    not enough here: ``load_config`` resolves the project file from
+    ``os.getcwd()``, and this repo's own project config sets
+    ``override_user_global``, so an unpinned mutation test writes into
+    the developer's live council config (bug-664).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _pin_cwd(self, isolated_home, tmp_path, monkeypatch):
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        return work
+
+    def test_defaults(self):
+        cfg = cc.load_config()
+        assert cfg.tools.enabled is True
+        assert cfg.tools.git is False       # opt-in, see M12 parity
+        assert cfg.tools.default_level == "auto"
+        assert cfg.tools.permissions == {}
+
+    def test_toggle_git_persists(self):
+        cc.set_tools(git=True)
+        assert cc.load_config().tools.git is True
+        cc.set_tools(git=False)
+        assert cc.load_config().tools.git is False
+
+    def test_disable_registry_persists(self):
+        cc.set_tools(enabled=False)
+        assert cc.load_config().tools.enabled is False
+
+    def test_default_level_validated(self):
+        cc.set_tools(default_level="ask_human")
+        assert cc.load_config().tools.default_level == "ask_human"
+        with pytest.raises(ValueError) as ei:
+            cc.set_tools(default_level="allow")   # the pre-ladder value
+        assert "invalid permission level" in str(ei.value)
+
+    def test_set_and_clear_a_permission(self):
+        cc.set_tools(set_permission=("git_diff", "ask_assistant"))
+        assert cc.load_config().tools.permissions == {
+            "git_diff": "ask_assistant"}
+        cc.set_tools(clear_permission="git_diff")
+        assert cc.load_config().tools.permissions == {}
+
+    def test_permission_level_validated(self):
+        with pytest.raises(ValueError):
+            cc.set_tools(set_permission=("git_diff", "maybe"))
+
+    def test_permission_tool_name_required(self):
+        with pytest.raises(ValueError):
+            cc.set_tools(set_permission=("  ", "auto"))
+
+    def test_clear_all_permissions(self):
+        cc.set_tools(set_permission=("a", "deny"))
+        cc.set_tools(set_permission=("b", "ask_human"))
+        assert len(cc.load_config().tools.permissions) == 2
+        cc.set_tools(clear_all_permissions=True)
+        assert cc.load_config().tools.permissions == {}
+
+    def test_none_leaves_values_unchanged(self):
+        """The 'pass None to leave unchanged' contract shared with
+        set_role / set_store."""
+        cc.set_tools(git=True, default_level="deny")
+        cc.set_tools(enabled=True)          # touches nothing else
+        cfg = cc.load_config()
+        assert cfg.tools.git is True
+        assert cfg.tools.default_level == "deny"
+
+    def test_permissions_round_trip_through_toml(self):
+        cc.set_tools(set_permission=("some_tool", "ask_human"))
+        text = cc.user_config_path().read_text(encoding="utf-8")
+        assert "[tools.permissions]" in text
+        assert cc.load_config().tools.permissions["some_tool"] == "ask_human"
+
+    def test_levels_match_the_registry_enum(self):
+        """config duplicates the ladder to stay importable without
+        claude_hooks on the path; the two must not drift."""
+        from claude_hooks.tool_registry.policy import LEVELS
+        assert cc.VALID_PERMISSION_LEVELS == LEVELS
+
+
+class TestToolsApprovalTimeout:
+    """``[tools] approval_timeout_s`` — the spend-approval deadline.
+
+    Only ``ask_human`` parks (``ask_assistant`` auto-approves per the
+    ladder), so this is the one knob that decides how long a council
+    waits for a person before denying.
+    """
+
+    def test_default_is_ten_minutes(self, isolated_home):
+        assert cc.ConsultantsConfig().tools.approval_timeout_s == 600.0
+
+    def test_round_trips_through_the_file(self, isolated_home):
+        cc.set_tools(approval_timeout_s=900)
+        assert cc.load_config().tools.approval_timeout_s == 900.0
+
+    def test_rejects_a_non_positive_deadline(self, isolated_home):
+        # Zero denies every parked call before an approver can see it,
+        # which is "deny" with extra steps and a confusing name.
+        with pytest.raises(ValueError):
+            cc.set_tools(approval_timeout_s=0)
+        with pytest.raises(ValueError):
+            cc.set_tools(approval_timeout_s=-5)
+
+    def test_a_bad_value_in_the_file_falls_back_to_the_default(
+            self, isolated_home):
+        # Load-time is lenient by design (the CLI is where a typo gets
+        # rejected loudly); a garbage value must not produce a
+        # zero-second deadline that denies everything.
+        path = cc.user_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '[tools]\napproval_timeout_s = "soon"\n', encoding="utf-8")
+        assert cc.load_config().tools.approval_timeout_s == 600.0
+
+    def test_zero_in_the_file_is_ignored(self, isolated_home):
+        path = cc.user_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('[tools]\napproval_timeout_s = 0\n',
+                        encoding="utf-8")
+        assert cc.load_config().tools.approval_timeout_s == 600.0
+
+    def test_other_tools_settings_survive_the_write(self, isolated_home):
+        cc.set_tools(git=True, default_level="ask_human")
+        cc.set_tools(approval_timeout_s=420)
+        cfg = cc.load_config()
+        assert cfg.tools.approval_timeout_s == 420.0
+        assert cfg.tools.git is True
+        assert cfg.tools.default_level == "ask_human"
+
+    def test_rejects_a_deadline_below_the_floor(self, isolated_home):
+        # 60 s looked answerable on paper and wasn't: the request has to
+        # be polled, relayed to a person and decided, and Claude Code's
+        # own turn latency eats most of a minute. A deadline nobody can
+        # meet is "deny" that also costs the wall-clock.
+        with pytest.raises(ValueError) as exc:
+            cc.set_tools(approval_timeout_s=60)
+        assert "180" in str(exc.value)
+
+    def test_the_floor_itself_is_accepted(self, isolated_home):
+        cc.set_tools(approval_timeout_s=cc.MIN_APPROVAL_TIMEOUT_S)
+        assert (cc.load_config().tools.approval_timeout_s
+                == cc.MIN_APPROVAL_TIMEOUT_S)
+
+    def test_a_short_value_in_the_file_is_raised_not_rejected(
+            self, isolated_home):
+        # Load-time stays lenient: refusing the whole config over one
+        # short deadline would take the council down for a value that
+        # can safely be corrected. The setter errors instead, because
+        # there the operator is present to be told.
+        path = cc.user_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('[tools]\napproval_timeout_s = 60\n',
+                        encoding="utf-8")
+        assert (cc.load_config().tools.approval_timeout_s
+                == cc.MIN_APPROVAL_TIMEOUT_S)
+
+    def test_a_value_above_the_floor_in_the_file_is_untouched(
+            self, isolated_home):
+        path = cc.user_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('[tools]\napproval_timeout_s = 240\n',
+                        encoding="utf-8")
+        assert cc.load_config().tools.approval_timeout_s == 240.0
