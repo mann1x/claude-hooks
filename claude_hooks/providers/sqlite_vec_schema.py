@@ -55,7 +55,7 @@ from claude_hooks.providers._content_hash import content_hash
 
 log = logging.getLogger("claude_hooks.providers.sqlite_vec_schema")
 
-LATEST_VERSION = 2
+LATEST_VERSION = 3
 
 # Identifier validation for the configurable memory table name. Same
 # pattern sqlite_vec.py uses; duplicated here so the schema module
@@ -153,6 +153,15 @@ def migrate_schema(conn: sqlite3.Connection, *, embedding_dim: int,
         _write_version(conn, 2, _build_v2_metadata(conn))
         conn.commit()
         log.info("sqlite_vec schema migrated to v2 (table=%s)", table)
+
+    # v3 — the vec0 mirror never had a delete trigger. Every removal
+    # since v1 left its embedding in ``<table>_vec``. Adds the trigger
+    # and sweeps the orphans already on disk.
+    if current < 3:
+        _migrate_v2_to_v3(conn, table=table)
+        _write_version(conn, 3, _build_v2_metadata(conn))
+        conn.commit()
+        log.info("sqlite_vec schema migrated to v3 (table=%s)", table)
     return LATEST_VERSION
 
 
@@ -317,6 +326,31 @@ def _migrate_v0_to_v1(conn: sqlite3.Connection, *, embedding_dim: int,
                 VALUES('delete', old.rowid, old.content);
         END
         """
+    )
+    # The vec0 mirror needs the same treatment and never had it. A
+    # virtual table is not reached by anything implicit: sharing a
+    # rowid with {table} does not make a DELETE propagate, and vec0
+    # has no foreign keys. Without this trigger every delete — the TTL
+    # reaper's included — left the embedding behind. Inner-joining
+    # through {table} hid the orphan from search results, so the only
+    # visible symptom was {table}_vec growing without bound; the
+    # dangerous case is quieter, because SQLite hands out a freed
+    # max(rowid) again and the stale vector then answers for whatever
+    # row inherits it.
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS {table}_vec_ad
+        AFTER DELETE ON {table} BEGIN
+            DELETE FROM {table}_vec WHERE rowid = old.rowid;
+        END
+        """
+    )
+    # Existing databases carry orphans created before the trigger. They
+    # are unreachable through the join but still occupy the index and
+    # still own their rowids, so sweep them once; the trigger keeps it
+    # true from here.
+    conn.execute(
+        f"DELETE FROM {table}_vec WHERE rowid NOT IN (SELECT rowid FROM {table})"
     )
 
     # Step 5: populate FTS5 from existing rows via the canonical
@@ -636,3 +670,41 @@ def _create_kg_observations(conn: sqlite3.Connection, *,
         END
         """
     )
+
+
+def _migrate_v2_to_v3(conn: sqlite3.Connection, *, table: str) -> None:
+    """Give ``<table>_vec`` a delete trigger, and sweep what it missed.
+
+    The FTS5 mirror has had ``<table>_fts_ad`` since v1; the vec0 mirror
+    was left to an assumption that never held — that sharing a ``rowid``
+    with ``<table>`` makes a DELETE propagate. It does not. vec0 is a
+    virtual table: no foreign keys reach it and nothing cascades into
+    it, so from v1 until now every delete (including the M14 TTL
+    reaper's, the only caller ``delete_by_hashes`` had) kept its
+    embedding.
+
+    Searches inner-join through ``<table>``, so orphans never surfaced
+    as wrong results — the visible cost was only unbounded growth in
+    the index. The quiet cost is worse: SQLite re-issues a freed
+    ``max(rowid)``, so a stale vector can end up answering for the next
+    row that inherits its id.
+
+    Idempotent: ``CREATE TRIGGER IF NOT EXISTS`` plus a sweep that is a
+    no-op once clean.
+    """
+    table = _safe_table(table)
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS {table}_vec_ad
+        AFTER DELETE ON {table} BEGIN
+            DELETE FROM {table}_vec WHERE rowid = old.rowid;
+        END
+        """
+    )
+    cur = conn.execute(
+        f"DELETE FROM {table}_vec WHERE rowid NOT IN (SELECT rowid FROM {table})"
+    )
+    swept = int(cur.rowcount or 0)
+    if swept:
+        log.info("sqlite_vec: swept %d orphaned vector(s) from %s_vec",
+                 swept, table)

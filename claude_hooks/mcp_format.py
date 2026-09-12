@@ -125,3 +125,38 @@ def format_delete_result(deleted: int, requested: int,
         more = f" +{len(rejected) - 5} more" if len(rejected) > 5 else ""
         parts.append(f"; rejected {len(rejected)} malformed id(s): {shown}{more}")
     return " ".join(parts)
+
+
+def format_kg_delete_result(res: dict) -> str:
+    """Render an entity deletion, blast radius included.
+
+    Entity deletion cascades: reporting only the entity count would
+    understate what happened by two orders of magnitude, and the
+    observations are the part that took work to accumulate.
+    """
+    ents = int(res.get("entities") or 0)
+    obs = int(res.get("observations") or 0)
+    rels = int(res.get("relations") or 0)
+    missing = res.get("missing") or []
+    out = (f"deleted {ents} entit{'y' if ents == 1 else 'ies'}, "
+           f"cascading to {obs} observation{'s' if obs != 1 else ''} "
+           f"and {rels} relation{'s' if rels != 1 else ''}")
+    if missing:
+        shown = ", ".join(str(m) for m in missing[:5])
+        more = f" +{len(missing) - 5} more" if len(missing) > 5 else ""
+        out += f"; {len(missing)} name(s) matched no entity: {shown}{more}"
+    return out
+
+
+def format_graph(nodes: list) -> str:
+    """Render a graph enumeration as one line per entity."""
+    if not nodes:
+        return "(empty graph)"
+    out = []
+    for n in nodes:
+        out.append(
+            f"# {n.get('name')} ({n.get('entity_type')})  "
+            f"observations={n.get('observation_count', 0)} "
+            f"relations={n.get('relation_count', 0)}"
+        )
+    return "\n".join(out)

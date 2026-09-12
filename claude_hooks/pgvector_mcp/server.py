@@ -143,6 +143,167 @@ def _tool_catalog() -> list[dict]:
             },
         },
         {
+            "name": "pgvector-list",
+            "description": (
+                "Page through stored memories, newest first, without a "
+                "query. The complement to find: search answers 'what "
+                "matches this', not 'what is in here'. Each row carries "
+                "its id, so a listed memory is directly deletable."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "default": 20},
+                    "offset": {"type": "integer", "default": 0},
+                    "table": {"type": "string"},
+                },
+            },
+        },
+        {
+            "name": "pgvector-replace",
+            "description": (
+                "Replace a memory: delete the row with the given id, "
+                "then store new content. Ordered delete-first on "
+                "purpose — store is idempotent on content_hash and the "
+                "Stop-hook store path dedups at 0.85 cosine, so storing "
+                "a correction before removing what it corrects can be "
+                "rejected as a near-duplicate."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "id of the memory to replace"},
+                    "content": {"type": "string"},
+                    "metadata": {"type": "object", "default": {}},
+                },
+                "required": ["id", "content"],
+            },
+        },
+        {
+            "name": "pgvector-expiring",
+            "description": (
+                "List memories whose TTL expires before an ISO-8601 "
+                "instant, oldest first. Read-only: shows what the "
+                "reaper would take, without taking it."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "before": {"type": "string", "description": "ISO-8601 instant"},
+                    "limit": {"type": "integer", "default": 50},
+                },
+                "required": ["before"],
+            },
+        },
+        {
+            "name": "pgvector-refresh-ttl",
+            "description": (
+                "Push a memory's expiry out to a new ISO-8601 instant, "
+                "by id. Use to rescue something the reaper is about to "
+                "remove."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "expires_at": {"type": "string", "description": "ISO-8601 instant"},
+                },
+                "required": ["id", "expires_at"],
+            },
+        },
+        {
+            "name": "pgvector-kg-delete-entities",
+            "description": (
+                "Delete KG entities by name. IRREVERSIBLE, and it "
+                "cascades: every observation and relation attached to "
+                "the entity goes with it — on this backend kg_entities is shared across every embedding namespace, so the cascade reaches observation tables for all models, not just the configured one. Reports the full "
+                "blast radius and names any entity that did not exist."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "names": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["names"],
+            },
+        },
+        {
+            "name": "pgvector-kg-delete-observations",
+            "description": (
+                "Delete specific observations. Same {entity_name, "
+                "content} shape as kg-observe, matched on normalised "
+                "content hash. IRREVERSIBLE."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "entity_name": {"type": "string"},
+                                "content": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+                "required": ["items"],
+            },
+        },
+        {
+            "name": "pgvector-kg-delete-relations",
+            "description": (
+                "Delete relations. Same {from, to, relation_type} shape "
+                "as kg-relate. IRREVERSIBLE. Entities are untouched."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "relations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "from": {"type": "string"},
+                                "to": {"type": "string"},
+                                "relation_type": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+                "required": ["relations"],
+            },
+        },
+        {
+            "name": "pgvector-kg-read-graph",
+            "description": (
+                "Enumerate KG entities with observation and relation "
+                "counts, newest first. The complement to kg-search: "
+                "answers 'what is in the graph at all'."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "default": 100}},
+            },
+        },
+        {
+            "name": "pgvector-kg-open-nodes",
+            "description": (
+                "Full detail for named entities — observations and "
+                "relations. Exact name match, not search: when you know "
+                "which node you mean, a fuzzy hit on a neighbour is how "
+                "the wrong one gets edited."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "names": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["names"],
+            },
+        },
+        {
             "name": "pgvector-kg-search",
             "description": (
                 "Search KG entities by name (trigram) and observation content "
@@ -344,6 +505,69 @@ class McpServer:
             rels = args.get("relations") or []
             n = self.provider.kg_create_relations(list(rels))
             return f"created {n} new relation{'s' if n != 1 else ''} ({len(rels)} requested)"
+        if name == "pgvector-list":
+            mems = self.provider.list_memories(
+                limit=int(args.get("limit") or 20),
+                offset=int(args.get("offset") or 0),
+                table=args.get("table"),
+            )
+            return _format_memories(mems)
+        if name == "pgvector-replace":
+            hashes, rejected = _parse_hashes([args.get("id")])
+            if rejected or not hashes:
+                return _format_delete_result(0, 0, rejected or [str(args.get("id"))])
+            content = str(args.get("content") or "")
+            if not content.strip():
+                raise ValueError("replace requires non-empty content")
+            # Delete first, then store. The reverse order can be
+            # rejected: store is idempotent on content_hash, so a
+            # correction identical to the original would no-op and then
+            # be deleted, leaving nothing at all.
+            removed = self.provider.delete_by_hashes(hashes, tables=self.provider._resolve_tables())
+            self.provider.store(content, metadata=args.get("metadata") or {})
+            return (f"replaced {removed} memor{'y' if removed == 1 else 'ies'} "
+                    f"with new content ({len(content)} chars)"
+                    + ("" if removed else
+                       " — WARNING: the id matched no row, so this only stored"))
+        if name == "pgvector-expiring":
+            before = str(args.get("before") or "")
+            if not before:
+                raise ValueError("expiring requires 'before' (ISO-8601)")
+            rows = self.provider.expire_before(
+                before_iso=before, limit=int(args.get("limit") or 50))
+            if not rows:
+                return "(nothing expires before that instant)"
+            out = []
+            for r in rows:
+                ch = getattr(r, "content_hash", b"") or b""
+                hx = bytes(ch).hex() if ch else "?"
+                body = (getattr(r, "content", "") or "")[:120]
+                out.append(f"[expires={getattr(r, 'expires_at', '?')} id={hx}] {body}")
+            return "\n".join(out)
+        if name == "pgvector-refresh-ttl":
+            hashes, rejected = _parse_hashes([args.get("id")])
+            if rejected or not hashes:
+                return _format_delete_result(0, 0, rejected or [str(args.get("id"))])
+            new_exp = str(args.get("expires_at") or "")
+            if not new_exp:
+                raise ValueError("refresh-ttl requires 'expires_at' (ISO-8601)")
+            self.provider.refresh_expires_at(hashes[0], new_exp)
+            return f"expiry for {hashes[0].hex()} set to {new_exp}"
+        if name == "pgvector-kg-delete-entities":
+            res = self.provider.kg_delete_entities(list(args.get("names") or []))
+            return _format_kg_delete_result(res)
+        if name == "pgvector-kg-delete-observations":
+            n = self.provider.kg_delete_observations(list(args.get("items") or []))
+            return f"deleted {n} observation{'s' if n != 1 else ''}"
+        if name == "pgvector-kg-delete-relations":
+            n = self.provider.kg_delete_relations(list(args.get("relations") or []))
+            return f"deleted {n} relation{'s' if n != 1 else ''}"
+        if name == "pgvector-kg-read-graph":
+            return _format_graph(
+                self.provider.kg_read_graph(limit=int(args.get("limit") or 100)))
+        if name == "pgvector-kg-open-nodes":
+            return _format_kg_nodes(
+                self.provider.kg_open_nodes(list(args.get("names") or [])))
         raise ValueError(f"unknown tool: {name}")
 
 
@@ -355,6 +579,8 @@ from claude_hooks.mcp_format import format_memories as _format_memories  # noqa:
 from claude_hooks.mcp_format import format_kg_nodes as _format_kg_nodes  # noqa: E402
 from claude_hooks.mcp_format import parse_hashes as _parse_hashes  # noqa: E402
 from claude_hooks.mcp_format import format_delete_result as _format_delete_result  # noqa: E402
+from claude_hooks.mcp_format import format_kg_delete_result as _format_kg_delete_result  # noqa: E402
+from claude_hooks.mcp_format import format_graph as _format_graph  # noqa: E402
 
 
 def serve_stdio(provider: Optional[Provider] = None) -> int:

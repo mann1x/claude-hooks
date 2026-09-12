@@ -2,10 +2,19 @@
 Autonomous memory consolidation — compress old memories, merge duplicates,
 and prune stale entries.
 
-Limitations:
-- Qdrant MCP has no delete API — consolidation can only prevent future
-  duplicates (via dedup) and store compressed versions. Old entries remain.
-- Memory KG has ``delete_entities`` — full consolidation is possible there.
+Consolidation requires deletion, because merging and compressing both
+mean "replace N rows with fewer". A provider that cannot delete is
+reported as ``skipped`` rather than counted as work: storing a summary
+next to the original grows the corpus this pass exists to shrink.
+
+- ``pgvector`` / ``sqlite_vec`` — full consolidation (``delete_by_hashes``).
+- ``qdrant`` — no delete API; every candidate is skipped.
+- ``memory_kg`` — has ``delete_entities``, but not the by-hash memory
+  delete this pass uses, so it skips too.
+
+Until v1.14.1 this module reported work it had not done: ``merged``
+counted *candidates* and never merged, every compression was computed
+by an LLM and discarded, and ``pruned`` was never incremented at all.
 
 Can be invoked as:
   - CLI: ``python -m claude_hooks.consolidate``
@@ -20,7 +29,7 @@ import socket
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -39,6 +48,23 @@ class ConsolidationResult:
     compressed: int = 0
     pruned: int = 0
     errors: list[str] = field(default_factory=list)
+    #: Work identified but not performed because the provider cannot
+    #: delete. Kept separate from the counters above on purpose: until
+    #: v1.14.1 ``merged`` reported *candidates* and ``compressed``
+    #: reported summaries that were computed and thrown away, so a run
+    #: that changed nothing announced "merged=12 compressed=8". A
+    #: number that means "considered" must never share a name with one
+    #: that means "done".
+    skipped: int = 0
+
+    def describe(self) -> str:
+        parts = [f"merged={self.merged}", f"compressed={self.compressed}",
+                 f"pruned={self.pruned}"]
+        if self.skipped:
+            parts.append(f"skipped={self.skipped} (provider cannot delete)")
+        if self.errors:
+            parts.append(f"errors={len(self.errors)}")
+        return " ".join(parts)
 
 
 def consolidate(
@@ -68,28 +94,85 @@ def consolidate(
         log.info("consolidate: too few memories (%d), skipping", len(all_mems))
         return result
 
-    # Find merge candidates.
-    pairs = _find_merge_candidates(all_mems, threshold=merge_threshold)
-    result.merged = len(pairs)
-    if pairs and not dry_run:
-        log.info("consolidate: found %d merge candidate(s)", len(pairs))
-        # For Qdrant, we can't delete — just log. For Memory KG, we could
-        # delete the duplicate entity. For now, log only.
-        for a, b in pairs[:10]:
-            log.info("  merge candidate: '%s...' ≈ '%s...'", a.text[:50], b.text[:50])
+    # Deletion is what makes consolidation consolidation. Without it
+    # the pass can only *add* a compressed copy next to the original,
+    # which grows the corpus it was asked to shrink — so a provider
+    # that can't delete gets counted as skipped, not done.
+    deleters = {id(p): _can_delete(p) for p in providers}
+    if not any(deleters.values()):
+        log.warning(
+            "consolidate: no provider supports deletion (%s) — nothing to do",
+            ", ".join(p.name for p in providers) or "none",
+        )
 
-    # Compress long memories.
+    # Merge near-duplicates: keep the longer text, delete the other.
+    pairs = _find_merge_candidates(all_mems, threshold=merge_threshold)
+    for a, b in pairs:
+        keep, drop = (a, b) if len(a.text) >= len(b.text) else (b, a)
+        prov = _provider_for(drop, providers)
+        if prov is None or not deleters.get(id(prov)):
+            result.skipped += 1
+            continue
+        log.info("consolidate: merging '%s...' into '%s...'",
+                 drop.text[:50], keep.text[:50])
+        if dry_run:
+            result.merged += 1
+            continue
+        try:
+            if _delete_memory(prov, drop):
+                result.merged += 1
+            else:
+                result.skipped += 1
+        except Exception as e:              # noqa: BLE001 - reported
+            result.errors.append(f"merge delete failed: {e}")
+
+    # Compress long memories: store the summary, then remove the
+    # original. Both halves or neither — a stored summary whose original
+    # survives is a duplicate, and a deleted original whose summary
+    # never stored is data loss.
     # ``model_ref`` (v1.5+) takes precedence over ``ollama_model``.
     model = con_cfg.get("model_ref") or con_cfg.get("ollama_model", "gemma4:e2b")
     url = con_cfg.get("ollama_url", "http://localhost:11434/api/generate")
     num_ctx = int(con_cfg.get("num_ctx", 16384))
+    merged_ids = {m.metadata.get("_hash") for _, m in pairs} if pairs else set()
     for mem in all_mems:
-        if len(mem.text) > 1000:
-            compressed = _compress(mem.text, model=model, url=url, num_ctx=num_ctx)
-            if compressed and len(compressed) < len(mem.text) * 0.7:
+        if len(mem.text) <= 1000:
+            continue
+        if mem.metadata.get("_hash") in merged_ids:
+            continue                        # already removed as a duplicate
+        prov = _provider_for(mem, providers)
+        if prov is None or not deleters.get(id(prov)):
+            # Don't pay for an LLM call we cannot act on. The old code
+            # ran one per oversized memory and discarded every result.
+            result.skipped += 1
+            continue
+        if dry_run:
+            result.compressed += 1
+            continue
+        compressed = _compress(mem.text, model=model, url=url, num_ctx=num_ctx)
+        if not compressed or len(compressed) >= len(mem.text) * 0.7:
+            continue
+        try:
+            prov.store(compressed, metadata=_carry_metadata(mem))
+            if _delete_memory(prov, mem):
                 result.compressed += 1
-                if not dry_run:
-                    log.debug("compressed: %d→%d chars", len(mem.text), len(compressed))
+                log.debug("consolidate: compressed %d→%d chars",
+                          len(mem.text), len(compressed))
+            else:
+                # Summary landed, original stayed: a duplicate, not a
+                # loss. Say so rather than counting it as compressed.
+                result.errors.append(
+                    "compressed copy stored but original not deleted "
+                    f"(id={mem.metadata.get('_hash')})"
+                )
+        except Exception as e:              # noqa: BLE001 - reported
+            result.errors.append(f"compress failed: {e}")
+
+    # Prune stale memories.
+    prune_days = int(con_cfg.get("prune_stale_days", 0) or 0)
+    if prune_days > 0:
+        result.pruned += _prune_stale(providers, deleters, prune_days,
+                                      result, dry_run=dry_run)
 
     # Update state.
     if not dry_run:
@@ -98,11 +181,88 @@ def consolidate(
         )
         _update_state(state_path)
 
-    log.info(
-        "consolidate: merged=%d compressed=%d pruned=%d errors=%d",
-        result.merged, result.compressed, result.pruned, len(result.errors),
-    )
+    log.info("consolidate: %s", result.describe())
     return result
+
+
+def _can_delete(provider: Provider) -> bool:
+    """Whether this provider can actually remove a memory."""
+    return callable(getattr(provider, "delete_by_hashes", None))
+
+
+def _provider_for(mem: Memory, providers: list) -> Optional[Provider]:
+    """The provider a recalled memory came from.
+
+    ``source_provider`` is stamped by the dispatcher during fan-out.
+    Falls back to the sole provider when there is only one, and
+    otherwise returns None — deleting from the wrong store is worse
+    than not deleting.
+    """
+    src = getattr(mem, "source_provider", "") or ""
+    for p in providers:
+        if p.name == src:
+            return p
+    return providers[0] if len(providers) == 1 else None
+
+
+def _delete_memory(provider: Provider, mem: Memory) -> bool:
+    """Delete one recalled memory by its ``_hash``. False if unaddressable."""
+    hash_hex = (mem.metadata or {}).get("_hash")
+    if not hash_hex:
+        return False
+    try:
+        blob = bytes.fromhex(str(hash_hex))
+    except ValueError:
+        return False
+    return int(provider.delete_by_hashes([blob]) or 0) > 0
+
+
+def _carry_metadata(mem: Memory) -> dict:
+    """Metadata for a compressed replacement.
+
+    Underscore-prefixed keys are per-recall annotations (``_hash``,
+    ``_table``, ``_score``) — carrying them into a stored row would
+    persist one query's ranking as if it were a property of the memory.
+    """
+    md = {k: v for k, v in (mem.metadata or {}).items()
+          if not str(k).startswith("_")}
+    md["consolidated"] = True
+    md["consolidated_at"] = datetime.now(timezone.utc).isoformat(
+        timespec="seconds")
+    return md
+
+
+def _prune_stale(providers: list, deleters: dict, prune_days: int,
+                 result: ConsolidationResult, *, dry_run: bool) -> int:
+    """Delete memories whose TTL lapsed more than ``prune_days`` ago.
+
+    Only touches rows that carry an explicit ``expires_at`` — a memory
+    with no TTL was never promised a lifetime, and age alone is not
+    staleness.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=prune_days)
+    pruned = 0
+    for p in providers:
+        if not deleters.get(id(p)) or not callable(
+                getattr(p, "expire_before", None)):
+            continue
+        try:
+            rows = p.expire_before(before_iso=cutoff.isoformat(), limit=500)
+        except Exception as e:              # noqa: BLE001 - reported
+            result.errors.append(f"{p.name} expire_before failed: {e}")
+            continue
+        hashes = [bytes(r.content_hash) for r in rows
+                  if getattr(r, "content_hash", None)]
+        if not hashes:
+            continue
+        if dry_run:
+            pruned += len(hashes)
+            continue
+        try:
+            pruned += int(p.delete_by_hashes(hashes) or 0)
+        except Exception as e:              # noqa: BLE001 - reported
+            result.errors.append(f"{p.name} prune failed: {e}")
+    return pruned
 
 
 def should_run(config: dict) -> bool:
@@ -139,6 +299,14 @@ def _pull_all(providers: list[Provider], max_total: int) -> list[Memory]:
                 key = m.text[:100]
                 if key not in seen:
                     seen.add(key)
+                    # Stamp provenance here, the only point that knows
+                    # it. Recall doesn't set it (the dispatcher does
+                    # that during hook fan-out, and this path bypasses
+                    # the dispatcher), and consolidation deletes — so
+                    # an unattributed memory is one we must skip rather
+                    # than guess a store for.
+                    if not getattr(m, "source_provider", ""):
+                        m.source_provider = provider.name
                     all_mems.append(m)
             if len(all_mems) >= max_total:
                 break
@@ -233,7 +401,9 @@ def main() -> int:
     # Force enable for CLI invocation.
     cfg.setdefault("consolidate", {})["enabled"] = True
     result = consolidate(cfg, dry_run=dry_run)
-    print(f"Consolidation: merged={result.merged} compressed={result.compressed} pruned={result.pruned}")
+    print(f"Consolidation: {result.describe()}")
+    for err in result.errors:
+        print(f"  error: {err}")
     return 0
 
 

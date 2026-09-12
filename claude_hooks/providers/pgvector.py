@@ -528,6 +528,67 @@ class PgvectorProvider(Provider):
                     pass
                 raise
 
+    def list_memories(self, limit: int = 20, offset: int = 0,
+                      table: Optional[str] = None) -> list[Memory]:
+        """Page through stored memories, newest first.
+
+        The complement to ``recall``: search answers "what is like this
+        query", which cannot answer "what is in here". Without it the
+        corpus is only reachable by guessing queries, so auditing 9 000
+        memories means hoping the right words occur to you — and a
+        memory you cannot find is one you cannot correct or delete.
+
+        Returns the same ``Memory`` shape recall does, ``_hash``
+        included, so a listed row is directly actionable rather than
+        needing a second lookup to become addressable. No embedding is
+        computed: this is an index scan, and making it pay for an embed
+        would put the browse path behind the same queue as recall.
+        """
+        limit = max(1, min(int(limit or 20), 200))
+        offset = max(0, int(offset or 0))
+        allowed = self._resolve_tables()
+        targets = [t for t in allowed if t == table] if table else allowed
+        if not targets:
+            return []
+        with self._lock:
+            self._ensure_ready()
+            rows: list[tuple] = []
+            try:
+                with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                    for t in targets:
+                        meta_expr = ("metadata" if "kg_observations" not in t
+                                     else "'{}'::jsonb AS metadata")
+                        cur.execute(
+                            f"SELECT content, {meta_expr}, created_at, "
+                            f"content_hash, %s AS _src FROM {t} "
+                            f"ORDER BY created_at DESC NULLS LAST, id DESC "
+                            f"LIMIT %s OFFSET %s",
+                            (t, limit, offset),
+                        )
+                        rows.extend(cur.fetchall())
+            except Exception as e:
+                log.warning("pgvector list_memories failed: %s", e)
+                try:
+                    self._conn.rollback()  # type: ignore[union-attr]
+                except Exception:
+                    pass
+                raise
+            # Merge across tables by recency, then re-apply the limit so
+            # a multi-table listing returns one coherent page rather
+            # than `limit` rows from each.
+            rows.sort(key=lambda r: (r[2] is not None, r[2]), reverse=True)
+            out: list[Memory] = []
+            for content, meta, created, chash, src in rows[:limit]:
+                md = dict(meta) if meta else {}
+                md["_table"] = src
+                if created is not None:
+                    md["_created_at"] = str(created)
+                if chash:
+                    md["_hash"] = bytes(chash).hex()
+                out.append(Memory(text=content, metadata=md))
+            self._read_only_finish()
+            return out
+
     def count(self) -> int:
         """Return the number of stored memories.
 
@@ -1352,6 +1413,264 @@ def _kg_search_nodes(self: PgvectorProvider, query: str, k: int = 5) -> list[dic
         return ranked
 
 
+def _kg_all_observation_tables(self: PgvectorProvider, cur) -> list[str]:
+    """Every ``kg_observations_*`` table in the database, not just ours.
+
+    ``kg_entities`` is shared across embedding namespaces: this host has
+    kg_observations_{arctic,minilm,nomic,qwen3}, all FK'd to the same
+    entity rows with ON DELETE CASCADE. Deleting an entity therefore
+    removes observations from *every* model's table, including a corpus
+    being kept as a rollback. Callers get told how much went, which
+    means counting where the cascade will actually reach rather than
+    only in the configured table.
+    """
+    cur.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema = 'public' AND table_name LIKE 'kg\\_observations\\_%' "
+        "ORDER BY table_name"
+    )
+    return [r[0] for r in cur.fetchall()]
+
+
+def _kg_delete_entities(self: PgvectorProvider, names: list) -> dict:
+    """Delete entities by name. Returns what actually went.
+
+    Relations and observations disappear via ON DELETE CASCADE, so this
+    counts them *before* issuing the delete — afterwards there is
+    nothing left to count, and reporting only the entity count would
+    understate the blast radius by two orders of magnitude.
+    """
+    wanted = [str(n).strip() for n in (names or []) if str(n).strip()]
+    if not wanted:
+        return {"entities": 0, "observations": 0, "relations": 0, "missing": []}
+    with self._lock:
+        self._ensure_ready()
+        try:
+            with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                cur.execute(
+                    "SELECT id, name FROM kg_entities WHERE name = ANY(%s)",
+                    (wanted,),
+                )
+                found = cur.fetchall()
+                ids = [r[0] for r in found]
+                present = {r[1] for r in found}
+                missing = sorted(set(wanted) - present)
+                if not ids:
+                    self._read_only_finish()
+                    return {"entities": 0, "observations": 0,
+                            "relations": 0, "missing": missing}
+
+                obs_total = 0
+                for t in _kg_all_observation_tables(self, cur):
+                    cur.execute(
+                        f"SELECT COUNT(*) FROM {t} WHERE entity_id = ANY(%s)",
+                        (ids,),
+                    )
+                    obs_total += int(cur.fetchone()[0] or 0)
+                cur.execute(
+                    "SELECT COUNT(*) FROM kg_relations "
+                    "WHERE from_entity_id = ANY(%s) OR to_entity_id = ANY(%s)",
+                    (ids, ids),
+                )
+                rel_total = int(cur.fetchone()[0] or 0)
+
+                cur.execute("DELETE FROM kg_entities WHERE id = ANY(%s)", (ids,))
+                deleted = int(cur.rowcount or 0)
+                self._conn.commit()  # type: ignore[union-attr]
+                return {"entities": deleted, "observations": obs_total,
+                        "relations": rel_total, "missing": missing}
+        except Exception as e:
+            log.warning("kg_delete_entities failed: %s", e)
+            try:
+                self._conn.rollback()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            raise
+
+
+def _kg_delete_observations(self: PgvectorProvider, items: list) -> int:
+    """Delete observations. Each item ``{entity_name, content}``.
+
+    Input shape mirrors ``kg_add_observations`` exactly so the same call
+    that created an observation removes it, with content matched on the
+    shared ``content_hash`` (whitespace-normalised) rather than raw
+    text. Scoped to the configured observation table only — unlike
+    entity deletion, this does not reach other namespaces, because the
+    caller named a specific observation in a specific corpus.
+    """
+    obs_table = _kg_obs_table(self)
+    if not obs_table:
+        raise RuntimeError(
+            "kg_observations table is not configured "
+            "(set kg_observations_table or additional_tables)"
+        )
+    pairs = []
+    for it in items or []:
+        name = (it.get("entity_name") or it.get("name") or "").strip()
+        content = it.get("content") or ""
+        if name and content:
+            pairs.append((name, _content_hash(content)))
+    if not pairs:
+        return 0
+    with self._lock:
+        self._ensure_ready()
+        deleted = 0
+        try:
+            with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                for name, chash in pairs:
+                    cur.execute(
+                        f"DELETE FROM {obs_table} o USING kg_entities e "
+                        f"WHERE o.entity_id = e.id AND e.name = %s "
+                        f"AND o.content_hash = %s",
+                        (name, chash),
+                    )
+                    deleted += int(cur.rowcount or 0)
+                self._conn.commit()  # type: ignore[union-attr]
+        except Exception as e:
+            log.warning("kg_delete_observations failed: %s", e)
+            try:
+                self._conn.rollback()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            raise
+        return deleted
+
+
+def _kg_delete_relations(self: PgvectorProvider, relations: list) -> int:
+    """Delete relations. Each dict ``{from, to, relation_type}`` —
+    the same shape ``kg_create_relations`` accepts, including its
+    ``from_name`` / ``to_name`` / ``type`` aliases."""
+    rows = []
+    for r in relations or []:
+        f = (r.get("from") or r.get("from_name") or "").strip()
+        t = (r.get("to") or r.get("to_name") or "").strip()
+        rt = (r.get("relation_type") or r.get("type") or "").strip()
+        if f and t and rt:
+            rows.append((f, t, rt))
+    if not rows:
+        return 0
+    with self._lock:
+        self._ensure_ready()
+        deleted = 0
+        try:
+            with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                for f, t, rt in rows:
+                    cur.execute(
+                        "DELETE FROM kg_relations r USING kg_entities a, kg_entities b "
+                        "WHERE r.from_entity_id = a.id AND r.to_entity_id = b.id "
+                        "AND a.name = %s AND b.name = %s AND r.relation_type = %s",
+                        (f, t, rt),
+                    )
+                    deleted += int(cur.rowcount or 0)
+                self._conn.commit()  # type: ignore[union-attr]
+        except Exception as e:
+            log.warning("kg_delete_relations failed: %s", e)
+            try:
+                self._conn.rollback()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            raise
+        return deleted
+
+
+def _kg_read_graph(self: PgvectorProvider, limit: int = 100) -> list[dict]:
+    """Enumerate the graph: every entity with its counts, newest first.
+
+    The complement to ``kg_search_nodes`` — search answers "what matches
+    this query", which cannot answer "what is in here at all". Without
+    it the graph can only be sampled by guessing names, so auditing or
+    cleaning it is guesswork. Observation text is deliberately excluded;
+    this is an index, and ``kg_open_nodes`` is the detail view.
+    """
+    limit = max(1, min(int(limit or 100), 1000))
+    obs_table = _kg_obs_table(self)
+    with self._lock:
+        self._ensure_ready()
+        try:
+            with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                obs_expr = (
+                    f"(SELECT COUNT(*) FROM {obs_table} o WHERE o.entity_id = e.id)"
+                    if obs_table else "0"
+                )
+                cur.execute(
+                    f"SELECT e.name, e.entity_type, e.metadata, {obs_expr} AS n_obs, "
+                    f"(SELECT COUNT(*) FROM kg_relations r "
+                    f" WHERE r.from_entity_id = e.id OR r.to_entity_id = e.id) AS n_rel "
+                    f"FROM kg_entities e ORDER BY e.id DESC LIMIT %s",
+                    (limit,),
+                )
+                out = [
+                    {"name": n, "entity_type": t, "metadata": m or {},
+                     "observation_count": int(no or 0),
+                     "relation_count": int(nr or 0)}
+                    for n, t, m, no, nr in cur.fetchall()
+                ]
+            self._read_only_finish()
+            return out
+        except Exception as e:
+            log.warning("kg_read_graph failed: %s", e)
+            try:
+                self._conn.rollback()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            raise
+
+
+def _kg_open_nodes(self: PgvectorProvider, names: list) -> list[dict]:
+    """Full detail for named entities — observations and relations.
+
+    Exact-name lookup, not search: when you already know which entity
+    you mean, ranking it against a query is noise, and a fuzzy match
+    returning a *neighbour* is how the wrong node gets edited.
+    """
+    wanted = [str(n).strip() for n in (names or []) if str(n).strip()]
+    if not wanted:
+        return []
+    obs_table = _kg_obs_table(self)
+    with self._lock:
+        self._ensure_ready()
+        try:
+            with self._conn.cursor() as cur:  # type: ignore[union-attr]
+                cur.execute(
+                    "SELECT id, name, entity_type, metadata FROM kg_entities "
+                    "WHERE name = ANY(%s)",
+                    (wanted,),
+                )
+                ents = cur.fetchall()
+                out = []
+                for eid, name, etype, meta in ents:
+                    obs = []
+                    if obs_table:
+                        cur.execute(
+                            f"SELECT content FROM {obs_table} "
+                            f"WHERE entity_id = %s ORDER BY id",
+                            (eid,),
+                        )
+                        obs = [r[0] for r in cur.fetchall()]
+                    cur.execute(
+                        "SELECT a.name, r.relation_type, b.name FROM kg_relations r "
+                        "JOIN kg_entities a ON a.id = r.from_entity_id "
+                        "JOIN kg_entities b ON b.id = r.to_entity_id "
+                        "WHERE r.from_entity_id = %s OR r.to_entity_id = %s "
+                        "ORDER BY r.id",
+                        (eid, eid),
+                    )
+                    rels = [{"from": f, "relation_type": rt, "to": t}
+                            for f, rt, t in cur.fetchall()]
+                    out.append({"name": name, "entity_type": etype,
+                                "metadata": meta or {}, "observations": obs,
+                                "relations": rels})
+            self._read_only_finish()
+            return out
+        except Exception as e:
+            log.warning("kg_open_nodes failed: %s", e)
+            try:
+                self._conn.rollback()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            raise
+
+
 # Bind extensions onto PgvectorProvider so the public class API now
 # includes recall_hybrid + kg_*. Done outside the class body so the
 # class definition above stays focused on the original recall/store
@@ -1361,4 +1680,9 @@ PgvectorProvider.kg_create_entities = _kg_create_entities
 PgvectorProvider.kg_add_observations = _kg_add_observations
 PgvectorProvider.kg_create_relations = _kg_create_relations
 PgvectorProvider.kg_search_nodes = _kg_search_nodes
+PgvectorProvider.kg_delete_entities = _kg_delete_entities
+PgvectorProvider.kg_delete_observations = _kg_delete_observations
+PgvectorProvider.kg_delete_relations = _kg_delete_relations
+PgvectorProvider.kg_read_graph = _kg_read_graph
+PgvectorProvider.kg_open_nodes = _kg_open_nodes
 PgvectorProvider._kg_entity_count_unsafe = _kg_entity_count_unsafe

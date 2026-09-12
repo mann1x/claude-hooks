@@ -18,6 +18,76 @@ release with the auto-generated source archive
 
 ### Added
 
+- **The memory stores became administrable.** Both MCP catalogs go
+  9 → 18 tools. The audit behind this found one theme repeated at every
+  layer: the read side and the write side disagreed about what was
+  reachable. Search could find KG entities nothing could remove, recall
+  spanned tables delete did not, and `count` reported 9 380 memories
+  that nothing could page through.
+
+  - **KG removal** — `kg-delete-entities` / `-observations` /
+    `-relations` on both providers. Entity deletion cascades, and the
+    tool reports the blast radius rather than the entity count alone:
+    on pgvector `kg_entities` is shared across *every* embedding
+    namespace, so removing one entity takes its observations out of
+    `kg_observations_{arctic,minilm,nomic,qwen3}` together — including a
+    corpus being kept as a rollback. Delete shapes mirror their create
+    counterparts exactly, so the call that made a thing removes it.
+  - **KG enumeration** — `kg-read-graph` (entities with observation and
+    relation counts) and `kg-open-nodes` (exact-name detail). Search
+    answers "what matches this", which cannot answer "what is in here",
+    and a fuzzy hit on a *neighbour* is how the wrong node gets edited.
+  - **`list`** — paged, newest-first, no query, ids included. A memory
+    you cannot find is one you cannot correct.
+  - **`replace`** — ordered delete-then-store. The reverse order can be
+    rejected: `store` is idempotent on `content_hash` and the Stop-hook
+    path dedups at 0.85 cosine, so a correction resembling what it
+    corrects could be dropped as a near-duplicate, leaving the wrong
+    memory in place. Reports when the id matched nothing instead of
+    silently degrading into a plain store.
+  - **`expiring` / `refresh-ttl`** — the M14 TTL machinery had existed
+    since v1.8 with exactly one caller (the consultants reaper). Now
+    inspectable: `expiring` shows what the reaper would take without
+    taking it.
+
+### Fixed
+
+- **sqlite_vec deletes leaked their embeddings** (schema v3). Only the
+  FTS5 mirror had a delete trigger; `<table>_vec` had none, resting on
+  an assumption that never held — that sharing a `rowid` makes a DELETE
+  propagate. vec0 is a virtual table: nothing cascades into it. Every
+  removal since v1 kept its vector, the TTL reaper's included. Searches
+  inner-join through the base table so orphans never surfaced as wrong
+  results; the visible cost was unbounded index growth. The quiet cost
+  is worse — SQLite re-issues a freed `max(rowid)`, so a stale vector
+  ends up answering for the next row that inherits its id, and in
+  testing the collision surfaced as a `UNIQUE constraint failed` on the
+  *next insert*. Adds `<table>_vec_ad` plus a one-shot sweep of
+  existing orphans, both idempotent.
+
+- **sqlite_vec ran with foreign keys off.** The pragma is
+  connection-scoped and defaults to OFF; `sqlite_vec_schema` set it for
+  the migration and its comment claimed the provider re-ran it in
+  `_ensure_ready`, which it never did. Every live connection therefore
+  had `ON DELETE CASCADE` inert — KG entity deletion would have orphaned
+  observations and relations, invisible to `kg_search_nodes` (which
+  joins through `kg_entities`) but still on disk.
+
+- **`consolidate.py` reported work it had not done.** `merged` counted
+  *candidates* and merged nothing; every compression ran an LLM call
+  over each memory above 1 000 chars and discarded the result — never
+  stored, original never removed; `pruned` was never incremented at
+  all. A run that changed nothing announced `merged=12 compressed=8`.
+  It now actually merges (keeping the longer of a near-duplicate pair),
+  compresses (store-then-delete, both halves or neither), and prunes
+  lapsed TTLs — and where a provider cannot delete it counts the work
+  as `skipped` rather than done, because storing a summary beside its
+  original grows the corpus the pass exists to shrink. `_pull_all` now
+  stamps `source_provider`, without which multi-provider runs could not
+  attribute a memory to a store and skipped everything.
+
+### Added
+
 - **Memory deletion over MCP** — `pgvector-delete` / `sqlite-vec-delete`
   (both catalogs go 8 → 9 tools). The stores were append-only from the
   outside: both providers have had `delete_by_hashes` since the M14 TTL

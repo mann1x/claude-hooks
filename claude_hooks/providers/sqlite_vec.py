@@ -361,10 +361,11 @@ class SqliteVecProvider(Provider):
         and ignoring the distinction is honest here, whereas silently
         accepting a table name it would never touch is not.
 
-        Cascades to the ``_vec`` virtual table because both share
-        the same ``rowid`` and SQLite's INSERT/DELETE triggers on
-        ``<table>_fts`` keep the FTS5 mirror in sync. Empty input
-        is a no-op.
+        Both mirrors are cleaned by AFTER DELETE triggers —
+        ``<table>_fts_ad`` for FTS5 and ``<table>_vec_ad`` for vec0.
+        The latter was missing until v1.14.1; a shared ``rowid`` does
+        not propagate a delete on its own, so until then every removal
+        left its embedding behind. Empty input is a no-op.
 
         Caller must batch — SQLite parameter limit is 999 by default.
         The reaper batches in pages of 500.
@@ -837,6 +838,234 @@ class SqliteVecProvider(Provider):
         out.sort(key=lambda t: t[1], reverse=True)
         return out[:k]
 
+    # ------------------------------------------------------------------ #
+    # KG removal + enumeration (v1.14.1)
+    # ------------------------------------------------------------------ #
+
+    def kg_delete_entities(self, names: list) -> dict:
+        """Delete entities by name. Returns what actually went.
+
+        Observations and relations follow via ON DELETE CASCADE — which
+        only works because ``_ensure_ready`` now turns foreign keys on;
+        the pragma is connection-scoped and defaults to off, so before
+        v1.14.1 this would have orphaned both. Counts are taken before
+        the delete, since afterwards there is nothing left to count.
+        """
+        wanted = [str(n).strip() for n in (names or []) if str(n).strip()]
+        if not wanted:
+            return {"entities": 0, "observations": 0, "relations": 0,
+                    "missing": []}
+        self._ensure_ready()
+        ph = ",".join("?" for _ in wanted)
+        try:
+            with self._conn:  # type: ignore[union-attr]
+                rows = self._conn.execute(  # type: ignore[union-attr]
+                    f"SELECT id, name FROM kg_entities WHERE name IN ({ph})",
+                    wanted,
+                ).fetchall()
+                ids = [r[0] for r in rows]
+                missing = sorted(set(wanted) - {r[1] for r in rows})
+                if not ids:
+                    return {"entities": 0, "observations": 0,
+                            "relations": 0, "missing": missing}
+                iph = ",".join("?" for _ in ids)
+                obs = self._conn.execute(  # type: ignore[union-attr]
+                    f"SELECT COUNT(*) FROM kg_observations "
+                    f"WHERE entity_id IN ({iph})", ids,
+                ).fetchone()[0]
+                rel = self._conn.execute(  # type: ignore[union-attr]
+                    f"SELECT COUNT(*) FROM kg_relations "
+                    f"WHERE from_entity_id IN ({iph}) "
+                    f"OR to_entity_id IN ({iph})", ids + ids,
+                ).fetchone()[0]
+                cur = self._conn.execute(  # type: ignore[union-attr]
+                    f"DELETE FROM kg_entities WHERE id IN ({iph})", ids,
+                )
+                return {"entities": int(cur.rowcount or 0),
+                        "observations": int(obs or 0),
+                        "relations": int(rel or 0), "missing": missing}
+        except sqlite3.Error as e:
+            log.warning("sqlite_vec kg_delete_entities failed: %s", e)
+            raise
+
+    def kg_delete_observations(self, items: list) -> int:
+        """Delete observations. Each item ``{entity_name, content}`` —
+        the same shape ``kg_add_observations`` takes, matched on the
+        shared whitespace-normalised ``content_hash``."""
+        pairs = []
+        for it in items or []:
+            name = (it.get("entity_name") or it.get("name") or "").strip()
+            body = it.get("content") or ""
+            if name and body:
+                pairs.append((name, content_hash(body)))
+        if not pairs:
+            return 0
+        self._ensure_ready()
+        deleted = 0
+        try:
+            with self._conn:  # type: ignore[union-attr]
+                for name, chash in pairs:
+                    cur = self._conn.execute(  # type: ignore[union-attr]
+                        "DELETE FROM kg_observations WHERE id IN ("
+                        "  SELECT o.id FROM kg_observations o "
+                        "  JOIN kg_entities e ON e.id = o.entity_id "
+                        "  WHERE e.name = ? AND o.content_hash = ?)",
+                        (name, chash),
+                    )
+                    deleted += int(cur.rowcount or 0)
+        except sqlite3.Error as e:
+            log.warning("sqlite_vec kg_delete_observations failed: %s", e)
+            raise
+        return deleted
+
+    def kg_delete_relations(self, relations: list) -> int:
+        """Delete relations. Each dict ``{from, to, relation_type}`` —
+        the shape ``kg_create_relations`` accepts, aliases included."""
+        rows = []
+        for r in relations or []:
+            f = (r.get("from") or r.get("from_name") or "").strip()
+            t = (r.get("to") or r.get("to_name") or "").strip()
+            rt = (r.get("relation_type") or r.get("type") or "").strip()
+            if f and t and rt:
+                rows.append((f, t, rt))
+        if not rows:
+            return 0
+        self._ensure_ready()
+        deleted = 0
+        try:
+            with self._conn:  # type: ignore[union-attr]
+                for f, t, rt in rows:
+                    cur = self._conn.execute(  # type: ignore[union-attr]
+                        "DELETE FROM kg_relations WHERE id IN ("
+                        "  SELECT r.id FROM kg_relations r "
+                        "  JOIN kg_entities a ON a.id = r.from_entity_id "
+                        "  JOIN kg_entities b ON b.id = r.to_entity_id "
+                        "  WHERE a.name = ? AND b.name = ? "
+                        "    AND r.relation_type = ?)",
+                        (f, t, rt),
+                    )
+                    deleted += int(cur.rowcount or 0)
+        except sqlite3.Error as e:
+            log.warning("sqlite_vec kg_delete_relations failed: %s", e)
+            raise
+        return deleted
+
+    def kg_read_graph(self, limit: int = 100) -> list[dict]:
+        """Enumerate entities with their counts, newest first.
+
+        The complement to ``kg_search_nodes``: search answers "what
+        matches this", which cannot answer "what is in here at all".
+        """
+        limit = max(1, min(int(limit or 100), 1000))
+        self._ensure_ready()
+        try:
+            rows = self._conn.execute(  # type: ignore[union-attr]
+                "SELECT e.name, e.entity_type, e.metadata, "
+                "  (SELECT COUNT(*) FROM kg_observations o "
+                "     WHERE o.entity_id = e.id), "
+                "  (SELECT COUNT(*) FROM kg_relations r "
+                "     WHERE r.from_entity_id = e.id OR r.to_entity_id = e.id) "
+                "FROM kg_entities e ORDER BY e.id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        except sqlite3.Error as e:
+            log.warning("sqlite_vec kg_read_graph failed: %s", e)
+            raise
+        out = []
+        for name, etype, meta, n_obs, n_rel in rows:
+            try:
+                md = json.loads(meta) if meta else {}
+            except json.JSONDecodeError:
+                md = {}
+            out.append({"name": name, "entity_type": etype, "metadata": md,
+                        "observation_count": int(n_obs or 0),
+                        "relation_count": int(n_rel or 0)})
+        return out
+
+    def kg_open_nodes(self, names: list) -> list[dict]:
+        """Full detail for named entities — exact match, not search.
+
+        When the entity is already known, ranking it against a query is
+        noise, and a fuzzy hit returning a *neighbour* is how the wrong
+        node gets edited.
+        """
+        wanted = [str(n).strip() for n in (names or []) if str(n).strip()]
+        if not wanted:
+            return []
+        self._ensure_ready()
+        ph = ",".join("?" for _ in wanted)
+        try:
+            ents = self._conn.execute(  # type: ignore[union-attr]
+                f"SELECT id, name, entity_type, metadata FROM kg_entities "
+                f"WHERE name IN ({ph})", wanted,
+            ).fetchall()
+            out = []
+            for eid, name, etype, meta in ents:
+                try:
+                    md = json.loads(meta) if meta else {}
+                except json.JSONDecodeError:
+                    md = {}
+                obs = [r[0] for r in self._conn.execute(  # type: ignore[union-attr]
+                    "SELECT content FROM kg_observations "
+                    "WHERE entity_id = ? ORDER BY id", (eid,),
+                ).fetchall()]
+                rels = [
+                    {"from": f, "relation_type": rt, "to": t}
+                    for f, rt, t in self._conn.execute(  # type: ignore[union-attr]
+                        "SELECT a.name, r.relation_type, b.name "
+                        "FROM kg_relations r "
+                        "JOIN kg_entities a ON a.id = r.from_entity_id "
+                        "JOIN kg_entities b ON b.id = r.to_entity_id "
+                        "WHERE r.from_entity_id = ? OR r.to_entity_id = ? "
+                        "ORDER BY r.id", (eid, eid),
+                    ).fetchall()
+                ]
+                out.append({"name": name, "entity_type": etype,
+                            "metadata": md, "observations": obs,
+                            "relations": rels})
+            return out
+        except sqlite3.Error as e:
+            log.warning("sqlite_vec kg_open_nodes failed: %s", e)
+            raise
+
+    def list_memories(self, limit: int = 20, offset: int = 0,
+                      table: Optional[str] = None) -> list[Memory]:
+        """Page through stored memories, newest first.
+
+        The complement to ``recall`` — see the pgvector twin. Returns
+        the same ``Memory`` shape with ``_hash`` populated so a listed
+        row is immediately deletable, and computes no embedding.
+        """
+        limit = max(1, min(int(limit or 20), 200))
+        offset = max(0, int(offset or 0))
+        self._ensure_ready()
+        tbl = _safe_table(self.options.get("table") or "memory")
+        if table and table != tbl:
+            return []
+        try:
+            rows = self._conn.execute(  # type: ignore[union-attr]
+                f"SELECT content, metadata, created_at, content_hash "
+                f"FROM {tbl} ORDER BY created_at DESC, rowid DESC "
+                f"LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        except sqlite3.Error as e:
+            log.warning("sqlite_vec list_memories failed: %s", e)
+            raise
+        out: list[Memory] = []
+        for content, meta_json, created, chash in rows:
+            try:
+                md = json.loads(meta_json) if meta_json else {}
+            except json.JSONDecodeError:
+                md = {}
+            md["_table"] = tbl
+            if created is not None:
+                md["_created_at"] = str(created)
+            if chash:
+                md["_hash"] = bytes(chash).hex()
+            out.append(Memory(text=content, metadata=md))
+        return out
+
     def count(self) -> int:
         """Return the number of stored memories.
 
@@ -893,6 +1122,17 @@ class SqliteVecProvider(Provider):
             p = expand_user_path(db_path)
             p.parent.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(str(p))
+            # Foreign-key enforcement is connection-scoped in SQLite and
+            # defaults to OFF, which makes the KG's ON DELETE CASCADE
+            # inert. sqlite_vec_schema sets it for the migration and its
+            # comment claims the provider re-runs it here — it did not,
+            # so on every live connection deleting an entity would have
+            # left its observations and relations behind, pointing at an
+            # id that no longer exists. They would vanish from
+            # kg_search_nodes (which JOINs through kg_entities) while
+            # still occupying the table and its vec/fts mirrors: gone
+            # from view, not gone from disk.
+            self._conn.execute("PRAGMA foreign_keys = ON")
             self._conn.enable_load_extension(True)
             sqlite_vec.load(self._conn)
             self._db_identity = self._current_db_identity()
