@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.14.0** — ~4.8k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.15.0** — ~5.7k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -258,6 +258,45 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > `.claude-hooks/consultants.toml` (project), **never** in
 > `claude-hooks.json`. See
 > [`docs/deployment.md`](docs/deployment.md) "Verify".
+>
+> v1.15 is an **administrability release**, and the common thread is
+> that a store you can only write to is a store you cannot correct.
+> (1) Both MCP catalogs go **9 → 18 tools**: `delete` / `list` /
+> `replace` / `expiring` / `refresh-ttl` on the memory side, and
+> `kg-delete-entities` / `-observations` / `-relations` /
+> `kg-read-graph` / `kg-open-nodes` on the graph side. The audit
+> behind it found the same shape at every layer — the read side and
+> the write side disagreed about what was reachable: search found KG
+> entities nothing could remove, recall spanned tables delete did not,
+> and `count` reported 9 380 memories nothing could page through.
+> Entity deletion reports its **blast radius**, because on pgvector
+> `kg_entities` is shared across every embedding namespace, so one
+> delete reaches a corpus being kept for rollback. (2) `sqlite_vec`
+> **schema v3**: deletes used to leave their embeddings behind — vec0
+> virtual tables have no foreign keys and nothing cascades into them,
+> and SQLite re-issues freed rowids, so a later insert collided with a
+> stale vector (`UNIQUE constraint failed`). A migration adds the
+> missing `AFTER DELETE` trigger and sweeps existing orphans. The same
+> pass turned **foreign keys on**, a connection-scoped pragma that
+> defaults off — every `ON DELETE CASCADE` in the schema was inert.
+> (3) `consolidate.py` **did the work it reported**: `merged` counted
+> pairs it had found, not pairs it had merged, and compression stored
+> a summary without deleting what it summarized, so a "compressed"
+> store grew. (4) The **daemon publishes its bound port** to
+> `~/.claude/claude-hooks-daemon.port`, falling back to an OS-assigned
+> one — `DEFAULT_PORT` 47018 sits inside a Windows reserved range on
+> pandorum, where the daemon had therefore never started at all. (5)
+> The **embedder gets 3 slots** (`--parallel`, with `--ctx-size`
+> scaled by slot count since it is a *total* KV budget), ending the
+> head-of-line blocking where a background store stalled an
+> interactive recall for tens of seconds. (6) **Deploy restores what
+> deploy takes down** — restarting the daemon kills its managed
+> llamafile, which a LAN consumer cannot respawn — and
+> `verify_deploy.py` now **performs a real embed** rather than reading
+> a manager's state, under the interpreter the hooks actually use.
+> See [`docs/pgvector-runbook.md`](docs/pgvector-runbook.md),
+> [`docs/sqlite-vec-runbook.md`](docs/sqlite-vec-runbook.md) and
+> [`docs/daemon.md`](docs/daemon.md) "Which port".
 
 ---
 
