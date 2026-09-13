@@ -240,8 +240,15 @@ def reconcile(cfg: dict, *, resolve_commands: bool = False) -> tuple[dict, list[
         if entry is not None and resolve_commands:
             existing = entry.get("command") or []
             if existing and Path(existing[0]).suffix.lower() in (".cmd", ".bat"):
+                # The entry may name a bare shim ("pyright-langserver.cmd")
+                # rather than a path. Resolve it, or there is no directory
+                # to find the shim's target in — which is how pyright
+                # warned while its five identical siblings repaired.
+                shim = existing[0]
+                if not Path(shim).is_absolute():
+                    shim = shutil.which(shim) or resolved or shim
                 repaired, rewritten = spawnable_command(
-                    existing[0], list(existing[1:]))
+                    shim, list(existing[1:]))
                 if rewritten:
                     entry["command"] = repaired
                     notes.append(
