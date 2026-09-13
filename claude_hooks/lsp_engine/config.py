@@ -145,17 +145,39 @@ def load_cclsp_config(path: str | os.PathLike) -> list[LspServerSpec]:
     return out
 
 
+def resolve_servers_for_path(
+    path: str | os.PathLike,
+    servers: list[LspServerSpec],
+) -> list[LspServerSpec]:
+    """Every server whose extensions cover ``path``, in config order.
+
+    A list rather than a single winner, because one file is not one
+    language. An ``.html`` document carries JavaScript and CSS; a
+    ``.vue`` or ``.svelte`` file carries all three; ``.md`` carries
+    whatever its fences say. Returning the first match made those
+    documents the property of whichever server happened to be listed
+    first, and silently discarded the rest.
+
+    Extensions remain the declaration of *what is supported* — they
+    are how an operator reads the config and how
+    :meth:`Engine.configured_extensions` decides what to preload. What
+    changes is that the declaration is no longer exclusive.
+    """
+    return [srv for srv in servers if srv.matches(path)]
+
+
 def resolve_server_for_path(
     path: str | os.PathLike,
     servers: list[LspServerSpec],
 ) -> Optional[LspServerSpec]:
-    """Return the first server whose extensions list covers ``path``,
-    or ``None`` when no server claims the file.
+    """First server claiming ``path``, or ``None``.
+
+    Retained for callers that genuinely want one server (and for the
+    published API surface). New code should prefer
+    :func:`resolve_servers_for_path`.
     """
-    for srv in servers:
-        if srv.matches(path):
-            return srv
-    return None
+    matches = resolve_servers_for_path(path, servers)
+    return matches[0] if matches else None
 
 
 def load_engine_config(

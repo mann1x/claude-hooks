@@ -31,6 +31,7 @@ import shutil
 import subprocess
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
@@ -38,6 +39,18 @@ from typing import Optional
 from urllib.parse import unquote
 
 log = logging.getLogger("claude_hooks.lsp_engine.lsp")
+
+#: How many stderr lines to keep per server for diagnosis. Small on
+#: purpose — this is a breadcrumb for "why is this server silent", not
+#: a log file. The full stream goes to the engine log.
+_STDERR_TAIL_LINES = 40
+
+#: Substrings that mark a stderr line as worth surfacing at WARNING.
+#: A degraded server announces itself in prose here or not at all.
+_STDERR_ALERT_HINTS = (
+    "not found", "not installed", "missing", "cannot find", "couldn't find",
+    "unable to", "failed", "error", "deprecat", "no such file",
+)
 
 
 _LANGUAGE_ID_BY_EXT = {
@@ -205,7 +218,19 @@ class LspClient:
 
         self._proc: Optional[subprocess.Popen] = None
         self._reader_thread: Optional[threading.Thread] = None
+        self._stderr_thread: Optional[threading.Thread] = None
         self._stop_requested = threading.Event()
+
+        #: What the server said it can do, from the ``initialize``
+        #: result. Previously validated and thrown away, which left the
+        #: engine unable to answer the most basic question about a
+        #: server it had just started.
+        self._server_capabilities: dict = {}
+
+        #: Last few stderr lines. A server that is degraded rather than
+        #: broken says so here and nowhere else — there is no LSP
+        #: message for "I started fine but a helper binary is missing".
+        self._stderr_tail: deque = deque(maxlen=_STDERR_TAIL_LINES)
 
         self._next_id = 1
         self._id_lock = threading.Lock()
@@ -284,6 +309,24 @@ class LspClient:
         )
         self._reader_thread.start()
 
+        # Drain stderr. Two reasons, and the second is the serious one.
+        # (1) A server that is *degraded* reports it here and nowhere
+        #     else — bash-language-server without shellcheck starts,
+        #     handshakes, advertises its capabilities and then publishes
+        #     an empty diagnostic list forever, which is byte-identical
+        #     to "this file is clean". Its complaint goes to stderr.
+        # (2) An undrained PIPE is a deadlock. The buffer is ~64 KB on
+        #     Linux; a server that exceeds it blocks on write, and since
+        #     these are single-threaded event loops it stops answering
+        #     LSP entirely — presenting as a hung server with no error.
+        #     rust-analyzer and gopls are both chatty there.
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr,
+            name=f"lsp-stderr-{self._command[0]}",
+            daemon=True,
+        )
+        self._stderr_thread.start()
+
         # Initialize handshake — required before any other request.
         # The deadline applies to the whole handshake, not each step.
         deadline = time.monotonic() + self._startup_timeout
@@ -300,7 +343,27 @@ class LspClient:
                         },
                         "publishDiagnostics": {
                             "relatedInformation": False,
+                            # We already drop publishes older than the
+                            # last didChange; saying so lets servers
+                            # stamp the version rather than guess.
+                            "versionSupport": True,
+                            "codeDescriptionSupport": False,
+                            "dataSupport": False,
                         },
+                        # LSP 3.17 pull diagnostics. A server only
+                        # advertises ``diagnosticProvider`` when the
+                        # *client* declares support — so omitting this
+                        # guaranteed every server looked push-only, and
+                        # the engine had no choice but to wait out a
+                        # timeout and call the silence an answer.
+                        "diagnostic": {
+                            "dynamicRegistration": False,
+                            "relatedDocumentSupport": False,
+                        },
+                    },
+                    "window": {"workDoneProgress": False},
+                    "general": {
+                        "positionEncodings": ["utf-16"],
                     },
                 },
                 "clientInfo": {"name": "claude-hooks-lsp-engine", "version": "0.1.0"},
@@ -311,7 +374,71 @@ class LspClient:
             raise LspProtocolError(
                 f"initialize returned unexpected payload: {result!r}",
             )
+        self._server_capabilities = result.get("capabilities") or {}
+        log.debug("lsp %s capabilities: %s", self._command[0],
+                  sorted(self._server_capabilities))
         self._send_notification("initialized", {})
+
+    # ─── introspection ───────────────────────────────────────────────
+
+    @property
+    def server_capabilities(self) -> dict:
+        """What the server advertised at ``initialize``.
+
+        Empty until :meth:`start` completes. This is the only place a
+        server states what it can do; there is no message for what file
+        types it handles — that association is always the client's, which
+        is why ``cclsp.json`` exists.
+        """
+        return dict(self._server_capabilities)
+
+    def supports(self, capability: str) -> bool:
+        """Is ``capability`` advertised (and not explicitly False)?"""
+        val = self._server_capabilities.get(capability)
+        return bool(val) if not isinstance(val, dict) else True
+
+    @property
+    def supports_pull_diagnostics(self) -> bool:
+        """Does the server implement ``textDocument/diagnostic``?
+
+        When true the engine can *ask* for diagnostics instead of
+        waiting for a push it cannot distinguish from silence.
+        """
+        return bool(self._server_capabilities.get("diagnosticProvider"))
+
+    def stderr_tail(self) -> list[str]:
+        """Recent stderr lines — where a degraded server explains
+        itself, since the protocol gives it nowhere else to."""
+        return list(self._stderr_tail)
+
+    def _drain_stderr(self) -> None:
+        """Read the child's stderr until EOF.
+
+        Never lets the pipe fill (see the comment at the spawn site),
+        keeps a bounded tail for diagnosis, and promotes lines that look
+        like complaints to WARNING so a degraded server is visible in
+        the engine log rather than only in its absence of output.
+        """
+        proc = self._proc
+        if proc is None or proc.stderr is None:
+            return
+        name = os.path.basename(self._command[0])
+        try:
+            for raw in iter(proc.stderr.readline, b""):
+                if self._stop_requested.is_set():
+                    break
+                line = raw.decode("utf-8", errors="replace").rstrip()
+                if not line:
+                    continue
+                self._stderr_tail.append(line)
+                low = line.lower()
+                if any(h in low for h in _STDERR_ALERT_HINTS):
+                    log.warning("lsp %s stderr: %s", name, line[:400])
+                else:
+                    log.debug("lsp %s stderr: %s", name, line[:400])
+        except (OSError, ValueError):
+            # Pipe closed underneath us during shutdown — expected.
+            pass
 
     def stop(self, *, timeout: float = 3.0) -> None:
         if self._proc is None:
@@ -338,6 +465,9 @@ class LspClient:
             if self._reader_thread is not None:
                 self._reader_thread.join(timeout=1.0)
                 self._reader_thread = None
+            if self._stderr_thread is not None:
+                self._stderr_thread.join(timeout=1.0)
+                self._stderr_thread = None
 
     def __enter__(self) -> "LspClient":
         self.start()
@@ -414,10 +544,60 @@ class LspClient:
             event = self._diagnostics_event.setdefault(key, threading.Event())
             if event.is_set():
                 return list(self._diagnostics.get(key, []))
+
+        # Prefer asking over waiting. With push diagnostics an empty
+        # result and a server that never answers are the same
+        # observation — we wait out the timeout and return [], which the
+        # caller renders as "no problems". Pull diagnostics (LSP 3.17)
+        # turn that into a question with an answer, and a failure into
+        # an exception instead of a plausible silence. Only available
+        # because the client now declares `textDocument.diagnostic`;
+        # servers withhold `diagnosticProvider` otherwise.
+        if self.supports_pull_diagnostics:
+            pulled = self._pull_diagnostics(path, key, timeout=timeout)
+            if pulled is not None:
+                return pulled
+
         if not event.wait(timeout=timeout):
             return []
         with self._diag_lock:
             return list(self._diagnostics.get(key, []))
+
+    def _pull_diagnostics(
+        self, path, key: str, *, timeout: float,
+    ) -> Optional[list[Diagnostic]]:
+        """``textDocument/diagnostic`` round trip.
+
+        Returns None — never an empty list — when the pull could not be
+        completed, so the caller falls back to the push path rather than
+        treating a transport problem as a clean file.
+        """
+        try:
+            res = self._send_request(
+                "textDocument/diagnostic",
+                {"textDocument": {"uri": path_to_uri(path)}},
+                timeout=timeout,
+            )
+        except (LspError, OSError) as e:
+            log.debug("pull diagnostics unavailable for %s: %s", key, e)
+            return None
+        if not isinstance(res, dict):
+            return None
+        # A full report carries items; an unchanged report means "same
+        # as last time", which we cannot answer from here.
+        kind = res.get("kind")
+        if kind == "unchanged":
+            with self._diag_lock:
+                cached = self._diagnostics.get(key)
+            return list(cached) if cached is not None else None
+        items = res.get("items")
+        if items is None:
+            return None
+        diags = self._parse_diagnostics(key, items)
+        with self._diag_lock:
+            self._diagnostics[key] = diags
+            self._diagnostics_event.setdefault(key, threading.Event()).set()
+        return list(diags)
 
     def _reset_diagnostics(self, key: str, *, expected_version: int) -> None:
         """``key`` is a :func:`uri_key` result, never a raw URI — the
@@ -552,6 +732,34 @@ class LspClient:
                 }
             )
 
+    @staticmethod
+    def _parse_diagnostics(uri: str, raw: list) -> list[Diagnostic]:
+        """Build :class:`Diagnostic` objects from the wire form.
+
+        Shared by the push notification and the pull response — the two
+        carry the same item shape, and letting them drift would mean a
+        server's diagnostics rendering differently depending on which
+        way they arrived.
+        """
+        out: list[Diagnostic] = []
+        for d in raw or []:
+            try:
+                start = d.get("range", {}).get("start", {})
+                out.append(
+                    Diagnostic(
+                        uri=uri,
+                        severity=int(d.get("severity", 1)),
+                        line=int(start.get("line", 0)),
+                        character=int(start.get("character", 0)),
+                        message=str(d.get("message", "")),
+                        code=str(d["code"]) if "code" in d else None,
+                        source=d.get("source"),
+                    )
+                )
+            except (TypeError, ValueError, AttributeError):
+                continue
+        return out
+
     def _on_publish_diagnostics(self, params: dict) -> None:
         uri = params.get("uri")
         if not isinstance(uri, str):
@@ -569,24 +777,7 @@ class LspClient:
                 expected = self._diag_min_version.get(key)
             if expected is not None and publish_version < expected:
                 return
-        diags_raw = params.get("diagnostics") or []
-        diags: list[Diagnostic] = []
-        for d in diags_raw:
-            try:
-                start = d.get("range", {}).get("start", {})
-                diags.append(
-                    Diagnostic(
-                        uri=uri,
-                        severity=int(d.get("severity", 1)),
-                        line=int(start.get("line", 0)),
-                        character=int(start.get("character", 0)),
-                        message=str(d.get("message", "")),
-                        code=str(d["code"]) if "code" in d else None,
-                        source=d.get("source"),
-                    )
-                )
-            except (TypeError, ValueError):
-                continue
+        diags = self._parse_diagnostics(uri, params.get("diagnostics") or [])
         with self._diag_lock:
             self._diagnostics[key] = diags
             event = self._diagnostics_event.setdefault(key, threading.Event())

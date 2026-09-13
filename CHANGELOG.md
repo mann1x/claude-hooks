@@ -18,6 +18,60 @@ release with the auto-generated source archive
 
 ### Fixed
 
+- **Nothing drained the LSP server's stderr.** `lsp.py` set
+  `stderr=PIPE` and ran one reader thread, for stdout. Two consequences.
+  A server that is *degraded* rather than broken reports it there and
+  nowhere else — the protocol has no message for "I started fine but a
+  helper binary is missing" — so bash-language-server's complaint about
+  a missing shellcheck was invisible while it published empty
+  diagnostics. And an undrained pipe is a deadlock: the buffer is ~64 KB
+  on Linux, and a server that exceeds it blocks on write, stopping its
+  single-threaded event loop from answering LSP at all. rust-analyzer
+  and gopls are both chatty there. Now drained on its own thread, logged
+  (complaint-shaped lines promoted to WARNING), with a bounded tail kept
+  per server for diagnosis.
+
+### Added
+
+- **Server capabilities are captured instead of discarded.** The
+  `initialize` result was validated and thrown away, leaving the engine
+  unable to answer the most basic question about a server it had just
+  started. Exposed as `server_capabilities` / `supports()` /
+  `supports_pull_diagnostics`, and surfaced in the daemon's `status`
+  under `support` alongside each server's claimed extensions and stderr
+  tail — *what is routed* and *what the server will do once routed* are
+  different questions, and only the config answered the first.
+
+- **Pull diagnostics (LSP 3.17), where the server offers them.** The
+  client now declares `textDocument.diagnostic`; without that
+  declaration a server withholds `diagnosticProvider`, so every server
+  necessarily looked push-only. With push, an empty result and a server
+  that never answers are the same observation — we wait out a timeout
+  and return `[]`, which renders as "no problems". Pull turns it into a
+  question with an answer, and a failure into an exception rather than a
+  plausible silence. Measured afterwards: **no installed server
+  advertises it yet** — gopls v0.21.1, pyright, typescript-language-server,
+  bash-language-server and lua-language-server are all push-only — so the
+  path is dormant and falls back. It costs nothing and activates on its
+  own when a server catches up.
+
+### Changed
+
+- **A file may be claimed by more than one server.** `.html` carries
+  JavaScript and CSS; `.vue` and `.svelte` carry all three; `.md`
+  carries whatever its fences say. Routing took the *first* match, which
+  made such a document the property of whichever server happened to be
+  listed first and silently discarded the rest.
+  `resolve_servers_for_path()` returns all claimants in config order,
+  and the engine fans `did_open` / `did_change` / `did_close` across
+  them and merges their diagnostics. Extensions remain the statement of
+  what is supported — they are just no longer exclusive. One server
+  failing now degrades rather than dooms the file, but if *every*
+  claimant fails, `did_open` raises instead of returning `False`:
+  `False` means "no server claims this file", which is normal for a
+  README, and conflating the two would lose the fact that a configured
+  server is broken.
+
 - **`shellcheck` is a dependency, and nothing modelled dependencies.**
   bash-language-server shells out to it for every diagnostic it emits;
   without it the server installs, starts, handshakes, reports healthy

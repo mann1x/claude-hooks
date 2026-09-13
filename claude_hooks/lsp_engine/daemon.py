@@ -671,6 +671,11 @@ class Daemon:
                 spec.command[0] for spec in self._engine.active_servers()
             ],
             "held_uris": self._lock_manager.held_uris(),
+            # What each configured server claims (extensions) versus
+            # what it actually advertises once running (capabilities),
+            # plus the stderr tail — the only channel on which a server
+            # that started fine but is degraded can say so.
+            "support": self._engine.support_report(),
             "compile_aware_languages": (
                 sorted(self._compile.runners().keys()) if self._compile else []
             ),
