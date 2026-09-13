@@ -16,20 +16,7 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
-### Fixed
-
-- **Nothing drained the LSP server's stderr.** `lsp.py` set
-  `stderr=PIPE` and ran one reader thread, for stdout. Two consequences.
-  A server that is *degraded* rather than broken reports it there and
-  nowhere else — the protocol has no message for "I started fine but a
-  helper binary is missing" — so bash-language-server's complaint about
-  a missing shellcheck was invisible while it published empty
-  diagnostics. And an undrained pipe is a deadlock: the buffer is ~64 KB
-  on Linux, and a server that exceeds it blocks on write, stopping its
-  single-threaded event loop from answering LSP at all. rust-analyzer
-  and gopls are both chatty there. Now drained on its own thread, logged
-  (complaint-shaped lines promoted to WARNING), with a bounded tail kept
-  per server for diagnosis.
+## [1.16.0] — 2026-09-13
 
 ### Added
 
@@ -55,6 +42,29 @@ release with the auto-generated source archive
   path is dormant and falls back. It costs nothing and activates on its
   own when a server catches up.
 
+- **A from-source path for what no manager carries.** Debian 11 has
+  neither `lua-language-server` nor `zls`; Debian 13 has the first.
+  `install_from_release()` fetches the upstream release, extracts it
+  under a configurable prefix (`CLAUDE_HOOKS_LSP_PREFIX`, one directory
+  per version so upgrades are additive) and symlinks into
+  `/usr/local/bin`. Tar members that escape the prefix are refused. The
+  installer asks before the network call, not after — a pre-flight
+  lookup spends a round trip on every user who declines.
+
+- **`scripts/sync_cclsp.py`** — reconciles `cclsp.json` with the
+  servers actually on `PATH`. `install.py` writes that file once from
+  what exists at setup time and never revisits it, so servers installed
+  later are never wired. Pandorum had nine installed and four unmapped
+  (`typescript-language-server`, `bash-language-server`,
+  `lua-language-server`, `zls`); solidpc had one. Existing entries keep
+  their command and gain only missing extensions; an uninstalled server
+  is reported, never removed.
+
+- **`.caliberignore`** — keeps `caliber refresh` out of the 171 tracked
+  `*.transcript.db` benchmark sidecars (largest 5.3 MB) and the
+  generated `graphify-out/`. They stay in git; they just stop being read
+  as agent context.
+
 ### Changed
 
 - **A file may be claimed by more than one server.** `.html` carries
@@ -71,6 +81,40 @@ release with the auto-generated source archive
   `False` means "no server claims this file", which is normal for a
   README, and conflating the two would lose the fact that a configured
   server is broken.
+
+- **winget before scoop on Windows**, consistently: it is in-box on
+  Win10 1909+ while scoop needs an opt-in install first. Applied to
+  `shellcheck` and `rust-analyzer` (`Rustlang.rust-analyzer`, confirmed
+  present), matching the rationale the clangd spec already carried.
+  msys2 is deliberately *not* offered for shellcheck — its db carries no
+  such package, so the offer could only fail.
+
+### Removed
+
+- **`patches/apply-caliber-patch.sh`** and its note. The patch deleted
+  `CLAUDE_CODE_SIMPLE=1` from the environment Caliber handed to
+  `claude -p`, where it broke OAuth — and because it rewrote an
+  installed `dist/bin.js`, it had to be re-applied after every Caliber
+  upgrade. Upstream now strips that variable itself
+  (`src/llm/claude-cli.ts:92`, with a test named for the behaviour), and
+  has since before 1.49.6, so the local copy was already inert: the
+  installed `bin.js` on this host carries no patch, and re-running the
+  script exits 1 on "pattern not found".
+
+### Fixed
+
+- **Nothing drained the LSP server's stderr.** `lsp.py` set
+  `stderr=PIPE` and ran one reader thread, for stdout. Two consequences.
+  A server that is *degraded* rather than broken reports it there and
+  nowhere else — the protocol has no message for "I started fine but a
+  helper binary is missing" — so bash-language-server's complaint about
+  a missing shellcheck was invisible while it published empty
+  diagnostics. And an undrained pipe is a deadlock: the buffer is ~64 KB
+  on Linux, and a server that exceeds it blocks on write, stopping its
+  single-threaded event loop from answering LSP at all. rust-analyzer
+  and gopls are both chatty there. Now drained on its own thread, logged
+  (complaint-shaped lines promoted to WARNING), with a bounded tail kept
+  per server for diagnosis.
 
 - **`shellcheck` is a dependency, and nothing modelled dependencies.**
   bash-language-server shells out to it for every diagnostic it emits;
@@ -90,22 +134,6 @@ release with the auto-generated source archive
   vetoes an installer, because "could not check" — `apt-cache` missing,
   the command erroring — must not silently strip apt from hosts that
   have it.
-
-- **A from-source path for what no manager carries.** Debian 11 has
-  neither `lua-language-server` nor `zls`; Debian 13 has the first.
-  `install_from_release()` fetches the upstream release, extracts it
-  under a configurable prefix (`CLAUDE_HOOKS_LSP_PREFIX`, one directory
-  per version so upgrades are additive) and symlinks into
-  `/usr/local/bin`. Tar members that escape the prefix are refused. The
-  installer asks before the network call, not after — a pre-flight
-  lookup spends a round trip on every user who declines.
-
-- **winget before scoop on Windows**, consistently: it is in-box on
-  Win10 1909+ while scoop needs an opt-in install first. Applied to
-  `shellcheck` and `rust-analyzer` (`Rustlang.rust-analyzer`, confirmed
-  present), matching the rationale the clangd spec already carried.
-  msys2 is deliberately *not* offered for shellcheck — its db carries no
-  such package, so the offer could only fail.
 
 - **Windows LSP diagnostics were computed, then thrown away.** With
   the spawn fixed, pyright started and answered in under a second — and
@@ -127,17 +155,6 @@ release with the auto-generated source archive
   `plaintext`, which most servers decline to analyse. That is the same
   silent-empty failure one layer down, so a test now asserts every
   extension in `lang_servers.SPECS` resolves to a real language id.
-
-### Added
-
-- **`scripts/sync_cclsp.py`** — reconciles `cclsp.json` with the
-  servers actually on `PATH`. `install.py` writes that file once from
-  what exists at setup time and never revisits it, so servers installed
-  later are never wired. Pandorum had nine installed and four unmapped
-  (`typescript-language-server`, `bash-language-server`,
-  `lua-language-server`, `zls`); solidpc had one. Existing entries keep
-  their command and gain only missing extensions; an uninstalled server
-  is reported, never removed.
 
 - **No LSP diagnostics on Windows for any npm-installed server.**
   `LspClient.start` handed `Popen` a bare command name, and on Windows
@@ -161,25 +178,6 @@ release with the auto-generated source archive
   minority platform exercises. An explicit path is never re-resolved,
   and an unresolvable name is passed through untouched so the
   `LSP binary not found:` error still quotes what the user configured.
-
-### Removed
-
-- **`patches/apply-caliber-patch.sh`** and its note. The patch deleted
-  `CLAUDE_CODE_SIMPLE=1` from the environment Caliber handed to
-  `claude -p`, where it broke OAuth — and because it rewrote an
-  installed `dist/bin.js`, it had to be re-applied after every Caliber
-  upgrade. Upstream now strips that variable itself
-  (`src/llm/claude-cli.ts:92`, with a test named for the behaviour), and
-  has since before 1.49.6, so the local copy was already inert: the
-  installed `bin.js` on this host carries no patch, and re-running the
-  script exits 1 on "pattern not found".
-
-### Added
-
-- **`.caliberignore`** — keeps `caliber refresh` out of the 171 tracked
-  `*.transcript.db` benchmark sidecars (largest 5.3 MB) and the
-  generated `graphify-out/`. They stay in git; they just stop being read
-  as agent context.
 
 ## [1.15.0] — 2026-09-12
 
@@ -9462,7 +9460,8 @@ prior tag. From any unreleased checkout, just `git pull` on `main`
 once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
-[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.15.0...HEAD
+[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.16.0...HEAD
+[1.16.0]: https://github.com/mann1x/claude-hooks/compare/v1.15.0...v1.16.0
 [1.15.0]: https://github.com/mann1x/claude-hooks/compare/v1.14.0...v1.15.0
 [1.14.0]: https://github.com/mann1x/claude-hooks/compare/v1.13.0...v1.14.0
 [1.13.0]: https://github.com/mann1x/claude-hooks/compare/v1.12.0...v1.13.0

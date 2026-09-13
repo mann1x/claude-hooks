@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.15.0** — ~5.7k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.16.0** — ~5.7k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -297,6 +297,39 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > See [`docs/pgvector-runbook.md`](docs/pgvector-runbook.md),
 > [`docs/sqlite-vec-runbook.md`](docs/sqlite-vec-runbook.md) and
 > [`docs/daemon.md`](docs/daemon.md) "Which port".
+>
+> v1.16 is an **LSP-engine release**, and every bug in it produced the
+> same artefact: an empty diagnostic list, which is what a clean file
+> also produces. (1) On Windows the engine could not start **any**
+> npm-installed server — `Popen` means `CreateProcess`, which appends
+> `.exe` and never reads `PATHEXT`, so the `.CMD` shims for
+> pyright, typescript-language-server and bash-language-server were
+> invisible while sitting on `PATH`. Go/Rust/C++ worked, because those
+> ship real `.exe`s, which is how a dead TypeScript LSP hid behind a
+> visibly-healthy engine. (2) With that fixed pyright answered in under
+> a second and the engine still returned nothing: it keys diagnostics by
+> URI, and `Path.as_uri()` spells one `file:///C:/x/a.py` while
+> vscode-uri-based servers publish `file:///c%3A/x/a.py`. Results were
+> filed under the server's spelling and every lookup used ours.
+> `uri_key()` normalises the key only; the wire URI is untouched.
+> (3) **`shellcheck` is a dependency and nothing modelled dependencies**
+> — bash-language-server shells out to it for every diagnostic, so
+> without it the server starts, handshakes, advertises a full capability
+> list and emits nothing. It was missing on both hosts, so bash had
+> never worked anywhere. `LangServerSpec.requires` + `TOOL_SPECS` +
+> `detect_tools()` now cover that. (4) **Nothing drained the server's
+> stderr** — the one channel a degraded server has, and an undrained
+> pipe is also a ~64 KB deadlock. (5) Routing took the *first* matching
+> server, so an `.html` belonged to whoever was listed first;
+> `resolve_servers_for_path()` returns every claimant and merges their
+> diagnostics. (6) `install.py` now **asks** apt/dnf whether a package
+> exists instead of assuming, falls back to upstream releases under
+> `CLAUDE_HOOKS_LSP_PREFIX` for what no manager carries, and prefers
+> winget over scoop on Windows. `scripts/sync_cclsp.py` reconciles
+> `cclsp.json` with the servers actually installed — it drifts, and an
+> unmapped extension means no server is ever launched. Both hosts now
+> run all nine servers with TypeScript, Python and bash verified live.
+> See [`docs/lsp-engine.md`](docs/lsp-engine.md).
 
 ---
 
