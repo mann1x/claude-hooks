@@ -293,6 +293,82 @@ class TestLspClientWindowlessSpawn(unittest.TestCase):
             f"(0x{expected:08x}) — LSP children will pop console windows",
         )
 
+    def _capture_popen_cmd(self, *, which_returns, os_name=None,
+                           command=("fake-lsp",)) -> list:
+        from unittest.mock import patch
+
+        client = LspClient(
+            command=list(command), root_dir=".",
+            startup_timeout=0.01, request_timeout=0.01,
+        )
+        seen: list = []
+
+        def _fake_popen(cmd, **kwargs):  # noqa: ARG001
+            seen.append(cmd)
+            raise FileNotFoundError("we only need the argv")
+
+        patches = [
+            patch("claude_hooks.lsp_engine.lsp.subprocess.Popen",
+                  side_effect=_fake_popen),
+            patch("claude_hooks.lsp_engine.lsp.shutil.which",
+                  side_effect=lambda n: which_returns),
+        ]
+        if os_name is not None:
+            patches.append(patch("claude_hooks.lsp_engine.lsp.os.name", os_name))
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        with self.assertRaises(LspError):
+            client.start()
+        return seen[0]
+
+    def test_bare_name_is_resolved_before_spawn(self) -> None:
+        """The npm-shim bug: ``CreateProcess`` appends ``.exe`` and does
+        not read ``PATHEXT``, so a ``.CMD`` shim on PATH is invisible to
+        Popen. Every npm-installed server — pyright,
+        typescript-language-server, bash-language-server — failed to
+        start on Windows while ``shutil.which`` found all three.
+
+        This is invisible on the Linux dev box by construction, which
+        is why it survived: there the bare name resolves natively.
+        """
+        cmd = self._capture_popen_cmd(
+            which_returns=r"C:\Users\x\AppData\Roaming\npm\pyright-langserver.CMD",
+            os_name="nt", command=("pyright-langserver", "--stdio"),
+        )
+        self.assertEqual(cmd[0].lower()[-4:], ".cmd",
+                         f"spawned {cmd[0]!r} — the bare name is what fails")
+        self.assertEqual(cmd[1], "--stdio", "arguments must survive resolution")
+
+    def test_unresolvable_name_is_passed_through_unchanged(self) -> None:
+        """A genuinely missing server must still surface as the name the
+        user configured, not ``None`` — the LspError quotes it."""
+        cmd = self._capture_popen_cmd(which_returns=None,
+                                      command=("no-such-lsp", "--stdio"))
+        self.assertEqual(cmd, ["no-such-lsp", "--stdio"])
+
+    def test_absolute_path_is_not_re_resolved(self) -> None:
+        """An explicit path means that exact file — never swap it for
+        whatever happens to be first on PATH."""
+        exact = os.path.join(os.sep, "opt", "custom", "pyright-langserver")
+        cmd = self._capture_popen_cmd(
+            which_returns=os.path.join(os.sep, "usr", "bin", "pyright-langserver"),
+            command=(exact,),
+        )
+        self.assertEqual(cmd[0], exact)
+
+    def test_error_names_the_configured_command_not_the_resolution(self) -> None:
+        from unittest.mock import patch
+
+        client = LspClient(command=["pyright-langserver"], root_dir=".",
+                           startup_timeout=0.01, request_timeout=0.01)
+        with patch("claude_hooks.lsp_engine.lsp.subprocess.Popen",
+                   side_effect=FileNotFoundError("nope")), \
+             patch("claude_hooks.lsp_engine.lsp.shutil.which", return_value=None):
+            with self.assertRaises(LspError) as cm:
+                client.start()
+        self.assertIn("pyright-langserver", str(cm.exception))
+
     def test_posix_does_not_set_creationflags(self) -> None:
         """``creationflags`` is a Windows-only kwarg; must not appear
         on POSIX so ``subprocess.Popen`` stays portable."""

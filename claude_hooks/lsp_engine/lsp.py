@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -76,6 +77,43 @@ def path_to_uri(path: str | os.PathLike) -> str:
     so always normalise via ``Path.as_uri()`` after resolving.
     """
     return Path(path).resolve().as_uri()
+
+
+def _resolve_binary(name: str) -> str:
+    """Return an executable path for ``name``, or ``name`` unchanged.
+
+    ``Popen`` cannot be trusted to find the server on Windows. It calls
+    ``CreateProcess``, which appends ``.exe`` and consults nothing else
+    — in particular not ``PATHEXT``. npm installs its global binaries
+    as ``.CMD`` shims, so ``pyright-langserver``,
+    ``typescript-language-server`` and ``bash-language-server`` are
+    *invisible* to it while sitting on ``PATH`` in plain view.
+    ``shutil.which`` does apply ``PATHEXT``, and a resolved ``.CMD``
+    launches fine (``CreateProcess`` routes batch files through
+    ``cmd.exe``; ``stop()`` shuts the server down over LSP's own
+    ``shutdown``/``exit`` on the pipes, which reaches it through that
+    intermediate).
+
+    The symptom this fixes is not a crash. ``PostToolUse`` catches the
+    spawn failure, logs a warning and returns no block, so on Windows
+    every TypeScript, Python and bash edit simply produced no
+    diagnostics — while Go, Rust and C++ worked, because those ship
+    real ``.exe``s and ``CreateProcess``'s one hardcoded extension is
+    enough for them.
+
+    Resolving on POSIX too is deliberate: ``which`` performs the same
+    ``PATH`` search ``Popen`` would, so behaviour is unchanged, and one
+    code path beats a platform branch that only the minority platform
+    ever exercises. An absolute or relative path is returned untouched
+    — the caller meant that exact file. When nothing resolves, the name
+    comes back unchanged so the caller's "not found" error can name
+    what the user configured.
+    """
+    if os.path.isabs(name):
+        return name
+    if os.sep in name or (os.altsep and os.altsep in name):
+        return name
+    return shutil.which(name) or name
 
 
 @dataclass
@@ -182,8 +220,15 @@ class LspClient:
                 subprocess, "CREATE_NO_WINDOW", 0,
             )
 
+        # Resolve the binary ourselves rather than letting Popen search
+        # PATH — see :func:`_resolve_binary`. The error below still
+        # names the *configured* command, not the resolution, so a
+        # genuinely missing server reads the way the user wrote it.
+        cmd = list(self._command)
+        cmd[0] = _resolve_binary(cmd[0])
+
         try:
-            self._proc = subprocess.Popen(self._command, **popen_kwargs)
+            self._proc = subprocess.Popen(cmd, **popen_kwargs)
         except FileNotFoundError as e:
             raise LspError(f"LSP binary not found: {self._command[0]}") from e
 

@@ -16,6 +16,31 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed
+
+- **No LSP diagnostics on Windows for any npm-installed server.**
+  `LspClient.start` handed `Popen` a bare command name, and on Windows
+  `Popen` calls `CreateProcess`, which appends `.exe` and consults
+  nothing else — in particular not `PATHEXT`. npm installs its global
+  binaries as `.CMD` shims, so **pyright-langserver**,
+  **typescript-language-server** and **bash-language-server** were
+  invisible to it while sitting on `PATH` in plain view; `shutil.which`
+  found all three. Go, Rust and C++ were unaffected, because those ship
+  real `.exe`s and `CreateProcess`'s one hardcoded extension covers
+  them — which is how a dead Python/TypeScript LSP hid behind a
+  visibly-working engine.
+
+  Nothing reported it. `PostToolUse._run_lsp_engine` catches the spawn
+  failure, logs a warning and returns no block, so an edit that should
+  have produced diagnostics produced silence instead. The engine's own
+  `status` was healthy throughout: daemon up, servers installed, config
+  enabled. `lsp.py` now resolves the binary through `shutil.which`
+  before spawning, on every platform — on POSIX that is the same `PATH`
+  search `Popen` performs, and one code path beats a branch only the
+  minority platform exercises. An explicit path is never re-resolved,
+  and an unresolvable name is passed through untouched so the
+  `LSP binary not found:` error still quotes what the user configured.
+
 ### Removed
 
 - **`patches/apply-caliber-patch.sh`** and its note. The patch deleted
