@@ -16,6 +16,25 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Removed
+
+- **`patches/apply-caliber-patch.sh`** and its note. The patch deleted
+  `CLAUDE_CODE_SIMPLE=1` from the environment Caliber handed to
+  `claude -p`, where it broke OAuth — and because it rewrote an
+  installed `dist/bin.js`, it had to be re-applied after every Caliber
+  upgrade. Upstream now strips that variable itself
+  (`src/llm/claude-cli.ts:92`, with a test named for the behaviour), and
+  has since before 1.49.6, so the local copy was already inert: the
+  installed `bin.js` on this host carries no patch, and re-running the
+  script exits 1 on "pattern not found".
+
+### Added
+
+- **`.caliberignore`** — keeps `caliber refresh` out of the 171 tracked
+  `*.transcript.db` benchmark sidecars (largest 5.3 MB) and the
+  generated `graphify-out/`. They stay in git; they just stop being read
+  as agent context.
+
 ## [1.15.0] — 2026-09-12
 
 ### Added
