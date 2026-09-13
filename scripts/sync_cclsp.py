@@ -132,6 +132,56 @@ def _node_shim_target(shim: Path) -> Optional[Path]:
     return target if target.is_file() else None
 
 
+def _find_entry(cfg: dict, spec) -> Optional[dict]:
+    """Locate the entry that represents ``spec``, if any.
+
+    Matching on ``command[0]`` alone is not enough once a command has
+    been rewritten to ``["node", "<script>"]``: every rewritten entry
+    then keys as ``node``, so the next run recognises none of them and
+    appends a duplicate for each. That happened — pandorum's config grew
+    from 12 servers to 14, with html/json/bash/ts listed twice.
+
+    Falling back to **extension overlap** is both robust and faithful:
+    it is exactly how cclsp itself resolves a server
+    (``servers.filter(s => s.extensions.includes(ext))``), so an entry
+    that would answer for this spec's files *is* this spec's entry,
+    whatever its command says.
+    """
+    for entry in cfg["servers"]:
+        cmd = entry.get("command") or []
+        if cmd and _bin_key(cmd[0]) == _bin_key(spec.bin):
+            return entry
+    for entry in cfg["servers"]:
+        if set(entry.get("extensions") or []) & set(spec.extensions):
+            return entry
+    return None
+
+
+def dedupe_servers(cfg: dict) -> list[str]:
+    """Collapse entries that claim overlapping extensions.
+
+    Only duplicates are dropped — an entry for a server that is merely
+    uninstalled is still left alone, since another host may share the
+    file. Returns notes describing what was removed.
+    """
+    notes: list[str] = []
+    kept: list[dict] = []
+    claimed: set[str] = set()
+    for entry in cfg["servers"]:
+        exts = set(entry.get("extensions") or [])
+        overlap = exts & claimed
+        if overlap and exts <= claimed:
+            cmd = (entry.get("command") or ["?"])[0]
+            notes.append(
+                f"  DEDUPE {PurePath(cmd).name} -> dropped duplicate for "
+                f"{','.join(sorted(exts))}")
+            continue
+        claimed |= exts
+        kept.append(entry)
+    cfg["servers"] = kept
+    return notes
+
+
 def spawnable_command(resolved: str, args: list[str]) -> tuple[list[str], bool]:
     """Return ``(command, rewritten)`` that ``cclsp`` can actually spawn.
 
@@ -209,16 +259,11 @@ def reconcile(cfg: dict, *, resolve_commands: bool = False) -> tuple[dict, list[
     proved this class of failure predates the sync script entirely.
     Anything that is not a ``.cmd``/``.bat`` shim is still left alone.
     """
-    by_bin = {
-        _bin_key(s["command"][0]): s
-        for s in cfg["servers"]
-        if s.get("command")
-    }
     notes: list[str] = []
 
     for spec in SPECS:
         resolved = shutil.which(spec.bin)
-        entry = by_bin.get(_bin_key(spec.bin))
+        entry = _find_entry(cfg, spec)
         if resolved is None:
             if entry is not None:
                 notes.append(
@@ -280,6 +325,7 @@ def reconcile(cfg: dict, *, resolve_commands: bool = False) -> tuple[dict, list[
             entry["extensions"] = sorted(have | set(missing))
             notes.append(f"  EXTEND {spec.bin} += {','.join(missing)}")
 
+    notes.extend(dedupe_servers(cfg))
     return cfg, notes
 
 

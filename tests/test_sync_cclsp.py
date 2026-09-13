@@ -130,6 +130,141 @@ class ReconcileTests(unittest.TestCase):
         self.assertIn("js", out["servers"][0]["extensions"])
 
 
+class NodeShimTests(unittest.TestCase):
+    """Node refuses to spawn .cmd/.bat with shell:false (CVE-2024-27980).
+
+    Every npm-installed language server on Windows is a .cmd shim, so
+    all of them raised EINVAL under cclsp. Measured on pandorum: 6 of 12
+    servers dead, including pyright, which predated this script.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _shim(self, name: str, target_rel: str) -> Path:
+        # target_rel is spelled with backslashes because that is what the
+        # shim contains. Build the real file from its parts, or on POSIX
+        # this creates one file whose *name* contains backslashes.
+        target = self.dir.joinpath(*target_rel.split("\\"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("// entry", encoding="utf-8")
+        shim = self.dir / name
+        shim.write_text(
+            '@ECHO off\r\n'
+            'IF EXIST "%dp0%\\node.exe" (\r\n'
+            '  SET "_prog=%dp0%\\node.exe"\r\n'
+            ') ELSE (\r\n  SET "_prog=node"\r\n)\r\n'
+            f'endLocal & "%_prog%"  "%dp0%\\{target_rel}" %*\r\n',
+            encoding="utf-8")
+        return shim
+
+    def test_cmd_shim_is_rewritten_to_node_plus_script(self):
+        shim = self._shim("pyright-langserver.cmd",
+                          r"node_modules\pyright\langserver.index.js")
+        cmd, rewritten = sync_cclsp.spawnable_command(str(shim), ["--stdio"])
+        self.assertTrue(rewritten)
+        self.assertEqual(cmd[0], "node")
+        self.assertTrue(cmd[1].endswith("langserver.index.js"))
+        self.assertEqual(cmd[2], "--stdio")
+
+    def test_interpreter_reference_is_not_mistaken_for_the_target(self):
+        """The shim names node.exe *before* its target; naive
+        first-match resolution returned node.exe itself."""
+        shim = self._shim("ts.cmd", r"node_modules\x\lib\cli.mjs")
+        cmd, _ = sync_cclsp.spawnable_command(str(shim), [])
+        self.assertTrue(cmd[1].endswith("cli.mjs"), cmd)
+
+    def test_extensionless_target_resolves(self):
+        """vscode-langservers-extracted wraps a file with no extension,
+        and typescript-language-server a .mjs — a `.js`-only pattern
+        silently matched neither."""
+        shim = self._shim("vscode-html-language-server.CMD",
+                          r"node_modules\v\bin\vscode-html-language-server")
+        cmd, rewritten = sync_cclsp.spawnable_command(str(shim), ["--stdio"])
+        self.assertTrue(rewritten)
+        self.assertTrue(cmd[1].endswith("vscode-html-language-server"))
+
+    def test_exe_is_left_alone(self):
+        cmd, rewritten = sync_cclsp.spawnable_command(
+            r"C:\tools\clangd.exe", [])
+        self.assertFalse(rewritten)
+        self.assertEqual(cmd, [r"C:\tools\clangd.exe"])
+
+    def test_posix_path_is_left_alone(self):
+        cmd, rewritten = sync_cclsp.spawnable_command(
+            "/usr/local/bin/pyright-langserver", ["--stdio"])
+        self.assertFalse(rewritten)
+        self.assertEqual(cmd, ["/usr/local/bin/pyright-langserver", "--stdio"])
+
+    def test_unresolvable_shim_is_reported_not_silently_kept(self):
+        missing = self.dir / "ghost.cmd"
+        missing.write_text("@ECHO off\r\n", encoding="utf-8")
+        cmd, rewritten = sync_cclsp.spawnable_command(str(missing), [])
+        self.assertFalse(rewritten)
+
+
+class DedupeTests(unittest.TestCase):
+    """A rewritten command keys as ``node``, so a second sync run used
+    to re-add every repaired server. pandorum's config grew 12 -> 14."""
+
+    def test_repaired_entry_is_found_again_by_extension(self):
+        cfg = {"servers": [
+            {"extensions": ["ts", "js"],
+             "command": ["node", r"C:\npm\node_modules\x\cli.mjs"]},
+        ]}
+
+        class S:
+            bin = "typescript-language-server"
+            extensions = ("ts", "js")
+            cclsp_command = ("typescript-language-server", "--stdio")
+
+        self.assertIsNotNone(sync_cclsp._find_entry(cfg, S()))
+
+    def test_second_run_does_not_duplicate(self):
+        class S:
+            bin = "typescript-language-server"
+            extensions = ("ts", "js")
+            cclsp_command = ("typescript-language-server", "--stdio")
+
+        cfg = {"servers": []}
+        with mock.patch.object(sync_cclsp, "SPECS", [S()]), \
+             mock.patch.object(sync_cclsp.shutil, "which",
+                               return_value="/usr/bin/tsls"):
+            cfg, _ = sync_cclsp.reconcile(cfg, resolve_commands=True)
+            cfg["servers"][0]["command"] = ["node", "/x/cli.mjs"]  # as repaired
+            cfg, _ = sync_cclsp.reconcile(cfg, resolve_commands=True)
+        self.assertEqual(len(cfg["servers"]), 1, cfg["servers"])
+
+    def test_dedupe_drops_the_fully_covered_duplicate(self):
+        cfg = {"servers": [
+            {"extensions": ["html", "htm"], "command": ["a"]},
+            {"extensions": ["html", "htm"], "command": ["node", "b"]},
+        ]}
+        notes = sync_cclsp.dedupe_servers(cfg)
+        self.assertEqual(len(cfg["servers"]), 1)
+        self.assertTrue(any("DEDUPE" in n for n in notes))
+
+    def test_dedupe_keeps_distinct_servers(self):
+        cfg = {"servers": [
+            {"extensions": ["py"], "command": ["a"]},
+            {"extensions": ["go"], "command": ["b"]},
+        ]}
+        sync_cclsp.dedupe_servers(cfg)
+        self.assertEqual(len(cfg["servers"]), 2)
+
+    def test_dedupe_keeps_an_entry_that_adds_new_extensions(self):
+        """Partial overlap is not duplication — dropping it would lose
+        the extensions only that entry claims."""
+        cfg = {"servers": [
+            {"extensions": ["ts"], "command": ["a"]},
+            {"extensions": ["ts", "tsx"], "command": ["b"]},
+        ]}
+        sync_cclsp.dedupe_servers(cfg)
+        self.assertEqual(len(cfg["servers"]), 2)
+
+
 class McpConfigPathTests(unittest.TestCase):
     """Uses a real isolated home rather than patching ``pathlib``.
 
