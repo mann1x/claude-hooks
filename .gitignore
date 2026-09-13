@@ -140,3 +140,9 @@ benchmarks/consultants/results/**/*
 # file lets contributors point the test suite at their real infra
 # without leaking those values into version control.
 tests/.env.local
+
+# Per-host LSP server map. Written by install.py from what is installed
+# *on this machine* and reconciled by scripts/sync_cclsp.py — solidpc
+# has no bash/lua/zig server, pandorum has all three. Tracking it would
+# push one host's hardware reality onto the other on the next pull.
+cclsp.json
