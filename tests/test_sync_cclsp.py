@@ -17,6 +17,7 @@ import importlib.util
 import json
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -130,41 +131,63 @@ class ReconcileTests(unittest.TestCase):
 
 
 class McpConfigPathTests(unittest.TestCase):
+    """Uses a real isolated home rather than patching ``pathlib``.
+
+    An earlier version patched ``Path.read_text`` at class level, which
+    passed on Linux and raised from inside pathlib on Windows — where
+    ``Path`` instantiation goes through machinery that a blanket class
+    patch disturbs. Both HOME *and* USERPROFILE are set: ``Path.home()``
+    reads USERPROFILE on Windows, so a HOME-only fixture silently
+    no-ops there and the test reads the developer's real config.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _isolated(self, extra_env=None):
+        env = {"HOME": str(self.home), "USERPROFILE": str(self.home)}
+        env.update(extra_env or {})
+        return mock.patch.dict(os.environ, env, clear=True)
+
+    def _write_claude_json(self, data):
+        (self.home / ".claude.json").write_text(
+            json.dumps(data), encoding="utf-8")
 
     def test_env_var_wins(self):
-        with mock.patch.dict(os.environ,
-                             {"CCLSP_CONFIG_PATH": "/tmp/x/cclsp.json"}):
-            self.assertEqual(sync_cclsp.mcp_config_path(),
-                             Path("/tmp/x/cclsp.json"))
+        target = str(self.home / "explicit" / "cclsp.json")
+        with self._isolated({"CCLSP_CONFIG_PATH": target}):
+            self.assertEqual(sync_cclsp.mcp_config_path(), Path(target))
 
     def test_reads_the_path_claude_json_declares(self):
         """The MCP is launched with that env var set, so the file it
         actually reads is recorded there and nowhere else."""
-        declared = r"C:\Users\manni\.config\cclsp\cclsp.json"
-        data = {"mcpServers": {"lsp": {
+        declared = str(self.home / ".config" / "cclsp" / "cclsp.json")
+        self._write_claude_json({"mcpServers": {"lsp": {
             "command": "cclsp.cmd",
             "env": {"CCLSP_CONFIG_PATH": declared},
-        }}}
-        with mock.patch.dict(os.environ, {}, clear=True), \
-             mock.patch.object(sync_cclsp.Path, "read_text",
-                               return_value=json.dumps(data)):
+        }}})
+        with self._isolated():
             self.assertEqual(sync_cclsp.mcp_config_path(), Path(declared))
 
-    def test_falls_back_to_the_conventional_default(self):
-        with mock.patch.dict(os.environ, {}, clear=True), \
-             mock.patch.object(sync_cclsp.Path, "read_text",
-                               side_effect=OSError):
+    def test_falls_back_when_there_is_no_claude_json(self):
+        with self._isolated():
+            self.assertEqual(sync_cclsp.mcp_config_path(),
+                             sync_cclsp.DEFAULT_MCP_CONFIG)
+
+    def test_falls_back_when_claude_json_is_corrupt(self):
+        (self.home / ".claude.json").write_text("{not json", encoding="utf-8")
+        with self._isolated():
             self.assertEqual(sync_cclsp.mcp_config_path(),
                              sync_cclsp.DEFAULT_MCP_CONFIG)
 
     def test_non_cclsp_mcp_entries_are_ignored(self):
-        data = {"mcpServers": {
+        self._write_claude_json({"mcpServers": {
             "pgvector": {"command": "claude-hook-pgvector-mcp",
                          "env": {"CCLSP_CONFIG_PATH": "/wrong/one.json"}},
-        }}
-        with mock.patch.dict(os.environ, {}, clear=True), \
-             mock.patch.object(sync_cclsp.Path, "read_text",
-                               return_value=json.dumps(data)):
+        }})
+        with self._isolated():
             self.assertEqual(sync_cclsp.mcp_config_path(),
                              sync_cclsp.DEFAULT_MCP_CONFIG)
 
