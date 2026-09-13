@@ -82,6 +82,20 @@ _LANGUAGE_ID_BY_EXT = {
     "bash": "shellscript",
     "lua": "lua",
     "zig": "zig",
+    # Web trio, served by vscode-langservers-extracted. `html` is NOT
+    # mapped to a JS languageId: tsserver silently declines a document
+    # announced as anything it doesn't claim, so pointing html at it
+    # would buy an accepted file and an empty diagnostic list — the
+    # failure shape this module exists to prevent. Embedded <script>
+    # analysis is a client-side virtual-document trick in VS Code, not
+    # something a standalone server does.
+    "html": "html",
+    "htm": "html",
+    "css": "css",
+    "scss": "scss",
+    "less": "less",
+    "json": "json",
+    "jsonc": "jsonc",
 }
 
 

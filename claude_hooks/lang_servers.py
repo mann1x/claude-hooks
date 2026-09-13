@@ -210,6 +210,41 @@ SPECS: tuple[LangServerSpec, ...] = (
         installers=(Installer.BREW, Installer.WINGET, Installer.SCOOP),
         docs_url="https://github.com/zigtools/zls",
     ),
+    # vscode-langservers-extracted — one npm package, three binaries.
+    # Microsoft ships these as part of VS Code and does not publish them
+    # standalone; hrsh7th's extraction is the canonical source and what
+    # every editor distribution uses. Installing any one of the three
+    # installs all of them, so the install command repeats by design.
+    LangServerSpec(
+        name="vscode-html-language-server",
+        display="vscode-html-language-server (HTML)",
+        bin="vscode-html-language-server",
+        extensions=("html", "htm"),
+        cclsp_command=("vscode-html-language-server", "--stdio"),
+        tier=2,
+        installers=(Installer.NPM,),
+        docs_url="https://github.com/hrsh7th/vscode-langservers-extracted",
+    ),
+    LangServerSpec(
+        name="vscode-css-language-server",
+        display="vscode-css-language-server (CSS/SCSS/Less)",
+        bin="vscode-css-language-server",
+        extensions=("css", "scss", "less"),
+        cclsp_command=("vscode-css-language-server", "--stdio"),
+        tier=2,
+        installers=(Installer.NPM,),
+        docs_url="https://github.com/hrsh7th/vscode-langservers-extracted",
+    ),
+    LangServerSpec(
+        name="vscode-json-language-server",
+        display="vscode-json-language-server (JSON)",
+        bin="vscode-json-language-server",
+        extensions=("json", "jsonc"),
+        cclsp_command=("vscode-json-language-server", "--stdio"),
+        tier=2,
+        installers=(Installer.NPM,),
+        docs_url="https://github.com/hrsh7th/vscode-langservers-extracted",
+    ),
     LangServerSpec(
         name="omnisharp",
         display="OmniSharp (C#)",
@@ -293,6 +328,16 @@ INSTALL_COMMANDS: dict[Installer, dict[str, list[str]]] = {
             "typescript-language-server", "typescript",
         ],
         "bash-language-server": ["npm", "install", "-g", "bash-language-server"],
+        # One package, three binaries — see the SPECS note.
+        "vscode-html-language-server": [
+            "npm", "install", "-g", "vscode-langservers-extracted",
+        ],
+        "vscode-css-language-server": [
+            "npm", "install", "-g", "vscode-langservers-extracted",
+        ],
+        "vscode-json-language-server": [
+            "npm", "install", "-g", "vscode-langservers-extracted",
+        ],
     },
     Installer.GO: {
         "gopls": ["go", "install", "golang.org/x/tools/gopls@latest"],
