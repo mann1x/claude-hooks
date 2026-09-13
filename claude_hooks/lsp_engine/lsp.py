@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -34,6 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Optional
+from urllib.parse import unquote
 
 log = logging.getLogger("claude_hooks.lsp_engine.lsp")
 
@@ -56,6 +58,17 @@ _LANGUAGE_ID_BY_EXT = {
     "tsx": "typescriptreact",
     "js": "javascript",
     "jsx": "javascriptreact",
+    # ESM/CJS TypeScript. typescript-language-server claims these in
+    # the installer matrix, and a document announced as "plaintext" is
+    # one most servers decline to analyse — so an extension mapped in
+    # cclsp.json but missing here produces a *silent* no-diagnostics,
+    # which is the same shape as the two bugs above it.
+    "mts": "typescript",
+    "cts": "typescript",
+    "sh": "shellscript",
+    "bash": "shellscript",
+    "lua": "lua",
+    "zig": "zig",
 }
 
 
@@ -77,6 +90,38 @@ def path_to_uri(path: str | os.PathLike) -> str:
     so always normalise via ``Path.as_uri()`` after resolving.
     """
     return Path(path).resolve().as_uri()
+
+
+_FILE_DRIVE_RE = re.compile(r"^(file:///)([a-zA-Z])(?::|%3[Aa]|\|)(/.*)?$")
+
+
+def uri_key(uri: str) -> str:
+    """Canonical dictionary key for a ``file://`` URI.
+
+    Windows LSP servers do not spell a file URI the way Python does.
+    ``Path.as_uri()`` produces ``file:///C:/x/a.py``; pyright — and
+    anything else built on ``vscode-uri``, which is most of them —
+    publishes ``file:///c%3A/x/a.py``: lowercased drive letter, colon
+    percent-encoded. Same file, two strings.
+
+    That mismatch silently destroyed every diagnostic on Windows. The
+    server answered in under a second, the engine filed the result
+    under the key the *server* used, and every lookup asked for the key
+    *we* built — so `diagnostics()` waited out its timeout and returned
+    an empty list, which reads exactly like a clean file. It survived
+    because POSIX has no drive letter to disagree about: there the two
+    spellings are identical and this function is the identity.
+
+    Only the dictionary key is normalised. The URI sent on the wire
+    stays whatever ``path_to_uri`` produced, because that is a
+    well-formed URI the servers accept — the disagreement is about
+    which of two valid spellings comes back.
+    """
+    s = unquote(uri).replace("\\", "/")
+    m = _FILE_DRIVE_RE.match(s)
+    if m:
+        return f"{m.group(1)}{m.group(2).upper()}:{m.group(3) or '/'}"
+    return s
 
 
 def _resolve_binary(name: str) -> str:
@@ -305,9 +350,10 @@ class LspClient:
 
     def did_open(self, path: str | os.PathLike, content: str) -> None:
         uri = path_to_uri(path)
-        version = self._open_versions.get(uri, 0) + 1
-        self._open_versions[uri] = version
-        self._reset_diagnostics(uri, expected_version=version)
+        key = uri_key(uri)
+        version = self._open_versions.get(key, 0) + 1
+        self._open_versions[key] = version
+        self._reset_diagnostics(key, expected_version=version)
         self._send_notification(
             "textDocument/didOpen",
             {
@@ -322,13 +368,14 @@ class LspClient:
 
     def did_change(self, path: str | os.PathLike, content: str) -> None:
         uri = path_to_uri(path)
-        if uri not in self._open_versions:
+        key = uri_key(uri)
+        if key not in self._open_versions:
             raise LspError(
                 f"did_change before did_open: {uri}",
             )
-        self._open_versions[uri] += 1
-        version = self._open_versions[uri]
-        self._reset_diagnostics(uri, expected_version=version)
+        self._open_versions[key] += 1
+        version = self._open_versions[key]
+        self._reset_diagnostics(key, expected_version=version)
         self._send_notification(
             "textDocument/didChange",
             {
@@ -339,7 +386,7 @@ class LspClient:
 
     def did_close(self, path: str | os.PathLike) -> None:
         uri = path_to_uri(path)
-        self._open_versions.pop(uri, None)
+        self._open_versions.pop(uri_key(uri), None)
         self._send_notification(
             "textDocument/didClose",
             {"textDocument": {"uri": uri}},
@@ -362,21 +409,24 @@ class LspClient:
         should distinguish "no diagnostics yet" from "no diagnostics"
         via the timeout themselves if they care.
         """
-        uri = path_to_uri(path)
+        key = uri_key(path_to_uri(path))
         with self._diag_lock:
-            event = self._diagnostics_event.setdefault(uri, threading.Event())
+            event = self._diagnostics_event.setdefault(key, threading.Event())
             if event.is_set():
-                return list(self._diagnostics.get(uri, []))
+                return list(self._diagnostics.get(key, []))
         if not event.wait(timeout=timeout):
             return []
         with self._diag_lock:
-            return list(self._diagnostics.get(uri, []))
+            return list(self._diagnostics.get(key, []))
 
-    def _reset_diagnostics(self, uri: str, *, expected_version: int) -> None:
+    def _reset_diagnostics(self, key: str, *, expected_version: int) -> None:
+        """``key`` is a :func:`uri_key` result, never a raw URI — the
+        two differ on Windows and mixing them is the bug this rename
+        exists to prevent."""
         with self._diag_lock:
-            self._diagnostics.pop(uri, None)
-            self._diag_min_version[uri] = expected_version
-            event = self._diagnostics_event.get(uri)
+            self._diagnostics.pop(key, None)
+            self._diag_min_version[key] = expected_version
+            event = self._diagnostics_event.get(key)
             if event is not None:
                 event.clear()
 
@@ -506,6 +556,9 @@ class LspClient:
         uri = params.get("uri")
         if not isinstance(uri, str):
             return
+        # The server's spelling of the URI is not ours — normalise
+        # before it touches any dict. See :func:`uri_key`.
+        key = uri_key(uri)
         # Drop publishes for stale versions (delayed didOpen v1
         # arriving after didChange v2 reset). Servers that don't send
         # a version field land here as None and we can't filter — same
@@ -513,7 +566,7 @@ class LspClient:
         publish_version = params.get("version")
         if isinstance(publish_version, int):
             with self._diag_lock:
-                expected = self._diag_min_version.get(uri)
+                expected = self._diag_min_version.get(key)
             if expected is not None and publish_version < expected:
                 return
         diags_raw = params.get("diagnostics") or []
@@ -535,6 +588,6 @@ class LspClient:
             except (TypeError, ValueError):
                 continue
         with self._diag_lock:
-            self._diagnostics[uri] = diags
-            event = self._diagnostics_event.setdefault(uri, threading.Event())
+            self._diagnostics[key] = diags
+            event = self._diagnostics_event.setdefault(key, threading.Event())
             event.set()

@@ -18,6 +18,38 @@ release with the auto-generated source archive
 
 ### Fixed
 
+- **Windows LSP diagnostics were computed, then thrown away.** With
+  the spawn fixed, pyright started and answered in under a second — and
+  `diagnostics()` still returned `[]`. The engine keys its diagnostic
+  cache by URI, and the two sides do not spell a Windows URI the same
+  way: `Path.as_uri()` gives `file:///C:/x/a.py`, while pyright — and
+  anything built on `vscode-uri`, which is most servers — publishes
+  `file:///c%3A/x/a.py`, lowercased drive and percent-encoded colon.
+  Results were filed under the server's spelling and every lookup asked
+  for ours, so the wait timed out and returned empty, which reads as a
+  clean file. POSIX has no drive letter to disagree about, so this was
+  structurally invisible on Linux. `uri_key()` now normalises every
+  dictionary key (drive-letter case, `%3A`, the legacy `file:///c|/`
+  form); the URI on the wire is untouched, because both spellings are
+  valid and servers accept ours.
+
+- **Six extensions the installer can wire had no `languageId`** —
+  `mts`, `cts`, `sh`, `bash`, `lua`, `zig` were announced as
+  `plaintext`, which most servers decline to analyse. That is the same
+  silent-empty failure one layer down, so a test now asserts every
+  extension in `lang_servers.SPECS` resolves to a real language id.
+
+### Added
+
+- **`scripts/sync_cclsp.py`** — reconciles `cclsp.json` with the
+  servers actually on `PATH`. `install.py` writes that file once from
+  what exists at setup time and never revisits it, so servers installed
+  later are never wired. Pandorum had nine installed and four unmapped
+  (`typescript-language-server`, `bash-language-server`,
+  `lua-language-server`, `zls`); solidpc had one. Existing entries keep
+  their command and gain only missing extensions; an uninstalled server
+  is reported, never removed.
+
 - **No LSP diagnostics on Windows for any npm-installed server.**
   `LspClient.start` handed `Popen` a bare command name, and on Windows
   `Popen` calls `CreateProcess`, which appends `.exe` and consults

@@ -48,6 +48,20 @@
         "omnisharp",
         "-lsp"
       ]
+    },
+    {
+      "extensions": [
+        "ts",
+        "tsx",
+        "js",
+        "jsx",
+        "mts",
+        "cts"
+      ],
+      "command": [
+        "typescript-language-server",
+        "--stdio"
+      ]
     }
   ]
 }

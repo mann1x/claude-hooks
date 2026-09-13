@@ -13,6 +13,7 @@ to validate. Phase 4 (Windows parity) will revisit.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 import unittest
@@ -158,6 +159,26 @@ class TestLanguageIdMapping(unittest.TestCase):
 
     def test_uppercase_extension(self) -> None:
         self.assertEqual(language_id_for("A.PY"), "python")
+
+    def test_every_matrix_extension_has_a_language_id(self) -> None:
+        """An extension mapped in cclsp.json but missing from
+        ``_LANGUAGE_ID_BY_EXT`` is announced as ``plaintext``, which
+        most servers decline to analyse — producing silent
+        no-diagnostics rather than an error. The installer matrix is
+        the source of truth for which extensions can be wired, so
+        every one of them must resolve to a real language id."""
+        from claude_hooks.lang_servers import SPECS
+
+        self.assertTrue(SPECS, "no server specs found in lang_servers")
+        missing = sorted({
+            ext for sp in SPECS for ext in sp.extensions
+            if language_id_for(f"x.{ext}") == "plaintext"
+        })
+        self.assertEqual(
+            missing, [],
+            f"extensions the installer can wire but lsp.py calls "
+            f"plaintext: {missing}",
+        )
 
     def test_unknown_extension_falls_back_to_plaintext(self) -> None:
         self.assertEqual(language_id_for("a.weird"), "plaintext")
@@ -378,3 +399,84 @@ class TestLspClientWindowlessSpawn(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWindowsUriKey(unittest.TestCase):
+    """Windows LSP servers and Python disagree on how to spell a file
+    URI, and the disagreement silently destroyed every diagnostic.
+
+    Measured on pandorum 2026-09-13, same file:
+
+        engine  (Path.as_uri)  file:///C:/Users/manni/.../a.py
+        pyright (vscode-uri)   file:///c%3A/Users/manni/.../a.py
+
+    pyright published in under a second. The engine filed it under the
+    server's spelling and every lookup asked for its own, so
+    ``diagnostics()`` waited out the timeout and returned ``[]`` — which
+    reads as a clean file, not as a failure. Invisible on POSIX, where
+    there is no drive letter to disagree about.
+    """
+
+    def test_the_two_real_spellings_collide(self) -> None:
+        from claude_hooks.lsp_engine.lsp import uri_key
+        ours = "file:///C:/Users/manni/AppData/Local/Temp/lsp-raw/a.py"
+        theirs = "file:///c%3A/Users/manni/AppData/Local/Temp/lsp-raw/a.py"
+        self.assertEqual(uri_key(ours), uri_key(theirs))
+
+    def test_drive_letter_case_is_normalised(self) -> None:
+        from claude_hooks.lsp_engine.lsp import uri_key
+        self.assertEqual(uri_key("file:///c:/x/a.py"), uri_key("file:///C:/x/a.py"))
+
+    def test_percent_encoded_colon_is_decoded(self) -> None:
+        from claude_hooks.lsp_engine.lsp import uri_key
+        self.assertEqual(uri_key("file:///C%3A/x/a.py"), "file:///C:/x/a.py")
+
+    def test_legacy_pipe_drive_form(self) -> None:
+        """``file:///c|/x`` is the pre-RFC-8089 spelling; some servers
+        still emit it."""
+        from claude_hooks.lsp_engine.lsp import uri_key
+        self.assertEqual(uri_key("file:///c|/x/a.py"), "file:///C:/x/a.py")
+
+    def test_posix_uris_are_untouched(self) -> None:
+        """POSIX has no drive letter — this must be the identity there,
+        or the fix for one platform becomes a bug on the other."""
+        from claude_hooks.lsp_engine.lsp import uri_key
+        for u in ("file:///home/me/a.py", "file:///srv/dev/x/b.py", "file:///"):
+            self.assertEqual(uri_key(u), u)
+
+    def test_percent_encoded_spaces_survive_as_real_spaces(self) -> None:
+        from claude_hooks.lsp_engine.lsp import uri_key
+        self.assertEqual(
+            uri_key("file:///C:/My%20Docs/a.py"), "file:///C:/My Docs/a.py")
+        self.assertEqual(
+            uri_key("file:///C:/My%20Docs/a.py"), uri_key("file:///c%3A/My Docs/a.py"))
+
+    def test_publish_under_server_spelling_is_readable_by_path(self) -> None:
+        """End-to-end of the actual bug: publish the way pyright does,
+        read back the way the engine does."""
+        from unittest.mock import patch
+
+        client = LspClient(command=["fake"], root_dir=".",
+                           startup_timeout=0.01, request_timeout=0.01)
+        target = r"C:\Users\manni\probe\a.py"
+        ours = "file:///C:/Users/manni/probe/a.py"
+        theirs = "file:///c%3A/Users/manni/probe/a.py"
+        # Pin our side's spelling rather than deriving it from the host:
+        # on POSIX ``path_to_uri`` yields no drive letter at all, so a
+        # derived URI cannot express the disagreement and the test would
+        # pass against the unfixed code — which it did.
+        self.addCleanup(patch.stopall)
+        patch("claude_hooks.lsp_engine.lsp.path_to_uri",
+              return_value=ours).start()
+        client._on_publish_diagnostics({
+            "uri": theirs,
+            "diagnostics": [{
+                "range": {"start": {"line": 4, "character": 11}},
+                "severity": 1, "message": '"undefined_name" is not defined',
+                "code": "reportUndefinedVariable", "source": "Pyright",
+            }],
+        })
+        got = client.get_diagnostics(target, timeout=0.1)
+        self.assertEqual(len(got), 1,
+                         f"published as {theirs!r}, looked up as {ours!r}")
+        self.assertEqual(got[0].code, "reportUndefinedVariable")
