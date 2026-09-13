@@ -542,6 +542,37 @@ Check `cclsp.json`:
 cat $CCLSP_CONFIG_PATH | jq '.servers[].extensions'
 ```
 
+### TypeScript/JavaScript specifically returns empty — on one host only
+
+If `support_report()` shows `typescript-language-server` with
+`running: true`, a full capability list and an empty `stderr_tail`,
+the server is healthy and the problem is the *project boundary*.
+
+With no `tsconfig.json` / `jsconfig.json` anywhere above the file,
+tsserver opens an **inferred project** rooted at the repo and walks
+the tree. That is survivable on a clean checkout and fatal on a
+working one: on solidpc (2026-09-13) the tracked source is ~40 MB but
+the tree was **4.2 GB**, because `vendor/`, `benchmarks/`, `docs/` and
+`graphify-out/` accumulate untracked output. tsserver never finished
+the scan, so it never published — **120 s of silence**, which the
+engine reports exactly the way it reports a clean file. Nothing
+errored anywhere; TypeScript support was simply absent, and only on
+the host with the big tree. The same binary answered in **1.1 s**
+against a two-file throwaway project.
+
+The fix is a `tsconfig.json` at the repo root whose `exclude` names
+the heavy directories; the repo ships one. Confirm the split before
+blaming the binary:
+
+```bash
+du -sh --exclude=.git * | sort -rh | head        # is the tree huge?
+git ls-files '*.ts' '*.js' '*.mjs' | wc -l       # vs. what you author
+```
+
+Note `allowJs` there too. Without it `// @ts-check` in a `.js` file
+has nothing to attach to, so JavaScript reports zero diagnostics
+while TypeScript works — a quieter version of the same bug.
+
 ### The daemon survived my Claude Code crash
 
 By design — the daemon is per-project, not per-session. Other

@@ -1,0 +1,49 @@
+{
+  "//": [
+    "This is a Python project with exactly one authored JS/TS file:",
+    ".claude/workflows/consult-with-adversarial-review.mjs. The file exists",
+    "to give typescript-language-server a *project boundary*, not to build",
+    "anything — `noEmit` is set and nothing ever runs `tsc`.",
+    "",
+    "Without it tsserver has no tsconfig to anchor to, so it opens an",
+    "`inferred project` rooted at the repo and walks the whole tree. On a",
+    "working checkout that tree is not the 40 MB of tracked source: it is",
+    "4.2 GB, because vendor/ (2.5 GB), benchmarks/, docs/ and graphify-out/",
+    "accumulate untracked output. tsserver never finished the scan and never",
+    "published a diagnostic — 120 s of silence, which the engine reports the",
+    "same way it reports a clean file. Nothing errored; TypeScript support",
+    "was simply, quietly absent, and only on the host with the big tree.",
+    "",
+    "`exclude` is therefore the load-bearing half of this file. `include`",
+    "keeps root-level scratch files (probes, one-off scripts) inside a",
+    "bounded project instead of spawning a fresh inferred one each time."
+  ],
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "node",
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": [
+    "*.ts",
+    "*.tsx",
+    "*.js",
+    "*.jsx",
+    "*.mjs",
+    "*.cjs",
+    ".claude/workflows/**/*"
+  ],
+  "exclude": [
+    "vendor",
+    "benchmarks",
+    "graphify-out",
+    "docs",
+    "node_modules",
+    ".git",
+    ".venv",
+    "backup_models"
+  ]
+}
