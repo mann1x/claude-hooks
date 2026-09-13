@@ -62,9 +62,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path, PurePath
+from typing import Optional
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -104,6 +106,63 @@ def _bin_key(command: str) -> str:
     return name
 
 
+# npm's Windows shim names node.exe first, then the script it runs:
+#
+#   ... & "%_prog%"  "%dp0%\node_modules\pyright\langserver.index.js" %*
+#
+# Targets are not reliably ``.js``: typescript-language-server points at
+# a ``.mjs`` and vscode-langservers-extracted at an extensionless file.
+# So capture every %dp0%-relative token, drop the interpreter, and take
+# the last one.
+_SHIM_TARGET_RE = re.compile(r'"%dp0%\\+([^"]+)"', re.IGNORECASE)
+_NODE_RE = re.compile(r"node(\.exe)?$", re.IGNORECASE)
+
+
+def _node_shim_target(shim: Path) -> Optional[Path]:
+    """Return the script an npm ``.cmd`` shim wraps, if resolvable."""
+    try:
+        text = shim.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    targets = [t for t in _SHIM_TARGET_RE.findall(text)
+               if not _NODE_RE.fullmatch(t)]
+    if not targets:
+        return None
+    target = shim.parent / targets[-1].replace("\\", os.sep)
+    return target if target.is_file() else None
+
+
+def spawnable_command(resolved: str, args: list[str]) -> tuple[list[str], bool]:
+    """Return ``(command, rewritten)`` that ``cclsp`` can actually spawn.
+
+    cclsp calls ``child_process.spawn(cmd, args, {shell: false})``. Since
+    the fix for CVE-2024-27980, Node **refuses** to execute a ``.cmd`` or
+    ``.bat`` file that way — it raises ``EINVAL`` before the process
+    exists. Every npm-installed language server on Windows is a ``.cmd``
+    shim, so all of them fail; only the native ``.exe`` servers (gopls,
+    clangd, rust-analyzer, …) ever worked.
+
+    Measured on pandorum 2026-09-13: 6 of 12 configured servers threw
+    ``EINVAL``, including ``pyright-langserver.cmd``, which predated any
+    of this. Python, TypeScript and bash had never worked through the
+    MCP on that host.
+
+    Note this is the *opposite* constraint from our own engine, which
+    spawns via Python: ``CreateProcess`` there happily runs a ``.cmd``
+    but ignores ``PATHEXT``, so it needs the resolved shim path. Two
+    consumers, two spawn models — which is why only the MCP's config
+    gets rewritten.
+    """
+    path = Path(resolved)
+    if path.suffix.lower() not in (".cmd", ".bat"):
+        return [resolved, *args], False
+    target = _node_shim_target(path)
+    if target is None:
+        # Nothing better available; leave it and let the caller warn.
+        return [resolved, *args], False
+    return ["node", str(target), *args], True
+
+
 def mcp_config_path() -> Path:
     """Where the ``lsp`` MCP server reads its config from.
 
@@ -139,8 +198,16 @@ def reconcile(cfg: dict, *, resolve_commands: bool = False) -> tuple[dict, list[
     """Return ``(new_cfg, notes)``.
 
     ``resolve_commands`` rewrites the command of *newly added* entries
-    to the absolute path ``shutil.which`` reports. Existing entries keep
-    their command either way — a hand-tuned one is not overwritten.
+    to the absolute path ``shutil.which`` reports, and rewrites Windows
+    ``.cmd`` shims to ``node <script>`` — see :func:`spawnable_command`.
+
+    It also **repairs** an existing entry that names a ``.cmd`` shim.
+    That is a deliberate exception to "an existing command is never
+    overwritten": a shim cclsp raises ``EINVAL`` on is not hand-tuning,
+    it is a server that cannot start. Leaving it would have preserved
+    pandorum's dead ``pyright-langserver.cmd`` entry — the one that
+    proved this class of failure predates the sync script entirely.
+    Anything that is not a ``.cmd``/``.bat`` shim is still left alone.
     """
     by_bin = {
         _bin_key(s["command"][0]): s
@@ -170,12 +237,29 @@ def reconcile(cfg: dict, *, resolve_commands: bool = False) -> tuple[dict, list[
                 f"  SKIP   {spec.bin}: {','.join(skipped)} have no languageId "
                 f"in lsp.py — add them there first")
 
+        if entry is not None and resolve_commands:
+            existing = entry.get("command") or []
+            if existing and Path(existing[0]).suffix.lower() in (".cmd", ".bat"):
+                repaired, rewritten = spawnable_command(
+                    existing[0], list(existing[1:]))
+                if rewritten:
+                    entry["command"] = repaired
+                    notes.append(
+                        f"  REPAIR {spec.bin}: .cmd shim cannot be spawned by "
+                        f"cclsp (EINVAL) -> node {Path(repaired[1]).name}")
+                else:
+                    notes.append(
+                        f"  WARN   {spec.bin}: .cmd shim will fail with EINVAL "
+                        f"and its target could not be resolved")
+
         if entry is None:
             command = list(spec.cclsp_command)
             if resolve_commands:
                 # `which` honours PATHEXT; CreateProcess does not. A bare
-                # name here is invisible to cclsp on Windows.
-                command[0] = resolved
+                # name here is invisible to cclsp on Windows. The shim it
+                # finds is then unspawnable *by node*, so resolve through
+                # to the script the shim wraps.
+                command, _ = spawnable_command(resolved, command[1:])
             cfg["servers"].append({
                 "extensions": wanted,
                 "command": command,
