@@ -66,7 +66,7 @@ import re
 import shutil
 import sys
 from pathlib import Path, PurePath
-from typing import Optional
+from typing import Iterable, Optional
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -244,7 +244,34 @@ def mcp_config_path() -> Path:
     return DEFAULT_MCP_CONFIG
 
 
-def reconcile(cfg: dict, *, resolve_commands: bool = False) -> tuple[dict, list[str]]:
+EXCLUDE_KEY = "_cclsp_sync"
+
+
+def excluded_names(cfg: dict) -> set[str]:
+    """Servers this config has opted out of.
+
+    Persisted *inside* the config file, because the alternative is a
+    flag the operator must remember on every future run — and the whole
+    point of this script is that drift happens when a step is skipped.
+    cclsp reads the file with ``JSON.parse`` and only ever touches
+    ``config.servers``, so an extra top-level key is inert to it.
+    """
+    block = cfg.get(EXCLUDE_KEY)
+    if not isinstance(block, dict):
+        return set()
+    return {str(n) for n in (block.get("exclude") or [])}
+
+
+def add_exclusions(cfg: dict, names: Iterable[str]) -> set[str]:
+    """Record ``names`` as excluded and return the full exclusion set."""
+    current = excluded_names(cfg) | {str(n) for n in names}
+    if current:
+        cfg.setdefault(EXCLUDE_KEY, {})["exclude"] = sorted(current)
+    return current
+
+
+def reconcile(cfg: dict, *, resolve_commands: bool = False,
+              exclude: Optional[set[str]] = None) -> tuple[dict, list[str]]:
     """Return ``(new_cfg, notes)``.
 
     ``resolve_commands`` rewrites the command of *newly added* entries
@@ -260,10 +287,17 @@ def reconcile(cfg: dict, *, resolve_commands: bool = False) -> tuple[dict, list[
     Anything that is not a ``.cmd``/``.bat`` shim is still left alone.
     """
     notes: list[str] = []
+    exclude = exclude or excluded_names(cfg)
 
     for spec in SPECS:
         resolved = shutil.which(spec.bin)
         entry = _find_entry(cfg, spec)
+
+        if spec.name in exclude or spec.bin in exclude:
+            if entry is not None:
+                cfg["servers"] = [s for s in cfg["servers"] if s is not entry]
+                notes.append(f"  EXCLUDE {spec.bin}: removed (opted out)")
+            continue
         if resolved is None:
             if entry is not None:
                 notes.append(
@@ -330,11 +364,14 @@ def reconcile(cfg: dict, *, resolve_commands: bool = False) -> tuple[dict, list[
 
 
 def _sync_one(path: Path, *, label: str, write: bool,
-              resolve_commands: bool) -> tuple[bool, bool]:
+              resolve_commands: bool,
+              exclude: Iterable[str] = ()) -> tuple[bool, bool]:
     """Sync a single config file. Returns ``(changed, wrote)``."""
     cfg = _load(path)
     before = json.dumps(cfg, sort_keys=True)
-    cfg, notes = reconcile(cfg, resolve_commands=resolve_commands)
+    active = add_exclusions(cfg, exclude) if exclude else excluded_names(cfg)
+    cfg, notes = reconcile(cfg, resolve_commands=resolve_commands,
+                           exclude=active)
     changed = json.dumps(cfg, sort_keys=True) != before
 
     print(f"\n{label} — {path}")
@@ -365,6 +402,13 @@ def main() -> int:
                          "one leaves the MCP stale.")
     ap.add_argument("--mcp-path", default=None,
                     help="override the MCP config location")
+    ap.add_argument("--mcp-exclude", action="append", default=[],
+                    metavar="NAME",
+                    help="do not configure NAME in the MCP config, and "
+                         "remove it if present. Persisted in the file, so "
+                         "later runs keep honouring it. Repeatable. Applies "
+                         "to the MCP config only — the engine is a separate "
+                         "consumer with its own constraints.")
     a = ap.parse_args()
 
     project_path = Path(a.project).resolve() / "cclsp.json"
@@ -380,6 +424,7 @@ def main() -> int:
             # Windows: cclsp spawns by the configured name, and a bare
             # name does not resolve to a .CMD shim.
             write=a.write, resolve_commands=True,
+            exclude=a.mcp_exclude,
         )
         changed = changed or m_changed
         wrote = wrote or m_wrote

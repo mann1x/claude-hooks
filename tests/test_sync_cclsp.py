@@ -59,11 +59,14 @@ class BinKeyTests(unittest.TestCase):
 
 class ReconcileTests(unittest.TestCase):
 
-    def _spec_stub(self, name="gopls", ext=("go",)):
+    def _spec_stub(self, name_="gopls", ext=("go",)):
+        """Mirror LangServerSpec: ``name`` is the spec identity the
+        exclusion list matches on, ``bin`` is the executable."""
         class S:
-            bin = name
+            name = name_
+            bin = name_
             extensions = ext
-            cclsp_command = (name,)
+            cclsp_command = (name_,)
         return S()
 
     def test_already_mapped_server_is_not_duplicated(self):
@@ -128,6 +131,88 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual(out["servers"][0]["command"],
                          ["/opt/custom/tsls", "--stdio"])
         self.assertIn("js", out["servers"][0]["extensions"])
+
+
+class ExclusionTests(unittest.TestCase):
+    """Opting a server out of the MCP config, persistently.
+
+    vscode-json-language-server was excluded on pandorum 2026-09-13: it
+    was the slowest to answer cclsp's hardcoded 3 s initialization race
+    and cline would not load the MCP with it configured. The engine
+    keeps its json support — different consumer, different constraints.
+    """
+
+    def _spec(self, name="vscode-json-language-server", ext=("json",)):
+        class S:
+            pass
+        S.name = name
+        S.bin = name
+        S.extensions = ext
+        S.cclsp_command = (name, "--stdio")
+        return S()
+
+    def test_excluded_server_is_not_added(self):
+        cfg = {"servers": []}
+        with mock.patch.object(sync_cclsp, "SPECS", [self._spec()]), \
+             mock.patch.object(sync_cclsp.shutil, "which",
+                               return_value="/usr/bin/x"):
+            out, _ = sync_cclsp.reconcile(
+                cfg, exclude={"vscode-json-language-server"})
+        self.assertEqual(out["servers"], [])
+
+    def test_excluded_server_already_present_is_removed(self):
+        cfg = {"servers": [
+            {"extensions": ["json", "jsonc"], "command": ["node", "/x/json"]},
+        ]}
+        with mock.patch.object(sync_cclsp, "SPECS", [self._spec()]), \
+             mock.patch.object(sync_cclsp.shutil, "which",
+                               return_value="/usr/bin/x"):
+            out, notes = sync_cclsp.reconcile(
+                cfg, exclude={"vscode-json-language-server"})
+        self.assertEqual(out["servers"], [])
+        self.assertTrue(any("EXCLUDE" in n for n in notes))
+
+    def test_exclusion_persists_in_the_file(self):
+        """Otherwise it is a flag the operator must remember forever —
+        and a forgotten step is how this whole config drifted."""
+        cfg = {"servers": []}
+        sync_cclsp.add_exclusions(cfg, ["vscode-json-language-server"])
+        self.assertEqual(sync_cclsp.excluded_names(cfg),
+                         {"vscode-json-language-server"})
+        # Survives a round-trip through JSON, which is how it is stored.
+        reloaded = json.loads(json.dumps(cfg))
+        self.assertEqual(sync_cclsp.excluded_names(reloaded),
+                         {"vscode-json-language-server"})
+
+    def test_a_later_run_without_the_flag_still_honours_it(self):
+        cfg = {"servers": []}
+        sync_cclsp.add_exclusions(cfg, ["vscode-json-language-server"])
+        with mock.patch.object(sync_cclsp, "SPECS", [self._spec()]), \
+             mock.patch.object(sync_cclsp.shutil, "which",
+                               return_value="/usr/bin/x"):
+            out, _ = sync_cclsp.reconcile(cfg)      # no exclude= passed
+        self.assertEqual(out["servers"], [])
+
+    def test_other_servers_are_unaffected(self):
+        cfg = {"servers": []}
+        specs = [self._spec(),
+                 self._spec("pyright-langserver", ("py",))]
+        with mock.patch.object(sync_cclsp, "SPECS", specs), \
+             mock.patch.object(sync_cclsp.shutil, "which",
+                               return_value="/usr/bin/x"):
+            out, _ = sync_cclsp.reconcile(
+                cfg, exclude={"vscode-json-language-server"})
+        self.assertEqual(len(out["servers"]), 1)
+        self.assertEqual(out["servers"][0]["extensions"], ["py"])
+
+    def test_exclusion_key_does_not_disturb_the_servers_list(self):
+        """cclsp reads the file with JSON.parse and only touches
+        config.servers, so the extra top-level key is inert to it."""
+        cfg = {"servers": [{"extensions": ["go"], "command": ["gopls"]}]}
+        sync_cclsp.add_exclusions(cfg, ["x"])
+        self.assertIn("servers", cfg)
+        self.assertEqual(len(cfg["servers"]), 1)
+        self.assertIn(sync_cclsp.EXCLUDE_KEY, cfg)
 
 
 class NodeShimTests(unittest.TestCase):
@@ -216,6 +301,7 @@ class DedupeTests(unittest.TestCase):
         ]}
 
         class S:
+            name = "typescript-language-server"
             bin = "typescript-language-server"
             extensions = ("ts", "js")
             cclsp_command = ("typescript-language-server", "--stdio")
@@ -224,6 +310,7 @@ class DedupeTests(unittest.TestCase):
 
     def test_second_run_does_not_duplicate(self):
         class S:
+            name = "typescript-language-server"
             bin = "typescript-language-server"
             extensions = ("ts", "js")
             cclsp_command = ("typescript-language-server", "--stdio")
