@@ -101,6 +101,14 @@ class LangServerSpec:
     tier: int                       # 1 (auto-install offered) or 2 (manual only)
     installers: tuple[Installer, ...]  # in preference order
     docs_url: Optional[str] = None  # link surfaced for Tier 2 / blocked Tier 1
+    #: External tools the server needs to *produce diagnostics*, as
+    #: :data:`TOOL_SPECS` keys. Distinct from ``installers``: the server
+    #: starts, handshakes and reports itself healthy without these, and
+    #: then returns an empty diagnostic list forever — which is
+    #: indistinguishable from a clean file. bash-language-server is the
+    #: case that prompted this: it shells out to ``shellcheck`` for
+    #: every diagnostic it emits, and neither host had it.
+    requires: tuple[str, ...] = ()
 
 
 SPECS: tuple[LangServerSpec, ...] = (
@@ -132,7 +140,12 @@ SPECS: tuple[LangServerSpec, ...] = (
         extensions=("rs",),
         cclsp_command=("rust-analyzer",),
         tier=1,
-        installers=(Installer.RUSTUP, Installer.BREW, Installer.SCOOP),
+        # rustup first (it is the toolchain's own component, so it
+        # tracks the installed Rust), then winget ahead of scoop on
+        # Windows — in-box, no opt-in manager. `Rustlang.rust-analyzer`
+        # confirmed present 2026-09-13.
+        installers=(Installer.RUSTUP, Installer.BREW,
+                    Installer.WINGET, Installer.SCOOP),
         docs_url="https://rust-analyzer.github.io/",
     ),
     LangServerSpec(
@@ -169,6 +182,7 @@ SPECS: tuple[LangServerSpec, ...] = (
         tier=1,
         installers=(Installer.NPM,),
         docs_url="https://github.com/bash-lsp/bash-language-server",
+        requires=("shellcheck",),
     ),
     # Tier 2 — optional. Auto-install offered when a known package
     # manager is available; otherwise displayed as MISSING with the
@@ -207,6 +221,59 @@ SPECS: tuple[LangServerSpec, ...] = (
         docs_url="https://github.com/OmniSharp/omnisharp-roslyn",
     ),
 )
+
+
+# --------------------------------------------------------------------- #
+# External tool dependencies
+#
+# Not language servers — tools a server shells out to. A server whose
+# dependency is missing is the worst failure shape in this subsystem:
+# it installs, starts, handshakes, and reports healthy, then returns an
+# empty diagnostic list for every file. bash-language-server without
+# shellcheck was dead on *both* hosts and neither the engine status nor
+# the install table said a word.
+# --------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class ToolSpec:
+    name: str
+    display: str
+    bin: str
+    why: str                        # what breaks without it, in one line
+    installers: tuple[Installer, ...]
+    docs_url: Optional[str] = None
+
+
+TOOL_SPECS: dict[str, ToolSpec] = {
+    "shellcheck": ToolSpec(
+        name="shellcheck",
+        display="ShellCheck",
+        bin="shellcheck",
+        why="bash-language-server emits no diagnostics at all without it",
+        # msys2 is deliberately absent: its package db carries no
+        # shellcheck (checked 2026-09-13 against a synced db — the
+        # Haskell build is not packaged there), so offering pacman
+        # would be an install that cannot succeed. scoop `main` and
+        # winget `koalaman.shellcheck` both carry 0.11.0.
+        # winget before scoop on Windows: it is in-box on Win10 1909+
+        # and needs no opt-in package manager, same rationale as clangd.
+        installers=(Installer.APT, Installer.DNF, Installer.BREW,
+                    Installer.WINGET, Installer.SCOOP),
+        docs_url="https://www.shellcheck.net/",
+    ),
+}
+
+
+TOOL_INSTALL_COMMANDS: dict[Installer, dict[str, list[str]]] = {
+    Installer.APT: {"shellcheck": ["apt-get", "install", "-y", "shellcheck"]},
+    Installer.DNF: {"shellcheck": ["dnf", "install", "-y", "ShellCheck"]},
+    Installer.BREW: {"shellcheck": ["brew", "install", "shellcheck"]},
+    Installer.SCOOP: {"shellcheck": ["scoop", "install", "shellcheck"]},
+    Installer.WINGET: {"shellcheck": [
+        "winget", "install", "--id", "koalaman.shellcheck",
+        "--silent", "--accept-source-agreements", "--accept-package-agreements",
+    ]},
+}
 
 
 # --------------------------------------------------------------------- #
@@ -287,6 +354,12 @@ INSTALL_COMMANDS: dict[Installer, dict[str, list[str]]] = {
             "--accept-source-agreements",
             "--accept-package-agreements",
         ],
+        "rust-analyzer": [
+            "winget", "install", "--id", "Rustlang.rust-analyzer",
+            "--silent",
+            "--accept-source-agreements",
+            "--accept-package-agreements",
+        ],
     },
     Installer.MANUAL: {},
 }
@@ -333,6 +406,112 @@ def _manager_available(installer: Installer) -> bool:
     return shutil.which(bin_name) is not None
 
 
+#: Where source/release installs land when no package manager has the
+#: package. Overridable per host via ``CLAUDE_HOOKS_LSP_PREFIX`` — on
+#: solidpc that is ``/shared/dev/lsp-servers``. Binaries are symlinked
+#: into :data:`RELEASE_BIN_DIR` so they reach ``PATH`` the normal way.
+DEFAULT_RELEASE_PREFIX = "/usr/local/lib/lsp-servers"
+RELEASE_BIN_DIR = "/usr/local/bin"
+
+
+def release_prefix() -> str:
+    return os.environ.get("CLAUDE_HOOKS_LSP_PREFIX") or DEFAULT_RELEASE_PREFIX
+
+
+@dataclass(frozen=True)
+class ReleaseSpec:
+    """Upstream release tarball, for packages no manager carries.
+
+    Distro packaging for language servers is thin and uneven —
+    Debian 11 has no ``lua-language-server`` and no ``zls`` at all,
+    while Debian 13 and Ubuntu 24.04 do carry the former. Hardcoding
+    either answer is wrong, which is why :func:`apt_has_package` asks
+    the host instead of assuming.
+    """
+    repo: str                 # "LuaLS/lua-language-server"
+    asset_contains: tuple[str, ...]   # all must appear in the asset name
+    asset_excludes: tuple[str, ...] = ()
+    bin_subpath: str = ""     # path to the binary inside the extracted tree
+
+
+#: Keyed by spec name. Only consulted when no package manager works.
+RELEASE_SOURCES: dict[str, ReleaseSpec] = {
+    "lua-language-server": ReleaseSpec(
+        repo="LuaLS/lua-language-server",
+        asset_contains=("linux-x64", ".tar.gz"),
+        asset_excludes=("musl",),
+        bin_subpath="bin/lua-language-server",
+    ),
+    "zls": ReleaseSpec(
+        repo="zigtools/zls",
+        asset_contains=("x86_64-linux", ".tar.xz"),
+        asset_excludes=(".minisig",),
+        bin_subpath="zls",
+    ),
+}
+
+
+def apt_has_package(pkg: str, *, timeout: float = 20.0) -> Optional[bool]:
+    """Does this host's apt actually offer ``pkg``?
+
+    Asked, never assumed. The installer runs on whatever Debian or
+    Ubuntu the user has, and the answer genuinely differs between
+    them — proposing ``apt-get install lua-language-server`` on
+    Debian 11 produces a confident-looking command that cannot work.
+    """
+    exe = shutil.which("apt-cache")
+    if not exe:
+        return None          # cannot check — not the same as "absent"
+    try:
+        proc = subprocess.run([exe, "policy", pkg], capture_output=True,
+                              text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    if not proc.stdout.strip():
+        return False         # apt-cache answered, and the answer is "no"
+    for line in proc.stdout.splitlines():
+        if "Candidate:" in line:
+            cand = line.split("Candidate:", 1)[1].strip()
+            return bool(cand) and cand != "(none)"
+    return False
+
+
+def dnf_has_package(pkg: str, *, timeout: float = 30.0) -> Optional[bool]:
+    """dnf counterpart of :func:`apt_has_package`. ``None`` when the
+    question could not be asked."""
+    exe = shutil.which("dnf")
+    if not exe:
+        return None
+    try:
+        proc = subprocess.run([exe, "list", "--available", pkg],
+                              capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return False
+    return pkg.lower() in proc.stdout.lower()
+
+
+def _repo_has_package(installer: Installer, cmd: list[str]) -> bool:
+    """Availability probe for repo-backed managers.
+
+    Only a definitive "this distro does not carry it" vetoes the
+    installer. A probe that could not run — ``apt-cache`` absent, the
+    command erroring — returns ``None`` and is treated as *allow*:
+    "could not check" is not "unavailable", and turning an unanswerable
+    question into a veto would silently strip apt from hosts that have
+    it. Non-repo managers name a package id already verified by hand,
+    and probing each would cost a network round trip per candidate.
+    """
+    if installer is Installer.APT:
+        return apt_has_package(cmd[-1]) is not False
+    if installer is Installer.DNF:
+        return dnf_has_package(cmd[-1]) is not False
+    return True
+
+
 def select_installer_for(spec: LangServerSpec) -> Optional[Installer]:
     """Per-OS dispatch — first installer in ``spec.installers`` that
     is (a) allowed on the current platform, (b) has its package
@@ -347,7 +526,13 @@ def select_installer_for(spec: LangServerSpec) -> Optional[Installer]:
             continue
         if not _manager_available(inst):
             continue
-        if spec.name not in INSTALL_COMMANDS.get(inst, {}):
+        cmd = INSTALL_COMMANDS.get(inst, {}).get(spec.name)
+        if not cmd:
+            continue
+        if not _repo_has_package(inst, cmd):
+            # The manager is present but this distro release does not
+            # carry the package — keep looking rather than proposing a
+            # command that will fail.
             continue
         return inst
     return None
@@ -521,6 +706,23 @@ def install_language_server(
     cmd = INSTALL_COMMANDS.get(installer, {}).get(spec.name)
     if not cmd:
         return False, f"no install command registered for {spec.name} via {installer.value}"
+    return _execute_install(cmd, installer, dry_run=dry_run, timeout=timeout)
+
+
+def _execute_install(
+    cmd: list[str],
+    installer: Installer,
+    *,
+    dry_run: bool = False,
+    timeout: float = 600.0,
+) -> tuple[bool, str]:
+    """Run one install command and classify the result.
+
+    Shared by :func:`install_language_server` and :func:`install_tool`
+    so the manager-specific traps below — scoop exiting 0 on a missing
+    manifest, winget exiting non-zero when nothing needs upgrading —
+    are handled identically no matter what is being installed.
+    """
 
     # Windows: ``CreateProcess`` does NOT honor ``PATHEXT`` — a bare
     # argv of ``["npm", "install", ...]`` fails with
@@ -590,6 +792,216 @@ def install_language_server(
 
     err = (proc.stderr or proc.stdout or "").strip().splitlines()
     return False, (err[-1] if err else f"exit={proc.returncode}")[:200]
+
+
+# --------------------------------------------------------------------- #
+# Release (from-source) install — for what no package manager carries
+# --------------------------------------------------------------------- #
+
+def _latest_release_asset(rel: ReleaseSpec, *, timeout: float = 30.0):
+    """Return ``(tag, asset_name, url)`` for the newest matching asset."""
+    import json as _json
+    import urllib.request
+
+    url = f"https://api.github.com/repos/{rel.repo}/releases/latest"
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "claude-hooks-installer",
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = _json.loads(r.read().decode("utf-8"))
+    for asset in data.get("assets", []):
+        name = asset.get("name", "")
+        if all(t in name for t in rel.asset_contains) and not any(
+            x in name for x in rel.asset_excludes
+        ):
+            return data.get("tag_name", "latest"), name, asset["browser_download_url"]
+    raise RuntimeError(
+        f"no asset in {rel.repo}@{data.get('tag_name')} matched "
+        f"{rel.asset_contains}")
+
+
+def _safe_extract(archive: str, dest: str) -> None:
+    """Extract without letting a member escape ``dest``.
+
+    A tar member may name ``../`` or an absolute path; honouring that
+    writes outside the prefix the operator chose.
+    """
+    import tarfile
+
+    with tarfile.open(archive) as tf:
+        base = os.path.realpath(dest)
+        for m in tf.getmembers():
+            target = os.path.realpath(os.path.join(dest, m.name))
+            if not (target == base or target.startswith(base + os.sep)):
+                raise RuntimeError(f"unsafe tar member: {m.name}")
+        try:
+            tf.extractall(dest, filter="data")   # py3.12+/3.11.4+
+        except TypeError:                        # pragma: no cover
+            tf.extractall(dest)
+
+
+def install_from_release(
+    name: str,
+    *,
+    prefix: Optional[str] = None,
+    bin_dir: Optional[str] = None,
+    dry_run: bool = False,
+    timeout: float = 600.0,
+) -> tuple[bool, str]:
+    """Install ``name`` from its upstream release tarball.
+
+    The fallback for packages no manager on this host carries — which
+    is the common case for language servers on stable distros, not an
+    edge case. Everything lands under ``prefix`` (one directory per
+    version, so an upgrade is additive and reversible) with a symlink
+    from ``bin_dir`` so it reaches ``PATH`` the ordinary way.
+    """
+    rel = RELEASE_SOURCES.get(name)
+    if rel is None:
+        return False, f"no release source registered for {name}"
+    if sys.platform not in ("linux", "linux2"):
+        return False, (
+            f"release install for {name} is wired for Linux assets only; "
+            f"use a package manager on {sys.platform}")
+
+    prefix = prefix or release_prefix()
+    bin_dir = bin_dir or RELEASE_BIN_DIR
+
+    try:
+        tag, asset, url = _latest_release_asset(rel)
+    except Exception as e:
+        return False, f"could not resolve latest release: {e}"
+
+    target = os.path.join(prefix, f"{name}-{tag}")
+    link = os.path.join(bin_dir, name)
+    if dry_run:
+        return True, (f"[dry-run] would install {name} {tag} from {url} "
+                      f"into {target}, symlink {link}")
+
+    import tempfile
+    import urllib.request
+
+    try:
+        os.makedirs(target, exist_ok=True)
+        with tempfile.TemporaryDirectory() as td:
+            archive = os.path.join(td, asset)
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "claude-hooks-installer"})
+            with urllib.request.urlopen(req, timeout=timeout) as r, \
+                    open(archive, "wb") as f:
+                shutil.copyfileobj(r, f)
+            _safe_extract(archive, target)
+    except Exception as e:
+        return False, f"download/extract failed: {e}"
+
+    binary = os.path.join(target, rel.bin_subpath)
+    if not os.path.isfile(binary):
+        found = None
+        for root, _dirs, files in os.walk(target):
+            if os.path.basename(rel.bin_subpath) in files:
+                found = os.path.join(root, os.path.basename(rel.bin_subpath))
+                break
+        if not found:
+            return False, f"binary {rel.bin_subpath} not found under {target}"
+        binary = found
+    try:
+        os.chmod(binary, 0o755)
+        tmp_link = link + ".new"
+        if os.path.lexists(tmp_link):
+            os.unlink(tmp_link)
+        os.symlink(binary, tmp_link)
+        os.replace(tmp_link, link)
+    except OSError as e:
+        return False, (f"installed to {target} but could not link {link}: {e} "
+                       f"(need write access to {bin_dir}?)")
+    return True, f"{name} {tag} -> {binary} (linked at {link})"
+
+
+# --------------------------------------------------------------------- #
+# External tool dependencies — detection + install
+# --------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class ToolState:
+    spec: ToolSpec
+    installed: bool
+    path: Optional[str]
+    installer_for_missing: Optional[Installer]
+    #: Language servers that need this tool and are themselves
+    #: installed — i.e. the ones currently producing nothing.
+    needed_by: tuple[str, ...] = ()
+
+
+def select_installer_for_tool(spec: ToolSpec) -> Optional[Installer]:
+    """First installer that is allowed on this OS, present on PATH, and
+    has a command registered for ``spec``. Mirrors
+    :func:`select_installer_for`."""
+    plat = _current_platform()
+    for inst in spec.installers:
+        if inst is Installer.MANUAL:
+            continue
+        if not _installer_allowed_on(inst, plat):
+            continue
+        if not _manager_available(inst):
+            continue
+        cmd = TOOL_INSTALL_COMMANDS.get(inst, {}).get(spec.name)
+        if not cmd:
+            continue
+        if not _repo_has_package(inst, cmd):
+            continue
+        return inst
+    return None
+
+
+def detect_tools(
+    server_state: Optional[dict[str, "InstalledState"]] = None,
+) -> dict[str, ToolState]:
+    """Which external dependencies are present, and who is waiting.
+
+    ``needed_by`` lists only *installed* servers, because a missing
+    dependency for a server you don't have is not a problem — while a
+    missing one for a server you do have is a server that reports
+    healthy and returns nothing.
+    """
+    if server_state is None:
+        server_state = detect_language_servers()
+    waiting: dict[str, list[str]] = {}
+    for st in server_state.values():
+        if not st.installed:
+            continue
+        for dep in st.spec.requires:
+            waiting.setdefault(dep, []).append(st.spec.name)
+
+    out: dict[str, ToolState] = {}
+    for name, spec in TOOL_SPECS.items():
+        path = shutil.which(spec.bin)
+        out[name] = ToolState(
+            spec=spec,
+            installed=bool(path),
+            path=path,
+            installer_for_missing=None if path else select_installer_for_tool(spec),
+            needed_by=tuple(sorted(waiting.get(name, ()))),
+        )
+    return out
+
+
+def install_tool(
+    spec: ToolSpec,
+    installer: Installer,
+    *,
+    dry_run: bool = False,
+    timeout: float = 600.0,
+) -> tuple[bool, str]:
+    """Install one external dependency. Same contract as
+    :func:`install_language_server`."""
+    cmd = TOOL_INSTALL_COMMANDS.get(installer, {}).get(spec.name)
+    if not cmd:
+        return False, (
+            f"no install command registered for {spec.name} "
+            f"via {installer.value}"
+        )
+    return _execute_install(cmd, installer, dry_run=dry_run, timeout=timeout)
 
 
 # --------------------------------------------------------------------- #

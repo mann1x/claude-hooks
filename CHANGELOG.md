@@ -18,6 +18,41 @@ release with the auto-generated source archive
 
 ### Fixed
 
+- **`shellcheck` is a dependency, and nothing modelled dependencies.**
+  bash-language-server shells out to it for every diagnostic it emits;
+  without it the server installs, starts, handshakes, reports healthy
+  and returns an empty list for every file. It was absent on *both*
+  hosts, so bash diagnostics had never worked anywhere. `LangServerSpec`
+  gains `requires`, `TOOL_SPECS`/`TOOL_INSTALL_COMMANDS` describe
+  non-server tools, `detect_tools()` reports which installed servers are
+  waiting on what, and `install.py` offers the install after the server
+  loop. The `needed_by` list only counts *installed* servers — a missing
+  dependency for a server you don't have is noise.
+
+- **The installer assumed distro packaging instead of asking.** It would
+  happily propose `apt-get install -y lua-language-server` on a Debian
+  that has no such package. `apt_has_package()` / `dnf_has_package()`
+  now probe, and they are **tri-state**: only a definitive "not carried"
+  vetoes an installer, because "could not check" — `apt-cache` missing,
+  the command erroring — must not silently strip apt from hosts that
+  have it.
+
+- **A from-source path for what no manager carries.** Debian 11 has
+  neither `lua-language-server` nor `zls`; Debian 13 has the first.
+  `install_from_release()` fetches the upstream release, extracts it
+  under a configurable prefix (`CLAUDE_HOOKS_LSP_PREFIX`, one directory
+  per version so upgrades are additive) and symlinks into
+  `/usr/local/bin`. Tar members that escape the prefix are refused. The
+  installer asks before the network call, not after — a pre-flight
+  lookup spends a round trip on every user who declines.
+
+- **winget before scoop on Windows**, consistently: it is in-box on
+  Win10 1909+ while scoop needs an opt-in install first. Applied to
+  `shellcheck` and `rust-analyzer` (`Rustlang.rust-analyzer`, confirmed
+  present), matching the rationale the clangd spec already carried.
+  msys2 is deliberately *not* offered for shellcheck — its db carries no
+  such package, so the offer could only fail.
+
 - **Windows LSP diagnostics were computed, then thrown away.** With
   the spawn fixed, pyright started and answered in under a second — and
   `diagnostics()` still returned `[]`. The engine keys its diagnostic

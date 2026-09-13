@@ -6958,6 +6958,16 @@ def _setup_lsp_engine(cfg: dict, *, non_interactive: bool, dry_run: bool) -> Non
     # Re-detect after the install loop so the starter cclsp.json
     # reflects what's now on disk.
     state = _lang.detect_language_servers()
+
+    # Dependencies of the servers that are now installed. A server
+    # missing its external tool is the worst outcome in this whole
+    # section: it installs, starts, handshakes, reports healthy, and
+    # returns an empty diagnostic list forever. Reuses the detection
+    # above rather than running its own — that pass probes disk
+    # locations on Windows, and doing it twice is both slow and a
+    # second chance to disagree with itself.
+    _lsp_offer_dependency_installs(state, dry_run=dry_run)
+
     n_tier1_installed = sum(
         1 for st in state.values()
         if st.installed and st.spec.tier == 1
@@ -7146,6 +7156,109 @@ def _lsp_maybe_bootstrap_scoop(state, *, dry_run: bool):
     return _lang.detect_language_servers()
 
 
+def _lsp_offer_release_install(st, *, dry_run: bool = False) -> bool:
+    """Offer an upstream-release install for a spec no manager carries.
+
+    Returns True when the offer was made (accepted or declined), False
+    when there is no release source and the caller should fall through
+    to its manual-install pointer.
+
+    The install prefix is a prompt rather than a constant because hosts
+    differ about where non-packaged software belongs — this one keeps
+    it on /shared/dev, a different disk from /usr/local. The default
+    comes from ``CLAUDE_HOOKS_LSP_PREFIX`` so a host can answer once in
+    its environment instead of at every re-run.
+    """
+    from claude_hooks import lang_servers as _lang  # local — kept light
+
+    if st.spec.name not in _lang.RELEASE_SOURCES:
+        return False
+    if sys.platform not in ("linux", "linux2"):
+        return False
+
+    # Deliberately no pre-flight lookup here. Resolving the latest
+    # release is a network round trip, and doing it before the question
+    # spends it on every user who says no — and drags github into the
+    # test suite, where it desynchronised four scripted-input tests.
+    # The version is reported after the install instead.
+    rel = _lang.RELEASE_SOURCES[st.spec.name]
+    print(f"\n  {st.spec.name}: no package for this distro release, but "
+          f"upstream publishes a build ({rel.repo}).")
+    default_prefix = _lang.release_prefix()
+    ans = input(
+        f"  Install {st.spec.name} from the upstream release? [Y/n]: ",
+    ).strip().lower()
+    if ans and ans not in ("y", "yes"):
+        print(f"  [skipping {st.spec.name}]")
+        return True
+
+    prefix = input(
+        f"  Install prefix [{default_prefix}]: ",
+    ).strip() or default_prefix
+
+    if dry_run:
+        ok, msg = _lang.install_from_release(
+            st.spec.name, prefix=prefix, dry_run=True)
+        print(f"    [dry-run] {msg}")
+        return True
+
+    print(f"    Fetching {st.spec.name} into {prefix} ...")
+    ok, msg = _lang.install_from_release(st.spec.name, prefix=prefix)
+    print(f"    [{'ok' if ok else 'FAIL'}] {msg}")
+    return True
+
+
+def _lsp_offer_dependency_installs(state, *, dry_run: bool = False) -> None:
+    """Detect and offer to install external tools the installed servers
+    need in order to emit anything.
+
+    Separate from the language-server loop because the failure it
+    prevents is different in kind. A missing *server* is visible — the
+    detection table says MISSING and no diagnostics appear for that
+    language, which is at least consistent. A missing *dependency*
+    leaves a server that installs, starts, completes its handshake and
+    reports itself healthy while returning an empty diagnostic list for
+    every file, which is indistinguishable from clean code.
+    bash-language-server without shellcheck was in exactly that state
+    on both hosts on 2026-09-13, and nothing in this installer or the
+    engine's own status said so.
+    """
+    from claude_hooks import lang_servers as _lang  # local — kept light
+
+    tools = _lang.detect_tools(state)
+    pending = [t for t in tools.values() if not t.installed and t.needed_by]
+    if not pending:
+        return
+
+    print("\n  Dependencies of the installed language servers:")
+    for t in pending:
+        print(f"    [MISSING] {t.spec.display} — {t.spec.why}")
+        print(f"              needed by: {', '.join(t.needed_by)}")
+
+    for t in pending:
+        installer = t.spec and t.installer_for_missing
+        if installer is None:
+            url = t.spec.docs_url or "the project's docs"
+            print(f"\n  No package manager on PATH can install "
+                  f"{t.spec.name}. Install it from {url} and re-run.")
+            continue
+        cmd = _lang.TOOL_INSTALL_COMMANDS.get(installer, {}).get(t.spec.name)
+        cmd_str = " ".join(cmd or [])
+        ans = input(
+            f"\n  Install {t.spec.name} via `{cmd_str}`? [Y/n]: ",
+        ).strip().lower()
+        if ans and ans not in ("y", "yes"):
+            print(f"  [skipping {t.spec.name}] — {t.needed_by[0]} will "
+                  "keep returning no diagnostics.")
+            continue
+        if dry_run:
+            print(f"    [dry-run] Would run: {cmd_str}")
+            continue
+        print(f"    Running: {cmd_str}")
+        ok, msg = _lang.install_tool(t.spec, installer, dry_run=False)
+        print(f"    [{'ok' if ok else 'FAIL'}] {msg}")
+
+
 def _lsp_run_install_loop(
     missing_specs,
     state,
@@ -7160,7 +7273,16 @@ def _lsp_run_install_loop(
     for st in missing_specs:
         installer = st.installer_for_missing
         if installer is None:
-            # No installable path — surface why and skip.
+            # No package manager can install it. Before falling back to
+            # "read the docs", check whether upstream publishes a
+            # release we can fetch — for language servers on stable
+            # distros that is the normal case, not an edge one. Debian
+            # 11 carries neither lua-language-server nor zls; Debian 13
+            # carries the first. `select_installer_for` already asked
+            # this host rather than assuming, so arriving here means
+            # the answer really was no.
+            if _lsp_offer_release_install(st, dry_run=dry_run):
+                continue
             url = st.spec.docs_url or "the project's docs"
             print(f"\n  Install {st.spec.name}? Requires a package manager "
                   "not found on PATH.")
