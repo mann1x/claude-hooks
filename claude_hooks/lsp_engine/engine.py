@@ -28,7 +28,7 @@ from typing import Optional
 from claude_hooks.lsp_engine.config import (
     EngineConfig,
     LspServerSpec,
-    resolve_server_for_path,
+    resolve_servers_for_path,
 )
 from claude_hooks.lsp_engine.lsp import (
     Diagnostic,
@@ -107,15 +107,35 @@ class Engine:
         an error — most projects have files no LSP cares about (READMEs,
         JSON fixtures, etc).
         """
-        spec = resolve_server_for_path(path, self._servers)
-        if spec is None:
+        specs = resolve_servers_for_path(path, self._servers)
+        if not specs:
             return False
-        client = self._client_for(spec)
         uri = _path_to_uri(path)
         abs_path = str(Path(path).resolve())
+        opened = []
+        first_error: Optional[LspError] = None
+        for spec in specs:
+            try:
+                self._client_for(spec).did_open(path, content)
+                opened.append(spec)
+            except LspError as e:
+                # One server failing must not cost the file its others —
+                # an .html handled by both an HTML and a TS server is
+                # still worth half an answer.
+                first_error = first_error or e
+                log.warning("did_open: %s failed for %s",
+                            spec.command[0], abs_path, exc_info=True)
+        if not opened:
+            # Every server that claimed the file failed. Returning False
+            # here would report it as "no server claims this file" — a
+            # perfectly normal condition for a README — and lose the
+            # fact that a configured server is broken. Raise what went
+            # wrong instead.
+            if first_error is not None:
+                raise first_error
+            return False
         with self._lock:
-            self._uri_routing[uri] = (abs_path, spec)
-        client.did_open(path, content)
+            self._uri_routing[uri] = (abs_path, tuple(opened))
         return True
 
     def did_change(self, path: str | os.PathLike, content: str) -> bool:
@@ -130,9 +150,9 @@ class Engine:
             entry = self._uri_routing.get(uri)
         if entry is None:
             return False
-        _abs_path, spec = entry
-        client = self._client_for(spec)
-        client.did_change(path, content)
+        _abs_path, specs = entry
+        for spec in specs:
+            self._client_for(spec).did_change(path, content)
         return True
 
     def did_close(self, path: str | os.PathLike) -> bool:
@@ -141,13 +161,15 @@ class Engine:
             entry = self._uri_routing.pop(uri, None)
         if entry is None:
             return False
-        _abs_path, spec = entry
-        client = self._client_for(spec)
-        try:
-            client.did_close(path)
-        except LspError:
-            return False
-        return True
+        _abs_path, specs = entry
+        ok = False
+        for spec in specs:
+            try:
+                self._client_for(spec).did_close(path)
+                ok = True
+            except LspError:
+                continue
+        return ok
 
     def get_diagnostics(
         self,
@@ -160,9 +182,24 @@ class Engine:
             entry = self._uri_routing.get(uri)
         if entry is None:
             return []
-        _abs_path, spec = entry
-        client = self._client_for(spec)
-        return client.get_diagnostics(path, timeout=timeout)
+        _abs_path, specs = entry
+        if len(specs) == 1:
+            return self._client_for(specs[0]).get_diagnostics(
+                path, timeout=timeout)
+        # Several servers claim this file — an .html carrying JS and
+        # CSS, say. Each holds its own view, so the answer is the
+        # union. The timeout is per server rather than shared: a slow
+        # one should not consume the budget of the rest, and the
+        # callers here already bound the whole call.
+        merged: list[Diagnostic] = []
+        for spec in specs:
+            try:
+                merged.extend(
+                    self._client_for(spec).get_diagnostics(
+                        path, timeout=timeout))
+            except LspError:
+                log.debug("get_diagnostics: %s failed", spec.command[0])
+        return merged
 
     def refresh_open_files(self) -> int:
         """Re-send the on-disk content of every open file to its LSP.
@@ -176,7 +213,7 @@ class Engine:
         refreshed = 0
         with self._lock:
             snapshot = dict(self._uri_routing)
-        for uri, (abs_path, spec) in snapshot.items():
+        for uri, (abs_path, specs) in snapshot.items():
             p = Path(abs_path)
             if not p.is_file():
                 with self._lock:
@@ -186,12 +223,13 @@ class Engine:
                 content = p.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            try:
-                client = self._client_for(spec)
-                client.did_change(abs_path, content)
-                refreshed += 1
-            except LspError:  # pragma: no cover — defensive
-                log.exception("refresh: did_change failed for %s", abs_path)
+            for spec in specs:
+                try:
+                    self._client_for(spec).did_change(abs_path, content)
+                    refreshed += 1
+                except LspError:  # pragma: no cover — defensive
+                    log.exception("refresh: did_change failed for %s (%s)",
+                                  abs_path, spec.command[0])
         return refreshed
 
     # ─── introspection ───────────────────────────────────────────────
@@ -208,6 +246,52 @@ class Engine:
     def active_servers(self) -> list[LspServerSpec]:
         with self._lock:
             return list(self._clients.keys())
+
+    def support_report(self) -> list[dict]:
+        """What each configured server claims, and what it can do.
+
+        Two different questions, and the config only answers the first.
+        Extensions say what the engine will *route* — they remain the
+        honest statement of what is supported, and are how an operator
+        reads the config at a glance. Capabilities say what the server
+        will *do* once routed, and only the server can answer that,
+        after it has started.
+
+        ``running`` distinguishes them: a configured-but-never-started
+        server has extensions and no capabilities, which is a claim
+        without evidence rather than a contradiction.
+        """
+        out: list[dict] = []
+        with self._lock:
+            clients = dict(self._clients)
+        for spec in self._servers:
+            client = clients.get(spec)
+            entry = {
+                "command": list(spec.command),
+                "extensions": sorted(spec.extensions),
+                "running": client is not None,
+                "capabilities": [],
+                "pull_diagnostics": False,
+                "stderr_tail": [],
+            }
+            if client is not None:
+                entry["capabilities"] = sorted(client.server_capabilities)
+                entry["pull_diagnostics"] = client.supports_pull_diagnostics
+                # The one channel a degraded server has. bash-language-
+                # server without shellcheck says so here and nowhere
+                # else — its LSP conversation looks perfectly healthy.
+                entry["stderr_tail"] = client.stderr_tail()[-5:]
+            out.append(entry)
+        return out
+
+    def servers_for_path(self, path) -> list[list[str]]:
+        """Which servers would claim ``path`` — all of them, in order.
+
+        Answers "is this file supported, and by what" without opening
+        it, which is the question an operator actually asks.
+        """
+        return [list(s.command)
+                for s in resolve_servers_for_path(path, self._servers)]
 
     def configured_extensions(self) -> set[str]:
         """All extensions any configured server claims, lowercased and

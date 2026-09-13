@@ -43,7 +43,10 @@ forgetting. Beyond the core:
     role-by-role reference (all 6 active roles, including the
     opt-in `tool_executor` + `coder`), and
     the [benchmark index](docs/benchmarks/index.md) for the cloud-model
-    evaluation suite (council-role sweeps, coder, per-language,
+    evaluation suite (council-role sweeps, coder, per-language
+    incl. the `coder_easy` bank — 30 problems × 6 languages = 180
+    questions emitted by `benchmarks/consultants/gen_coder_easy.py`,
+    graded through `benchmarks/consultants/oracles_mlang.py` —
     tool-executor, stall, and caliber-eval — each with its grading
     protocol).
 - **v1.2** — caliber-grounding-proxy cloud-resilience port +

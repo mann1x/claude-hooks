@@ -16,6 +16,171 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed
+
+- **Nothing drained the LSP server's stderr.** `lsp.py` set
+  `stderr=PIPE` and ran one reader thread, for stdout. Two consequences.
+  A server that is *degraded* rather than broken reports it there and
+  nowhere else — the protocol has no message for "I started fine but a
+  helper binary is missing" — so bash-language-server's complaint about
+  a missing shellcheck was invisible while it published empty
+  diagnostics. And an undrained pipe is a deadlock: the buffer is ~64 KB
+  on Linux, and a server that exceeds it blocks on write, stopping its
+  single-threaded event loop from answering LSP at all. rust-analyzer
+  and gopls are both chatty there. Now drained on its own thread, logged
+  (complaint-shaped lines promoted to WARNING), with a bounded tail kept
+  per server for diagnosis.
+
+### Added
+
+- **Server capabilities are captured instead of discarded.** The
+  `initialize` result was validated and thrown away, leaving the engine
+  unable to answer the most basic question about a server it had just
+  started. Exposed as `server_capabilities` / `supports()` /
+  `supports_pull_diagnostics`, and surfaced in the daemon's `status`
+  under `support` alongside each server's claimed extensions and stderr
+  tail — *what is routed* and *what the server will do once routed* are
+  different questions, and only the config answered the first.
+
+- **Pull diagnostics (LSP 3.17), where the server offers them.** The
+  client now declares `textDocument.diagnostic`; without that
+  declaration a server withholds `diagnosticProvider`, so every server
+  necessarily looked push-only. With push, an empty result and a server
+  that never answers are the same observation — we wait out a timeout
+  and return `[]`, which renders as "no problems". Pull turns it into a
+  question with an answer, and a failure into an exception rather than a
+  plausible silence. Measured afterwards: **no installed server
+  advertises it yet** — gopls v0.21.1, pyright, typescript-language-server,
+  bash-language-server and lua-language-server are all push-only — so the
+  path is dormant and falls back. It costs nothing and activates on its
+  own when a server catches up.
+
+### Changed
+
+- **A file may be claimed by more than one server.** `.html` carries
+  JavaScript and CSS; `.vue` and `.svelte` carry all three; `.md`
+  carries whatever its fences say. Routing took the *first* match, which
+  made such a document the property of whichever server happened to be
+  listed first and silently discarded the rest.
+  `resolve_servers_for_path()` returns all claimants in config order,
+  and the engine fans `did_open` / `did_change` / `did_close` across
+  them and merges their diagnostics. Extensions remain the statement of
+  what is supported — they are just no longer exclusive. One server
+  failing now degrades rather than dooms the file, but if *every*
+  claimant fails, `did_open` raises instead of returning `False`:
+  `False` means "no server claims this file", which is normal for a
+  README, and conflating the two would lose the fact that a configured
+  server is broken.
+
+- **`shellcheck` is a dependency, and nothing modelled dependencies.**
+  bash-language-server shells out to it for every diagnostic it emits;
+  without it the server installs, starts, handshakes, reports healthy
+  and returns an empty list for every file. It was absent on *both*
+  hosts, so bash diagnostics had never worked anywhere. `LangServerSpec`
+  gains `requires`, `TOOL_SPECS`/`TOOL_INSTALL_COMMANDS` describe
+  non-server tools, `detect_tools()` reports which installed servers are
+  waiting on what, and `install.py` offers the install after the server
+  loop. The `needed_by` list only counts *installed* servers — a missing
+  dependency for a server you don't have is noise.
+
+- **The installer assumed distro packaging instead of asking.** It would
+  happily propose `apt-get install -y lua-language-server` on a Debian
+  that has no such package. `apt_has_package()` / `dnf_has_package()`
+  now probe, and they are **tri-state**: only a definitive "not carried"
+  vetoes an installer, because "could not check" — `apt-cache` missing,
+  the command erroring — must not silently strip apt from hosts that
+  have it.
+
+- **A from-source path for what no manager carries.** Debian 11 has
+  neither `lua-language-server` nor `zls`; Debian 13 has the first.
+  `install_from_release()` fetches the upstream release, extracts it
+  under a configurable prefix (`CLAUDE_HOOKS_LSP_PREFIX`, one directory
+  per version so upgrades are additive) and symlinks into
+  `/usr/local/bin`. Tar members that escape the prefix are refused. The
+  installer asks before the network call, not after — a pre-flight
+  lookup spends a round trip on every user who declines.
+
+- **winget before scoop on Windows**, consistently: it is in-box on
+  Win10 1909+ while scoop needs an opt-in install first. Applied to
+  `shellcheck` and `rust-analyzer` (`Rustlang.rust-analyzer`, confirmed
+  present), matching the rationale the clangd spec already carried.
+  msys2 is deliberately *not* offered for shellcheck — its db carries no
+  such package, so the offer could only fail.
+
+- **Windows LSP diagnostics were computed, then thrown away.** With
+  the spawn fixed, pyright started and answered in under a second — and
+  `diagnostics()` still returned `[]`. The engine keys its diagnostic
+  cache by URI, and the two sides do not spell a Windows URI the same
+  way: `Path.as_uri()` gives `file:///C:/x/a.py`, while pyright — and
+  anything built on `vscode-uri`, which is most servers — publishes
+  `file:///c%3A/x/a.py`, lowercased drive and percent-encoded colon.
+  Results were filed under the server's spelling and every lookup asked
+  for ours, so the wait timed out and returned empty, which reads as a
+  clean file. POSIX has no drive letter to disagree about, so this was
+  structurally invisible on Linux. `uri_key()` now normalises every
+  dictionary key (drive-letter case, `%3A`, the legacy `file:///c|/`
+  form); the URI on the wire is untouched, because both spellings are
+  valid and servers accept ours.
+
+- **Six extensions the installer can wire had no `languageId`** —
+  `mts`, `cts`, `sh`, `bash`, `lua`, `zig` were announced as
+  `plaintext`, which most servers decline to analyse. That is the same
+  silent-empty failure one layer down, so a test now asserts every
+  extension in `lang_servers.SPECS` resolves to a real language id.
+
+### Added
+
+- **`scripts/sync_cclsp.py`** — reconciles `cclsp.json` with the
+  servers actually on `PATH`. `install.py` writes that file once from
+  what exists at setup time and never revisits it, so servers installed
+  later are never wired. Pandorum had nine installed and four unmapped
+  (`typescript-language-server`, `bash-language-server`,
+  `lua-language-server`, `zls`); solidpc had one. Existing entries keep
+  their command and gain only missing extensions; an uninstalled server
+  is reported, never removed.
+
+- **No LSP diagnostics on Windows for any npm-installed server.**
+  `LspClient.start` handed `Popen` a bare command name, and on Windows
+  `Popen` calls `CreateProcess`, which appends `.exe` and consults
+  nothing else — in particular not `PATHEXT`. npm installs its global
+  binaries as `.CMD` shims, so **pyright-langserver**,
+  **typescript-language-server** and **bash-language-server** were
+  invisible to it while sitting on `PATH` in plain view; `shutil.which`
+  found all three. Go, Rust and C++ were unaffected, because those ship
+  real `.exe`s and `CreateProcess`'s one hardcoded extension covers
+  them — which is how a dead Python/TypeScript LSP hid behind a
+  visibly-working engine.
+
+  Nothing reported it. `PostToolUse._run_lsp_engine` catches the spawn
+  failure, logs a warning and returns no block, so an edit that should
+  have produced diagnostics produced silence instead. The engine's own
+  `status` was healthy throughout: daemon up, servers installed, config
+  enabled. `lsp.py` now resolves the binary through `shutil.which`
+  before spawning, on every platform — on POSIX that is the same `PATH`
+  search `Popen` performs, and one code path beats a branch only the
+  minority platform exercises. An explicit path is never re-resolved,
+  and an unresolvable name is passed through untouched so the
+  `LSP binary not found:` error still quotes what the user configured.
+
+### Removed
+
+- **`patches/apply-caliber-patch.sh`** and its note. The patch deleted
+  `CLAUDE_CODE_SIMPLE=1` from the environment Caliber handed to
+  `claude -p`, where it broke OAuth — and because it rewrote an
+  installed `dist/bin.js`, it had to be re-applied after every Caliber
+  upgrade. Upstream now strips that variable itself
+  (`src/llm/claude-cli.ts:92`, with a test named for the behaviour), and
+  has since before 1.49.6, so the local copy was already inert: the
+  installed `bin.js` on this host carries no patch, and re-running the
+  script exits 1 on "pattern not found".
+
+### Added
+
+- **`.caliberignore`** — keeps `caliber refresh` out of the 171 tracked
+  `*.transcript.db` benchmark sidecars (largest 5.3 MB) and the
+  generated `graphify-out/`. They stay in git; they just stop being read
+  as agent context.
+
 ## [1.15.0] — 2026-09-12
 
 ### Added

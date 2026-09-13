@@ -13,6 +13,7 @@ to validate. Phase 4 (Windows parity) will revisit.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 import unittest
@@ -159,6 +160,26 @@ class TestLanguageIdMapping(unittest.TestCase):
     def test_uppercase_extension(self) -> None:
         self.assertEqual(language_id_for("A.PY"), "python")
 
+    def test_every_matrix_extension_has_a_language_id(self) -> None:
+        """An extension mapped in cclsp.json but missing from
+        ``_LANGUAGE_ID_BY_EXT`` is announced as ``plaintext``, which
+        most servers decline to analyse — producing silent
+        no-diagnostics rather than an error. The installer matrix is
+        the source of truth for which extensions can be wired, so
+        every one of them must resolve to a real language id."""
+        from claude_hooks.lang_servers import SPECS
+
+        self.assertTrue(SPECS, "no server specs found in lang_servers")
+        missing = sorted({
+            ext for sp in SPECS for ext in sp.extensions
+            if language_id_for(f"x.{ext}") == "plaintext"
+        })
+        self.assertEqual(
+            missing, [],
+            f"extensions the installer can wire but lsp.py calls "
+            f"plaintext: {missing}",
+        )
+
     def test_unknown_extension_falls_back_to_plaintext(self) -> None:
         self.assertEqual(language_id_for("a.weird"), "plaintext")
         self.assertEqual(language_id_for("noextension"), "plaintext")
@@ -293,6 +314,82 @@ class TestLspClientWindowlessSpawn(unittest.TestCase):
             f"(0x{expected:08x}) — LSP children will pop console windows",
         )
 
+    def _capture_popen_cmd(self, *, which_returns, os_name=None,
+                           command=("fake-lsp",)) -> list:
+        from unittest.mock import patch
+
+        client = LspClient(
+            command=list(command), root_dir=".",
+            startup_timeout=0.01, request_timeout=0.01,
+        )
+        seen: list = []
+
+        def _fake_popen(cmd, **kwargs):  # noqa: ARG001
+            seen.append(cmd)
+            raise FileNotFoundError("we only need the argv")
+
+        patches = [
+            patch("claude_hooks.lsp_engine.lsp.subprocess.Popen",
+                  side_effect=_fake_popen),
+            patch("claude_hooks.lsp_engine.lsp.shutil.which",
+                  side_effect=lambda n: which_returns),
+        ]
+        if os_name is not None:
+            patches.append(patch("claude_hooks.lsp_engine.lsp.os.name", os_name))
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        with self.assertRaises(LspError):
+            client.start()
+        return seen[0]
+
+    def test_bare_name_is_resolved_before_spawn(self) -> None:
+        """The npm-shim bug: ``CreateProcess`` appends ``.exe`` and does
+        not read ``PATHEXT``, so a ``.CMD`` shim on PATH is invisible to
+        Popen. Every npm-installed server — pyright,
+        typescript-language-server, bash-language-server — failed to
+        start on Windows while ``shutil.which`` found all three.
+
+        This is invisible on the Linux dev box by construction, which
+        is why it survived: there the bare name resolves natively.
+        """
+        cmd = self._capture_popen_cmd(
+            which_returns=r"C:\Users\x\AppData\Roaming\npm\pyright-langserver.CMD",
+            os_name="nt", command=("pyright-langserver", "--stdio"),
+        )
+        self.assertEqual(cmd[0].lower()[-4:], ".cmd",
+                         f"spawned {cmd[0]!r} — the bare name is what fails")
+        self.assertEqual(cmd[1], "--stdio", "arguments must survive resolution")
+
+    def test_unresolvable_name_is_passed_through_unchanged(self) -> None:
+        """A genuinely missing server must still surface as the name the
+        user configured, not ``None`` — the LspError quotes it."""
+        cmd = self._capture_popen_cmd(which_returns=None,
+                                      command=("no-such-lsp", "--stdio"))
+        self.assertEqual(cmd, ["no-such-lsp", "--stdio"])
+
+    def test_absolute_path_is_not_re_resolved(self) -> None:
+        """An explicit path means that exact file — never swap it for
+        whatever happens to be first on PATH."""
+        exact = os.path.join(os.sep, "opt", "custom", "pyright-langserver")
+        cmd = self._capture_popen_cmd(
+            which_returns=os.path.join(os.sep, "usr", "bin", "pyright-langserver"),
+            command=(exact,),
+        )
+        self.assertEqual(cmd[0], exact)
+
+    def test_error_names_the_configured_command_not_the_resolution(self) -> None:
+        from unittest.mock import patch
+
+        client = LspClient(command=["pyright-langserver"], root_dir=".",
+                           startup_timeout=0.01, request_timeout=0.01)
+        with patch("claude_hooks.lsp_engine.lsp.subprocess.Popen",
+                   side_effect=FileNotFoundError("nope")), \
+             patch("claude_hooks.lsp_engine.lsp.shutil.which", return_value=None):
+            with self.assertRaises(LspError) as cm:
+                client.start()
+        self.assertIn("pyright-langserver", str(cm.exception))
+
     def test_posix_does_not_set_creationflags(self) -> None:
         """``creationflags`` is a Windows-only kwarg; must not appear
         on POSIX so ``subprocess.Popen`` stays portable."""
@@ -302,3 +399,84 @@ class TestLspClientWindowlessSpawn(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWindowsUriKey(unittest.TestCase):
+    """Windows LSP servers and Python disagree on how to spell a file
+    URI, and the disagreement silently destroyed every diagnostic.
+
+    Measured on pandorum 2026-09-13, same file:
+
+        engine  (Path.as_uri)  file:///C:/Users/manni/.../a.py
+        pyright (vscode-uri)   file:///c%3A/Users/manni/.../a.py
+
+    pyright published in under a second. The engine filed it under the
+    server's spelling and every lookup asked for its own, so
+    ``diagnostics()`` waited out the timeout and returned ``[]`` — which
+    reads as a clean file, not as a failure. Invisible on POSIX, where
+    there is no drive letter to disagree about.
+    """
+
+    def test_the_two_real_spellings_collide(self) -> None:
+        from claude_hooks.lsp_engine.lsp import uri_key
+        ours = "file:///C:/Users/manni/AppData/Local/Temp/lsp-raw/a.py"
+        theirs = "file:///c%3A/Users/manni/AppData/Local/Temp/lsp-raw/a.py"
+        self.assertEqual(uri_key(ours), uri_key(theirs))
+
+    def test_drive_letter_case_is_normalised(self) -> None:
+        from claude_hooks.lsp_engine.lsp import uri_key
+        self.assertEqual(uri_key("file:///c:/x/a.py"), uri_key("file:///C:/x/a.py"))
+
+    def test_percent_encoded_colon_is_decoded(self) -> None:
+        from claude_hooks.lsp_engine.lsp import uri_key
+        self.assertEqual(uri_key("file:///C%3A/x/a.py"), "file:///C:/x/a.py")
+
+    def test_legacy_pipe_drive_form(self) -> None:
+        """``file:///c|/x`` is the pre-RFC-8089 spelling; some servers
+        still emit it."""
+        from claude_hooks.lsp_engine.lsp import uri_key
+        self.assertEqual(uri_key("file:///c|/x/a.py"), "file:///C:/x/a.py")
+
+    def test_posix_uris_are_untouched(self) -> None:
+        """POSIX has no drive letter — this must be the identity there,
+        or the fix for one platform becomes a bug on the other."""
+        from claude_hooks.lsp_engine.lsp import uri_key
+        for u in ("file:///home/me/a.py", "file:///srv/dev/x/b.py", "file:///"):
+            self.assertEqual(uri_key(u), u)
+
+    def test_percent_encoded_spaces_survive_as_real_spaces(self) -> None:
+        from claude_hooks.lsp_engine.lsp import uri_key
+        self.assertEqual(
+            uri_key("file:///C:/My%20Docs/a.py"), "file:///C:/My Docs/a.py")
+        self.assertEqual(
+            uri_key("file:///C:/My%20Docs/a.py"), uri_key("file:///c%3A/My Docs/a.py"))
+
+    def test_publish_under_server_spelling_is_readable_by_path(self) -> None:
+        """End-to-end of the actual bug: publish the way pyright does,
+        read back the way the engine does."""
+        from unittest.mock import patch
+
+        client = LspClient(command=["fake"], root_dir=".",
+                           startup_timeout=0.01, request_timeout=0.01)
+        target = r"C:\Users\manni\probe\a.py"
+        ours = "file:///C:/Users/manni/probe/a.py"
+        theirs = "file:///c%3A/Users/manni/probe/a.py"
+        # Pin our side's spelling rather than deriving it from the host:
+        # on POSIX ``path_to_uri`` yields no drive letter at all, so a
+        # derived URI cannot express the disagreement and the test would
+        # pass against the unfixed code — which it did.
+        self.addCleanup(patch.stopall)
+        patch("claude_hooks.lsp_engine.lsp.path_to_uri",
+              return_value=ours).start()
+        client._on_publish_diagnostics({
+            "uri": theirs,
+            "diagnostics": [{
+                "range": {"start": {"line": 4, "character": 11}},
+                "severity": 1, "message": '"undefined_name" is not defined',
+                "code": "reportUndefinedVariable", "source": "Pyright",
+            }],
+        })
+        got = client.get_diagnostics(target, timeout=0.1)
+        self.assertEqual(len(got), 1,
+                         f"published as {theirs!r}, looked up as {ours!r}")
+        self.assertEqual(got[0].code, "reportUndefinedVariable")

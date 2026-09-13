@@ -41,6 +41,7 @@ from claude_hooks.lsp_engine.config import (
     load_cclsp_config,
     load_engine_config,
     resolve_server_for_path,
+    resolve_servers_for_path,
 )
 from claude_hooks.lsp_engine.daemon import (
     Daemon,
@@ -102,5 +103,6 @@ __all__ = [
     "project_dir",
     "rank_files_by_in_degree",
     "resolve_server_for_path",
+    "resolve_servers_for_path",
     "socket_path_for",
 ]

@@ -1,0 +1,16 @@
+# Paths caliber should not read as context.
+#
+# Everything here is committed on purpose — this file is about what an
+# agent should *read*, not what the repo should keep. `caliber refresh`
+# flagged 12 files over 1 MB on the 2026-09-13 run; they are SQLite
+# sidecars and generated graphs, so scanning them spends context on
+# binary with no prose in it.
+
+# Consultants benchmark transcripts: 171 tracked `.transcript.db` files,
+# the largest 5.3 MB. The graded results next to them are markdown and
+# stay readable.
+docs/benchmarks/**/*.transcript.db
+benchmarks/**/*.transcript.db
+
+# Generated code-graph export — regenerated on demand, never authored.
+graphify-out/
