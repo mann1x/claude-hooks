@@ -54,6 +54,16 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     # Prepend the "## Now" block so the model has a fresh, local-TZ
     # timestamp every turn — anchors ETAs and scheduled-trigger
     # reasoning that would otherwise drift on UTC-only datetime.now().
+    # Mail that arrived between turns. One indexed SELECT, soft-fail:
+    # no announcement beats a delayed prompt, since the model can always
+    # call mailbox-list itself.
+    from claude_hooks.mailbox import hook as _mailbox
+    mailbox_block = _mailbox.announce_block(
+        event=event, config=config, providers=providers)
+    if mailbox_block:
+        additional_context = (f"{additional_context}\n\n{mailbox_block}"
+                              if additional_context else mailbox_block)
+
     from claude_hooks.now_block import prepend_to_context
     final_context = prepend_to_context(additional_context, config)
     if not final_context:

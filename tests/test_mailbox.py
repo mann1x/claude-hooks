@@ -729,3 +729,220 @@ class ToolsTests(StoreHarness):
     def test_handles_reports_ownership(self):
         self.assertTrue(self.me.handles("mailbox-send"))
         self.assertFalse(self.me.handles("pgvector-find"))
+
+
+class HookIntegrationTests(StoreHarness):
+    """The hooks' job is to announce without costing anything."""
+
+    def setUp(self):
+        super().setUp()
+        from claude_hooks.mailbox import hook as hookmod
+        self.hookmod = hookmod
+        self.cfg = {"hooks": {"mailbox": {"enabled": True}}}
+
+        store = self.store
+
+        class FakeProvider:
+            name = "pgvector"
+
+        from claude_hooks.mailbox.tools import MailboxTools
+        self.tools = MailboxTools(store, alias="me", session_id="mine",
+                                  host="solidpc")
+        hookmod._tools = lambda config, providers, event=None: (
+            self.tools if providers else None)
+        self.addCleanup(self._restore, hookmod)
+        self._orig = hookmod._tools
+        self.provider = FakeProvider()
+        self.register("me", "solidpc", sid="mine")
+
+    def _restore(self, hookmod):
+        import importlib
+        importlib.reload(hookmod)
+
+    def test_disabled_by_default(self):
+        self.assertFalse(self.hookmod._enabled({}))
+        self.assertEqual(self.hookmod.announce_block(
+            event={}, config={}, providers=[self.provider]), "")
+
+    def test_announces_unread_mail(self):
+        self.store.send("me", "the subject", "the body", from_alias="them")
+        out = self.hookmod.announce_block(
+            event={"session_id": "mine"}, config=self.cfg,
+            providers=[self.provider])
+        self.assertIn("the subject", out)
+        self.assertNotIn("the body", out, "hooks never inject a body")
+
+    def test_silent_when_there_is_nothing(self):
+        self.assertEqual(self.hookmod.announce_block(
+            event={"session_id": "mine"}, config=self.cfg,
+            providers=[self.provider]), "")
+
+    def test_a_broken_mailbox_costs_nothing(self):
+        """No announcement beats a delayed prompt — the model can always
+        call mailbox-list itself."""
+        def boom(*a, **k):
+            raise RuntimeError("db on fire")
+        self.tools.store.inbox = boom          # type: ignore
+        self.assertEqual(self.hookmod.announce_block(
+            event={"session_id": "mine"}, config=self.cfg,
+            providers=[self.provider]), "")
+
+    def test_no_provider_is_not_an_error(self):
+        self.assertEqual(self.hookmod.announce_block(
+            event={}, config=self.cfg, providers=[]), "")
+
+    def test_since_limits_to_mid_turn_arrivals(self):
+        """What stops the Stop hook repeating UserPromptSubmit."""
+        import time
+        self.store.send("me", "before", "b", from_alias="them")
+        cut = utcnow()
+        time.sleep(0.01)
+        self.store.send("me", "after", "b", from_alias="them")
+        out = self.hookmod.announce_block(
+            event={"session_id": "mine"}, config=self.cfg,
+            providers=[self.provider], since=cut)
+        self.assertIn("after", out)
+        self.assertNotIn("before", out)
+
+    def test_receipts_are_announced_then_marked_seen(self):
+        self.store.send("other", "s", "b", from_alias="me")
+        mid = self.store.sent(from_alias="me")[0]["id"]
+        self.register("other", "solidpc", sid="o1")
+        self.store.read([mid], reader_session="o1", alias="other",
+                        host="solidpc")
+        self.store.ack(mid, "on it", session_id="o1", alias="other",
+                       host="solidpc")
+
+        first = self.hookmod.announce_block(
+            event={"session_id": "mine"}, config=self.cfg,
+            providers=[self.provider])
+        self.assertIn("on it", first)
+        second = self.hookmod.announce_block(
+            event={"session_id": "mine"}, config=self.cfg,
+            providers=[self.provider])
+        self.assertNotIn("on it", second,
+                         "a receipt must not repeat forever")
+
+    def test_turn_start_parses_or_returns_none(self):
+        self.assertIsNone(self.hookmod.turn_start({}))
+        self.assertIsNone(self.hookmod.turn_start({"started_at": "nonsense"}))
+        got = self.hookmod.turn_start({"started_at": utcnow().isoformat()})
+        self.assertIsNotNone(got)
+
+
+class ArchiveTests(StoreHarness):
+    """Nothing is deleted before its durable copy is on disk."""
+
+    def setUp(self):
+        super().setUp()
+        from claude_hooks.mailbox import archive
+        self.archive = archive
+        self.dir = Path(self._tmp.name) / "arch"
+        # `self.archive` is the module, so anything stubbed on it leaks
+        # into every later test in this class.
+        self._orig_write = archive.write
+        self.addCleanup(setattr, archive, "write", self._orig_write)
+
+    def expire_one(self, subject="s"):
+        self.store.send("x", subject, "body", from_alias="me",
+                        expires_days=-1)
+
+    def test_write_then_read_back(self):
+        self.expire_one()
+        rows = self.store.expired()
+        files = self.archive.write(rows, directory=self.dir)
+        self.assertEqual(len(files), 1)
+        back = self.archive._decode(files[0].read_bytes())
+        self.assertEqual(back[0]["subject"], "s")
+
+    def test_written_file_is_compressed(self):
+        self.expire_one()
+        files = self.archive.write(self.store.expired(), directory=self.dir)
+        self.assertEqual(files[0].read_bytes()[:4], b"\x28\xb5\x2f\xfd")
+
+    def test_append_keeps_earlier_rows(self):
+        self.expire_one("first")
+        self.archive.write(self.store.expired(), directory=self.dir)
+        ids = [r["id"] for r in self.store.expired()]
+        self.store.delete(ids)
+        self.expire_one("second")
+        files = self.archive.write(self.store.expired(), directory=self.dir)
+        subjects = {r["subject"]
+                    for r in self.archive._decode(files[0].read_bytes())}
+        self.assertEqual(subjects, {"first", "second"})
+
+    def test_sweep_archives_before_deleting(self):
+        self.expire_one()
+        res = self.archive.sweep(self.store, directory=self.dir)
+        self.assertEqual(res["expired"], 1)
+        self.assertEqual(res["deleted"], 1)
+        self.assertEqual(self.store.expired(), [])
+        self.assertTrue(list(self.dir.glob("*.jsonl.zst")))
+
+    def test_sweep_does_not_delete_when_the_archive_fails(self):
+        """The failure mode of the other order is silent data loss that
+        looks like successful housekeeping."""
+        self.expire_one()
+        self.archive.write = lambda *a, **k: []     # type: ignore
+        res = self.archive.sweep(self.store, directory=self.dir)
+        self.assertEqual(res["deleted"], 0)
+        self.assertEqual(len(self.store.expired()), 1,
+                         "rows must survive a failed archive")
+
+    def test_fresh_messages_are_untouched(self):
+        self.store.send("x", "keep", "b", from_alias="me")
+        res = self.archive.sweep(self.store, directory=self.dir)
+        self.assertEqual(res["expired"], 0)
+        self.assertEqual(len(self.store.sent(from_alias="me")), 1)
+
+    def test_cap_drops_oldest_quarter_first(self):
+        self.dir.mkdir(parents=True)
+        for name in ("2025-Q1", "2025-Q2", "2026-Q1"):
+            (self.dir / f"{name}.jsonl.zst").write_bytes(b"x" * 1000)
+        dropped = self.archive.enforce_cap(directory=self.dir,
+                                           cap_bytes=1500)
+        self.assertEqual(dropped, ["2025-Q1.jsonl.zst", "2025-Q2.jsonl.zst"])
+        self.assertTrue((self.dir / "2026-Q1.jsonl.zst").is_file())
+
+    def test_cap_does_nothing_under_the_limit(self):
+        self.dir.mkdir(parents=True)
+        (self.dir / "2026-Q1.jsonl.zst").write_bytes(b"x" * 10)
+        self.assertEqual(self.archive.enforce_cap(directory=self.dir,
+                                                  cap_bytes=1000), [])
+
+    def test_cap_on_a_missing_directory(self):
+        self.assertEqual(self.archive.enforce_cap(
+            directory=self.dir / "nope"), [])
+
+    def test_corrupt_archive_is_set_aside_not_overwritten(self):
+        self.dir.mkdir(parents=True)
+        bad = self.dir / f"{self.archive.quarter_of(None)}.jsonl.zst"
+        bad.write_bytes(b"\x28\xb5\x2f\xfdnot really zstd")
+        self.expire_one()
+        self.archive.write(self.store.expired(), directory=self.dir)
+        self.assertTrue(list(self.dir.glob("*.corrupt")),
+                        "the unreadable file must be kept")
+        self.assertTrue(bad.is_file())
+
+    def test_sweep_also_forgets_stale_sessions(self):
+        self.register("old", "h1")
+        cutoff = utcnow() - timedelta(days=40)
+        with self.db.lock:
+            self.db.conn.execute(
+                "UPDATE session_registry SET last_seen = ?",
+                (cutoff.isoformat(),))
+            self.db.conn.commit()
+        res = self.archive.sweep(self.store, directory=self.dir,
+                                 registry_days=30)
+        self.assertEqual(res["sessions_forgotten"], 1)
+
+    def test_quarter_boundaries(self):
+        for month, q in ((1, "Q1"), (3, "Q1"), (4, "Q2"), (6, "Q2"),
+                         (7, "Q3"), (9, "Q3"), (10, "Q4"), (12, "Q4")):
+            with self.subTest(month=month):
+                ts = f"2026-{month:02d}-15T00:00:00+00:00"
+                self.assertEqual(self.archive.quarter_of(ts), f"2026-{q}")
+
+    def test_cap_default_is_ten_gb(self):
+        self.assertEqual(self.archive.DEFAULT_CAP_BYTES,
+                         10 * 1024 * 1024 * 1024)
