@@ -23,6 +23,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from claude_hooks.lsp_engine.daemon import Daemon  # noqa: E402
+from claude_hooks.lsp_engine.pool import EnginePool  # noqa: E402
 from claude_hooks.lsp_engine.lsp import Diagnostic, DiagnosticsResult  # noqa: E402
 
 
@@ -58,7 +59,11 @@ class DedupTests(unittest.TestCase):
         res = DiagnosticsResult(
             items=items if items is not None else [],
             settled=settled, server="pyright-langserver", timeout=8.0)
-        d._engine = _Engine(res)
+        # The daemon routes per file now, so the fake goes in as the
+        # pool's factory rather than as a single attribute.
+        self.engine = _Engine(res)
+        d._pool = EnginePool(Path(self.tmp.name), [],
+                             factory=lambda root: self.engine)
         return d
 
     def _ask(self, d, window=60.0):
@@ -73,7 +78,7 @@ class DedupTests(unittest.TestCase):
         second = self._ask(d)
         self.assertTrue(second["deduped"])
         # The engine was not asked a second time.
-        self.assertEqual(d._engine.calls, 1)
+        self.assertEqual(self.engine.calls, 1)
         # And the payload is the same answer, not an empty one.
         self.assertEqual(second["diagnostics"], first["diagnostics"])
 
@@ -85,7 +90,7 @@ class DedupTests(unittest.TestCase):
         st = self.file.stat()
         os.utime(self.file, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
         self.assertFalse(self._ask(d)["deduped"])
-        self.assertEqual(d._engine.calls, 2)
+        self.assertEqual(self.engine.calls, 2)
 
     def test_unsettled_results_are_never_replayed(self) -> None:
         # A cold server publishes nothing, then everything, for the same
@@ -94,13 +99,13 @@ class DedupTests(unittest.TestCase):
         d = self.daemon(settled=False)
         self.assertFalse(self._ask(d)["deduped"])
         self.assertFalse(self._ask(d)["deduped"])
-        self.assertEqual(d._engine.calls, 2)
+        self.assertEqual(self.engine.calls, 2)
 
     def test_window_of_zero_disables_it(self) -> None:
         d = self.daemon()
         self._ask(d, window=0.0)
         self.assertFalse(self._ask(d, window=0.0)["deduped"])
-        self.assertEqual(d._engine.calls, 2)
+        self.assertEqual(self.engine.calls, 2)
 
     def test_the_replay_expires(self) -> None:
         d = self.daemon()

@@ -12,6 +12,7 @@ engine object is a client of it rather than an owner of servers.
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -19,7 +20,8 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from claude_hooks.lsp_engine import wire  # noqa: E402
+from claude_hooks.lsp_engine import wire
+from claude_hooks.lsp_engine.pool import EnginePool  # noqa: E402
 from claude_hooks.lsp_engine.daemon import Daemon  # noqa: E402
 from claude_hooks.lsp_engine.engine import NavResponse  # noqa: E402
 from claude_hooks.lsp_engine.protocol import (  # noqa: E402
@@ -53,7 +55,13 @@ class DaemonNavOpTests(unittest.TestCase):
 
     def daemon(self, engine):
         d = Daemon.__new__(Daemon)
-        d._engine = engine
+        # A repository now holds one engine per package, so the fake
+        # goes in as the pool's factory. Pre-warmed at the boundary so
+        # the fan-out ops (restart, status) have something to fan over.
+        d._project_root = Path(tempfile.gettempdir()).resolve()
+        d._pool = EnginePool(d._project_root, [],
+                             factory=lambda root: engine)
+        d._pool.for_root(d._project_root)
         return d
 
     def test_nav_op_returns_items_and_provenance(self) -> None:

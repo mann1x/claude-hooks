@@ -26,7 +26,7 @@ if str(REPO) not in sys.path:
 
 from claude_hooks.lsp_engine.engine import NavResponse  # noqa: E402
 from claude_hooks.lsp_mcp import tools as T  # noqa: E402
-from claude_hooks.lsp_mcp.server import (  # noqa: E402
+from claude_hooks.lsp_engine.config import (  # noqa: E402
     ROOT_SENTINEL, describe_scope, find_project_root,
 )
 

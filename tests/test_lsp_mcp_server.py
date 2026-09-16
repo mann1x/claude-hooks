@@ -54,11 +54,27 @@ class SurfaceConformanceTests(unittest.TestCase):
         "restart_server": set(),
     }
 
+    #: Tools that are ours, not cclsp's. Adding to the surface does not
+    #: break a client that learned cclsp's — removing or changing one of
+    #: the twelve does. The two claims are separated so the recording
+    #: above stays a recording, and an addition stays deliberate.
+    ADDITIONS = {
+        # cclsp has no lifecycle verb beyond restart, and restart cannot
+        # apply a changed config: the daemon parsed it once and a
+        # running server holds what it started with.
+        "reload_servers": set(),
+    }
+
     def setUp(self):
         self.catalog = {t["name"]: t for t in T.tool_catalog()}
 
-    def test_exactly_the_twelve_cclsp_tools(self):
-        self.assertEqual(set(self.catalog), set(self.EXPECTED))
+    def test_every_cclsp_tool_is_still_present(self):
+        missing = set(self.EXPECTED) - set(self.catalog)
+        self.assertEqual(missing, set())
+
+    def test_nothing_is_added_by_accident(self):
+        self.assertEqual(set(self.catalog),
+                         set(self.EXPECTED) | set(self.ADDITIONS))
 
     def test_required_parameters_match(self):
         for name, required in self.EXPECTED.items():
@@ -487,7 +503,7 @@ class JsonRpcTests(unittest.TestCase):
     def test_tools_list(self):
         r = self.server.handle({"jsonrpc": "2.0", "id": 2,
                                 "method": "tools/list"})
-        self.assertEqual(len(r["result"]["tools"]), 12)
+        self.assertEqual(len(r["result"]["tools"]), len(T.TOOL_NAMES))
 
     def test_unknown_method_errors(self):
         r = self.server.handle({"jsonrpc": "2.0", "id": 3,

@@ -61,6 +61,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 from claude_hooks.lsp_engine.config import (
+    _ROOT_MARKERS,
+    describe_scope,
+    find_project_root,
     candidate_cclsp_paths as _candidate_cclsp_paths,
     resolve_cclsp_path as _resolve_cclsp_path,
     CclspConfigError,
@@ -77,95 +80,6 @@ log = logging.getLogger("claude_hooks.lsp_mcp")
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "claude-hooks-lsp"
 SERVER_VERSION = "1.0.0"
-
-#: Files that mark a directory as a project root, most specific first.
-#: ``cclsp.json`` wins because it is the thing that actually configures
-#: an engine; a repo without one has no servers to route to anyway.
-_ROOT_MARKERS = ("cclsp.json", ".git", "pyproject.toml", "go.mod",
-                 "Cargo.toml", "package.json", "compile_commands.json")
-
-DEFAULT_IDLE_HOURS = 24.0
-
-
-def find_project_root(path: str | os.PathLike) -> Optional[Path]:
-    """Walk up from ``path`` to the nearest project root.
-
-    Returns None when nothing marks a root, which the caller reports as
-    such — guessing the filesystem root would start a language server
-    over the whole disk, which is the 4.2 GB inferred-project problem
-    that made TypeScript silently useless on solidpc.
-    """
-    p = Path(path)
-    p = p if p.is_dir() else p.parent
-    try:
-        p = p.resolve()
-    except OSError:
-        return None
-    # An explicit declaration outranks every heuristic. This is the
-    # escape hatch for a monorepo that wants ONE engine over several
-    # packages — see ``describe_scope`` for why that is not the default.
-    for candidate in (p, *p.parents):
-        if (candidate / ROOT_SENTINEL).exists():
-            return candidate
-    for candidate in (p, *p.parents):
-        for marker in _ROOT_MARKERS:
-            if (candidate / marker).exists():
-                return candidate
-    return None
-
-
-#: Written by an operator to say "the engine root is here", overriding
-#: the marker walk.
-ROOT_SENTINEL = Path(".claude-hooks") / "lsp-root"
-
-#: Markers that indicate a root is nested inside something larger. A
-#: package directory inside a repository answers correctly *for that
-#: package*, which is not the question a caller usually asked.
-_OUTER_MARKERS = (".git", ROOT_SENTINEL)
-
-
-def describe_scope(root: Path) -> Optional[str]:
-    """Say when ``root`` is a package inside a bigger tree.
-
-    ``find_project_root`` stops at the nearest marker, and in a monorepo
-    that is the package's own ``package.json`` — so a reference search
-    is complete for the package and silently incomplete for the repo.
-    Measured on a real monorepo: a symbol with 443 occurrences across
-    the tree returned 9, all inside the declaring package, with nothing
-    in the result indicating the search had a boundary. That is a
-    plausible number a caller acts on, which makes it worse than an
-    obviously absurd one.
-
-    Widening the root is NOT the fix, and was measured too: rooted at
-    that repo (6.1 GB, no root tsconfig) tsserver answered 0 references
-    in 81.7 s and then failed, because it falls back to an inferred
-    project over the whole tree. A bounded answer that says it is
-    bounded beats an empty one that does not.
-
-    So the engine keeps the narrow root and reports the boundary. The
-    real remedy is at the language level — a tsconfig spanning the
-    packages, or project references — plus ``.claude-hooks/lsp-root``
-    for a repo where one wide engine is actually viable.
-    """
-    try:
-        if (root / ROOT_SENTINEL).exists():
-            # Declared deliberately, so there is no boundary to warn
-            # about even when it sits inside a larger repository.
-            return None
-        for parent in root.parents:
-            if (parent / ".git").is_dir():
-                return (f"{root.name} — a package inside {parent}. "
-                        f"Sibling packages were not searched: the server "
-                        f"is rooted here, so its program does not contain "
-                        f"their sources. Cross-package uses of a symbol "
-                        f"will be missing rather than reported. Put a "
-                        f"`.claude-hooks/lsp-root` file at the level you "
-                        f"want one engine over, if the server can handle "
-                        f"that tree.")
-    except OSError:  # pragma: no cover - defensive
-        return None
-    return None
-
 
 def candidate_config_paths(root: Path) -> list[Path]:
     """Delegates to the engine's resolver, which the daemon also uses.
@@ -284,6 +198,17 @@ class DaemonEngine:
     def restart(self, extensions=None) -> list[str]:
         return self._client.restart(extensions)
 
+    def reload(self, *, config: bool = True) -> dict:
+        """Stop every server in the repository and re-read the config.
+
+        Lifecycle is what this shim is *for*. Everything else it does
+        is a pass-through to the daemon, but the daemon is a long-lived
+        process holding a configuration it parsed once, and nothing in
+        a session could replace that — which is why applying a
+        ``cclsp.json`` edit meant closing the connection.
+        """
+        return self._client.reload(config=config)
+
     def take_notices(self) -> list[str]:
         """Everything worth telling the caller, once each.
 
@@ -310,6 +235,10 @@ class DaemonEngine:
             self._client.detach()
         finally:
             self._client.close()
+
+
+#: How long an unused project engine is kept attached.
+DEFAULT_IDLE_HOURS = 24.0
 
 
 class EngineRegistry:
@@ -738,6 +667,39 @@ class LspMcpServer:
             str(query), start_all=bool(args.get("start_all")))
         return T.render_symbols(res, root=entry.root,
                                 title=f"Workspace symbols for {query!r}")
+
+    def _tool_reload_servers(self, args: dict) -> str:
+        entry = self._project_hint(args.get("file_path"))
+        keep = bool(args.get("keep_config"))
+        try:
+            result = entry.engine.reload(config=not keep)
+        except AttributeError:
+            raise T.ToolError(
+                "This project is served by an in-process engine, which has "
+                "no configuration to reload. Use restart_server instead.")
+        except RuntimeError as e:
+            if "unknown op" not in str(e):
+                raise
+            raise T.ToolError(
+                f"The lsp_engine daemon for {entry.root} is running code "
+                f"that predates this operation — it is a long-lived process "
+                f"and restarting this MCP client does not restart it. "
+                f"Restart it with:\n"
+                f"  python -m claude_hooks.lsp_engine restart --project "
+                f"{entry.root}")
+        stopped = result.get("stopped") or []
+        lines = [
+            f"Reloaded the engine for {entry.root}.",
+            f"Stopped {len(stopped)} package engine(s) and their language "
+            f"servers; they start again on the next request.",
+        ]
+        if result.get("reloaded_config"):
+            lines.append(f"Re-read {result.get('cclsp_config')}.")
+        else:
+            lines.append("Kept the configuration already loaded.")
+        for root in stopped:
+            lines.append(f"  - {root}")
+        return "\n".join(lines)
 
     def _tool_restart_server(self, args: dict) -> str:
         hint = args.get("file_path")

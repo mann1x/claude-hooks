@@ -324,10 +324,10 @@ class TestPhase2PreloadAndGitWatch(unittest.TestCase):
             # appears or we time out.
             deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline:
-                if len(daemon._engine.open_files()) >= 2:
+                if len(daemon.open_files()) >= 2:
                     break
                 time.sleep(0.10)
-            opened_paths = daemon._engine.open_files()
+            opened_paths = daemon.open_files()
             self.assertEqual(len(opened_paths), 2)
             opened_names = {Path(u).name for u in opened_paths}
             self.assertEqual(opened_names, {"utils.py", "api.py"})
@@ -354,7 +354,7 @@ class TestPhase2PreloadAndGitWatch(unittest.TestCase):
         daemon.start()
         try:
             time.sleep(0.30)
-            self.assertEqual(daemon._engine.open_files(), [])
+            self.assertEqual(daemon.open_files(), [])
         finally:
             daemon.stop()
 

@@ -26,6 +26,7 @@ from typing import Optional
 
 from claude_hooks._popen import popen_detached, windowless_python_executable
 from claude_hooks.lsp_engine.daemon import (
+    daemon_root_for,
     lock_path_for,
     socket_path_for,
 )
@@ -178,6 +179,21 @@ class LspEngineClient:
         resp = self._call("restart", extensions=extensions)
         return list(resp.get("restarted") or [])
 
+    def reload(self, *, config: bool = True) -> dict:
+        """Stop every engine and re-read the configuration from disk.
+
+        The lifecycle op that ``restart`` is not. ``restart`` replaces
+        clients the engine is holding, which fixes a hung server but
+        keeps the server list the daemon parsed at startup. A changed
+        ``cclsp.json``, or an upgraded server binary, reaches neither a
+        running process nor a stale config — so until this existed the
+        only way to apply either was to kill the daemon, and the only
+        reliable way to do *that* was to close the session.
+
+        Returns ``{stopped, reloaded_config, cclsp_config}``.
+        """
+        return self._call("reload", config=config)
+
     def diagnostics_result(
         self,
         path: str | os.PathLike,
@@ -295,8 +311,14 @@ def _spawn_daemon(
         "-m",
         "claude_hooks.lsp_engine",
         "daemon",
+        # The boundary, not whatever path the caller happened to hold.
+        # The daemon normalises this itself, so passing the raw path
+        # still works — but then ``ps`` shows a daemon "for" a source
+        # file that is actually serving the whole repository, and the
+        # first thing anyone does when the engine misbehaves is read
+        # the process list.
         "--project",
-        str(Path(project_root).resolve()),
+        str(daemon_root_for(project_root)),
     ]
     if state_base is not None:
         cmd.extend(["--state-base", str(state_base)])

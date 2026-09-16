@@ -197,6 +197,26 @@ def tool_catalog() -> list[dict]:
                 ["file_path", "line", "character", "new_name"]),
         },
         {
+            "name": "reload_servers",
+            "description": "Stop every language server for a project and "
+                           "re-read cclsp.json + lsp-engine.toml, without "
+                           "restarting the session. Use this after editing "
+                           "the LSP config, after upgrading a language "
+                           "server, or when a server is wedged and "
+                           "restart_server did not clear it.",
+            "inputSchema": _schema(
+                {"file_path": {
+                    "type": "string",
+                    "description": "Any file in the project to reload. "
+                                   "Optional when only one project is open."},
+                 "keep_config": {
+                     "type": "boolean",
+                     "description": "Stop the servers but keep the "
+                                    "configuration already loaded. Default "
+                                    "false (the config is re-read)."}},
+                []),
+        },
+        {
             "name": "restart_server",
             "description": "Manually restart LSP servers. Can restart servers "
                            "for specific file extensions or all running "

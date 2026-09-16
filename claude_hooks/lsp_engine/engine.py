@@ -125,6 +125,50 @@ class NavResponse:
                 and not self.scan_truncated_at)
 
 
+def merge_nav(parts: "list[NavResponse]") -> "NavResponse":
+    """Combine per-engine answers to one workspace-wide question.
+
+    A repository now holds one engine per package, so a query with no
+    path to route on — ``workspace_symbols`` — has several engines that
+    could answer and no single one that should. Merging keeps the
+    provenance union rather than the intersection: if one package's
+    server failed while another answered, the result is a partial
+    answer that says so, which is the distinction ``NavResponse``
+    exists to carry. Taking only the successful part would rebuild the
+    "empty means nothing found" bug one level up.
+    """
+    if len(parts) == 1:
+        return parts[0]
+    items: list = []
+    consulted: list[str] = []
+    failures: list[tuple[str, str]] = []
+    not_running: list[str] = []
+    progress = None
+    truncated = 0
+    for part in parts:
+        items.extend(part.items)
+        for name in part.consulted:
+            if name not in consulted:
+                consulted.append(name)
+        for pair in part.failures:
+            if pair not in failures:
+                failures.append(pair)
+        for name in part.not_running:
+            if name not in not_running:
+                not_running.append(name)
+        if progress is None:
+            progress = part.progress
+        truncated = max(truncated, part.scan_truncated_at)
+    return NavResponse(
+        items=items,
+        consulted=tuple(consulted),
+        failures=tuple(failures),
+        progress=progress,
+        not_running=tuple(not_running),
+        scan_truncated_at=truncated,
+    )
+
+
 #: A cold language server has to build the project graph before it can
 #: answer anything that crosses a file, and it does that lazily on the
 #: first such request. Measured on the cline monorepo (3415 authored

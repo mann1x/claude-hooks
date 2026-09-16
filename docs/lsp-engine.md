@@ -459,9 +459,28 @@ python -m claude_hooks.lsp_engine status --project /path/to/project
 #   "sessions": ["session-A", "session-B"],
 #   "open_files": ["file:///.../foo.py", ...],
 #   "active_servers": ["pyright-langserver", "gopls"],
-#   "held_uris": ["/path/to/project/foo.py"]
+#   "held_uris": ["/path/to/project/foo.py"],
+#   "engines": [                      # one per package actually touched
+#     {"root": "/path/to/project/packages/a",
+#      "servers": ["typescript-language-server"],
+#      "open_files": 12, "idle_s": 4.1}
+#   ]
 # }
+
+# Stop the language servers and re-read cclsp.json + lsp-engine.toml,
+# WITHOUT stopping the daemon or dropping its sessions. Use after
+# editing the config or upgrading a server binary.
+python -m claude_hooks.lsp_engine reload --project /path/to/project
+python -m claude_hooks.lsp_engine reload --project /path/to/project --keep-config
+
+# Stop the daemon entirely and clear its state dir. The next hook
+# lazy-spawns a fresh one.
+python -m claude_hooks.lsp_engine restart --project /path/to/project
 ```
+
+`--project` accepts any path inside the repository, including a source
+file: it is resolved to the repository boundary by the same function the
+daemon and the client use. See *One daemon per repository*.
 
 ---
 
@@ -478,6 +497,9 @@ status`) uses. You'd only call them directly when debugging.
 | `did_change` | `path`, `content` | `{ok: true, forwarded: bool, queued_behind: str|null}` |
 | `did_close` | `path` | `{ok: true, closed: bool}` |
 | `diagnostics` | `path`, `timeout_ms?`, `diag_timeout_s?` | `{ok: true, diagnostics: [...], stale: bool}` |
+| `nav` | `method`, `args` | `{ok: true, nav: {...}}` — routed by `args.path` |
+| `restart` | `extensions?` | `{ok: true, restarted: [server, ...]}` |
+| `reload` | `config?` | `{ok: true, stopped: [root, ...], reloaded_config: bool, cclsp_config: str}` |
 | `status` | — | full status payload |
 | `shutdown` | — | graceful daemon stop |
 
@@ -569,6 +591,112 @@ looking like a fact about the code.
 
 If the daemon cannot be reached the MCP fails loudly with the `status`
 command to run, rather than quietly starting its own servers again.
+
+### One daemon per repository, one engine per package
+
+The two roots are not the same root, and treating them as one was the
+defect.
+
+A **language server** must be rooted narrowly. `find_project_root` stops
+at the nearest marker — a package's own `package.json` — and that is
+correct: rooted at a 6.1 GB monorepo, tsserver falls back to an inferred
+project over the whole tree and answered **0 references in 81.7 s**.
+Widening the server's root is not the fix and never was.
+
+A **daemon** keyed that narrowly is a process per package. Measured on
+the cline checkout: 3 536 source files across **30** distinct project
+roots, so 30 Python processes for one repository, each with its own
+socket, lock file, sweeper thread, idle timer and fleet — and no single
+process that could say what the repository as a whole was running, or be
+told to stop it. Nothing bounded the count because nothing counted it: a
+root is discovered per request, and each one looks reasonable alone.
+
+So the daemon moves out to the repository boundary and holds a pool:
+
+```
+~/.claude/lsp-engine/<hash of /repo>/daemon.sock     one daemon
+    ├── Engine(/repo)                                one per package
+    ├── Engine(/repo/sdk/packages/shared)              actually touched
+    └── Engine(/repo/sdk/packages/core)
+```
+
+`boundary_root_for()` picks the daemon key: `.claude-hooks/lsp-root` if
+an operator declared one, else the enclosing `.git`, else the narrow
+root. `find_project_root()` still picks each engine's key. The servers
+are configured once for the whole repository — one `cclsp.json`, read at
+the boundary — and rooted per package, because a spec's `rootDir` is
+resolved against the engine's own root.
+
+Measured after the change, same repository: **1** daemon, three engines,
+`references` in 2.09 s with `trustworthy=True`.
+
+The pool is bounded twice, since the failure it prevents is memory and
+process count rather than an error anyone would see:
+
+| knob | default | what it bounds |
+|---|---|---|
+| `pool.max_engines` | 4 | live engines; the least recently used is stopped |
+| `pool.idle_seconds` | 900 | seconds without a request before an engine is reaped |
+
+Both live in `.claude-hooks/lsp-engine.toml`:
+
+```toml
+[pool]
+max_engines = 4
+idle_seconds = 900
+```
+
+Eviction is safe by construction: the servers die, the open files are
+forgotten, and the next request rebuilds from disk — `did_change` falls
+back to `did_open`, and `_ensure_open` re-reads content it has no stamp
+for. What it costs is a cold start, which is why the bounds are on count
+and idleness rather than on time.
+
+**Every address goes through `daemon_root_for()`** — the state
+directory, the socket, the Windows pipe name, the lock file, the client
+resolving where to connect, and the daemon deciding what it owns. That
+is not tidiness. Two resolvers on one path is a bug this engine has
+already shipped twice: once as `cclsp.json` (the MCP and the daemon
+disagreeing about which file was in play) and once here, where
+`Daemon.__init__` normalised its root and `load_daemon_config` did not —
+so the daemon reported the repository's `cclsp_config` in `status` while
+holding **zero servers**, because it had read `messages.ts/cclsp.json`.
+Nothing errored. Every lookup simply returned nothing, which is what a
+project with no servers also returns.
+
+### Lifecycle: `reload` vs `restart`
+
+Three different things, and reaching for the wrong one is why "I have to
+close the connection to update the LSP" became routine.
+
+| verb | what it replaces | keeps |
+|---|---|---|
+| `restart_server` (MCP) / `restart` (op) | the engine's language-server clients | the daemon, its config, its sessions |
+| `reload_servers` (MCP) / `reload` (op) | every server **and** the parsed config | the daemon and its sessions |
+| `lsp_engine restart` (CLI) | the daemon process and its state dir | nothing |
+
+`restart` is the right tool for a wedged server. It is the wrong tool
+for a *changed* one: a language server is configured when it is spawned,
+and the daemon read `cclsp.json` once, at startup. So an edited config
+or an upgraded server binary reaches neither — and until `reload`
+existed the only way to apply either was to kill the daemon, which on
+Windows had no supported route at all.
+
+```bash
+# after editing cclsp.json, or upgrading a server
+python -m claude_hooks.lsp_engine reload --project /path/to/repo
+
+# stop the servers but keep the config already loaded
+python -m claude_hooks.lsp_engine reload --project /path/to/repo --keep-config
+```
+
+From inside a session, the MCP tool does the same thing:
+`reload_servers(file_path=...)`. Both report which package engines were
+stopped and which config was re-read; the servers start again on the
+next request. A `cclsp.json` that fails to parse is reported as a failed
+reload rather than adopted — a daemon that quietly adopted an empty
+server list would answer every question with silence while claiming
+health.
 
 ### De-duplication
 
