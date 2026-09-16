@@ -185,6 +185,53 @@ _SEVERITY_LABEL = {
 }
 
 
+# Extensions whose analysis depends on a compile database. Without one
+# clangd invents flags, and with invented flags *navigation still mostly
+# works* — so the breakage is invisible unless diagnostics are tested.
+_COMPILE_DB_EXTS = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp",
+                    ".hxx", ".cu", ".cuh"}
+_COMPILE_DB_NAMES = ("compile_commands.json", "compile_flags.txt")
+
+# Phrases that mark a *driver* failure rather than a finding about the
+# code. Observed on solidpc 2026-09-16: clangd 11 against a -std=gnu++23
+# tree emitted 24 diagnostics, 23 of them the driver listing spellings it
+# would have accepted.
+_DRIVER_ERROR_HINTS = (
+    "invalid value",
+    "unknown argument",
+    "unsupported option",
+    "no such file or directory",
+    "file not found",
+    "unable to handle compilation",
+    "cannot find",
+)
+
+
+def is_translation_unit_failure(d: dict) -> bool:
+    """True when a diagnostic means *the file never parsed*.
+
+    Driver errors are reported at 1:1 (LSP 0:0) with severity Error and
+    no meaningful range. They are categorically different from a finding
+    about the code: everything after them is unanalysed.
+    """
+    if int(d.get("severity") or 2) != 1:          # 1 = Error
+        return False
+    if int(d.get("line") or 0) != 0 or int(d.get("character") or 0) != 0:
+        return False
+    msg = (d.get("message") or "").lower()
+    return any(h in msg for h in _DRIVER_ERROR_HINTS)
+
+
+def missing_compile_db(path: Path) -> bool:
+    """True for a C/C++/CUDA file with no compile database above it."""
+    if path.suffix.lower() not in _COMPILE_DB_EXTS:
+        return False
+    for parent in [path.parent, *path.parent.parents]:
+        if any((parent / n).is_file() for n in _COMPILE_DB_NAMES):
+            return False
+    return True
+
+
 def format_diagnostics_block(
     *,
     path: str | os.PathLike,
@@ -195,12 +242,54 @@ def format_diagnostics_block(
 ) -> Optional[str]:
     """Build the markdown block PostToolUse adds to ``additionalContext``.
 
-    Returns ``None`` when there's nothing to surface (no diagnostics).
-    Mirrors the shape of ``post_tool_use._run_ruff``'s output so the
-    model treats the two layers uniformly.
+    Returns ``None`` when there's nothing to surface, *and nothing to
+    warn about*. Mirrors the shape of ``post_tool_use._run_ruff``'s
+    output so the model treats the two layers uniformly.
+
+    An empty diagnostic list is **not** evidence that a file is clean —
+    it is equally what a file that never parsed produces, and what an
+    unconfigured extension produces. Both are reported here rather than
+    rendered as silence, because a confident false negative is worse
+    than no answer: on 2026-09-16 a C++ tree read as clean for a while
+    when in fact clangd 11 had rejected `-std=gnu++23` and abandoned
+    every translation unit at line 1.
     """
+    p = Path(str(path))
+    display = _relative_or_absolute(p, cwd)
+
     if not diagnostics:
+        if missing_compile_db(p):
+            return (
+                f"## LSP diagnostics — `{display}`\n\n"
+                "**No diagnostics, but this result is not trustworthy.** No "
+                "`compile_commands.json` was found in this file's directory "
+                "or any parent, so clangd is analysing with invented flags. "
+                "Navigation still works under invented flags, which is why "
+                "this failure is normally invisible — but diagnostics are "
+                "not meaningful. Generate a compile database before reading "
+                "'no problems' as 'no problems'."
+            )
         return None
+
+    tu_failures = [d for d in diagnostics if is_translation_unit_failure(d)]
+    if tu_failures:
+        first = (tu_failures[0].get("message") or "").strip().splitlines()[0]
+        note = (
+            f"## LSP analysis FAILED — `{display}`\n\n"
+            f"**The file was not analysed.** The language server rejected "
+            f"the compilation command and abandoned the translation unit at "
+            f"line 1, so the absence of further diagnostics says nothing "
+            f"about this code:\n\n"
+            f"```\n{first}\n```\n\n"
+            f"Typical causes: a language-server version older than the "
+            f"standard in use (clangd only learned the `c++23` spelling in "
+            f"clang 17; before that it is `c++2b`), a missing or stale "
+            f"compile database, or an include path that does not resolve. "
+            f"Fix the configuration before trusting any result for this file."
+        )
+        if len(tu_failures) > 1:
+            note += f"\n\n_({len(tu_failures)} driver-level errors in total.)_"
+        return note
 
     p = Path(str(path))
     display = _relative_or_absolute(p, cwd)

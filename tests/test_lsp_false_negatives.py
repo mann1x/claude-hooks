@@ -1,0 +1,172 @@
+"""An empty diagnostic list is not evidence of anything.
+
+From the 2026-09-16 handover (opencoti → claude-hooks): a large C++ tree
+answered "No diagnostics found" while every translation unit was in fact
+being abandoned at line 1. clangd 11 (Debian bullseye's default) rejects
+``-std=gnu++23`` — clang only learned that spelling in 17 — so the file
+never parsed. At the tool surface that is indistinguishable from clean
+code, and it was acted on as clean for a while.
+
+Three states share one rendering unless something separates them:
+
+    parsed and clean        -> trustworthy silence
+    never parsed            -> driver error at 1:1, everything else unknown
+    no compile database     -> invented flags; navigation works, diagnostics lie
+
+These tests pin the separation.
+"""
+from __future__ import annotations
+
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from claude_hooks import lsp_integration as li  # noqa: E402
+
+
+def _diag(msg, *, line=0, char=0, severity=1, source="clang"):
+    return {"line": line, "character": char, "severity": severity,
+            "message": msg, "source": source}
+
+
+class TranslationUnitFailureTests(unittest.TestCase):
+
+    def test_std_rejection_is_a_tu_failure(self):
+        """The exact observed message."""
+        self.assertTrue(li.is_translation_unit_failure(
+            _diag("Invalid value 'gnu++23' in '-std=gnu++23'")))
+
+    def test_missing_include_at_origin_is_a_tu_failure(self):
+        self.assertTrue(li.is_translation_unit_failure(
+            _diag("'stdio.h' file not found")))
+
+    def test_unknown_argument_is_a_tu_failure(self):
+        self.assertTrue(li.is_translation_unit_failure(
+            _diag("unknown argument: '-fno-foo'")))
+
+    def test_a_real_finding_at_line_one_is_not_a_tu_failure(self):
+        """Position alone must not classify — real code can be wrong on
+        its first line, and calling that 'unanalysed' would hide it."""
+        self.assertFalse(li.is_translation_unit_failure(
+            _diag("expected ';' after top level declarator")))
+
+    def test_a_finding_elsewhere_is_not_a_tu_failure(self):
+        self.assertFalse(li.is_translation_unit_failure(
+            _diag("Invalid value 'x'", line=42)))
+
+    def test_a_warning_is_not_a_tu_failure(self):
+        """Severity matters: a driver *warning* still parsed the file."""
+        self.assertFalse(li.is_translation_unit_failure(
+            _diag("unknown argument: '-Wfoo'", severity=2)))
+
+
+class CompileDbTests(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_missing_db_is_detected_for_cpp(self):
+        f = self.root / "a" / "b" / "x.cpp"
+        f.parent.mkdir(parents=True)
+        f.write_text("int main(){}", encoding="utf-8")
+        self.assertTrue(li.missing_compile_db(f))
+
+    def test_db_in_an_ancestor_counts(self):
+        f = self.root / "a" / "b" / "x.cpp"
+        f.parent.mkdir(parents=True)
+        f.write_text("int main(){}", encoding="utf-8")
+        (self.root / "a" / "compile_commands.json").write_text("[]",
+                                                               encoding="utf-8")
+        self.assertFalse(li.missing_compile_db(f))
+
+    def test_compile_flags_txt_also_counts(self):
+        f = self.root / "x.c"
+        f.write_text("int main(){}", encoding="utf-8")
+        (self.root / "compile_flags.txt").write_text("-I.", encoding="utf-8")
+        self.assertFalse(li.missing_compile_db(f))
+
+    def test_cuda_is_covered(self):
+        """`.cu`/`.cuh` had no server at all until 2026-09-16."""
+        f = self.root / "k.cu"
+        f.write_text("__global__ void k(){}", encoding="utf-8")
+        self.assertTrue(li.missing_compile_db(f))
+
+    def test_python_is_not_subject_to_this(self):
+        f = self.root / "x.py"
+        f.write_text("pass", encoding="utf-8")
+        self.assertFalse(li.missing_compile_db(f))
+
+
+class BlockRenderingTests(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _cpp(self, with_db: bool) -> Path:
+        f = self.root / "x.cpp"
+        f.write_text("int main(){}", encoding="utf-8")
+        if with_db:
+            (self.root / "compile_commands.json").write_text("[]",
+                                                              encoding="utf-8")
+        return f
+
+    def test_tu_failure_renders_as_failure_not_as_findings(self):
+        block = li.format_diagnostics_block(
+            path=self._cpp(True),
+            diagnostics=[_diag("Invalid value 'gnu++23' in '-std=gnu++23'")],
+            stale=False,
+        )
+        self.assertIn("FAILED", block)
+        self.assertIn("was not analysed", block)
+        self.assertIn("gnu++23", block)
+
+    def test_tu_failure_names_the_version_trap(self):
+        block = li.format_diagnostics_block(
+            path=self._cpp(True),
+            diagnostics=[_diag("Invalid value 'gnu++23' in '-std=gnu++23'")],
+            stale=False,
+        )
+        self.assertIn("c++2b", block)
+
+    def test_empty_without_a_compile_db_warns_instead_of_going_silent(self):
+        block = li.format_diagnostics_block(
+            path=self._cpp(False), diagnostics=[], stale=False)
+        self.assertIsNotNone(block)
+        self.assertIn("not trustworthy", block)
+        self.assertIn("compile_commands.json", block)
+
+    def test_empty_with_a_compile_db_stays_silent(self):
+        """Trustworthy silence must remain silent, or the warning is
+        noise and gets ignored when it matters."""
+        self.assertIsNone(li.format_diagnostics_block(
+            path=self._cpp(True), diagnostics=[], stale=False))
+
+    def test_empty_for_python_stays_silent(self):
+        f = self.root / "x.py"
+        f.write_text("pass", encoding="utf-8")
+        self.assertIsNone(li.format_diagnostics_block(
+            path=f, diagnostics=[], stale=False))
+
+    def test_ordinary_findings_still_render_normally(self):
+        block = li.format_diagnostics_block(
+            path=self._cpp(True),
+            diagnostics=[_diag("use 'contains'", line=2137, char=38,
+                               severity=2, source="clang-tidy")],
+            stale=False,
+        )
+        self.assertIn("LSP diagnostics", block)
+        self.assertIn("2138:39", block)          # 0-based -> 1-based
+        self.assertNotIn("FAILED", block)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -64,14 +64,18 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path, PurePath
 from typing import Iterable, Optional
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from claude_hooks.lang_servers import SPECS  # noqa: E402
+from claude_hooks.lang_servers import (  # noqa: E402
+    SPECS, server_version, version_warning,
+)
 from claude_hooks.lsp_engine.lsp import language_id_for  # noqa: E402
 
 
@@ -338,6 +342,17 @@ def reconcile(cfg: dict, *, resolve_commands: bool = False,
                         f"  WARN   {spec.bin}: .cmd shim will fail with EINVAL "
                         f"and its target could not be resolved")
 
+        # A server too old for the standard in use abandons the
+        # translation unit and emits nothing — the same observation a
+        # clean file produces. Check the binary actually configured,
+        # which may be a hand-pointed one (clangd-16, not clangd).
+        probe_bin = resolved
+        if entry is not None and (entry.get("command") or []):
+            probe_bin = entry["command"][0]
+        warning = version_warning(spec.name, server_version(probe_bin))
+        if warning:
+            notes.append(f"  WARN   {warning}")
+
         if entry is None:
             command = list(spec.cclsp_command)
             if resolve_commands:
@@ -361,6 +376,70 @@ def reconcile(cfg: dict, *, resolve_commands: bool = False,
 
     notes.extend(dedupe_servers(cfg))
     return cfg, notes
+
+
+def stale_cclsp_processes(config_path: Path) -> list[tuple[int, float]]:
+    """Running ``cclsp`` processes started *before* the config was written.
+
+    cclsp reads its config once, at startup, and caches it. Nothing in
+    the MCP surface says so, which makes an edited config look applied
+    when it is not: ``mcp__lsp__restart_server`` restarts the *language
+    server* using the command cclsp cached when its own process began,
+    then reports "Successfully restarted 1 LSP server(s)". Killing the
+    language server has the same non-effect. Killing cclsp itself does
+    drop the stale config, but no client respawns a stdio MCP server, so
+    every ``lsp`` tool goes offline until the client restarts.
+
+    Net: a config change always costs a client restart. The least we can
+    do is *say so* instead of letting the next caller trust a stale
+    answer. Returns ``(pid, start_epoch)`` pairs, oldest first.
+    """
+    try:
+        cfg_mtime = config_path.stat().st_mtime
+    except OSError:
+        return []
+
+    try:
+        out = subprocess.run(
+            ["ps", "-eo", "pid=,lstart=,cmd="],
+            capture_output=True, text=True, timeout=20, check=True,
+        ).stdout
+    except (subprocess.SubprocessError, OSError, FileNotFoundError):
+        return []   # Windows, or no ps — advisory only, never fatal.
+
+    stale: list[tuple[int, float]] = []
+    for line in out.splitlines():
+        if "cclsp" not in line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        # lstart is a fixed 24-char ctime string: "Sat Jul 25 14:01:04 2026"
+        stamp = parts[1][:24]
+        try:
+            started = time.mktime(time.strptime(stamp))
+        except ValueError:
+            continue
+        if started < cfg_mtime:
+            stale.append((int(parts[0]), started))
+    return sorted(stale, key=lambda p: p[1])
+
+
+def _report_stale(config_path: Path) -> None:
+    stale = stale_cclsp_processes(config_path)
+    if not stale:
+        return
+    print(f"\n  !! {len(stale)} running cclsp process(es) predate this config "
+          f"and are serving a STALE copy:")
+    for pid, started in stale:
+        age = (time.time() - started) / 86400.0
+        print(f"       pid {pid:<8} started {time.strftime('%Y-%m-%d %H:%M', time.localtime(started))}"
+              f"  ({age:.1f} days ago)")
+    print("     cclsp caches its config at startup. restart_server will NOT\n"
+          "     pick this up — it relaunches the language server with the\n"
+          "     command cclsp cached when it started, and still reports\n"
+          "     success. Restart the MCP client (Claude Code / VS Code /\n"
+          "     cline) for these changes to take effect.")
 
 
 def _sync_one(path: Path, *, label: str, write: bool,
@@ -428,6 +507,9 @@ def main() -> int:
         )
         changed = changed or m_changed
         wrote = wrote or m_wrote
+        # Always check, not only after a write: the config may have been
+        # edited by hand (or by another session) since cclsp started.
+        _report_stale(mcp_path)
 
     if not changed:
         return 0

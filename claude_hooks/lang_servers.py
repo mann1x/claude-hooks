@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -152,7 +153,11 @@ SPECS: tuple[LangServerSpec, ...] = (
         name="clangd",
         display="clangd (C/C++)",
         bin="clangd",
-        extensions=("c", "cc", "cpp", "cxx", "h", "hh", "hpp"),
+        extensions=("c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx",
+                    # clangd handles CUDA. These were missing from every
+                    # config until 2026-09-16, so .cu/.cuh had no server
+                    # at all — which reads as "no problems found".
+                    "cu", "cuh"),
         cclsp_command=("clangd",),
         tier=1,
         # Windows: prefer winget (ships clangd in the LLVM bundle) over
@@ -256,6 +261,67 @@ SPECS: tuple[LangServerSpec, ...] = (
         docs_url="https://github.com/OmniSharp/omnisharp-roslyn",
     ),
 )
+
+
+# --------------------------------------------------------------------- #
+# Version probing
+#
+# A language server too old for the standard in use does not fail
+# loudly: it rejects the compilation command and abandons the
+# translation unit, which reads as "no diagnostics" — the same thing
+# clean code produces.
+#
+# The trap is that the *default* is the bad one. On Debian bullseye
+# /usr/bin/clangd is clangd 11 (2020), and clang only learned the
+# `c++23`/`gnu++23` spelling in clang 17 — before that the same standard
+# is spelled `c++2b`. Any modern C++ tree therefore dies at line 1
+# against the distro default, silently. Observed on solidpc 2026-09-16.
+# --------------------------------------------------------------------- #
+
+_VERSION_RE = re.compile(r"version\s+(\d+)(?:\.(\d+))?", re.IGNORECASE)
+
+#: Minimum major version that can analyse a contemporary tree at all.
+MIN_USEFUL_VERSION = {
+    "clangd": 12,
+}
+
+
+def server_version(binary: str, *, timeout: float = 10.0) -> Optional[str]:
+    """Return the first line of ``<binary> --version``, or ``None``."""
+    resolved = shutil.which(binary) or binary
+    try:
+        out = subprocess.run(
+            [resolved, "--version"], capture_output=True, text=True,
+            timeout=timeout,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    text = (out.stdout or out.stderr or "").strip()
+    return text.splitlines()[0] if text else None
+
+
+def version_major(version_line: Optional[str]) -> Optional[int]:
+    m = _VERSION_RE.search(version_line or "")
+    return int(m.group(1)) if m else None
+
+
+def version_warning(spec_name: str,
+                    version_line: Optional[str]) -> Optional[str]:
+    """Warn when a server is too old to be *trusted*, not merely old."""
+    floor = MIN_USEFUL_VERSION.get(spec_name)
+    if floor is None or not version_line:
+        return None
+    major = version_major(version_line)
+    if major is None or major >= floor:
+        return None
+    return (
+        f"{spec_name} is version {major} (< {floor}). It cannot parse a "
+        f"modern C/C++ tree: it rejects the -std flag and abandons the "
+        f"translation unit, which surfaces as ZERO diagnostics — "
+        f"indistinguishable from clean code. Install a newer clangd and "
+        f"point the config at it explicitly; the distro default on Debian "
+        f"bullseye is clangd 11."
+    )
 
 
 # --------------------------------------------------------------------- #

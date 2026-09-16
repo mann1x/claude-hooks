@@ -66,6 +66,12 @@ _LANGUAGE_ID_BY_EXT = {
     "hh": "cpp",
     "hpp": "cpp",
     "hxx": "cpp",
+    "hxx": "cpp",
+    # CUDA. clangd handles .cu/.cuh, but they were absent from every
+    # config until 2026-09-16, so CUDA files had no server at all — and
+    # an unmapped extension is a silent no-diagnostics, not an error.
+    "cu": "cuda",
+    "cuh": "cuda",
     "cs": "csharp",
     "ts": "typescript",
     "tsx": "typescriptreact",
