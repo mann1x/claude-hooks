@@ -664,6 +664,27 @@ holding **zero servers**, because it had read `messages.ts/cclsp.json`.
 Nothing errored. Every lookup simply returned nothing, which is what a
 project with no servers also returns.
 
+### The shim holds one connection per repository
+
+The MCP registry keys its entries on the **narrow** root, because that
+is what a result's scope warning and its relative paths are about. Every
+one of those roots now resolves to the same daemon socket, so the
+entries share one connection, refcounted, and the **last** holder
+detaches.
+
+That is not an optimisation. Every client from this process attaches
+with the same session id (`lsp-mcp-<pid>`), the daemon holds attached
+sessions in a set, and detach releases that session's file locks — so
+the first package reaped would drop the locks of every other package in
+the repository, and the daemon has no way to tell that apart from the
+session ending.
+
+The same move fixed a second disagreement: the shim resolved
+`cclsp.json` beside the *package* while the daemon resolved it at the
+*boundary*. In a monorepo with one config at the top, that made the MCP
+refuse to serve a project the daemon would have served fine. Both now
+resolve at the boundary.
+
 ### Lifecycle: `reload` vs `restart`
 
 Three different things, and reaching for the wrong one is why "I have to

@@ -62,6 +62,7 @@ from typing import Any, Optional
 
 from claude_hooks.lsp_engine.config import (
     _ROOT_MARKERS,
+    boundary_root_for,
     describe_scope,
     find_project_root,
     candidate_cclsp_paths as _candidate_cclsp_paths,
@@ -140,6 +141,24 @@ class DaemonEngine:
         self._root = root
         self._client = client
         self._pending: list[str] = []
+        # How many project entries hold this connection. One daemon now
+        # serves a whole repository, so every package inside it shares
+        # this handle — see ``EngineRegistry._connection_for``.
+        self._holders = 1
+        self._closed = False
+
+    def acquire(self) -> "DaemonEngine":
+        self._holders += 1
+        return self
+
+    @property
+    def root(self) -> Path:
+        return self._root
+
+    @property
+    def closed(self) -> bool:
+        """True once the last holder detached."""
+        return self._closed
 
     def add_notice(self, text: str) -> None:
         """Queue something the next tool call should surface."""
@@ -230,7 +249,19 @@ class DaemonEngine:
         the PostToolUse hook and any other session in the project, so
         reaping our handle must not take their servers down with it —
         the daemon has its own idle reaper for that.
+
+        It is also shared *within* this process now. The daemon is keyed
+        at the repository, so every package under it resolves to the
+        same socket — and every client from this process attaches with
+        the same session id, ``lsp-mcp-<pid>``. Detaching on the first
+        package reaped would release the session's locks for all of
+        them, which the daemon cannot distinguish from the session
+        going away. So the last holder detaches, not the first.
         """
+        self._holders -= 1
+        if self._holders > 0:
+            return
+        self._closed = True
         try:
             self._client.detach()
         finally:
@@ -251,6 +282,10 @@ class EngineRegistry:
 
     def __init__(self, *, idle_hours: float = DEFAULT_IDLE_HOURS):
         self._engines: dict[Path, _ProjectEngine] = {}
+        #: repository boundary -> the one connection serving it. The
+        #: daemon is keyed there, so two packages in one repo are two
+        #: entries above and one socket here.
+        self._connections: dict[Path, "DaemonEngine"] = {}
         self._lock = threading.RLock()
         self._idle_seconds = max(60.0, idle_hours * 3600.0)
 
@@ -275,7 +310,15 @@ class EngineRegistry:
             return entry
 
     def _build(self, root: Path) -> _ProjectEngine:
-        config_path = resolve_config_path(root)
+        # Resolve the config where the DAEMON resolves it: at the
+        # repository boundary. ``root`` here is the package, and a
+        # monorepo keeps one cclsp.json at the top — so looking beside
+        # the package finds nothing and this refuses to serve a project
+        # the daemon would have served fine. Same file, two resolvers,
+        # which is the shape of every silent disagreement this engine
+        # has shipped.
+        boundary = boundary_root_for(root) or root
+        config_path = resolve_config_path(boundary)
         mtime = None
         servers = []
         if config_path is not None and config_path.is_file():
@@ -288,9 +331,10 @@ class EngineRegistry:
                     f"`python3 scripts/sync_cclsp.py --write` to regenerate "
                     f"it.") from e
         if not servers:
-            searched = ", ".join(str(p) for p in candidate_config_paths(root))
+            searched = ", ".join(str(p)
+                                 for p in candidate_config_paths(boundary))
             raise T.ToolError(
-                f"No language servers configured for {root}. Looked at: "
+                f"No language servers configured for {boundary}. Looked at: "
                 f"{searched}. Run `python3 scripts/sync_cclsp.py --write` to "
                 f"create one from the servers actually installed.")
         # The engine config is no longer read here: the daemon loads it
@@ -300,10 +344,19 @@ class EngineRegistry:
         # still read above because a project with no servers must fail
         # here with a message that says so, rather than after a socket
         # round trip.
+        # One connection per repository. Opening a second to the same
+        # daemon would attach the same session id twice, and the daemon
+        # refcounts sessions in a set — so the first detach would
+        # release the other entry's locks with no way to tell that
+        # apart from the session ending.
+        shared = self._connections.get(boundary)
+        if shared is not None:
+            return _ProjectEngine(root, shared.acquire(), config_path, mtime)
+
         session = f"lsp-mcp-{os.getpid()}"
         try:
             client = connect_or_spawn(
-                project_root=root,
+                project_root=boundary,
                 session_id=session,
                 # Longer than the hook's 5 s: a first MCP call is
                 # interactive and worth waiting out, where a hook that
@@ -320,7 +373,7 @@ class EngineRegistry:
                 f"per project, so navigation needs that daemon. Check "
                 f"`python -m claude_hooks.lsp_engine status --project "
                 f"{root}`.") from e
-        engine = DaemonEngine(root, client)
+        engine = DaemonEngine(boundary, client)
         # Pinning the config only binds a daemon WE spawn. One that was
         # already running kept whatever it started with, and a daemon
         # started from an environment carrying CCLSP_CONFIG_PATH can
@@ -339,15 +392,16 @@ class EngineRegistry:
                     f"   serving:   {served}\n"
                     f"   It was already running when this session "
                     f"attached, so it kept the file it started with. "
-                    f"Restart it to pick up the other one:\n"
-                    f"     python -m claude_hooks.lsp_engine status "
-                    f"--project {root}   # prints the pid\n"
-                    f"     kill <pid>")
+                    f"Reload it to pick up the other one:\n"
+                    f"     python -m claude_hooks.lsp_engine reload "
+                    f"--project {root}\n"
+                    f"   or call the reload_servers tool.")
         except Exception:  # pragma: no cover - never fail the build
             log.debug("could not compare daemon config for %s", root,
                       exc_info=True)
-        log.info("engine for %s: daemon-backed, %d servers configured",
-                 root, len(servers))
+        self._connections[boundary] = engine
+        log.info("engine for %s: daemon-backed via %s, %d servers configured",
+                 root, boundary, len(servers))
         return _ProjectEngine(root, engine, config_path, mtime)
 
     def _drop(self, root: Path) -> None:
@@ -357,6 +411,12 @@ class EngineRegistry:
                 entry.engine.shutdown()
             except Exception:  # pragma: no cover — defensive
                 log.exception("error shutting down engine for %s", root)
+            # The connection is shared across the repository's packages;
+            # forget it only when its last holder let go, or the next
+            # lookup would hand out a detached client.
+            if getattr(entry.engine, "closed", True):
+                self._connections.pop(getattr(entry.engine, "root", root),
+                                      None)
 
     def reap_idle(self) -> list[str]:
         """Stop engines nobody has used recently.
@@ -381,10 +441,15 @@ class EngineRegistry:
         """Collect any daemon notices picked up during this call."""
         out: list[str] = []
         with self._lock:
-            engines = list(self._engines.values())
-        for entry in engines:
+            # By identity: several package entries share one connection,
+            # and its notice is once-only — asking it per entry would
+            # hand the notice to the first and nothing to the rest,
+            # which reads as "only that package's daemon is stale".
+            engines = list({id(e.engine): e.engine
+                            for e in self._engines.values()}.values())
+        for engine in engines:
             try:
-                out.extend(entry.engine.take_notices())
+                out.extend(engine.take_notices())
             except Exception:  # pragma: no cover - defensive
                 continue
         return out
@@ -688,8 +753,13 @@ class LspMcpServer:
                 f"  python -m claude_hooks.lsp_engine restart --project "
                 f"{entry.root}")
         stopped = result.get("stopped") or []
+        # Name the repository, not the package that was passed in. One
+        # daemon serves the whole tree, so this stops every package's
+        # servers — saying "reloaded <package>" would understate what
+        # just happened to a colleague's warm engine next door.
+        scope = getattr(entry.engine, "root", entry.root)
         lines = [
-            f"Reloaded the engine for {entry.root}.",
+            f"Reloaded the lsp_engine daemon for {scope}.",
             f"Stopped {len(stopped)} package engine(s) and their language "
             f"servers; they start again on the next request.",
         ]
