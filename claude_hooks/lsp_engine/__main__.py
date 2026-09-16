@@ -412,9 +412,8 @@ def _run_stop(args: argparse.Namespace) -> int:
     client = LspEngineClient(sock, session_id="stop-cli")
     try:
         client.connect()
-        # Direct IPC call — bypass attach/detach since we're terminating.
-        resp = client._ipc.call("shutdown", session="stop-cli")
-        ok = bool(resp.get("ok"))
+        ok = client.shutdown_daemon()
+        resp = {}
     except (OSError, RuntimeError) as e:
         print(json.dumps({
             "stopped": False,
@@ -424,7 +423,7 @@ def _run_stop(args: argparse.Namespace) -> int:
         return 2
     finally:
         try:
-            client._ipc.close()
+            client.close()
         except Exception:
             pass
 

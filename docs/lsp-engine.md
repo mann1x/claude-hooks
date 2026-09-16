@@ -743,6 +743,76 @@ Measured on a scratch project, MCP first and the hook immediately after:
 0.50 s and a full diagnostics block with de-dup off, 0.00 s and no block
 with it on.
 
+## Supervision from the claude-hooks daemon
+
+The LSP daemons are lazy-spawned by whoever needs one first and outlive
+that process on purpose — a warm language server is the entire point.
+Nothing owned them afterwards, and the bill arrived as three separate
+problems with one root.
+
+Measured on the development host the day this was written:
+
+```
+state dirs            : 307
+live daemons          : 175
+  orphaned (tree gone): 156   -> 3.37 GB RSS
+  with a session      :  14
+  idle, tree present  :   5
+dead state dirs       : 132
+roots nested inside a repository boundary: 74
+    37 roots -> /srv/…/dev/opencoti
+    14 roots -> /srv/…/dev/omnimergekit
+```
+
+156 of the 175 live daemons were holding language servers for project
+directories that no longer existed — test fixtures under `/tmp`, scratch
+checkouts. Nothing listed them, nothing reaped them, and nothing could
+reload them. The 74 nested roots are the other half of the same story:
+37 separate daemons for one checkout of opencoti, which the boundary
+keying collapses to one.
+
+So `LspEngineManager` rides in the claude-hooks daemon alongside
+`EmbeddingManager` and `ChatModelManager`. It differs from both in one
+way that matters: **it does not spawn.** Only the caller with a project
+in hand knows the root, so the supervisor discovers what exists from the
+state directories the daemons themselves write. Discovery over a
+registry is deliberate — a registry can disagree with reality, and the
+failure mode of that disagreement is a daemon nobody can see.
+
+```bash
+claude-hooks-daemon-ctl lsp list      # every daemon, with its engines
+claude-hooks-daemon-ctl lsp reload    # fleet-wide: stop servers, re-read config
+claude-hooks-daemon-ctl lsp reload --project /path/to/repo
+claude-hooks-daemon-ctl lsp stop --project /path/to/repo
+claude-hooks-daemon-ctl lsp reap      # run the reaper pass now
+```
+
+The reaper runs every 5 minutes and distinguishes two cases:
+
+* **Orphaned** — the project directory is gone. Stopped immediately,
+  with no idle grace, because there is nothing left to be warm *for*.
+* **Idle** — the project is still there but no session has attached for
+  `idle_seconds` (default 4 h). Stopped, and re-spawned lazily by
+  whoever next needs it.
+
+A daemon with an attached session is never reaped for idleness, however
+quiet it has been: someone is in it. A daemon that is *wedged* — socket
+down, process up — keeps its state directory, because removing the lock
+of a live process invites a second daemon for the same project; it is
+reported with `wedged: true` so the distinction between "reap it" and
+"why is nothing answering" is visible.
+
+Stopping the claude-hooks daemon stops the *supervision*, not the LSP
+daemons. A deploy restarts the hook daemon, and that must not cost every
+open session its warm language servers.
+
+```toml
+# config/claude-hooks.json -> hooks.lsp_engine.supervision
+{"enabled": true, "idle_seconds": 14400, "reap_orphans": true}
+```
+
+---
+
 ## Troubleshooting
 
 ### Daemon won't start: `another daemon already holds daemon.lock`

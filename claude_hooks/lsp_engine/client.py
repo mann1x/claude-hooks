@@ -194,6 +194,17 @@ class LspEngineClient:
         """
         return self._call("reload", config=config)
 
+    def shutdown_daemon(self) -> bool:
+        """Stop the daemon itself.
+
+        Deliberately bypasses attach/detach: we are terminating the
+        thing that tracks sessions, so registering as one first would
+        only leave a lock to release against a process that is going
+        away.
+        """
+        resp = self._ipc.call("shutdown", session=self.session_id)
+        return bool(resp.get("ok"))
+
     def diagnostics_result(
         self,
         path: str | os.PathLike,

@@ -378,6 +378,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
             # Override the daemon state directory.
             # ``null`` = ``~/.claude/lsp-engine``.
             "state_base": None,
+            # Host-level supervision of the LSP daemons, run by the
+            # claude-hooks daemon (v1.17+). They are lazy-spawned by
+            # whoever needs one and outlive it on purpose, and nothing
+            # owned them afterwards: on this host that was 175 live
+            # daemons, 156 of them holding language servers for project
+            # directories that had been deleted, for 3.37 GB.
+            #
+            # ``idle_seconds`` only reaps a daemon with NO attached
+            # session; an orphan (its project directory gone) is
+            # stopped immediately, since there is nothing left to be
+            # warm for. Set ``idle_seconds`` to 0 to reap orphans only.
+            "supervision": {
+                "enabled": True,
+                "idle_seconds": 4 * 3600.0,
+                "reap_orphans": True,
+            },
             # Cap on ``connect_or_spawn`` — how long to wait for the
             # daemon socket to appear after fork-and-exec.
             "spawn_timeout_s": 5.0,
