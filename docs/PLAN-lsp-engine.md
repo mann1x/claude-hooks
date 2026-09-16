@@ -103,6 +103,9 @@ The motivating user statement, paraphrased:
 
 ## Why not just an LSP-MCP server (cclsp / mcp-language-server)
 
+> **Superseded in part, 2026-09-16.** The reasoning below still holds for why the *engine* is not an MCP client. It no longer holds for the inverse: we now also put an MCP **surface** on the engine and retire cclsp. See *Phase 5* at the end of this document for the evidence that forced that change.
+
+
 Both work, both are stateless-per-call: every `tools/call` re-opens
 the file, the LSP server (re)indexes if it has to, the response
 comes back. For a small project this is fine. For a 200 K-LOC
@@ -393,3 +396,155 @@ Phase 0 entry checklist:
 - [ ] Tests: fake LSP server, didOpen → didChange → diagnostics
 
 When you've answered those, Phase 0 can start.
+
+---
+
+# Phase 5 — retire cclsp, put the MCP surface on the engine
+
+**Added 2026-09-16.** Reverses the "we are not an MCP server" stance of
+the section above, on evidence rather than preference.
+
+## Why now
+
+Four independent defects in cclsp surfaced in a single week, three of
+them silent. Listed because each one is an acceptance criterion:
+
+| # | Defect | Shape |
+|---|---|---|
+| 1 | **Frames by character count, not bytes** | `Content-Length` is bytes; `String.substring` is UTF-16 units. clangd renders every function hover as `→ <type>` (U+2192 = 3 bytes, 1 unit), so the slice over-runs by 2, eats the next message, and the buffer stays misaligned **permanently**. Every later request on that server times out — including ones that worked seconds before. |
+| 2 | **Config cached at process start** | `restart_server` relaunches the *language server* with the command cclsp cached when *it* started, and reports success. A config change costs a full client restart. |
+| 3 | **No exit on stdin EOF** | Closed clients left servers running; six found on solidpc, oldest 80 days, holding 143 MB of language servers. |
+| 4 | **Startup preload** raced a hardcoded 3 s readiness timeout | ~5 s stall spawning every matching server; cline would not load the MCP at all. |
+
+Defect 1 is the decisive one. It is not a bug we could have avoided by
+being careful — it is the bug you get from hand-rolling framing, and
+writing a fresh JSON-RPC client would be re-earning it.
+
+**Our framing is already correct, and now proven:** `lsp.py::_read_frame`
+reads `stream.read(length)` from a *binary* stream and decodes after, so
+it consumes exactly N bytes. `tests/test_lsp_framing_multibyte.py` pins
+it with the exact killer case (`→` hover followed by another message),
+astral-plane characters, 50-message drift, split reads, and malformed
+JSON raising rather than continuing mid-stream.
+
+## What we inherit vs. what we own
+
+**Inherit the surface, not the implementation.** Clients (Claude Code,
+VS Code, cline) are configured against cclsp's tool names. Keeping them
+byte-compatible makes this a config swap, not a migration:
+
+```
+find_definition        get_hover                prepare_call_hierarchy
+find_references        find_workspace_symbols   get_incoming_calls
+rename_symbol          find_implementation      get_outgoing_calls
+rename_symbol_strict   get_diagnostics          restart_server
+```
+
+Worth harvesting from cclsp rather than reinventing:
+
+- its **tool schemas and result phrasing** (so existing prompts and
+  autoApprove lists keep working verbatim);
+- `rename_symbol` vs `rename_symbol_strict` — the distinction between
+  "rename by symbol name, resolving ambiguity" and "rename exactly this
+  position" is a genuinely good API split;
+- **lazy spawn** — its one unambiguously correct behaviour;
+- the `restartInterval` idea, as an optional per-server knob.
+
+We own everything below the tool boundary: transport, framing, lifecycle,
+routing, config.
+
+## Gap analysis — engine today vs. what the surface needs
+
+| Capability | Engine status |
+|---|---|
+| Byte-exact framing, protocol errors raised | **have**, tested |
+| Lazy spawn, per-project daemon, session attach/detach | **have** |
+| `cclsp.json` reading + multi-server routing per extension | **have** (`resolve_servers_for_path` returns *all* claimants) |
+| `did_open` / `did_change` / diagnostics (push **and** pull) | **have** |
+| Capability report, stderr drain, URI normalisation | **have** |
+| never-parsed vs clean discrimination, compile-DB + version warnings | **have** (`lsp_integration`, `lang_servers`) |
+| `hover`, `definition`, `references`, `implementation` | **add** — plain LSP requests over existing `_send_request` |
+| `rename` (+ strict variant), workspace symbols | **add** |
+| call hierarchy (prepare / incoming / outgoing) | **add** |
+| MCP stdio shim + tool schemas | **add** |
+| Config **hot reload** on mtime | **add** — this is what kills the restart tax |
+| `$/progress` capture → adaptive deadlines + honest "indexing, 62%" | **add** |
+| `$/cancelRequest` on timeout so one slow call cannot strand later ones | **add** |
+| Self-heal: protocol error → tear down, respawn, retry once | **add** |
+
+The work is a **thin MCP tool layer plus seven LSP request wrappers**,
+not a new LSP client.
+
+## Design notes
+
+**Routing.** The MCP process is user-global; our daemon is per-project.
+The shim resolves each request's `file_path` to a project root (walk up
+for `.git` / `cclsp.json` / `.claude-hooks/`), then connects-or-spawns
+that project's daemon. One MCP process, N daemons, each already
+session-scoped. This is strictly better than cclsp's single flat
+`rootDir` and is why per-project config finally works.
+
+**Config hot reload.** The daemon stats `cclsp.json` (both files — see
+`docs/lsp-mcp.md`) and reloads on mtime change; `restart_server`
+force-reloads. Because the MCP shim is a thin client of a long-lived
+daemon, the daemon can restart its servers while the MCP process stays
+up — the property no cclsp patch can provide.
+
+**Provenance in every response.** No tool may return an empty list
+without saying why it is empty: server binary + version, whether a
+compile DB was found and which, whether the TU parsed, index state. The
+entire clangd failure hid behind a bare `"No diagnostics found"`.
+
+**Timeouts become answers, not errors.** With `$/progress` captured, a
+slow request reports *what* is slow and roughly how long is left, and
+extends its own deadline while the server is genuinely indexing. A cold
+1156-entry C++/CUDA tree legitimately needs minutes on first open.
+
+## Conformance checklist (acceptance suite)
+
+From the opencoti handover; every line is an observed failure, not a
+wishlist. Status is against the engine as it stands today.
+
+1. Frame on bytes, never a string — **done**, tested.
+2. `JSON.parse` failure ⇒ desynced ⇒ tear down and respawn — *partial*:
+   we raise `LspProtocolError`; the respawn-and-retry path is new work.
+3. Timeout must not poison the queue: send `$/cancelRequest`, drop the
+   pending entry — **new**.
+4. Re-read config on `restart_server` — **new**.
+5. Complete extension → languageId map, validated against the server's
+   own `extensions` — **done** (`cu`/`cuh`/`hxx` added 2026-09-16;
+   `sync_cclsp.py` refuses to map an extension with no languageId).
+6. Never report "no diagnostics" for a TU that failed to parse — **done**.
+7. Log server version at startup, warn when too old — **done**
+   (clangd floor 17; CUDA lane floor 22).
+8. Warn when a C/C++ root has no `compile_commands.json` — **done**.
+9. Keep lazy spawn — **done**.
+
+**Fixture:** the vendored llamafile tree (1156-entry compile DB, cosmocc
+host TUs at `-std=gnu++23`, 398 CUDA TUs at CUDA 13.3). It exercises
+byte framing, large preambles, background indexing and multi-extension
+routing at once.
+
+## Phasing
+
+- **5.0** — seven LSP request wrappers on `LspClient` + engine/daemon ops,
+  with unit tests against the fake server.
+- **5.1** — MCP stdio shim (`claude_hooks/lsp_mcp/`), 12 tools with
+  cclsp-compatible schemas, project-root routing, provenance in results.
+- **5.2** — resilience: `$/cancelRequest`, respawn-on-desync, adaptive
+  deadlines from `$/progress`.
+- **5.3** — config hot reload + `restart_server` semantics.
+- **5.4** — swap `~/.claude.json` and cline's settings from `cclsp` to
+  ours on one host, run the conformance suite against the llamafile tree,
+  then the second host. Keep cclsp installed until both pass.
+- **5.5** — retire: remove `patches/apply-cclsp-patches.py`, fold the
+  cclsp sections of `docs/lsp-mcp.md` into history, uninstall.
+
+## Non-goals
+
+- Per-query latency. The daemon is already single-digit ms warm; every
+  real failure here was correctness or observability.
+- Re-implementing diagnostics logic. clangd is right; the client's only
+  job is to report it honestly.
+- Supporting cclsp's config *format* beyond `cclsp.json`, which we
+  already read and already sync.
