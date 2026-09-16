@@ -573,6 +573,52 @@ Note `allowJs` there too. Without it `// @ts-check` in a `.js` file
 has nothing to attach to, so JavaScript reports zero diagnostics
 while TypeScript works — a quieter version of the same bug.
 
+### You shipped a fix and the behaviour did not change
+
+`python -m claude_hooks.lsp_mcp` imports the package once, at process
+start, and holds that code for the life of the process. Upgrading the
+package underneath it — `pip install -e .`, a `git pull`, a
+`scripts/deploy.py` run — does **not** reach an MCP server that is
+already running. Neither does `restart_server`: that restarts the
+*language servers* under the engine, not the Python process hosting the
+MCP tools.
+
+So a session started before the fix keeps serving pre-fix code, and the
+symptom is indistinguishable from "the fix does not work" — which costs a
+second debugging session on an already-fixed bug.
+
+Observed 2026-09-16: a `did_open` fix landed at 13:37; a peer session
+whose MCP server had started at 12:56 could only verify it by driving
+`Engine` directly in a fresh interpreter, because no amount of
+restarting language servers moved the shim. A client restart at 15:24
+picked it up immediately.
+
+**Remedy: restart the MCP client** (the Claude Code session), not the
+language servers. To see what a running server actually imported:
+
+```bash
+ps -o pid,lstart,cmd -C python | grep claude_hooks.lsp_mcp
+```
+
+Compare that start time against the commit you expect it to be running.
+If you run this from inside an agent shell, your own command line can
+match the pattern too — trust the start time, not the match count.
+
+This is the same shape as cclsp's config staleness, one level down:
+*cclsp caches config, `lsp_mcp` caches code.*
+
+**Planned:** the shim compares the installed package version against the
+one it imported and says so in its **tool output** (not only the log —
+a log nobody reads is how a wrong clangd survived for months here),
+once per session on the first affected call, naming both versions and
+the remedy. Deliberately an announcement and **not** an automatic
+re-exec: a re-exec would drop in-flight language servers — including a
+warm clangd index — and the client's `initialize` state, making two
+identical tool calls return differently for reasons the caller cannot
+see. That is the same failure class as "no diagnostics" meaning both
+*clean* and *never parsed*, and it cannot be fixed by adding another
+instance of it.
+
 ### The daemon survived my Claude Code crash
 
 By design — the daemon is per-project, not per-session. Other
