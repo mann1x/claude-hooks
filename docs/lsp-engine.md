@@ -802,6 +802,17 @@ of a live process invites a second daemon for the same project; it is
 reported with `wedged: true` so the distinction between "reap it" and
 "why is nothing answering" is visible.
 
+`lsp list` also reports a `stateless` list: daemons whose state
+directory has been removed — by `cleanup`, by `restart`, or by this
+reaper. On POSIX the socket inode goes with the directory, so nothing
+can connect to one again; it keeps serving the connections it already
+has and can never be reached. That is "it cannot be updated and I have
+to close the session" in its purest form, and two such daemons existed
+on this host the day the manager was written, which is why discovery
+reads the process table as well as the filesystem. They are reported and
+never auto-reaped: an unlinked socket does not mean nobody is attached,
+so stopping one takes a signal, and that is the operator's call.
+
 Stopping the claude-hooks daemon stops the *supervision*, not the LSP
 daemons. A deploy restarts the hook daemon, and that must not cost every
 open session its warm language servers.

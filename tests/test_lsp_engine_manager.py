@@ -84,7 +84,7 @@ class _Fixture(unittest.TestCase):
         """``live`` maps project path -> status dict (or None for dead)."""
         m = LspEngineManager(state_base=self.base, **kw)
 
-        def fake_client(root, session):
+        def fake_client(root, session, state_dir=None):
             status = live.get(str(root))
             if status is None:
                 return None
@@ -150,6 +150,158 @@ class ListingTests(_Fixture):
         res = m.list()
         self.assertFalse(res["available"])
         self.assertNotIn("daemons", res)
+
+
+class SocketIdentityTests(_Fixture):
+    """A state dir is probed at its OWN socket, not a recomputed one.
+
+    Those used to be the same thing. Since the daemon moved to the
+    repository boundary they are not, and recomputing gets it wrong in
+    both directions — measured during the migration on this host, where
+    the manager reported 19 live daemons for 4 processes.
+    """
+
+    def test_stale_dirs_under_one_repo_are_not_counted_as_daemons(self) -> None:
+        # Pre-boundary state dirs for packages inside a repository all
+        # recompute to that repository's socket, so one live daemon gets
+        # reported once per stale directory.
+        repo = self._project("repo")
+        (repo / ".git").mkdir()
+        pkg = repo / "packages" / "a"
+        pkg.mkdir(parents=True)
+        self._state("boundary", repo)
+        self._state("stale", pkg)
+
+        probed: list[Path] = []
+        m = LspEngineManager(state_base=self.base)
+
+        def fake_client(root, session, state_dir=None):
+            probed.append(state_dir)
+            if state_dir is not None and state_dir.name == "boundary":
+                return _FakeClient({"pid": 1, "project": str(repo),
+                                    "sessions": []})
+            return None
+
+        m._client = fake_client         # type: ignore[assignment]
+        m._lock_pid = lambda root: None  # type: ignore[assignment]
+        rows = m.list()["daemons"]
+        # Each state dir was asked about itself, not about the boundary.
+        self.assertEqual(sorted(d.name for d in probed if d),
+                         ["boundary", "stale"])
+        self.assertEqual(len([r for r in rows if r["running"]]), 1)
+
+    def test_a_daemon_serving_more_than_its_hint_says_so(self) -> None:
+        # The daemon is the authority on what it owns; the hint file is
+        # a breadcrumb that can predate the move to boundaries.
+        repo = self._project("repo")
+        pkg = repo / "packages" / "a"
+        pkg.mkdir(parents=True)
+        d = self._state("aaa", pkg)
+        m = LspEngineManager(state_base=self.base)
+        m._client = lambda root, session, state_dir=None: _FakeClient(
+            {"pid": 1, "project": str(repo), "sessions": []})
+        m._lock_pid = lambda root: None  # type: ignore[assignment]
+        row = m.list()["daemons"][0]
+        self.assertTrue(row["superseded"])
+        self.assertEqual(row["serves"], str(repo))
+        self.assertEqual(row["state_dir"], str(d))
+
+
+class StatelessDaemonTests(_Fixture):
+    """A daemon whose state dir is gone is invisible to the filesystem.
+
+    Removed by ``cleanup``, by ``restart``, or by this reaper. On POSIX
+    the socket inode goes with it, so nothing can connect either — the
+    daemon keeps serving the connections it already has and can never be
+    reached again. Two existed on this host when the manager was
+    written, which is why discovery does not stop at the filesystem.
+    """
+
+    def _fake_proc(self, procs: dict[int, list[str]]):
+        """A /proc-shaped tree the manager can walk."""
+        import claude_hooks.lsp_engine_manager as M
+        root = Path(self.tmp.name) / "proc"
+        root.mkdir()
+        for pid, argv in procs.items():
+            d = root / str(pid)
+            d.mkdir()
+            (d / "cmdline").write_bytes(b"\0".join(
+                a.encode() for a in argv) + b"\0")
+        (root / "notapid").mkdir()
+        orig = M.Path
+
+        # Only the literal Path("/proc") lookup is redirected.
+        def fake_path(arg="."):
+            return root if str(arg) == "/proc" else orig(arg)
+
+        M.Path = fake_path  # type: ignore[assignment]
+        self.addCleanup(lambda: setattr(M, "Path", orig))
+        return root
+
+    def test_a_daemon_with_no_hint_anywhere_is_reported(self) -> None:
+        p = self._project("lost")
+        self._fake_proc({4242: [
+            "python", "-m", "claude_hooks.lsp_engine", "daemon",
+            "--project", str(p)]})
+        rows = LspEngineManager(state_base=self.base).stateless_daemons()
+        self.assertEqual([r["pid"] for r in rows], [4242])
+        self.assertTrue(rows[0]["stateless"])
+
+    def test_a_discoverable_daemon_is_not_double_reported(self) -> None:
+        p = self._project("known")
+        self._state("aaa", p)
+        self._fake_proc({4242: [
+            "python", "-m", "claude_hooks.lsp_engine", "daemon",
+            "--project", str(p)]})
+        self.assertEqual(
+            LspEngineManager(state_base=self.base).stateless_daemons(), [])
+
+    def test_the_hint_is_compared_not_a_recomputed_state_dir(self) -> None:
+        # Recomputing normalises a pre-boundary daemon's narrow root up
+        # to the repository, which has its own live state dir — so
+        # every such daemon looks discoverable and none is reported.
+        # The count came back zero against two processes in ``ps``.
+        repo = self._project("repo")
+        (repo / ".git").mkdir()
+        pkg = repo / "packages" / "a"
+        pkg.mkdir(parents=True)
+        self._state("boundary", repo)          # the repo IS discoverable
+        self._fake_proc({4242: [
+            "python", "-m", "claude_hooks.lsp_engine", "daemon",
+            "--project", str(pkg)]})           # this package is not
+        rows = LspEngineManager(state_base=self.base).stateless_daemons()
+        self.assertEqual([r["project"] for r in rows], [str(pkg)])
+
+    def test_unrelated_processes_are_ignored(self) -> None:
+        self._fake_proc({
+            1: ["/sbin/init"],
+            2: ["python", "-m", "claude_hooks.lsp_engine", "status",
+                "--project", "/x"],
+            3: ["python", "-m", "claude_hooks.daemon"],
+        })
+        self.assertEqual(
+            LspEngineManager(state_base=self.base).stateless_daemons(), [])
+
+    def test_a_malformed_argv_does_not_raise(self) -> None:
+        self._fake_proc({7: [
+            "python", "-m", "claude_hooks.lsp_engine", "daemon",
+            "--project"]})          # flag with no value
+        self.assertEqual(
+            LspEngineManager(state_base=self.base).stateless_daemons(), [])
+
+    def test_they_are_never_auto_reaped(self) -> None:
+        # An unlinked socket does not mean nobody is attached: existing
+        # connections survive it. Stopping one needs a signal, and a
+        # signal to a daemon a live session is still talking to is the
+        # user's call, not a reaper's.
+        p = self._project("lost")
+        self._fake_proc({4242: [
+            "python", "-m", "claude_hooks.lsp_engine", "daemon",
+            "--project", str(p)]})
+        m = self.manager(live={})
+        res = m.reap()
+        self.assertEqual(res["stopped_orphaned"], [])
+        self.assertEqual(res["stopped_idle"], [])
 
 
 class ReapTests(_Fixture):

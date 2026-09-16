@@ -131,7 +131,7 @@ class LspEngineManager:
                 "engines": [],
                 "active_servers": [],
             }
-            status = self._status(root)
+            status = self._status(root, state_dir)
             if status is not None:
                 entry.update({
                     "running": True,
@@ -140,6 +140,14 @@ class LspEngineManager:
                     "engines": status.get("engines") or [],
                     "active_servers": status.get("active_servers") or [],
                 })
+                # The daemon is the authority on what it serves; the
+                # hint file is a breadcrumb that predates the move to
+                # repository boundaries and can now name a package
+                # inside what the daemon actually owns.
+                served = status.get("project")
+                if served and str(served) != str(root):
+                    entry["serves"] = str(served)
+                    entry["superseded"] = True
             else:
                 pid = self._lock_pid(root)
                 if pid is not None and pid_is_alive(pid):
@@ -149,7 +157,12 @@ class LspEngineManager:
                     entry["pid"] = pid
                     entry["wedged"] = True
             out.append(entry)
+        try:
+            stateless = self.stateless_daemons()
+        except Exception:  # pragma: no cover — defensive
+            stateless = []
         return {"available": True, "daemons": out,
+                "stateless": stateless,
                 "idle_seconds": self._idle_seconds}
 
     @staticmethod
@@ -166,26 +179,111 @@ class LspEngineManager:
         except Exception:
             return None
 
+    def stateless_daemons(self) -> list[dict]:
+        """Live daemons with no state directory left.
+
+        A daemon whose state dir was removed — by ``lsp_engine cleanup``,
+        by ``restart``, or by this reaper — is invisible to every
+        disk-based lookup, and on POSIX its socket inode is unlinked, so
+        nothing can connect to it either. It keeps serving the
+        connections it already has and can never be reached again: the
+        purest form of "it cannot be updated and I have to close the
+        session".
+
+        Two such daemons existed on this host the day this was written,
+        which is why discovery does not stop at the filesystem.
+
+        They are reported and never auto-reaped. An unlinked socket does
+        not mean nobody is attached — existing connections survive it —
+        so stopping one needs a signal, and a signal to a daemon a live
+        session is still talking to is the user's call, not a reaper's.
+        Linux-only: ``/proc`` is the cheap answer and there is no
+        dependency-free equivalent elsewhere.
+        """
+        out: list[dict] = []
+        proc = Path("/proc")
+        if not proc.is_dir():
+            return out
+        # Compare against the hints themselves, not against a
+        # recomputed state dir: recomputing normalises a pre-boundary
+        # daemon's narrow root up to the repository, which has its own
+        # live state dir, so every such daemon looked discoverable and
+        # none was reported. Found by the count coming back zero
+        # against two processes visible in ``ps``.
+        hinted = {str(r) for r in (
+            self._project_of(d) for d in self._state_dirs()) if r is not None}
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                argv = (entry / "cmdline").read_bytes().split(b"\0")
+            except OSError:
+                continue
+            parts = [a.decode("utf-8", "replace") for a in argv if a]
+            if not (any("claude_hooks.lsp_engine" in a for a in parts)
+                    and "daemon" in parts and "--project" in parts):
+                continue
+            try:
+                root = Path(parts[parts.index("--project") + 1])
+            except (ValueError, IndexError):  # pragma: no cover — defensive
+                continue
+            if str(root) in hinted:
+                continue          # discoverable the normal way
+            out.append({
+                "pid": int(entry.name),
+                "project": str(root),
+                "project_exists": self._exists(root),
+                "stateless": True,
+                "reason": "state directory was removed; unreachable over IPC",
+            })
+        return out
+
     # ─── talking to one daemon ───────────────────────────────────────
 
-    def _client(self, root: Path, session: str):
+    def _socket_for(self, root: Path,
+                    state_dir: Optional[Path] = None):
+        """Where to knock for the daemon a state dir belongs to.
+
+        The state directory\'s **own** socket, not one recomputed from
+        the project hint. Those used to be the same thing; since the
+        daemon moved to the repository boundary they are not, and
+        recomputing gets both directions wrong:
+
+        * every pre-boundary state dir under one repository recomputes
+          to that repository\'s socket, so one live daemon is reported
+          once per stale directory — 19 "daemons" for 4 processes,
+          observed here during the migration;
+        * a daemon started before the change is listening on the old
+          narrow-rooted socket, which nothing recomputes to any more,
+          so it becomes invisible and therefore unreapable.
+
+        On Windows the pipe has no filesystem entry, so there is nothing
+        to read beside the state dir and the name has to be derived.
+        """
+        from claude_hooks.lsp_engine.daemon import _is_windows, socket_path_for
+        if state_dir is not None and not _is_windows():
+            return state_dir / "daemon.sock"
+        return socket_path_for(root, base=self._state_base)
+
+    def _client(self, root: Path, session: str,
+                state_dir: Optional[Path] = None):
         """A connected client, or None when no daemon is listening.
 
         Never spawns. A supervisor that started what it was asked to
         inspect would report a fleet into existence.
         """
         from claude_hooks.lsp_engine.client import LspEngineClient
-        from claude_hooks.lsp_engine.daemon import socket_path_for
         from claude_hooks.lsp_engine.ipc import _is_socket_alive
-        sock = socket_path_for(root, base=self._state_base)
+        sock = self._socket_for(root, state_dir)
         if not _is_socket_alive(sock):
             return None
         client = LspEngineClient(sock, session_id=session)
         client.connect()
         return client
 
-    def _status(self, root: Path) -> Optional[dict]:
-        client = self._client(root, "claude-hooks-daemon-status")
+    def _status(self, root: Path,
+                state_dir: Optional[Path] = None) -> Optional[dict]:
+        client = self._client(root, "claude-hooks-daemon-status", state_dir)
         if client is None:
             return None
         try:
@@ -200,16 +298,26 @@ class LspEngineManager:
 
     # ─── lifecycle ───────────────────────────────────────────────────
 
-    def _roots(self, project: Optional[str | os.PathLike]) -> list[Path]:
+    def _roots(
+        self, project: Optional[str | os.PathLike],
+    ) -> list[tuple[Path, Optional[Path]]]:
+        """(project root, its state dir) for each daemon to act on.
+
+        The state dir travels with the root because it is what says
+        *which socket*; see :meth:`_socket_for`.
+        """
         if project is not None:
-            from claude_hooks.lsp_engine.daemon import daemon_root_for
-            return [daemon_root_for(project)]
-        roots = []
+            from claude_hooks.lsp_engine.daemon import (
+                daemon_root_for, project_dir,
+            )
+            root = daemon_root_for(project)
+            return [(root, project_dir(root, base=self._state_base))]
+        out: list[tuple[Path, Optional[Path]]] = []
         for state_dir in self._state_dirs():
             root = self._project_of(state_dir)
             if root is not None:
-                roots.append(root)
-        return roots
+                out.append((root, state_dir))
+        return out
 
     def reload(self, project: Optional[str | os.PathLike] = None,
                *, config: bool = True) -> dict:
@@ -223,8 +331,9 @@ class LspEngineManager:
         if not self._enabled:
             return {"available": False, "reason": "lsp engine manager disabled"}
         results = []
-        for root in self._roots(project):
-            client = self._client(root, "claude-hooks-daemon-reload")
+        for root, state_dir in self._roots(project):
+            client = self._client(root, "claude-hooks-daemon-reload",
+                                  state_dir)
             if client is None:
                 results.append({"project": str(root), "reloaded": False,
                                 "reason": "not running"})
@@ -251,13 +360,14 @@ class LspEngineManager:
         if not self._enabled:
             return {"available": False, "reason": "lsp engine manager disabled"}
         results = []
-        for root in self._roots(project):
+        for root, state_dir in self._roots(project):
             results.append({"project": str(root),
-                            "stopped": self._stop_one(root)})
+                            "stopped": self._stop_one(root, state_dir)})
         return {"available": True, "results": results}
 
-    def _stop_one(self, root: Path) -> bool:
-        client = self._client(root, "claude-hooks-daemon-stop")
+    def _stop_one(self, root: Path,
+                  state_dir: Optional[Path] = None) -> bool:
+        client = self._client(root, "claude-hooks-daemon-stop", state_dir)
         if client is None:
             return False
         try:
@@ -312,8 +422,9 @@ class LspEngineManager:
                     cleaned.append(key)
                 self._last_busy.pop(key, None)
                 continue
+            state_dir = Path(entry["state_dir"])
             if self._reap_orphans and not entry["project_exists"]:
-                if self._stop_one(root):
+                if self._stop_one(root, state_dir):
                     stopped_orphan.append(key)
                     self._last_busy.pop(key, None)
                 continue
@@ -324,7 +435,7 @@ class LspEngineManager:
             with self._lock:
                 since = self._last_busy.setdefault(key, clock)
             if self._idle_seconds > 0 and clock - since > self._idle_seconds:
-                if self._stop_one(root):
+                if self._stop_one(root, state_dir):
                     stopped_idle.append(key)
                     with self._lock:
                         self._last_busy.pop(key, None)
