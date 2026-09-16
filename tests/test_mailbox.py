@@ -168,8 +168,26 @@ class _SqliteConn:
 
 
 class StoreHarness(unittest.TestCase):
+    """Shared SQLite-backed harness with the host name **pinned**.
+
+    ``send()`` stamps ``host_name()`` on every row, and the sender-side
+    queries match on it. Tests that name a host literally therefore only
+    pass on a machine that happens to be called that — which is why the
+    tools tests passed on solidpc and failed on pandorum. Pinning it
+    here makes the whole file host-independent; a test that wants to
+    *be* another host patches over this for the duration of its send.
+    """
+
+    HOST = "solidpc"
 
     def setUp(self):
+        from unittest import mock
+        from claude_hooks.mailbox import store as store_mod
+        patcher = mock.patch.object(store_mod, "host_name",
+                                    lambda: self.HOST)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.db = _SqliteConn(Path(self._tmp.name) / "m.db")
