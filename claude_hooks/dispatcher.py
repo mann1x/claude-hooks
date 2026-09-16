@@ -20,6 +20,7 @@ import traceback
 from typing import Optional
 
 from claude_hooks.config import expand_user_path, load_config, project_disabled
+from claude_hooks.mcp_stdio import force_utf8_stdio
 from claude_hooks.providers import (
     Provider,
     ServerCandidate,
@@ -195,7 +196,15 @@ def _setup_logging(cfg: dict) -> None:
 
 
 def read_event_from_stdin() -> dict:
-    """Read the event JSON Claude Code pipes to a hook on stdin."""
+    """Read the event JSON Claude Code pipes to a hook on stdin.
+
+    The UTF-8 call is not decoration. Hook events are UTF-8 and this
+    stdin is a pipe, so on Windows it decodes as ``cp1252`` — which
+    mangles the user's own prompt before it reaches the recall query
+    and before the Stop hook stores it, silently, because cp1252 maps
+    nearly every byte to *something*. See :mod:`claude_hooks.mcp_stdio`.
+    """
+    force_utf8_stdio()
     raw = sys.stdin.read()
     if not raw.strip():
         return {}

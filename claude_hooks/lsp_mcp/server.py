@@ -68,6 +68,7 @@ from claude_hooks.lsp_engine.config import (
 from claude_hooks.lsp_engine.engine import Engine, NavResponse
 from claude_hooks.lsp_engine.lsp import LspError
 from claude_hooks.lsp_mcp import tools as T
+from claude_hooks.mcp_stdio import force_utf8_stdio
 
 log = logging.getLogger("claude_hooks.lsp_mcp")
 
@@ -690,6 +691,7 @@ def serve_stdio(registry: Optional[EngineRegistry] = None) -> int:
     after the sessions that started them had gone. A stdio server whose
     client has closed has no way to be reached and no reason to live.
     """
+    force_utf8_stdio()
     server = LspMcpServer(registry)
     stop = threading.Event()
 

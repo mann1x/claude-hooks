@@ -33,6 +33,7 @@ from typing import Any, Optional
 
 from claude_hooks.config import load_config
 from claude_hooks.dispatcher import build_providers
+from claude_hooks.mcp_stdio import force_utf8_stdio
 from claude_hooks.providers.base import Provider
 from claude_hooks.providers.pgvector import PgvectorProvider
 
@@ -628,6 +629,7 @@ def serve_stdio(provider: Optional[Provider] = None) -> int:
 
     Returns 0 on clean EOF, 1 on fatal init failure.
     """
+    force_utf8_stdio()
     if provider is None:
         cfg = load_config()
         providers = build_providers(cfg)
