@@ -125,6 +125,21 @@ class NavResponse:
                 and not self.scan_truncated_at)
 
 
+#: A cold language server has to build the project graph before it can
+#: answer anything that crosses a file, and it does that lazily on the
+#: first such request. Measured on the cline monorepo (3415 authored
+#: .ts, tsserver rooted at sdk/packages/core): the first
+#: ``textDocument/references`` took **7.84 s**, the second **0.15 s** —
+#: a 52x warm-up cliff. Against the flat 5 s budget that is a
+#: deterministic failure on the first call and a success on every one
+#: after, which reads as "no references" rather than "not ready yet".
+#:
+#: The warm budget stays small on purpose: once the graph is built,
+#: anything slow is genuinely slow. This is the navigation-side twin of
+#: the diagnostics floor raised in f3c4bd3.
+NAV_COLD_TIMEOUT = 30.0
+
+
 class Engine:
     """Owns the LSP clients for a project. Thread-safe for concurrent
     callers via a single coarse lock — the daemon's IPC layer is what
@@ -145,6 +160,11 @@ class Engine:
         self._config = config or EngineConfig()
         self._startup_timeout = startup_timeout
         self._request_timeout = request_timeout
+        # Clients that have completed at least one navigation request,
+        # and so have their project graph built. Identity-keyed: a
+        # restarted client is a new object and correctly starts cold
+        # again.
+        self._nav_warm: set = set()
 
         # spec -> LspClient, lazily populated on first did_open that
         # routes to that spec. Identity-keyed (the spec dataclass is
@@ -374,6 +394,31 @@ class Engine:
             entry = self._uri_routing.get(uri)
         return entry[1] if entry else ()
 
+    #: Requests that have to know the whole project, and so pay for
+    #: the graph on the first one. A ``documentSymbol`` or ``hover``
+    #: answering proves only that the file parsed — it says nothing
+    #: about cross-file readiness, so it must not clear the allowance
+    #: for the request that does need it.
+    _PROJECT_SCOPED = frozenset({
+        "references", "implementation", "rename", "workspaceSymbol",
+        "prepareCallHierarchy", "incomingCalls", "outgoingCalls",
+        "definition",
+    })
+
+    def _nav_timeout(self, client, what: str = "") -> float:
+        """Budget for one navigation request against ``client``.
+
+        The first project-scoped request to a client pays for building
+        the graph; every later one does not. Sizing both off the cold
+        number would make a genuinely hung server take that long to say
+        so, and sizing both off the warm one is the bug this replaces.
+        """
+        if what and what not in self._PROJECT_SCOPED:
+            return self._request_timeout
+        if (client, "project") in self._nav_warm:
+            return self._request_timeout
+        return max(self._request_timeout, NAV_COLD_TIMEOUT)
+
     def _fan_out(self, specs, call, *, what: str) -> "NavResponse":
         """Run ``call`` against each server and merge, keeping track of
         which ones answered.
@@ -398,6 +443,10 @@ class Engine:
             try:
                 items.extend(call(client) or [])
                 consulted.append(name)
+                if what in self._PROJECT_SCOPED:
+                    # It answered something that needed the graph, so
+                    # the graph exists now.
+                    self._nav_warm.add((client, "project"))
             except LspError as e:
                 failures.append((name, str(e)))
                 snap = client.progress_snapshot()
@@ -431,8 +480,9 @@ class Engine:
         if not specs:
             return NavResponse(items=[])
         res = self._fan_out(
-            specs, lambda c: c.document_symbols(path,
-                                                timeout=self._request_timeout),
+            specs,
+            lambda c: c.document_symbols(
+                path, timeout=self._nav_timeout(c, "documentSymbol")),
             what="documentSymbol")
         pool = [s for s in res.items if kind is None or s.kind == kind]
         matches = [s for s in pool if s.name == name]
@@ -456,7 +506,7 @@ class Engine:
         return self._fan_out(
             specs,
             lambda c: c.definition(path, line, character,
-                                   timeout=self._request_timeout),
+                                   timeout=self._nav_timeout(c, "definition")),
             what="definition")
 
     def implementation(self, path, line: int, character: int) -> "NavResponse":
@@ -464,7 +514,7 @@ class Engine:
         return self._fan_out(
             specs,
             lambda c: c.implementation(path, line, character,
-                                       timeout=self._request_timeout),
+                                       timeout=self._nav_timeout(c, "implementation")),
             what="implementation")
 
     def references(self, path, line: int, character: int, *,
@@ -484,7 +534,7 @@ class Engine:
             specs,
             lambda c: c.references(path, line, character,
                                    include_declaration=include_declaration,
-                                   timeout=self._request_timeout),
+                                   timeout=self._nav_timeout(c, "references")),
             what="references")
         return NavResponse(items=res.items, consulted=res.consulted,
                            failures=res.failures, progress=res.progress,
@@ -543,7 +593,7 @@ class Engine:
         res = self._fan_out(
             specs,
             lambda c: [c.hover(path, line, character,
-                               timeout=self._request_timeout)],
+                               timeout=self._nav_timeout(c, "hover"))],
             what="hover")
         # A server with nothing to say returns "", which is an answer
         # but not a result; keeping it would render as a blank hover
@@ -557,8 +607,9 @@ class Engine:
         specs = self._ensure_open(path)
         return self._fan_out(
             specs,
-            lambda c: c.prepare_call_hierarchy(path, line, character,
-                                               timeout=self._request_timeout),
+            lambda c: c.prepare_call_hierarchy(
+                path, line, character,
+                timeout=self._nav_timeout(c, "prepareCallHierarchy")),
             what="prepareCallHierarchy")
 
     def calls(self, path, line: int, character: int, *,
@@ -573,13 +624,14 @@ class Engine:
         specs = self._ensure_open(path)
 
         def _both(client):
+            budget = self._nav_timeout(client, f"{direction}Calls")
             items = client.prepare_call_hierarchy(
-                path, line, character, timeout=self._request_timeout)
+                path, line, character, timeout=budget)
             out = []
             for item in items:
                 fn = (client.incoming_calls if direction == "incoming"
                       else client.outgoing_calls)
-                out.extend(fn(item, timeout=self._request_timeout))
+                out.extend(fn(item, timeout=budget))
             return out
 
         return self._fan_out(specs, _both, what=f"{direction}Calls")
@@ -597,9 +649,9 @@ class Engine:
         return self._fan_out(
             specs,
             lambda c: ([c.rename(path, line, character, new_name,
-                                 timeout=self._request_timeout)]
+                                 timeout=self._nav_timeout(c, "rename"))]
                        if c.prepare_rename(path, line, character,
-                                           timeout=self._request_timeout)
+                                           timeout=self._nav_timeout(c, "rename"))
                        else []),
             what="rename")
 
@@ -627,7 +679,7 @@ class Engine:
                 for s in self._servers if s not in specs]
         res = self._fan_out(
             specs, lambda c: c.workspace_symbols(
-                query, timeout=self._request_timeout),
+                query, timeout=self._nav_timeout(c, "workspaceSymbol")),
             what="workspaceSymbol")
         return NavResponse(items=res.items, consulted=res.consulted,
                            failures=res.failures, progress=res.progress,

@@ -323,8 +323,49 @@ def provenance_note(res: NavResponse) -> str:
 
 
 def _wrap(body: str, res: NavResponse, *, empty: str) -> str:
+    """Render a navigation result, and never invent an empty one.
+
+    ``empty`` is the truth only when every server that claims the file
+    actually answered — which is what :attr:`NavResponse.trustworthy`
+    already decides. When it did not, the result set is not empty, it is
+    *unknown*, and "none found" is a false negative that reads exactly
+    like a fact.
+
+    Measured on the cline monorepo: a cold ``textDocument/references``
+    took 7.84 s against the old flat 5 s budget, and the symbol had four
+    real references — every one of which rendered as "none found" with
+    the warning pushed below the lead line. The lead line is what a
+    caller reads and acts on, so it has to carry the distinction.
+
+    The type enumerates four ways ``items`` comes back empty and says
+    collapsing them is the bug class this engine exists to avoid. This
+    is the renderer honouring that.
+    """
     note = provenance_note(res)
-    text = body.strip() or empty
+    text = body.strip()
+    if not text:
+        if res.failures:
+            who = ", ".join(name for name, _ in res.failures)
+            text = (f"NO ANSWER — {who} did not answer, so this search did "
+                    f"not complete. This is NOT an empty result: whether "
+                    f"matches exist is unknown. The first cross-file "
+                    f"request to a cold server pays for building its "
+                    f"project graph — retry the same call.")
+        elif res.progress is not None:
+            text = ("NO ANSWER YET — the server is still indexing, so it "
+                    "has not searched yet. This is NOT an empty result. "
+                    "Retry the same call.")
+        elif not res.consulted:
+            text = ("NOT ANALYSED — no configured language server claims "
+                    "this file, so nothing was asked. This is not a "
+                    "statement about the code.")
+        elif not res.trustworthy:
+            # Something answered, but not over the whole project.
+            text = (f"{empty.rstrip('.')} in what was searched — the search "
+                    f"was incomplete (see below), so matches elsewhere are "
+                    f"not ruled out.")
+        else:
+            text = empty
     return f"{text}\n\n{note}".strip() if note else text
 
 
