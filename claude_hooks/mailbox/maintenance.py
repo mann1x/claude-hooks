@@ -21,6 +21,7 @@ the hook executor.
 from __future__ import annotations
 
 import logging
+import random
 import threading
 import time
 from typing import Callable, Optional
@@ -49,12 +50,26 @@ DEFAULT_LIMIT = 1000
 MIN_INTERVAL_SECONDS = 60.0
 
 
-def sleep_seconds(interval: float) -> float:
+#: Fraction of the interval to scatter each sleep by. Two hosts share
+#: one Postgres, so both daemons sweep the same table; without jitter
+#: their hourly ticks can phase-lock and both archive the same expired
+#: rows before either deletes them — the archive is append-only, so the
+#: duplicate is permanent. Jitter does not make that impossible, only
+#: rare; see the note in docs/mailbox.md.
+_JITTER_FRACTION = 0.15
+
+
+def sleep_seconds(interval: float, *, jitter: bool = False) -> float:
     """Clamp a configured cadence to something a daemon can survive."""
     try:
-        return max(MIN_INTERVAL_SECONDS, float(interval))
+        value = max(MIN_INTERVAL_SECONDS, float(interval))
     except (TypeError, ValueError):
-        return DEFAULT_INTERVAL_SECONDS
+        value = DEFAULT_INTERVAL_SECONDS
+    if jitter:
+        spread = value * _JITTER_FRACTION
+        value = max(MIN_INTERVAL_SECONDS,
+                    value + random.uniform(-spread, spread))
+    return value
 
 
 def _enabled(cfg: Optional[dict]) -> bool:
@@ -187,7 +202,13 @@ class MailboxMaintenanceThread(threading.Thread):
 
     def run(self) -> None:  # pragma: no cover - thread loop
         log.debug("mailbox maintenance thread started")
-        if self._stop_event.wait(self._initial_delay):
+        # Scatter the first sweep too: two hosts brought up together —
+        # a deploy, a power cut — would otherwise start in lockstep and
+        # stay there.
+        delay = self._initial_delay
+        if delay > 0:
+            delay *= random.uniform(0.5, 1.5)
+        if self._stop_event.wait(delay):
             return
         while not self._stop_event.is_set():
             interval = self._interval
@@ -199,5 +220,5 @@ class MailboxMaintenanceThread(threading.Thread):
                 interval = float(_settings(cfg)["interval"])
             except Exception as e:
                 log.debug("mailbox maintenance tick failed: %s", e)
-            self._stop_event.wait(sleep_seconds(interval))
+            self._stop_event.wait(sleep_seconds(interval, jitter=True))
         log.debug("mailbox maintenance thread exiting")

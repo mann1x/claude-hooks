@@ -192,6 +192,17 @@ A sweep that cannot reach a store returns `None` rather than an empty
 report, and logs at INFO only when it actually did something — an
 hourly "nothing to do" line is how a log stops being read.
 
+> **Two daemons, one table.** When hosts share a Postgres, both
+> daemons sweep it. Sweeps are scattered (±15 % on the interval, ±50 %
+> on the first run) so they rarely coincide, but the window is not
+> closed: if two sweeps overlap exactly, both can archive the same
+> expired rows before either deletes them, and the archive is
+> append-only, so the duplicate is permanent. The delete is by id, so
+> nothing is lost and nothing is double-deleted — the cost is a
+> duplicated archive entry, bounded by `maintenance_limit`. Closing it
+> properly needs a lease, which is not worth it at this cadence
+> against 180-day deadlines.
+
 ---
 
 ## Troubleshooting

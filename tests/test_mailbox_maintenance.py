@@ -344,3 +344,75 @@ class TouchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JitterTests(unittest.TestCase):
+    """Two hosts share one Postgres, so both daemons sweep the same
+    table. Phase-locked ticks let both archive the same expired rows
+    before either deletes them, and the archive is append-only."""
+
+    def test_jitter_moves_the_sleep(self):
+        seen = {maintenance.sleep_seconds(3600.0, jitter=True)
+                for _ in range(50)}
+        self.assertGreater(len(seen), 1, "jitter produced a constant")
+
+    def test_jitter_stays_near_the_interval(self):
+        for _ in range(200):
+            v = maintenance.sleep_seconds(3600.0, jitter=True)
+            self.assertGreaterEqual(v, 3600.0 * 0.8)
+            self.assertLessEqual(v, 3600.0 * 1.2)
+
+    def test_jitter_never_goes_below_the_floor(self):
+        # The floor exists to stop a hot loop; jitter must not defeat it.
+        for _ in range(200):
+            self.assertGreaterEqual(
+                maintenance.sleep_seconds(60.0, jitter=True),
+                maintenance.MIN_INTERVAL_SECONDS)
+
+    def test_no_jitter_by_default(self):
+        self.assertEqual(maintenance.sleep_seconds(3600.0), 3600.0)
+
+
+class SelfRegistrationTests(unittest.TestCase):
+    """A session using the MCP tools without the hooks — Cline, Cursor,
+    a bare client — could send and read but never appeared in
+    ``mailbox-sessions``, so nobody could discover it."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.db = _Conn(Path(self._tmp.name) / "m.db")
+        self.addCleanup(self.db.close)
+        self.store = MailboxStore(self.db, self.db.lock, dialect="sqlite")
+        self.store.ensure_schema()
+        from claude_hooks.mailbox.tools import MailboxTools
+        self.tools = MailboxTools(self.store, alias="cline",
+                                  session_id="c-1", host="solidpc")
+
+    def test_first_tool_call_registers_the_session(self):
+        self.assertEqual(self.store.sessions(), [])
+        self.tools.call("mailbox-list", {})
+        self.assertEqual([s.alias for s in self.store.sessions()], ["cline"])
+
+    def test_registration_happens_once(self):
+        calls = []
+        real = self.store.register
+        with mock.patch.object(type(self.store), "register",
+                               lambda _s, *a, **k: calls.append(a) or real(*a, **k)):
+            self.tools.call("mailbox-list", {})
+            self.tools.call("mailbox-sessions", {})
+            self.tools.call("mailbox-sent", {})
+        self.assertEqual(len(calls), 1)
+
+    def test_a_session_without_an_id_is_not_registered(self):
+        from claude_hooks.mailbox.tools import MailboxTools
+        anon = MailboxTools(self.store, alias="anon", session_id="",
+                            host="solidpc")
+        anon.call("mailbox-list", {})
+        self.assertEqual(self.store.sessions(), [])
+
+    def test_a_failing_registration_does_not_break_the_tool(self):
+        with mock.patch.object(type(self.store), "register",
+                               side_effect=RuntimeError("db gone")):
+            out = self.tools.call("mailbox-list", {})
+        self.assertIn("No messages", out)

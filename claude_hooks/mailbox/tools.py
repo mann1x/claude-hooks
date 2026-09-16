@@ -12,11 +12,14 @@ is which connection the store borrows.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional, Sequence
 
 from claude_hooks.mailbox.addressing import AddressError, describe_recipients
 from claude_hooks.mailbox.announce import ago
 from claude_hooks.mailbox.store import MailboxError, MailboxStore, host_name
+
+log = logging.getLogger("claude_hooks.mailbox.tools")
 
 TOOL_NAMES = (
     "mailbox-send", "mailbox-list", "mailbox-read", "mailbox-ack",
@@ -171,16 +174,41 @@ class MailboxTools:
         self.alias = alias
         self.session_id = session_id or ""
         self.host = host or host_name()
+        self._registered = False
 
     def handles(self, name: str) -> bool:
         return name in TOOL_NAMES
 
     def call(self, name: str, args: dict) -> str:
+        self._ensure_registered()
         try:
             return getattr(self, "_" + name.replace("-", "_"))(args)
         except (MailboxError, AddressError) as e:
             # Both are the caller's to fix, so they go back as prose.
             return str(e)
+
+    def _ensure_registered(self) -> None:
+        """Announce this session the first time it uses the mailbox.
+
+        Registration otherwise happens only in the SessionStart hook,
+        which leaves a session using the MCP tools without the hooks —
+        Cline, Cursor, a bare MCP client — able to send and read while
+        never appearing in ``mailbox-sessions``. Its mail still works,
+        because an alias with no live session simply parks, but nobody
+        can *discover* it, and a correspondent reading the session list
+        concludes it is not there.
+
+        Once per process, and soft-fail: being unlisted is a smaller
+        problem than a mailbox that refuses to work.
+        """
+        if self._registered or not self.session_id:
+            return
+        self._registered = True
+        try:
+            self.store.register(self.session_id, self.alias, host=self.host)
+        except Exception:
+            log.debug("mailbox: could not self-register %s@%s",
+                      self.alias, self.host, exc_info=True)
 
     # ─── tools ───────────────────────────────────────────────────────
 
