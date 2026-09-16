@@ -73,9 +73,17 @@ def pytest_configure(config):
     import sys
     import sysconfig
 
+    # Compared with separators normalised: on pandorum the interpreter
+    # is ...\envs\claude-hooks\python.exe, so a POSIX-spelled marker
+    # never matched and every Windows run printed this warning while
+    # running under exactly the env it was demanding.
     expected_marker = "envs/claude-hooks"
-    exe = sys.executable or ""
-    prefix = sysconfig.get_config_var("prefix") or ""
+
+    def _norm(p: str) -> str:
+        return (p or "").replace("\\", "/")
+
+    exe = _norm(sys.executable)
+    prefix = _norm(sysconfig.get_config_var("prefix") or "")
     if expected_marker not in exe and expected_marker not in prefix:
         msg = (
             f"\n\n  ⚠  pytest is NOT running under the claude-hooks conda env.\n"
