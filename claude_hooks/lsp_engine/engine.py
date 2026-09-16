@@ -165,6 +165,12 @@ class Engine:
         # restarted client is a new object and correctly starts cold
         # again.
         self._nav_warm: set = set()
+        # uri -> (mtime_ns, size) as of the last time the server's copy
+        # was known to match disk. An edit that does not come through
+        # did_change (sed, a heredoc, another process, another session)
+        # leaves the server serving what it first read, which is worse
+        # than an empty answer: stale positions look like an answer.
+        self._synced: dict[str, tuple[int, int]] = {}
 
         # spec -> LspClient, lazily populated on first did_open that
         # routes to that spec. Identity-keyed (the spec dataclass is
@@ -253,6 +259,7 @@ class Engine:
             return False
         with self._lock:
             self._uri_routing[uri] = (abs_path, tuple(opened))
+        self._record_sync(uri, path)
         return True
 
     def did_change(self, path: str | os.PathLike, content: str) -> bool:
@@ -270,6 +277,7 @@ class Engine:
         _abs_path, specs = entry
         for spec in specs:
             self._client_for(spec).did_change(path, content)
+        self._record_sync(uri, path)
         return True
 
     def did_close(self, path: str | os.PathLike) -> bool:
@@ -364,6 +372,52 @@ class Engine:
     # empty, not an error, so every entry point here opens the file
     # first.
 
+    def _record_sync(self, uri: str, path) -> None:
+        """Remember the disk stamp the server's copy corresponds to."""
+        try:
+            st = Path(path).stat()
+        except OSError:
+            self._synced.pop(uri, None)
+            return
+        self._synced[uri] = (st.st_mtime_ns, st.st_size)
+
+    def _resync_from_disk(self, path, uri: str) -> bool:
+        """Re-send ``path`` if it changed behind the engine's back.
+
+        Only edits routed through ``did_change`` reach a language
+        server. Anything else — ``sed``, a shell heredoc, a second
+        session, a git checkout, another editor — leaves the server
+        answering from the content it first read. That does not surface
+        as an error or an empty result: positions come back shifted and
+        newly added references are simply absent, which is a wrong
+        answer wearing the shape of a right one. Observed 2026-09-16 by
+        a peer session editing through Bash in auto mode.
+
+        The check is a ``stat``, so it costs nothing on the common path;
+        content is only re-read when the stamp moved. ``did_open`` is
+        idempotent, so identical content is a no-op and different
+        content becomes a ``didChange``.
+        """
+        p = Path(path)
+        try:
+            st = p.stat()
+        except OSError:
+            # Deleted or unreadable. The next real request reports that
+            # honestly; silently dropping the routing here would make
+            # it look like the file was never opened.
+            return False
+        stamp = (st.st_mtime_ns, st.st_size)
+        if self._synced.get(uri) == stamp:
+            return False
+        try:
+            content = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        log.debug("resync %s: disk changed since last sync", p)
+        self.did_open(p, content)
+        self._synced[uri] = stamp
+        return True
+
     def _ensure_open(self, path) -> tuple[LspServerSpec, ...]:
         """Open ``path`` if it is not already, and return its servers.
 
@@ -382,6 +436,7 @@ class Engine:
         with self._lock:
             entry = self._uri_routing.get(uri)
         if entry is not None:
+            self._resync_from_disk(path, uri)
             return entry[1]
         p = Path(path)
         try:

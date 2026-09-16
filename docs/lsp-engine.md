@@ -650,6 +650,35 @@ return differently for reasons the caller cannot see. That is the same
 failure class as "no diagnostics" meaning both *clean* and *never
 parsed*, and it cannot be fixed by adding another instance of it.
 
+### Results reflect an older version of the file
+
+Only edits routed through `did_change` reach a language server. The
+PostToolUse hook fires it for `Edit` / `Write` / `MultiEdit` — but an
+edit made with `sed`, a shell heredoc, another session, another editor
+or a `git checkout` sends nothing, and the server keeps answering from
+the content it first read.
+
+This does not surface as an error or as an empty result. Positions come
+back shifted and newly added references are simply absent, which is a
+wrong answer wearing the shape of a right one. Measured 2026-09-16 by a
+session editing through Bash in auto mode: `find_references` returned
+pre-edit line numbers and missed three call sites that had just been
+added, while symbol lookup and workspace search stayed correct — so
+nothing about the output looked suspect.
+
+The engine now **re-checks the file before answering**. Every request
+that opens a path compares the on-disk `(mtime, size)` against the stamp
+the server's copy corresponds to, and re-sends the content when it
+moved. The check is a `stat`, so the common path costs nothing, and
+`did_open` is idempotent — identical content is a no-op, different
+content becomes a `did_change`. Both parts of the stamp matter: an edit
+can land inside one clock tick, and a truncation that keeps the mtime
+still changes the size.
+
+Cross-checking reference sweeps with `grep` is no longer necessary for
+this reason. (`refresh_open_files()` still exists for the whole-project
+case after a branch switch; this is the per-request version of it.)
+
 ### The daemon survived my Claude Code crash
 
 By design — the daemon is per-project, not per-session. Other
