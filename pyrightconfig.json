@@ -1,0 +1,26 @@
+{
+  "include": [
+    "claude_hooks",
+    "scripts",
+    "tests",
+    "install.py"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "**/node_modules",
+    ".git",
+    ".venv",
+    "vendor",
+    "benchmarks",
+    "graphify-out",
+    "backup_models",
+    "docs"
+  ],
+  "extraPaths": [
+    "."
+  ],
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "warning",
+  "reportMissingModuleSource": "none"
+}

@@ -405,6 +405,19 @@ class LspClient:
             {
                 "processId": os.getpid(),
                 "rootUri": self._root_dir.as_uri(),
+                # `rootUri` has been deprecated since LSP 3.6 in favour
+                # of `workspaceFolders`, and pyright reads only the
+                # latter when deciding where its `pyrightconfig.json`
+                # is. With rootUri alone it starts, handshakes, answers
+                # every request — and resolves no first-party import, so
+                # `find_references` returns just the matches inside the
+                # file you asked about. A shorter list, not an error,
+                # which is indistinguishable from a symbol that really
+                # has one reference.
+                "workspaceFolders": [{
+                    "uri": self._root_dir.as_uri(),
+                    "name": self._root_dir.name,
+                }],
                 "capabilities": {
                     "textDocument": {
                         "synchronization": {

@@ -39,6 +39,40 @@ from claude_hooks.lsp_engine.lsp import (
 
 log = logging.getLogger("claude_hooks.lsp_engine.engine")
 
+#: Upper bound on files opened to make a workspace query complete.
+#: Generous — seeding is cheap (140 files in 0.1 s here) — but finite,
+#: because a monorepo would otherwise stall the first query behind tens
+#: of thousands of ``didOpen`` notifications.
+_SEED_MAX_FILES = 2000
+
+#: Never walked into. These hold vendored, generated or archived code
+#: whose symbols are not the ones anybody is asking about, and which on
+#: this repo alone would multiply the file count by an order of
+#: magnitude (``backup_models``, ``vendor``).
+_SEED_SKIP_DIRS = frozenset({
+    ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "env",
+    "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    "vendor", "third_party", "benchmarks", "backup_models",
+    "graphify-out", "dist", "build", "target", ".tox", ".next",
+    "site-packages", ".claude-hooks",
+})
+
+
+def _walk_project(root: Path, extensions: frozenset):
+    """Yield project files matching ``extensions``, skipping the noise.
+
+    ``os.walk`` with in-place pruning rather than ``Path.glob`` so an
+    excluded directory is never descended into — on a tree with a
+    ``node_modules`` the difference is seconds versus minutes.
+    """
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in _SEED_SKIP_DIRS and not d.startswith(".")]
+        for fn in filenames:
+            ext = fn.rsplit(".", 1)[-1].lower() if "." in fn else ""
+            if ext in extensions:
+                yield Path(dirpath) / fn
+
 
 @dataclass(frozen=True)
 class NavResponse:
@@ -70,6 +104,9 @@ class NavResponse:
     #: Configured but not started — only meaningful for workspace-wide
     #: queries, which have no path to route on.
     not_running: tuple[str, ...] = ()
+    #: Set when a workspace-wide query hit the seeding cap, i.e. the
+    #: search covered this many files and not the whole project.
+    scan_truncated_at: int = 0
 
     def __bool__(self) -> bool:
         return bool(self.items)
@@ -82,7 +119,8 @@ class NavResponse:
         caller must surface rather than round down to zero.
         """
         return (bool(self.consulted) and not self.failures
-                and self.progress is None and not self.not_running)
+                and self.progress is None and not self.not_running
+                and not self.scan_truncated_at)
 
 
 class Engine:
@@ -115,7 +153,16 @@ class Engine:
         # Storing the path alongside the spec lets ``refresh_open_files``
         # re-read content from disk without round-tripping back through
         # ``urllib.parse`` to derive the path from the URI.
-        self._uri_routing: dict[str, tuple[str, LspServerSpec]] = {}
+        # Plural since multi-claimant routing landed: an .html belongs
+        # to the HTML *and* TypeScript servers. The annotation kept
+        # saying one spec long after the code stored a tuple of them,
+        # and nothing caught it because pyright could not resolve this
+        # project's own imports until `workspaceFolders` was sent.
+        self._uri_routing: dict[str, tuple[str, tuple[LspServerSpec, ...]]] = {}
+        #: Extension groups already seeded, so a second references query
+        #: does not re-walk the tree.
+        self._seeded: set = set()
+        self._seed_truncated: dict = {}
         self._lock = threading.RLock()
         self._stopped = False
 
@@ -364,14 +411,75 @@ class Engine:
             what="implementation")
 
     def references(self, path, line: int, character: int, *,
-                   include_declaration: bool = True) -> "NavResponse":
+                   include_declaration: bool = True,
+                   seed: bool = True) -> "NavResponse":
+        """Find references across the project.
+
+        Seeds the workspace first — see :meth:`seed_workspace`. Without
+        it pyright answers from open documents only, so a class used in
+        thirty files reports the two uses inside its own. That is not an
+        error and not an empty result; it is a *shorter list*, which is
+        the one shape a caller cannot tell from the truth.
+        """
         specs = self._ensure_open(path)
-        return self._fan_out(
+        truncated = self.seed_workspace(path) if seed else 0
+        res = self._fan_out(
             specs,
             lambda c: c.references(path, line, character,
                                    include_declaration=include_declaration,
                                    timeout=self._request_timeout),
             what="references")
+        return NavResponse(items=res.items, consulted=res.consulted,
+                           failures=res.failures, progress=res.progress,
+                           scan_truncated_at=truncated)
+
+    def seed_workspace(self, path, *, max_files: Optional[int] = None) -> int:
+        """Open the project's other files of the same language.
+
+        Measured on this repo: 140 files in 0.1 s, and ``find_references``
+        for ``Engine`` goes from 2 hits to 16. The cost is trivial and
+        the difference is between a wrong answer and a right one.
+
+        Done once per extension group per engine. Returns 0 normally, or
+        the cap when it was hit — the caller reports that, because a
+        search over the first 2000 files of a larger repo is a partial
+        answer and must not read as a complete one.
+        """
+        specs = resolve_servers_for_path(path, self._servers)
+        if not specs:
+            return 0
+        exts = frozenset(e for s in specs for e in s.extensions)
+        with self._lock:
+            if exts in self._seeded:
+                return self._seed_truncated.get(exts, 0)
+            self._seeded.add(exts)
+
+        cap = max_files if max_files is not None else _SEED_MAX_FILES
+        opened = 0
+        truncated = 0
+        for p in _walk_project(self._project_root, exts):
+            if opened >= cap:
+                truncated = cap
+                log.info("seed_workspace: stopped at %d files for %s",
+                         cap, sorted(exts))
+                break
+            uri = _path_to_uri(p)
+            with self._lock:
+                if uri in self._uri_routing:
+                    continue
+            try:
+                if self.did_open(p, p.read_text(encoding="utf-8",
+                                                errors="replace")):
+                    opened += 1
+            except (OSError, LspError):
+                # One unreadable file must not abort the seed; the
+                # remaining files are still worth opening.
+                continue
+        with self._lock:
+            self._seed_truncated[exts] = truncated
+        log.debug("seed_workspace: opened %d files for %s", opened,
+                  sorted(exts))
+        return truncated
 
     def hover(self, path, line: int, character: int) -> "NavResponse":
         specs = self._ensure_open(path)
@@ -486,6 +594,15 @@ class Engine:
                                            for x in spec.extensions}
             ]
             clients = [(s, self._clients.pop(s)) for s in targets]
+            # A restarted server has forgotten every open document, so
+            # the seed is gone with it. Leaving the marker set would
+            # make the next references query skip seeding and quietly
+            # answer from an empty workspace.
+            for spec in targets:
+                for group in [g for g in self._seeded
+                              if set(spec.extensions) & set(g)]:
+                    self._seeded.discard(group)
+                    self._seed_truncated.pop(group, None)
             # Drop routing for files whose server just went away, or the
             # next did_change would be sent to a client that no longer
             # exists and fail as "did_change before did_open".

@@ -301,6 +301,107 @@ class ReferencesTests(EngineHarness):
         self.assertFalse(client.include_declaration)
 
 
+class SeedWorkspaceTests(EngineHarness):
+    """Without seeding, pyright answers `find_references` from open
+    documents only — so a class used in thirty files reports the two
+    uses inside its own. Not an error, not empty: a *shorter list*,
+    which is the one shape a caller cannot tell from the truth.
+
+    Measured on this repo: 140 files in 0.1 s, references 2 -> 16.
+    """
+
+    def setUp(self):
+        super().setUp()
+        for name in ("a.py", "b.py", "c.py"):
+            (self.root / name).write_text("x = 1\n", encoding="utf-8")
+        (self.root / "notes.md").write_text("hi", encoding="utf-8")
+
+    def test_references_opens_the_other_files_of_that_language(self):
+        client = FakeClient()
+        eng = self.engine((self.spec("py"), client))
+        eng.references(self.file, 0, 4)
+        opened = {Path(p).name for p in client.opened}
+        self.assertEqual(opened, {"x.py", "a.py", "b.py", "c.py"})
+
+    def test_other_languages_are_not_opened(self):
+        client = FakeClient()
+        eng = self.engine((self.spec("py"), client))
+        eng.references(self.file, 0, 4)
+        self.assertNotIn("notes.md", {Path(p).name for p in client.opened})
+
+    def test_seeding_happens_once(self):
+        client = FakeClient()
+        eng = self.engine((self.spec("py"), client))
+        eng.references(self.file, 0, 4)
+        first = len(client.opened)
+        eng.references(self.file, 0, 4)
+        self.assertEqual(len(client.opened), first,
+                         "second query must not re-walk the tree")
+
+    def test_seed_can_be_declined(self):
+        client = FakeClient()
+        eng = self.engine((self.spec("py"), client))
+        eng.references(self.file, 0, 4, seed=False)
+        self.assertEqual({Path(p).name for p in client.opened}, {"x.py"})
+
+    def test_excluded_directories_are_not_walked(self):
+        """node_modules and friends hold code nobody is asking about,
+        and on a real tree they dominate the file count."""
+        for bad in ("node_modules", ".venv", "backup_models", "vendor"):
+            d = self.root / bad
+            d.mkdir()
+            (d / "junk.py").write_text("x = 1\n", encoding="utf-8")
+        client = FakeClient()
+        eng = self.engine((self.spec("py"), client))
+        eng.references(self.file, 0, 4)
+        self.assertNotIn("junk.py", {Path(p).name for p in client.opened})
+
+    def test_hitting_the_cap_is_reported_not_hidden(self):
+        """A search over the first N files of a bigger repo is a partial
+        answer and must not read as a complete one."""
+        client = FakeClient()
+        eng = self.engine((self.spec("py"), client))
+        truncated = eng.seed_workspace(self.file, max_files=2)
+        self.assertEqual(truncated, 2)
+        res = eng.references(self.file, 0, 4)
+        self.assertEqual(res.scan_truncated_at, 2)
+        self.assertFalse(res.trustworthy)
+
+    def test_complete_scan_is_trustworthy(self):
+        eng = self.engine((self.spec("py"), FakeClient()))
+        res = eng.references(self.file, 0, 4)
+        self.assertEqual(res.scan_truncated_at, 0)
+        self.assertTrue(res.trustworthy)
+
+    def test_unreadable_file_does_not_abort_the_seed(self):
+        client = FakeClient()
+        eng = self.engine((self.spec("py"), client))
+        original = eng.did_open
+
+        def flaky(path, content):
+            if Path(path).name == "b.py":
+                raise LspError("nope")
+            return original(path, content)
+
+        eng.did_open = flaky   # type: ignore
+        eng.seed_workspace(self.file)
+        self.assertIn("c.py", {Path(p).name for p in client.opened})
+
+    def test_restart_clears_the_seed_so_it_runs_again(self):
+        """A restarted server has forgotten every open document; leaving
+        the marker would make the next query answer from an empty
+        workspace."""
+        client = FakeClient()
+        spec = self.spec("py")
+        eng = self.engine((spec, client))
+        eng.references(self.file, 0, 4)
+        eng.restart(["py"])
+        eng._clients = {spec: client}
+        client.opened.clear()
+        eng.references(self.file, 0, 4)
+        self.assertGreater(len(client.opened), 1, "seed must run again")
+
+
 class CallHierarchyTests(EngineHarness):
 
     def test_prepare_and_query_happen_against_the_same_server(self):
