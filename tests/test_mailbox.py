@@ -968,3 +968,189 @@ class ArchiveTests(StoreHarness):
     def test_cap_default_is_ten_gb(self):
         self.assertEqual(self.archive.DEFAULT_CAP_BYTES,
                          10 * 1024 * 1024 * 1024)
+
+
+class SharedAliasAcrossHostsTests(StoreHarness):
+    """The alias is not an identity — only alias@host is.
+
+    The default alias is the project directory name, so two hosts with
+    the same repo checked out are both ``claude-hooks``. The addressing
+    layer already knows this: it is exactly the case where a bare alias
+    is refused. The sender-side queries did not, and scoped on the alias
+    alone, which handed each host authority over the other's mail.
+
+    Found live on 2026-09-16: pandorum's ``mailbox-sent`` listed a
+    message solidpc had sent.
+    """
+
+    ALIAS = "claude-hooks"
+
+    def setUp(self):
+        super().setUp()
+        self.register(self.ALIAS, "solidpc", sid="sol-1")
+        self.register(self.ALIAS, "pandorum", sid="pan-1")
+
+    def send_from(self, host, to, subject="s", body="b"):
+        """Send with ``host_name()`` pinned, as the real host would."""
+        from unittest import mock
+        from claude_hooks.mailbox import store as store_mod
+        with mock.patch.object(store_mod, "host_name", lambda: host):
+            return self.store.send(to, subject, body, from_alias=self.ALIAS,
+                                   from_session=f"{host}-sid")
+
+    # ─── the outbox ──────────────────────────────────────────────────
+
+    def test_sent_shows_only_this_hosts_messages(self):
+        self.send_from("solidpc", f"{self.ALIAS}@pandorum", subject="from-sol")
+        self.send_from("pandorum", f"{self.ALIAS}@solidpc", subject="from-pan")
+
+        sol = self.store.sent(from_alias=self.ALIAS, from_host="solidpc")
+        pan = self.store.sent(from_alias=self.ALIAS, from_host="pandorum")
+        self.assertEqual([m["subject"] for m in sol], ["from-sol"])
+        self.assertEqual([m["subject"] for m in pan], ["from-pan"])
+
+    # ─── the receipt, which is the one that lost data ────────────────
+
+    def test_one_host_cannot_consume_the_others_pending_receipt(self):
+        res = self.send_from("solidpc", f"{self.ALIAS}@pandorum")
+        mid = res["ids"][0]
+        self.store.read([mid], reader_session="pan-1", alias=self.ALIAS,
+                        host="pandorum")
+        self.store.ack(mid, "noted", session_id="pan-1", alias=self.ALIAS,
+                       host="pandorum")
+
+        # pandorum checks its own outbox. Before the fix this marked
+        # solidpc's receipt seen, so solidpc was never told.
+        self.store.mark_receipts_seen(
+            [mid], from_alias=self.ALIAS, from_host="pandorum")
+
+        still = self.store.pending_receipts(from_alias=self.ALIAS,
+                                            from_host="solidpc")
+        self.assertEqual([r["id"] for r in still], [mid],
+                         "pandorum swallowed solidpc's receipt")
+
+    def test_the_sender_can_still_see_its_own_receipt(self):
+        res = self.send_from("solidpc", f"{self.ALIAS}@pandorum")
+        mid = res["ids"][0]
+        self.store.read([mid], reader_session="pan-1", alias=self.ALIAS,
+                        host="pandorum")
+        self.store.ack(mid, "noted", session_id="pan-1", alias=self.ALIAS,
+                       host="pandorum")
+
+        self.assertEqual(
+            [r["id"] for r in self.store.pending_receipts(
+                from_alias=self.ALIAS, from_host="solidpc")], [mid])
+        self.assertEqual(self.store.mark_receipts_seen(
+            [mid], from_alias=self.ALIAS, from_host="solidpc"), 1)
+        self.assertEqual(self.store.pending_receipts(
+            from_alias=self.ALIAS, from_host="solidpc"), [])
+
+    # ─── authority over the body ─────────────────────────────────────
+
+    def test_one_host_cannot_edit_the_others_message(self):
+        mid = self.send_from("solidpc", f"{self.ALIAS}@pandorum",
+                             subject="original")["ids"][0]
+        with self.assertRaises(MailboxError) as ctx:
+            self.store.edit(mid, from_alias=self.ALIAS, from_host="pandorum",
+                            subject="hijacked")
+        msg = str(ctx.exception)
+        self.assertIn("solidpc", msg)
+        self.assertIn("pandorum", msg)
+        row = self.store.sent(from_alias=self.ALIAS, from_host="solidpc")[0]
+        self.assertEqual(row["subject"], "original")
+
+    def test_one_host_cannot_cancel_the_others_message(self):
+        mid = self.send_from("solidpc", f"{self.ALIAS}@pandorum")["ids"][0]
+        with self.assertRaises(MailboxError):
+            self.store.cancel(mid, from_alias=self.ALIAS,
+                              from_host="pandorum")
+        self.assertIsNone(
+            self.store.sent(from_alias=self.ALIAS,
+                            from_host="solidpc")[0]["cancelled_at"])
+
+    def test_the_sender_can_still_edit_its_own_message(self):
+        mid = self.send_from("solidpc", f"{self.ALIAS}@pandorum",
+                             subject="original")["ids"][0]
+        self.store.edit(mid, from_alias=self.ALIAS, from_host="solidpc",
+                        subject="corrected")
+        self.assertEqual(
+            self.store.sent(from_alias=self.ALIAS,
+                            from_host="solidpc")[0]["subject"], "corrected")
+
+    def test_the_refusal_names_both_sides(self):
+        """A session called claude-hooks being told the sender was
+        'claude-hooks, not you' is the unhelpful version of this."""
+        mid = self.send_from("solidpc", f"{self.ALIAS}@pandorum")["ids"][0]
+        with self.assertRaises(MailboxError) as ctx:
+            self.store.cancel(mid, from_alias=self.ALIAS,
+                              from_host="pandorum")
+        self.assertIn(f"{self.ALIAS}@solidpc", str(ctx.exception))
+        self.assertIn(f"{self.ALIAS}@pandorum", str(ctx.exception))
+
+    # ─── broadcasts ──────────────────────────────────────────────────
+
+    def test_broadcast_unread_check_is_scoped_to_its_own_sender(self):
+        """Two hosts broadcasting to the same alias produce two groups;
+        neither may answer the other's 'is any copy still unread'."""
+        self.register("worker", "h1", sid="w1")
+        self.register("worker", "h2", sid="w2")
+        sol = self.send_from("solidpc", "worker*")
+        self.assertEqual(len(sol["ids"]), 2)
+        pan = self.send_from("pandorum", "worker*")
+        self.assertEqual(len(pan["ids"]), 2)
+
+        for mid in pan["ids"]:
+            self.store.read([mid], reader_session="w1", alias="worker",
+                            host=self._host_of(mid))
+
+        # solidpc's broadcast is untouched, so it stays editable.
+        self.store.edit(sol["ids"][0], from_alias=self.ALIAS,
+                        from_host="solidpc", subject="still-editable")
+        self.assertEqual(
+            self.store.sent(from_alias=self.ALIAS,
+                            from_host="solidpc")[0]["subject"],
+            "still-editable")
+
+    def _host_of(self, mid):
+        with self.db.lock:
+            cur = self.db.conn.execute(
+                "SELECT to_host FROM session_messages WHERE id = ?", (mid,))
+            return cur.fetchone()[0]
+
+
+class SharedAliasToolsTests(StoreHarness):
+    """The tools layer must pass its own host down, not just its alias."""
+
+    ALIAS = "claude-hooks"
+
+    def setUp(self):
+        super().setUp()
+        from claude_hooks.mailbox.tools import MailboxTools
+        self.register(self.ALIAS, "solidpc", sid="sol-1")
+        self.register(self.ALIAS, "pandorum", sid="pan-1")
+        self.sol = MailboxTools(self.store, alias=self.ALIAS,
+                                session_id="sol-1", host="solidpc")
+        self.pan = MailboxTools(self.store, alias=self.ALIAS,
+                                session_id="pan-1", host="pandorum")
+
+    def _send(self, tools, **kw):
+        from unittest import mock
+        from claude_hooks.mailbox import store as store_mod
+        with mock.patch.object(store_mod, "host_name", lambda: tools.host):
+            return tools.call("mailbox-send", kw)
+
+    def test_mailbox_sent_does_not_list_the_other_hosts_mail(self):
+        self._send(self.sol, to=f"{self.ALIAS}@pandorum",
+                   subject="from-solidpc", body="b")
+        self.assertIn("You have not sent any messages.",
+                      self.pan.call("mailbox-sent", {}))
+        self.assertIn("from-solidpc", self.sol.call("mailbox-sent", {}))
+
+    def test_mailbox_edit_from_the_other_host_is_refused(self):
+        out = self._send(self.sol, to=f"{self.ALIAS}@pandorum",
+                         subject="original", body="b")
+        mid = int(out.split("id ")[1].split(")")[0])
+        refusal = self.pan.call("mailbox-edit",
+                                {"id": mid, "subject": "hijacked"})
+        self.assertIn("cannot rewrite", refusal)
+        self.assertIn("original", self.sol.call("mailbox-sent", {}))

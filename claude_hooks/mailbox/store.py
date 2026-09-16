@@ -389,9 +389,26 @@ class MailboxStore:
         return rows
 
     # ─── sender-side ─────────────────────────────────────────────────
+    #
+    # Every query here is scoped by ``from_alias`` **and** ``from_host``,
+    # because the alias alone is not an identity. The default alias is
+    # the project directory name, so two hosts checking out the same
+    # repo are both ``claude-hooks`` — which the addressing layer
+    # already knows, since that is exactly when it refuses a bare alias
+    # and demands ``claude-hooks@solidpc``.
+    #
+    # Scoping on the alias alone gave one host authority over another's
+    # mail. The expensive case was ``mark_receipts_seen``: pandorum
+    # calling ``mailbox-sent`` marked solidpc's unseen receipts as seen,
+    # so solidpc's announcement — the entire point of the receipt — never
+    # fired, and nothing anywhere recorded that it had been swallowed.
+    # ``edit`` and ``cancel`` were the same hole pointed at a message
+    # body, with ``_own_message`` approving the rewrite.
 
-    def sent(self, *, from_alias: str, limit: int = 50) -> list[dict]:
+    def sent(self, *, from_alias: str, from_host: Optional[str] = None,
+             limit: int = 50) -> list[dict]:
         self.ensure_schema()
+        host = from_host if from_host is not None else host_name()
         with self._lock:
             conn = self._connect()
             try:
@@ -399,8 +416,9 @@ class MailboxStore:
                     cur.execute(self._q(
                         "SELECT " + ", ".join(schema.MESSAGE_COLUMNS) +
                         " FROM session_messages WHERE from_alias = ? "
+                        "AND from_host = ? "
                         "ORDER BY created_at DESC LIMIT ?"),
-                        (from_alias, int(limit)))
+                        (from_alias, host, int(limit)))
                     rows = self._rows(cur, schema.MESSAGE_COLUMNS)
                 conn.commit()
             except Exception:
@@ -408,7 +426,8 @@ class MailboxStore:
                 raise
         return rows
 
-    def pending_receipts(self, *, from_alias: str) -> list[dict]:
+    def pending_receipts(self, *, from_alias: str,
+                         from_host: Optional[str] = None) -> list[dict]:
         """Acks the sender has not seen yet — the announcement gate.
 
         A read with no ack is deliberately invisible: a bare "your
@@ -416,6 +435,7 @@ class MailboxStore:
         no action, which is why plain acknowledgement was dropped.
         """
         self.ensure_schema()
+        host = from_host if from_host is not None else host_name()
         with self._lock:
             conn = self._connect()
             try:
@@ -423,8 +443,9 @@ class MailboxStore:
                     cur.execute(self._q(
                         "SELECT " + ", ".join(schema.MESSAGE_COLUMNS) +
                         " FROM session_messages WHERE from_alias = ? "
+                        "AND from_host = ? "
                         "AND ack_body IS NOT NULL AND receipt_read_at IS NULL "
-                        "ORDER BY ack_at ASC"), (from_alias,))
+                        "ORDER BY ack_at ASC"), (from_alias, host))
                     rows = self._rows(cur, schema.MESSAGE_COLUMNS)
                 conn.commit()
             except Exception:
@@ -433,10 +454,12 @@ class MailboxStore:
         return rows
 
     def mark_receipts_seen(self, ids: Sequence[int], *,
-                           from_alias: str) -> int:
+                           from_alias: str,
+                           from_host: Optional[str] = None) -> int:
         if not ids:
             return 0
         self.ensure_schema()
+        host = from_host if from_host is not None else host_name()
         marks = ", ".join("?" for _ in ids)
         with self._lock:
             conn = self._connect()
@@ -445,8 +468,10 @@ class MailboxStore:
                     cur.execute(self._q(
                         "UPDATE session_messages SET receipt_read_at = ? "
                         f"WHERE id IN ({marks}) AND from_alias = ? "
+                        "AND from_host = ? "
                         "AND receipt_read_at IS NULL"),
-                        tuple([self._now()] + list(ids) + [from_alias]))
+                        tuple([self._now()] + list(ids)
+                              + [from_alias, host]))
                     n = cur.rowcount or 0
                 conn.commit()
             except Exception:
@@ -455,6 +480,7 @@ class MailboxStore:
         return n
 
     def edit(self, message_id: int, *, from_alias: str,
+             from_host: Optional[str] = None,
              subject: Optional[str] = None, body: Optional[str] = None,
              priority: Optional[int] = None) -> dict:
         """Change an unread message you sent.
@@ -464,7 +490,8 @@ class MailboxStore:
         except now it is an error rather than a document changing
         silently under someone's reply.
         """
-        row = self._own_message(message_id, from_alias)
+        host = from_host if from_host is not None else host_name()
+        row = self._own_message(message_id, from_alias, host)
         self._require_editable(row, message_id, verb="edited")
         sets, params = [], []
         if subject is not None:
@@ -493,14 +520,16 @@ class MailboxStore:
                         cur.execute(self._q(
                             "UPDATE session_messages SET " + ", ".join(sets) +
                             " WHERE broadcast_group = ? AND from_alias = ? "
+                            "AND from_host = ? "
                             "AND read_at IS NULL AND cancelled_at IS NULL"),
-                            tuple(params + [group, from_alias]))
+                            tuple(params + [group, from_alias, host]))
                     else:
                         cur.execute(self._q(
                             "UPDATE session_messages SET " + ", ".join(sets) +
                             " WHERE id = ? AND from_alias = ? "
+                            "AND from_host = ? "
                             "AND read_at IS NULL AND cancelled_at IS NULL"),
-                            tuple(params + [message_id, from_alias]))
+                            tuple(params + [message_id, from_alias, host]))
                     n = cur.rowcount or 0
                 conn.commit()
             except Exception:
@@ -508,8 +537,10 @@ class MailboxStore:
                 raise
         return {"updated": n, "broadcast_group": group}
 
-    def cancel(self, message_id: int, *, from_alias: str) -> dict:
-        row = self._own_message(message_id, from_alias)
+    def cancel(self, message_id: int, *, from_alias: str,
+               from_host: Optional[str] = None) -> dict:
+        host = from_host if from_host is not None else host_name()
+        row = self._own_message(message_id, from_alias, host)
         self._require_editable(row, message_id, verb="withdrawn")
         group = row["broadcast_group"]
         with self._lock:
@@ -520,14 +551,14 @@ class MailboxStore:
                         cur.execute(self._q(
                             "UPDATE session_messages SET cancelled_at = ? "
                             "WHERE broadcast_group = ? AND from_alias = ? "
-                            "AND read_at IS NULL"),
-                            (self._now(), group, from_alias))
+                            "AND from_host = ? AND read_at IS NULL"),
+                            (self._now(), group, from_alias, host))
                     else:
                         cur.execute(self._q(
                             "UPDATE session_messages SET cancelled_at = ? "
                             "WHERE id = ? AND from_alias = ? "
-                            "AND read_at IS NULL"),
-                            (self._now(), message_id, from_alias))
+                            "AND from_host = ? AND read_at IS NULL"),
+                            (self._now(), message_id, from_alias, host))
                     n = cur.rowcount or 0
                 conn.commit()
             except Exception:
@@ -653,7 +684,8 @@ class MailboxStore:
         """
         group = row["broadcast_group"]
         if group:
-            if self._group_has_unread(group, row["from_alias"]):
+            if self._group_has_unread(group, row["from_alias"],
+                                      row["from_host"]):
                 return
             raise MailboxError(
                 f"Every copy of broadcast {group} has been read, so it "
@@ -666,7 +698,9 @@ class MailboxStore:
                 f"It can no longer be {verb} — send a correction with "
                 f"mailbox-send instead.")
 
-    def _group_has_unread(self, group: str, from_alias: str) -> bool:
+    def _group_has_unread(self, group: str, from_alias: str,
+                          from_host: Optional[str] = None) -> bool:
+        host = from_host if from_host is not None else host_name()
         with self._lock:
             conn = self._connect()
             try:
@@ -674,8 +708,9 @@ class MailboxStore:
                     cur.execute(self._q(
                         "SELECT COUNT(*) FROM session_messages "
                         "WHERE broadcast_group = ? AND from_alias = ? "
+                        "AND from_host = ? "
                         "AND read_at IS NULL AND cancelled_at IS NULL"),
-                        (group, from_alias))
+                        (group, from_alias, host))
                     n = cur.fetchone()[0]
                 conn.commit()
             except Exception:
@@ -683,8 +718,10 @@ class MailboxStore:
                 raise
         return bool(n)
 
-    def _own_message(self, message_id: int, from_alias: str) -> dict:
+    def _own_message(self, message_id: int, from_alias: str,
+                     from_host: Optional[str] = None) -> dict:
         self.ensure_schema()
+        host = from_host if from_host is not None else host_name()
         with self._lock:
             conn = self._connect()
             try:
@@ -704,6 +741,16 @@ class MailboxStore:
             raise MailboxError(
                 f"Message {message_id} was sent by {row['from_alias']!r}, "
                 f"not you — one session cannot rewrite another's message.")
+        if (row["from_host"] or "") != host:
+            # Same alias, different host. Worth its own message: with the
+            # default alias being the directory name, this is the *likely*
+            # collision, and "sent by 'claude-hooks', not you" would be
+            # baffling to a session that is also called claude-hooks.
+            raise MailboxError(
+                f"Message {message_id} was sent by "
+                f"{row['from_alias']}@{row['from_host'] or '?'}, and you are "
+                f"{from_alias}@{host} — the alias is shared but the session "
+                f"is not. One host cannot rewrite another's message.")
         if row["cancelled_at"]:
             raise MailboxError(f"Message {message_id} was already withdrawn.")
         return row

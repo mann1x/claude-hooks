@@ -251,7 +251,7 @@ class MailboxTools:
 
     def _mailbox_edit(self, args: dict) -> str:
         res = self.store.edit(
-            int(args["id"]), from_alias=self.alias,
+            int(args["id"]), from_alias=self.alias, from_host=self.host,
             subject=args.get("subject"), body=args.get("body"),
             priority=(int(args["priority"])
                       if args.get("priority") is not None else None))
@@ -262,7 +262,8 @@ class MailboxTools:
                 else "Nothing changed — it may have just been read.")
 
     def _mailbox_cancel(self, args: dict) -> str:
-        res = self.store.cancel(int(args["id"]), from_alias=self.alias)
+        res = self.store.cancel(int(args["id"]), from_alias=self.alias,
+                                from_host=self.host)
         if res["broadcast_group"]:
             return (f"Withdrew {res['cancelled']} unread copy/copies of that "
                     f"broadcast.")
@@ -270,7 +271,7 @@ class MailboxTools:
                 else "Nothing withdrawn — it may have just been read.")
 
     def _mailbox_sent(self, args: dict) -> str:
-        rows = self.store.sent(from_alias=self.alias,
+        rows = self.store.sent(from_alias=self.alias, from_host=self.host,
                                limit=int(args.get("limit") or 20))
         if not rows:
             return "You have not sent any messages."
@@ -293,7 +294,8 @@ class MailboxTools:
                     pending.append(m["id"])
             out.append(line)
         if pending:
-            self.store.mark_receipts_seen(pending, from_alias=self.alias)
+            self.store.mark_receipts_seen(pending, from_alias=self.alias,
+                                          from_host=self.host)
         return "\n".join(out)
 
     def _mailbox_sessions(self, args: dict) -> str:

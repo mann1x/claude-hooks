@@ -1315,6 +1315,7 @@ Runbooks (`docs/`):
 - [`episodic-server.md`](docs/episodic-server.md) — HTTP front-end for [obra/episodic-memory](https://github.com/obra/episodic-memory)
 - [`lsp-engine.md`](docs/lsp-engine.md) — LSP engine user guide
 - [`lsp-mcp.md`](docs/lsp-mcp.md) — cclsp MCP companion install and Linux/Windows config
+- [`mailbox.md`](docs/mailbox.md) — inter-session mailbox: addressing, the eight tools, ack/receipt semantics, retention
 - [`RELEASING.md`](docs/RELEASING.md) — versioning, branch model, cut procedure, hotfix flow
 
 Plans (`docs/PLAN-*.md`):

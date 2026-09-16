@@ -70,7 +70,8 @@ def announce_block(*, event: dict, config: dict, providers,
         messages = tools.store.inbox(
             alias=tools.alias, session_id=tools.session_id or None,
             host=tools.host, since=since)
-        receipts = (tools.store.pending_receipts(from_alias=tools.alias)
+        receipts = (tools.store.pending_receipts(from_alias=tools.alias,
+                                                 from_host=tools.host)
                     if include_receipts else [])
         if not messages and not receipts:
             return ""
@@ -85,7 +86,8 @@ def announce_block(*, event: dict, config: dict, providers,
             # turn, which is the right way round for this to fail.
             try:
                 tools.store.mark_receipts_seen(
-                    [r["id"] for r in receipts], from_alias=tools.alias)
+                    [r["id"] for r in receipts], from_alias=tools.alias,
+                    from_host=tools.host)
             except Exception:
                 log.debug("mailbox: could not mark receipts seen",
                           exc_info=True)
