@@ -411,6 +411,20 @@ def render_rename(edit: WorkspaceEdit, *, root: Optional[Path] = None,
     return "\n".join(lines)
 
 
+def inexact_note(requested: str, symbols) -> str:
+    """Disclose a substring match.
+
+    cclsp matched substrings silently, so ``open`` could answer about
+    ``did_open`` with nothing saying it had. The fallback is worth
+    keeping; doing it without a word is not.
+    """
+    names = sorted({s.name for s in symbols if s.name != requested})
+    if not names:
+        return ""
+    return (f"NOTE — no symbol is named exactly {requested!r}; matched by "
+            f"substring: {', '.join(names)}.")
+
+
 def render_candidates(symbols: Iterable[Symbol], *,
                       root: Optional[Path] = None) -> str:
     """Several symbols share the name — say so and hand back positions.

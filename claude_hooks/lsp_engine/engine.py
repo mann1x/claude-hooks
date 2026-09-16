@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -163,6 +164,8 @@ class Engine:
         #: does not re-walk the tree.
         self._seeded: set = set()
         self._seed_truncated: dict = {}
+        #: When each client was started, for ``restartInterval``.
+        self._started_at: dict = {}
         self._lock = threading.RLock()
         self._stopped = False
 
@@ -316,6 +319,13 @@ class Engine:
         a normal condition, distinct from an open that failed, which
         raises.
         """
+        # Retire unhealthy clients *before* consulting the routing.
+        # Doing it lazily in `_client_for` is too late: routing is
+        # resolved first, so the request would be answered as "already
+        # open" and the replacement process would never be given the
+        # file — a fresh server with an empty document set, which
+        # answers every query with nothing.
+        self._retire_unhealthy(path)
         uri = _path_to_uri(path)
         with self._lock:
             entry = self._uri_routing.get(uri)
@@ -368,14 +378,17 @@ class Engine:
     # ─── symbol resolution ───────────────────────────────────────────
 
     def find_symbols(self, path, name: str, *,
-                     kind: Optional[int] = None) -> "NavResponse":
+                     kind: Optional[int] = None,
+                     substring: bool = True) -> "NavResponse":
         """Locate ``name`` in ``path`` via ``textDocument/documentSymbol``.
 
         This is what makes the name-addressed tools possible: a caller
-        knows ``did_open``, not line 102 column 8. Matching is exact on
-        the symbol name — a prefix match would silently return
-        ``did_open_all`` for ``did_open``, and a caller that then renames
-        it has no way to notice.
+        knows ``did_open``, not line 102 column 8.
+
+        **Exact matches win.** Substring is a fallback used only when
+        nothing matches exactly, so an existing name can never be
+        shadowed by a near-miss — the reason cclsp's unordered
+        ``name === q || name.includes(q)`` is not copied verbatim.
 
         ``container`` disambiguation is left to the caller, which is why
         every match is returned rather than the first: two classes in one
@@ -389,8 +402,20 @@ class Engine:
             specs, lambda c: c.document_symbols(path,
                                                 timeout=self._request_timeout),
             what="documentSymbol")
-        matches = [s for s in res.items
-                   if s.name == name and (kind is None or s.kind == kind)]
+        pool = [s for s in res.items if kind is None or s.kind == kind]
+        matches = [s for s in pool if s.name == name]
+        if not matches and substring:
+            # cclsp matched `name === query || name.includes(query)`, so
+            # `open` found `did_open`. Doing that *first* is the wrong
+            # trade — it silently returns a near-miss for an exact name
+            # that exists — but refusing it outright loses a real
+            # discovery affordance and would regress every caller that
+            # relies on partial names.
+            #
+            # Exact wins when there is one; substring only fills the
+            # gap where the answer would otherwise be "not found", and
+            # the caller is told the match was inexact.
+            matches = [s for s in pool if name in s.name]
         return NavResponse(items=matches, consulted=res.consulted,
                            failures=res.failures, progress=res.progress)
 
@@ -735,7 +760,18 @@ class Engine:
                 raise LspError("engine has been shut down")
             client = self._clients.get(spec)
             if client is not None:
-                return client
+                reason = self._retire_reason(spec, client)
+                if reason is None:
+                    return client
+                # Drop it *inside* the lock so a concurrent caller
+                # cannot pick up the client we are about to stop.
+                log.info("lsp_engine: replacing %s — %s",
+                         spec.command[0], reason)
+                self._clients.pop(spec, None)
+                self._forget_client(spec)
+                retiring = client
+            else:
+                retiring = None
             log.info(
                 "lsp_engine: starting %s for %s",
                 spec.command[0],
@@ -746,6 +782,7 @@ class Engine:
                 root_dir=self._resolve_root(spec),
                 startup_timeout=self._startup_timeout,
                 request_timeout=self._request_timeout,
+                initialization_options=spec.initialization_options,
             )
             try:
                 client.start()
@@ -754,7 +791,93 @@ class Engine:
                 # gets a clear error. Next call retries from scratch.
                 raise
             self._clients[spec] = client
-            return client
+            self._started_at[spec] = time.monotonic()
+
+        # Stop the old process outside the lock: `stop()` waits on the
+        # child, and holding the engine lock through that would block
+        # every other language for the duration.
+        if retiring is not None:
+            try:
+                retiring.stop(timeout=3.0)
+            except Exception:  # pragma: no cover — defensive
+                log.exception("error stopping retired %s", spec.command[0])
+        return client
+
+    def _retire_unhealthy(self, path) -> list[str]:
+        """Drop any unusable client claiming ``path``, before routing.
+
+        Returns the binaries retired, so a caller that wants to report
+        "the server was replaced, results may be cold" can.
+        """
+        specs = resolve_servers_for_path(path, self._servers)
+        retired: list[tuple[LspServerSpec, LspClient, str]] = []
+        with self._lock:
+            for spec in specs:
+                client = self._clients.get(spec)
+                if client is None:
+                    continue
+                reason = self._retire_reason(spec, client)
+                if reason is None:
+                    continue
+                self._clients.pop(spec, None)
+                self._forget_client(spec)
+                retired.append((spec, client, reason))
+        for spec, client, reason in retired:
+            log.info("lsp_engine: retiring %s — %s", spec.command[0], reason)
+            try:
+                client.stop(timeout=3.0)
+            except Exception:  # pragma: no cover — defensive
+                log.exception("error stopping %s", spec.command[0])
+        return [os.path.basename(s.command[0]) for s, _, _ in retired]
+
+    def _retire_reason(self, spec: LspServerSpec,
+                       client: LspClient) -> Optional[str]:
+        """Why this cached client must not be reused, or None.
+
+        Two reasons, and they fail the same way if missed — the caller
+        gets an empty result from a server that cannot answer.
+
+        **Desynced.** A malformed frame means the read position no
+        longer sits on a message boundary, and every subsequent read is
+        garbage. It is not recoverable by waiting: cclsp's version of
+        this bug turned one bad frame into a server that timed out
+        forever, surviving restarts of everything except itself.
+
+        **Aged out.** ``restartInterval`` in ``cclsp.json`` is a
+        workaround for servers that leak (cclsp ships 5 minutes for
+        pylsp). We read that key, so honouring it is the difference
+        between a documented field and a decorative one.
+        """
+        if client.is_desynced:
+            return "protocol desync; respawning"
+        if not client.is_alive:
+            return "process exited"
+        interval = spec.restart_interval_minutes
+        if interval > 0:
+            started = self._started_at.get(spec)
+            if started is not None and time.monotonic() - started > interval * 60:
+                return f"restartInterval of {interval:g} min elapsed"
+        return None
+
+    def _forget_client(self, spec: LspServerSpec) -> None:
+        """Drop the bookkeeping tied to one client. Caller holds the lock.
+
+        Routing and seed markers both describe state that lives *inside*
+        the server process, so a replacement starts without them. Left
+        behind, the next ``did_change`` would be sent to a document the
+        new process has never opened, and the next references query
+        would skip seeding and answer from an empty workspace.
+        """
+        self._started_at.pop(spec, None)
+        for group in [g for g in self._seeded if set(spec.extensions) & set(g)]:
+            self._seeded.discard(group)
+            self._seed_truncated.pop(group, None)
+        for uri, (abs_path, specs) in list(self._uri_routing.items()):
+            remaining = tuple(s for s in specs if s is not spec)
+            if remaining:
+                self._uri_routing[uri] = (abs_path, remaining)
+            else:
+                self._uri_routing.pop(uri, None)
 
     def _resolve_root(self, spec: LspServerSpec) -> Path:
         # rootDir in cclsp.json is relative to the project root by

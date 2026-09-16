@@ -120,6 +120,84 @@ _LANGUAGE_ID_BY_EXT = {
     "less": "less",
     "json": "json",
     "jsonc": "jsonc",
+    # ─── parity with cclsp's map (audited 2026-09-16) ───────────────
+    # cclsp mapped 47 extensions to our 32. An extension missing here
+    # is announced as "plaintext", which most servers decline — so
+    # configuring jdtls and opening a .java file produced an accepted
+    # document and an empty result, with nothing anywhere saying why.
+    # These are the ones it had and we did not; they cost nothing when
+    # no server claims the extension, because routing is by cclsp.json
+    # and this map only names what is already being opened.
+    "java": "java",
+    "kt": "kotlin",
+    "kts": "kotlin",
+    "scala": "scala",
+    "sc": "scala",
+    "groovy": "groovy",
+    "rb": "ruby",
+    "erb": "erb",
+    "php": "php",
+    "swift": "swift",
+    "dart": "dart",
+    "hs": "haskell",
+    "lhs": "haskell",
+    "ml": "ocaml",
+    "mli": "ocaml",
+    "clj": "clojure",
+    "cljs": "clojure",
+    "cljc": "clojure",
+    "edn": "clojure",
+    "fs": "fsharp",
+    "fsi": "fsharp",
+    "fsx": "fsharp",
+    "elm": "elm",
+    "ex": "elixir",
+    "exs": "elixir",
+    "erl": "erlang",
+    "r": "r",
+    "jl": "julia",
+    "nim": "nim",
+    "v": "v",
+    "vue": "vue",
+    "svelte": "svelte",
+    "astro": "astro",
+    "tf": "terraform",
+    "tfvars": "terraform",
+    "hcl": "hcl",
+    "sql": "sql",
+    "graphql": "graphql",
+    "gql": "graphql",
+    "proto": "proto3",
+    "md": "markdown",
+    "markdown": "markdown",
+    "mdx": "mdx",
+    "tex": "latex",
+    "bib": "bibtex",
+    "xml": "xml",
+    "xsl": "xml",
+    "svg": "xml",
+    "yaml": "yaml",
+    "yml": "yaml",
+    "toml": "toml",
+    "ini": "ini",
+    "dockerfile": "dockerfile",
+    "makefile": "makefile",
+    "cmake": "cmake",
+    "nix": "nix",
+    "ps1": "powershell",
+    "psm1": "powershell",
+    "zsh": "shellscript",
+    "fish": "fish",
+    "vim": "vim",
+    "m": "objective-c",
+    "mm": "objective-cpp",
+    "pl": "perl",
+    "pm": "perl",
+    # Deliberately NOT inherited from cclsp: `jar` and `class` mapped to
+    # "java". Both are binary. Reading one as UTF-8 text and sending it
+    # in a didOpen hands the server megabytes of mojibake to parse, and
+    # nothing good follows. The user's rule applies — we do not match
+    # cclsp on unwanted behaviour.
 }
 
 
@@ -173,6 +251,112 @@ def uri_key(uri: str) -> str:
     if m:
         return f"{m.group(1)}{m.group(2).upper()}:{m.group(3) or '/'}"
     return s
+
+
+def client_capabilities() -> dict:
+    """What this client tells a server it can do.
+
+    Module-level and returned fresh, so the declaration can be
+    asserted directly rather than grepped for. It is not
+    bookkeeping: a server withholds any provider whose client
+    capability is absent, so this dict *is* the feature set.
+    """
+    return {
+
+        "textDocument": {
+            "synchronization": {
+                "didSave": False,
+                "willSave": False,
+            },
+            "publishDiagnostics": {
+                "relatedInformation": False,
+                # We already drop publishes older than the
+                # last didChange; saying so lets servers
+                # stamp the version rather than guess.
+                "versionSupport": True,
+                "codeDescriptionSupport": False,
+                "dataSupport": False,
+            },
+            # LSP 3.17 pull diagnostics. A server only
+            # advertises ``diagnosticProvider`` when the
+            # *client* declares support — so omitting this
+            # guaranteed every server looked push-only, and
+            # the engine had no choice but to wait out a
+            # timeout and call the silence an answer.
+            "diagnostic": {
+                "dynamicRegistration": False,
+                "relatedDocumentSupport": False,
+            },
+            # ─── navigation ──────────────────────────────
+            # Same rule as pull diagnostics above: a server
+            # only advertises a provider when the client
+            # declares the matching capability, so omitting
+            # any of these makes the feature look absent
+            # rather than undeclared.
+            #
+            # ``linkSupport`` opts into ``LocationLink``,
+            # whose ``targetSelectionRange`` points at the
+            # *name* instead of the whole definition body —
+            # strictly better answers, and the reason
+            # ``parse_locations`` reads both shapes.
+            "definition": {"linkSupport": True},
+            "typeDefinition": {"linkSupport": True},
+            "implementation": {"linkSupport": True},
+            "references": {"dynamicRegistration": False},
+            "hover": {
+                "contentFormat": ["markdown", "plaintext"],
+            },
+            "documentSymbol": {
+                # Without this a server may flatten to
+                # SymbolInformation, losing the nesting that
+                # tells `Engine.start` from `Client.start`.
+                "hierarchicalDocumentSymbolSupport": True,
+                "symbolKind": {"valueSet": _SYMBOL_KIND_VALUE_SET},
+            },
+            "callHierarchy": {"dynamicRegistration": False},
+            "rename": {
+                # prepareSupport lets us ask "is this
+                # renameable, and what is its extent?"
+                # before editing anything.
+                "prepareSupport": True,
+                "dynamicRegistration": False,
+            },
+        },
+        "workspace": {
+            "symbol": {
+                "symbolKind": {"valueSet": _SYMBOL_KIND_VALUE_SET},
+            },
+            # Declared as well as sent: a server may check
+            # the capability rather than the field, and
+            # gopls in particular decides its module scope
+            # from it.
+            "workspaceFolders": True,
+            "workspaceEdit": {
+                "documentChanges": True,
+                # Deliberately NOT declaring
+                # resourceOperations. A server that believes
+                # we can create/rename/delete files will
+                # emit those operations as part of a rename
+                # (jdtls renames the file holding a renamed
+                # public class), and we do not apply file
+                # operations. Not declaring it means the
+                # server keeps the rename to text edits;
+                # `WorkspaceEdit.file_operations` still
+                # reports any that arrive anyway, so the
+                # caller learns the edit was partial rather
+                # than being told it succeeded.
+                "failureHandling": "abort",
+            },
+        },
+        # Servers only emit `$/progress` when the client
+        # says it can receive it. cclsp left this off and
+        # ignored the notification, which is why "still
+        # indexing" and "dead" were the same observation.
+        "window": {"workDoneProgress": True},
+        "general": {
+            "positionEncodings": ["utf-16"],
+        },
+    }
 
 
 def _call_item_wire(item: CallHierarchyItem) -> dict:
@@ -273,8 +457,10 @@ class LspClient:
         *,
         startup_timeout: float = 10.0,
         request_timeout: float = 5.0,
+        initialization_options: Optional[dict] = None,
     ) -> None:
         self._command = list(command)
+        self._initialization_options = initialization_options
         self._root_dir = Path(root_dir).resolve()
         self._startup_timeout = startup_timeout
         self._request_timeout = request_timeout
@@ -283,6 +469,12 @@ class LspClient:
         self._reader_thread: Optional[threading.Thread] = None
         self._stderr_thread: Optional[threading.Thread] = None
         self._stop_requested = threading.Event()
+        #: Set when the reader exits, for any reason. Distinct from
+        #: ``_stop_requested``, which is *us* asking it to stop.
+        self._reader_stopped = threading.Event()
+        #: A malformed frame was read. Terminal: the stream cannot be
+        #: resynchronised, only replaced.
+        self._desynced = False
 
         #: What the server said it can do, from the ``initialize``
         #: result. Previously validated and thrown away, which left the
@@ -418,97 +610,10 @@ class LspClient:
                     "uri": self._root_dir.as_uri(),
                     "name": self._root_dir.name,
                 }],
-                "capabilities": {
-                    "textDocument": {
-                        "synchronization": {
-                            "didSave": False,
-                            "willSave": False,
-                        },
-                        "publishDiagnostics": {
-                            "relatedInformation": False,
-                            # We already drop publishes older than the
-                            # last didChange; saying so lets servers
-                            # stamp the version rather than guess.
-                            "versionSupport": True,
-                            "codeDescriptionSupport": False,
-                            "dataSupport": False,
-                        },
-                        # LSP 3.17 pull diagnostics. A server only
-                        # advertises ``diagnosticProvider`` when the
-                        # *client* declares support — so omitting this
-                        # guaranteed every server looked push-only, and
-                        # the engine had no choice but to wait out a
-                        # timeout and call the silence an answer.
-                        "diagnostic": {
-                            "dynamicRegistration": False,
-                            "relatedDocumentSupport": False,
-                        },
-                        # ─── navigation ──────────────────────────────
-                        # Same rule as pull diagnostics above: a server
-                        # only advertises a provider when the client
-                        # declares the matching capability, so omitting
-                        # any of these makes the feature look absent
-                        # rather than undeclared.
-                        #
-                        # ``linkSupport`` opts into ``LocationLink``,
-                        # whose ``targetSelectionRange`` points at the
-                        # *name* instead of the whole definition body —
-                        # strictly better answers, and the reason
-                        # ``parse_locations`` reads both shapes.
-                        "definition": {"linkSupport": True},
-                        "typeDefinition": {"linkSupport": True},
-                        "implementation": {"linkSupport": True},
-                        "references": {"dynamicRegistration": False},
-                        "hover": {
-                            "contentFormat": ["markdown", "plaintext"],
-                        },
-                        "documentSymbol": {
-                            # Without this a server may flatten to
-                            # SymbolInformation, losing the nesting that
-                            # tells `Engine.start` from `Client.start`.
-                            "hierarchicalDocumentSymbolSupport": True,
-                            "symbolKind": {"valueSet": _SYMBOL_KIND_VALUE_SET},
-                        },
-                        "callHierarchy": {"dynamicRegistration": False},
-                        "rename": {
-                            # prepareSupport lets us ask "is this
-                            # renameable, and what is its extent?"
-                            # before editing anything.
-                            "prepareSupport": True,
-                            "dynamicRegistration": False,
-                        },
-                    },
-                    "workspace": {
-                        "symbol": {
-                            "symbolKind": {"valueSet": _SYMBOL_KIND_VALUE_SET},
-                        },
-                        "workspaceEdit": {
-                            "documentChanges": True,
-                            # Deliberately NOT declaring
-                            # resourceOperations. A server that believes
-                            # we can create/rename/delete files will
-                            # emit those operations as part of a rename
-                            # (jdtls renames the file holding a renamed
-                            # public class), and we do not apply file
-                            # operations. Not declaring it means the
-                            # server keeps the rename to text edits;
-                            # `WorkspaceEdit.file_operations` still
-                            # reports any that arrive anyway, so the
-                            # caller learns the edit was partial rather
-                            # than being told it succeeded.
-                            "failureHandling": "abort",
-                        },
-                    },
-                    # Servers only emit `$/progress` when the client
-                    # says it can receive it. cclsp left this off and
-                    # ignored the notification, which is why "still
-                    # indexing" and "dead" were the same observation.
-                    "window": {"workDoneProgress": True},
-                    "general": {
-                        "positionEncodings": ["utf-16"],
-                    },
-                },
+                "capabilities": client_capabilities(),
                 "clientInfo": {"name": "claude-hooks-lsp-engine", "version": "0.1.0"},
+                **({"initializationOptions": self._initialization_options}
+                   if self._initialization_options is not None else {}),
             },
             timeout=max(0.1, deadline - time.monotonic()),
         )
@@ -947,14 +1052,65 @@ class LspClient:
     def _read_loop(self) -> None:
         assert self._proc and self._proc.stdout
         stdout = self._proc.stdout
+        reason = "reader stopped"
         try:
             while not self._stop_requested.is_set():
                 msg = self._read_frame(stdout)
                 if msg is None:
-                    return  # EOF
+                    reason = "server closed its output stream"
+                    return
                 self._dispatch(msg)
-        except Exception:  # pragma: no cover — defensive
+        except LspProtocolError as e:
+            # The read position is no longer on a message boundary, so
+            # every later read is garbage. This is not recoverable by
+            # waiting — it is the state cclsp got stuck in, where one
+            # bad frame turned into a server that timed out forever.
+            # Mark it so the engine replaces the process instead.
+            self._desynced = True
+            reason = f"protocol desync: {e}"
+            log.warning("lsp %s desynced: %s", self._command[0], e)
+        except Exception as e:  # pragma: no cover — defensive
+            reason = f"reader thread crashed: {e}"
             log.exception("lsp reader thread crashed")
+        finally:
+            self._reader_stopped.set()
+            # Nothing will ever answer these now. Waking them with an
+            # error beats letting each one burn its full timeout —
+            # which, with the reader dead, is every request from here on.
+            self._fail_pending(reason)
+
+    def _fail_pending(self, reason: str) -> None:
+        with self._pending_lock:
+            pending = list(self._pending.items())
+            self._pending.clear()
+        for rid, q in pending:
+            try:
+                q.put_nowait({
+                    "jsonrpc": "2.0", "id": rid,
+                    "error": {"code": -32603, "message": reason},
+                })
+            except Exception:  # pragma: no cover — full queue, caller gone
+                pass
+
+    # ─── health ──────────────────────────────────────────────────────
+
+    @property
+    def is_desynced(self) -> bool:
+        """True once a malformed frame proved the stream is unusable."""
+        return self._desynced
+
+    @property
+    def is_alive(self) -> bool:
+        """Can this client still carry a request?
+
+        Requires both a living process *and* a running reader: a server
+        whose reader thread has died is a process we can write to and
+        never hear from, which presents as a hang rather than a failure.
+        """
+        if self._desynced or self._reader_stopped.is_set():
+            return False
+        proc = self._proc
+        return proc is not None and proc.poll() is None
 
     @staticmethod
     def _read_frame(stream) -> Optional[dict]:

@@ -358,6 +358,10 @@ class LspMcpServer:
         if len(res.items) > 1:
             raise T.ToolError(T.render_candidates(res.items, root=entry.root))
         sym = res.items[0]
+        if sym.name != name:
+            # A substring hit. Saying so costs one line and stops the
+            # caller acting on a symbol it did not ask for.
+            log.info("resolved %r to %r by substring", name, sym.name)
         return sym.selection.start.line, sym.selection.start.character
 
     # ─── tools ───────────────────────────────────────────────────────

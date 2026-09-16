@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -54,6 +55,16 @@ class FakeClient:
         self.opened: list[str] = []
         self.stopped = False
         self.rename_calls: list[tuple] = []
+        self.desynced = False
+        self.alive = True
+
+    @property
+    def is_desynced(self):
+        return self.desynced
+
+    @property
+    def is_alive(self):
+        return self.alive and not self.desynced
 
     def _maybe_fail(self):
         if self._fail:
@@ -400,6 +411,163 @@ class SeedWorkspaceTests(EngineHarness):
         client.opened.clear()
         eng.references(self.file, 0, 4)
         self.assertGreater(len(client.opened), 1, "seed must run again")
+
+
+class RespawnTests(EngineHarness):
+    """A desynced or dead server must be replaced, not reused.
+
+    Reusing one is how cclsp turned a single bad frame into a server
+    that timed out forever — surviving restarts of everything except
+    itself.
+    """
+
+    def engine_with_factory(self, spec, clients):
+        """Engine whose _client_for hands out `clients` in order."""
+        eng = Engine(self.root, [spec])
+        made = []
+
+        def factory(s):
+            with eng._lock:
+                cur = eng._clients.get(s)
+                if cur is not None:
+                    reason = eng._retire_reason(s, cur)
+                    if reason is None:
+                        return cur
+                    eng._clients.pop(s, None)
+                    eng._forget_client(s)
+                    cur.stop()
+                nxt = clients[len(made)]
+                made.append(nxt)
+                eng._clients[s] = nxt
+                eng._started_at[s] = time.monotonic()
+                return nxt
+
+        eng._client_for = factory   # type: ignore
+        return eng, made
+
+    def test_desynced_client_is_replaced(self):
+        first, second = FakeClient("a"), FakeClient("b")
+        spec = self.spec("py")
+        eng, made = self.engine_with_factory(spec, [first, second])
+        eng.did_open(self.file, "x")
+        self.assertEqual(len(made), 1)
+
+        first.desynced = True
+        eng.definition(self.file, 0, 0)
+        self.assertEqual(len(made), 2, "must have spawned a replacement")
+        self.assertTrue(first.stopped)
+
+    def test_dead_process_is_replaced(self):
+        first, second = FakeClient("a"), FakeClient("b")
+        spec = self.spec("py")
+        eng, made = self.engine_with_factory(spec, [first, second])
+        eng.did_open(self.file, "x")
+        first.alive = False
+        eng.definition(self.file, 0, 0)
+        self.assertEqual(len(made), 2)
+
+    def test_healthy_client_is_reused(self):
+        first, second = FakeClient("a"), FakeClient("b")
+        spec = self.spec("py")
+        eng, made = self.engine_with_factory(spec, [first, second])
+        eng.did_open(self.file, "x")
+        eng.definition(self.file, 0, 0)
+        eng.hover(self.file, 0, 0)
+        self.assertEqual(len(made), 1)
+
+    def test_replacement_clears_routing_so_the_file_reopens(self):
+        """A new process has never seen the document; a stale route would
+        send it a did_change for a file it never opened."""
+        first, second = FakeClient("a"), FakeClient("b")
+        spec = self.spec("py")
+        eng, _ = self.engine_with_factory(spec, [first, second])
+        eng.did_open(self.file, "x")
+        first.desynced = True
+        eng.definition(self.file, 0, 0)
+        self.assertGreaterEqual(len(second.opened), 1,
+                                "replacement must be given the file")
+
+    def test_retire_reason_names_the_cause(self):
+        spec = self.spec("py")
+        eng = self.engine((spec, FakeClient()))
+        c = FakeClient()
+        self.assertIsNone(eng._retire_reason(spec, c))
+        c.desynced = True
+        self.assertIn("desync", eng._retire_reason(spec, c))
+        c.desynced, c.alive = False, False
+        self.assertIn("exited", eng._retire_reason(spec, c))
+
+
+class RestartIntervalTests(EngineHarness):
+    """cclsp reads `restartInterval` and ships 5 minutes for pylsp.
+    We read the same key, so honouring it is the difference between a
+    documented field and a decorative one."""
+
+    def test_zero_means_never(self):
+        spec = LspServerSpec(extensions=("py",), command=("x",))
+        eng = self.engine((spec, FakeClient()))
+        eng._started_at[spec] = time.monotonic() - 100000
+        self.assertIsNone(eng._retire_reason(spec, FakeClient()))
+
+    def test_elapsed_interval_retires_the_client(self):
+        spec = LspServerSpec(extensions=("py",), command=("x",),
+                             restart_interval_minutes=5.0)
+        eng = self.engine((spec, FakeClient()))
+        eng._started_at[spec] = time.monotonic() - 301
+        reason = eng._retire_reason(spec, FakeClient())
+        self.assertIsNotNone(reason)
+        self.assertIn("restartInterval", reason)
+
+    def test_within_the_interval_is_reused(self):
+        spec = LspServerSpec(extensions=("py",), command=("x",),
+                             restart_interval_minutes=5.0)
+        eng = self.engine((spec, FakeClient()))
+        eng._started_at[spec] = time.monotonic() - 10
+        self.assertIsNone(eng._retire_reason(spec, FakeClient()))
+
+    def test_unknown_start_time_does_not_retire(self):
+        spec = LspServerSpec(extensions=("py",), command=("x",),
+                             restart_interval_minutes=1.0)
+        eng = self.engine((spec, FakeClient()))
+        self.assertIsNone(eng._retire_reason(spec, FakeClient()))
+
+
+class SubstringFallbackTests(EngineHarness):
+    """cclsp matched `name === q || name.includes(q)`. Keeping the
+    capability without the silence: exact wins, substring only fills a
+    gap that would otherwise be 'not found'."""
+
+    def test_exact_match_wins_over_a_substring_candidate(self):
+        eng = self.engine((self.spec("py"), FakeClient(symbols=[
+            sym("open"), sym("did_open"), sym("open_all")])))
+        res = eng.find_symbols(self.file, "open")
+        self.assertEqual([s.name for s in res.items], ["open"],
+                         "an exact name must never be shadowed")
+
+    def test_substring_fills_the_gap_when_nothing_matches_exactly(self):
+        eng = self.engine((self.spec("py"), FakeClient(symbols=[
+            sym("did_open"), sym("did_close")])))
+        res = eng.find_symbols(self.file, "open")
+        self.assertEqual([s.name for s in res.items], ["did_open"])
+
+    def test_substring_can_be_declined(self):
+        eng = self.engine((self.spec("py"), FakeClient(symbols=[
+            sym("did_open")])))
+        self.assertEqual(
+            eng.find_symbols(self.file, "open", substring=False).items, [])
+
+    def test_kind_filter_applies_before_the_fallback(self):
+        eng = self.engine((self.spec("py"), FakeClient(symbols=[
+            sym("did_open", kind=12), sym("did_open", kind=6)])))
+        res = eng.find_symbols(self.file, "open", kind=6)
+        self.assertEqual(len(res.items), 1)
+        self.assertEqual(res.items[0].kind_name, "method")
+
+    def test_no_match_at_all_is_still_empty(self):
+        eng = self.engine((self.spec("py"), FakeClient(symbols=[sym("zzz")])))
+        res = eng.find_symbols(self.file, "qqq")
+        self.assertEqual(res.items, [])
+        self.assertTrue(res.trustworthy)
 
 
 class CallHierarchyTests(EngineHarness):

@@ -52,12 +52,17 @@ class TestCapabilityCapture(unittest.TestCase):
 class TestClientDeclaresPullSupport(unittest.TestCase):
     def test_initialize_declares_textdocument_diagnostic(self) -> None:
         """A server only advertises `diagnosticProvider` when the client
-        declares support. Omitting it made every server look push-only."""
-        import inspect
-        from claude_hooks.lsp_engine import lsp as mod
-        src = inspect.getsource(mod.LspClient.start)
-        self.assertIn('"diagnostic"', src)
-        self.assertIn('"publishDiagnostics"', src)
+        declares support. Omitting it made every server look push-only.
+
+        Asserted against the declaration itself rather than against the
+        source text of ``start()``, which is what this checked until the
+        capabilities moved into :func:`client_capabilities`. A grep
+        passes on a capability that is present but commented out.
+        """
+        from claude_hooks.lsp_engine.lsp import client_capabilities
+        td = client_capabilities()["textDocument"]
+        self.assertIn("diagnostic", td)
+        self.assertIn("publishDiagnostics", td)
 
 
 class TestStderrDrain(unittest.TestCase):

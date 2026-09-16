@@ -55,6 +55,16 @@ class LspServerSpec:
     extensions: tuple[str, ...]
     command: tuple[str, ...]
     root_dir: str = "."
+    #: Passed through to ``initialize``. Several servers are inert
+    #: without it — pylsp's plugin set, jdtls's runtime list,
+    #: rust-analyzer's cargo settings all arrive this way and have no
+    #: other channel. cclsp reads this key, so a config written for
+    #: cclsp carries it; ignoring it would mean the field is present,
+    #: documented, and does nothing.
+    initialization_options: Optional[dict] = None
+    #: Minutes between forced restarts, cclsp's workaround for servers
+    #: that leak (it ships ``restartInterval: 5`` for pylsp). 0 = never.
+    restart_interval_minutes: float = 0.0
 
     def matches(self, path: str | os.PathLike) -> bool:
         suffix = Path(path).suffix.lower().lstrip(".")
@@ -135,11 +145,26 @@ def load_cclsp_config(path: str | os.PathLike) -> list[LspServerSpec]:
             raise CclspConfigError(
                 f"{p}: servers[{i}].command must be a non-empty array",
             )
+        init_opts = entry.get("initializationOptions")
+        if init_opts is not None and not isinstance(init_opts, dict):
+            raise CclspConfigError(
+                f"{p}: servers[{i}].initializationOptions must be an object",
+            )
+        interval = entry.get("restartInterval", 0)
+        try:
+            interval = float(interval or 0)
+        except (TypeError, ValueError):
+            raise CclspConfigError(
+                f"{p}: servers[{i}].restartInterval must be a number of "
+                f"minutes",
+            ) from None
         out.append(
             LspServerSpec(
                 extensions=tuple(s.lower().lstrip(".") for s in exts),
                 command=tuple(str(c) for c in cmd),
                 root_dir=str(entry.get("rootDir", ".")),
+                initialization_options=init_opts,
+                restart_interval_minutes=max(0.0, interval),
             )
         )
     return out

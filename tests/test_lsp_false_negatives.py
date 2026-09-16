@@ -249,5 +249,84 @@ class VersionFloorTests(unittest.TestCase):
             ("cu",), "clangd", None))
 
 
+class CompileDbInBuildDirTests(unittest.TestCase):
+    """CMake writes compile_commands.json into the build directory, not
+    the source root — the overwhelmingly common layout.
+
+    Searching only the file's own ancestors reported "no compile DB" for
+    a correctly-configured project, and that warning says results are
+    not trustworthy. Firing it on every CMake project teaches the reader
+    to skip it, which costs the honest warnings their meaning. Found by
+    scripts/lsp_conformance.py against llama.cpp.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.src = self.root / "ggml" / "src" / "cuda"
+        self.src.mkdir(parents=True)
+        self.file = self.src / "acc.cu"
+        self.file.write_text("// cuda\n", encoding="utf-8")
+
+    def test_build_subdirectory_counts(self):
+        (self.root / "build").mkdir()
+        (self.root / "build" / "compile_commands.json").write_text(
+            "[]", encoding="utf-8")
+        self.assertFalse(li.missing_compile_db(self.file))
+
+    def test_other_common_build_dirs(self):
+        for name in ("out", "cmake-build-debug", "cmake-build-release",
+                     "builddir", ".build"):
+            with self.subTest(dir=name):
+                d = self.root / name
+                d.mkdir()
+                (d / "compile_commands.json").write_text("[]", encoding="utf-8")
+                self.assertFalse(li.missing_compile_db(self.file))
+                (d / "compile_commands.json").unlink()
+                d.rmdir()
+
+    def test_source_root_still_counts(self):
+        (self.root / "compile_commands.json").write_text("[]", encoding="utf-8")
+        self.assertFalse(li.missing_compile_db(self.file))
+
+    def test_genuinely_absent_is_still_reported(self):
+        self.assertTrue(li.missing_compile_db(self.file))
+
+    def test_non_c_files_are_unaffected(self):
+        py = self.src / "x.py"
+        py.write_text("x = 1\n", encoding="utf-8")
+        self.assertFalse(li.missing_compile_db(py))
+
+
+class DiagnosticDataclassTests(unittest.TestCase):
+    """The helper must read a Diagnostic as well as a wire dict.
+
+    The hook path carries dicts; Engine.get_diagnostics returns parsed
+    objects. Understanding only dicts meant returning "not a
+    translation-unit failure" for one that was.
+    """
+
+    def test_dataclass_is_understood(self):
+        from claude_hooks.lsp_engine.lsp import Diagnostic
+        d = Diagnostic(uri="file:///a.cu", line=0, character=0, severity=1,
+                       message="unable to handle compilation",
+                       source="clangd", code="drv")
+        self.assertTrue(li.is_translation_unit_failure(d))
+
+    def test_dict_still_understood(self):
+        self.assertTrue(li.is_translation_unit_failure(
+            {"line": 0, "character": 0, "severity": 1,
+             "message": "unable to handle compilation"}))
+
+    def test_dataclass_ordinary_error_is_not_a_tu_failure(self):
+        from claude_hooks.lsp_engine.lsp import Diagnostic
+        d = Diagnostic(uri="file:///a.cu", line=42, character=8, severity=1,
+                       message="no member named 'foo'",
+                       source="clangd", code="err")
+        self.assertFalse(li.is_translation_unit_failure(d))
+
+
 if __name__ == "__main__":
     unittest.main()

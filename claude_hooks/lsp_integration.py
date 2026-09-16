@@ -207,19 +207,49 @@ _DRIVER_ERROR_HINTS = (
 )
 
 
-def is_translation_unit_failure(d: dict) -> bool:
+def _field(d, name: str, default=None):
+    """Read ``name`` from a dict *or* a ``Diagnostic`` dataclass.
+
+    The two shapes both exist in this codebase — the hook path carries
+    raw dicts off the wire, while ``Engine.get_diagnostics`` returns
+    parsed ``Diagnostic`` objects. A helper that silently only
+    understood dicts returned False for every dataclass, i.e. reported
+    "not a translation-unit failure" for one that was.
+    """
+    if isinstance(d, dict):
+        return d.get(name, default)
+    return getattr(d, name, default)
+
+
+def is_translation_unit_failure(d) -> bool:
     """True when a diagnostic means *the file never parsed*.
 
     Driver errors are reported at 1:1 (LSP 0:0) with severity Error and
     no meaningful range. They are categorically different from a finding
     about the code: everything after them is unanalysed.
+
+    Accepts either wire dicts or ``Diagnostic`` instances; see
+    :func:`_field`.
     """
-    if int(d.get("severity") or 2) != 1:          # 1 = Error
+    if int(_field(d, "severity") or 2) != 1:          # 1 = Error
         return False
-    if int(d.get("line") or 0) != 0 or int(d.get("character") or 0) != 0:
+    if int(_field(d, "line") or 0) != 0 or int(_field(d, "character") or 0) != 0:
         return False
-    msg = (d.get("message") or "").lower()
+    msg = (_field(d, "message") or "").lower()
     return any(h in msg for h in _DRIVER_ERROR_HINTS)
+
+
+#: Where a compile database actually lives. CMake writes it into the
+#: build directory, not the source root, and that is the overwhelmingly
+#: common layout — so searching only the file's own ancestors reports
+#: "no compile DB" for a correctly-configured project.
+#:
+#: That false positive is worse than it looks. The warning it produces
+#: says results are not trustworthy; firing it on every CMake project
+#: teaches the reader to skip it, which costs the *honest* warnings
+#: their meaning. clangd itself searches these same subdirectories.
+_COMPILE_DB_SUBDIRS = ("", "build", "out", "cmake-build-debug",
+                       "cmake-build-release", "builddir", ".build")
 
 
 def missing_compile_db(path: Path) -> bool:
@@ -227,8 +257,10 @@ def missing_compile_db(path: Path) -> bool:
     if path.suffix.lower() not in _COMPILE_DB_EXTS:
         return False
     for parent in [path.parent, *path.parent.parents]:
-        if any((parent / n).is_file() for n in _COMPILE_DB_NAMES):
-            return False
+        for sub in _COMPILE_DB_SUBDIRS:
+            base = parent / sub if sub else parent
+            if any((base / n).is_file() for n in _COMPILE_DB_NAMES):
+                return False
     return True
 
 
