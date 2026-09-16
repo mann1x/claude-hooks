@@ -125,7 +125,7 @@ v0.7; v1.9 only adds consumer wiring.
   "state_base": null,                // override ~/.claude/lsp-engine
   "spawn_timeout_s": 5.0,            // connect_or_spawn cap
   "diagnostics_timeout_ms": 500,     // lock_timeout_ms
-  "diagnostics_wait_s": 2.0,         // diag_timeout_s
+  "diagnostics_wait_s": 8.0,         // diag_timeout_s
   "extensions_blacklist": [],        // skip these even if cclsp claims them
   "max_diagnostics_per_file": 50,    // truncate noisy files
   "log_path": "~/.claude/claude-hooks-lsp-engine.log"

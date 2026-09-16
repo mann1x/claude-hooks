@@ -29,6 +29,7 @@ if str(REPO) not in sys.path:
 
 from claude_hooks.lsp_engine.lsp import (  # noqa: E402
     _DIAGNOSTICS_TIMEOUT_CEILING,
+    _DIAGNOSTICS_COLD_FLOOR,
     _DIAGNOSTICS_TIMEOUT_DEFAULT,
     Diagnostic,
     DiagnosticsResult,
@@ -48,14 +49,50 @@ class TimeoutPolicyTests(unittest.TestCase):
         self.assertGreaterEqual(_client(["clangd"]).diagnostics_timeout(),
                                 15.0)
 
-    def test_fast_servers_keep_a_short_budget(self):
-        # Not merely a preference: this wait runs after every edit, so
-        # giving pyright clangd's budget would stall the hook.
+    def test_fast_servers_keep_a_short_budget_once_measured(self):
+        # Still not merely a preference: this wait runs after every
+        # edit, so giving pyright clangd's standing budget would stall
+        # the hook. What changed is that it applies from the SECOND
+        # publish — the first one has no measurement behind it.
         for name in ("pyright-langserver", "gopls",
                      "typescript-language-server"):
             with self.subTest(server=name):
-                self.assertEqual(_client([name]).diagnostics_timeout(),
+                c = _client([name])
+                c._observed_publish_latency = 0.4
+                self.assertEqual(c.diagnostics_timeout(),
                                  _DIAGNOSTICS_TIMEOUT_DEFAULT)
+
+    def test_first_publish_gets_the_cold_floor(self):
+        # The adaptive budget raises itself from observed latency, and
+        # can only observe a request that finished. A server whose cold
+        # publish exceeds the default would otherwise time out forever
+        # and never learn. Measured on a real monorepo: cold 3.78 s
+        # against a 5 s default, warm 0.00 s — the same thin margin
+        # clangd had at 2.74 s under 2.00 s.
+        for name in ("pyright-langserver", "typescript-language-server"):
+            with self.subTest(server=name):
+                self.assertEqual(_client([name]).diagnostics_timeout(),
+                                 _DIAGNOSTICS_COLD_FLOOR)
+
+    def test_the_cold_floor_costs_nothing_when_the_server_is_quick(self):
+        # It bounds the wait, it does not schedule one: a server that
+        # publishes in 0.2 s returns in 0.2 s under any budget. This
+        # pins the intent, since the number looks alarming next to a
+        # post-edit hook until you know that.
+        c = _client(["typescript-language-server"])
+        self.assertGreater(c.diagnostics_timeout(), 5.0)
+        c._observed_publish_latency = 0.2
+        self.assertEqual(c.diagnostics_timeout(),
+                         _DIAGNOSTICS_TIMEOUT_DEFAULT)
+
+    def test_an_operator_value_outranks_the_cold_floor(self):
+        # Naming a value for this server in cclsp.json is a statement
+        # about this project; a floor picked from somebody else's
+        # monorepo must not override it. The first version of this
+        # change did exactly that.
+        c = LspClient(command=["typescript-language-server"], root_dir=REPO,
+                      diagnostics_timeout=3.0)
+        self.assertEqual(c.diagnostics_timeout(), 3.0)
 
     def test_an_explicit_caller_budget_still_wins(self):
         # The PostToolUse hook passes 2.0 deliberately; a table must not
@@ -69,8 +106,9 @@ class TimeoutPolicyTests(unittest.TestCase):
 
     def test_measurement_raises_the_floor(self):
         c = _client(["pyright-langserver"])
+        c._observed_publish_latency = 0.5      # measured, and quick
         self.assertEqual(c.diagnostics_timeout(), 5.0)
-        c._observed_publish_latency = 9.0
+        c._observed_publish_latency = 9.0      # measured, and slow
         self.assertEqual(c.diagnostics_timeout(), 18.0)
 
     def test_measurement_is_capped(self):

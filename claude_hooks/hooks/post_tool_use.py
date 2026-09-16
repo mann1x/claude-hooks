@@ -391,7 +391,7 @@ def _run_lsp_engine(
             diags, stale, diag_meta = client.diagnostics_full(
                 abs_path,
                 lock_timeout_ms=int(eng_cfg.get("diagnostics_timeout_ms", 500)),
-                diag_timeout_s=float(eng_cfg.get("diagnostics_wait_s", 2.0)),
+                diag_timeout_s=float(eng_cfg.get("diagnostics_wait_s", 8.0)),
             )
         except (RuntimeError, OSError) as e:
             log.warning("lsp_engine: diagnostics RPC failed: %s", e)

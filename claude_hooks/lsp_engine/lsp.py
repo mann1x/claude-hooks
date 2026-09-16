@@ -481,6 +481,23 @@ _DIAGNOSTICS_TIMEOUT_BY_SERVER = {
     "sourcekit-lsp": 15.0,
 }
 _DIAGNOSTICS_TIMEOUT_DEFAULT = 5.0
+#: Floor for a server's FIRST publish, before anything has been measured.
+#:
+#: The adaptive budget below raises itself from observed latency — which
+#: it can only observe from a request that finished. A server whose cold
+#: first publish exceeds the default therefore times out forever and
+#: never learns, which is the shape of every bug in this file.
+#:
+#: Measured on the cline monorepo: a cold first publish took 3.78 s
+#: against the 5 s default, warm 0.00 s, and a second file on the warm
+#: server 0.35 s. 3.78 under 5.00 is the same thin margin clangd had at
+#: 2.74 under 2.00 — and a heavier TU in that repo did exceed it. So the
+#: floor is set well clear of the measurement rather than just above it.
+#:
+#: This costs nothing when the server is quick: the budget bounds the
+#: wait, it does not schedule one. It applies once per server, because
+#: the first publish is also the first measurement.
+_DIAGNOSTICS_COLD_FLOOR = 15.0
 #: Never wait longer than this, however slow the server has been.
 _DIAGNOSTICS_TIMEOUT_CEILING = 30.0
 
@@ -899,7 +916,12 @@ class LspClient:
         base = _DIAGNOSTICS_TIMEOUT_BY_SERVER.get(
             self.server_name, _DIAGNOSTICS_TIMEOUT_DEFAULT)
         if self._diagnostics_timeout_override is not None:
+            # An operator naming a value for this server in cclsp.json
+            # is a statement about this project, and outranks a floor
+            # we picked from somebody else's monorepo.
             base = self._diagnostics_timeout_override
+        elif not self._observed_publish_latency:
+            base = max(base, _DIAGNOSTICS_COLD_FLOOR)
         # Double the worst latency seen: a server that once took 9 s
         # will take longer on a colder file, and the cost of waiting is
         # a slow answer while the cost of not waiting is a wrong one.
