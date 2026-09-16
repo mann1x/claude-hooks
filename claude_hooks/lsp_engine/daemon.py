@@ -54,6 +54,7 @@ from claude_hooks.lsp_engine.config import (
     load_cclsp_config,
     load_engine_config,
 )
+from claude_hooks.lsp_engine import wire
 from claude_hooks.lsp_engine.engine import Engine
 from claude_hooks.lsp_engine.git_watch import GitWatcher
 from claude_hooks.lsp_engine.ipc import IpcServer, windows_pipe_name_for
@@ -564,6 +565,10 @@ class Daemon:
                 return self._op_did_close(rid, session, req)
             if op == "diagnostics":
                 return self._op_diagnostics(rid, session, req)
+            if op == "nav":
+                return self._op_nav(rid, req)
+            if op == "restart":
+                return self._op_restart(rid, req)
             if op == "status":
                 return self._op_status(rid)
             if op == "shutdown":
@@ -658,6 +663,56 @@ class Daemon:
             "diag_server": res.server,
             "diag_timeout_s": res.timeout,
         }
+
+    #: method -> the kind of item its NavResponse carries. This is the
+    #: whitelist as well as the codec table: an op name that is not here
+    #: is not reachable, so a malformed request cannot call arbitrary
+    #: engine methods.
+    _NAV_METHODS = {
+        "find_symbols": "symbol",
+        "definition": "location",
+        "implementation": "location",
+        "references": "location",
+        "hover": "text",
+        "prepare_call_hierarchy": "call_item",
+        "calls": "call",
+        "rename": "edit",
+        "workspace_symbols": "symbol",
+    }
+
+    def _op_nav(self, rid, req: dict) -> dict:
+        """Serve the navigation surface.
+
+        The daemon owns one Engine per project. Before this op existed
+        the MCP server built a second one in-process, which meant two
+        fleets of language servers per project and two caches that could
+        disagree about the same file. Navigation had to cross the socket
+        for them to share.
+        """
+        method = req.get("method")
+        if method not in self._NAV_METHODS:
+            return {"id": rid, "ok": False,
+                    "error": f"unknown nav method: {method!r}"}
+        args = req.get("args") or {}
+        if not isinstance(args, dict):
+            return {"id": rid, "ok": False, "error": "args must be an object"}
+        try:
+            res = getattr(self._engine, method)(**args)
+        except TypeError as e:
+            # A bad argument set is the caller's to fix, and saying so
+            # beats a stack trace in the daemon log.
+            return {"id": rid, "ok": False, "error": f"bad arguments: {e}"}
+        return {"id": rid, "ok": True,
+                "nav": wire.nav_to_json(res,
+                                        item_kind=self._NAV_METHODS[method])}
+
+    def _op_restart(self, rid, req: dict) -> dict:
+        exts = req.get("extensions")
+        if exts is not None and not isinstance(exts, list):
+            return {"id": rid, "ok": False,
+                    "error": "extensions must be a list"}
+        return {"id": rid, "ok": True,
+                "restarted": self._engine.restart(exts)}
 
     def _op_status(self, rid) -> dict:
         with self._sessions_lock:

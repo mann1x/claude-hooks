@@ -149,6 +149,49 @@ class LspEngineClient:
         }
         return list(resp.get("diagnostics") or []), bool(resp.get("stale")), meta
 
+    # ─── navigation ──────────────────────────────────────────────────
+    #
+    # These exist so the MCP server can use the daemon's Engine instead
+    # of building its own. Two engines per project meant two fleets of
+    # language servers, two warm-ups, and two caches that could disagree
+    # about the same file.
+
+    def nav(self, method: str, **args):
+        """Run one navigation method on the daemon's engine.
+
+        Returns a ``NavResponse`` with its provenance intact — the
+        fields that keep an empty result from being read as a fact
+        about the code survive the socket.
+        """
+        from claude_hooks.lsp_engine import wire
+        resp = self._call("nav", method=method, args=args)
+        return wire.nav_from_json(resp["nav"])
+
+    def restart(self, extensions: Optional[list[str]] = None) -> list[str]:
+        """Stop servers so the next request starts them fresh."""
+        resp = self._call("restart", extensions=extensions)
+        return list(resp.get("restarted") or [])
+
+    def diagnostics_result(
+        self,
+        path: str | os.PathLike,
+        *,
+        lock_timeout_ms: int = 500,
+        diag_timeout_s: float = 8.0,
+    ):
+        """``DiagnosticsResult``, so callers can check ``settled``."""
+        from claude_hooks.lsp_engine import wire
+        from claude_hooks.lsp_engine.lsp import DiagnosticsResult
+        diags, _stale, meta = self.diagnostics_full(
+            path, lock_timeout_ms=lock_timeout_ms,
+            diag_timeout_s=diag_timeout_s)
+        return DiagnosticsResult(
+            items=[wire.diagnostic_from_json(d) for d in diags],
+            settled=bool(meta.get("settled", True)),
+            timeout=float(meta.get("timeout") or diag_timeout_s),
+            server=str(meta.get("server") or ""),
+        )
+
     def status(self) -> dict:
         return self._call("status")
 

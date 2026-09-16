@@ -63,9 +63,9 @@ from typing import Any, Optional
 from claude_hooks.lsp_engine.config import (
     CclspConfigError,
     load_cclsp_config,
-    load_engine_config,
 )
-from claude_hooks.lsp_engine.engine import Engine, NavResponse
+from claude_hooks.lsp_engine.client import connect_or_spawn
+from claude_hooks.lsp_engine.engine import NavResponse
 from claude_hooks.lsp_mcp import tools as T
 from claude_hooks.lsp_mcp.staleness import DETECTOR
 from claude_hooks.mcp_stdio import force_utf8_stdio
@@ -140,7 +140,8 @@ def resolve_config_path(root: Path) -> Optional[Path]:
 class _ProjectEngine:
     """One engine plus the bookkeeping that keeps it honest."""
 
-    def __init__(self, root: Path, engine: Engine, config_path: Optional[Path],
+    def __init__(self, root: Path, engine: "DaemonEngine",
+                 config_path: Optional[Path],
                  config_mtime: Optional[float]):
         self.root = root
         self.engine = engine
@@ -158,6 +159,97 @@ class _ProjectEngine:
             # rather than tearing down working servers on a transient
             # error — a missing config is reported when it is next read.
             return False
+
+
+class DaemonEngine:
+    """The daemon's Engine, reached over its socket.
+
+    The MCP server used to construct an ``Engine`` in-process. That
+    meant two engines per project — this one and the daemon's, which
+    the PostToolUse hook talks to — and therefore two fleets of
+    language servers indexing the same tree, two warm-ups to pay, and
+    two diagnostic caches free to disagree about the same file. On this
+    host that was 12 servers across three fleets holding 357 MB.
+
+    One engine per project was the design; this makes the MCP use it.
+    Sharing the cache is also what makes de-duplication between the
+    hook and the MCP possible at all — they finally see the same state.
+
+    The method surface deliberately mirrors ``Engine``'s, so the tool
+    layer above does not know or care which side of a socket it is on.
+    """
+
+    def __init__(self, root: Path, client) -> None:
+        self._root = root
+        self._client = client
+
+    # -- navigation ----------------------------------------------------
+
+    def find_symbols(self, path, name: str, *, kind=None, substring=True):
+        return self._client.nav("find_symbols", path=str(path), name=name,
+                                kind=kind, substring=substring)
+
+    def definition(self, path, line: int, character: int):
+        return self._client.nav("definition", path=str(path), line=line,
+                                character=character)
+
+    def implementation(self, path, line: int, character: int):
+        return self._client.nav("implementation", path=str(path), line=line,
+                                character=character)
+
+    def references(self, path, line: int, character: int, *,
+                   include_declaration: bool = True, seed: bool = True):
+        return self._client.nav("references", path=str(path), line=line,
+                                character=character,
+                                include_declaration=include_declaration,
+                                seed=seed)
+
+    def hover(self, path, line: int, character: int):
+        return self._client.nav("hover", path=str(path), line=line,
+                                character=character)
+
+    def prepare_call_hierarchy(self, path, line: int, character: int):
+        return self._client.nav("prepare_call_hierarchy", path=str(path),
+                                line=line, character=character)
+
+    def calls(self, path, line: int, character: int, *, direction: str):
+        return self._client.nav("calls", path=str(path), line=line,
+                                character=character, direction=direction)
+
+    def rename(self, path, line: int, character: int, new_name: str):
+        return self._client.nav("rename", path=str(path), line=line,
+                                character=character, new_name=new_name)
+
+    def workspace_symbols(self, query: str, *, start_all: bool = False):
+        return self._client.nav("workspace_symbols", query=query,
+                                start_all=start_all)
+
+    # -- documents and diagnostics -------------------------------------
+
+    def did_open(self, path, content: str) -> bool:
+        return self._client.did_open(path, content)
+
+    def get_diagnostics_result(self, path, *, timeout=None):
+        kw = {} if timeout is None else {"diag_timeout_s": float(timeout)}
+        return self._client.diagnostics_result(path, **kw)
+
+    def restart(self, extensions=None) -> list[str]:
+        return self._client.restart(extensions)
+
+    # -- lifecycle ------------------------------------------------------
+
+    def shutdown(self, *, timeout: float = 3.0) -> None:
+        """Detach, and leave the daemon running.
+
+        An in-process engine was ours to stop. This one is shared with
+        the PostToolUse hook and any other session in the project, so
+        reaping our handle must not take their servers down with it —
+        the daemon has its own idle reaper for that.
+        """
+        try:
+            self._client.detach()
+        finally:
+            self._client.close()
 
 
 class EngineRegistry:
@@ -212,13 +304,33 @@ class EngineRegistry:
                 f"No language servers configured for {root}. Looked at: "
                 f"{searched}. Run `python3 scripts/sync_cclsp.py --write` to "
                 f"create one from the servers actually installed.")
-        engine_cfg = None
+        # The engine config is no longer read here: the daemon loads it
+        # for the Engine it owns, and a second read could only disagree.
+        # The daemon owns the project's one Engine; we attach to it,
+        # spawning it if this is the first client. The cclsp config was
+        # still read above because a project with no servers must fail
+        # here with a message that says so, rather than after a socket
+        # round trip.
+        session = f"lsp-mcp-{os.getpid()}"
         try:
-            engine_cfg = load_engine_config(project_root=root)
-        except Exception:  # pragma: no cover — config is optional
-            log.debug("no engine config for %s", root, exc_info=True)
-        engine = Engine(root, servers, engine_cfg)
-        log.info("engine for %s: %d servers", root, len(servers))
+            client = connect_or_spawn(
+                project_root=root,
+                session_id=session,
+                # Longer than the hook's 5 s: a first MCP call is
+                # interactive and worth waiting out, where a hook that
+                # blocks the edit loop is not.
+                spawn_wait_s=10.0,
+            )
+        except (TimeoutError, OSError, RuntimeError) as e:
+            raise T.ToolError(
+                f"Could not reach the lsp_engine daemon for {root}: {e}. "
+                f"The MCP server and the PostToolUse hook share one engine "
+                f"per project, so navigation needs that daemon. Check "
+                f"`python -m claude_hooks.lsp_engine status --project "
+                f"{root}`.") from e
+        engine = DaemonEngine(root, client)
+        log.info("engine for %s: daemon-backed, %d servers configured",
+                 root, len(servers))
         return _ProjectEngine(root, engine, config_path, mtime)
 
     def _drop(self, root: Path) -> None:

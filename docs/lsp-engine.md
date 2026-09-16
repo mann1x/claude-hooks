@@ -487,6 +487,35 @@ the owner's view (Decision 5).
 
 ---
 
+## One engine per project
+
+The daemon owns the project's `Engine`. The MCP server (`claude_hooks.
+lsp_mcp`) is a **client** of that daemon, not an owner of language
+servers — it attaches over the socket exactly as the PostToolUse hook
+does, spawning the daemon if it is the first to arrive.
+
+It did not always work that way. The MCP built an `Engine` in-process,
+so a project being used through both paths ran **two** fleets of
+language servers over the same tree: double the memory, double the
+indexing, two warm-ups to pay, and two diagnostic caches free to
+disagree about the same file. On the development host that was 12
+servers across three fleets holding 357 MB.
+
+Sharing one engine also means the caches are shared, so work done by one
+path is not repeated by the other: diagnostics fetched through the MCP
+come back to the hook as `source: cached`.
+
+The daemon serves navigation over a `nav` op whose method table doubles
+as the whitelist — a name not in it is unreachable, so a malformed
+request cannot reach arbitrary engine methods. Results cross the socket
+through `claude_hooks/lsp_engine/wire.py`, which preserves the
+provenance fields (`consulted`, `failures`, `progress`, `not_running`,
+`scan_truncated_at`); dropping them would let an empty result arrive
+looking like a fact about the code.
+
+If the daemon cannot be reached the MCP fails loudly with the `status`
+command to run, rather than quietly starting its own servers again.
+
 ## Troubleshooting
 
 ### Daemon won't start: `another daemon already holds daemon.lock`
