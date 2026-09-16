@@ -100,8 +100,10 @@ CREATE INDEX ON session_registry (alias);
 ```
 
 `last_seen` is what makes "is anyone working in opencoti right now?"
-answerable, and it drives expiry of dead sessions from the registry
-(not of their messages).
+answerable, and it drives expiry of dead sessions from the registry:
+a row with no `last_seen` for **30 days** is dropped. Messages already
+addressed to that session are untouched and keep their own 180-day
+expiry, so forgetting a session never loses its mail.
 
 **Registration reports collisions.** On registering, a session counts the
 other live rows sharing its alias. If there are any, `SessionStart`
@@ -147,34 +149,96 @@ CREATE TABLE IF NOT EXISTS session_messages (
     priority     SMALLINT NOT NULL DEFAULT 0,
     read_at      TIMESTAMPTZ,          -- when mailbox-read returned the body
     read_by      TEXT,                 -- which session_id read it
+    -- the optional receipt, written by the RECIPIENT onto the message
+    ack_body     TEXT,                 -- NULL = no receipt, stay silent
+    ack_at       TIMESTAMPTZ,
+    ack_edited_at   TIMESTAMPTZ,
+    receipt_read_at TIMESTAMPTZ,       -- when the SENDER read the receipt
     expires_at   TIMESTAMPTZ NOT NULL DEFAULT now() + INTERVAL '180 days',
     CONSTRAINT one_recipient CHECK (
-        (to_alias IS NULL) <> (to_session IS NULL))
+        (to_alias IS NULL) <> (to_session IS NULL)),
+    CONSTRAINT ack_needs_read CHECK (
+        ack_body IS NULL OR read_at IS NOT NULL)
 );
 CREATE INDEX ON session_messages (to_alias)   WHERE read_at IS NULL;
 CREATE INDEX ON session_messages (to_session) WHERE read_at IS NULL;
 CREATE INDEX ON session_messages (expires_at);
+-- the sender-side announcement query: receipts waiting to be seen
+CREATE INDEX ON session_messages (from_alias)
+    WHERE ack_body IS NOT NULL AND receipt_read_at IS NULL;
 ```
 
 `sqlite_vec` hosts get the same table in their `.db`; the two are not
 synchronised, which is honest — a host without the shared Postgres
 simply has a local mailbox.
 
-### No acknowledgement
+### Read receipts, gated on an ack message
 
-An earlier draft had a separate `mailbox-ack`. It is dropped: an ack is
-work the recipient has to remember to do, for a fact the sender can
-already see, and an unacked-but-read message would get re-announced
-forever, nagging a session about something it has handled.
+A bare receipt — "your message was read" — is a notification about
+something that needs no action, so it is not worth announcing on its
+own. But the recipient often knows one cheap thing the sender wants:
+*"got it, this is two hours of work"* or *"already fixed, ignore"*. A
+full reply message for that is more machinery than the content deserves.
 
-**`read_at` is the only state that matters.** A session that reads a
-message and has something to say back sends a message back — that reply
-*is* the acknowledgement, and it carries the part the sender actually
-wants (what happened, what to do next) rather than a bare receipt.
+So the receipt carries an optional **ack message**, and **the ack message
+is the gate**:
 
-The cost is the narrow window where a session reads a message and dies
-before acting. That is acceptable: the message is still in the table,
-`mailbox-list --all` shows it, and the sender can see `read_by` and ask.
+| recipient did | sender sees |
+|---|---|
+| read, no ack | **nothing** — silence is the default |
+| read, attached an ack | an announced receipt with the ack text |
+
+That inverts the usual design in the right direction: the notification
+exists only when someone deliberately put something in it. `read_at` is
+still stamped on every read and still visible on request via
+`mailbox-list --sent`; what it does not do is generate an announcement.
+
+**The ack is not tied to the moment of reading.** `mailbox-ack` can be
+called at read time or an hour later, which is the point — a session
+that reads a message, starts working, and *then* realises it needs the
+rest of the day can say so without composing a new message. The
+`ack_needs_read` constraint only requires that the message has been read
+first.
+
+#### The ack message has the same ownership rule as a message
+
+Symmetry here is deliberate — one rule to remember, not two:
+
+* the recipient may **edit** the ack (`mailbox-ack` again replaces it,
+  stamping `ack_edited_at`) while `receipt_read_at IS NULL`;
+* once the sender has read the receipt, the ack is **frozen**, and the
+  refusal says so and suggests `mailbox-send` instead.
+
+Same reasoning as a message: you can correct what nobody has seen; once
+it has been read, a correction is a new statement, not a rewrite. This
+is precisely the failure mode in the "Why" section, applied to the
+reverse direction.
+
+#### Announcing a receipt
+
+Receipts ride in the same announcement block as messages, under their
+own heading, and follow the same never-inject discipline **except** that
+an ack is by construction short, so it is shown inline — fetching it
+would cost more than it saves:
+
+```markdown
+## Messages
+
+**1 receipt** for messages you sent:
+
+- `LSP MCP wedges on multi-byte hover` — read by `opencoti@solidpc`,
+  3 min ago: *"confirmed, rebuilding the compile DB first — ~2h"*
+```
+
+Announcing a receipt is what marks it read, because unlike a message
+body the ack has already been delivered in full at that point — there is
+nothing left to fetch, so requiring a tool call would be ceremony.
+
+The hook still does not write. It hands the stamp to the **daemon**,
+fire-and-forget, on the same channel as the `last_seen` refresh. If the
+daemon is down the receipt is announced again next turn, which is a
+harmless duplicate rather than a lost one — the correct way round for a
+failure this subsystem can have.
 
 ### Editable until read, then frozen
 
@@ -208,6 +272,14 @@ archive is append-only, so a quarter's file is written once and never
 rewritten. Rows are deleted from the table only after the archive write
 returns — the same "write the durable copy first" ordering the
 distillation reaper already uses, for the same reason.
+
+The archive directory is capped at **10 GB**, oldest quarter first, and
+only once the cap is actually exceeded. At the size messages actually
+run this is years of traffic, so the cap is not a retention policy — it
+is the guarantee that an unattended host cannot fill its disk with its
+own mail. Each drop is logged with the file and the span it covered,
+because a silent deletion of history is the failure it is meant to
+prevent.
 
 ---
 
@@ -302,6 +374,8 @@ present in every client with no skill load and no slash command:
 | `mailbox-read` | full bodies by id; stamps `read_at` / `read_by` |
 | `mailbox-edit` | change `subject` / `body` / `priority` of an unread message you sent |
 | `mailbox-cancel` | withdraw an unread message you sent |
+| `mailbox-ack` | attach (or replace) the short ack on a message sent to you; frozen once the sender reads the receipt |
+| `mailbox-sent` | messages you sent, with `read_at` / `read_by` and any ack — the on-request view that needs no announcement |
 | `mailbox-sessions` | who is registered: alias, host, os, `last_seen` |
 
 `mailbox-send` resolves `to` as a session id when it looks like a UUID,
@@ -311,39 +385,40 @@ silently creating a mailbox nobody reads.
 
 ---
 
-## Open questions for review
+## Resolved in review (2026-09-16)
 
-1. **Does the sender get a read receipt?** The data is there (`read_by`,
-   `read_at`) and `mailbox-list --sent` would show it. The question is
-   whether to *announce* "opencoti read your message" — which is a
-   notification about something that needs no action, i.e. the thing
-   `ack` was dropped for.
-2. **Broadcast to a bare alias with one live session.** Right now
-   `osync` with a single match just sends. Should it still require
-   `osync@host` for the sake of a stable habit, or is "unambiguous means
-   send" the right call?
-3. **Registry expiry.** How long does a dead session stay addressable by
-   id? Proposal: registry rows drop at 30 days of no `last_seen`;
-   messages already sent to them survive to the 180-day expiry.
-4. **Archive retention.** The quarterly `.jsonl.zst` files are tiny, so
-   the default is to keep them forever. Worth a cap?
-
----
+1. **Read receipts** — yes, but gated on an ack message, not on the read
+   itself. No ack, no announcement. See *Read receipts, gated on an ack
+   message*; the ack inherits the editable-until-read rule.
+2. **Bare alias with one live match** — sends. Cross-host traffic is the
+   rare case, so paying `@host` on every send to guard against it is the
+   wrong default; the refusal fires only when the alias is genuinely
+   ambiguous.
+3. **Registry expiry** — 30 days without `last_seen`. Messages already
+   addressed to a dropped session survive to their own 180-day expiry,
+   so expiring the registry never loses mail.
+4. **Archive retention** — capped at **10 GB**. Oldest quarters are
+   dropped first, and only after the cap is genuinely exceeded, logged
+   with what was removed. At the observed message size this is years of
+   traffic; the cap exists so an unattended host cannot fill a disk.
 
 ## Rollout
 
 1. Table + `MailboxStore` on the existing pgvector connection (lock-
    reusing), plus the sqlite_vec variant; `session_registry` alongside.
-2. Six MCP tools, with the same byte-identical output formatting both
+2. Eight MCP tools, with the same byte-identical output formatting both
    MCP servers already share via `claude_hooks/mcp_format.py`.
 3. Session registry write at `SessionStart`, collision line in the
    status block, `last_seen` refresh via the daemon.
 4. Announcement block in `SessionStart`, `UserPromptSubmit` and `Stop`,
    behind `hooks.mailbox.enabled` (default **off** until proven).
-5. Expiry sweep + zstd archive writer in the existing reaper slot.
+5. Expiry sweep + zstd archive writer in the existing reaper slot,
+   with the 10 GB cap and the 30-day registry sweep.
 6. Tests: addressing resolution including the ambiguity refusal and the
    broadcast group; alias-with-no-session; edit/cancel refused after
-   read; Stop announcing only what arrived mid-turn; expiry archiving
-   before deleting; and a concurrency test that runs a mailbox check
-   against the same connection as a parallel recall.
+   read; **ack absent means silence**; ack editable until the receipt is
+   read and frozen after; Stop announcing only what arrived mid-turn;
+   expiry archiving before deleting; archive cap dropping oldest first;
+   and a concurrency test that runs a mailbox check against the same
+   connection as a parallel recall.
 7. Only then: retire `/shared/dev/handover/`.
