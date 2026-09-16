@@ -1,15 +1,18 @@
 """One daemon per repository, many narrowly-rooted engines.
 
-The number that forced this: the cline checkout has **137** project
-roots, and the daemon was keyed on the same root the language server is
-keyed on. That meant 137 Python processes for one repository, each with
-a socket, a lock file, a sweeper thread and its own fleet — with nothing
-counting them, because each one looked reasonable in isolation.
+The daemon used to be keyed on the same root the language server is
+keyed on, so every project root meant another Python process with its
+own socket, lock file, sweeper thread and fleet. Measured rather than
+assumed: the cline checkout has **30** distinct project roots across
+3 536 source files, and across this host **74** state directories named
+a root nested inside a repository — 37 of them inside one checkout of
+opencoti. Nothing bounded the count because nothing counted it; each
+root looks reasonable in isolation.
 
-Widening the *server's* root is not the alternative and was measured:
-tsserver rooted at that 6.1 GB tree answered 0 references in 81.7 s. So
-the roots stay narrow and the *daemon* moves out to the repository
-boundary, which is what this pool implements.
+Widening the *server's* root is not the alternative, and that was
+measured too: tsserver rooted at that 6.1 GB tree answered 0 references
+in 81.7 s. So the roots stay narrow and the *daemon* moves out to the
+repository boundary, which is what this pool implements.
 """
 from __future__ import annotations
 
@@ -139,7 +142,7 @@ class RoutingTests(_Fixture):
 
 
 class BoundTests(_Fixture):
-    """The 137 case: what stops it recurring inside one process."""
+    """The sprawl case: what stops it recurring inside one process."""
 
     def _pkg(self, name: str) -> Path:
         pkg = self.repo / "packages" / name
@@ -169,6 +172,34 @@ class BoundTests(_Fixture):
         self.assertIn(self.a, roots)
         self.assertNotIn(self.b, roots)
         self.assertFalse(ea.stopped)
+
+    def test_recency_does_not_depend_on_clock_resolution(self) -> None:
+        """Order is not a question a clock answers.
+
+        ``time.monotonic()`` has ~15.6 ms resolution on Windows, so
+        several requests share one value, the tie breaks on dict order,
+        and the engine evicted is whichever was inserted first — which
+        can be the one in active use, costing a cold start (7.84 s
+        measured) in the middle of a task. Caught on pandorum, where
+        three calls inside one tick evicted the most recent engine.
+
+        Frozen clock here so the assertion is about ordering and cannot
+        pass by accident on a host with a finer timer.
+        """
+        # A frozen clock, injected rather than patched onto the shared
+        # ``time`` module — patching that reaches every other user of it
+        # in the process, which is how the Windows-dispatch test broke
+        # pathlib.
+        p = self.pool(max_engines=2, clock=lambda: 1000.0)
+        fa = self.a / "src" / "index.ts"
+        fb = self.b / "src" / "index.ts"
+        p.for_path(fa)
+        p.for_path(fb)
+        p.for_path(fa)                 # a is the most recent
+        p.for_path(self._pkg("c"))     # b is the one to lose
+        roots = p.live_roots()
+        self.assertIn(self.a, roots)
+        self.assertNotIn(self.b, roots)
 
     def test_the_engine_being_built_is_never_the_one_evicted(self) -> None:
         # With a cap of 1 an unprotected LRU evicts what it just made.

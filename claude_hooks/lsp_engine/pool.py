@@ -7,13 +7,15 @@ monorepo measured 0 references in 81.7 s, because it falls back to an
 inferred project over the whole tree. Narrow rooting is not a compromise
 there, it is the only thing that works.
 
-It is the wrong key for a **daemon**. The cline checkout has 137 of those
-roots. One daemon each would be 137 Python processes for one repository,
-each with its own socket, its own lock file, its own sweeper thread, its
-own idle timer and its own fleet of language servers — and no single
-place to ask what is running or to tell it to stop. Nothing bounded it,
+It is the wrong key for a **daemon**. Measured: the cline checkout has
+30 such roots across 3 536 source files, and this host held 74 state
+directories naming a root nested inside a repository — 37 of them inside
+one checkout of opencoti. One daemon each means that many Python
+processes for one repository, each with its own socket, lock file,
+sweeper thread, idle timer and fleet of language servers — and no single
+place to ask what is running or to tell it to stop. Nothing bounded it
 because nothing counted it: a root is discovered per request, and each
-one looked like a reasonable single daemon in isolation.
+one looks like a reasonable single daemon in isolation.
 
 So the two keys are separated. The daemon is keyed at the repository
 boundary (``boundary_root_for``) and owns this pool; the pool holds one
@@ -80,6 +82,7 @@ class EnginePool:
         max_engines: int = DEFAULT_MAX_ENGINES,
         idle_seconds: float = DEFAULT_ENGINE_IDLE_S,
         factory: Optional[Callable[[Path], Engine]] = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._boundary = Path(boundary).resolve()
         self._servers = list(servers)
@@ -89,9 +92,24 @@ class EnginePool:
         self._max_engines = max(1, int(max_engines))
         self._idle_seconds = float(idle_seconds)
         self._factory = factory
+        self._clock = clock
 
         self._engines: dict[Path, Engine] = {}
+        #: root -> wall time of last use. Drives the *idle* reap, which
+        #: is a question about elapsed seconds.
         self._used_at: dict[Path, float] = {}
+        #: root -> a strictly increasing use counter. Drives the *LRU*,
+        #: which is a question about order, and order is not what a
+        #: clock answers. ``time.monotonic()`` has ~15.6 ms resolution
+        #: on Windows, so several requests land on the same value, the
+        #: tie breaks on dict order, and the engine evicted is whichever
+        #: was inserted first — which can be the one in active use.
+        #: Caught by tests/test_lsp_engine_pool.py on pandorum, where
+        #: three calls inside one tick evicted the most recent engine.
+        #: Same shape as the content stamp carrying size as well as
+        #: mtime: an event can land inside one clock tick.
+        self._use_seq: dict[Path, int] = {}
+        self._seq = 0
         self._lock = threading.RLock()
         self._stopped = False
 
@@ -151,7 +169,7 @@ class EnginePool:
                 self._engines[key] = engine
                 log.info("lsp-engine: started engine for %s (%d live)",
                          key, len(self._engines))
-            self._used_at[key] = time.monotonic()
+            self._touch(key)
             return engine
 
     def existing_for_path(self, path: str | os.PathLike) -> Optional[Engine]:
@@ -165,8 +183,14 @@ class EnginePool:
             key = self.root_for(path)
             engine = self._engines.get(key)
             if engine is not None:
-                self._used_at[key] = time.monotonic()
+                self._touch(key)
             return engine
+
+    def _touch(self, root: Path) -> None:
+        """Record a use: wall time for idleness, sequence for order."""
+        self._seq += 1
+        self._use_seq[root] = self._seq
+        self._used_at[root] = self._clock()
 
     def _build(self, root: Path) -> Engine:
         if self._factory is not None:
@@ -193,7 +217,7 @@ class EnginePool:
             candidates = [r for r in self._engines if r != protect]
             if not candidates:
                 return
-            oldest = min(candidates, key=lambda r: self._used_at.get(r, 0.0))
+            oldest = min(candidates, key=lambda r: self._use_seq.get(r, 0))
             log.info("lsp-engine: evicting idle engine for %s (LRU)", oldest)
             self._shutdown_root(oldest)
 
@@ -207,7 +231,7 @@ class EnginePool:
         """
         if self._idle_seconds <= 0:
             return []
-        clock = time.monotonic() if now is None else now
+        clock = self._clock() if now is None else now
         reaped: list[Path] = []
         with self._lock:
             stale = [r for r, t in self._used_at.items()
@@ -225,6 +249,7 @@ class EnginePool:
         """Called with the lock held."""
         engine = self._engines.pop(root, None)
         self._used_at.pop(root, None)
+        self._use_seq.pop(root, None)
         if engine is None:
             return False
         try:
@@ -315,7 +340,7 @@ class EnginePool:
         all: with a daemon per narrow root there was no process that
         could say what the repository as a whole was running.
         """
-        now = time.monotonic()
+        now = self._clock()
         out = []
         for root, engine in self.items():
             try:

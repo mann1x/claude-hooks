@@ -118,8 +118,8 @@ DEFAULT_ENGINE_IDLE_S = 900.0
 class PoolConfig:
     """Bounds on how many narrowly-rooted engines a daemon holds.
 
-    These are the knobs that keep a monorepo from costing what 137
-    separate daemons cost. They are operator-settable because the right
+    These are the knobs that keep a monorepo from costing what a daemon
+    per package costs. They are operator-settable because the right
     number depends on the tree: a repo of small Python packages can
     afford more live engines than one where every package starts a
     tsserver.
@@ -480,8 +480,9 @@ def boundary_root_for(path: str | os.PathLike) -> Optional[Path]:
     6.1 GB monorepo measured 0 references in 81.7 s, because it falls
     back to an inferred project over the whole tree. But one *daemon*
     per narrow root is a different question, and the answer there was
-    137 daemons for one repository, each a Python process with its own
-    fleet, its own cache and its own idle timer.
+    dozens of daemons for one repository — 37 for one checkout of
+    opencoti on this host — each a Python process with its own fleet,
+    its own cache and its own idle timer.
 
     So the daemon is keyed here, at the repository (or an explicitly
     declared root), and holds one narrowly-rooted engine per package

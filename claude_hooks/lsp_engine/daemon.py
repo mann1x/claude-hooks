@@ -90,8 +90,8 @@ def daemon_root_for(project_root: str | os.PathLike) -> Path:
 
     The narrow root the language server needs is a different question,
     answered per file by :class:`~claude_hooks.lsp_engine.pool.EnginePool`.
-    Keying the daemon on it too is what produced 137 daemons for one
-    checkout of cline.
+    Keying the daemon on it too is what produced a daemon per package:
+    30 roots in one checkout of cline, 37 in one of opencoti.
     """
     root = Path(project_root).resolve()
     if not root.exists():
