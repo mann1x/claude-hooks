@@ -187,16 +187,47 @@ class LspEngineManager:
         not in a test.
         """
         try:
-            if state_dir is not None:
-                lock = state_dir / "daemon.lock"
-                if not lock.is_file():
-                    return None
-                first = lock.read_text(encoding="ascii").splitlines()[0]
-                return int(first.strip())
-            from claude_hooks.lsp_engine.client import daemon_pid
-            return daemon_pid(root, state_base=self._state_base)
+            if state_dir is None:
+                from claude_hooks.lsp_engine.client import daemon_pid
+                return daemon_pid(root, state_base=self._state_base)
+            lock = state_dir / "daemon.lock"
+            if not lock.is_file():
+                return None
+            lines = lock.read_text(encoding="ascii").splitlines()
+            pid = int(lines[0].strip())
+            # The daemon writes "<pid>\n<unix start time>\n", and the
+            # second line is what makes the first trustworthy. PIDs wrap:
+            # a lock written on 20 Aug named pid 3804291, and on 16 Sep a
+            # completely unrelated process held that number — so the
+            # directory was reported ``wedged`` on the strength of a
+            # stranger. That is not cosmetic, because ``wedged`` is what
+            # stops the reaper clearing state, so the entry could never
+            # be cleaned while some process happened to occupy the pid.
+            started = float(lines[1].strip()) if len(lines) > 1 else None
+            if started is not None and self._started_after(pid, started):
+                return None
+            return pid
         except Exception:
             return None
+
+    @staticmethod
+    def _started_after(pid: int, when: float) -> bool:
+        """True when the process on ``pid`` began after ``when``.
+
+        i.e. it cannot be the one that wrote the lock. ``/proc/<pid>``'s
+        mtime is the process start time on Linux. Elsewhere there is no
+        dependency-free equivalent, so this returns False and the pid is
+        taken at face value, as it was before.
+
+        The allowance is generous: a daemon writes its lock immediately
+        after starting, and a reused PID is days or weeks later, so a
+        minute of slack cannot confuse the two.
+        """
+        try:
+            started = Path(f"/proc/{pid}").stat().st_mtime
+        except OSError:
+            return False
+        return started > when + 60.0
 
     def stateless_daemons(self) -> list[dict]:
         """Live daemons with no state directory left.

@@ -328,6 +328,81 @@ class StatelessDaemonTests(_Fixture):
         self.assertIsNone(rows[str(pkg)]["pid"])
 
 
+class PidReuseTests(_Fixture):
+    """A month-old lock naming a live PID is not a wedged daemon.
+
+    PIDs wrap. A lock written 2026-08-20 named pid 3804291, and on
+    2026-09-16 a completely unrelated process held that number, so the
+    directory was reported ``wedged`` on the strength of a stranger.
+    ``wedged`` is what stops the reaper clearing state, so the entry
+    could never be cleaned while some process happened to occupy the
+    pid. Found in ``lsp list`` output after deploying, not in review.
+
+    The daemon writes ``<pid>\n<unix start time>``, and the second line
+    is what makes the first trustworthy.
+    """
+
+    def _locked(self, name: str, project: Path, pid: int,
+                started: float) -> Path:
+        d = self._state(name, project)
+        (d / "daemon.lock").write_text(f"{pid}\n{int(started)}\n",
+                                       encoding="ascii")
+        return d
+
+    def _manager(self) -> LspEngineManager:
+        m = LspEngineManager(state_base=self.base)
+        m._client = lambda root, session, state_dir=None: None
+        return m
+
+    @unittest.skipUnless(Path("/proc").is_dir(), "needs /proc start times")
+    def test_a_reused_pid_is_not_reported_wedged(self) -> None:
+        import os
+        import time
+        p = self._project("stale")
+        # This very process: alive, and started long after the lock.
+        self._locked("aaa", p, os.getpid(), time.time() - 30 * 86400)
+        row = self._manager().list()["daemons"][0]
+        self.assertNotIn("wedged", row)
+        self.assertIsNone(row["pid"])
+
+    @unittest.skipUnless(Path("/proc").is_dir(), "needs /proc start times")
+    def test_a_genuinely_wedged_daemon_is_still_reported(self) -> None:
+        # The check must not swallow the case it was added beside: a
+        # process that really is the one the lock names.
+        import os
+        import time
+        p = self._project("wedged")
+        self._locked("aaa", p, os.getpid(), time.time() + 60)
+        row = self._manager().list()["daemons"][0]
+        self.assertTrue(row["wedged"])
+        self.assertEqual(row["pid"], os.getpid())
+
+    def test_a_lock_without_a_start_time_is_taken_at_face_value(self) -> None:
+        # Locks written by an older daemon have only the pid line.
+        import os
+        p = self._project("old-format")
+        d = self._state("aaa", p)
+        (d / "daemon.lock").write_text(f"{os.getpid()}\n", encoding="ascii")
+        row = self._manager().list()["daemons"][0]
+        self.assertTrue(row["wedged"])
+
+    def test_a_dead_pid_is_not_wedged(self) -> None:
+        import time
+        p = self._project("dead")
+        # PID 1 is init; a pid that cannot be ours and is not running as
+        # a daemon. Use an implausible one instead.
+        self._locked("aaa", p, 2 ** 22 - 1, time.time())
+        row = self._manager().list()["daemons"][0]
+        self.assertNotIn("wedged", row)
+
+    def test_an_unreadable_lock_does_not_raise(self) -> None:
+        p = self._project("garbage")
+        d = self._state("aaa", p)
+        (d / "daemon.lock").write_text("not-a-pid\n", encoding="ascii")
+        row = self._manager().list()["daemons"][0]
+        self.assertIsNone(row["pid"])
+
+
 class ReapTests(_Fixture):
     def test_an_orphan_is_stopped(self) -> None:
         gone = self.projects / "vanished"
