@@ -666,10 +666,21 @@ pre-edit line numbers and missed three call sites that had just been
 added, while symbol lookup and workspace search stayed correct — so
 nothing about the output looked suspect.
 
-The engine now **re-checks the file before answering**. Every request
-that opens a path compares the on-disk `(mtime, size)` against the stamp
-the server's copy corresponds to, and re-sends the content when it
-moved. The check is a `stat`, so the common path costs nothing, and
+The engine now **re-checks before answering**. Every request that opens
+a path compares the on-disk `(mtime, size)` against the stamp the
+server's copy corresponds to and re-sends when it moved — and a
+*project-scoped* request (references, implementation, rename, workspace
+symbols, call hierarchy, definition) re-checks **every open document**,
+not only the one it was handed.
+
+That second part matters because a sweep reads across files, and the
+server holds documents it opened itself while answering an earlier
+sweep. Left unchecked they freeze until something names them directly,
+so the sweep is wrong in both directions: a call site added to an
+unnamed file is missed, and one removed from it is still reported.
+Measured on a two-file scratch project: after deleting a file, the old
+behaviour still reported two references *inside the deleted file*. A
+file that has vanished is now closed rather than left open. The check is a `stat`, so the common path costs nothing, and
 `did_open` is idempotent — identical content is a no-op, different
 content becomes a `did_change`. Both parts of the stamp matter: an edit
 can land inside one clock tick, and a truncation that keeps the mtime

@@ -418,6 +418,53 @@ class Engine:
         self._synced[uri] = stamp
         return True
 
+    def _resync_all_open(self) -> int:
+        """Re-check every open document, not just the one being asked about.
+
+        ``_ensure_open`` only refreshes the path in the request. But a
+        project-scoped query answers *across* files, and the server has
+        other documents open — including result files it opened itself
+        while answering an earlier sweep. Those stay frozen at whatever
+        they last held until something names them directly, so a sweep
+        is wrong in both directions: a call site added to an unnamed
+        file is missed, and one deleted from it is still reported.
+
+        The second is the dangerous one. Reported 2026-09-16: after a
+        ``git checkout`` reverted a test file, ``find_references`` kept
+        returning a hit at line 348 of a file that was 345 lines long —
+        a phantom past EOF, which "rename every caller" and "is this
+        symbol dead" both act on.
+
+        A ``stat`` per open file is cheap next to the request it guards
+        (a cold cross-file query is seconds), and content is re-read
+        only for files whose stamp moved.
+        """
+        with self._lock:
+            snapshot = dict(self._uri_routing)
+        touched = 0
+        for uri, (abs_path, _specs) in snapshot.items():
+            path = Path(abs_path)
+            try:
+                path.stat()
+            except FileNotFoundError:
+                # Deleted under us. Left open, its stale copy keeps
+                # producing references to code that no longer exists.
+                log.debug("resync: %s is gone, closing it", path)
+                try:
+                    self.did_close(path)
+                except LspError:
+                    pass
+                with self._lock:
+                    self._uri_routing.pop(uri, None)
+                self._synced.pop(uri, None)
+                touched += 1
+                continue
+            except OSError:
+                continue
+            if self._resync_from_disk(path, uri):
+                touched += 1
+        return touched
+
     def _ensure_open(self, path) -> tuple[LspServerSpec, ...]:
         """Open ``path`` if it is not already, and return its servers.
 
@@ -484,6 +531,10 @@ class Engine:
         reporting progress* attaches that progress, because "still
         indexing, 40%" and "dead" are otherwise the same empty list.
         """
+        if what in self._PROJECT_SCOPED:
+            # This request reads across files, so every open document
+            # has to match disk — not only the one that was named.
+            self._resync_all_open()
         items: list = []
         consulted: list[str] = []
         failures: list[tuple[str, str]] = []

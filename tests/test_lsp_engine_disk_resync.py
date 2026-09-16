@@ -35,6 +35,7 @@ class _Client:
     def __init__(self) -> None:
         self.opened: list[tuple[str, str]] = []
         self.changed: list[tuple[str, str]] = []
+        self.closed: list[str] = []
         self.alive = True
 
     @property
@@ -52,13 +53,16 @@ class _Client:
         self.changed.append((str(path), content))
 
     def did_close(self, path) -> None:
-        pass
+        self.closed.append(str(path))
 
     def document_symbols(self, path, **kw):
         return []
 
     def references(self, path, line, ch, **kw):
         return []
+
+    def hover(self, path, line, ch, **kw):
+        return ""
 
     def progress_snapshot(self):
         return None
@@ -156,3 +160,81 @@ class DiskResyncTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class OtherOpenFilesTests(unittest.TestCase):
+    """A sweep reads across files, so every open one has to be current.
+
+    ``_ensure_open`` only refreshes the path in the request. The server
+    also holds result files it opened itself while answering an earlier
+    sweep, and those stay frozen until something names them — so a call
+    site added to an unnamed file is missed, and one removed from it is
+    still reported. Reported 2026-09-16 with a phantom reference at line
+    348 of a 345-line file after a git checkout.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.named = self.root / "named.py"
+        self.other = self.root / "other.py"
+        self.named.write_text("named v1\n", encoding="utf-8")
+        self.other.write_text("other v1\n", encoding="utf-8")
+        self.addCleanup(self.tmp.cleanup)
+
+        self.spec = LspServerSpec(command=("fake-ls",), extensions=("py",))
+        self.client = _Client()
+        self.eng = Engine(self.root, [self.spec])
+        self.eng._client_for = lambda spec: self.client  # type: ignore
+        self.eng._clients = {self.spec: self.client}
+        # Both files open, as they would be after one sweep.
+        self.eng._ensure_open(self.named)
+        self.eng._ensure_open(self.other)
+
+    def _sent_for(self, path: Path) -> list[str]:
+        return [c for p, c in self.client.opened + self.client.changed
+                if p == str(path)]
+
+    def _edit(self, path: Path, text: str) -> None:
+        path.write_text(text, encoding="utf-8")
+        st = path.stat()
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+
+    def test_unnamed_open_file_is_refreshed_by_a_sweep(self) -> None:
+        self._edit(self.other, "other v2\n")
+        # The request names `named`, but reads across files.
+        self.eng.references(self.named, 0, 0)
+        self.assertEqual(self._sent_for(self.other)[-1], "other v2\n",
+                         "the unnamed open file was left stale")
+
+    def test_a_per_file_request_does_not_sweep(self) -> None:
+        # hover is about one position; paying for every open file on
+        # every hover would be the wrong trade.
+        self._edit(self.other, "other v2\n")
+        self.eng.hover(self.named, 0, 0)
+        self.assertEqual(self._sent_for(self.other)[-1], "other v1\n")
+
+    def test_reverted_file_stops_reporting_the_old_content(self) -> None:
+        # The git-checkout case, in both directions.
+        self._edit(self.other, "other v2 with an extra line\n")
+        self.eng.references(self.named, 0, 0)
+        self._edit(self.other, "other v1\n")
+        self.eng.references(self.named, 0, 0)
+        self.assertEqual(self._sent_for(self.other)[-1], "other v1\n")
+
+    def test_deleted_file_is_closed_not_left_open(self) -> None:
+        # Left open, its stale copy keeps producing references to code
+        # that no longer exists.
+        uri = [u for u in self.eng._uri_routing
+               if u.endswith("other.py")][0]
+        self.other.unlink()
+        self.eng.references(self.named, 0, 0)
+        self.assertNotIn(uri, self.eng._uri_routing)
+        self.assertIn(str(self.other), [str(p) for p in self.client.closed])
+
+    def test_unchanged_files_are_not_resent(self) -> None:
+        before = len(self.client.opened) + len(self.client.changed)
+        for _ in range(3):
+            self.eng.references(self.named, 0, 0)
+        self.assertEqual(len(self.client.opened) + len(self.client.changed),
+                         before, "re-sent files whose stamp had not moved")
