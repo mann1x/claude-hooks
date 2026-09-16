@@ -17,8 +17,12 @@ The contract is intentionally narrow for Phase 0:
   timeout expires; returns the latest list.
 - ``stop()`` sends ``shutdown`` + ``exit`` and reaps the child.
 
-No goto-def / hover / references yet — those land once the IPC layer
-is in place in Phase 1 and we have a real consumer for them.
+The navigation surface — definition, references, implementation, hover,
+document/workspace symbols, call hierarchy and rename — sits alongside
+it. Every one of those returns a union type; decoding lives in
+:mod:`claude_hooks.lsp_engine.protocol` as pure functions, so the arms
+belonging to servers we do not have installed are still covered by
+tests. The methods here are the transport half only.
 """
 
 from __future__ import annotations
@@ -35,10 +39,24 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import unquote
 
+from . import protocol
+from .protocol import (
+    CallHierarchyCall,
+    CallHierarchyItem,
+    Location,
+    Symbol,
+    WorkspaceEdit,
+)
+
 log = logging.getLogger("claude_hooks.lsp_engine.lsp")
+
+#: Declared to servers so they may use the full SymbolKind range. A
+#: server clamps to what the client lists, so an omitted kind comes back
+#: as a different kind rather than as an error.
+_SYMBOL_KIND_VALUE_SET = sorted(protocol.SYMBOL_KINDS)
 
 #: How many stderr lines to keep per server for diagnosis. Small on
 #: purpose — this is a breadcrumb for "why is this server silent", not
@@ -157,6 +175,31 @@ def uri_key(uri: str) -> str:
     return s
 
 
+def _call_item_wire(item: CallHierarchyItem) -> dict:
+    """A ``CallHierarchyItem`` back on the wire.
+
+    The incoming/outgoing requests take the item the *server* handed us
+    in ``prepareCallHierarchy``, so this has to round-trip faithfully:
+    some servers (rust-analyzer, jdtls) key their internal lookup on the
+    exact range they sent, and a reconstructed-but-different item comes
+    back as an empty call list rather than an error.
+    """
+    def _r(r) -> dict:
+        return {"start": {"line": r.start.line, "character": r.start.character},
+                "end": {"line": r.end.line, "character": r.end.character}}
+
+    wire = {
+        "name": item.name,
+        "kind": item.kind,
+        "uri": item.uri,
+        "range": _r(item.range),
+        "selectionRange": _r(item.selection),
+    }
+    if item.detail:
+        wire["detail"] = item.detail
+    return wire
+
+
 def _resolve_binary(name: str) -> str:
     """Return an executable path for ``name``, or ``name`` unchanged.
 
@@ -251,6 +294,13 @@ class LspClient:
         #: broken says so here and nowhere else — there is no LSP
         #: message for "I started fine but a helper binary is missing".
         self._stderr_tail: deque = deque(maxlen=_STDERR_TAIL_LINES)
+
+        #: In-flight ``$/progress`` work, keyed by token. Bounded by the
+        #: server's own begin/end pairs rather than by us, which is safe
+        #: because a token that never ends belongs to a server that is
+        #: still claiming to work — exactly what we want to report.
+        self._progress: dict = {}
+        self._progress_lock = threading.Lock()
 
         self._next_id = 1
         self._id_lock = threading.Lock()
@@ -380,8 +430,67 @@ class LspClient:
                             "dynamicRegistration": False,
                             "relatedDocumentSupport": False,
                         },
+                        # ─── navigation ──────────────────────────────
+                        # Same rule as pull diagnostics above: a server
+                        # only advertises a provider when the client
+                        # declares the matching capability, so omitting
+                        # any of these makes the feature look absent
+                        # rather than undeclared.
+                        #
+                        # ``linkSupport`` opts into ``LocationLink``,
+                        # whose ``targetSelectionRange`` points at the
+                        # *name* instead of the whole definition body —
+                        # strictly better answers, and the reason
+                        # ``parse_locations`` reads both shapes.
+                        "definition": {"linkSupport": True},
+                        "typeDefinition": {"linkSupport": True},
+                        "implementation": {"linkSupport": True},
+                        "references": {"dynamicRegistration": False},
+                        "hover": {
+                            "contentFormat": ["markdown", "plaintext"],
+                        },
+                        "documentSymbol": {
+                            # Without this a server may flatten to
+                            # SymbolInformation, losing the nesting that
+                            # tells `Engine.start` from `Client.start`.
+                            "hierarchicalDocumentSymbolSupport": True,
+                            "symbolKind": {"valueSet": _SYMBOL_KIND_VALUE_SET},
+                        },
+                        "callHierarchy": {"dynamicRegistration": False},
+                        "rename": {
+                            # prepareSupport lets us ask "is this
+                            # renameable, and what is its extent?"
+                            # before editing anything.
+                            "prepareSupport": True,
+                            "dynamicRegistration": False,
+                        },
                     },
-                    "window": {"workDoneProgress": False},
+                    "workspace": {
+                        "symbol": {
+                            "symbolKind": {"valueSet": _SYMBOL_KIND_VALUE_SET},
+                        },
+                        "workspaceEdit": {
+                            "documentChanges": True,
+                            # Deliberately NOT declaring
+                            # resourceOperations. A server that believes
+                            # we can create/rename/delete files will
+                            # emit those operations as part of a rename
+                            # (jdtls renames the file holding a renamed
+                            # public class), and we do not apply file
+                            # operations. Not declaring it means the
+                            # server keeps the rename to text edits;
+                            # `WorkspaceEdit.file_operations` still
+                            # reports any that arrive anyway, so the
+                            # caller learns the edit was partial rather
+                            # than being told it succeeded.
+                            "failureHandling": "abort",
+                        },
+                    },
+                    # Servers only emit `$/progress` when the client
+                    # says it can receive it. cclsp left this off and
+                    # ignored the notification, which is why "still
+                    # indexing" and "dead" were the same observation.
+                    "window": {"workDoneProgress": True},
                     "general": {
                         "positionEncodings": ["utf-16"],
                     },
@@ -619,6 +728,130 @@ class LspClient:
             self._diagnostics_event.setdefault(key, threading.Event()).set()
         return list(diags)
 
+    # ─── navigation ──────────────────────────────────────────────────
+    #
+    # All positions crossing this boundary are LSP-native: 0-based line
+    # *and* 0-based character. The MCP surface is 1-based on both axes,
+    # and converting anywhere other than at that one edge is how a
+    # result ends up one line off in a way nobody notices until it lands
+    # on the wrong function.
+
+    def _position_params(self, path, line: int, character: int) -> dict:
+        return {
+            "textDocument": {"uri": path_to_uri(path)},
+            "position": {"line": line, "character": character},
+        }
+
+    def _request_at(self, method: str, path, line: int, character: int,
+                    *, timeout: Optional[float] = None,
+                    extra: Optional[dict] = None) -> Any:
+        params = self._position_params(path, line, character)
+        if extra:
+            params.update(extra)
+        return self._send_request(method, params, timeout=timeout)
+
+    def definition(self, path, line: int, character: int,
+                   *, timeout: Optional[float] = None) -> list[Location]:
+        return protocol.parse_locations(
+            self._request_at("textDocument/definition", path, line, character,
+                             timeout=timeout))
+
+    def type_definition(self, path, line: int, character: int,
+                        *, timeout: Optional[float] = None) -> list[Location]:
+        return protocol.parse_locations(
+            self._request_at("textDocument/typeDefinition", path, line,
+                             character, timeout=timeout))
+
+    def implementation(self, path, line: int, character: int,
+                       *, timeout: Optional[float] = None) -> list[Location]:
+        return protocol.parse_locations(
+            self._request_at("textDocument/implementation", path, line,
+                             character, timeout=timeout))
+
+    def references(self, path, line: int, character: int,
+                   *, include_declaration: bool = True,
+                   timeout: Optional[float] = None) -> list[Location]:
+        return protocol.parse_locations(self._request_at(
+            "textDocument/references", path, line, character, timeout=timeout,
+            extra={"context": {"includeDeclaration": include_declaration}}))
+
+    def hover(self, path, line: int, character: int,
+              *, timeout: Optional[float] = None) -> str:
+        return protocol.parse_hover(
+            self._request_at("textDocument/hover", path, line, character,
+                             timeout=timeout))
+
+    def document_symbols(self, path,
+                         *, timeout: Optional[float] = None) -> list[Symbol]:
+        uri = path_to_uri(path)
+        return protocol.parse_document_symbols(
+            self._send_request("textDocument/documentSymbol",
+                               {"textDocument": {"uri": uri}}, timeout=timeout),
+            uri=uri)
+
+    def workspace_symbols(self, query: str,
+                          *, timeout: Optional[float] = None) -> list[Symbol]:
+        return protocol.parse_workspace_symbols(
+            self._send_request("workspace/symbol", {"query": query},
+                               timeout=timeout))
+
+    def prepare_call_hierarchy(
+        self, path, line: int, character: int,
+        *, timeout: Optional[float] = None,
+    ) -> list[CallHierarchyItem]:
+        return protocol.parse_call_hierarchy_items(
+            self._request_at("textDocument/prepareCallHierarchy", path, line,
+                             character, timeout=timeout))
+
+    def incoming_calls(self, item: CallHierarchyItem,
+                       *, timeout: Optional[float] = None
+                       ) -> list[CallHierarchyCall]:
+        return protocol.parse_calls(
+            self._send_request("callHierarchy/incomingCalls",
+                               {"item": _call_item_wire(item)}, timeout=timeout),
+            direction="incoming")
+
+    def outgoing_calls(self, item: CallHierarchyItem,
+                       *, timeout: Optional[float] = None
+                       ) -> list[CallHierarchyCall]:
+        return protocol.parse_calls(
+            self._send_request("callHierarchy/outgoingCalls",
+                               {"item": _call_item_wire(item)}, timeout=timeout),
+            direction="outgoing")
+
+    def prepare_rename(self, path, line: int, character: int,
+                       *, timeout: Optional[float] = None) -> bool:
+        """Is the symbol at this position renameable?
+
+        Returns True when the server says yes *or* when it does not
+        implement the check — an unimplemented precondition must not
+        read as a refusal. Only an explicit ``null`` is a no.
+        """
+        if not self.supports("renameProvider"):
+            return True
+        provider = self._server_capabilities.get("renameProvider")
+        if not (isinstance(provider, dict) and provider.get("prepareProvider")):
+            return True
+        try:
+            res = self._request_at("textDocument/prepareRename", path, line,
+                                   character, timeout=timeout)
+        except LspError as e:
+            log.debug("prepareRename unavailable: %s", e)
+            return True
+        if res is None:
+            return False
+        # {defaultBehavior: false} is the server declining in the one
+        # shape that is not null.
+        if isinstance(res, dict) and res.get("defaultBehavior") is False:
+            return False
+        return True
+
+    def rename(self, path, line: int, character: int, new_name: str,
+               *, timeout: Optional[float] = None) -> WorkspaceEdit:
+        return protocol.parse_workspace_edit(self._request_at(
+            "textDocument/rename", path, line, character, timeout=timeout,
+            extra={"newName": new_name}))
+
     def _reset_diagnostics(self, key: str, *, expected_version: int) -> None:
         """``key`` is a :func:`uri_key` result, never a raw URI — the
         two differ on Windows and mixing them is the bug this rename
@@ -660,6 +893,20 @@ class LspClient:
         except Empty:
             with self._pending_lock:
                 self._pending.pop(rid, None)
+            # Tell the server to stop. Without this the request keeps
+            # running — a `find_references` over a large workspace can
+            # occupy a single-threaded server for minutes after we have
+            # given up on it, so the *next* request queues behind work
+            # nobody is waiting for and times out in turn. That is how
+            # one slow call degrades into a server that looks hung.
+            #
+            # Best-effort by definition: the server may answer anyway,
+            # and the reply is discarded because `rid` is no longer
+            # pending.
+            try:
+                self._send_notification("$/cancelRequest", {"id": rid})
+            except (LspError, OSError) as e:      # pragma: no cover - rare
+                log.debug("could not cancel request %s (%s): %s", rid, method, e)
             raise LspError(f"timeout waiting for response to {method!r}")
         if "error" in response:
             err = response["error"]
@@ -738,19 +985,110 @@ class LspClient:
         if method == "textDocument/publishDiagnostics":
             self._on_publish_diagnostics(msg.get("params") or {})
             return
+        if method == "$/progress":
+            self._on_progress(msg.get("params") or {})
+            return
         if method == "window/logMessage" or method == "window/showMessage":
             log.debug("lsp %s: %s", method, (msg.get("params") or {}).get("message"))
             return
         if "id" in msg and "method" in msg:
-            # Server-to-client request — we don't implement any yet.
-            # Reply with method-not-found so the server doesn't hang.
-            self._write_frame(
-                {
-                    "jsonrpc": "2.0",
-                    "id": msg["id"],
-                    "error": {"code": -32601, "message": "not implemented"},
-                }
-            )
+            self._answer_server_request(msg, method)
+
+    def _answer_server_request(self, msg: dict, method) -> None:
+        """Reply to a server-to-client request.
+
+        Three of these must be answered *successfully* rather than with
+        method-not-found, because the error is not neutral — a server
+        that asks and is refused changes its behaviour:
+
+        ``window/workDoneProgress/create``
+            We declared ``window.workDoneProgress``, so refusing the
+            token we just asked to be sent is incoherent, and a server
+            that takes the error seriously stops reporting progress —
+            re-creating the exact blind spot the declaration was added
+            to remove.
+        ``workspace/configuration``
+            gopls and pyright ask for their settings on startup. An
+            error there is not "no settings", it is a failed request
+            during initialisation, and both degrade quietly afterwards.
+            A list of nulls is the spec's way of saying "defaults".
+        ``client/registerCapability``
+            Dynamic registration. We do not track registrations, but
+            acknowledging is correct: the server is informing us, not
+            asking permission.
+        """
+        rid = msg["id"]
+        if method == "workspace/configuration":
+            items = (msg.get("params") or {}).get("items")
+            n = len(items) if isinstance(items, list) else 1
+            result: Any = [None] * n
+        elif method in ("window/workDoneProgress/create",
+                        "client/registerCapability",
+                        "client/unregisterCapability"):
+            result = None
+        else:
+            self._write_frame({
+                "jsonrpc": "2.0", "id": rid,
+                "error": {"code": -32601, "message": "not implemented"},
+            })
+            return
+        self._write_frame({"jsonrpc": "2.0", "id": rid, "result": result})
+
+    # ─── progress ────────────────────────────────────────────────────
+
+    def _on_progress(self, params: dict) -> None:
+        """Track the server's own account of what it is doing.
+
+        This is the difference between "timed out" and "timed out while
+        clangd was 40% through indexing 12k files". cclsp had zero
+        references to ``$/progress``, so every slow answer and every
+        dead server produced the same message.
+        """
+        value = params.get("value")
+        if not isinstance(value, dict):
+            return
+        kind = value.get("kind")
+        token = params.get("token")
+        with self._progress_lock:
+            if kind == "end":
+                self._progress.pop(token, None)
+                return
+            if kind not in ("begin", "report"):
+                return
+            prev = self._progress.get(token) or {}
+            pct = value.get("percentage")
+            self._progress[token] = {
+                "title": value.get("title") or prev.get("title") or "",
+                "message": value.get("message") or prev.get("message") or "",
+                "percentage": pct if isinstance(pct, (int, float)) else prev.get("percentage"),
+                "since": prev.get("since") or time.monotonic(),
+            }
+
+    def progress_snapshot(self) -> Optional[dict]:
+        """The most advanced in-flight progress, or None if idle.
+
+        Includes ``eta_seconds`` when the server reports a percentage,
+        derived from elapsed-versus-percentage. That is a rough figure
+        and labelled as one — but "roughly two minutes" is a decision a
+        caller can act on, and a bare timeout is not.
+        """
+        with self._progress_lock:
+            entries = list(self._progress.values())
+        if not entries:
+            return None
+        best = max(entries, key=lambda e: e.get("percentage") or 0)
+        elapsed = max(1.0, time.monotonic() - best["since"])
+        pct = best.get("percentage")
+        eta = None
+        if isinstance(pct, (int, float)) and 0 < pct < 100:
+            eta = max(1, int(elapsed * (100 - pct) / pct))
+        return {
+            "title": best["title"],
+            "message": best["message"],
+            "percentage": pct,
+            "elapsed_seconds": int(elapsed),
+            "eta_seconds": eta,
+        }
 
     @staticmethod
     def _parse_diagnostics(uri: str, raw: list) -> list[Diagnostic]:

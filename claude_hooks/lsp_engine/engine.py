@@ -22,8 +22,9 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from claude_hooks.lsp_engine.config import (
     EngineConfig,
@@ -37,6 +38,51 @@ from claude_hooks.lsp_engine.lsp import (
 )
 
 log = logging.getLogger("claude_hooks.lsp_engine.engine")
+
+
+@dataclass(frozen=True)
+class NavResponse:
+    """A navigation result plus who produced it.
+
+    The provenance fields are not diagnostics-for-humans; they are what
+    stops an empty ``items`` being reported as a fact about the code.
+    Four different situations produce ``items == []``:
+
+    * the answer really is empty — nothing references this symbol;
+    * every server that claims the file failed (``failures``);
+    * no server claims the file at all (``consulted`` empty, and no
+      failures either);
+    * the server is alive but still indexing (``progress``).
+
+    Only the first is a statement about the workspace. Collapsing them
+    into a bare list is precisely the bug class this engine exists to
+    avoid, so the distinction is carried in the type rather than left
+    to each caller to reconstruct.
+    """
+
+    items: list[Any] = field(default_factory=list)
+    #: Servers that answered, by binary name.
+    consulted: tuple[str, ...] = ()
+    #: (binary, message) for servers that were asked and did not answer.
+    failures: tuple[tuple[str, str], ...] = ()
+    #: Progress reported by a server that timed out, if any.
+    progress: Optional[dict] = None
+    #: Configured but not started — only meaningful for workspace-wide
+    #: queries, which have no path to route on.
+    not_running: tuple[str, ...] = ()
+
+    def __bool__(self) -> bool:
+        return bool(self.items)
+
+    @property
+    def trustworthy(self) -> bool:
+        """True when an empty result can be read as "nothing found".
+
+        False when something prevented a complete answer, which the
+        caller must surface rather than round down to zero.
+        """
+        return (bool(self.consulted) and not self.failures
+                and self.progress is None and not self.not_running)
 
 
 class Engine:
@@ -200,6 +246,262 @@ class Engine:
             except LspError:
                 log.debug("get_diagnostics: %s failed", spec.command[0])
         return merged
+
+    # ─── navigation ──────────────────────────────────────────────────
+    #
+    # Two things make this more than a passthrough to ``LspClient``.
+    #
+    # First, a file can route to several servers (an ``.html`` claimed
+    # by both the HTML and the TypeScript server), so every answer is a
+    # merge — and a merge that silently drops a server's failure is how
+    # a half-answer passes for a whole one. Hence ``NavResponse``, which
+    # carries *who answered* alongside the results.
+    #
+    # Second, LSP has no "look at this file" request. A position query
+    # against a document the server has never been told about returns
+    # empty, not an error, so every entry point here opens the file
+    # first.
+
+    def _ensure_open(self, path) -> tuple[LspServerSpec, ...]:
+        """Open ``path`` if it is not already, and return its servers.
+
+        Empty tuple means no configured server claims the extension —
+        a normal condition, distinct from an open that failed, which
+        raises.
+        """
+        uri = _path_to_uri(path)
+        with self._lock:
+            entry = self._uri_routing.get(uri)
+        if entry is not None:
+            return entry[1]
+        p = Path(path)
+        try:
+            content = p.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            raise LspError(f"cannot read {p}: {e}") from e
+        if not self.did_open(p, content):
+            return ()
+        with self._lock:
+            entry = self._uri_routing.get(uri)
+        return entry[1] if entry else ()
+
+    def _fan_out(self, specs, call, *, what: str) -> "NavResponse":
+        """Run ``call`` against each server and merge, keeping track of
+        which ones answered.
+
+        A server that fails is recorded rather than raised: with two
+        servers on one file, one being broken should cost its half of
+        the answer and nothing more. A server that times out *while
+        reporting progress* attaches that progress, because "still
+        indexing, 40%" and "dead" are otherwise the same empty list.
+        """
+        items: list = []
+        consulted: list[str] = []
+        failures: list[tuple[str, str]] = []
+        progress = None
+        for spec in specs:
+            name = os.path.basename(spec.command[0])
+            try:
+                client = self._client_for(spec)
+            except LspError as e:
+                failures.append((name, str(e)))
+                continue
+            try:
+                items.extend(call(client) or [])
+                consulted.append(name)
+            except LspError as e:
+                failures.append((name, str(e)))
+                snap = client.progress_snapshot()
+                if snap is not None and progress is None:
+                    progress = dict(snap, server=name)
+                log.debug("%s: %s failed: %s", what, name, e)
+        return NavResponse(items=items, consulted=tuple(consulted),
+                           failures=tuple(failures), progress=progress)
+
+    # ─── symbol resolution ───────────────────────────────────────────
+
+    def find_symbols(self, path, name: str, *,
+                     kind: Optional[int] = None) -> "NavResponse":
+        """Locate ``name`` in ``path`` via ``textDocument/documentSymbol``.
+
+        This is what makes the name-addressed tools possible: a caller
+        knows ``did_open``, not line 102 column 8. Matching is exact on
+        the symbol name — a prefix match would silently return
+        ``did_open_all`` for ``did_open``, and a caller that then renames
+        it has no way to notice.
+
+        ``container`` disambiguation is left to the caller, which is why
+        every match is returned rather than the first: two classes in one
+        file can both have ``start``, and picking one is a coin flip
+        dressed as an answer.
+        """
+        specs = self._ensure_open(path)
+        if not specs:
+            return NavResponse(items=[])
+        res = self._fan_out(
+            specs, lambda c: c.document_symbols(path,
+                                                timeout=self._request_timeout),
+            what="documentSymbol")
+        matches = [s for s in res.items
+                   if s.name == name and (kind is None or s.kind == kind)]
+        return NavResponse(items=matches, consulted=res.consulted,
+                           failures=res.failures, progress=res.progress)
+
+    def definition(self, path, line: int, character: int) -> "NavResponse":
+        specs = self._ensure_open(path)
+        return self._fan_out(
+            specs,
+            lambda c: c.definition(path, line, character,
+                                   timeout=self._request_timeout),
+            what="definition")
+
+    def implementation(self, path, line: int, character: int) -> "NavResponse":
+        specs = self._ensure_open(path)
+        return self._fan_out(
+            specs,
+            lambda c: c.implementation(path, line, character,
+                                       timeout=self._request_timeout),
+            what="implementation")
+
+    def references(self, path, line: int, character: int, *,
+                   include_declaration: bool = True) -> "NavResponse":
+        specs = self._ensure_open(path)
+        return self._fan_out(
+            specs,
+            lambda c: c.references(path, line, character,
+                                   include_declaration=include_declaration,
+                                   timeout=self._request_timeout),
+            what="references")
+
+    def hover(self, path, line: int, character: int) -> "NavResponse":
+        specs = self._ensure_open(path)
+        res = self._fan_out(
+            specs,
+            lambda c: [c.hover(path, line, character,
+                               timeout=self._request_timeout)],
+            what="hover")
+        # A server with nothing to say returns "", which is an answer
+        # but not a result; keeping it would render as a blank hover
+        # from a server that simply does not handle this file.
+        return NavResponse(items=[t for t in res.items if t and t.strip()],
+                           consulted=res.consulted, failures=res.failures,
+                           progress=res.progress)
+
+    def prepare_call_hierarchy(self, path, line: int,
+                               character: int) -> "NavResponse":
+        specs = self._ensure_open(path)
+        return self._fan_out(
+            specs,
+            lambda c: c.prepare_call_hierarchy(path, line, character,
+                                               timeout=self._request_timeout),
+            what="prepareCallHierarchy")
+
+    def calls(self, path, line: int, character: int, *,
+              direction: str) -> "NavResponse":
+        """Incoming or outgoing calls in one step.
+
+        The two-request dance (prepare, then query) is an LSP detail:
+        the item must be the one *that server* produced, so the pair
+        cannot be split across servers. Doing both here keeps that
+        invariant in one place instead of making every caller hold it.
+        """
+        specs = self._ensure_open(path)
+
+        def _both(client):
+            items = client.prepare_call_hierarchy(
+                path, line, character, timeout=self._request_timeout)
+            out = []
+            for item in items:
+                fn = (client.incoming_calls if direction == "incoming"
+                      else client.outgoing_calls)
+                out.extend(fn(item, timeout=self._request_timeout))
+            return out
+
+        return self._fan_out(specs, _both, what=f"{direction}Calls")
+
+    def rename(self, path, line: int, character: int,
+               new_name: str) -> "NavResponse":
+        """Compute the rename edit. Nothing is written here.
+
+        Applying is the caller's step, deliberately: an edit that
+        touches thirty files across a workspace should be inspectable
+        before it lands, and the engine is the wrong layer to decide
+        that for everyone.
+        """
+        specs = self._ensure_open(path)
+        return self._fan_out(
+            specs,
+            lambda c: ([c.rename(path, line, character, new_name,
+                                 timeout=self._request_timeout)]
+                       if c.prepare_rename(path, line, character,
+                                           timeout=self._request_timeout)
+                       else []),
+            what="rename")
+
+    def workspace_symbols(self, query: str, *,
+                          start_all: bool = False) -> "NavResponse":
+        """Search symbols across the project.
+
+        There is no file path to route on, so there is no honest way to
+        pick a server. Default is to ask the ones **already running**,
+        which is fast and correct-as-far-as-it-goes; the cost is that a
+        fresh session has none running and would answer "nothing found"
+        for a symbol that plainly exists.
+
+        That is why ``not_running`` is part of the response and not a
+        footnote: an empty result from zero servers is not a statement
+        about the workspace. ``start_all=True`` spawns every configured
+        server instead — correct, and expensive enough that it must be
+        asked for rather than assumed. Starting nine servers eagerly is
+        the preload mistake that stopped cclsp loading at all.
+        """
+        with self._lock:
+            running = [s for s in self._servers if s in self._clients]
+        specs = list(self._servers) if start_all else running
+        idle = [os.path.basename(s.command[0])
+                for s in self._servers if s not in specs]
+        res = self._fan_out(
+            specs, lambda c: c.workspace_symbols(
+                query, timeout=self._request_timeout),
+            what="workspaceSymbol")
+        return NavResponse(items=res.items, consulted=res.consulted,
+                           failures=res.failures, progress=res.progress,
+                           not_running=tuple(idle))
+
+    def restart(self, extensions: Optional[list[str]] = None) -> list[str]:
+        """Stop the servers for ``extensions`` (or all) so the next
+        request starts them fresh.
+
+        Restarting is the documented escape hatch for a wedged server,
+        and it is also how a config change takes effect. Returns the
+        binaries actually stopped, because "restarted 0 servers" and
+        "restarted 3" are very different answers to the same request.
+        """
+        wanted = {e.lower().lstrip(".") for e in (extensions or [])}
+        stopped: list[str] = []
+        with self._lock:
+            targets = [
+                spec for spec in list(self._clients)
+                if not wanted or wanted & {x.lower().lstrip(".")
+                                           for x in spec.extensions}
+            ]
+            clients = [(s, self._clients.pop(s)) for s in targets]
+            # Drop routing for files whose server just went away, or the
+            # next did_change would be sent to a client that no longer
+            # exists and fail as "did_change before did_open".
+            for uri, (abs_path, specs) in list(self._uri_routing.items()):
+                remaining = tuple(s for s in specs if s not in targets)
+                if remaining:
+                    self._uri_routing[uri] = (abs_path, remaining)
+                else:
+                    self._uri_routing.pop(uri, None)
+        for spec, client in clients:
+            try:
+                client.stop(timeout=3.0)
+            except Exception:  # pragma: no cover — defensive
+                log.exception("error stopping %s", spec.command[0])
+            stopped.append(os.path.basename(spec.command[0]))
+        return stopped
 
     def refresh_open_files(self) -> int:
         """Re-send the on-disk content of every open file to its LSP.
