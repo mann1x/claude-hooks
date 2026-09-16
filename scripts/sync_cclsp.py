@@ -74,7 +74,8 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from claude_hooks.lang_servers import (  # noqa: E402
-    SPECS, newer_sibling_note, server_version, version_warning,
+    SPECS, extension_version_warning, newer_sibling_note,
+    server_version, version_warning,
 )
 from claude_hooks.lsp_engine.lsp import language_id_for  # noqa: E402
 
@@ -379,6 +380,12 @@ def reconcile(cfg: dict, *, resolve_commands: bool = False,
         warning = version_warning(spec.name, probed_version)
         if warning:
             notes.append(f"  WARN   {warning}")
+        # Past the general floor is not enough everywhere: clangd 19
+        # parses gnu++23 and still cannot read CUDA 13.3 headers.
+        lane = extension_version_warning(spec.extensions, spec.name,
+                                         probed_version)
+        if lane:
+            notes.append(f"  WARN   {lane}")
         # A pin escapes an ancient default and then stops following
         # upgrades — the next newer server sits installed and unused.
         newer = newer_sibling_note(probe_bin, probed_version)

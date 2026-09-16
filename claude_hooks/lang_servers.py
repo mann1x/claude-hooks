@@ -44,7 +44,7 @@ import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePath
-from typing import Optional
+from typing import Iterable, Optional
 
 
 log = logging.getLogger("claude_hooks.lang_servers")
@@ -281,8 +281,23 @@ SPECS: tuple[LangServerSpec, ...] = (
 _VERSION_RE = re.compile(r"version\s+(\d+)(?:\.(\d+))?", re.IGNORECASE)
 
 #: Minimum major version that can analyse a contemporary tree at all.
+#: clangd only grew the ``c++23``/``gnu++23`` spelling in **clang 17**;
+#: before that the same standard is ``c++2b``, so anything older rejects
+#: the -std flag outright and abandons the translation unit.
 MIN_USEFUL_VERSION = {
-    "clangd": 12,
+    "clangd": 17,
+}
+
+#: Extensions whose analysis needs a *newer* server than the general
+#: floor. Measured on solidpc 2026-09-16 against CUDA 13.3 headers:
+#: clangd 19.1.7 produced 20 hard errors on a .cu TU that clangd 22.1.6
+#: parses clean. 19 fixed the ``gnu++23`` half and still could not read
+#: the CUDA headers, so "new enough for C++" is not "new enough for
+#: CUDA" — and the failure mode is a screen of fabricated errors about
+#: std::atomic and std::_Vector_base that look like real code bugs.
+EXTENSION_MIN_VERSION = {
+    "cu": ("clangd", 22),
+    "cuh": ("clangd", 22),
 }
 
 
@@ -375,11 +390,41 @@ def version_warning(spec_name: str,
         return None
     return (
         f"{spec_name} is version {major} (< {floor}). It cannot parse a "
-        f"modern C/C++ tree: it rejects the -std flag and abandons the "
-        f"translation unit, which surfaces as ZERO diagnostics — "
-        f"indistinguishable from clean code. Install a newer clangd and "
-        f"point the config at it explicitly; the distro default on Debian "
-        f"bullseye is clangd 11."
+        f"modern C/C++ tree: the c++23/gnu++23 spelling only arrived in "
+        f"clang 17, so an older server rejects the -std flag and abandons "
+        f"the translation unit — which surfaces as ZERO diagnostics, "
+        f"indistinguishable from clean code. Debian bullseye's default is "
+        f"clangd 11. Official standalone builds (no distro packaging) are "
+        f"at https://github.com/clangd/clangd/releases; point the config "
+        f"at one by absolute path."
+    )
+
+
+def extension_version_warning(
+        extensions: Iterable[str], spec_name: str,
+        version_line: Optional[str]) -> Optional[str]:
+    """Warn when a server is new enough generally but not for a lane.
+
+    Being past the general floor is not sufficient everywhere: clangd 19
+    parses ``gnu++23`` fine and still cannot read CUDA 13.3 headers.
+    """
+    major = version_major(version_line)
+    if major is None:
+        return None
+    worst: Optional[tuple[str, int]] = None
+    for ext in extensions:
+        entry = EXTENSION_MIN_VERSION.get(ext)
+        if entry and entry[0] == spec_name and major < entry[1]:
+            if worst is None or entry[1] > worst[1]:
+                worst = (ext, entry[1])
+    if worst is None:
+        return None
+    return (
+        f"{spec_name} v{major} claims .{worst[0]} but CUDA analysis needs "
+        f"v{worst[1]}+. Measured against CUDA 13.3 headers: v19 emitted 20 "
+        f"hard errors on a .cu file that v22 parses clean. The errors are "
+        f"fabricated — they name std::atomic and std::_Vector_base and read "
+        f"exactly like real code bugs."
     )
 
 

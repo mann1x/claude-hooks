@@ -26,6 +26,7 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+from claude_hooks import lang_servers as ls  # noqa: E402
 from claude_hooks import lsp_integration as li  # noqa: E402
 
 
@@ -201,6 +202,51 @@ class DeadCommandTests(unittest.TestCase):
     def test_bare_name_not_on_path_does_not_resolve(self):
         self.assertFalse(
             self.mod._command_resolves("definitely-not-a-real-binary-xyz"))
+
+
+class VersionFloorTests(unittest.TestCase):
+    """Floors come from measurement, not from "newer is better".
+
+    clang 17 is where `c++23`/`gnu++23` became spellable, so anything
+    older abandons a modern TU at line 1. CUDA needs a *higher* floor
+    than C++: measured on solidpc 2026-09-16, clangd 19.1.7 emitted 20
+    hard errors on a .cu TU that 22.1.6 parses clean — 19 fixed the
+    gnu++23 half and still could not read CUDA 13.3 headers.
+    """
+
+    def test_clangd_11_is_flagged(self):
+        self.assertIn("< 17", ls.version_warning(
+            "clangd", "Debian clangd version 11.0.1-2"))
+
+    def test_clangd_16_is_flagged(self):
+        """16 was the first fix attempt and is still too old."""
+        self.assertIsNotNone(ls.version_warning(
+            "clangd", "Debian clangd version 16.0.6"))
+
+    def test_clangd_17_clears_the_general_floor(self):
+        self.assertIsNone(ls.version_warning("clangd", "clangd version 17.0.1"))
+
+    def test_clangd_19_clears_cpp_but_not_cuda(self):
+        self.assertIsNone(ls.version_warning("clangd", "clangd version 19.1.7"))
+        warn = ls.extension_version_warning(
+            ("cpp", "cu", "cuh"), "clangd", "clangd version 19.1.7")
+        self.assertIsNotNone(warn)
+        self.assertIn("v22", warn)
+
+    def test_clangd_22_clears_both(self):
+        self.assertIsNone(ls.version_warning("clangd", "clangd version 22.1.6"))
+        self.assertIsNone(ls.extension_version_warning(
+            ("cpp", "cu"), "clangd", "clangd version 22.1.6"))
+
+    def test_a_server_without_cuda_extensions_is_not_warned(self):
+        self.assertIsNone(ls.extension_version_warning(
+            ("cpp", "h"), "clangd", "clangd version 19.1.7"))
+
+    def test_unparseable_version_never_warns(self):
+        """A probe that failed must not manufacture a verdict."""
+        self.assertIsNone(ls.version_warning("clangd", None))
+        self.assertIsNone(ls.extension_version_warning(
+            ("cu",), "clangd", None))
 
 
 if __name__ == "__main__":
