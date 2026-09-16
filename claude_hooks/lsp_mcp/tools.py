@@ -322,7 +322,8 @@ def provenance_note(res: NavResponse) -> str:
     return "\n".join(parts)
 
 
-def _wrap(body: str, res: NavResponse, *, empty: str) -> str:
+def _wrap(body: str, res: NavResponse, *, empty: str,
+          scope: Optional[str] = None) -> str:
     """Render a navigation result, and never invent an empty one.
 
     ``empty`` is the truth only when every server that claims the file
@@ -342,6 +343,11 @@ def _wrap(body: str, res: NavResponse, *, empty: str) -> str:
     is the renderer honouring that.
     """
     note = provenance_note(res)
+    if scope:
+        # Where the search actually ran. A bare "References (9)" gives a
+        # caller no way to know the answer was bounded; naming the root
+        # invites the follow-up question that the count alone suppresses.
+        note = f"SEARCHED {scope}" + (f"\n\n{note}" if note else "")
     text = body.strip()
     if not text:
         if res.failures:
@@ -370,6 +376,7 @@ def _wrap(body: str, res: NavResponse, *, empty: str) -> str:
 
 
 def render_locations(res: NavResponse, *, root: Optional[Path] = None,
+                     scope: Optional[str] = None,
                      title: str) -> str:
     locs: list[Location] = res.items
     seen: set[tuple[str, int, int]] = set()
@@ -385,11 +392,12 @@ def render_locations(res: NavResponse, *, root: Optional[Path] = None,
         lines.append(f"  {_rel(path, root)}:{loc.range.start.human_line}:"
                      f"{loc.range.start.character + 1}")
     body = (f"{title} ({len(lines)}):\n" + "\n".join(lines)) if lines else ""
-    return _wrap(body, res, empty=f"{title}: none found.")
+    return _wrap(body, res, empty=f"{title}: none found.", scope=scope)
 
 
 def render_symbols(res: NavResponse, *, root: Optional[Path] = None,
-                   title: str = "Symbols") -> str:
+                   title: str = "Symbols",
+                   scope: Optional[str] = None) -> str:
     syms: list[Symbol] = res.items
     lines = []
     for s in syms:
@@ -398,7 +406,7 @@ def render_symbols(res: NavResponse, *, root: Optional[Path] = None,
         detail = f"  {s.detail}" if s.detail else ""
         lines.append(f"  [{s.kind_name}] {qualified} — {where}{detail}")
     body = (f"{title} ({len(lines)}):\n" + "\n".join(lines)) if lines else ""
-    return _wrap(body, res, empty=f"{title}: none found.")
+    return _wrap(body, res, empty=f"{title}: none found.", scope=scope)
 
 
 def render_hover(res: NavResponse) -> str:
@@ -408,7 +416,7 @@ def render_hover(res: NavResponse) -> str:
 
 
 def render_calls(res: NavResponse, *, root: Optional[Path] = None,
-                 direction: str) -> str:
+                 direction: str, scope: Optional[str] = None) -> str:
     calls: list[CallHierarchyCall] = res.items
     label = "Callers" if direction == "incoming" else "Callees"
     lines = []
@@ -419,7 +427,7 @@ def render_calls(res: NavResponse, *, root: Optional[Path] = None,
                  f"{'s' if len(c.ranges) != 1 else ''})") if c.ranges else ""
         lines.append(f"  [{c.item.kind_name}] {c.item.name} — {where}{sites}")
     body = (f"{label} ({len(lines)}):\n" + "\n".join(lines)) if lines else ""
-    return _wrap(body, res, empty=f"{label}: none found.")
+    return _wrap(body, res, empty=f"{label}: none found.", scope=scope)
 
 
 def render_rename(edit: WorkspaceEdit, *, root: Optional[Path] = None,

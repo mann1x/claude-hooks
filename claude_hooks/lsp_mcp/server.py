@@ -101,10 +101,69 @@ def find_project_root(path: str | os.PathLike) -> Optional[Path]:
         p = p.resolve()
     except OSError:
         return None
+    # An explicit declaration outranks every heuristic. This is the
+    # escape hatch for a monorepo that wants ONE engine over several
+    # packages — see ``describe_scope`` for why that is not the default.
+    for candidate in (p, *p.parents):
+        if (candidate / ROOT_SENTINEL).exists():
+            return candidate
     for candidate in (p, *p.parents):
         for marker in _ROOT_MARKERS:
             if (candidate / marker).exists():
                 return candidate
+    return None
+
+
+#: Written by an operator to say "the engine root is here", overriding
+#: the marker walk.
+ROOT_SENTINEL = Path(".claude-hooks") / "lsp-root"
+
+#: Markers that indicate a root is nested inside something larger. A
+#: package directory inside a repository answers correctly *for that
+#: package*, which is not the question a caller usually asked.
+_OUTER_MARKERS = (".git", ROOT_SENTINEL)
+
+
+def describe_scope(root: Path) -> Optional[str]:
+    """Say when ``root`` is a package inside a bigger tree.
+
+    ``find_project_root`` stops at the nearest marker, and in a monorepo
+    that is the package's own ``package.json`` — so a reference search
+    is complete for the package and silently incomplete for the repo.
+    Measured on a real monorepo: a symbol with 443 occurrences across
+    the tree returned 9, all inside the declaring package, with nothing
+    in the result indicating the search had a boundary. That is a
+    plausible number a caller acts on, which makes it worse than an
+    obviously absurd one.
+
+    Widening the root is NOT the fix, and was measured too: rooted at
+    that repo (6.1 GB, no root tsconfig) tsserver answered 0 references
+    in 81.7 s and then failed, because it falls back to an inferred
+    project over the whole tree. A bounded answer that says it is
+    bounded beats an empty one that does not.
+
+    So the engine keeps the narrow root and reports the boundary. The
+    real remedy is at the language level — a tsconfig spanning the
+    packages, or project references — plus ``.claude-hooks/lsp-root``
+    for a repo where one wide engine is actually viable.
+    """
+    try:
+        if (root / ROOT_SENTINEL).exists():
+            # Declared deliberately, so there is no boundary to warn
+            # about even when it sits inside a larger repository.
+            return None
+        for parent in root.parents:
+            if (parent / ".git").is_dir():
+                return (f"{root.name} — a package inside {parent}. "
+                        f"Sibling packages were not searched: the server "
+                        f"is rooted here, so its program does not contain "
+                        f"their sources. Cross-package uses of a symbol "
+                        f"will be missing rather than reported. Put a "
+                        f"`.claude-hooks/lsp-root` file at the level you "
+                        f"want one engine over, if the server can handle "
+                        f"that tree.")
+    except OSError:  # pragma: no cover - defensive
+        return None
     return None
 
 
@@ -580,7 +639,8 @@ class LspMcpServer:
                                     s.selection.start.character,
                                     include_declaration=include)
             for s in syms])
-        return T.render_locations(merged, root=entry.root, title="References")
+        return T.render_locations(merged, root=entry.root, title="References",
+                                  scope=describe_scope(entry.root))
 
     # -- position-addressed --------------------------------------------
 
@@ -589,6 +649,7 @@ class LspMcpServer:
         entry = self.registry.for_path(path)
         line, ch = self._position(entry, path, args)
         return T.render_locations(entry.engine.implementation(path, line, ch),
+                                  scope=describe_scope(entry.root),
                                   root=entry.root, title="Implementations")
 
     def _tool_get_hover(self, args: dict) -> str:

@@ -506,6 +506,34 @@ file it validated when it spawns a daemon, and if it attaches to a
 daemon that was already running with a different one, it says so rather
 than serving the difference silently.
 
+**In a monorepo the root is the package, and results say so.** The walk
+stops at the *nearest* marker, so a file in `packages/shared` roots at
+`packages/shared` — its own `package.json` shadows anything above it,
+including a repo-root `cclsp.json`. The server is then rooted at the
+package and answers correctly *for the package*, which is not the
+question the caller asked. Measured: a symbol with 443 occurrences
+across a monorepo returned **9**, all inside the declaring package.
+
+Widening the root is **not** the fix, and that was measured too. Rooted
+at that repo (6.1 GB, no root `tsconfig.json`) tsserver returned **0
+references in 81.7 s and then failed** — it falls back to an inferred
+project over the whole tree, which is the same collapse that made
+TypeScript silently useless here before. A bounded answer that says it
+is bounded beats an empty one that does not.
+
+So project-scoped results carry a `SEARCHED …` line naming the root, and
+flag when that root is a package inside a larger repository. The real
+remedy is at the language level — a `tsconfig.json` spanning the
+packages, or project references. Where one wide engine genuinely is
+viable, declare it:
+
+```bash
+touch <repo>/.claude-hooks/lsp-root   # this directory is the engine root
+```
+
+That outranks the marker walk, and a root declared this way is not
+flagged as bounded.
+
 **Project root** is not git-specific. `find_project_root()` walks up for
 any of `cclsp.json`, `.git`, `pyproject.toml`, `go.mod`, `Cargo.toml`,
 `package.json`, `compile_commands.json`, and returns None when nothing
