@@ -209,8 +209,20 @@ class LspEngineClient:
     def __exit__(self, *exc) -> None:
         self.close()
 
+    def take_stale_notice(self) -> Optional[str]:
+        """The daemon's stale-code notice, once, if it sent one.
+
+        Cleared on read: the consumer surfaces it, and a notice repeated
+        on every call would become noise and get filtered out.
+        """
+        notice, self._stale_notice = getattr(self, "_stale_notice", None), None
+        return notice
+
     def _call(self, op: str, **params) -> dict:
         resp = self._ipc.call(op, session=self._session, **params)
+        notice = resp.get("stale_notice")
+        if notice:
+            self._stale_notice = notice
         if not resp.get("ok"):
             raise RuntimeError(
                 f"daemon op {op!r} failed: {resp.get('error')}",

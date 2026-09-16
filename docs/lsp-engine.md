@@ -646,8 +646,27 @@ whose MCP server had started at 12:56 could only verify it by driving
 restarting language servers moved the shim. A client restart at 15:24
 picked it up immediately.
 
-**Remedy: restart the MCP client** (the Claude Code session), not the
-language servers. To see what a running server actually imported:
+**Two processes can be stale, and they have different remedies.** The
+MCP server holds its imported code, and so does the **daemon behind it**
+— which matters more now that every tool call routes through the daemon,
+because restarting the client does not restart it.
+
+Each announces itself. The MCP server prefixes its notice to tool
+output once per session; the daemon tells **each attached session once**,
+over its own responses, and both the MCP and the PostToolUse hook
+surface what it sends. A stale MCP shim and a stale daemon are reported
+separately rather than one standing in for the other.
+
+**Remedy for the MCP server: restart the client** (the Claude Code
+session), not the language servers.
+
+**Remedy for the daemon:** restart the daemon — it respawns on the next
+request:
+
+```bash
+python -m claude_hooks.lsp_engine status --project .   # prints the pid
+kill <pid>
+``` To see what a running server actually imported:
 
 ```bash
 ps -o pid,lstart,cmd -C python | grep claude_hooks.lsp_mcp

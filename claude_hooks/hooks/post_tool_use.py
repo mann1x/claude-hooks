@@ -394,13 +394,25 @@ def _run_lsp_engine(
                 diag_timeout_s=float(eng_cfg.get("diagnostics_wait_s", 8.0)),
                 dedup_window_s=float(eng_cfg.get("dedup_window_s", 60.0)),
             )
+            # Taken before the de-dup return below: a stale daemon is
+            # worth reporting even on a call that has nothing else to
+            # say, and it is told to each session only once.
+            try:
+                notice = client.take_stale_notice()
+            except Exception:  # pragma: no cover - never fail the hook
+                notice = None
+            # Off the wire, so only a real string is surfaced: an older
+            # daemon omits the field, and nothing else belongs in the
+            # context block.
+            daemon_notice = notice if isinstance(notice, str) and notice \
+                else None
             if diag_meta.get("deduped"):
                 # Someone already asked about this exact content — in
                 # practice the MCP server, which shares this engine. The
                 # answer is in the conversation already, so repeating it
                 # spends tokens to say nothing new.
                 log.debug("lsp_engine: diagnostics deduped for %s", abs_path)
-                return None
+                return daemon_notice or None
         except (RuntimeError, OSError) as e:
             log.warning("lsp_engine: diagnostics RPC failed: %s", e)
             return None
@@ -410,7 +422,7 @@ def _run_lsp_engine(
         except Exception as e:
             log.debug("lsp_engine: client.close failed: %s", e)
 
-    return _lsp.format_diagnostics_block(
+    block = _lsp.format_diagnostics_block(
         path=abs_path,
         diagnostics=diags,
         stale=stale,
@@ -420,3 +432,9 @@ def _run_lsp_engine(
         server=str(diag_meta.get("server") or ""),
         wait_budget=float(diag_meta.get("timeout") or 0.0),
     )
+    if daemon_notice:
+        # Surfaced even when there is no diagnostics block: "the daemon
+        # is stale" is worth more than the silence it would otherwise
+        # be reported as.
+        return f"{daemon_notice}\n\n{block}" if block else daemon_notice
+    return block

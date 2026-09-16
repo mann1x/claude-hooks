@@ -198,37 +198,63 @@ class DispatchIntegrationTests(unittest.TestCase):
             out, self.text = self.text, None
             return out
 
-    def _patch(self, text):
+    def _patch(self, text, daemon_notices=()):
         fake = self._FakeDetector(text)
         original = S.DETECTOR
         S.DETECTOR = fake
         self.addCleanup(lambda: setattr(S, "DETECTOR", original))
+        self.srv = S.LspMcpServer()
+        # The daemon behind us has its own imported code; drain_stale_
+        # notices is how the MCP learns about it.
+        self.srv.registry.drain_stale_notices = lambda: list(daemon_notices)
         return fake
 
     def test_banner_is_prefixed_to_tool_output(self) -> None:
         self._patch("STALE-NOTICE")
-        out = S.LspMcpServer._announce("24 diagnostics")
+        out = self.srv._announce("24 diagnostics")
         self.assertTrue(out.startswith("STALE-NOTICE"))
         # The real payload survives intact underneath it.
         self.assertIn("24 diagnostics", out)
 
     def test_clean_process_adds_nothing(self) -> None:
         self._patch(None)
-        self.assertEqual(S.LspMcpServer._announce("24 diagnostics"),
+        self.assertEqual(self.srv._announce("24 diagnostics"),
                          "24 diagnostics")
 
     def test_second_call_is_unprefixed(self) -> None:
         self._patch("STALE-NOTICE")
-        S.LspMcpServer._announce("first")
-        self.assertEqual(S.LspMcpServer._announce("second"), "second")
+        self.srv._announce("first")
+        self.assertEqual(self.srv._announce("second"), "second")
 
     def test_errors_carry_the_notice_too(self) -> None:
         # A stale process can produce the error as easily as the wrong
         # answer, so the error path must not swallow the explanation.
         self._patch("STALE-NOTICE")
-        out = S.LspMcpServer._announce("ToolError: no such symbol")
+        out = self.srv._announce("ToolError: no such symbol")
         self.assertIn("STALE-NOTICE", out)
         self.assertIn("no such symbol", out)
+
+    def test_a_stale_daemon_is_reported_too(self) -> None:
+        # Our shim can be current while the daemon behind it is not —
+        # different processes, different remedies, so one must not stand
+        # in for the other.
+        self._patch(None, daemon_notices=["DAEMON-STALE"])
+        out = self.srv._announce("24 diagnostics")
+        self.assertIn("DAEMON-STALE", out)
+        self.assertIn("24 diagnostics", out)
+
+    def test_both_stale_processes_are_reported(self) -> None:
+        self._patch("SHIM-STALE", daemon_notices=["DAEMON-STALE"])
+        out = self.srv._announce("ok")
+        self.assertIn("SHIM-STALE", out)
+        self.assertIn("DAEMON-STALE", out)
+
+    def test_a_failing_drain_never_breaks_a_tool_call(self) -> None:
+        self._patch(None)
+        def boom():
+            raise RuntimeError("socket gone")
+        self.srv.registry.drain_stale_notices = boom
+        self.assertEqual(self.srv._announce("payload"), "payload")
 
 
 if __name__ == "__main__":  # pragma: no cover

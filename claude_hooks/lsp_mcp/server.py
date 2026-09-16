@@ -236,6 +236,10 @@ class DaemonEngine:
     def restart(self, extensions=None) -> list[str]:
         return self._client.restart(extensions)
 
+    def take_stale_notice(self):
+        """The daemon's stale-code notice, if it sent one."""
+        return self._client.take_stale_notice()
+
     # -- lifecycle ------------------------------------------------------
 
     def shutdown(self, *, timeout: float = 3.0) -> None:
@@ -360,6 +364,20 @@ class EngineRegistry:
             log.info("reaped idle engine for %s", root)
         return dropped
 
+    def drain_stale_notices(self) -> list[str]:
+        """Collect any daemon notices picked up during this call."""
+        out: list[str] = []
+        with self._lock:
+            engines = list(self._engines.values())
+        for entry in engines:
+            try:
+                notice = entry.engine.take_stale_notice()
+            except Exception:  # pragma: no cover - defensive
+                continue
+            if notice:
+                out.append(notice)
+        return out
+
     def running(self) -> list[Path]:
         with self._lock:
             return list(self._engines)
@@ -482,17 +500,24 @@ class LspMcpServer:
 
     # ─── tools ───────────────────────────────────────────────────────
 
-    @staticmethod
-    def _announce(text: str) -> str:
-        """Prefix the one-per-session stale-process notice, if it is due.
+    def _announce(self, text: str) -> str:
+        """Prefix any stale-process notice — ours, the daemon's, or both.
 
         Applied to every outcome — result, ToolError and unexpected
         exception alike — because a process serving old code is just as
         able to produce the error as the wrong answer, and the caller
         needs the same context either way.
         """
-        notice = DETECTOR.banner()
-        return f"{notice}\n\n{text}" if notice else text
+        notices = [n for n in (DETECTOR.banner(),) if n]
+        # The daemon holds its own imported code, and it is the one
+        # every tool call actually runs on. A stale MCP shim and a stale
+        # daemon are different processes with different remedies, so
+        # both are reported rather than one standing in for the other.
+        try:
+            notices.extend(self.registry.drain_stale_notices())
+        except Exception:  # pragma: no cover - never fail a tool call
+            pass
+        return "\n\n".join([*notices, text]) if notices else text
 
     def call_tool(self, name: str, args: dict) -> str:
         if name not in T.TOOL_NAMES:

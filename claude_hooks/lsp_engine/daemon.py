@@ -227,6 +227,27 @@ class Daemon:
         # unchanged content be answered without re-running the wait;
         # see _op_diagnostics.
         self._served: dict[str, dict] = {}
+        # The daemon holds the code it imported, like every long-lived
+        # process here — and it is the consequential one now that the
+        # MCP server is one of its clients: everything routes through
+        # it, and restarting the client does not restart it. Each
+        # attached session is told once, over its own responses.
+        import claude_hooks
+        from claude_hooks import staleness as _staleness
+        self._staleness = _staleness.StalenessDetector(
+            pkg_root=Path(claude_hooks.__file__).resolve().parent,
+            imported_version=claude_hooks.__version__,
+            import_time=_staleness.IMPORT_TIME,
+            subject=f"the lsp_engine daemon for {self._project_root}",
+            remedy=(
+                "Restart the daemon — it respawns on the next request:",
+                f"  python -m claude_hooks.lsp_engine status --project "
+                f"{self._project_root}   # prints the pid",
+                "  kill <pid>",
+                "Restarting your MCP client does NOT restart the daemon.",
+            ),
+        )
+        self._stale_told: set[str] = set()
 
         self._ipc = IpcServer(
             self._socket_path,
@@ -547,6 +568,22 @@ class Daemon:
     # ─── request dispatch ────────────────────────────────────────────
 
     def _handle_request(self, req: dict) -> dict:
+        """Dispatch, then tell this session once if we are stale."""
+        resp = self._dispatch_request(req)
+        session = req.get("session")
+        if isinstance(session, str) and session and session not in (
+                self._stale_told):
+            try:
+                notice = self._staleness.notice()
+            except Exception:  # pragma: no cover - never fail a request
+                notice = None
+            if notice:
+                self._stale_told.add(session)
+                resp = dict(resp)
+                resp["stale_notice"] = notice
+        return resp
+
+    def _dispatch_request(self, req: dict) -> dict:
         rid = req.get("id")
         op = req.get("op")
         session = req.get("session")
