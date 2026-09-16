@@ -460,10 +460,31 @@ class LspMcpServer:
             return ("NOT ANALYSED — no configured language server claims "
                     f"{path.suffix or 'this file type'}. This is not a "
                     "statement about the code.")
-        diags = entry.engine.get_diagnostics(path, timeout=5.0)
+        res = entry.engine.get_diagnostics_result(path)
+        diags = res.items
         if not diags:
+            if not res.settled:
+                # The failure this whole tool exists to avoid: clangd
+                # needs AST + clang-tidy before its first push on a
+                # large TU, and reporting that wait as "no diagnostics"
+                # is a clean bill of health the server never gave.
+                who = res.server or "the language server"
+                return (
+                    f"NO ANSWER YET — {who} did not publish diagnostics for "
+                    f"{path.name} within {res.timeout:.0f}s. This is not a "
+                    f"statement about the code: a cold translation unit "
+                    f"(large preamble, background index) can legitimately "
+                    f"take longer. Re-run once it has warmed up, or raise "
+                    f"`diagnosticsTimeout` for that server in cclsp.json.")
             return f"No diagnostics for {path.name}."
-        lines = [f"Diagnostics for {path.name} ({len(diags)}):"]
+        header = f"Diagnostics for {path.name} ({len(diags)})"
+        if not res.settled:
+            # A file claimed by two servers where only one replied: the
+            # list is real but it is not the whole file, and an
+            # unqualified count reads as though it were.
+            header += (f" — PARTIAL, {res.server} did not answer within "
+                       f"{res.timeout:.0f}s")
+        lines = [header + ":"]
         for d in diags:
             sev = {1: "error", 2: "warning", 3: "info",
                    4: "hint"}.get(getattr(d, "severity", 0), "note")

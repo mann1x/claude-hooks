@@ -646,3 +646,60 @@ python scripts/bench_lsp_engine.py --json   # machine-readable
   this page covers the "how".
 - [`COMPANION_TOOLS.md`](../COMPANION_TOOLS.md) §8 — short pitch
   for `cclsp` as the recommended baseline.
+
+## Diagnostics: "no diagnostics" vs "no answer yet"
+
+An empty diagnostics list has three meanings and only one of them is
+good news. The engine keeps them apart, because conflating them is what
+hid a dead clangd for months and then hid a live one.
+
+| what happened | `DiagnosticsResult` | rendered as |
+|---|---|---|
+| server answered, nothing wrong | `settled=True`, `items=[]` | `No diagnostics for X.` / hook silence |
+| server has not answered yet | `settled=False`, `items=[]` | `NO ANSWER YET — <server> did not publish within Ns` |
+| TU never parsed | `items` carry a driver error at 1:1 | `## LSP analysis FAILED` |
+| no compile DB | — | `not trustworthy` warning |
+| no server claims the extension | — | `NOT ANALYSED` |
+
+Use `get_diagnostics_result()` anywhere the answer is **rendered**.
+`get_diagnostics()` still returns a plain list for callers that only
+want the items — but a bare list cannot carry `settled`, and that is
+precisely the field a renderer must consult before phrasing an empty
+result as good news.
+
+### Why the wait is per-server
+
+clangd builds an AST and runs clang-tidy before its first publish; on a
+large TU with a 24 MB preamble that is many seconds. pyright publishes
+in milliseconds. A single flat timeout was wrong in both directions —
+2 s made every large C++ file report clean, and 15 s everywhere would
+stall the PostToolUse hook behind a server that had already answered.
+
+Floors live in `_DIAGNOSTICS_TIMEOUT_BY_SERVER` (clangd 15 s,
+rust-analyzer / jdtls / metals 20 s, default 5 s), keyed on the binary
+*basename* so an absolute pin like
+`.toolchains/clangd_22.1.6/bin/clangd` still matches. The floor is
+raised by measurement — twice the slowest publish yet observed on that
+client — and capped at 30 s. An explicit caller budget always wins, so
+the post-edit hook keeps its short wait on purpose.
+
+Override per server in `cclsp.json`:
+
+```json
+{ "extensions": ["cpp", "cu"], "command": ["clangd"],
+  "diagnosticsTimeout": 25 }
+```
+
+### `did_open` is idempotent, and must stay that way
+
+LSP forbids opening the same document twice, and clangd ignores the
+duplicate. An unconditional `did_open` therefore cleared the cached
+diagnostics, bumped the version, and waited for a republish that was
+never coming — so the *second* request for a file always looked clean.
+Since `get_diagnostics` opens the file first, any file already touched
+by `hover` or `find_definition` hit this.
+
+Now: identical content on an open document is a no-op, different
+content becomes a `didChange`, and `did_close` forgets the cached copy.
+`tests/test_lsp_diagnostics_settled.py::ReopenPreservesDiagnosticsTests`
+pins it.

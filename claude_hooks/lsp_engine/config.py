@@ -65,6 +65,12 @@ class LspServerSpec:
     #: Minutes between forced restarts, cclsp's workaround for servers
     #: that leak (it ships ``restartInterval: 5`` for pylsp). 0 = never.
     restart_interval_minutes: float = 0.0
+    #: Seconds to wait for this server's *first* diagnostics publish.
+    #: None means "use the built-in floor for this binary, raised by
+    #: whatever we measure". Present because the built-in floors are
+    #: guesses about a machine, and the operator watching a 20-minute
+    #: cold index knows better than the table does.
+    diagnostics_timeout: Optional[float] = None
 
     def matches(self, path: str | os.PathLike) -> bool:
         suffix = Path(path).suffix.lower().lstrip(".")
@@ -158,6 +164,20 @@ def load_cclsp_config(path: str | os.PathLike) -> list[LspServerSpec]:
                 f"{p}: servers[{i}].restartInterval must be a number of "
                 f"minutes",
             ) from None
+        diag_timeout = entry.get("diagnosticsTimeout")
+        if diag_timeout is not None:
+            try:
+                diag_timeout = float(diag_timeout)
+            except (TypeError, ValueError):
+                raise CclspConfigError(
+                    f"{p}: servers[{i}].diagnosticsTimeout must be a number "
+                    f"of seconds",
+                ) from None
+            if diag_timeout <= 0:
+                raise CclspConfigError(
+                    f"{p}: servers[{i}].diagnosticsTimeout must be positive "
+                    f"— 0 would make every file report clean instantly",
+                )
         out.append(
             LspServerSpec(
                 extensions=tuple(s.lower().lstrip(".") for s in exts),
@@ -165,6 +185,7 @@ def load_cclsp_config(path: str | os.PathLike) -> list[LspServerSpec]:
                 root_dir=str(entry.get("rootDir", ".")),
                 initialization_options=init_opts,
                 restart_interval_minutes=max(0.0, interval),
+                diagnostics_timeout=diag_timeout,
             )
         )
     return out

@@ -113,6 +113,28 @@ class LspEngineClient:
         """Returns ``(diagnostics, stale)``. ``stale=True`` means we
         served the owner's view because the affinity lock didn't
         release within ``lock_timeout_ms``.
+
+        See :meth:`diagnostics_full` when an *empty* list has to be
+        told apart from a server that never answered.
+        """
+        diags, stale, _ = self.diagnostics_full(
+            path, lock_timeout_ms=lock_timeout_ms,
+            diag_timeout_s=diag_timeout_s)
+        return diags, stale
+
+    def diagnostics_full(
+        self,
+        path: str | os.PathLike,
+        *,
+        lock_timeout_ms: int = 500,
+        diag_timeout_s: float = 2.0,
+    ) -> tuple[list[dict], bool, dict]:
+        """``(diagnostics, stale, meta)``.
+
+        ``meta`` carries ``settled`` — whether the language server
+        actually published — plus which server and what budget. An
+        older daemon omits it, so ``settled`` defaults to True: a
+        version skew should not make every file look unanalysed.
         """
         resp = self._call(
             "diagnostics",
@@ -120,7 +142,12 @@ class LspEngineClient:
             timeout_ms=lock_timeout_ms,
             diag_timeout_s=diag_timeout_s,
         )
-        return list(resp.get("diagnostics") or []), bool(resp.get("stale"))
+        meta = {
+            "settled": bool(resp.get("settled", True)),
+            "server": resp.get("diag_server") or "",
+            "timeout": float(resp.get("diag_timeout_s") or diag_timeout_s),
+        }
+        return list(resp.get("diagnostics") or []), bool(resp.get("stale")), meta
 
     def status(self) -> dict:
         return self._call("status")

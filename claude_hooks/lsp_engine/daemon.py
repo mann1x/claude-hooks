@@ -638,7 +638,8 @@ class Daemon:
         )
         self._apply_drained(drained)
         stale = not can_forward  # we forward anyway per Decision 5
-        diags = self._engine.get_diagnostics(path, timeout=diag_timeout_s)
+        res = self._engine.get_diagnostics_result(path, timeout=diag_timeout_s)
+        diags = res.items
         # Merge compile-aware diagnostics on top, distinguished by
         # ``Diagnostic.source`` so the consumer can filter (cargo /
         # tsc / mypy show up as their tool name; the LSP entries
@@ -650,6 +651,12 @@ class Daemon:
             "ok": True,
             "diagnostics": [_diag_to_json(d) for d in diags],
             "stale": stale,
+            # Whether the server actually answered. Without this the
+            # hook cannot tell a clean file from one whose server was
+            # still thinking, and it renders both as silence.
+            "settled": res.settled,
+            "diag_server": res.server,
+            "diag_timeout_s": res.timeout,
         }
 
     def _op_status(self, rid) -> dict:

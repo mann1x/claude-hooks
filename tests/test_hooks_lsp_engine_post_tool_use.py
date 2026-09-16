@@ -62,14 +62,23 @@ def _cfg(*, lsp: dict | None = None, ruff: bool = False, **post_overrides) -> di
 def _fake_client(
     diagnostics: list[dict] | None = None,
     stale: bool = False,
+    settled: bool = True,
+    server: str = "pyright",
 ) -> MagicMock:
     """Build an LspEngineClient mock that returns ``diagnostics`` from
-    its ``diagnostics()`` call. ``did_open`` returns True, ``did_change``
-    returns ``(True, None)``."""
+    its ``diagnostics_full()`` call. ``did_open`` returns True,
+    ``did_change`` returns ``(True, None)``.
+
+    ``settled`` defaults True so the existing cases keep meaning "the
+    server answered"; the hook needs that to tell a clean file from one
+    whose server was still thinking.
+    """
     c = MagicMock(name="LspEngineClient")
     c.did_open.return_value = True
     c.did_change.return_value = (True, None)
+    meta = {"settled": settled, "server": server, "timeout": 2.0}
     c.diagnostics.return_value = (diagnostics or [], stale)
+    c.diagnostics_full.return_value = (diagnostics or [], stale, meta)
     return c
 
 
@@ -138,7 +147,7 @@ class TestHappyPath:
 
         client.did_open.assert_called_once()
         client.did_change.assert_called_once()
-        client.diagnostics.assert_called_once()
+        client.diagnostics_full.assert_called_once()
         client.close.assert_called_once()
         assert out is not None
         ctx = out["hookSpecificOutput"]["additionalContext"]
@@ -260,7 +269,7 @@ class TestIpcErrors:
         client = MagicMock()
         client.did_open.return_value = True
         client.did_change.return_value = (True, None)
-        client.diagnostics.side_effect = RuntimeError("ipc timeout")
+        client.diagnostics_full.side_effect = RuntimeError("ipc timeout")
         with patch(
             "claude_hooks.lsp_integration.open_client_safely",
             return_value=client,

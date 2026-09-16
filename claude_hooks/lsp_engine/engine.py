@@ -34,6 +34,7 @@ from claude_hooks.lsp_engine.config import (
 )
 from claude_hooks.lsp_engine.lsp import (
     Diagnostic,
+    DiagnosticsResult,
     LspClient,
     LspError,
 )
@@ -271,16 +272,33 @@ class Engine:
         self,
         path: str | os.PathLike,
         *,
-        timeout: float = 2.0,
+        timeout: Optional[float] = None,
     ) -> list[Diagnostic]:
+        """Items only. Renderers want :meth:`get_diagnostics_result`."""
+        return self.get_diagnostics_result(path, timeout=timeout).items
+
+    def get_diagnostics_result(
+        self,
+        path: str | os.PathLike,
+        *,
+        timeout: Optional[float] = None,
+    ) -> DiagnosticsResult:
+        """Merged diagnostics, carrying whether every server answered.
+
+        ``settled`` is conjunctive across servers on purpose: if an
+        ``.html``'s HTML server replied and its TypeScript server did
+        not, the union is not a complete picture of the file, and
+        saying so beats implying the missing half was clean.
+        """
         uri = _path_to_uri(path)
         with self._lock:
             entry = self._uri_routing.get(uri)
         if entry is None:
-            return []
+            return DiagnosticsResult(items=[], settled=False,
+                                     source="unrouted")
         _abs_path, specs = entry
         if len(specs) == 1:
-            return self._client_for(specs[0]).get_diagnostics(
+            return self._client_for(specs[0]).get_diagnostics_result(
                 path, timeout=timeout)
         # Several servers claim this file — an .html carrying JS and
         # CSS, say. Each holds its own view, so the answer is the
@@ -288,14 +306,28 @@ class Engine:
         # one should not consume the budget of the rest, and the
         # callers here already bound the whole call.
         merged: list[Diagnostic] = []
+        settled = True
+        waited = 0.0
+        budget = 0.0
+        unsettled: list[str] = []
         for spec in specs:
             try:
-                merged.extend(
-                    self._client_for(spec).get_diagnostics(
-                        path, timeout=timeout))
+                res = self._client_for(spec).get_diagnostics_result(
+                    path, timeout=timeout)
             except LspError:
                 log.debug("get_diagnostics: %s failed", spec.command[0])
-        return merged
+                settled = False
+                unsettled.append(Path(spec.command[0]).stem)
+                continue
+            merged.extend(res.items)
+            waited = max(waited, res.waited)
+            budget = max(budget, res.timeout)
+            if not res.settled:
+                settled = False
+                unsettled.append(res.server or Path(spec.command[0]).stem)
+        return DiagnosticsResult(
+            items=merged, settled=settled, waited=waited, timeout=budget,
+            server=", ".join(unsettled) if unsettled else "", source="push")
 
     # ─── navigation ──────────────────────────────────────────────────
     #
@@ -783,6 +815,7 @@ class Engine:
                 startup_timeout=self._startup_timeout,
                 request_timeout=self._request_timeout,
                 initialization_options=spec.initialization_options,
+                diagnostics_timeout=spec.diagnostics_timeout,
             )
             try:
                 client.start()

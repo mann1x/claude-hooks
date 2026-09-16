@@ -434,6 +434,57 @@ class Diagnostic:
     source: Optional[str] = None
 
 
+@dataclass
+class DiagnosticsResult:
+    """Diagnostics *plus whether the server actually answered*.
+
+    The bare list could not carry that, and an empty list meant both
+    "this file is clean" and "nobody replied in time". Those were
+    rendered identically — `"No diagnostics"` — which is the exact
+    false negative that hid a dead clangd for months, and then hid a
+    live one whose first publish simply took longer than the wait.
+
+    ``settled`` is the only field callers must consult before phrasing
+    an empty result as good news.
+    """
+
+    items: list[Diagnostic]
+    settled: bool
+    waited: float = 0.0
+    timeout: float = 0.0
+    server: str = ""
+    source: str = "push"  # push | pull | cached | unrouted
+
+    def __bool__(self) -> bool:  # pragma: no cover - trivial
+        return bool(self.items)
+
+    def __iter__(self):
+        return iter(self.items)
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+
+#: First-publish budgets, by language-server binary. A whole-tree
+#: default was wrong in both directions: 2 s let clangd time out on
+#: every large TU and report it as clean, while 15 s everywhere would
+#: stall the PostToolUse hook behind pyright, which publishes in
+#: milliseconds. clangd builds an AST and runs clang-tidy before its
+#: first push; rust-analyzer waits on cargo; jdtls on a workspace
+#: build. These are floors — :meth:`LspClient.diagnostics_timeout`
+#: raises them from measurement.
+_DIAGNOSTICS_TIMEOUT_BY_SERVER = {
+    "clangd": 15.0,
+    "rust-analyzer": 20.0,
+    "jdtls": 20.0,
+    "metals": 20.0,
+    "sourcekit-lsp": 15.0,
+}
+_DIAGNOSTICS_TIMEOUT_DEFAULT = 5.0
+#: Never wait longer than this, however slow the server has been.
+_DIAGNOSTICS_TIMEOUT_CEILING = 30.0
+
+
 class LspError(RuntimeError):
     """Raised when the LSP returns an error response or fails to start."""
 
@@ -458,9 +509,11 @@ class LspClient:
         startup_timeout: float = 10.0,
         request_timeout: float = 5.0,
         initialization_options: Optional[dict] = None,
+        diagnostics_timeout: Optional[float] = None,
     ) -> None:
         self._command = list(command)
         self._initialization_options = initialization_options
+        self._diagnostics_timeout_override = diagnostics_timeout
         self._root_dir = Path(root_dir).resolve()
         self._startup_timeout = startup_timeout
         self._request_timeout = request_timeout
@@ -510,12 +563,22 @@ class LspClient:
         self._diag_lock = threading.Lock()
 
         self._open_versions: dict[str, int] = {}
+        #: Last content we sent per URI, so a repeat ``did_open`` can
+        #: tell "same file again" from "the file changed" without
+        #: asking the server, which cannot answer that question.
+        self._open_content: dict[str, str] = {}
         # Drop publishDiagnostics whose ``version`` is older than the
         # last did_change we sent. Without this guard, a delayed
         # publish for didOpen v1 can land *after* we reset for
         # didChange v2 and pollute state with stale len-5 diagnostics
         # the test thread then reads.
         self._diag_min_version: dict[str, int] = {}
+        #: Longest gap yet observed between opening a file and this
+        #: server's first publish for it. A measurement beats the
+        #: table: the same clangd is fast on a small TU and slow on a
+        #: 24 MB preamble, and only the tree in front of us knows which.
+        self._observed_publish_latency: float = 0.0
+        self._diag_wait_started: dict[str, float] = {}
 
     # ─── lifecycle ───────────────────────────────────────────────────
 
@@ -726,10 +789,38 @@ class LspClient:
     # ─── document operations ─────────────────────────────────────────
 
     def did_open(self, path: str | os.PathLike, content: str) -> None:
+        """Open ``path``, or bring an already-open copy up to date.
+
+        **Idempotent, and it has to be.** LSP forbids opening the same
+        document twice and clangd simply ignores the duplicate — but the
+        old unconditional version still cleared the cached diagnostics
+        and bumped the version first. So a second call discarded a real
+        answer and then waited for a republish that the server had no
+        reason to send, and the caller read the resulting empty list as
+        a clean file.
+
+        That is the bug the opencoti session hit on 2026-09-16: by the
+        time they asked for diagnostics, hover had already opened the
+        file, so ``get_diagnostics`` re-opened it, dropped clangd's 24
+        diagnostics — including a severity-1 error — and reported "No
+        diagnostics". Driving the same clangd by hand showed them all.
+        """
         uri = path_to_uri(path)
         key = uri_key(uri)
+        if key in self._open_versions:
+            if self._open_content.get(key) == content:
+                # Same bytes, already open: the server's view is current
+                # and so are its diagnostics. Touching nothing is the
+                # whole fix.
+                return
+            # Genuinely different content for an open document is a
+            # change, and didChange is the notification that makes a
+            # server republish.
+            self.did_change(path, content)
+            return
         version = self._open_versions.get(key, 0) + 1
         self._open_versions[key] = version
+        self._open_content[key] = content
         self._reset_diagnostics(key, expected_version=version)
         self._send_notification(
             "textDocument/didOpen",
@@ -752,6 +843,7 @@ class LspClient:
             )
         self._open_versions[key] += 1
         version = self._open_versions[key]
+        self._open_content[key] = content
         self._reset_diagnostics(key, expected_version=version)
         self._send_notification(
             "textDocument/didChange",
@@ -764,6 +856,7 @@ class LspClient:
     def did_close(self, path: str | os.PathLike) -> None:
         uri = path_to_uri(path)
         self._open_versions.pop(uri_key(uri), None)
+        self._open_content.pop(uri_key(uri), None)
         self._send_notification(
             "textDocument/didClose",
             {"textDocument": {"uri": uri}},
@@ -771,44 +864,118 @@ class LspClient:
 
     # ─── diagnostics ─────────────────────────────────────────────────
 
+    @property
+    def server_name(self) -> str:
+        """Basename of the server binary, for messages and timeouts.
+
+        Separators are normalised by hand rather than left to ``Path``:
+        the configured command is usually an absolute pin (this repo's
+        clangd lives under ``.toolchains/clangd_22.1.6/bin/``), and a
+        Windows-spelled pin read on POSIX — or the reverse, in a test —
+        would leave the whole path as the "name" and silently fall back
+        to the default budget.
+        """
+        try:
+            raw = str(self._command[0])
+        except (IndexError, TypeError):  # pragma: no cover - defensive
+            return ""
+        base = raw.replace("\\", "/").rsplit("/", 1)[-1]
+        for suffix in (".exe", ".cmd", ".bat", ".ps1"):
+            if base.lower().endswith(suffix):
+                base = base[: -len(suffix)]
+                break
+        return base.lower()
+
+    def diagnostics_timeout(self, requested: Optional[float] = None) -> float:
+        """How long to wait for this server's first publish.
+
+        ``requested`` wins when given, so an explicit caller budget is
+        still honoured. Otherwise: the per-server floor, raised by
+        anything slower we have actually measured, capped so a
+        pathological server cannot hang the caller.
+        """
+        if requested is not None and requested > 0:
+            return requested
+        base = _DIAGNOSTICS_TIMEOUT_BY_SERVER.get(
+            self.server_name, _DIAGNOSTICS_TIMEOUT_DEFAULT)
+        if self._diagnostics_timeout_override is not None:
+            base = self._diagnostics_timeout_override
+        # Double the worst latency seen: a server that once took 9 s
+        # will take longer on a colder file, and the cost of waiting is
+        # a slow answer while the cost of not waiting is a wrong one.
+        measured = self._observed_publish_latency * 2.0
+        return min(max(base, measured), _DIAGNOSTICS_TIMEOUT_CEILING)
+
     def get_diagnostics(
         self,
         path: str | os.PathLike,
         *,
-        timeout: float = 2.0,
+        timeout: Optional[float] = None,
     ) -> list[Diagnostic]:
+        """Latest diagnostics for ``path`` as a plain list.
+
+        Kept for callers that genuinely only want the items. Anything
+        that *renders* the result must use
+        :meth:`get_diagnostics_result` instead — a bare list cannot say
+        whether an empty one means "clean" or "no answer yet", and
+        those two were rendered identically for months.
+        """
+        return self.get_diagnostics_result(path, timeout=timeout).items
+
+    def get_diagnostics_result(
+        self,
+        path: str | os.PathLike,
+        *,
+        timeout: Optional[float] = None,
+    ) -> DiagnosticsResult:
         """Block until the server publishes diagnostics for ``path``,
-        or ``timeout`` elapses; return the latest list.
+        or the deadline elapses, and report **which of those happened**.
 
         If the server has already published since the last reset (i.e.
-        since the last ``did_open`` / ``did_change`` for this URI),
-        return immediately. Returns an empty list on timeout — callers
-        should distinguish "no diagnostics yet" from "no diagnostics"
-        via the timeout themselves if they care.
+        since the last ``did_open`` / ``did_change`` for this URI), this
+        returns immediately.
         """
+        budget = self.diagnostics_timeout(timeout)
         key = uri_key(path_to_uri(path))
+        started = time.monotonic()
         with self._diag_lock:
             event = self._diagnostics_event.setdefault(key, threading.Event())
             if event.is_set():
-                return list(self._diagnostics.get(key, []))
+                return DiagnosticsResult(
+                    items=list(self._diagnostics.get(key, [])),
+                    settled=True, waited=0.0, timeout=budget,
+                    server=self.server_name, source="cached")
 
         # Prefer asking over waiting. With push diagnostics an empty
         # result and a server that never answers are the same
-        # observation — we wait out the timeout and return [], which the
-        # caller renders as "no problems". Pull diagnostics (LSP 3.17)
-        # turn that into a question with an answer, and a failure into
-        # an exception instead of a plausible silence. Only available
-        # because the client now declares `textDocument.diagnostic`;
-        # servers withhold `diagnosticProvider` otherwise.
+        # observation. Pull diagnostics (LSP 3.17) turn that into a
+        # question with an answer, and a failure into an exception
+        # instead of a plausible silence. Only available because the
+        # client declares `textDocument.diagnostic` — and note that
+        # clangd answers `diagnosticProvider: null` even then, so the
+        # push path below is not a rare fallback but the normal road
+        # for C/C++.
         if self.supports_pull_diagnostics:
-            pulled = self._pull_diagnostics(path, key, timeout=timeout)
+            pulled = self._pull_diagnostics(path, key, timeout=budget)
             if pulled is not None:
-                return pulled
+                return DiagnosticsResult(
+                    items=pulled, settled=True,
+                    waited=time.monotonic() - started, timeout=budget,
+                    server=self.server_name, source="pull")
 
-        if not event.wait(timeout=timeout):
-            return []
+        settled = event.wait(timeout=budget)
+        waited = time.monotonic() - started
+        if not settled:
+            return DiagnosticsResult(
+                items=[], settled=False, waited=waited, timeout=budget,
+                server=self.server_name, source="push")
+        if waited > self._observed_publish_latency:
+            self._observed_publish_latency = waited
         with self._diag_lock:
-            return list(self._diagnostics.get(key, []))
+            return DiagnosticsResult(
+                items=list(self._diagnostics.get(key, [])),
+                settled=True, waited=waited, timeout=budget,
+                server=self.server_name, source="push")
 
     def _pull_diagnostics(
         self, path, key: str, *, timeout: float,

@@ -271,6 +271,9 @@ def format_diagnostics_block(
     stale: bool,
     cwd: Optional[str | os.PathLike] = None,
     max_per_file: int = 50,
+    settled: bool = True,
+    server: str = "",
+    wait_budget: float = 0.0,
 ) -> Optional[str]:
     """Build the markdown block PostToolUse adds to ``additionalContext``.
 
@@ -290,6 +293,24 @@ def format_diagnostics_block(
     display = _relative_or_absolute(p, cwd)
 
     if not diagnostics:
+        if not settled:
+            # Third member of the same family as the two below: an
+            # empty list that is not a statement about the code. The
+            # hook's wait is deliberately short (it runs after every
+            # edit), so on a cold C++ TU this is the *expected* outcome
+            # rather than an error — but rendering it as silence is how
+            # a model concludes the file is fine.
+            who = server or "the language server"
+            budget = f" within {wait_budget:.0f}s" if wait_budget else ""
+            return (
+                f"## LSP diagnostics — `{display}`\n\n"
+                f"**No answer yet — not a clean result.** {who} had not "
+                f"published diagnostics for this file{budget}. A cold "
+                f"translation unit (large preamble, background index) "
+                f"routinely takes longer than the post-edit wait, so this "
+                f"says nothing about the code. Ask again once the server "
+                f"has warmed up, or raise `diagnostics_wait_s`."
+            )
         if missing_compile_db(p):
             return (
                 f"## LSP diagnostics — `{display}`\n\n"

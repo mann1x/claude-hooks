@@ -388,7 +388,7 @@ def _run_lsp_engine(
             return None
 
         try:
-            diags, stale = client.diagnostics(
+            diags, stale, diag_meta = client.diagnostics_full(
                 abs_path,
                 lock_timeout_ms=int(eng_cfg.get("diagnostics_timeout_ms", 500)),
                 diag_timeout_s=float(eng_cfg.get("diagnostics_wait_s", 2.0)),
@@ -408,4 +408,7 @@ def _run_lsp_engine(
         stale=stale,
         cwd=project_cwd,
         max_per_file=int(eng_cfg.get("max_diagnostics_per_file", 50)),
+        settled=bool(diag_meta.get("settled", True)),
+        server=str(diag_meta.get("server") or ""),
+        wait_budget=float(diag_meta.get("timeout") or 0.0),
     )

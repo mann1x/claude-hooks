@@ -25,11 +25,14 @@ subsystem exists to preserve.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import dataclasses
 import json
 import os
 import shutil
 import sys
 import time
+import types
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -220,13 +223,80 @@ def check_diagnostics_are_honest(ctx) -> Result:
     from claude_hooks.lsp_integration import is_translation_unit_failure
     engine = ctx["engine"]
     path = ctx["files"].get("cpp")
-    diags = engine.get_diagnostics(path, timeout=30.0)
-    broken = [d for d in diags if is_translation_unit_failure(d)]
+    res = engine.get_diagnostics_result(path, timeout=30.0)
+    if not res.settled:
+        return Result("diagnostics are honest", FAIL,
+                      f"{res.server or 'server'} never published within "
+                      f"{res.timeout:.0f}s and the engine did not say so")
+    broken = [d for d in res.items if is_translation_unit_failure(d)]
     if broken:
         return Result("diagnostics are honest", FAIL,
                       f"TU failure not surfaced: {broken[0].message[:120]}")
     return Result("diagnostics are honest", PASS,
-                  f"{len(diags)} diagnostic(s), none a TU failure")
+                  f"{len(res.items)} diagnostic(s), none a TU failure, "
+                  f"settled in {res.waited:.1f}s")
+
+
+def check_slow_publish_is_not_clean(ctx) -> Result:
+    """The bug the opencoti session found on 2026-09-16.
+
+    On their cosmocc tree clangd needed longer than the wait, and an
+    empty list came back rendered as *"No diagnostics"* — a clean bill
+    of health the server never gave. Reproduced here by asking with a
+    deliberately impossible budget, which is the same observation as a
+    cold 24 MB preamble and far cheaper to arrange. The engine must
+    report *unsettled*, and the MCP layer must not spell that "No
+    diagnostics".
+    """
+    from claude_hooks.lsp_mcp import server as mcp_server
+    # The budget is pinned on the *spec*, so the tool's own call — which
+    # passes no timeout — inherits it. Staging it any other way would
+    # test a path the MCP surface does not take, and the MCP surface is
+    # where the bug was reported.
+    spec = clangd_spec(ctx["db_dir"])
+    spec = dataclasses.replace(spec, diagnostics_timeout=0.001)
+    # Its own engine: the shared one has already been asked about these
+    # files by earlier checks, and a cached publish answers instantly,
+    # which would turn this into a SKIP that proves nothing.
+    engine = Engine(ctx["root"], [spec],
+                    startup_timeout=60.0, request_timeout=30.0)
+    path = ctx["files"].get("cpp")
+    try:
+        engine.did_open(path, path.read_text(errors="replace"))
+        res = engine.get_diagnostics_result(path)
+        if res.settled:
+            return Result("slow publish is not reported clean", SKIP,
+                          "server published within 1ms — cannot stage the "
+                          "condition on this fixture")
+        if res.items:
+            return Result("slow publish is not reported clean", FAIL,
+                          "unsettled result carried items")
+
+        srv = mcp_server.LspMcpServer.__new__(mcp_server.LspMcpServer)
+        entry = types.SimpleNamespace(engine=engine, root=ctx["root"])
+        srv.registry = types.SimpleNamespace(for_path=lambda _p: entry)
+        with _patched_file_path(mcp_server.LspMcpServer, path):
+            rendered = srv._tool_get_diagnostics({"file_path": str(path)})
+        if "No diagnostics for" in rendered:
+            return Result("slow publish is not reported clean", FAIL,
+                          "a timeout was rendered as 'No diagnostics'")
+        if "NO ANSWER YET" not in rendered:
+            return Result("slow publish is not reported clean", FAIL,
+                          f"unexpected rendering: {rendered[:120]}")
+        return Result("slow publish is not reported clean", PASS,
+                      "an unpublished TU renders as NO ANSWER YET, not clean")
+    finally:
+        engine.shutdown()
+
+
+@contextlib.contextmanager
+def _patched_file_path(cls, path):
+    original = cls._file_path
+    cls._file_path = lambda _self, _args: path
+    try:
+        yield
+    finally:
+        cls._file_path = original
 
 
 def check_cancel_does_not_poison(ctx) -> Result:
@@ -399,6 +469,7 @@ CHECKS: list[tuple[str, Callable]] = [
     ("routing", check_multi_extension_routing),
     ("compile_db", check_compile_db),
     ("diagnostics", check_diagnostics_are_honest),
+    ("slow-publish", check_slow_publish_is_not_clean),
     ("progress", check_progress_is_captured),
     ("navigation", check_navigation_surface),
 ]
