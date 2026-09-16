@@ -168,5 +168,40 @@ class BlockRenderingTests(unittest.TestCase):
         self.assertNotIn("FAILED", block)
 
 
+class DeadCommandTests(unittest.TestCase):
+    """A pinned path is the standard escape from an ancient distro
+    default — and the thing that silently breaks when the pin's binary
+    is removed. Observed 2026-09-16: a concurrent toolchain install
+    deleted /usr/bin/clangd-16 while two configs still named it.
+    """
+
+    def setUp(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "sync_cclsp_dead", REPO / "scripts" / "sync_cclsp.py")
+        self.mod = importlib.util.module_from_spec(spec)
+        sys.modules["sync_cclsp_dead"] = self.mod
+        spec.loader.exec_module(self.mod)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_absolute_path_that_exists_resolves(self):
+        f = self.dir / "clangd"
+        f.write_text("#!/bin/sh\n", encoding="utf-8")
+        self.assertTrue(self.mod._command_resolves(str(f)))
+
+    def test_absolute_path_that_vanished_does_not_resolve(self):
+        self.assertFalse(
+            self.mod._command_resolves(str(self.dir / "clangd-16")))
+
+    def test_bare_name_on_path_resolves(self):
+        self.assertTrue(self.mod._command_resolves("sh"))
+
+    def test_bare_name_not_on_path_does_not_resolve(self):
+        self.assertFalse(
+            self.mod._command_resolves("definitely-not-a-real-binary-xyz"))
+
+
 if __name__ == "__main__":
     unittest.main()

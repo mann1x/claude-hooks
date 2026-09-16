@@ -43,7 +43,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Optional
 
 
@@ -303,6 +303,65 @@ def server_version(binary: str, *, timeout: float = 10.0) -> Optional[str]:
 def version_major(version_line: Optional[str]) -> Optional[int]:
     m = _VERSION_RE.search(version_line or "")
     return int(m.group(1)) if m else None
+
+
+#: ``clangd-16``, ``clangd-22`` … Distros ship versioned siblings next
+#: to an unversioned default that is often much older.
+_VERSIONED_BIN_RE = re.compile(r"^(?P<stem>[A-Za-z_][\w.+-]*?)-(?P<major>\d+)$")
+
+
+def versioned_siblings(binary: str) -> list[tuple[int, str]]:
+    """Find ``<binary>-<N>`` executables on PATH, newest first.
+
+    Pinning a config at a specific version is the only way to escape an
+    ancient distro default, and it is also how a config goes stale: the
+    pin keeps working while a much newer server sits unused beside it.
+    The major version is read from the *name*, so this costs a directory
+    scan rather than N subprocess launches.
+    """
+    stem = PurePath(binary).name
+    for suffix in (".exe", ".cmd", ".bat"):
+        if stem.lower().endswith(suffix):
+            stem = stem[: -len(suffix)]
+    m = _VERSIONED_BIN_RE.match(stem)
+    if m:                       # already versioned — compare siblings
+        stem = m.group("stem")
+
+    found: dict[int, str] = {}
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory:
+            continue
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            continue
+        for entry in entries:
+            match = _VERSIONED_BIN_RE.match(entry.name)
+            if not match or match.group("stem") != stem:
+                continue
+            major = int(match.group("major"))
+            if major not in found and os.access(entry.path, os.X_OK):
+                found[major] = entry.path
+    return sorted(found.items(), key=lambda kv: kv[0], reverse=True)
+
+
+def newer_sibling_note(configured_bin: str,
+                       configured_version: Optional[str]) -> Optional[str]:
+    """Advise when a newer versioned server is installed but unused."""
+    current = version_major(configured_version)
+    if current is None:
+        return None
+    siblings = versioned_siblings(configured_bin)
+    if not siblings:
+        return None
+    best_major, best_path = siblings[0]
+    if best_major <= current:
+        return None
+    return (
+        f"{PurePath(configured_bin).name} is v{current}, but v{best_major} is "
+        f"installed at {best_path} and unused. A pinned version does not "
+        f"follow upgrades — repoint the config if the newer one is intended."
+    )
 
 
 def version_warning(spec_name: str,

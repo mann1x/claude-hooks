@@ -74,7 +74,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from claude_hooks.lang_servers import (  # noqa: E402
-    SPECS, server_version, version_warning,
+    SPECS, newer_sibling_note, server_version, version_warning,
 )
 from claude_hooks.lsp_engine.lsp import language_id_for  # noqa: E402
 
@@ -134,6 +134,20 @@ def _node_shim_target(shim: Path) -> Optional[Path]:
         return None
     target = shim.parent / targets[-1].replace("\\", os.sep)
     return target if target.is_file() else None
+
+
+def _command_resolves(command: str) -> bool:
+    """Can this configured command actually be executed?
+
+    An absolute path must exist; a bare name must be on PATH. Either
+    way the failure is the same shape as the rest of this subsystem: a
+    server that never starts produces no diagnostics, which reads as a
+    clean file.
+    """
+    path = Path(command)
+    if path.is_absolute() or os.sep in command or "/" in command:
+        return path.is_file()
+    return shutil.which(command) is not None
 
 
 def _find_entry(cfg: dict, spec) -> Optional[dict]:
@@ -349,9 +363,27 @@ def reconcile(cfg: dict, *, resolve_commands: bool = False,
         probe_bin = resolved
         if entry is not None and (entry.get("command") or []):
             probe_bin = entry["command"][0]
-        warning = version_warning(spec.name, server_version(probe_bin))
+
+            # A pinned path is the standard escape from an ancient distro
+            # default, and it is also the thing that silently breaks: the
+            # pin survives in the config long after the binary is gone.
+            # Observed 2026-09-16 — a concurrent toolchain install removed
+            # /usr/bin/clangd-16 while two configs still named it, leaving
+            # a server that can never start and a config that looks fine.
+            if not _command_resolves(probe_bin):
+                notes.append(
+                    f"  DEAD   {spec.bin}: configured command {probe_bin!r} "
+                    f"does not exist. The server cannot start, so every "
+                    f"file it claims returns no diagnostics — repoint it.")
+        probed_version = server_version(probe_bin)
+        warning = version_warning(spec.name, probed_version)
         if warning:
             notes.append(f"  WARN   {warning}")
+        # A pin escapes an ancient default and then stops following
+        # upgrades — the next newer server sits installed and unused.
+        newer = newer_sibling_note(probe_bin, probed_version)
+        if newer:
+            notes.append(f"  INFO   {newer}")
 
         if entry is None:
             command = list(spec.cclsp_command)
