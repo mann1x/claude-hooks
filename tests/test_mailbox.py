@@ -731,8 +731,19 @@ class ToolsTests(StoreHarness):
         self.assertIn("spans 2 hosts", out)
 
     def test_sessions_filters_by_os(self):
-        out = self.me.call("mailbox-sessions", {"os": "windows"})
-        self.assertIn("No sessions", out)
+        """Pinned relative to the running platform.
+
+        Asserting that "windows" finds nothing passes on Linux and fails
+        on Windows, where these sessions genuinely are Windows sessions —
+        which is how it was written, and why pandorum caught it.
+        """
+        from claude_hooks.mailbox.store import os_name
+        here = os_name()
+        elsewhere = "darwin" if here != "darwin" else "linux"
+        self.assertIn("session(s)", self.me.call("mailbox-sessions",
+                                                 {"os": here}))
+        self.assertIn("No sessions", self.me.call("mailbox-sessions",
+                                                  {"os": elsewhere}))
 
     def test_read_with_no_ids(self):
         self.assertIn("Pass ids", self.them.call("mailbox-read", {}))
