@@ -9,6 +9,7 @@ success.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import time
@@ -556,6 +557,64 @@ class NoSymbolMessageTests(unittest.TestCase):
         msg = S._no_symbol_message(
             "foo", NavResponse(items=[], failures=(("pyright", "died"),)))
         self.assertIn("pyright", msg)
+
+
+class ConfigFallbackTests(unittest.TestCase):
+    """cclsp was deployed here with a single CCLSP_CONFIG_PATH for every
+    project. Dropping that fallback would mean every project without its
+    own cclsp.json silently lost its servers the moment the MCP was
+    swapped — the migration failing quietly rather than loudly."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self._env = os.environ.get("CCLSP_CONFIG_PATH")
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self._env is None:
+            os.environ.pop("CCLSP_CONFIG_PATH", None)
+        else:
+            os.environ["CCLSP_CONFIG_PATH"] = self._env
+
+    def test_project_file_wins(self):
+        (self.root / "cclsp.json").write_text("{}", encoding="utf-8")
+        os.environ["CCLSP_CONFIG_PATH"] = str(self.root / "global.json")
+        (self.root / "global.json").write_text("{}", encoding="utf-8")
+        self.assertEqual(S.resolve_config_path(self.root),
+                         self.root / "cclsp.json")
+
+    def test_env_is_used_when_the_project_has_none(self):
+        g = self.root / "global.json"
+        g.write_text("{}", encoding="utf-8")
+        os.environ["CCLSP_CONFIG_PATH"] = str(g)
+        self.assertEqual(S.resolve_config_path(self.root), g)
+
+    def test_nothing_anywhere_returns_none(self):
+        os.environ.pop("CCLSP_CONFIG_PATH", None)
+        found = S.resolve_config_path(self.root)
+        self.assertTrue(found is None or found.is_file())
+
+    def test_error_names_every_place_it_looked(self):
+        os.environ.pop("CCLSP_CONFIG_PATH", None)
+        (self.root / ".git").mkdir()
+        (self.root / "a.py").write_text("x", encoding="utf-8")
+        reg = S.EngineRegistry()
+        self.addCleanup(reg.shutdown_all)
+        try:
+            reg.for_path(self.root / "a.py")
+        except T.ToolError as e:
+            self.assertIn("cclsp.json", str(e))
+            self.assertIn("sync_cclsp.py", str(e))
+        else:
+            self.skipTest("a user-global cclsp.json exists on this host")
+
+    def test_candidate_order(self):
+        os.environ["CCLSP_CONFIG_PATH"] = "/x/env.json"
+        paths = S.candidate_config_paths(self.root)
+        self.assertEqual(paths[0], self.root / "cclsp.json")
+        self.assertEqual(paths[1], Path("/x/env.json"))
 
 
 if __name__ == "__main__":

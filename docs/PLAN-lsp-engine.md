@@ -505,12 +505,15 @@ extends its own deadline while the server is genuinely indexing. A cold
 From the opencoti handover; every line is an observed failure, not a
 wishlist. Status is against the engine as it stands today.
 
-1. Frame on bytes, never a string — **done**, tested.
+1. Frame on bytes, never a string — **done**, tested
+   (`tests/test_lsp_framing_multibyte.py`).
 2. `JSON.parse` failure ⇒ desynced ⇒ tear down and respawn — *partial*:
-   we raise `LspProtocolError`; the respawn-and-retry path is new work.
+   we raise `LspProtocolError`; the respawn-and-retry path is still open.
 3. Timeout must not poison the queue: send `$/cancelRequest`, drop the
-   pending entry — **new**.
-4. Re-read config on `restart_server` — **new**.
+   pending entry — **done** (`LspClient._send_request`).
+4. Re-read config on `restart_server` — **done**, and better: the
+   config mtime is checked on *every* request, so a `sync_cclsp.py
+   --write` takes effect without any explicit restart.
 5. Complete extension → languageId map, validated against the server's
    own `extensions` — **done** (`cu`/`cuh`/`hxx` added 2026-09-16;
    `sync_cclsp.py` refuses to map an extension with no languageId).
@@ -520,6 +523,25 @@ wishlist. Status is against the engine as it stands today.
 8. Warn when a C/C++ root has no `compile_commands.json` — **done**.
 9. Keep lazy spawn — **done**.
 
+Three items the handover did not have, found by running the thing:
+
+10. **Declare the navigation capabilities at `initialize`.** A server
+    only advertises a provider when the client declares the matching
+    capability, so every navigation feature was *absent-looking rather
+    than undeclared* — **done**.
+11. **Send `workspaceFolders`, not only `rootUri`.** `rootUri` has been
+    deprecated since LSP 3.6 and pyright reads only the former to find
+    its `pyrightconfig.json`. With `rootUri` alone it started,
+    handshook, answered everything, and resolved no first-party import
+    — **done**. Adding `pyrightconfig.json` alone changed nothing; the
+    client was the problem.
+12. **Seed the workspace before a references query.** pyright searches
+    open documents only, so `find_references` for `Engine` returned
+    2 hits where the answer is 16. Not an error, not empty — a shorter
+    list, which is the one shape a caller cannot tell from the truth.
+    Seeding this repo's 140 `.py` files costs 0.1 s — **done**, bounded
+    at 2000 files with the truncation disclosed.
+
 **Fixture:** the vendored llamafile tree (1156-entry compile DB, cosmocc
 host TUs at `-std=gnu++23`, 398 CUDA TUs at CUDA 13.3). It exercises
 byte framing, large preambles, background indexing and multi-extension
@@ -527,18 +549,43 @@ routing at once.
 
 ## Phasing
 
-- **5.0** — seven LSP request wrappers on `LspClient` + engine/daemon ops,
-  with unit tests against the fake server.
-- **5.1** — MCP stdio shim (`claude_hooks/lsp_mcp/`), 12 tools with
-  cclsp-compatible schemas, project-root routing, provenance in results.
-- **5.2** — resilience: `$/cancelRequest`, respawn-on-desync, adaptive
-  deadlines from `$/progress`.
-- **5.3** — config hot reload + `restart_server` semantics.
-- **5.4** — swap `~/.claude.json` and cline's settings from `cclsp` to
-  ours on one host, run the conformance suite against the llamafile tree,
-  then the second host. Keep cclsp installed until both pass.
-- **5.5** — retire: remove `patches/apply-cclsp-patches.py`, fold the
-  cclsp sections of `docs/lsp-mcp.md` into history, uninstall.
+- **5.0** — ✅ *done (c8fe011)*. Eleven LSP request wrappers on
+  `LspClient`, the `protocol.py` union decoders, and `NavResponse`
+  routing on `Engine`. 95 tests.
+- **5.1** — ✅ *done (8351bb4)*. MCP stdio shim
+  (`claude_hooks/lsp_mcp/`), 12 tools with cclsp-compatible schemas
+  pinned by a conformance test, per-request project-root routing,
+  provenance in every result.
+- **5.2** — *mostly done (8351bb4)*. `$/cancelRequest` ✅, adaptive
+  deadlines from `$/progress` ✅. **Respawn-on-desync remains open** —
+  a `LspProtocolError` currently propagates rather than tearing the
+  client down and retrying, so a desynced server stays desynced until
+  `restart_server`. That is strictly better than cclsp (which had no
+  detection at all) and still not the finished behaviour.
+- **5.3** — ✅ *done (8351bb4)*. Config mtime is checked per request, so
+  the engine rebuilds on a changed `cclsp.json` with no restart; the
+  per-project file wins, falling back to `CCLSP_CONFIG_PATH` and then
+  `~/.config/cclsp/cclsp.json` so projects without their own file keep
+  their servers across the swap.
+- **5.4** — *in progress*. solidpc's `~/.claude.json` now points at
+  `bin/claude-hook-lsp-mcp` (backup at
+  `~/.claude.json.pre-lsp-mcp-swap.bak-*`). **Still to do:** run the
+  llamafile-tree conformance fixture, then pandorum, then cline's
+  `cline_mcp_settings.json`. cclsp stays installed until both hosts
+  pass.
+- **5.5** — *not started*. Retire: remove
+  `patches/apply-cclsp-patches.py`, fold the cclsp sections of
+  `docs/lsp-mcp.md` into history, uninstall the npm global.
+
+### Deviation from the inherited surface
+
+One, deliberate: **`rename_symbol` previews by default**, where cclsp
+applied unless `dry_run` was passed. A rename can touch dozens of files
+and an exploratory call should not rewrite them. `dry_run` is still
+honoured, so an existing caller that passes it behaves identically. The
+failure mode of this inversion is a rename that did not happen and said
+so — recoverable. The failure mode of the other default is a rename that
+happened and was not expected.
 
 ## Non-goals
 

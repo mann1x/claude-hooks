@@ -105,6 +105,37 @@ def find_project_root(path: str | os.PathLike) -> Optional[Path]:
     return None
 
 
+def candidate_config_paths(root: Path) -> list[Path]:
+    """Where a project's server list may live, best first.
+
+    The per-project file wins because it is the one ``sync_cclsp.py``
+    reconciles against the servers actually installed, and because two
+    projects on one machine legitimately need different servers.
+
+    The user-global fallbacks exist because that is how cclsp was
+    deployed here — a single ``CCLSP_CONFIG_PATH`` for every project.
+    Dropping them would mean every project without its own file
+    silently lost its language servers the moment the MCP was swapped,
+    which is the migration failing quietly rather than loudly.
+    """
+    out = [root / "cclsp.json"]
+    env = os.environ.get("CCLSP_CONFIG_PATH")
+    if env:
+        out.append(Path(env).expanduser())
+    out.append(Path.home() / ".config" / "cclsp" / "cclsp.json")
+    return out
+
+
+def resolve_config_path(root: Path) -> Optional[Path]:
+    for candidate in candidate_config_paths(root):
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:      # pragma: no cover — unreadable parent
+            continue
+    return None
+
+
 class _ProjectEngine:
     """One engine plus the bookkeeping that keeps it honest."""
 
@@ -162,10 +193,10 @@ class EngineRegistry:
             return entry
 
     def _build(self, root: Path) -> _ProjectEngine:
-        config_path = root / "cclsp.json"
+        config_path = resolve_config_path(root)
         mtime = None
         servers = []
-        if config_path.is_file():
+        if config_path is not None and config_path.is_file():
             try:
                 mtime = config_path.stat().st_mtime
                 servers = load_cclsp_config(config_path)
@@ -175,10 +206,11 @@ class EngineRegistry:
                     f"`python3 scripts/sync_cclsp.py --write` to regenerate "
                     f"it.") from e
         if not servers:
+            searched = ", ".join(str(p) for p in candidate_config_paths(root))
             raise T.ToolError(
-                f"No language servers configured for {root}. Expected "
-                f"{config_path}; run `python3 scripts/sync_cclsp.py --write` "
-                f"to create it from the servers actually installed.")
+                f"No language servers configured for {root}. Looked at: "
+                f"{searched}. Run `python3 scripts/sync_cclsp.py --write` to "
+                f"create one from the servers actually installed.")
         engine_cfg = None
         try:
             engine_cfg = load_engine_config(project_root=root)
