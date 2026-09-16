@@ -48,6 +48,9 @@ from claude_hooks.providers.sqlite_vec import SqliteVecProvider
 
 log = logging.getLogger("claude_hooks.sqlite_vec_mcp")
 
+#: "not yet looked up", so a genuine None is cached.
+_UNSET = object()
+
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "claude-hooks-sqlite-vec"
 SERVER_VERSION = "0.1.0"
@@ -418,6 +421,7 @@ class McpServer:
     def __init__(self, provider: SqliteVecProvider):
         self.provider = provider
         self._initialized = False
+        self._mailbox_tools: Any = _UNSET
 
     def handle(self, msg: dict) -> Optional[dict]:
         method = msg.get("method")
@@ -433,7 +437,7 @@ class McpServer:
         if method == "notifications/initialized":
             return None
         if method == "tools/list":
-            return self._reply(rpc_id, {"tools": _tool_catalog()})
+            return self._reply(rpc_id, {"tools": self._catalog()})
         if method == "tools/call":
             name = params.get("name") or ""
             args = params.get("arguments") or {}
@@ -464,7 +468,35 @@ class McpServer:
             out["result"] = result or {}
         return out
 
+    def _catalog(self) -> list[dict]:
+        """Memory tools plus the mailbox when a store is available.
+        Advertising a tool the host cannot serve is worse than omitting
+        it — the model calls it and gets an error it cannot act on."""
+        tools = _tool_catalog()
+        if self._mailbox() is not None:
+            from claude_hooks.mailbox.tools import tool_catalog
+            tools = tools + tool_catalog()
+        return tools
+
+    def _mailbox(self):
+        if self._mailbox_tools is _UNSET:
+            try:
+                from claude_hooks.mailbox.integration import (
+                    tools_for_provider,
+                )
+                self._mailbox_tools = tools_for_provider(self.provider)
+            except Exception:
+                log.warning("mailbox unavailable", exc_info=True)
+                self._mailbox_tools = None
+        return self._mailbox_tools
+
     def _dispatch_tool(self, name: str, args: dict) -> str:
+        if name.startswith("mailbox-"):
+            mb = self._mailbox()
+            if mb is None:
+                return ("The mailbox needs a SQL-backed memory store; "
+                        "this host has none configured.")
+            return mb.call(name, args)
         if name == "sqlite-vec-find":
             q = str(args.get("query") or "")
             k = int(args.get("k") or 5)
