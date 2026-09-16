@@ -79,8 +79,13 @@ class EmptyResultHonestyTests(unittest.TestCase):
 
     def test_results_present_are_untouched(self) -> None:
         # A partial answer with real items must still lead with them.
+        import tempfile
         from claude_hooks.lsp_engine.protocol import Location, Position, Range
-        loc = Location(uri=Path("/tmp/a.ts").as_uri(),
+        # Built from the platform's own temp dir: "/tmp/a.ts" has no
+        # drive letter, so it is not absolute on Windows and as_uri()
+        # raises there.
+        somewhere = Path(tempfile.gettempdir()).resolve() / "a.ts"
+        loc = Location(uri=somewhere.as_uri(),
                        range=Range(start=Position(line=3, character=2),
                                    end=Position(line=3, character=8)))
         res = NavResponse(items=[loc], consulted=("tsserver",),
