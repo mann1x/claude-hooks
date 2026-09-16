@@ -392,7 +392,15 @@ def _run_lsp_engine(
                 abs_path,
                 lock_timeout_ms=int(eng_cfg.get("diagnostics_timeout_ms", 500)),
                 diag_timeout_s=float(eng_cfg.get("diagnostics_wait_s", 8.0)),
+                dedup_window_s=float(eng_cfg.get("dedup_window_s", 60.0)),
             )
+            if diag_meta.get("deduped"):
+                # Someone already asked about this exact content — in
+                # practice the MCP server, which shares this engine. The
+                # answer is in the conversation already, so repeating it
+                # spends tokens to say nothing new.
+                log.debug("lsp_engine: diagnostics deduped for %s", abs_path)
+                return None
         except (RuntimeError, OSError) as e:
             log.warning("lsp_engine: diagnostics RPC failed: %s", e)
             return None

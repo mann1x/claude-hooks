@@ -390,6 +390,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
             # (``diag_timeout_s``). Bounds how long pyright / gopls /
             # etc has to respond before we surface what's cached.
             "diagnostics_wait_s": 8.0,
+            # Replay a settled result rather than re-running the wait
+            # when the file has not changed since it was served. 0
+            # disables.
+            "dedup_window_s": 60.0,
             # Skip diagnostics for these file extensions even if
             # cclsp.json claims them. Each entry is the extension
             # with no leading dot ("toml", "md", ...).

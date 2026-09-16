@@ -128,6 +128,7 @@ class LspEngineClient:
         *,
         lock_timeout_ms: int = 500,
         diag_timeout_s: float = 2.0,
+        dedup_window_s: float = 0.0,
     ) -> tuple[list[dict], bool, dict]:
         """``(diagnostics, stale, meta)``.
 
@@ -141,11 +142,16 @@ class LspEngineClient:
             path=str(path),
             timeout_ms=lock_timeout_ms,
             diag_timeout_s=diag_timeout_s,
+            dedup_window_s=dedup_window_s,
         )
         meta = {
             "settled": bool(resp.get("settled", True)),
             "server": resp.get("diag_server") or "",
             "timeout": float(resp.get("diag_timeout_s") or diag_timeout_s),
+            # True when this is a replay of a result already served for
+            # the same content. An older daemon omits it, which reads as
+            # "not deduped" and simply costs nothing.
+            "deduped": bool(resp.get("deduped", False)),
         }
         return list(resp.get("diagnostics") or []), bool(resp.get("stale")), meta
 

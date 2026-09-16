@@ -222,6 +222,11 @@ class Daemon:
             request_timeout=request_timeout,
         )
         self._engine_config = cfg
+        # path -> the last diagnostics payload served for it, with the
+        # content stamp it corresponds to. Lets a second asker for
+        # unchanged content be answered without re-running the wait;
+        # see _op_diagnostics.
+        self._served: dict[str, dict] = {}
 
         self._ipc = IpcServer(
             self._socket_path,
@@ -638,6 +643,29 @@ class Daemon:
                          or self._engine_config.session_locks.query_timeout_ms)
         diag_timeout_s = float(req.get("diag_timeout_s") or DEFAULT_DIAG_TIMEOUT_S)
 
+        # De-duplication. The MCP server and the PostToolUse hook now
+        # share this engine, so the same file gets asked about twice
+        # whenever the model inspects what it just edited. Keyed on the
+        # content stamp: if the file has not changed since diagnostics
+        # were served for it, the answer is identical by construction,
+        # so re-running the wait is pure load.
+        #
+        # Only a SETTLED result is ever replayed. A cold server can
+        # publish nothing and then publish 24 diagnostics for the same
+        # content once it has indexed, and pinning the empty one would
+        # turn a timing artefact into a persistent wrong answer.
+        window = float(req.get("dedup_window_s") or 0.0)
+        stamp = self._dedup_stamp(path)
+        if window > 0.0 and stamp is not None:
+            prev = self._served.get(path)
+            if (prev is not None and prev["stamp"] == stamp
+                    and prev["settled"]
+                    and time.monotonic() - prev["at"] <= window):
+                payload = dict(prev["payload"])
+                payload["id"] = rid
+                payload["deduped"] = True
+                return payload
+
         can_forward, drained = self._lock_manager.query(
             session, path, timeout_ms=timeout_ms,
         )
@@ -651,7 +679,7 @@ class Daemon:
         # carry pyright / rust-analyzer / etc).
         if self._compile is not None:
             diags = list(diags) + self._compile.get_diagnostics(path)
-        return {
+        payload = {
             "id": rid,
             "ok": True,
             "diagnostics": [_diag_to_json(d) for d in diags],
@@ -662,7 +690,29 @@ class Daemon:
             "settled": res.settled,
             "diag_server": res.server,
             "diag_timeout_s": res.timeout,
+            "deduped": False,
         }
+        if stamp is not None:
+            self._served[path] = {
+                "stamp": stamp,
+                "settled": bool(res.settled),
+                "at": time.monotonic(),
+                "payload": payload,
+            }
+        return payload
+
+    def _dedup_stamp(self, path) -> Optional[str]:
+        """Content identity for de-duplication: mtime plus size.
+
+        Both halves, for the same reason the resync uses both — an edit
+        can land inside one clock tick, and a truncation can keep the
+        mtime while changing the size.
+        """
+        try:
+            st = Path(path).stat()
+        except OSError:
+            return None
+        return f"{st.st_mtime_ns}:{st.st_size}"
 
     #: method -> the kind of item its NavResponse carries. This is the
     #: whitelist as well as the codec table: an op name that is not here

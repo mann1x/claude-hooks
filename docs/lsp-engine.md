@@ -516,6 +516,30 @@ looking like a fact about the code.
 If the daemon cannot be reached the MCP fails loudly with the `status`
 command to run, rather than quietly starting its own servers again.
 
+### De-duplication
+
+Because both callers share the engine, the daemon can answer the second
+asker without repeating the work. A diagnostics request carries
+`dedup_window_s` (config `hooks.lsp_engine.dedup_window_s`, default 60,
+`0` disables); if the file's `(mtime, size)` has not moved since a
+result was served for it, the daemon replays that result and marks it
+`deduped`. The PostToolUse hook then emits **no block at all** — the
+answer is already in the conversation, and repeating it spends tokens to
+say nothing new.
+
+Keyed on the content stamp rather than a timer, so the replay is
+identical by construction rather than merely probably identical: an edit
+changes the stamp and defeats it.
+
+**Only a settled result is ever replayed.** A cold server publishes
+nothing and then publishes everything for the same content once it has
+indexed, so pinning the empty answer would turn a timing artefact into a
+persistent wrong one.
+
+Measured on a scratch project, MCP first and the hook immediately after:
+0.50 s and a full diagnostics block with de-dup off, 0.00 s and no block
+with it on.
+
 ## Troubleshooting
 
 ### Daemon won't start: `another daemon already holds daemon.lock`
