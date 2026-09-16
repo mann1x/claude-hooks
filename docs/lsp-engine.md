@@ -487,6 +487,32 @@ the owner's view (Decision 5).
 
 ---
 
+## Which cclsp.json, and which project root
+
+**One resolver, shared.** `resolve_cclsp_path()` in
+`lsp_engine/config.py` is the only implementation, used by both the
+daemon and the MCP server. Order, most specific first:
+
+1. `<project_root>/cclsp.json` — the project-local file wins; it is what
+   `sync_cclsp.py` reconciles against the servers actually installed.
+2. `$CCLSP_CONFIG_PATH` — how cclsp itself was configured; the shared
+   fallback.
+3. `~/.config/cclsp/cclsp.json`.
+
+They were once two implementations in opposite orders, so the MCP could
+validate one file while the daemon served another — invisible while both
+files happened to list the same servers. The MCP now also **pins** the
+file it validated when it spawns a daemon, and if it attaches to a
+daemon that was already running with a different one, it says so rather
+than serving the difference silently.
+
+**Project root** is not git-specific. `find_project_root()` walks up for
+any of `cclsp.json`, `.git`, `pyproject.toml`, `go.mod`, `Cargo.toml`,
+`package.json`, `compile_commands.json`, and returns None when nothing
+marks a root — deliberately, since guessing would start a language
+server over the whole disk. Dropping a `cclsp.json` in a directory is
+therefore itself the escape hatch for an otherwise unmarked folder.
+
 ## One engine per project
 
 The daemon owns the project's `Engine`. The MCP server (`claude_hooks.

@@ -49,6 +49,7 @@ else:
 
 from claude_hooks.lsp_engine.compile import CompileOrchestrator
 from claude_hooks.lsp_engine.config import (
+    resolve_cclsp_path,
     EngineConfig,
     LspServerSpec,
     load_cclsp_config,
@@ -195,6 +196,7 @@ class Daemon:
         startup_timeout: float = 10.0,
         request_timeout: float = 5.0,
         git_poll_interval: float = 1.0,
+        cclsp_config_path: Optional[str | os.PathLike] = None,
     ) -> None:
         self._project_root = Path(project_root).resolve()
         self._dir = project_dir(self._project_root, base=state_base)
@@ -248,6 +250,10 @@ class Daemon:
             ),
         )
         self._stale_told: set[str] = set()
+        # Reported in status so a client can check that the file it
+        # validated is the file actually being served.
+        self._cclsp_config_path = daemon_cclsp_path(
+            self._project_root, cclsp_config_path)
 
         self._ipc = IpcServer(
             self._socket_path,
@@ -814,6 +820,7 @@ class Daemon:
             "ok": True,
             "project": str(self._project_root),
             "pid": os.getpid(),
+            "cclsp_config": str(self._cclsp_config_path),
             "sessions": sessions,
             "open_files": self._engine.open_files(),
             "active_servers": [
@@ -846,6 +853,22 @@ def _diag_to_json(d) -> dict:
 # ─── helpers for the spawn flow ──────────────────────────────────────
 
 
+def daemon_cclsp_path(
+    project_root: str | os.PathLike,
+    cclsp_config_path: Optional[str | os.PathLike] = None,
+) -> Path:
+    """Which cclsp.json this daemon is serving.
+
+    One function, so the file the daemon loads is the same file it
+    reports in ``status`` — and the same one the MCP resolves, since
+    both go through :func:`resolve_cclsp_path`.
+    """
+    root = Path(project_root).resolve()
+    if cclsp_config_path:
+        return Path(cclsp_config_path)
+    return resolve_cclsp_path(root) or (root / "cclsp.json")
+
+
 def load_daemon_config(
     project_root: str | os.PathLike,
     *,
@@ -853,18 +876,17 @@ def load_daemon_config(
 ) -> tuple[list[LspServerSpec], EngineConfig]:
     """Resolve the cclsp.json + lsp-engine.toml for ``project_root``.
 
-    cclsp.json is found via the env var the user already sets for
-    cclsp itself (``CCLSP_CONFIG_PATH``) or, failing that, falls
-    back to ``<project_root>/cclsp.json``. lsp-engine.toml lives at
+    cclsp.json is resolved by :func:`resolve_cclsp_path` — the single
+    resolver the MCP server shares, so both agree on which file is in
+    play. An explicit ``cclsp_config_path`` outranks it, which is how a
+    caller pins the file it already validated. lsp-engine.toml lives at
     ``<project_root>/.claude-hooks/lsp-engine.toml`` by convention.
     Both are optional; an empty servers list yields a daemon that
     starts but answers nothing useful.
     """
     root = Path(project_root).resolve()
     cclsp_path = (
-        Path(cclsp_config_path)
-        if cclsp_config_path
-        else Path(os.environ.get("CCLSP_CONFIG_PATH", str(root / "cclsp.json")))
+        daemon_cclsp_path(root, cclsp_config_path)
     )
     servers = load_cclsp_config(cclsp_path)
     engine_cfg = load_engine_config(

@@ -238,6 +238,7 @@ def connect_or_spawn(
     spawn_wait_s: float = DEFAULT_SPAWN_WAIT_S,
     spawn_env: Optional[dict] = None,
     log_path: Optional[Path] = None,
+    cclsp_config_path: Optional[str | os.PathLike] = None,
 ) -> LspEngineClient:
     """Return a connected, attached client for the project's daemon,
     spawning the daemon detached if it isn't already running.
@@ -251,6 +252,7 @@ def connect_or_spawn(
         _spawn_daemon(
             project_root, state_base=state_base,
             extra_env=spawn_env, log_path=log_path,
+            cclsp_config_path=cclsp_config_path,
         )
         _wait_for_socket(sock_path, deadline=time.monotonic() + spawn_wait_s)
 
@@ -266,6 +268,7 @@ def _spawn_daemon(
     state_base: Optional[Path] = None,
     extra_env: Optional[dict] = None,
     log_path: Optional[Path] = None,
+    cclsp_config_path: Optional[str | os.PathLike] = None,
 ) -> None:
     """Fork-and-exec a detached daemon. Returns immediately; the
     caller then polls for the socket via ``_wait_for_socket``.
@@ -297,6 +300,12 @@ def _spawn_daemon(
     ]
     if state_base is not None:
         cmd.extend(["--state-base", str(state_base)])
+    if cclsp_config_path is not None:
+        # Pin the file the caller already resolved and validated.
+        # Without this the daemon re-resolves, and a caller whose
+        # environment carries CCLSP_CONFIG_PATH would hand its child an
+        # env the resolver reads differently than the caller did.
+        cmd.extend(["--cclsp-config", str(cclsp_config_path)])
 
     env = dict(os.environ)
     if extra_env:

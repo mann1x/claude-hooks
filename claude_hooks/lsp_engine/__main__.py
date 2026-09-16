@@ -232,6 +232,7 @@ def _run_daemon(args: argparse.Namespace) -> int:
         servers=servers,
         engine_config=engine_cfg,
         state_base=state_base,
+        cclsp_config_path=args.cclsp_config,
     )
     try:
         daemon.run()
@@ -268,12 +269,24 @@ def _run_status(args: argparse.Namespace) -> int:
         # When the lock PID is dead, report pid=None so consumers don't
         # mistake it for a live daemon.
         reported_pid = None if stale_lock else lock_pid
-        print(json.dumps({
+        payload = {
             "running": False,
             "pid": reported_pid,
             "socket": str(sock),
             "stale_lock": stale_lock,
-        }))
+        }
+        if stale_lock:
+            # "running: false" alone reads as "nothing to see here", so
+            # a reader who does not already know the command concludes
+            # all is well and leaves the lock in place. Say what it is
+            # and what clears it.
+            payload["hint"] = (
+                "A lock file remains from a daemon that is gone. It does "
+                "not stop a new daemon starting, but it makes this "
+                "output ambiguous. Clear it with: python -m "
+                f"claude_hooks.lsp_engine restart --project "
+                f"{args.project}")
+        print(json.dumps(payload, indent=2))
         return 0
 
     # Socket alive — talk to the daemon for the rich payload.

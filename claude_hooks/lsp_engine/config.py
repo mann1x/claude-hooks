@@ -293,3 +293,44 @@ def _deep_merge(a: dict, b: dict) -> dict:
         else:
             out[k] = v
     return out
+
+
+# ─── where cclsp.json lives ──────────────────────────────────────────
+
+
+def candidate_cclsp_paths(project_root: str | os.PathLike) -> list[Path]:
+    """Every place a project's server list may live, best first.
+
+    There is exactly one of these functions on purpose. The MCP server
+    and the daemon used to resolve this independently and in opposite
+    orders — the MCP preferring ``<root>/cclsp.json`` and the daemon
+    preferring ``$CCLSP_CONFIG_PATH`` — so the MCP could validate one
+    file while the daemon served another. Nothing failed: the two files
+    happened to list the same servers, which is precisely how that kind
+    of disagreement waits to bite.
+
+    The project-local file wins because it is the more specific
+    statement, and because it is the one ``sync_cclsp.py`` reconciles
+    against the servers actually installed. ``$CCLSP_CONFIG_PATH`` is
+    how cclsp itself was configured and stays as the shared fallback.
+    """
+    root = Path(project_root).resolve()
+    out = [root / "cclsp.json"]
+    env = os.environ.get("CCLSP_CONFIG_PATH")
+    if env:
+        out.append(Path(env).expanduser())
+    out.append(Path.home() / ".config" / "cclsp" / "cclsp.json")
+    return out
+
+
+def resolve_cclsp_path(
+    project_root: str | os.PathLike,
+) -> Optional[Path]:
+    """The first candidate that exists, or None."""
+    for candidate in candidate_cclsp_paths(project_root):
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:      # pragma: no cover — unreadable parent
+            continue
+    return None

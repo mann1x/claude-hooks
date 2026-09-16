@@ -61,6 +61,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from claude_hooks.lsp_engine.config import (
+    candidate_cclsp_paths as _candidate_cclsp_paths,
+    resolve_cclsp_path as _resolve_cclsp_path,
     CclspConfigError,
     load_cclsp_config,
 )
@@ -107,34 +109,16 @@ def find_project_root(path: str | os.PathLike) -> Optional[Path]:
 
 
 def candidate_config_paths(root: Path) -> list[Path]:
-    """Where a project's server list may live, best first.
+    """Delegates to the engine's resolver, which the daemon also uses.
 
-    The per-project file wins because it is the one ``sync_cclsp.py``
-    reconciles against the servers actually installed, and because two
-    projects on one machine legitimately need different servers.
-
-    The user-global fallbacks exist because that is how cclsp was
-    deployed here — a single ``CCLSP_CONFIG_PATH`` for every project.
-    Dropping them would mean every project without its own file
-    silently lost its language servers the moment the MCP was swapped,
-    which is the migration failing quietly rather than loudly.
+    These used to be separate implementations in opposite orders, so the
+    MCP could validate one file while the daemon served another.
     """
-    out = [root / "cclsp.json"]
-    env = os.environ.get("CCLSP_CONFIG_PATH")
-    if env:
-        out.append(Path(env).expanduser())
-    out.append(Path.home() / ".config" / "cclsp" / "cclsp.json")
-    return out
+    return _candidate_cclsp_paths(root)
 
 
 def resolve_config_path(root: Path) -> Optional[Path]:
-    for candidate in candidate_config_paths(root):
-        try:
-            if candidate.is_file():
-                return candidate
-        except OSError:      # pragma: no cover — unreadable parent
-            continue
-    return None
+    return _resolve_cclsp_path(root)
 
 
 class _ProjectEngine:
@@ -182,6 +166,11 @@ class DaemonEngine:
     def __init__(self, root: Path, client) -> None:
         self._root = root
         self._client = client
+        self._pending: list[str] = []
+
+    def add_notice(self, text: str) -> None:
+        """Queue something the next tool call should surface."""
+        self._pending.append(text)
 
     # -- navigation ----------------------------------------------------
 
@@ -236,9 +225,17 @@ class DaemonEngine:
     def restart(self, extensions=None) -> list[str]:
         return self._client.restart(extensions)
 
-    def take_stale_notice(self):
-        """The daemon's stale-code notice, if it sent one."""
-        return self._client.take_stale_notice()
+    def take_notices(self) -> list[str]:
+        """Everything worth telling the caller, once each.
+
+        The daemon's stale-code notice, plus anything queued when this
+        engine was built — a config disagreement, say.
+        """
+        out, self._pending = list(self._pending), []
+        notice = self._client.take_stale_notice()
+        if isinstance(notice, str) and notice:
+            out.append(notice)
+        return out
 
     # -- lifecycle ------------------------------------------------------
 
@@ -324,6 +321,9 @@ class EngineRegistry:
                 # interactive and worth waiting out, where a hook that
                 # blocks the edit loop is not.
                 spawn_wait_s=10.0,
+                # The file validated above, so the daemon serves the
+                # one this error message would name.
+                cclsp_config_path=config_path,
             )
         except (TimeoutError, OSError, RuntimeError) as e:
             raise T.ToolError(
@@ -333,6 +333,31 @@ class EngineRegistry:
                 f"`python -m claude_hooks.lsp_engine status --project "
                 f"{root}`.") from e
         engine = DaemonEngine(root, client)
+        # Pinning the config only binds a daemon WE spawn. One that was
+        # already running kept whatever it started with, and a daemon
+        # started from an environment carrying CCLSP_CONFIG_PATH can
+        # legitimately differ from the file resolved here. Saying so is
+        # the whole point: the failure this replaces was the MCP
+        # validating one file while the daemon served another, with
+        # nothing anywhere reporting the difference.
+        try:
+            served = (client.status() or {}).get("cclsp_config")
+            if served and config_path and (
+                    Path(served).resolve() != Path(config_path).resolve()):
+                engine.add_notice(
+                    f"⚠  The lsp_engine daemon for {root} is serving a "
+                    f"different cclsp.json than this session validated.\n"
+                    f"   validated: {config_path}\n"
+                    f"   serving:   {served}\n"
+                    f"   It was already running when this session "
+                    f"attached, so it kept the file it started with. "
+                    f"Restart it to pick up the other one:\n"
+                    f"     python -m claude_hooks.lsp_engine status "
+                    f"--project {root}   # prints the pid\n"
+                    f"     kill <pid>")
+        except Exception:  # pragma: no cover - never fail the build
+            log.debug("could not compare daemon config for %s", root,
+                      exc_info=True)
         log.info("engine for %s: daemon-backed, %d servers configured",
                  root, len(servers))
         return _ProjectEngine(root, engine, config_path, mtime)
@@ -371,11 +396,9 @@ class EngineRegistry:
             engines = list(self._engines.values())
         for entry in engines:
             try:
-                notice = entry.engine.take_stale_notice()
+                out.extend(entry.engine.take_notices())
             except Exception:  # pragma: no cover - defensive
                 continue
-            if notice:
-                out.append(notice)
         return out
 
     def running(self) -> list[Path]:
