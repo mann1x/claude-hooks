@@ -822,6 +822,33 @@ open session its warm language servers.
 {"enabled": true, "idle_seconds": 14400, "reap_orphans": true}
 ```
 
+### Tests must stop the daemons they start
+
+A test that exercises the MCP registry spawns a **real** daemon, and
+`reg.shutdown_all()` does not stop it — `DaemonEngine.shutdown` detaches
+only, on purpose. Correct in production; a leak in a test, whose
+`tmp_path` is deleted moments later so nothing will ever attach to that
+daemon again or stop it. That is where the 156 orphans came from.
+
+Two layers, in `tests/conftest.py`:
+
+* `stop_lsp_daemon_for(root)` — what a test calls, registered **after**
+  `tmp.cleanup` so `addCleanup`'s LIFO order stops the daemon before the
+  tree it serves disappears.
+* a session-scoped autouse fixture that stops any temp-rooted daemon the
+  run started and reaps it. Per-test bookkeeping for a process-level
+  resource is the wrong layer: the next test to spawn one has to
+  remember. A daemon for a *non-temp* project is reported and left
+  alone — stopping it would take a developer's warm servers with it.
+
+Related, and found the same way: `pid_is_alive()` now excludes zombies.
+`os.kill(pid, 0)` succeeds on one, because the PID stays allocated until
+the parent collects the exit status — and `start_new_session=True`
+detaches the session without reparenting, so a long-lived spawner (the
+MCP server, a pytest run) stays the parent. `status` reported a live
+daemon that answered nothing, and `cleanup` refused to remove the state
+dir forever.
+
 ---
 
 ## Troubleshooting

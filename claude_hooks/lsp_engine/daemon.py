@@ -227,7 +227,41 @@ def pid_is_alive(pid: int) -> bool:
         return True
     except OSError:
         return False
-    return True
+    # A zombie answers ``kill(pid, 0)`` — the PID is still allocated so
+    # its parent can read the exit status — but the daemon is gone: no
+    # memory, no language servers, no socket. Both callers of this
+    # function want "is a daemon still serving", and for both the wrong
+    # answer is sticky: ``status`` reports a live daemon that answers
+    # nothing, and ``cleanup`` refuses to remove a state dir forever.
+    #
+    # It arises whenever the spawner outlives the daemon without
+    # reaping it. ``start_new_session=True`` detaches the session but
+    # does NOT reparent, so a long-lived spawner — the MCP server, a
+    # pytest run — stays the parent. Measured: a daemon stopped via the
+    # shutdown op reported ``pid_is_alive`` true for the rest of the
+    # session, in state Z, parented to the process that spawned it.
+    return not _is_zombie(pid)
+
+
+def _is_zombie(pid: int) -> bool:
+    """True when ``pid`` has exited but has not been reaped.
+
+    Linux-only; ``/proc`` is the only dependency-free way to ask, and
+    returning False elsewhere preserves the previous behaviour rather
+    than guessing. Windows has no equivalent state — a handle keeps the
+    PID valid, but ``OpenProcess`` on an exited process still succeeds
+    only while a handle is open, which is the same trade.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    except (OSError, ValueError):
+        return False
+    try:
+        # The comm field is parenthesised and may itself contain spaces
+        # or ')', so state is the first field after the LAST ')'.
+        return stat.rsplit(")", 1)[1].split()[0] == "Z"
+    except IndexError:  # pragma: no cover — defensive
+        return False
 
 
 class _PreloadRouter:

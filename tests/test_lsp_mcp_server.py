@@ -26,6 +26,7 @@ from claude_hooks.lsp_engine.protocol import (  # noqa: E402
 )
 from claude_hooks.lsp_mcp import server as S  # noqa: E402
 from claude_hooks.lsp_mcp import tools as T  # noqa: E402
+from tests.conftest import stop_lsp_daemon_for  # noqa: E402
 
 
 def rng(l1=0, c1=0, l2=0, c2=1):
@@ -390,7 +391,18 @@ class RegistryTests(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        # Stop the daemon BEFORE the tree it serves is deleted. Ordered
+        # deliberately: addCleanup is a stack, so this runs first.
+        #
+        # ``reg.shutdown_all()`` is not enough, and is not meant to be —
+        # ``DaemonEngine.shutdown`` detaches only, because in production
+        # the daemon is shared with the PostToolUse hook and every other
+        # session in the project. Here we spawned it ourselves for a
+        # directory about to vanish, so nothing else will attach to it
+        # and nothing else will stop it. 156 such daemons had
+        # accumulated on solidpc holding 3.37 GB.
         self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(lambda: stop_lsp_daemon_for(self.root))
         self.root = Path(self.tmp.name).resolve()
         self.cfg = self.root / "cclsp.json"
         self._write_config(["py"])
