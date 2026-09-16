@@ -67,6 +67,16 @@ def announce_block(*, event: dict, config: dict, providers,
         if tools is None:
             return ""
         from claude_hooks.mailbox.announce import render
+        if tools.session_id:
+            # Keep this session's registry row fresh. Without it
+            # ``last_seen`` only moves at SessionStart, so a session
+            # held open for longer than the registry TTL is swept away
+            # while somebody is actively using it — and the next sender
+            # is told the alias does not exist.
+            try:
+                tools.store.touch(tools.session_id)
+            except Exception:
+                log.debug("mailbox: touch failed", exc_info=True)
         messages = tools.store.inbox(
             alias=tools.alias, session_id=tools.session_id or None,
             host=tools.host, since=since)

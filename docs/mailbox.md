@@ -161,12 +161,36 @@ visibility.
 | registry entries | 30 days | a session unseen for a month is not reachable |
 | archive | quarterly zstd (level 19), capped at 10 GB | oldest quarters dropped first |
 
-Expired messages are archived before deletion — `mailbox.archive.sweep()`.
+Expired messages are archived **before** deletion — nothing leaves the
+table until its durable copy is on disk.
 
-> **Not yet scheduled.** `sweep()` is implemented and tested but nothing
-> calls it periodically; run it by hand or wire it to a timer. Likewise
-> `MailboxStore.touch()` exists for per-turn `last_seen` freshness and
-> is not yet called by the daemon.
+`claude-hooks-daemon` runs the cycle, alongside the embedding and
+chat-model reapers, because it is the only process alive between turns.
+A hook would be the wrong home for work measured in days: it would make
+maintenance a function of how often someone types.
+
+| knob (`hooks.mailbox.*`) | default | does |
+|---|---|---|
+| `maintenance` | `true` | master switch, under `enabled` |
+| `maintenance_interval_seconds` | `3600` | cadence; floored at 60 s |
+| `maintenance_limit` | `1000` | rows per sweep, so a cohort expiring on one tick drains over hours rather than in one long transaction |
+| `registry_days` | `30` | sessions unseen this long are forgotten |
+| `archive_cap_bytes` | `10 GB` | oldest quarters dropped first |
+
+The first sweep waits 5 minutes after daemon start — the opening
+minutes compete with recall, HyDE and a cold embedder for the same
+connection. Config is re-read every tick, so the switch and the cadence
+take effect without restarting the daemon (which would also kill the
+managed llamafile).
+
+`last_seen` is refreshed on **every announcement**, not only at
+`SessionStart`. Without that, a session held open longer than
+`registry_days` was swept away while someone was actively using it, and
+the next sender was told the alias did not exist.
+
+A sweep that cannot reach a store returns `None` rather than an empty
+report, and logs at INFO only when it actually did something — an
+hourly "nothing to do" line is how a log stops being read.
 
 ---
 

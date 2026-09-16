@@ -603,6 +603,24 @@ def serve(
     except Exception as e:
         log.debug("update_check thread not started: %s", e)
 
+    # Mailbox housekeeping: expired mail archived then deleted, the
+    # archive trimmed to its cap, dead registry entries forgotten. Here
+    # rather than in a hook because the deadlines are measured in days,
+    # and a hook that has to run for maintenance to happen makes
+    # maintenance a function of how often someone types.
+    mailbox_thread = None
+    try:
+        from claude_hooks.config import load_config
+        from claude_hooks.mailbox.maintenance import MailboxMaintenanceThread
+
+        mailbox_thread = MailboxMaintenanceThread(
+            config_loader=load_config,
+            stop_event=server.stop_event,
+        )
+        mailbox_thread.start()
+    except Exception as e:
+        log.debug("mailbox maintenance thread not started: %s", e)
+
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
@@ -624,6 +642,8 @@ def serve(
             # The thread reads stop_event already; just give it a
             # moment to wake from sleep before we return.
             update_thread.join(timeout=2.0)
+        if mailbox_thread is not None:
+            mailbox_thread.join(timeout=2.0)
     return 0
 
 
