@@ -404,13 +404,36 @@ class RegistryTests(unittest.TestCase):
         self.assertIsNot(first, second)
 
     def test_missing_config_is_an_actionable_error(self):
+        """Isolate the user-global fallbacks first.
+
+        Without this the test passes on a host with no
+        ~/.config/cclsp/cclsp.json and fails on one that has it — which
+        is how it was written, and why it only failed on pandorum.
+        """
         self.cfg.unlink()
         (self.root / ".git").mkdir()
+        empty = self.root / "no-home"
+        empty.mkdir()
+        for var in ("HOME", "USERPROFILE"):
+            self._patch_env(var, str(empty))
+        self._patch_env("CCLSP_CONFIG_PATH", str(empty / "nope.json"))
+
         reg = S.EngineRegistry()
         self.addCleanup(reg.shutdown_all)
         with self.assertRaises(T.ToolError) as cm:
             reg.for_path(self.file)
         self.assertIn("sync_cclsp.py", str(cm.exception))
+
+    def _patch_env(self, name, value):
+        old = os.environ.get(name)
+        os.environ[name] = value
+
+        def restore():
+            if old is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = old
+        self.addCleanup(restore)
 
     def test_idle_engines_are_reaped(self):
         reg = S.EngineRegistry(idle_hours=0.0)   # clamps to 60s

@@ -160,6 +160,12 @@ class _SqliteConn:
     def __call__(self):
         return self.conn
 
+    def close(self):
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+
 
 class StoreHarness(unittest.TestCase):
 
@@ -167,6 +173,11 @@ class StoreHarness(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.db = _SqliteConn(Path(self._tmp.name) / "m.db")
+        # Registered *after* the tempdir cleanup so it runs *before* it:
+        # addCleanup is LIFO, and Windows refuses to delete a file that
+        # is still open. On POSIX the unlink succeeds either way, which
+        # is why this only ever fails on pandorum.
+        self.addCleanup(self.db.close)
         self.store = MailboxStore(self.db, self.db.lock, dialect="sqlite")
         self.store.ensure_schema()
 
