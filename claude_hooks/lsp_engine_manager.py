@@ -149,7 +149,7 @@ class LspEngineManager:
                     entry["serves"] = str(served)
                     entry["superseded"] = True
             else:
-                pid = self._lock_pid(root)
+                pid = self._lock_pid(root, state_dir)
                 if pid is not None and pid_is_alive(pid):
                     # Socket down, process up: a daemon that is wedged
                     # rather than gone. Naming that is the difference
@@ -172,8 +172,27 @@ class LspEngineManager:
         except OSError:  # pragma: no cover — defensive
             return False
 
-    def _lock_pid(self, root: Path) -> Optional[int]:
+    def _lock_pid(self, root: Path,
+                  state_dir: Optional[Path] = None) -> Optional[int]:
+        """The pid in **this state dir's** lock file.
+
+        Same trap as :meth:`_socket_for`, and it survived the first fix
+        because only the socket path was corrected: ``daemon_pid()``
+        recomputes ``lock_path_for(root)``, which normalises a stale
+        narrow root up to its repository and returns the *boundary*
+        daemon's live pid. Every stale directory under a live repo was
+        then reported ``wedged`` with a pid that is not its own — and
+        ``wedged`` blocks state cleanup, so those directories could
+        never be cleared. Seen in ``lsp list`` output after the deploy,
+        not in a test.
+        """
         try:
+            if state_dir is not None:
+                lock = state_dir / "daemon.lock"
+                if not lock.is_file():
+                    return None
+                first = lock.read_text(encoding="ascii").splitlines()[0]
+                return int(first.strip())
             from claude_hooks.lsp_engine.client import daemon_pid
             return daemon_pid(root, state_base=self._state_base)
         except Exception:

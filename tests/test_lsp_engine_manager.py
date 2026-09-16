@@ -92,7 +92,7 @@ class _Fixture(unittest.TestCase):
             return c
 
         m._client = fake_client            # type: ignore[assignment]
-        m._lock_pid = lambda root: None    # type: ignore[assignment]
+        m._lock_pid = lambda root, state_dir=None: None  # type: ignore[assignment]
         return m
 
 
@@ -183,7 +183,7 @@ class SocketIdentityTests(_Fixture):
             return None
 
         m._client = fake_client         # type: ignore[assignment]
-        m._lock_pid = lambda root: None  # type: ignore[assignment]
+        m._lock_pid = lambda root, state_dir=None: None  # type: ignore[assignment]
         rows = m.list()["daemons"]
         # Each state dir was asked about itself, not about the boundary.
         self.assertEqual(sorted(d.name for d in probed if d),
@@ -200,7 +200,7 @@ class SocketIdentityTests(_Fixture):
         m = LspEngineManager(state_base=self.base)
         m._client = lambda root, session, state_dir=None: _FakeClient(
             {"pid": 1, "project": str(repo), "sessions": []})
-        m._lock_pid = lambda root: None  # type: ignore[assignment]
+        m._lock_pid = lambda root, state_dir=None: None  # type: ignore[assignment]
         row = m.list()["daemons"][0]
         self.assertTrue(row["superseded"])
         self.assertEqual(row["serves"], str(repo))
@@ -304,6 +304,30 @@ class StatelessDaemonTests(_Fixture):
         self.assertEqual(res["stopped_idle"], [])
 
 
+    def test_a_stale_dir_is_not_called_wedged_on_a_neighbours_pid(self) -> None:
+        """``wedged`` blocks state cleanup, so a wrong one is permanent.
+
+        ``daemon_pid()`` recomputes the lock path, which normalises a
+        stale narrow root up to its repository and returns the boundary
+        daemon\'s live pid. Every stale directory under a live repo was
+        reported wedged with a pid that is not its own, and could then
+        never be cleared. Seen in ``lsp list`` after the deploy.
+        """
+        repo = self._project("repo")
+        (repo / ".git").mkdir()
+        pkg = repo / "packages" / "a"
+        pkg.mkdir(parents=True)
+        boundary = self._state("boundary", repo)
+        (boundary / "daemon.lock").write_text("4242\n", encoding="ascii")
+        self._state("stale", pkg)          # no lock file of its own
+
+        m = LspEngineManager(state_base=self.base)
+        m._client = lambda root, session, state_dir=None: None
+        rows = {r["project"]: r for r in m.list()["daemons"]}
+        self.assertNotIn("wedged", rows[str(pkg)])
+        self.assertIsNone(rows[str(pkg)]["pid"])
+
+
 class ReapTests(_Fixture):
     def test_an_orphan_is_stopped(self) -> None:
         gone = self.projects / "vanished"
@@ -388,7 +412,7 @@ class ReapTests(_Fixture):
         gone = self.projects / "wedged"
         d = self._state("aaa", gone)
         m = self.manager(live={})
-        m._lock_pid = lambda root: 999999      # type: ignore[assignment]
+        m._lock_pid = lambda root, state_dir=None: 999999  # type: ignore[assignment]
         import claude_hooks.lsp_engine.daemon as D
         orig = D.pid_is_alive
         D.pid_is_alive = lambda pid: True
