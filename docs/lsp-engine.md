@@ -607,17 +607,48 @@ match the pattern too — trust the start time, not the match count.
 This is the same shape as cclsp's config staleness, one level down:
 *cclsp caches config, `lsp_mcp` caches code.*
 
-**Planned:** the shim compares the installed package version against the
-one it imported and says so in its **tool output** (not only the log —
-a log nobody reads is how a wrong clangd survived for months here),
-once per session on the first affected call, naming both versions and
-the remedy. Deliberately an announcement and **not** an automatic
-re-exec: a re-exec would drop in-flight language servers — including a
-warm clangd index — and the client's `initialize` state, making two
-identical tool calls return differently for reasons the caller cannot
-see. That is the same failure class as "no diagnostics" meaning both
-*clean* and *never parsed*, and it cannot be fixed by adding another
-instance of it.
+**The server tells you.** The MCP server checks itself and prefixes a
+notice to its **tool output** — not only the log, because a log nobody
+reads is how a wrong clangd survived for months here — on the first
+affected call, naming both versions and the remedy:
+
+```text
+⚠  claude-hooks-lsp is serving code older than the tree on disk.
+   imported: 1.16.0 (this process, started 2026-09-16 16:16:34)
+   on disk:  1.16.0 (same version, but claude_hooks/lsp_mcp/server.py
+             changed at 2026-09-16 16:42:28, after this process
+             imported it)
+
+   Restart the MCP client — this Claude Code session — to pick it up.
+   restart_server restarts the language servers, not this process,
+   so it will not help here.
+```
+
+Shown **once per session**, on the first affected call: a banner on
+every `get_hover` becomes noise, and noise is how a real warning gets
+filtered out. It rides on every outcome — result, `ToolError` and
+unexpected exception alike — since a process serving old code is just
+as able to produce the error as the wrong answer.
+
+Two signals, because either alone has a blind spot:
+
+| Signal | Catches | Blind to |
+|---|---|---|
+| installed vs imported **version** | an upgrade under a running process | a fix with no version bump |
+| newest package **`.py` mtime** vs import time | any code-only change | — this is the load-bearing one |
+
+The version check alone would have been silent through the incident
+above: `f3c4bd3` touched twelve files and not one of them was
+`pyproject.toml`. `.pyc` is deliberately not consulted — a recompile is
+not a source change. Set `LSP_MCP_STALENESS_CHECK=0` to silence the
+notice.
+
+Deliberately an announcement and **not** an automatic re-exec: a re-exec
+would drop in-flight language servers — including a warm clangd index —
+and the client's `initialize` state, making two identical tool calls
+return differently for reasons the caller cannot see. That is the same
+failure class as "no diagnostics" meaning both *clean* and *never
+parsed*, and it cannot be fixed by adding another instance of it.
 
 ### The daemon survived my Claude Code crash
 

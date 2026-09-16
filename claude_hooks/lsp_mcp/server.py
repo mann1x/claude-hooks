@@ -66,8 +66,8 @@ from claude_hooks.lsp_engine.config import (
     load_engine_config,
 )
 from claude_hooks.lsp_engine.engine import Engine, NavResponse
-from claude_hooks.lsp_engine.lsp import LspError
 from claude_hooks.lsp_mcp import tools as T
+from claude_hooks.lsp_mcp.staleness import DETECTOR
 from claude_hooks.mcp_stdio import force_utf8_stdio
 
 log = logging.getLogger("claude_hooks.lsp_mcp")
@@ -289,14 +289,16 @@ class LspMcpServer:
             try:
                 return self._reply(rpc_id, {
                     "content": [{"type": "text",
-                                 "text": self.call_tool(name, args)}],
+                                 "text": self._announce(
+                                     self.call_tool(name, args))}],
                     "isError": False,
                 })
             except T.ToolError as e:
                 # The caller's to fix, so it goes back as prose rather
                 # than a stack trace.
                 return self._reply(rpc_id, {
-                    "content": [{"type": "text", "text": str(e)}],
+                    "content": [{"type": "text",
+                                 "text": self._announce(str(e))}],
                     "isError": True,
                 })
             except Exception as e:
@@ -304,7 +306,8 @@ class LspMcpServer:
                             traceback.format_exc(limit=3))
                 return self._reply(rpc_id, {
                     "content": [{"type": "text",
-                                 "text": f"{type(e).__name__}: {e}"}],
+                                 "text": self._announce(
+                                     f"{type(e).__name__}: {e}")}],
                     "isError": True,
                 })
         if rpc_id is not None:
@@ -366,6 +369,18 @@ class LspMcpServer:
         return sym.selection.start.line, sym.selection.start.character
 
     # ─── tools ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _announce(text: str) -> str:
+        """Prefix the one-per-session stale-process notice, if it is due.
+
+        Applied to every outcome — result, ToolError and unexpected
+        exception alike — because a process serving old code is just as
+        able to produce the error as the wrong answer, and the caller
+        needs the same context either way.
+        """
+        notice = DETECTOR.banner()
+        return f"{notice}\n\n{text}" if notice else text
 
     def call_tool(self, name: str, args: dict) -> str:
         if name not in T.TOOL_NAMES:
