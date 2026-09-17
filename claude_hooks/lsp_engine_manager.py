@@ -446,7 +446,18 @@ class LspEngineManager:
         moment the signal is sent. A stale pid that has been recycled
         fails both, and is left alone.
         """
-        from claude_hooks.lsp_engine.daemon import pid_is_alive
+        from claude_hooks.lsp_engine.daemon import pid_is_alive, project_dir
+        if state_dir is None:
+            # Derive it rather than leave it None. The start-time proof
+            # in ``_may_signal`` reads the lock file, which lives in the
+            # state dir, so a caller that omits it silently drops the
+            # only identity proof that works off Linux — and on Linux
+            # leaves just ``/proc/<pid>/cmdline``, which reads empty for
+            # a process already on its way out.
+            try:
+                state_dir = project_dir(root, base=self._state_base)
+            except Exception:  # pragma: no cover — defensive
+                state_dir = None
         pid = self._lock_pid(root, state_dir)
         out = {"project": str(root), "pid": pid, "acked": False,
                "signalled": None, "stopped": False, "was_running": False}
@@ -504,7 +515,12 @@ class LspEngineManager:
             if self._await_exit(pid, wait_s):
                 out["stopped"] = True
                 return out
-        out["stopped"] = not pid_is_alive(pid)
+        # One last look before calling it a survivor. Everything above
+        # can decline for a reason that means the process is *going*
+        # rather than staying — ``_may_signal`` reads a cmdline that a
+        # dying process has already emptied — and a false "would not
+        # stop" is not cosmetic now that deploy fails on it.
+        out["stopped"] = self._await_exit(pid, 5.0)
         return out
 
     @staticmethod

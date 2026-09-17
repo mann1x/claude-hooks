@@ -325,5 +325,48 @@ class ReloadTests(_Fixture):
                          ["fake-ls@a", "fake-ls@b"])
 
 
+class NoBoundaryAtAllTests(unittest.TestCase):
+    """A path with nothing above it still keys a daemon on a directory.
+
+    Reached on a real tree, not invented: ``backup_models/manic-harness``
+    is a symlink onto another disk, so resolving a file under it escapes
+    the declared root and there is no repository, sentinel or package
+    marker anywhere above what is left. ``boundary_root_for`` correctly
+    returns None — and the fallback then handed back the *file*, so 179
+    files each keyed a daemon on themselves and looked for
+    ``<file>.py/cclsp.json``.
+
+    That is the same failure the existence guard in ``daemon_root_for``
+    was added for, arriving through a different door, which is why the
+    fallback is pinned here rather than left to the guard.
+    """
+
+    def test_a_file_with_no_boundary_keys_on_its_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            # No .git, no sentinel, no package marker anywhere inside.
+            leaf = Path(tmp).resolve() / "nested" / "deep"
+            leaf.mkdir(parents=True)
+            src = leaf / "script.py"
+            src.write_text("x = 1\n", encoding="utf-8")
+
+            from claude_hooks.lsp_engine.config import boundary_root_for
+            if boundary_root_for(src) is not None:
+                self.skipTest("temp dir sits inside a repository")
+
+            root = daemon_root_for(src)
+            self.assertTrue(Path(root).is_dir(),
+                            f"daemon keyed on a file: {root}")
+            self.assertEqual(Path(root), leaf)
+
+    def test_a_directory_with_no_boundary_keys_on_itself(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            leaf = Path(tmp).resolve() / "nested"
+            leaf.mkdir()
+            from claude_hooks.lsp_engine.config import boundary_root_for
+            if boundary_root_for(leaf) is not None:
+                self.skipTest("temp dir sits inside a repository")
+            self.assertEqual(Path(daemon_root_for(leaf)), leaf)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

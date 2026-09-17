@@ -394,6 +394,53 @@ class CloseAfterDaemonWentAwayTests(unittest.TestCase):
         self.assertTrue(_Ipc.closed, "the connection was left open")
 
 
+class DerivedStateDirTests(unittest.TestCase):
+    """A caller that omits the state dir must not lose the proof.
+
+    ``_may_signal`` has two identity proofs: the command line, and the
+    start time recorded in the lock file. The lock lives in the state
+    dir, so passing None dropped the second entirely — leaving only
+    ``/proc/<pid>/cmdline``, which a process already on its way out has
+    emptied. A live daemon was then declined for a signal *and* reported
+    as one that would not stop, seconds before it exited on its own.
+    Harmless when nothing read the result; not harmless now that deploy
+    fails the step on it.
+    """
+
+    def test_the_state_dir_is_derived_when_not_given(self) -> None:
+        import tempfile
+        m = LspEngineManager()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            seen = {}
+
+            def _lock_pid(r, sd=None):
+                seen["state_dir"] = sd
+                return None
+
+            m._lock_pid = _lock_pid                  # type: ignore
+            m._client = lambda *a, **k: None         # type: ignore
+            m._stop_one_detailed(root, wait_s=0.1)
+        self.assertIsNotNone(seen["state_dir"],
+                             "state dir was left None, dropping the "
+                             "start-time identity proof")
+
+    def test_a_late_exit_is_still_a_stop(self) -> None:
+        """The process goes after the ladder gives up, not before."""
+        import subprocess
+        proc = subprocess.Popen([sys.executable, "-c",
+                                 "import time; time.sleep(0.8)"])
+        self.addCleanup(proc.wait)
+        m = LspEngineManager()
+        m._lock_pid = lambda r, sd=None: proc.pid    # type: ignore
+        m._client = lambda *a, **k: None             # type: ignore
+        m._may_signal = lambda *a, **k: False        # type: ignore
+        res = m._stop_one_detailed(Path("/nonexistent"), wait_s=0.1)
+        self.assertTrue(res["was_running"])
+        self.assertTrue(res["stopped"],
+                        "declared a survivor while it was exiting")
+
+
 class StoppedMeansStoppedTests(unittest.TestCase):
     """The count has to mean what an operator reads it as meaning."""
 

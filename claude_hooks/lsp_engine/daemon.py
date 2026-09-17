@@ -112,7 +112,17 @@ def daemon_root_for(project_root: str | os.PathLike) -> Path:
         boundary = boundary_root_for(root)
     except OSError:  # pragma: no cover — unreadable parent
         boundary = None
-    return boundary or root
+    if boundary is not None:
+        return boundary
+    # No boundary at all: nothing above this path is a repository, a
+    # declared root, or a package. Falling back to ``root`` puts the
+    # file itself back in the daemon's identity — the same
+    # ``messages.ts/cclsp.json`` failure the guard above exists to
+    # prevent, reached through a different door. Found on a real tree:
+    # ``backup_models/manic-harness`` is a symlink to another disk, so
+    # resolving it escapes the declared root and leaves nothing to walk
+    # up to, and 179 files there each keyed a daemon on themselves.
+    return root if root.is_dir() else root.parent
 
 
 def _is_windows() -> bool:
