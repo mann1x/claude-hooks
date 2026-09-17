@@ -448,7 +448,12 @@ class WedgedReapTests(unittest.TestCase):
 
     def test_reap_stops_a_wedged_daemon(self) -> None:
         m = LspEngineManager()
-        entry = {"project": "/tmp/gone-wedged", "state_dir": "/tmp/sd",
+        # ``reap`` round-trips the project through ``Path``, which on
+        # Windows respells the separators, so the expectation has to go
+        # through the same normalisation rather than assume POSIX.
+        project = "/tmp/gone-wedged"
+        expected = str(Path(project))
+        entry = {"project": project, "state_dir": "/tmp/sd",
                  "running": False, "wedged": True, "pid": 424242,
                  "sessions": [], "project_exists": False}
         m.list = lambda: {"daemons": [entry]}          # type: ignore
@@ -457,8 +462,8 @@ class WedgedReapTests(unittest.TestCase):
             stopped.append(str(root)) or True)
         m._clean_state = lambda e: True                # type: ignore
         res = m.reap()
-        self.assertEqual(stopped, ["/tmp/gone-wedged"])
-        self.assertEqual(res["stopped_wedged"], ["/tmp/gone-wedged"])
+        self.assertEqual(stopped, [expected])
+        self.assertEqual(res["stopped_wedged"], [expected])
 
     def test_a_wedged_daemon_that_will_not_die_keeps_its_state(self) -> None:
         # Removing the lock of a live process invites a second daemon
