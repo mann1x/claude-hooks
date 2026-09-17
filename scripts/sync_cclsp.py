@@ -251,16 +251,54 @@ def mcp_config_path() -> Path:
     except (OSError, ValueError):
         return DEFAULT_MCP_CONFIG
 
-    for entry in (data.get("mcpServers") or {}).values():
+    # Match on the env var, not on the command name. The name was the
+    # original test and it silently stopped matching the moment the
+    # third-party ``cclsp`` binary was replaced by our own
+    # ``claude-hook-lsp-mcp`` launcher: the entry still declared
+    # ``CCLSP_CONFIG_PATH=/shared/config/cclsp/cclsp.json``, but nothing
+    # looked at it any more, so ``--mcp`` resolved to the conventional
+    # default instead and would have *created* a second config at a path
+    # nothing reads — leaving the file the MCP actually loads untouched
+    # and stale, while reporting a successful sync. Precisely the drift
+    # this script exists to catch, in the script itself.
+    #
+    # Whoever declares the variable is by definition the consumer, so
+    # that is the signal. The command-name heuristic stays as a fallback
+    # for an entry that names cclsp without declaring the path.
+    for name, entry in (data.get("mcpServers") or {}).items():
         if not isinstance(entry, dict):
             continue
-        if "cclsp" not in str(entry.get("command", "")).lower():
+        if not _is_lsp_mcp_entry(name, entry):
             continue
         declared = (entry.get("env") or {}).get("CCLSP_CONFIG_PATH")
         if declared:
             return Path(declared)
 
     return DEFAULT_MCP_CONFIG
+
+
+def _is_lsp_mcp_entry(name: str, entry: dict) -> bool:
+    """Whether this ``mcpServers`` entry is the LSP one.
+
+    Matching on ``"cclsp" in command`` alone was the original test, and
+    it silently stopped matching the moment the third-party ``cclsp``
+    binary was replaced by our own ``claude-hook-lsp-mcp`` launcher. The
+    entry still declared
+    ``CCLSP_CONFIG_PATH=/shared/config/cclsp/cclsp.json``, but nothing
+    looked at it, so ``--mcp`` fell through to the conventional default
+    and would have *created* a second config at a path nothing reads —
+    leaving the file the MCP actually loads stale while reporting a
+    successful sync. Exactly the drift this script exists to catch,
+    in the script itself.
+
+    Declaring the variable is not sufficient on its own: an unrelated
+    server carrying it must not hijack the path, which is why this asks
+    who the entry *is* rather than only what it sets.
+    """
+    command = str(entry.get("command", "")).lower()
+    if "cclsp" in command or "lsp-mcp" in command or "lsp_mcp" in command:
+        return True
+    return str(name).lower() in ("lsp", "cclsp")
 
 
 EXCLUDE_KEY = "_cclsp_sync"
@@ -453,6 +491,18 @@ def stale_cclsp_processes(config_path: Path) -> list[tuple[int, float]]:
         parts = line.split(None, 1)
         if len(parts) != 2 or not parts[0].isdigit():
             continue
+        if int(parts[0]) in _self_and_ancestors():
+            # This script's own path contains "cclsp", so a substring
+            # test matches the run doing the reporting — and under
+            # ``--write`` the config is written *during* that run, so
+            # its own start time precedes the new mtime and it lands in
+            # the list. It then tells the operator to restart their MCP
+            # client because of a process that is the reporter itself.
+            continue
+        if not _is_cclsp_command(parts[1][24:]):
+            # ``sync_cclsp.py`` is not ``cclsp``. Match the executable,
+            # not any command line that happens to mention it.
+            continue
         # lstart is a fixed 24-char ctime string: "Sat Jul 25 14:01:04 2026"
         stamp = parts[1][:24]
         try:
@@ -462,6 +512,41 @@ def stale_cclsp_processes(config_path: Path) -> list[tuple[int, float]]:
         if started < cfg_mtime:
             stale.append((int(parts[0]), started))
     return sorted(stale, key=lambda p: p[1])
+
+
+def _is_cclsp_command(cmd: str) -> bool:
+    """Whether ``cmd`` actually launches cclsp.
+
+    The MCP server runs as ``node /usr/local/bin/cclsp``, so the test is
+    on an argument's basename. A substring test also matches
+    ``python scripts/sync_cclsp.py`` and anything else with the word in
+    its path.
+    """
+    for token in cmd.split():
+        base = os.path.basename(token)
+        if base in ("cclsp", "cclsp.js", "cclsp.cmd", "cclsp.exe"):
+            return True
+    return False
+
+
+def _self_and_ancestors() -> set:
+    """This process and everything that spawned it.
+
+    Cheap insurance beside :func:`_is_cclsp_command`, for the case of a
+    wrapper genuinely named ``cclsp`` somewhere in this run's own chain.
+    """
+    pids = {os.getpid()}
+    pid = os.getpid()
+    for _ in range(12):        # bounded: never walk a corrupted chain forever
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+            pid = int(stat.rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+        if pid <= 1:
+            break
+        pids.add(pid)
+    return pids
 
 
 def _report_stale(config_path: Path) -> None:

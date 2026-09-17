@@ -404,6 +404,35 @@ class McpConfigPathTests(unittest.TestCase):
             self.assertEqual(sync_cclsp.mcp_config_path(),
                              sync_cclsp.DEFAULT_MCP_CONFIG)
 
+    def test_our_own_launcher_is_recognised(self):
+        """The regression that made ``--mcp`` write to the wrong file.
+
+        v1.16 replaced the third-party ``cclsp`` binary with
+        ``claude-hook-lsp-mcp``. The entry kept declaring
+        ``CCLSP_CONFIG_PATH``, but the resolver matched on ``"cclsp" in
+        command``, so it stopped finding it and fell through to the
+        conventional default — which would have *created* a second
+        config at a path nothing reads, while the file the MCP actually
+        loads stayed stale and the run reported success.
+        """
+        declared = str(self.home / "shared" / "cclsp.json")
+        self._write_claude_json({"mcpServers": {"lsp": {
+            "command": "/opt/claude-hooks/bin/claude-hook-lsp-mcp",
+            "env": {"CCLSP_CONFIG_PATH": declared},
+        }}})
+        with self._isolated():
+            self.assertEqual(sync_cclsp.mcp_config_path(), Path(declared))
+
+    def test_an_entry_named_lsp_is_recognised(self):
+        # Even if the command is renamed again, the key still says it.
+        declared = str(self.home / "by-name" / "cclsp.json")
+        self._write_claude_json({"mcpServers": {"lsp": {
+            "command": "/opt/something/entirely-different",
+            "env": {"CCLSP_CONFIG_PATH": declared},
+        }}})
+        with self._isolated():
+            self.assertEqual(sync_cclsp.mcp_config_path(), Path(declared))
+
     def test_non_cclsp_mcp_entries_are_ignored(self):
         self._write_claude_json({"mcpServers": {
             "pgvector": {"command": "claude-hook-pgvector-mcp",
@@ -412,6 +441,49 @@ class McpConfigPathTests(unittest.TestCase):
         with self._isolated():
             self.assertEqual(sync_cclsp.mcp_config_path(),
                              sync_cclsp.DEFAULT_MCP_CONFIG)
+
+
+class StaleProcessMatchTests(unittest.TestCase):
+    """The stale-cclsp warning must not report the reporter.
+
+    ``scripts/sync_cclsp.py`` has "cclsp" in its own path, and the
+    detector matched any ``ps`` line containing that substring. Under
+    ``--write`` the config is written *during* the run, so the script's
+    own start time precedes the new mtime and it listed itself — and its
+    parent shell — as processes "serving a STALE copy", telling the
+    operator to restart their MCP client over a false alarm. The warning
+    is load-bearing (a real 81-day-old session was genuinely stale), so
+    crying wolf costs more than the noise.
+    """
+
+    def test_the_script_itself_is_not_a_cclsp_process(self):
+        self.assertFalse(sync_cclsp._is_cclsp_command(
+            "/usr/bin/python scripts/sync_cclsp.py --project /x --write"))
+        self.assertFalse(sync_cclsp._is_cclsp_command(
+            "/bin/bash -c cd /repo && python sync_cclsp.py --mcp"))
+
+    def test_a_real_cclsp_launch_is_matched(self):
+        self.assertTrue(sync_cclsp._is_cclsp_command("node /usr/local/bin/cclsp"))
+        self.assertTrue(sync_cclsp._is_cclsp_command("cclsp"))
+        self.assertTrue(sync_cclsp._is_cclsp_command(
+            "node C:/npm/cclsp.cmd --stdio"))
+
+    def test_this_process_is_never_reported(self):
+        import tempfile
+        # A config written *now*, which is what --write produces before
+        # it calls _report_stale.
+        fd, name = tempfile.mkstemp(suffix="-cclsp.json")
+        os.close(fd)
+        self.addCleanup(os.unlink, name)
+        found = sync_cclsp.stale_cclsp_processes(Path(name))
+        self.assertNotIn(os.getpid(), [pid for pid, _ in found])
+
+    def test_ancestors_are_excluded(self):
+        pids = sync_cclsp._self_and_ancestors()
+        self.assertIn(os.getpid(), pids)
+        # Bounded, and never claims init.
+        self.assertNotIn(1, pids)
+        self.assertLessEqual(len(pids), 13)
 
 
 class SpecCoverageTests(unittest.TestCase):
