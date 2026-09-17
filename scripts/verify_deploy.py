@@ -280,6 +280,20 @@ def check_lsp_daemons(r: Results) -> None:
         r.add(PASS, "lsp daemons",
               f"{len(live)} running, none older than the tree")
 
+    wedged = [d for d in listing.get("daemons", []) if d.get("wedged")]
+    if wedged:
+        # Process up, socket down, lock still held — so nothing can
+        # spawn a replacement and the whole repository is out. It is not
+        # covered by the staleness loop above, which only looks at
+        # daemons that are *running*, and a wedged one by definition is
+        # not answering. This is the state that survived a deploy on
+        # 2026-09-17 and left a session on stale code for half a day.
+        r.add(FAIL, "lsp daemons",
+              f"{len(wedged)} wedged (up, not serving, holding the lock): "
+              + ", ".join(f"{d.get('project')} (pid {d.get('pid')})"
+                          for d in wedged[:3])
+              + " — run `claude-hooks-daemon-ctl lsp stop`")
+
     for d in listing.get("stateless", []):
         # Unreachable over IPC and invisible to every disk lookup, so
         # deploy cannot stop it. Say so rather than let a clean report
@@ -293,9 +307,10 @@ def _process_start(pid) -> Optional[float]:
     if not pid:
         return None
     try:
-        return Path(f"/proc/{pid}").stat().st_mtime
-    except OSError:
+        from claude_hooks.lsp_engine.daemon import process_start_time
+    except Exception:
         return None
+    return process_start_time(pid)
 
 
 def _newest_source_mtime() -> float:

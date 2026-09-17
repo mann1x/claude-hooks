@@ -157,6 +157,34 @@ class TestEveryArtifactClassIsDeployed(unittest.TestCase):
             "reloaded daemon keeps the Python it already imported",
         )
 
+    def test_the_stop_is_verified_not_merely_acknowledged(self):
+        """An ack is not an exit, and the difference shipped a lie.
+
+        The daemon's ``shutdown`` op replies *before* it tears down, so
+        the reply reaches the client rather than dying with the process.
+        Taking that ack for an outcome, the deploy reported "lsp
+        daemons: stopped 2" on 2026-09-17 while one of the two stayed up
+        for another half day, still serving the code the deploy had just
+        replaced — the step that was supposed to fix the problem is the
+        step that reported it fixed.
+
+        So the deploy has to surface what the supervisor now
+        distinguishes: which daemons needed a signal, and which would
+        not go at all. The second is a failure, because a daemon that
+        survives the deploy keeps serving stale code to every session in
+        its repository.
+        """
+        src = _src(DEPLOY)
+        self.assertIn("signalled", src,
+                      "deploy must report which daemons needed a signal")
+        # A survivor has to fail the step. Noting it would put it in the
+        # same list as the successes, which is how it was missed.
+        self.assertRegex(
+            src, r"s\.fail\(\s*f?[\"'][^\"']*lsp daemons",
+            "a daemon that would not stop must fail the deploy, not be "
+            "noted alongside the ones that did",
+        )
+
     def test_the_verifier_checks_the_lsp_daemons_too(self):
         """Same standard as the embedder: the claim is worth what the
         check behind it is worth."""

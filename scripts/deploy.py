@@ -449,12 +449,24 @@ def _stop_lsp_daemons(s: Step) -> None:
     # ``results`` has a row per known project root, most of which have
     # no daemon listening — reporting "2 of 149" would read as 147
     # failures when it is just the state-directory count.
-    stopped = [x for x in (res.get("results") or []) if x.get("stopped")]
-    if not stopped:
+    rows = res.get("results") or []
+    stopped = [x for x in rows if x.get("stopped")]
+    forced = [x for x in stopped if x.get("signalled")]
+    survived = [x for x in rows
+                if (x.get("acked") or x.get("pid")) and not x.get("stopped")]
+    if not stopped and not survived:
         s.note("lsp daemons: none were running")
     else:
         s.note(f"lsp daemons: stopped {len(stopped)} "
                f"(they respawn on the next request, on the new code)")
+    # A daemon that acked and stayed up is the whole reason this step
+    # verifies rather than trusting the ack, so say so rather than
+    # folding it into the count.
+    for x in forced:
+        s.note(f"lsp daemons: {x['project']} needed {x['signalled']}")
+    for x in survived:
+        s.fail(f"lsp daemons: {x['project']} (pid {x.get('pid')}) "
+               f"would not stop — it will keep serving the old code")
 
 
 # --------------------------------------------------------------------- #

@@ -243,6 +243,41 @@ def pid_is_alive(pid: int) -> bool:
     return not _is_zombie(pid)
 
 
+def process_start_time(pid: int) -> Optional[float]:
+    """When ``pid`` actually started, as a unix timestamp.
+
+    Linux-only; None elsewhere, and callers must treat None as "cannot
+    tell" rather than as an answer.
+
+    NOT ``Path(f"/proc/{pid}").stat().st_mtime``. That looks like the
+    start time and is not: the kernel updates the directory's mtime
+    afterwards, so a daemon started 2026-09-16 19:40:20 reported
+    02:03:30 the following morning. Two things were built on that
+    mistake within an hour of each other — the deploy's staleness check
+    (which then *under*-reports, the dangerous direction) and the PID
+    reuse guard (which concluded a live daemon's own lock belonged to
+    someone else, and so hid a genuinely wedged daemon from ``lsp
+    list``).
+
+    Field 22 of ``/proc/<pid>/stat`` is the start time in clock ticks
+    since boot; ``btime`` in ``/proc/stat`` is when boot was. The comm
+    field is parenthesised and may contain spaces or ``)``, so the
+    fields are counted from the LAST ``)``.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        ticks = float(stat.rsplit(")", 1)[1].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+    try:
+        for line in Path("/proc/stat").read_text(encoding="ascii").splitlines():
+            if line.startswith("btime "):
+                return float(line.split()[1]) + ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return None
+
+
 def _is_zombie(pid: int) -> bool:
     """True when ``pid`` has exited but has not been reaped.
 
@@ -407,6 +442,10 @@ class Daemon:
         self._sweeper_stop = threading.Event()
         self._lock_fd: Optional[int] = None
         self._stopping = threading.Event()
+        #: Set once the teardown below has actually *run*. Distinct
+        #: from ``_stopping``, which only means it was asked for.
+        self._stopped = threading.Event()
+        self._stop_lock = threading.Lock()
 
         # Phase 2 additions: adaptive preload + git watcher.
         self._preload_thread: Optional[threading.Thread] = None
@@ -502,8 +541,22 @@ class Daemon:
         log.info("lsp-engine daemon started for %s", self._project_root)
 
     def stop(self) -> None:
-        if self._stopping.is_set():
-            return
+        """Tear the daemon down. Safe to call twice; does the work once.
+
+        The guard is on ``_stopped`` — teardown already *performed* —
+        and not on ``_stopping``, which only records that a stop was
+        *asked for*. Keying it on the latter meant the SIGTERM path did
+        nothing at all: the signal handler sets ``_stopping``, the run
+        loop sees it and exits, and the ``finally: self.stop()`` then
+        found the flag set and returned immediately. Every SIGTERM
+        therefore skipped the language servers' shutdown/exit
+        handshake, the git watcher, and the socket unlink, and the
+        process fell out of ``run()`` with the teardown never run.
+        """
+        with self._stop_lock:
+            if self._stopped.is_set():
+                return
+            self._stopped.set()
         self._stopping.set()
         self._sweeper_stop.set()
         if self._git_watcher is not None:

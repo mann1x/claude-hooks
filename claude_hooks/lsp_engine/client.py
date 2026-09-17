@@ -76,8 +76,22 @@ class LspEngineClient:
             self._attached = False
 
     def close(self) -> None:
+        """Detach and release the connection. Never raises.
+
+        ``detach`` is a courtesy — it lets the daemon drop this
+        session's locks early instead of at the next sweep — so failing
+        to deliver it must not fail the close. A daemon that has gone
+        away is the normal case here, not an error: a deploy stops the
+        daemons, and every client still holding a connection then closes
+        it. Before this, that raised ``IpcProtocolError("daemon closed
+        connection")`` out of teardown, turning an orderly stop into an
+        exception in whatever was shutting down.
+        """
         try:
             self.detach()
+        except Exception:
+            log.debug("detach failed during close; daemon likely gone",
+                      exc_info=True)
         finally:
             self._ipc.close()
 

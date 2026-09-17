@@ -70,7 +70,13 @@ class StopHelperTests(unittest.TestCase):
         client.close()
 
         self.assertTrue(stop_lsp_daemon_for(self.root))
-        deadline = time.monotonic() + 10.0
+        # Generous on purpose. Teardown is not instantaneous — the pool
+        # shuts its language servers down, and a server that is already
+        # dead is waited on until the request timeout — so under a full
+        # suite's load this ran past a 10 s deadline once in three runs
+        # and passed in isolation every time. A guard test that fails
+        # intermittently gets ignored, which costs more than the wait.
+        deadline = time.monotonic() + 45.0
         while time.monotonic() < deadline and pid_is_alive(pid):
             time.sleep(0.05)
         # `pid_is_alive` excludes zombies, which is load-bearing here:

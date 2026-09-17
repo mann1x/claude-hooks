@@ -863,13 +863,40 @@ python -m claude_hooks.lsp_engine status --project .
 ```
 
 If that PID is dead but the lock file is still around (rare crash
-scenario), `flock` will release on process death — try again. If
-the lock genuinely is held by a live but stuck daemon:
+scenario), `flock` will release on process death — try again.
+
+If `status` returns nothing at all while the lock names a live PID,
+the daemon is **wedged**: the process is up, the socket is not, and
+because it still holds the lock, nothing can spawn to replace it. The
+whole repository is out until it goes. `lsp list` names that state
+explicitly:
 
 ```bash
-kill <pid>
-# Daemon catches SIGTERM and shuts down cleanly.
+claude-hooks-daemon-ctl lsp list      # look for "wedged": true
+claude-hooks-daemon-ctl lsp stop --project /path/to/repo
 ```
+
+`stop` escalates — it asks over the socket, waits for the process to
+actually exit, then sends SIGTERM, then SIGKILL — and it reports which
+rung it had to reach. The escalation is not paranoia. A wedged daemon
+is by definition running the code from before whatever fix is being
+deployed, and **SIGTERM may do nothing at all**: if the process is
+already inside interpreter shutdown, Python's signal handlers no longer
+run. The one on solidpc on 2026-09-17 ignored SIGTERM and needed
+SIGKILL. Nothing is signalled on a PID alone — the lock's recorded
+start time must match the live process, and the process must still
+identify as an lsp_engine daemon at the moment the signal is sent.
+
+The reaper clears wedged daemons on its own sweep, so this is a way to
+not wait for it rather than the only remedy.
+
+**What caused it, and why it should not recur:** `socketserver` gives
+request threads `daemon_threads = False` and `block_on_close = True`,
+and the connection read has no timeout. One client that connected and
+went away without closing therefore pinned the process open through
+both `server_close()` and interpreter shutdown. The server subclass now
+sets both flags the other way and closes lingering connections (after a
+grace period, so in-flight replies still land) when it shuts down.
 
 ### `forwarded: false, queued_behind: <other-session>`
 

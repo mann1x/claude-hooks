@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import shutil
 import threading
 import time
@@ -214,18 +215,17 @@ class LspEngineManager:
     def _started_after(pid: int, when: float) -> bool:
         """True when the process on ``pid`` began after ``when``.
 
-        i.e. it cannot be the one that wrote the lock. ``/proc/<pid>``'s
-        mtime is the process start time on Linux. Elsewhere there is no
-        dependency-free equivalent, so this returns False and the pid is
-        taken at face value, as it was before.
+        i.e. it cannot be the one that wrote the lock. Where the start
+        time cannot be read — anywhere without ``/proc`` — this returns
+        False and the pid is taken at face value, as it was before.
 
         The allowance is generous: a daemon writes its lock immediately
         after starting, and a reused PID is days or weeks later, so a
         minute of slack cannot confuse the two.
         """
-        try:
-            started = Path(f"/proc/{pid}").stat().st_mtime
-        except OSError:
+        from claude_hooks.lsp_engine.daemon import process_start_time
+        started = process_start_time(pid)
+        if started is None:
             return False
         return started > when + 60.0
 
@@ -411,27 +411,112 @@ class LspEngineManager:
             return {"available": False, "reason": "lsp engine manager disabled"}
         results = []
         for root, state_dir in self._roots(project):
-            results.append({"project": str(root),
-                            "stopped": self._stop_one(root, state_dir)})
+            results.append(self._stop_one_detailed(root, state_dir))
         return {"available": True, "results": results}
 
     def _stop_one(self, root: Path,
                   state_dir: Optional[Path] = None) -> bool:
+        """True when no daemon for ``root`` is left running."""
+        return self._stop_one_detailed(root, state_dir)["stopped"]
+
+    def _stop_one_detailed(self, root: Path,
+                           state_dir: Optional[Path] = None,
+                           *, wait_s: float = 10.0) -> dict:
+        """Stop the daemon for ``root`` and confirm the process exited.
+
+        The ack is not the answer. ``shutdown`` replies *before* it
+        tears down — deliberately, so the response reaches the client —
+        so a daemon that then hangs mid-teardown acks and lives on. That
+        is how a deploy reported "stopped 2" while one of the two was
+        still serving stale code half a day later; the operator was told
+        the thing had been fixed by the step that had not fixed it.
+
+        So the ack only opens the ladder: ask, wait for the process to
+        actually go, then SIGTERM, then SIGKILL. The escalation is not
+        belt-and-braces, it is the load-bearing part — a daemon being
+        stopped is by definition running the code from *before* whatever
+        fix is being deployed, so it may hang in ways the current source
+        no longer can. It also covers the wedged case, where there is no
+        socket left to ask politely and signalling is the only route.
+
+        Nothing is signalled on the strength of a pid alone. The pid
+        comes from the lock file, whose recorded start time must match
+        the live process (:meth:`_lock_pid`), and the process must still
+        identify as an lsp_engine daemon (:meth:`_is_lsp_daemon`) at the
+        moment the signal is sent. A stale pid that has been recycled
+        fails both, and is left alone.
+        """
+        from claude_hooks.lsp_engine.daemon import pid_is_alive
+        pid = self._lock_pid(root, state_dir)
+        out = {"project": str(root), "pid": pid, "acked": False,
+               "signalled": None, "stopped": False}
+
         client = self._client(root, "claude-hooks-daemon-stop", state_dir)
-        if client is None:
-            return False
-        try:
-            client.shutdown_daemon()
-            return True
-        except Exception:
-            log.debug("lsp daemon at %s did not ack shutdown", root,
-                      exc_info=True)
-            return False
-        finally:
+        if client is not None:
             try:
-                client.close()
-            except Exception:  # pragma: no cover — defensive
-                pass
+                client.shutdown_daemon()
+                out["acked"] = True
+            except Exception:
+                log.debug("lsp daemon at %s did not ack shutdown", root,
+                          exc_info=True)
+            finally:
+                try:
+                    client.close()
+                except Exception:  # pragma: no cover — defensive
+                    pass
+
+        if pid is None or not pid_is_alive(pid):
+            # Nothing identifiable to wait on. An ack with no readable
+            # lock still counts: something answered and agreed to go.
+            out["stopped"] = out["acked"] or pid is not None
+            return out
+
+        if self._await_exit(pid, wait_s):
+            out["stopped"] = True
+            return out
+        for sig, label in ((signal.SIGTERM, "SIGTERM"),
+                           (signal.SIGKILL, "SIGKILL")):
+            if not self._is_lsp_daemon(pid):
+                break
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                break
+            out["signalled"] = label
+            log.warning("lsp daemon %s at %s did not exit; sent %s",
+                        pid, root, label)
+            if self._await_exit(pid, wait_s):
+                out["stopped"] = True
+                return out
+        out["stopped"] = not pid_is_alive(pid)
+        return out
+
+    @staticmethod
+    def _await_exit(pid: int, wait_s: float) -> bool:
+        from claude_hooks.lsp_engine.daemon import pid_is_alive
+        deadline = time.monotonic() + wait_s
+        while time.monotonic() < deadline:
+            if not pid_is_alive(pid):
+                return True
+            time.sleep(0.05)
+        return not pid_is_alive(pid)
+
+    @staticmethod
+    def _is_lsp_daemon(pid: int) -> bool:
+        """Whether ``pid`` is running an lsp_engine daemon *right now*.
+
+        The last check before a signal. ``_lock_pid`` has already
+        matched the recorded start time, which rules out a recycled
+        pid; this rules out the remaining case of a lock that names
+        something which was never ours. Unreadable cmdline means no
+        signal — a supervisor that guesses is a supervisor that kills
+        the wrong process.
+        """
+        try:
+            argv = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            return False
+        return b"claude_hooks.lsp_engine" in argv
 
     # ─── reaping ─────────────────────────────────────────────────────
 
@@ -457,18 +542,31 @@ class LspEngineManager:
         clock = time.monotonic() if now is None else now
         stopped_orphan: list[str] = []
         stopped_idle: list[str] = []
+        stopped_wedged: list[str] = []
         cleaned: list[str] = []
         listing = self.list()
         for entry in listing.get("daemons", []):
             root = Path(entry["project"])
             key = str(root)
             if not entry["running"]:
-                # Nothing listening. Clear the state directory so the
-                # host stops accumulating them — but only when the
-                # daemon is really gone, never when it is merely wedged,
-                # since removing the lock of a live process invites a
-                # second daemon for the same project.
-                if not entry.get("wedged") and self._clean_state(entry):
+                if entry.get("wedged"):
+                    # Process up, socket down: it serves nothing and it
+                    # holds the lock, so no replacement can spawn for
+                    # this project either. That is an outage for the
+                    # whole repository, not an idle daemon, so it is
+                    # stopped with no grace period. Until the escalating
+                    # stop existed there was nothing to do about one but
+                    # leave it — and leaving it is what let a wedged
+                    # daemon serve a session stale code for half a day.
+                    if self._stop_one(root, Path(entry["state_dir"])):
+                        stopped_wedged.append(key)
+                        if self._clean_state(entry):
+                            cleaned.append(key)
+                    self._last_busy.pop(key, None)
+                    continue
+                # Nothing listening and nothing alive. Clear the state
+                # directory so the host stops accumulating them.
+                if self._clean_state(entry):
                     cleaned.append(key)
                 self._last_busy.pop(key, None)
                 continue
@@ -489,11 +587,13 @@ class LspEngineManager:
                     stopped_idle.append(key)
                     with self._lock:
                         self._last_busy.pop(key, None)
-        if stopped_orphan or stopped_idle or cleaned:
-            log.info("lsp reaper: %d orphaned, %d idle, %d state dirs cleaned",
-                     len(stopped_orphan), len(stopped_idle), len(cleaned))
+        if stopped_orphan or stopped_idle or stopped_wedged or cleaned:
+            log.info("lsp reaper: %d orphaned, %d idle, %d wedged, "
+                     "%d state dirs cleaned", len(stopped_orphan),
+                     len(stopped_idle), len(stopped_wedged), len(cleaned))
         return {"available": True, "stopped_orphaned": stopped_orphan,
-                "stopped_idle": stopped_idle, "cleaned": cleaned}
+                "stopped_idle": stopped_idle,
+                "stopped_wedged": stopped_wedged, "cleaned": cleaned}
 
     def _clean_state(self, entry: dict) -> bool:
         """Remove a state dir whose daemon is gone.

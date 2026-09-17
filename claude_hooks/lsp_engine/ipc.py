@@ -38,6 +38,7 @@ import os
 import socket
 import socketserver
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -256,6 +257,37 @@ class IpcServer:
         self._impl.shutdown()
 
 
+class _DaemonThreadingUnixStreamServer(socketserver.ThreadingUnixStreamServer):
+    """A threading server that cannot be held open by one client.
+
+    Both of ``socketserver``'s defaults are wrong for a daemon that has
+    to be stoppable. ``daemon_threads = False`` makes every request
+    thread non-daemon, so interpreter shutdown joins it; and
+    ``block_on_close = True`` makes ``server_close()`` join it too. A
+    request thread blocks in ``readinto`` with no timeout for as long
+    as its client holds the connection open — which, for a client that
+    goes away without closing, is forever.
+
+    Observed on solidpc 2026-09-17: one such connection left the
+    omnimergekit daemon alive with its listener already closed and its
+    lock still held, so nothing could answer a request and nothing
+    could respawn to replace it. Three threads were stacked on that one
+    read — the stop thread in ``server_close``, the main thread in
+    ``threading._shutdown``, and the request thread itself. The daemon
+    had to be killed by hand, which is precisely the "they hang and I
+    have to close the connection" this is meant to end.
+
+    A request in flight at shutdown has nothing worth preserving: the
+    client is being told the daemon is going away. So the threads are
+    daemon threads, they are never joined, and
+    :meth:`_PosixIpcServer.shutdown` closes their sockets first so they
+    unblock and exit rather than being frozen mid-call.
+    """
+
+    daemon_threads = True
+    block_on_close = False
+
+
 class _IpcServerImpl:
     """Common interface the platform-specific impls satisfy."""
 
@@ -284,6 +316,12 @@ class _UnixSocketServer(_IpcServerImpl):
         self._on_disconnect = on_disconnect
         self._server: Optional[socketserver.UnixStreamServer] = None
         self._thread: Optional[threading.Thread] = None
+        #: Sockets of connections currently being served, so shutdown
+        #: can close them. A request thread blocks in ``readinto``
+        #: until its client sends something or hangs up; closing the
+        #: socket under it is the only way to make that return.
+        self._live_conns: set = set()
+        self._conn_lock = threading.Lock()
 
     @property
     def socket_path(self) -> Path:
@@ -301,7 +339,7 @@ class _UnixSocketServer(_IpcServerImpl):
             self._socket_path.unlink()
 
         handler_cls = self._make_request_handler_cls()
-        self._server = socketserver.ThreadingUnixStreamServer(
+        self._server = _DaemonThreadingUnixStreamServer(
             str(self._socket_path), handler_cls
         )
         try:
@@ -325,9 +363,39 @@ class _UnixSocketServer(_IpcServerImpl):
         assert self._server is not None
         self._server.serve_forever()
 
+    #: How long a connection gets to finish what it is doing before
+    #: its socket is closed under it. It has to be non-zero: the
+    #: ``shutdown`` op replies and *then* tears down, so cutting
+    #: connections immediately truncates the very ack that tells the
+    #: caller the daemon agreed to stop — which turned every
+    #: ``shutdown_daemon()`` into a reported failure.
+    _DRAIN_GRACE_S = 1.0
+
     def shutdown(self) -> None:
         if self._server is not None:
+            # Stop accepting first, so nothing new arrives during the
+            # drain below.
             self._server.shutdown()
+        # Then give live connections a moment to finish. A request
+        # thread parks in ``readinto`` until its client acts, and a
+        # client that has gone away without closing never acts, so
+        # whatever is left after the grace is closed under it — that is
+        # what stops one silent client holding the daemon open.
+        deadline = time.monotonic() + self._DRAIN_GRACE_S
+        while time.monotonic() < deadline:
+            with self._conn_lock:
+                if not self._live_conns:
+                    break
+            time.sleep(0.02)
+        with self._conn_lock:
+            conns = list(self._live_conns)
+            self._live_conns.clear()
+        for conn in conns:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:  # already closed, or never connected
+                pass
+        if self._server is not None:
             self._server.server_close()
             self._server = None
         if self._thread is not None:
@@ -343,6 +411,9 @@ class _UnixSocketServer(_IpcServerImpl):
         on_connect = self._on_connect
         on_disconnect = self._on_disconnect
 
+        live = self._live_conns
+        conn_lock = self._conn_lock
+
         class _Handler(socketserver.StreamRequestHandler):
             def handle(self):  # type: ignore[override]
                 if on_connect is not None:
@@ -350,10 +421,16 @@ class _UnixSocketServer(_IpcServerImpl):
                         on_connect()
                     except Exception:  # pragma: no cover — defensive
                         log.exception("on_connect callback raised")
-                _serve_connection(
-                    self.rfile, self.wfile, handler_fn,
-                    on_disconnect=on_disconnect,
-                )
+                with conn_lock:
+                    live.add(self.connection)
+                try:
+                    _serve_connection(
+                        self.rfile, self.wfile, handler_fn,
+                        on_disconnect=on_disconnect,
+                    )
+                finally:
+                    with conn_lock:
+                        live.discard(self.connection)
 
         return _Handler
 
