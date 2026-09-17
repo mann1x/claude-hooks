@@ -220,8 +220,26 @@ def pid_is_alive(pid: int) -> bool:
             PROCESS_QUERY_LIMITED_INFORMATION, False, pid,
         )
         if handle:
-            kernel32.CloseHandle(handle)
-            return True
+            try:
+                # An open handle keeps the PID valid after the process
+                # has exited, so OpenProcess succeeding is not the same
+                # as the process running — the Windows counterpart of a
+                # POSIX zombie, and the same wrong answer: a daemon that
+                # has stopped reads as one that refused to, which the
+                # supervisor now reports as a survivor and the deploy
+                # fails on. GetExitCodeProcess is the question actually
+                # being asked. (A process that genuinely exits with 259
+                # is indistinguishable; that is the documented cost of
+                # STILL_ACTIVE sharing the value space.)
+                STILL_ACTIVE = 259
+                code = wintypes.DWORD()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return code.value == STILL_ACTIVE
+                # Could not ask: fall back to the old answer rather
+                # than report a live daemon dead.
+                return True
+            finally:
+                kernel32.CloseHandle(handle)
         # NULL handle: distinguish "access denied" (5) from "no such
         # PID" (87 — ERROR_INVALID_PARAMETER for OpenProcess).
         err = kernel32.GetLastError()
