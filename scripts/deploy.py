@@ -453,7 +453,7 @@ def _stop_lsp_daemons(s: Step) -> None:
     stopped = [x for x in rows if x.get("stopped")]
     forced = [x for x in stopped if x.get("signalled")]
     survived = [x for x in rows
-                if (x.get("acked") or x.get("pid")) and not x.get("stopped")]
+                if x.get("was_running") and not x.get("stopped")]
     if not stopped and not survived:
         s.note("lsp daemons: none were running")
     else:

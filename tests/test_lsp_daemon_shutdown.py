@@ -352,6 +352,34 @@ class CloseAfterDaemonWentAwayTests(unittest.TestCase):
         self.assertTrue(_Ipc.closed, "the connection was left open")
 
 
+class StoppedMeansStoppedTests(unittest.TestCase):
+    """The count has to mean what an operator reads it as meaning."""
+
+    def test_a_dead_lock_file_is_not_a_stopped_daemon(self) -> None:
+        """Most state dirs on a long-lived host hold a lock naming a pid
+        that died weeks ago. Counting those as stops reported "stopped
+        139" on a host running one daemon — the same inflated figure as
+        the old "stopped 2 of 149", just laundered through a different
+        field."""
+        m = LspEngineManager()
+        m._lock_pid = lambda root, sd=None: 2 ** 30   # long dead
+        m._client = lambda *a, **k: None              # nothing listening
+        res = m._stop_one_detailed(Path("/nonexistent"), wait_s=0.1)
+        self.assertFalse(res["was_running"])
+        self.assertFalse(res["stopped"])
+        self.assertIsNone(res["signalled"])
+
+    def test_a_dead_lock_file_is_not_a_survivor_either(self) -> None:
+        # The same conflation read the other way round would fail a
+        # deploy over 139 daemons that were never there.
+        m = LspEngineManager()
+        m._lock_pid = lambda root, sd=None: 2 ** 30
+        m._client = lambda *a, **k: None
+        res = m._stop_one_detailed(Path("/nonexistent"), wait_s=0.1)
+        survived = res["was_running"] and not res["stopped"]
+        self.assertFalse(survived)
+
+
 class WedgedReapTests(unittest.TestCase):
     """A wedged daemon is an outage, and the reaper now clears it."""
 

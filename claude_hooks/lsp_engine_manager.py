@@ -449,9 +449,25 @@ class LspEngineManager:
         from claude_hooks.lsp_engine.daemon import pid_is_alive
         pid = self._lock_pid(root, state_dir)
         out = {"project": str(root), "pid": pid, "acked": False,
-               "signalled": None, "stopped": False}
+               "signalled": None, "stopped": False, "was_running": False}
 
         client = self._client(root, "claude-hooks-daemon-stop", state_dir)
+        # "Nothing was running" is not "I stopped it", and conflating
+        # them is how a deploy reported stopping 139 daemons on a host
+        # with one: most state directories hold a lock file naming a pid
+        # that died weeks ago. The same conflation in the other
+        # direction would then count those as daemons that refused to
+        # stop, and fail the deploy over them.
+        out["was_running"] = bool(client is not None
+                                  or (pid is not None and pid_is_alive(pid)))
+        if not out["was_running"]:
+            if client is not None:  # pragma: no cover — defensive
+                try:
+                    client.close()
+                except Exception:
+                    pass
+            return out
+
         if client is not None:
             try:
                 client.shutdown_daemon()
@@ -466,9 +482,10 @@ class LspEngineManager:
                     pass
 
         if pid is None or not pid_is_alive(pid):
-            # Nothing identifiable to wait on. An ack with no readable
-            # lock still counts: something answered and agreed to go.
-            out["stopped"] = out["acked"] or pid is not None
+            # Nothing identifiable to wait on. The ack is all there is:
+            # something answered and agreed to go, and no pid is
+            # readable to confirm it did.
+            out["stopped"] = out["acked"]
             return out
 
         if self._await_exit(pid, wait_s):
