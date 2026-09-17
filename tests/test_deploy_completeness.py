@@ -128,6 +128,42 @@ class TestEveryArtifactClassIsDeployed(unittest.TestCase):
             "not sys.executable",
         )
 
+    def test_the_lsp_daemons_are_stopped_so_they_pick_up_new_code(self):
+        """The artifact class that no service loads, again.
+
+        An lsp_engine daemon is a long-lived process holding the Python
+        it imported at spawn. No systemd unit owns one, so restarting
+        services does not touch it, and it is lazy-spawned per project
+        so nothing else ever replaces it. Deploying new code therefore
+        left every daemon on the host serving the old code indefinitely
+        — reported live on 2026-09-17, where a session restarted *after*
+        two deploys still got the staleness banner for a daemon that had
+        been up since before them.
+
+        ``reload`` is NOT the fix and must not be substituted: it
+        replaces the language servers and re-reads cclsp.json, but the
+        daemon process survives, and the process is what holds the stale
+        code. Only stopping it works; the next request respawns it.
+        """
+        src = _src(DEPLOY)
+        self.assertIn("_stop_lsp_daemons", src)
+        self.assertIn("LspEngineManager", src)
+        # Restarting the session does not help and neither does reload,
+        # so a deploy that only reloaded would look like it had done the
+        # job while changing nothing.
+        self.assertNotRegex(
+            src, r"lsp_?reload|\.reload\(",
+            "deploy must STOP the lsp daemons, not reload them — a "
+            "reloaded daemon keeps the Python it already imported",
+        )
+
+    def test_the_verifier_checks_the_lsp_daemons_too(self):
+        """Same standard as the embedder: the claim is worth what the
+        check behind it is worth."""
+        src = _src(VERIFY)
+        self.assertIn("def check_lsp_daemons", src)
+        self.assertIn("check_lsp_daemons(r)", src)
+
     def test_the_verifier_checks_the_embedder_too(self):
         """Deploy's claim that it brought the embedder back is worth
         exactly as much as the check that confirms it."""

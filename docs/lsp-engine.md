@@ -971,13 +971,25 @@ separately rather than one standing in for the other.
 **Remedy for the MCP server: restart the client** (the Claude Code
 session), not the language servers.
 
-**Remedy for the daemon:** restart the daemon — it respawns on the next
-request:
+**Remedy for the daemon:** stop it — it respawns on the next request
+with the current code:
 
 ```bash
-python -m claude_hooks.lsp_engine status --project .   # prints the pid
-kill <pid>
-``` To see what a running server actually imported:
+python -m claude_hooks.lsp_engine stop --project .
+claude-hooks-daemon-ctl lsp stop        # every daemon on this host
+```
+
+`reload` is the **wrong** verb here, and reaching for it is the natural
+mistake now that it exists: it replaces the language servers and re-reads
+`cclsp.json`, but the daemon *process* survives — and the process is what
+holds the stale code. Restarting your Claude Code session does not help
+either; the daemon outlives it deliberately.
+
+A **deploy stops them for you** (`scripts/deploy.py` → step 4), so this
+should only ever be needed for a daemon started between deploys. It did
+not always: until 2026-09-17 deploy touched only systemd units, and an
+lsp_engine daemon is not one — so a session restarted after two deploys
+still drew this banner. To see what a running server actually imported:
 
 ```bash
 ps -o pid,lstart,cmd -C python | grep claude_hooks.lsp_mcp

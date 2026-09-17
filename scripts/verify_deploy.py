@@ -37,6 +37,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
@@ -233,6 +234,91 @@ def check_providers(r: Results) -> None:
             r.add(PASS, f"provider {p.name}", f"{n} memories")
 
 
+def check_lsp_daemons(r: Results) -> None:
+    """No lsp_engine daemon may be older than the code on disk.
+
+    Deploy stops them so they respawn on the new code, and this is the
+    check that the claim is worth anything. The failure it guards
+    against is silent by construction: a stale daemon answers every
+    request, just from the code it imported at spawn — which is how a
+    session restarted after two deploys still drew the staleness banner
+    on 2026-09-17.
+
+    A daemon that came up *after* the newest source file is fine, and
+    the common case here is none running at all, since they are
+    spawn-on-demand.
+    """
+    print("lsp engine")
+    try:
+        from claude_hooks.lsp_engine_manager import LspEngineManager
+    except Exception as e:
+        r.add(WARN, "lsp daemons", f"not importable ({type(e).__name__})")
+        return
+
+    try:
+        listing = LspEngineManager().list()
+    except Exception as e:
+        r.add(WARN, "lsp daemons", f"could not be listed: {e}")
+        return
+    if not listing.get("available"):
+        r.add(PASS, "lsp daemons", "supervision disabled")
+        return
+
+    live = [d for d in listing.get("daemons", []) if d.get("running")]
+    newest = _newest_source_mtime()
+    stale = []
+    for d in live:
+        started = _process_start(d.get("pid"))
+        if started is not None and started < newest:
+            stale.append(f"{d.get('project')} (pid {d.get('pid')})")
+    if stale:
+        r.add(FAIL, "lsp daemons",
+              f"{len(stale)} serving code older than the tree: "
+              + ", ".join(stale[:3])
+              + " — run `claude-hooks-daemon-ctl lsp stop`")
+    else:
+        r.add(PASS, "lsp daemons",
+              f"{len(live)} running, none older than the tree")
+
+    for d in listing.get("stateless", []):
+        # Unreachable over IPC and invisible to every disk lookup, so
+        # deploy cannot stop it. Say so rather than let a clean report
+        # imply it is not there.
+        r.add(WARN, "lsp daemon (stateless)",
+              f"pid {d.get('pid')} {d.get('project')} — {d.get('reason')}")
+
+
+def _process_start(pid) -> Optional[float]:
+    """Process start time, or None where it cannot be read."""
+    if not pid:
+        return None
+    try:
+        return Path(f"/proc/{pid}").stat().st_mtime
+    except OSError:
+        return None
+
+
+def _newest_source_mtime() -> float:
+    """The newest ``.py`` in the installed package.
+
+    The same signal the staleness detector uses, and for the same
+    reason: a fix can ship without touching ``pyproject.toml``, so a
+    version comparison alone would stay silent through exactly the
+    twelve-file change that motivated all of this.
+    """
+    import claude_hooks
+    root = Path(claude_hooks.__file__).resolve().parent
+    newest = 0.0
+    for path in root.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        try:
+            newest = max(newest, path.stat().st_mtime)
+        except OSError:
+            continue
+    return newest
+
+
 def check_embedder(r: Results) -> None:
     """Can this host actually turn text into a vector?
 
@@ -383,6 +469,7 @@ def main() -> int:
         check_version(r)
         check_providers(r)
         check_embedder(r)
+        check_lsp_daemons(r)
         check_skills(r)
         check_store(r)
 

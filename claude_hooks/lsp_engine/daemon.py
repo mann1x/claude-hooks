@@ -370,11 +370,17 @@ class Daemon:
             import_time=_staleness.IMPORT_TIME,
             subject=f"the lsp_engine daemon for {self._project_root}",
             remedy=(
-                "Restart the daemon — it respawns on the next request:",
-                f"  python -m claude_hooks.lsp_engine status --project "
-                f"{self._project_root}   # prints the pid",
-                "  kill <pid>",
-                "Restarting your MCP client does NOT restart the daemon.",
+                "Stop the daemon — it respawns on the next request with "
+                "the current code:",
+                f"  python -m claude_hooks.lsp_engine stop --project "
+                f"{self._project_root}",
+                "  claude-hooks-daemon-ctl lsp stop        # every daemon "
+                "on this host",
+                "Restarting your MCP client does NOT restart the daemon, "
+                "and neither does restarting your session.",
+                "`reload` is the WRONG verb here: it replaces the "
+                "language servers and re-reads cclsp.json, but this "
+                "process keeps the Python it already imported.",
             ),
         )
         self._stale_told: set[str] = set()
