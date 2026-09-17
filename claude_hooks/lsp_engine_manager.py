@@ -492,9 +492,22 @@ class LspEngineManager:
                 except Exception:  # pragma: no cover — defensive
                     pass
 
-        if pid is None or not pid_is_alive(pid):
-            # Nothing identifiable to wait on. The ack is all there is:
-            # something answered and agreed to go, and no pid is
+        if pid is not None and not pid_is_alive(pid):
+            # It was running when this started — ``was_running`` above
+            # said so — and it is not running now. That is the outcome,
+            # whatever happened to the ack.
+            #
+            # The ack routinely does NOT arrive here, and its absence
+            # means the opposite of failure: the daemon tore down fast
+            # enough to close the connection before the reply landed. A
+            # warm daemon stopped in 0.0s this way, reported itself a
+            # survivor, and failed a deploy over a process that was
+            # already a zombie by the time it was asked about.
+            out["stopped"] = True
+            return out
+        if pid is None:
+            # Nothing identifiable to wait on, so the ack is all there
+            # is: something answered and agreed to go, and no pid is
             # readable to confirm it did.
             out["stopped"] = out["acked"]
             return out

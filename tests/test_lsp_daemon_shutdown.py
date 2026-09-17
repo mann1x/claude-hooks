@@ -441,6 +441,61 @@ class DerivedStateDirTests(unittest.TestCase):
                         "declared a survivor while it was exiting")
 
 
+class AckLessStopTests(unittest.TestCase):
+    """A missing ack on a dead process means success, not failure.
+
+    The common case for a healthy stop, and it read as the opposite. The
+    daemon answers ``shutdown`` and tears down; when it tears down fast
+    enough the connection closes before the reply lands, so the client
+    raises and ``acked`` stays False. If the process is by then gone,
+    that is a stop — the fastest possible one.
+
+    Reported live: a warm daemon stopped in 0.0s, was called a survivor,
+    and failed the deploy over a process that was already a zombie when
+    it was asked about. The branch conflated "no pid readable, so trust
+    the ack" with "pid known and the process is gone", which are
+    different facts with opposite answers.
+    """
+
+    def test_a_dead_pid_after_a_failed_ack_is_a_stop(self) -> None:
+        import subprocess
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()                      # definitively gone
+
+        class _Client:
+            def shutdown_daemon(self):
+                raise RuntimeError("daemon closed connection")
+
+            def close(self):
+                pass
+
+        m = LspEngineManager()
+        m._lock_pid = lambda r, sd=None: proc.pid        # type: ignore
+        m._client = lambda *a, **k: _Client()            # type: ignore
+        res = m._stop_one_detailed(Path("/nonexistent"), wait_s=0.1)
+        self.assertTrue(res["was_running"], "a live socket means it was up")
+        self.assertFalse(res["acked"])
+        self.assertTrue(res["stopped"],
+                        "called a survivor while the process was gone")
+
+    def test_no_readable_pid_still_falls_back_to_the_ack(self) -> None:
+        # The other half of the branch has to keep working: with no pid
+        # to confirm anything, the ack is the only evidence there is.
+        class _Client:
+            def shutdown_daemon(self):
+                return True
+
+            def close(self):
+                pass
+
+        m = LspEngineManager()
+        m._lock_pid = lambda r, sd=None: None            # type: ignore
+        m._client = lambda *a, **k: _Client()            # type: ignore
+        res = m._stop_one_detailed(Path("/nonexistent"), wait_s=0.1)
+        self.assertTrue(res["acked"])
+        self.assertTrue(res["stopped"])
+
+
 class StoppedMeansStoppedTests(unittest.TestCase):
     """The count has to mean what an operator reads it as meaning."""
 
