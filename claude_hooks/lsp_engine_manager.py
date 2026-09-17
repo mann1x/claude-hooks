@@ -491,9 +491,8 @@ class LspEngineManager:
         if self._await_exit(pid, wait_s):
             out["stopped"] = True
             return out
-        for sig, label in ((signal.SIGTERM, "SIGTERM"),
-                           (signal.SIGKILL, "SIGKILL")):
-            if not self._is_lsp_daemon(pid):
+        for sig, label in self._signal_rungs():
+            if not self._may_signal(pid, state_dir):
                 break
             try:
                 os.kill(pid, sig)
@@ -517,6 +516,67 @@ class LspEngineManager:
                 return True
             time.sleep(0.05)
         return not pid_is_alive(pid)
+
+    @staticmethod
+    def _signal_rungs(sig_mod=signal) -> list:
+        """The escalation ladder available on this platform.
+
+        SIGKILL does not exist on Windows, where SIGTERM is already
+        ``TerminateProcess`` and there is no gentler rung to have
+        climbed from. Naming it unconditionally raised
+        ``AttributeError: module 'signal' has no attribute 'SIGKILL'``
+        out of the stop path on pandorum, which took the reaper down
+        with it — the ladder added to make daemons stoppable instead
+        made every stop on that host raise.
+
+        Takes the module so the absent-SIGKILL branch is reachable from
+        a platform that has one. Patching the real ``signal`` module to
+        test this would reach every other user of it in the process.
+        """
+        rungs = [(sig_mod.SIGTERM, "SIGTERM")]
+        if hasattr(sig_mod, "SIGKILL"):
+            rungs.append((sig_mod.SIGKILL, "SIGKILL"))
+        return rungs
+
+    def _may_signal(self, pid: int,
+                    state_dir: Optional[Path] = None) -> bool:
+        """Whether ``pid`` is provably still our daemon.
+
+        Two independent proofs, either of which suffices:
+
+        * its command line still says ``claude_hooks.lsp_engine``, and
+        * the process start time matches the one the lock file recorded.
+
+        The second is what makes this work off Linux at all. There is no
+        ``/proc/<pid>/cmdline`` on Windows, so the first is always False
+        there, and a supervisor that cannot prove identity must not
+        signal — which would have left Windows with no way to clear a
+        wedged daemon, the platform where there was no route to one in
+        the first place. Matching the recorded start time is in fact the
+        stronger claim of the two: a recycled pid cannot forge it.
+        """
+        if self._is_lsp_daemon(pid):
+            return True
+        return self._lock_start_matches(pid, state_dir)
+
+    @staticmethod
+    def _lock_start_matches(pid: int,
+                            state_dir: Optional[Path] = None) -> bool:
+        from claude_hooks.lsp_engine.daemon import process_start_time
+        if state_dir is None:
+            return False
+        try:
+            lines = (state_dir / "daemon.lock").read_text(
+                encoding="ascii").splitlines()
+            recorded = float(lines[1].strip())
+        except (OSError, ValueError, IndexError):
+            return False
+        started = process_start_time(pid)
+        if started is None:
+            return False
+        # The daemon writes the lock immediately after starting, so the
+        # two differ by well under a second; a recycled pid is days out.
+        return abs(started - recorded) <= 60.0
 
     @staticmethod
     def _is_lsp_daemon(pid: int) -> bool:

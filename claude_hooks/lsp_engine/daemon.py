@@ -263,7 +263,19 @@ def process_start_time(pid: int) -> Optional[float]:
     since boot; ``btime`` in ``/proc/stat`` is when boot was. The comm
     field is parenthesised and may contain spaces or ``)``, so the
     fields are counted from the LAST ``)``.
+
+    On Windows the same fact comes from ``GetProcessTimes``, whose
+    creation time is a FILETIME — 100 ns ticks since 1601-01-01. It is
+    worth having there for more than parity: with no ``/proc/<pid>/
+    cmdline`` to read, a start time that matches the one recorded in
+    the lock file is the only proof available that a pid is still the
+    daemon that wrote it, and without some such proof nothing on
+    Windows may be signalled at all.
     """
+    if pid is None or pid <= 0:
+        return None
+    if os.name == "nt":
+        return _process_start_time_windows(pid)
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
         ticks = float(stat.rsplit(")", 1)[1].split()[19])
@@ -276,6 +288,40 @@ def process_start_time(pid: int) -> Optional[float]:
     except (OSError, ValueError, AttributeError):
         return None
     return None
+
+
+#: Seconds between the FILETIME epoch (1601-01-01) and the unix epoch.
+_FILETIME_EPOCH_DELTA = 11644473600.0
+
+
+def _process_start_time_windows(pid: int) -> Optional[float]:  # pragma: no cover — Windows
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return None
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        created = wintypes.FILETIME()
+        exited = wintypes.FILETIME()
+        kernel = wintypes.FILETIME()
+        user = wintypes.FILETIME()
+        ok = kernel32.GetProcessTimes(
+            handle, ctypes.byref(created), ctypes.byref(exited),
+            ctypes.byref(kernel), ctypes.byref(user))
+        if not ok:
+            return None
+        ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime
+        return ticks / 1e7 - _FILETIME_EPOCH_DELTA
+    except Exception:
+        return None
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _is_zombie(pid: int) -> bool:

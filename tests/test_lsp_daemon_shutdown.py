@@ -226,23 +226,30 @@ class ImportsWithoutUnixSocketsTests(unittest.TestCase):
     """
 
     def test_it_imports_when_the_unix_server_is_absent(self) -> None:
-        import importlib
+        import importlib.util
         import socketserver as ss
 
-        missing = not hasattr(ss, "ThreadingUnixStreamServer")
+        # Loaded as a *separate* module object, never through
+        # sys.modules. ``importlib.reload`` would rebind the real one,
+        # and every class it defines with it — which quietly broke the
+        # Windows-dispatch tests that run after this file and compare
+        # against those classes by identity.
         saved = getattr(ss, "ThreadingUnixStreamServer", None)
-        if not missing:
+        if saved is not None:
             del ss.ThreadingUnixStreamServer
         try:
-            mod = importlib.reload(
-                importlib.import_module("claude_hooks.lsp_engine.ipc"))
+            spec = importlib.util.spec_from_file_location(
+                "_ipc_without_unix_sockets",
+                REPO / "claude_hooks" / "lsp_engine" / "ipc.py")
+            assert spec and spec.loader
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)       # must not raise
             self.assertTrue(hasattr(mod, "IpcServer"))
         finally:
             if saved is not None:
                 ss.ThreadingUnixStreamServer = saved
-            # Restore the module other tests hold references into.
-            importlib.reload(
-                importlib.import_module("claude_hooks.lsp_engine.ipc"))
+        # And the real module is untouched.
+        self.assertTrue(hasattr(ipc_mod, "IpcServer"))
 
 
 class StopIdempotenceTests(unittest.TestCase):
@@ -413,6 +420,27 @@ class StoppedMeansStoppedTests(unittest.TestCase):
         res = m._stop_one_detailed(Path("/nonexistent"), wait_s=0.1)
         survived = res["was_running"] and not res["stopped"]
         self.assertFalse(survived)
+
+
+class SignalLadderTests(unittest.TestCase):
+    """The ladder has to exist on the platform it runs on."""
+
+    def test_posix_climbs_to_sigkill(self) -> None:
+        import signal as real
+        if not hasattr(real, "SIGKILL"):
+            self.skipTest("no SIGKILL on this platform")
+        rungs = LspEngineManager._signal_rungs(real)
+        self.assertEqual([label for _, label in rungs],
+                         ["SIGTERM", "SIGKILL"])
+
+    def test_windows_stops_at_sigterm(self) -> None:
+        """Windows has no SIGKILL, and naming it raised out of every
+        stop on pandorum. SIGTERM there is already TerminateProcess, so
+        one rung is the whole ladder."""
+        class _NoSigkill:
+            SIGTERM = 15
+        rungs = LspEngineManager._signal_rungs(_NoSigkill)
+        self.assertEqual([label for _, label in rungs], ["SIGTERM"])
 
 
 class WedgedReapTests(unittest.TestCase):
