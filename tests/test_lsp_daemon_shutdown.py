@@ -210,6 +210,41 @@ class HungClientTests(unittest.TestCase):
         self.assertFalse(self.server._impl._live_conns)
 
 
+class ImportsWithoutUnixSocketsTests(unittest.TestCase):
+    """The ipc module must import where unix sockets do not exist.
+
+    Windows has no ``socketserver.ThreadingUnixStreamServer`` — it uses
+    named pipes, and the POSIX backend is simply never started there. So
+    a reference to that name inside ``start()`` costs nothing, and the
+    same reference as a base class at module level breaks the import,
+    taking every lsp test on the host with it. That is what happened on
+    pandorum, and it would have shipped had the suite not run there.
+
+    Reproducing it on Linux is the point: a platform-only failure that
+    can only be seen on the other platform gets found late, by someone
+    else, every time.
+    """
+
+    def test_it_imports_when_the_unix_server_is_absent(self) -> None:
+        import importlib
+        import socketserver as ss
+
+        missing = not hasattr(ss, "ThreadingUnixStreamServer")
+        saved = getattr(ss, "ThreadingUnixStreamServer", None)
+        if not missing:
+            del ss.ThreadingUnixStreamServer
+        try:
+            mod = importlib.reload(
+                importlib.import_module("claude_hooks.lsp_engine.ipc"))
+            self.assertTrue(hasattr(mod, "IpcServer"))
+        finally:
+            if saved is not None:
+                ss.ThreadingUnixStreamServer = saved
+            # Restore the module other tests hold references into.
+            importlib.reload(
+                importlib.import_module("claude_hooks.lsp_engine.ipc"))
+
+
 class StopIdempotenceTests(unittest.TestCase):
     """``stop()`` must tear down on the signal path, not just the op."""
 

@@ -257,7 +257,20 @@ class IpcServer:
         self._impl.shutdown()
 
 
-class _DaemonThreadingUnixStreamServer(socketserver.ThreadingUnixStreamServer):
+# ``ThreadingUnixStreamServer`` does not exist on Windows, which has no
+# unix-socket server in ``socketserver`` — the Windows backend below
+# uses named pipes instead. Subclassing it at import time therefore
+# broke *every* lsp test on pandorum with ``AttributeError: module
+# 'socketserver' has no attribute 'ThreadingUnixStreamServer'``, where
+# the original reference was inside ``start()`` and so only ever
+# evaluated on the POSIX path. A module-level name is not a lazy one.
+if hasattr(socketserver, "ThreadingUnixStreamServer"):
+    _UnixStreamServerBase = socketserver.ThreadingUnixStreamServer
+else:  # pragma: no cover — Windows
+    _UnixStreamServerBase = socketserver.ThreadingTCPServer
+
+
+class _DaemonThreadingUnixStreamServer(_UnixStreamServerBase):  # type: ignore[misc,valid-type]
     """A threading server that cannot be held open by one client.
 
     Both of ``socketserver``'s defaults are wrong for a daemon that has
