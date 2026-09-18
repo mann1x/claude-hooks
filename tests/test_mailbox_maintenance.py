@@ -309,8 +309,9 @@ class TouchTests(unittest.TestCase):
         tools = MailboxTools(self.store, alias="me", session_id="mine",
                              host="solidpc")
         touched = []
-        with mock.patch.object(type(self.store), "touch",
-                               lambda _s, sid: touched.append(sid)):
+        with mock.patch.object(
+                type(self.store), "touch",
+                lambda _s, sid, **kw: touched.append((sid, kw.get("alias")))):
             hookmod._tools = lambda config, providers, event=None: tools
             try:
                 hookmod.announce_block(
@@ -319,7 +320,10 @@ class TouchTests(unittest.TestCase):
             finally:
                 import importlib
                 importlib.reload(hookmod)
-        self.assertEqual(touched, ["mine"])
+        # The alias travels with the touch: a row evicted for being
+        # quiet is re-created from it, which is what keeps eviction from
+        # silencing a session that is merely idle.
+        self.assertEqual(touched, [("mine", "me")])
 
     def test_a_failing_touch_does_not_break_the_announcement(self):
         from claude_hooks.mailbox import hook as hookmod

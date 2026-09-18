@@ -74,7 +74,13 @@ def announce_block(*, event: dict, config: dict, providers,
             # while somebody is actively using it — and the next sender
             # is told the alias does not exist.
             try:
-                tools.store.touch(tools.session_id)
+                # Pass the identity too: if this row has been evicted for
+                # being quiet, the touch re-creates it rather than
+                # leaving a live session unaddressable for the rest of
+                # its life.
+                tools.store.touch(
+                    tools.session_id, alias=tools.alias, host=tools.host,
+                    cwd=(event.get("cwd") or "") if event else "")
             except Exception:
                 log.debug("mailbox: touch failed", exc_info=True)
         messages = tools.store.inbox(
@@ -129,6 +135,23 @@ def register_session(*, event: dict, config: dict, providers) -> str:
     except Exception:
         log.debug("mailbox registration failed", exc_info=True)
         return ""
+
+
+def unregister_session(*, event: dict, config: dict, providers) -> None:
+    """Drop this session from the registry at SessionEnd.
+
+    Soft-fails like every other mailbox hook path: a mailbox that cannot
+    be reached must not fail the hook.
+    """
+    if not _enabled(config):
+        return
+    try:
+        tools = _tools(config, providers, event)
+        if tools is None or not tools.session_id:
+            return
+        tools.store.forget(tools.session_id)
+    except Exception:
+        log.debug("mailbox unregistration failed", exc_info=True)
 
 
 def turn_start(event: dict) -> Optional[datetime]:

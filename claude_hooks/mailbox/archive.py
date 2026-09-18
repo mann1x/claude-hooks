@@ -153,7 +153,8 @@ def enforce_cap(*, directory: Optional[Path] = None,
 
 def sweep(store, *, directory: Optional[Path] = None,
           cap_bytes: int = DEFAULT_CAP_BYTES,
-          registry_days: int = 30, limit: int = 1000) -> dict:
+          registry_days: int = 30, limit: int = 1000,
+          evict_hours: Optional[float] = None) -> dict:
     """Archive expired mail, delete it, then trim the archive.
 
     The order is the whole point: nothing is deleted from the table
@@ -169,6 +170,18 @@ def sweep(store, *, directory: Optional[Path] = None,
                   "archive write produced no file", len(expired))
     dropped = enforce_cap(directory=directory, cap_bytes=cap_bytes)
     forgotten = store.sweep_registry(days=registry_days)
+    # Thirty days is the right horizon for archiving mail and the wrong
+    # one for addressing: ten sessions that ran and ended inside ten
+    # minutes left ten rows that a send fanned out over, and they would
+    # have sat there for a month. Evicting on hours is what keeps the
+    # registry a list of live sessions.
+    try:
+        from claude_hooks.mailbox.store import DEFAULT_EVICT_HOURS
+        evicted = store.evict_stale(
+            hours=DEFAULT_EVICT_HOURS if evict_hours is None else evict_hours)
+    except Exception:  # pragma: no cover — older store, or unreachable
+        log.debug("mailbox: stale eviction failed", exc_info=True)
+        evicted = 0
     return {"expired": len(expired), "archived": [p.name for p in archived],
             "deleted": deleted, "dropped": dropped,
-            "sessions_forgotten": forgotten}
+            "sessions_forgotten": forgotten, "sessions_evicted": evicted}

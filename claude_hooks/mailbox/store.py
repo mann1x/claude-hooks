@@ -35,6 +35,19 @@ log = logging.getLogger("claude_hooks.mailbox")
 DEFAULT_EXPIRY_DAYS = 180
 DEFAULT_REGISTRY_DAYS = 30
 
+#: How long since ``last_seen`` a registration still counts as a live
+#: session. ``touch()`` runs once per turn, so an *open but idle* session
+#: goes untouched for as long as its user is away — which is why nothing
+#: may be lost by falling outside this window: a stale row is ignored for
+#: addressing, and :meth:`touch` re-creates one that has been evicted.
+DEFAULT_LIVE_HOURS = 12
+
+#: Grace before a stale registration is physically deleted. Deliberately
+#: longer than the window above, so a row stops being *used* before it
+#: stops being *readable* — the ten dead rows behind the eleven-fold
+#: delivery were the only evidence of what had happened.
+DEFAULT_EVICT_HOURS = 24
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -173,8 +186,46 @@ class MailboxStore:
                 raise
         return [_as_session(r) for r in others]
 
-    def touch(self, session_id: str) -> None:
-        """Refresh ``last_seen``. Called off the hook path."""
+    def forget(self, session_id: str) -> bool:
+        """Drop this session's registration. Called at SessionEnd.
+
+        Without it a registration lived until the 30-day sweep, so every
+        session that had *ever* run in a directory stayed listed under
+        its alias. Ten short sessions in ten minutes left ten dead rows
+        beside the live one, which is how ``xollama@solidpc`` came to
+        have eleven registrations — visible in ``mailbox-sessions``, and
+        counted as ten peers by the SessionStart collision warning.
+
+        A session that ends and is later resumed re-registers at
+        SessionStart, so forgetting here loses nothing. A session that
+        dies without SessionEnd still falls to the sweep.
+        """
+        self.ensure_schema()
+        with self._lock:
+            conn = self._connect()
+            try:
+                with _cursor(conn) as cur:
+                    cur.execute(self._q(
+                        "DELETE FROM session_registry WHERE session_id = ?"),
+                        (session_id,))
+                    gone = cur.rowcount or 0
+                conn.commit()
+            except Exception:
+                self._rollback(conn)
+                raise
+        return gone > 0
+
+    def touch(self, session_id: str, *, alias: Optional[str] = None,
+              host: Optional[str] = None, cwd: str = "") -> None:
+        """Refresh ``last_seen``, re-registering if the row is gone.
+
+        Called once per turn off the hook path. The re-registration is
+        what makes eviction safe: a session open long enough to fall
+        outside the live window is not dead, it is quiet, and its next
+        turn must put it back rather than leave it unaddressable for the
+        rest of its life. Without ``alias`` there is nothing to rebuild
+        from, so the refresh is best-effort as before.
+        """
         self.ensure_schema()
         with self._lock:
             conn = self._connect()
@@ -183,13 +234,36 @@ class MailboxStore:
                     cur.execute(self._q(
                         "UPDATE session_registry SET last_seen = ? "
                         "WHERE session_id = ?"), (self._now(), session_id))
+                    missing = (cur.rowcount or 0) == 0
+                    if missing and alias:
+                        now = self._now()
+                        cur.execute(self._q(
+                            "INSERT INTO session_registry "
+                            "(session_id, alias, host, os, cwd, started_at, "
+                            " last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)"),
+                            (session_id, alias, host or host_name(),
+                             os_name(), cwd, now, now))
                 conn.commit()
             except Exception:
                 self._rollback(conn)
                 raise
 
     def sessions(self, *, alias: Optional[str] = None,
-                 os_filter: Optional[str] = None) -> list[Session]:
+                 os_filter: Optional[str] = None,
+                 include_stale: bool = False,
+                 live_hours: Optional[float] = None) -> list[Session]:
+        """Live registrations, newest-seen first within an alias.
+
+        Stale rows are excluded by default, because a registration is
+        evidence that a session *was* running and addressing needs to
+        know which ones still are. Until this filter existed, an alias
+        accumulated a row per session that had ever run in its directory
+        — `xollama@solidpc` reached eleven — and every one of them was
+        treated as a live addressee.
+
+        Pass ``include_stale=True`` to see everything, which is what an
+        operator listing the registry wants; delivery never does.
+        """
         self.ensure_schema()
         sql = ("SELECT " + ", ".join(schema.SESSION_COLUMNS) +
                " FROM session_registry")
@@ -200,6 +274,10 @@ class MailboxStore:
         if os_filter:
             where.append("os = ?")
             params.append(os_filter)
+        if not include_stale:
+            hours = (DEFAULT_LIVE_HOURS if live_hours is None else live_hours)
+            where.append("last_seen >= ?")
+            params.append(self._at(utcnow() - timedelta(hours=hours)))
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY alias, host"
@@ -237,6 +315,38 @@ class MailboxStore:
                 raise
         return n
 
+    def evict_stale(self, *, hours: float = DEFAULT_EVICT_HOURS) -> int:
+        """Physically remove registrations nobody has touched in ``hours``.
+
+        The counterpart of :meth:`sweep_registry`, which keeps a 30-day
+        horizon for the archive pass. Thirty days is the wrong scale for
+        *addressing*: ten sessions that ran and ended inside ten minutes
+        left ten rows that a send then fanned out over, and they would
+        have sat there for a month.
+
+        Nothing is lost. Messages already addressed to a forgotten
+        session keep their own expiry, an alias's mail is addressed to
+        the alias rather than to a row, and a session still running
+        re-creates its registration on the next :meth:`touch`.
+        """
+        self.ensure_schema()
+        cutoff = self._at(utcnow() - timedelta(hours=hours))
+        with self._lock:
+            conn = self._connect()
+            try:
+                with _cursor(conn) as cur:
+                    cur.execute(self._q(
+                        "DELETE FROM session_registry WHERE last_seen < ?"),
+                        (cutoff,))
+                    n = cur.rowcount or 0
+                conn.commit()
+            except Exception:
+                self._rollback(conn)
+                raise
+        if n:
+            log.info("mailbox: evicted %d stale registration(s)", n)
+        return n
+
     # ─── sending ─────────────────────────────────────────────────────
 
     def send(self, to: str, subject: str, body: str, *,
@@ -256,7 +366,29 @@ class MailboxStore:
         address = parse_address(to)
         recipients = resolve(address, self.sessions())
 
-        group = str(uuid.uuid4()) if len(recipients) > 1 else None
+        # One row per DESTINATION, never per registration.
+        #
+        # The row that gets written carries ``to_alias`` and ``to_host``
+        # and nothing that distinguishes one session from another, so N
+        # registrations of one alias on one host produced N rows that
+        # were byte-identical apart from their id — and ``inbox()``
+        # reads by alias, so the recipient saw the same message N times.
+        # Observed live: ``xollama@solidpc`` had 11 registrations (one
+        # live session plus ten from sessions that had ended minutes
+        # apart), and a single send was delivered eleven times.
+        #
+        # A registration is not an addressee. The mailbox belongs to the
+        # alias — which is also why parking mail on an alias nobody has
+        # registered works at all — so the destination set is the
+        # distinct ``(alias, host)`` pairs, and a broadcast is a message
+        # reaching more than one of *those*, not more than one process.
+        destinations: list[tuple[str, Optional[str]]] = []
+        for r in recipients:
+            key = (r.alias, r.host)
+            if key not in destinations:
+                destinations.append(key)
+
+        group = str(uuid.uuid4()) if len(destinations) > 1 else None
         expires = self._at(utcnow() + timedelta(
             days=expires_days if expires_days is not None
             else self._expiry_days))
@@ -268,10 +400,10 @@ class MailboxStore:
             rows.append((now, from_alias, from_session, host, None,
                          address.session_id, None, None, subject, body,
                          int(priority), expires))
-        elif recipients:
-            for r in recipients:
-                rows.append((now, from_alias, from_session, host, r.alias,
-                             None, r.host, group, subject, body,
+        elif destinations:
+            for to_alias, to_host in destinations:
+                rows.append((now, from_alias, from_session, host, to_alias,
+                             None, to_host, group, subject, body,
                              int(priority), expires))
         else:
             # Nobody registered: park it on the alias. This is the point
@@ -304,7 +436,7 @@ class MailboxStore:
                 self._rollback(conn)
                 raise
         return {"ids": ids, "address": address, "recipients": recipients,
-                "broadcast_group": group}
+                "destinations": destinations, "broadcast_group": group}
 
     # ─── reading ─────────────────────────────────────────────────────
 

@@ -34,6 +34,12 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     # Best-effort, no-op when engine disabled / daemon already gone.
     _detach_lsp_engine_session(event, config)
 
+    # Mailbox — drop this session's registration, so an alias lists the
+    # sessions that exist rather than every session that ever ran in the
+    # directory. Delivery no longer fans out over the difference, but a
+    # registry full of dead rows still misreports peers at SessionStart.
+    _unregister_mailbox_session(event, config, providers)
+
     ep_cfg = config.get("episodic") or {}
     mode = (ep_cfg.get("mode") or "off").lower()
 
@@ -44,6 +50,18 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
 
     log.debug("session ended (episodic off): %s", event.get("session_id"))
     return None
+
+
+def _unregister_mailbox_session(event: dict, config: dict, providers) -> None:
+    try:
+        from claude_hooks.mailbox import hook as mailbox_hook
+    except Exception:  # pragma: no cover — mailbox optional
+        return
+    try:
+        mailbox_hook.unregister_session(
+            event=event, config=config, providers=providers)
+    except Exception:  # pragma: no cover — never fail the hook
+        log.debug("mailbox unregister failed", exc_info=True)
 
 
 def _detach_lsp_engine_session(event: dict, config: dict) -> None:

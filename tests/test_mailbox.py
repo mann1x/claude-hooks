@@ -582,6 +582,205 @@ class SchemaConstraintTests(StoreHarness):
                 self.db.conn.commit()
 
 
+class OneMailboxPerAliasTests(StoreHarness):
+    """A registration is not an addressee.
+
+    Reported live on 2026-09-18: one `mailbox-send` call was delivered
+    **eleven times**. `xollama@solidpc` had eleven registrations — one
+    live session plus ten from sessions that had ended minutes apart —
+    and `send()` wrote one row per registration. The rows carry
+    `to_alias` and `to_host` and nothing that distinguishes one session
+    from another, so all eleven were byte-identical apart from their id,
+    and `inbox()` reads by alias, so the recipient saw eleven copies.
+
+    Nothing about that was a retry, and nothing about it was visible to
+    the sender: the confirmation listed the same label eleven times.
+    """
+
+    def _register_many(self, alias, host, n):
+        for i in range(n):
+            self.register(alias, host, sid=f"{alias}-{host}-{i}")
+
+    def test_eleven_registrations_deliver_once(self):
+        self._register_many("xollama", self.HOST, 11)
+        self.assertEqual(len(self.store.sessions()), 11)
+        res = self.store.send(f"xollama@{self.HOST}", "s", "b",
+                              from_alias="me")
+        self.assertEqual(len(res["ids"]), 1,
+                         "one send, one row per mailbox")
+        self.assertIsNone(res["broadcast_group"],
+                          "a single mailbox is not a broadcast")
+        self.assertEqual(res["destinations"], [("xollama", self.HOST)])
+
+    def test_the_recipient_sees_one_copy(self):
+        self._register_many("xollama", self.HOST, 11)
+        self.store.send(f"xollama@{self.HOST}", "s", "b", from_alias="me")
+        self.assertEqual(len(self.store.inbox(alias="xollama")), 1)
+
+    def test_a_restarted_session_does_not_make_its_alias_unaddressable(self):
+        """The bare-alias guard counted rows where it meant hosts.
+
+        With eleven registrations on one host it raised "`xollama` is
+        registered on 1 hosts: solidpc" and refused to send — a session
+        that merely restarted eleven times locked its own alias out.
+        """
+        self._register_many("xollama", self.HOST, 11)
+        res = self.store.send("xollama", "s", "b", from_alias="me")
+        self.assertEqual(len(res["ids"]), 1)
+
+    def test_a_genuine_cross_host_ambiguity_still_refuses(self):
+        # The guard must keep working: same alias, two hosts, two
+        # mailboxes, and no way to pick one.
+        self.register("osync", "solidpc")
+        self.register("osync", "pandorum")
+        with self.assertRaises(AddressError):
+            self.store.send("osync", "s", "b", from_alias="me")
+
+    def test_broadcast_counts_hosts_not_registrations(self):
+        self._register_many("osync", "solidpc", 4)
+        self._register_many("osync", "pandorum", 3)
+        res = self.store.send("osync*", "s", "b", from_alias="me")
+        self.assertEqual(len(res["ids"]), 2, "one row per host, not per row")
+        self.assertIsNotNone(res["broadcast_group"])
+        self.assertEqual(sorted(h for _, h in res["destinations"]),
+                         ["pandorum", "solidpc"])
+
+    def test_the_confirmation_names_each_mailbox_once(self):
+        from claude_hooks.mailbox.addressing import (
+            describe_recipients,
+            parse_address,
+        )
+        self._register_many("xollama", self.HOST, 11)
+        sessions = self.store.sessions()
+        addr = parse_address(f"xollama@{self.HOST}")
+        text = describe_recipients(sessions, addr)
+        self.assertEqual(text.count("xollama"), 1,
+                         f"repeated the same mailbox: {text}")
+
+
+class ForgetTests(StoreHarness):
+    """SessionEnd drops the registration, or dead rows pile up.
+
+    Nothing unregistered a session, and a row lived until the 30-day
+    sweep, so an alias listed every session that had *ever* run in the
+    directory. Ten short sessions in ten minutes is all it took.
+    """
+
+    def test_forget_removes_only_that_session(self):
+        self.register("osync", self.HOST, sid="live")
+        self.register("osync", self.HOST, sid="dead")
+        self.assertTrue(self.store.forget("dead"))
+        left = [s.session_id for s in self.store.sessions()]
+        self.assertEqual(left, ["live"])
+
+    def test_forgetting_an_unknown_session_is_not_an_error(self):
+        self.assertFalse(self.store.forget("never-existed"))
+
+    def test_session_end_unregisters(self):
+        # The wiring, not the store: a fix nothing calls changes nothing.
+        import inspect
+        from claude_hooks.hooks import session_end
+        src = inspect.getsource(session_end)
+        self.assertIn("_unregister_mailbox_session", src)
+        self.assertIn("unregister_session", src)
+
+
+class StaleEvictionTests(StoreHarness):
+    """A registration is evidence a session *was* running.
+
+    Ten sessions that ran and ended inside ten minutes left ten rows
+    beside the live one, and the only eviction was a 30-day sweep — the
+    right horizon for archiving mail and the wrong one for addressing.
+    Three layers now: stale rows are not addressees, they are physically
+    evicted on hours, and a quiet session re-creates its own row so
+    eviction can never silence it.
+    """
+
+    def _age(self, session_id, hours):
+        """Backdate last_seen, the way a session that ended looks."""
+        from datetime import timedelta
+        from claude_hooks.mailbox.store import utcnow
+        cutoff = self.store._at(utcnow() - timedelta(hours=hours))
+        with self.db.lock:
+            conn = self.db()
+            cur = conn.cursor()
+            cur.execute("UPDATE session_registry SET last_seen = ? "
+                        "WHERE session_id = ?", (cutoff, session_id))
+            conn.commit()
+
+    def test_a_stale_row_is_not_an_addressee(self):
+        self.register("osync", self.HOST, sid="live")
+        self.register("osync", self.HOST, sid="ended")
+        self._age("ended", 48)
+        live = [s.session_id for s in self.store.sessions()]
+        self.assertEqual(live, ["live"])
+
+    def test_an_operator_can_still_see_stale_rows(self):
+        self.register("osync", self.HOST, sid="ended")
+        self._age("ended", 48)
+        self.assertEqual(self.store.sessions(), [])
+        self.assertEqual(
+            [s.session_id for s in self.store.sessions(include_stale=True)],
+            ["ended"])
+
+    def test_a_stale_row_does_not_multiply_delivery(self):
+        # The reported bug, from the other direction: even before the
+        # physical eviction runs, a dead row cannot take a copy.
+        self.register("xollama", self.HOST, sid="live")
+        for i in range(10):
+            self.register("xollama", self.HOST, sid=f"ended-{i}")
+            self._age(f"ended-{i}", 48)
+        res = self.store.send(f"xollama@{self.HOST}", "s", "b",
+                              from_alias="me")
+        self.assertEqual(len(res["ids"]), 1)
+
+    def test_evict_stale_removes_only_the_stale(self):
+        self.register("osync", self.HOST, sid="live")
+        self.register("osync", self.HOST, sid="ended")
+        self._age("ended", 48)
+        self.assertEqual(self.store.evict_stale(hours=24), 1)
+        self.assertEqual(
+            [s.session_id for s in self.store.sessions(include_stale=True)],
+            ["live"])
+
+    def test_eviction_is_later_than_the_live_window(self):
+        # A row must stop being *used* before it stops being *readable*:
+        # those ten dead rows were the only evidence of what happened.
+        from claude_hooks.mailbox.store import (
+            DEFAULT_EVICT_HOURS,
+            DEFAULT_LIVE_HOURS,
+        )
+        self.assertGreater(DEFAULT_EVICT_HOURS, DEFAULT_LIVE_HOURS)
+
+    def test_touch_recreates_an_evicted_live_session(self):
+        """Eviction must not silence a session that is merely quiet.
+
+        ``touch`` runs once per turn, so an open session with an idle
+        user falls outside the window on its own. Its next turn has to
+        put it back.
+        """
+        self.register("osync", self.HOST, sid="quiet")
+        self.assertEqual(self.store.evict_stale(hours=0), 1)
+        self.assertEqual(self.store.sessions(include_stale=True), [])
+
+        self.store.touch("quiet", alias="osync", host=self.HOST)
+        back = self.store.sessions()
+        self.assertEqual([s.session_id for s in back], ["quiet"])
+        self.assertEqual(back[0].alias, "osync")
+
+    def test_touch_without_an_alias_cannot_rebuild(self):
+        # Nothing to rebuild from, so it stays best-effort as before
+        # rather than inventing a registration.
+        self.store.touch("unknown-session")
+        self.assertEqual(self.store.sessions(include_stale=True), [])
+
+    def test_the_maintenance_sweep_evicts(self):
+        import inspect
+        from claude_hooks.mailbox import archive
+        src = inspect.getsource(archive.sweep)
+        self.assertIn("evict_stale", src)
+
+
 if __name__ == "__main__":
     unittest.main()
 
