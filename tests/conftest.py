@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Optional
@@ -127,15 +128,41 @@ def stop_lsp_daemon_for(project_root, *, state_base=None) -> bool:
     except Exception:
         return False
     try:
+        from claude_hooks.lsp_engine.daemon import pid_is_alive
+    except Exception:
+        pid_is_alive = None                      # type: ignore[assignment]
+    try:
         sock = socket_path_for(project_root, base=state_base)
         if not _is_socket_alive(sock):
             return False
         client = LspEngineClient(sock, session_id="pytest-teardown")
         client.connect()
+        pid = None
         try:
-            return client.shutdown_daemon()
+            try:
+                pid = (client.status() or {}).get("pid")
+            except Exception:
+                pid = None
+            # The ack is not the outcome, and its absence is not a
+            # failure. ``shutdown`` replies *before* tearing down, so a
+            # daemon that goes quickly closes the connection first and
+            # the reply never lands. Returning that raised this helper's
+            # answer to False for a daemon it had just stopped — which
+            # under load failed the leak guard about one run in three,
+            # the same "an ack is not an exit" confusion that made the
+            # supervisor report survivors.
+            try:
+                acked = bool(client.shutdown_daemon())
+            except Exception:
+                acked = False
         finally:
             client.close()
+        if pid is None or pid_is_alive is None:
+            return acked
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline and pid_is_alive(pid):
+            time.sleep(0.05)
+        return not pid_is_alive(pid)
     except Exception:
         return False
 
