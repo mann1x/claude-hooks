@@ -1,0 +1,31 @@
+# Normalise line endings.
+#
+# pandorum rewrites files with CRLF while core.autocrlf=false, so a pull
+# there aborts with "local changes would be overwritten" for files whose
+# content is byte-identical. On 2026-09-16 that blocked a deploy with a
+# 300-insertion/300-deletion diff on lsp_integration.py in which not one
+# character differed — `git diff --ignore-cr-at-eol` showed nothing.
+#
+# Checking text out as LF everywhere makes that impossible rather than
+# merely unlikely.
+* text=auto eol=lf
+
+# Windows-only entry points must keep CRLF: cmd.exe mis-parses LF-only
+# batch files, and these are the shims that launch everything on that
+# host.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary — never touch, never diff as text.
+*.png binary
+*.jpg binary
+*.gif binary
+*.pdf binary
+*.zip binary
+*.gz  binary
+*.db  binary
+*.sqlite binary
+*.sqlite3 binary
+*.llamafile binary
+*.gguf binary

@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.16.0** — ~5.7k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.17.0** — ~6.4k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -330,6 +330,36 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > unmapped extension means no server is ever launched. Both hosts now
 > run all nine servers with TypeScript, Python and bash verified live.
 > See [`docs/lsp-engine.md`](docs/lsp-engine.md).
+>
+> v1.17 takes over the `lsp` MCP surface and re-keys the engine. The
+> twelve `lsp` tools now run on **our** server
+> (`claude_hooks/lsp_mcp/`) instead of `node /usr/local/bin/cclsp`,
+> with a 12/12 conformance suite: cclsp cached its config at startup,
+> so `restart_server` relaunched the language server with the command
+> it had cached and reported success, and a config change could not
+> take effect without restarting the MCP client. Here the file's mtime
+> is checked per request. The engine gains a full **navigation
+> surface** (definition / references / implementation / hover / call
+> hierarchy / symbols / rename) whose answers carry provenance —
+> `consulted`, `failures`, `not_running`, `scan_truncated_at` and a
+> `trustworthy` flag — so a search that stopped at a package boundary
+> says so rather than returning a short list that looks complete.
+> The daemon is re-keyed to the **repository** boundary
+> (`.claude-hooks/lsp-root` > `.git` > narrow root) holding a bounded
+> pool of narrowly-rooted engines: language servers must stay narrow
+> (tsserver rooted at a 6.1 GB monorepo measured 0 references in
+> 81.7 s) but keying the *daemon* there too had produced 30 daemons
+> for one checkout of cline and 37 for one of opencoti. Also new: the
+> **session mailbox** (inter-session messaging, 8 MCP tools,
+> daemon-owned sweep, verified solidpc↔pandorum) and **daemon
+> supervision** — `lsp list|reload|stop|reap`, an idle reaper, and a
+> named `wedged` state for a daemon whose process is up, socket down
+> and lock still held. `scripts/deploy.py` now stops the lsp_engine
+> daemons, which are the artifact class it exists for: nothing else
+> ever replaced one, so a deploy shipped new code and every daemon
+> kept serving the old indefinitely. See
+> [`docs/lsp-engine.md`](docs/lsp-engine.md) and
+> [`docs/lsp-mcp.md`](docs/lsp-mcp.md).
 
 ---
 

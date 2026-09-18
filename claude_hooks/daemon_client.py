@@ -413,3 +413,82 @@ def chat_model_gc(
         return {"available": False,
                 "reason": resp.get("error", "unknown")}
     return resp.get("result") or {}
+
+
+# ─── lsp_engine supervision (v1.17) ──────────────────────────────────
+#
+# The lsp_engine daemons are not spawned by the claude-hooks daemon —
+# they are lazy-spawned by whoever has a project in hand — so these are
+# a supervisor's verbs, not a launcher's: report, reload, stop, reap.
+
+
+def _lsp_call(event: str, payload: dict, *, host: str, port: Optional[int],
+              secret_path: Path, timeout: float) -> Optional[dict]:
+    resp = call(event, payload, host=host, port=port,
+                secret_path=secret_path, timeout=timeout)
+    if resp is None:
+        return None
+    if not resp.get("ok"):
+        return {"available": False, "reason": resp.get("error", "unknown")}
+    return resp.get("result") or {}
+
+
+def lsp_list(
+    *,
+    host: str = DEFAULT_HOST,
+    port: Optional[int] = None,
+    secret_path: Path = DEFAULT_SECRET_PATH,
+    timeout: float = 15.0,
+) -> Optional[dict]:
+    """Every lsp_engine daemon on this host, with its engines.
+
+    The question that had no answer before: ``lsp_engine status`` reports
+    on one project, if you already know which one to ask about.
+    """
+    return _lsp_call("_lsp_list", {}, host=host, port=port,
+                     secret_path=secret_path, timeout=timeout)
+
+
+def lsp_reload(
+    project: Optional[str] = None,
+    *,
+    config: bool = True,
+    host: str = DEFAULT_HOST,
+    port: Optional[int] = None,
+    secret_path: Path = DEFAULT_SECRET_PATH,
+    timeout: float = 60.0,
+) -> Optional[dict]:
+    """Reload one daemon, or every daemon when ``project`` is None.
+
+    Fleet-wide matters after an upgrade or an edit to a shared
+    ``cclsp.json``: both change what every daemon should be running, and
+    a daemon holds the config it parsed at startup.
+    """
+    return _lsp_call("_lsp_reload", {"project": project, "config": config},
+                     host=host, port=port, secret_path=secret_path,
+                     timeout=timeout)
+
+
+def lsp_stop(
+    project: Optional[str] = None,
+    *,
+    host: str = DEFAULT_HOST,
+    port: Optional[int] = None,
+    secret_path: Path = DEFAULT_SECRET_PATH,
+    timeout: float = 60.0,
+) -> Optional[dict]:
+    """Stop one lsp_engine daemon, or all of them."""
+    return _lsp_call("_lsp_stop", {"project": project}, host=host, port=port,
+                     secret_path=secret_path, timeout=timeout)
+
+
+def lsp_reap(
+    *,
+    host: str = DEFAULT_HOST,
+    port: Optional[int] = None,
+    secret_path: Path = DEFAULT_SECRET_PATH,
+    timeout: float = 60.0,
+) -> Optional[dict]:
+    """Run the reaper pass now: orphaned daemons, idle daemons, dead state."""
+    return _lsp_call("_lsp_reap", {}, host=host, port=port,
+                     secret_path=secret_path, timeout=timeout)

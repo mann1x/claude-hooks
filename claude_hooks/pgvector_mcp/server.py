@@ -33,10 +33,15 @@ from typing import Any, Optional
 
 from claude_hooks.config import load_config
 from claude_hooks.dispatcher import build_providers
+from claude_hooks.mcp_stdio import force_utf8_stdio
 from claude_hooks.providers.base import Provider
 from claude_hooks.providers.pgvector import PgvectorProvider
 
 log = logging.getLogger("claude_hooks.pgvector_mcp")
+
+#: "not yet looked up", so a genuine None is cached rather than
+#: retried on every call.
+_UNSET = object()
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "claude-hooks-pgvector"
@@ -411,6 +416,7 @@ class McpServer:
     def __init__(self, provider: PgvectorProvider):
         self.provider = provider
         self._initialized = False
+        self._mailbox_tools: Any = _UNSET
 
     def handle(self, msg: dict) -> Optional[dict]:
         method = msg.get("method")
@@ -426,7 +432,7 @@ class McpServer:
         if method == "notifications/initialized":
             return None
         if method == "tools/list":
-            return self._reply(rpc_id, {"tools": _tool_catalog()})
+            return self._reply(rpc_id, {"tools": self._catalog()})
         if method == "tools/call":
             name = params.get("name") or ""
             args = params.get("arguments") or {}
@@ -448,6 +454,34 @@ class McpServer:
             return self._reply(rpc_id, error={"code": -32601, "message": f"Method not found: {method}"})
         return None
 
+    def _catalog(self) -> list[dict]:
+        """Memory tools plus the mailbox, when there is a store to put
+        it on. Advertising a tool the host cannot serve would be worse
+        than omitting it: the model would call it and get an error it
+        cannot act on."""
+        tools = _tool_catalog()
+        if self._mailbox() is not None:
+            from claude_hooks.mailbox.tools import tool_catalog
+            tools = tools + tool_catalog()
+        return tools
+
+    def _mailbox(self):
+        """Bound lazily and cached, including the None.
+
+        Built on the provider's own connection, so it inherits the
+        dead-handle detection that makes a Postgres restart survivable.
+        """
+        if self._mailbox_tools is _UNSET:
+            try:
+                from claude_hooks.mailbox.integration import (
+                    tools_for_provider,
+                )
+                self._mailbox_tools = tools_for_provider(self.provider)
+            except Exception:
+                log.warning("mailbox unavailable", exc_info=True)
+                self._mailbox_tools = None
+        return self._mailbox_tools
+
     def _reply(self, rpc_id: Any, result: Optional[dict] = None,
                error: Optional[dict] = None) -> dict:
         out: dict = {"jsonrpc": "2.0", "id": rpc_id}
@@ -458,6 +492,13 @@ class McpServer:
         return out
 
     def _dispatch_tool(self, name: str, args: dict) -> str:
+        if name.startswith("mailbox-"):
+            mb = self._mailbox()
+            if mb is None:
+                return ("The mailbox needs a SQL-backed memory store "
+                        "(pgvector or sqlite_vec); this host has none "
+                        "configured.")
+            return mb.call(name, args)
         if name == "pgvector-find":
             q = str(args.get("query") or "")
             k = int(args.get("k") or 5)
@@ -588,6 +629,7 @@ def serve_stdio(provider: Optional[Provider] = None) -> int:
 
     Returns 0 on clean EOF, 1 on fatal init failure.
     """
+    force_utf8_stdio()
     if provider is None:
         cfg = load_config()
         providers = build_providers(cfg)

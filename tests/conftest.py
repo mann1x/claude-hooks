@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Optional
@@ -60,6 +61,151 @@ def pytest_runtest_makereport(item, call):
             os.name = saved
 
 
+# --------------------------------------------------------------------------- #
+# lsp_engine daemon safety net (session-scoped)
+# --------------------------------------------------------------------------- #
+# Tests that exercise the MCP registry spawn a REAL lsp_engine daemon, and
+# tearing the registry down does not stop it. That is correct in production —
+# ``DaemonEngine.shutdown`` detaches only, because the daemon is shared with
+# the PostToolUse hook and every other session in the project, so reaping one
+# handle must not take their language servers down. In a test it is a leak:
+# the daemon was spawned for a ``tmp_path`` that is deleted moments later, so
+# nothing will ever attach to it again and nothing will ever stop it.
+#
+# The bill is not theoretical. On solidpc (2026-09-16) this had accumulated
+# 156 live daemons rooted at deleted temp directories, holding 3.37 GB of RSS
+# between them and their language servers.
+#
+# ``addCleanup`` in each test is the wrong layer: it is per-test bookkeeping
+# for a process-level resource, and the next test to spawn a daemon has to
+# remember. This runs once at session end and stops any daemon this session
+# started under the temp directory. Tests that want deterministic teardown can
+# still call ``stop_lsp_daemon_for`` (below) directly.
+def _live_lsp_daemons() -> dict[int, str]:
+    """pid -> project root, for every lsp_engine daemon on this host.
+
+    Linux-only (reads ``/proc``); returns ``{}`` elsewhere, which turns the
+    whole net into a no-op rather than a failure. Windows CI runs short
+    sessions on a machine that is not also the development host, so the
+    accumulation this guards against does not arise there.
+    """
+    out: dict[int, str] = {}
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return out
+    try:
+        entries = list(proc.iterdir())
+    except OSError:
+        return out
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = (entry / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue          # exited between listing and reading
+        parts = [a.decode("utf-8", "replace") for a in argv if a]
+        if not (any("claude_hooks.lsp_engine" in a for a in parts)
+                and "daemon" in parts and "--project" in parts):
+            continue
+        try:
+            out[int(entry.name)] = parts[parts.index("--project") + 1]
+        except (ValueError, IndexError):
+            continue
+    return out
+
+
+def stop_lsp_daemon_for(project_root, *, state_base=None) -> bool:
+    """Stop the lsp_engine daemon serving ``project_root``.
+
+    For a test that spawned one against a throwaway tree. Returns False
+    when nothing was listening, which is the common case and not an error.
+    """
+    try:
+        from claude_hooks.lsp_engine.client import LspEngineClient
+        from claude_hooks.lsp_engine.daemon import socket_path_for
+        from claude_hooks.lsp_engine.ipc import _is_socket_alive
+    except Exception:
+        return False
+    try:
+        from claude_hooks.lsp_engine.daemon import pid_is_alive
+    except Exception:
+        pid_is_alive = None                      # type: ignore[assignment]
+    try:
+        sock = socket_path_for(project_root, base=state_base)
+        if not _is_socket_alive(sock):
+            return False
+        client = LspEngineClient(sock, session_id="pytest-teardown")
+        client.connect()
+        pid = None
+        try:
+            try:
+                pid = (client.status() or {}).get("pid")
+            except Exception:
+                pid = None
+            # The ack is not the outcome, and its absence is not a
+            # failure. ``shutdown`` replies *before* tearing down, so a
+            # daemon that goes quickly closes the connection first and
+            # the reply never lands. Returning that raised this helper's
+            # answer to False for a daemon it had just stopped — which
+            # under load failed the leak guard about one run in three,
+            # the same "an ack is not an exit" confusion that made the
+            # supervisor report survivors.
+            try:
+                acked = bool(client.shutdown_daemon())
+            except Exception:
+                acked = False
+        finally:
+            client.close()
+        if pid is None or pid_is_alive is None:
+            return acked
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline and pid_is_alive(pid):
+            time.sleep(0.05)
+        return not pid_is_alive(pid)
+    except Exception:
+        return False
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_leaked_lsp_daemons():
+    """Stop temp-rooted lsp_engine daemons this session started."""
+    import signal
+    import tempfile
+
+    before = set(_live_lsp_daemons())
+    yield
+    tmp_root = os.path.realpath(tempfile.gettempdir())
+    for pid, root in _live_lsp_daemons().items():
+        if pid in before:
+            continue          # not ours — someone else's working daemon
+        try:
+            real = os.path.realpath(root)
+        except OSError:       # pragma: no cover — defensive
+            continue
+        if not real.startswith(tmp_root + os.sep):
+            # A daemon for a real project. A test should not have started
+            # one, but stopping it would take a developer's warm servers
+            # with it, so leave it and say so.
+            print(f"\n  ⚠  test session left an lsp_engine daemon for a "
+                  f"non-temp project: pid={pid} {root}")
+            continue
+        if not stop_lsp_daemon_for(root):
+            # Its socket may already be unlinked (its tmpdir is gone),
+            # which leaves no way to ask politely.
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                pass
+        # Reap it. ``start_new_session`` detaches the session but does
+        # not reparent, so a daemon spawned by this run is still our
+        # child and stays a zombie until someone waits on it.
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except (ChildProcessError, OSError):
+            pass
+
+
 def pytest_configure(config):
     """Loud warning if the test runner isn't the claude-hooks conda env.
 
@@ -73,9 +219,17 @@ def pytest_configure(config):
     import sys
     import sysconfig
 
+    # Compared with separators normalised: on pandorum the interpreter
+    # is ...\envs\claude-hooks\python.exe, so a POSIX-spelled marker
+    # never matched and every Windows run printed this warning while
+    # running under exactly the env it was demanding.
     expected_marker = "envs/claude-hooks"
-    exe = sys.executable or ""
-    prefix = sysconfig.get_config_var("prefix") or ""
+
+    def _norm(p: str) -> str:
+        return (p or "").replace("\\", "/")
+
+    exe = _norm(sys.executable)
+    prefix = _norm(sysconfig.get_config_var("prefix") or "")
     if expected_marker not in exe and expected_marker not in prefix:
         msg = (
             f"\n\n  ⚠  pytest is NOT running under the claude-hooks conda env.\n"

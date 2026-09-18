@@ -30,6 +30,7 @@ Design choices:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -373,7 +374,59 @@ def _build_parser() -> argparse.ArgumentParser:
     p_tail = sub.add_parser("tail", help="show last N lines or log command")
     p_tail.add_argument("-n", type=int, default=80,
                         help="number of trailing lines (default 80)")
+
+    p_lsp = sub.add_parser(
+        "lsp", help="supervise the per-repository lsp_engine daemons")
+    lsp_sub = p_lsp.add_subparsers(dest="lsp_cmd", required=True)
+    lsp_sub.add_parser("list", help="every lsp_engine daemon on this host")
+    p_rl = lsp_sub.add_parser(
+        "reload",
+        help="stop the language servers and re-read the config, keeping "
+             "the daemon and its sessions")
+    p_rl.add_argument("--project", default=None,
+                      help="one project (any path inside it); "
+                           "default: every daemon on the host")
+    p_rl.add_argument("--keep-config", action="store_true",
+                      help="stop the servers but keep the loaded config")
+    p_ls = lsp_sub.add_parser("stop", help="stop lsp_engine daemons")
+    p_ls.add_argument("--project", default=None,
+                      help="one project; default: every daemon on the host")
+    lsp_sub.add_parser(
+        "reap", help="stop orphaned and idle daemons, clear dead state")
     return ap
+
+
+def cmd_lsp(args, **common) -> int:
+    """Supervisor verbs for the lsp_engine daemons.
+
+    These daemons are lazy-spawned by whoever needs one and outlive that
+    process on purpose — a warm language server is the whole point. What
+    was missing is everything after: nothing could list them, nothing
+    reaped one whose project had been deleted, and nothing could apply a
+    config change without killing it, which on Windows had no supported
+    route.
+    """
+    from claude_hooks import daemon_client as dc
+
+    if args.lsp_cmd == "list":
+        res = dc.lsp_list(**common)
+    elif args.lsp_cmd == "reload":
+        res = dc.lsp_reload(args.project, config=not args.keep_config,
+                            **common)
+    elif args.lsp_cmd == "stop":
+        res = dc.lsp_stop(args.project, **common)
+    else:
+        res = dc.lsp_reap(**common)
+
+    if res is None:
+        print("daemon NOT RESPONDING — start it with "
+              "`claude-hooks-daemon-ctl start`")
+        return 2
+    if not res.get("available", True):
+        print(f"unavailable: {res.get('reason')}")
+        return 1
+    print(json.dumps(res, indent=2))
+    return 0
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -393,6 +446,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return cmd_restart(**common)
     if args.cmd == "tail":
         return cmd_tail(n=args.n)
+    if args.cmd == "lsp":
+        return cmd_lsp(args, **common)
     return 2  # unreachable — argparse rejects unknown subcommand
 
 

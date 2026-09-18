@@ -167,6 +167,26 @@ GPU-spawn failure flips that label to CPU mode for the daemon's
 lifetime (mirrors the v1.4 manager-global behaviour, scoped down
 to one label).
 
+### Mailbox maintenance (v1.17+)
+
+A third background thread, next to the embedding and chat-model
+reapers. Hourly (floored at 60 s, first run deferred 5 minutes after
+start) it runs `mailbox.archive.sweep()`: expired mail archived to
+quarterly zstd, *then* deleted, the archive trimmed to its cap, and
+registry entries for sessions unseen in `registry_days` forgotten.
+
+It lives here for the same reason the reapers do — the daemon is the
+only process alive between turns, and a hook would make work measured
+in days a function of how often someone types. Config is re-read every
+tick, so `hooks.mailbox.maintenance: false` takes effect without a
+restart; restarting this daemon also kills the managed llamafile, so
+runtime switches matter more here than elsewhere.
+
+Fail-open: a host with no pgvector/sqlite_vec provider has no mailbox
+and the sweep returns `None` — which is deliberately not an empty
+report, so "never ran" cannot be mistaken for "ran and found nothing".
+See [`mailbox.md`](mailbox.md) for the knobs.
+
 ## Install / autostart
 
 `install.py` prompts to register an autostart entry for your platform:

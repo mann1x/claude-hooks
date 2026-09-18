@@ -326,6 +326,15 @@ def step_services(dry: bool, skip: bool) -> Step:
     if skip:
         s.note("--skip-restart: not touching any service")
         return s
+    # Before the unit loop, and deliberately: an lsp_engine daemon is
+    # not a systemd unit, and on a host with no units at all — pandorum
+    # has none — the loop below returns early. Putting this after it
+    # would leave Windows permanently on stale daemons while reporting
+    # a clean deploy.
+    if dry:
+        s.note("[dry-run] would stop the lsp_engine daemons")
+    else:
+        _stop_lsp_daemons(s)
     units = _repo_units()
     if not units:
         s.note("no systemd unit references this repo")
@@ -399,6 +408,65 @@ def _respawn_embedder(s: Step) -> None:
         # so deploy owns the failure rather than deferring it to the
         # next recall.
         s.fail(f"embedder: did not come back up — {res}")
+
+
+def _stop_lsp_daemons(s: Step) -> None:
+    """Stop the lsp_engine daemons so they respawn on the new code.
+
+    They are the artifact class this script exists for: a long-lived
+    process holding the Python it imported at spawn, owned by no
+    systemd unit, lazy-spawned per project. Restarting services does
+    not touch one, and nothing else ever replaces it — so a deploy
+    shipped new code and every daemon on the host kept serving the old
+    code indefinitely. Reported live on 2026-09-17: a session restarted
+    *after* two deploys still drew the staleness banner, because
+    restarting the session was never what needed restarting.
+
+    Stopping is the only remedy, and ``reload`` is specifically NOT a
+    substitute: it replaces the language servers and re-reads
+    cclsp.json, but the daemon process survives, and the process is
+    what holds the stale code. Stopped daemons cost the next request a
+    cold start and nothing else — spawn-on-demand is how they start in
+    the first place.
+    """
+    try:
+        sys.path.insert(0, str(REPO))
+        from claude_hooks.lsp_engine_manager import LspEngineManager
+    except Exception as e:                    # pragma: no cover — import guard
+        s.note(f"lsp daemons: skipped ({type(e).__name__})")
+        return
+
+    # Deliberately not routed through claude-hooks-daemon: the manager
+    # talks to the lsp sockets directly, so this works on a host where
+    # the hook daemon is down — which is exactly when someone is
+    # deploying to fix it.
+    try:
+        res = LspEngineManager().stop() or {}
+    except Exception as e:
+        s.fail(f"lsp daemons: stop raised {type(e).__name__}: {e}")
+        return
+
+    # ``results`` has a row per known project root, most of which have
+    # no daemon listening — reporting "2 of 149" would read as 147
+    # failures when it is just the state-directory count.
+    rows = res.get("results") or []
+    stopped = [x for x in rows if x.get("stopped")]
+    forced = [x for x in stopped if x.get("signalled")]
+    survived = [x for x in rows
+                if x.get("was_running") and not x.get("stopped")]
+    if not stopped and not survived:
+        s.note("lsp daemons: none were running")
+    else:
+        s.note(f"lsp daemons: stopped {len(stopped)} "
+               f"(they respawn on the next request, on the new code)")
+    # A daemon that acked and stayed up is the whole reason this step
+    # verifies rather than trusting the ack, so say so rather than
+    # folding it into the count.
+    for x in forced:
+        s.note(f"lsp daemons: {x['project']} needed {x['signalled']}")
+    for x in survived:
+        s.fail(f"lsp daemons: {x['project']} (pid {x.get('pid')}) "
+               f"would not stop — it will keep serving the old code")
 
 
 # --------------------------------------------------------------------- #

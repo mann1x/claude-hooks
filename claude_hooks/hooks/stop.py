@@ -56,6 +56,36 @@ def _with_update_notice(result: Optional[dict], config: dict) -> Optional[dict]:
         return result
 
 
+def _mailbox_notice(event: dict, config: dict, providers) -> str:
+    """Mail that arrived *during* this turn.
+
+    This is the gap that matters: a turn running twenty minutes is
+    exactly when another session finishes something worth telling us,
+    and without this the message waits for the next prompt — which, if
+    you walk away, is tomorrow.
+
+    Scoped to arrivals after the turn began so it never repeats what
+    UserPromptSubmit already showed, and rendered as a one-line summary
+    rather than the full block: the turn is over, so this is a nudge to
+    the operator, not context for a model that has stopped.
+    """
+    try:
+        from claude_hooks.mailbox import hook as _mailbox
+        block = _mailbox.announce_block(
+            event=event, config=config, providers=providers,
+            since=_mailbox.turn_start(event))
+        if not block:
+            return ""
+        lines = [ln for ln in block.splitlines() if ln.startswith("- ")]
+        if not lines:
+            return ""
+        head = f"[claude-hooks] {len(lines)} new message(s) while working:"
+        return "\n".join([head] + lines)
+    except Exception as e:
+        log.debug("mailbox stop notice skipped: %s", e)
+        return ""
+
+
 def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[dict]:
     hook_cfg = (config.get("hooks") or {}).get("stop") or {}
     if not hook_cfg.get("enabled", True):
@@ -335,18 +365,22 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
         except Exception as e:
             log.debug("instinct extraction skipped: %s", e)
 
+    mailbox_notice = _mailbox_notice(event, config, providers)
+
     if not stored and not failed:
-        return _with_update_notice(None, config)
+        result = ({"systemMessage": mailbox_notice} if mailbox_notice
+                  else None)
+        return _with_update_notice(result, config)
 
     parts = []
     if stored:
         parts.append(f"stored to {', '.join(stored)}")
     if failed:
         parts.append(f"failed: {', '.join(n for n, _ in failed)}")
-    return _with_update_notice(
-        {"systemMessage": f"[claude-hooks] {' · '.join(parts)}"},
-        config,
-    )
+    message = f"[claude-hooks] {' · '.join(parts)}"
+    if mailbox_notice:
+        message = f"{message}\n{mailbox_notice}"
+    return _with_update_notice({"systemMessage": message}, config)
 
 
 # ---------------------------------------------------------------------- #

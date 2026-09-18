@@ -23,12 +23,42 @@ Two layers that look similar but solve different problems:
 | Coverage | every file the model decides to query | every file Claude Code edits via Edit/Write/MultiEdit |
 | Default | opt-in via `~/.claude.json` MCP registration | opt-in via `hooks.lsp_engine.enabled` |
 
-Both read the same `cclsp.json` for the LSP-command roster — they
-are complementary, not exclusive. Most users want at least the
+They are complementary, not exclusive. Most users want at least the
 LSP engine on (deterministic, low latency, fires automatically on
 every edit), and can layer the `cclsp` MCP on top if they want the
 model itself to be able to ask "go to definition" / "find references"
 between edits.
+
+> **They do _not_ read the same `cclsp.json`.** This page said they did
+> until 2026-09-13, and that sentence cost a day. They read the same
+> *format*, from two different files:
+>
+> | consumer | config file |
+> |---|---|
+> | LSP engine | `<project>/cclsp.json` |
+> | `cclsp` MCP (and VS Code, which shares it) | `$CCLSP_CONFIG_PATH`, in practice `~/.config/cclsp/cclsp.json` |
+>
+> The engine's file is per-project and gitignored; the MCP's is
+> user-global and hand-maintained. They drift, and the drift is silent:
+> on both hosts the engine ran 9 servers while the MCP ran 5, so
+> `mcp__lsp__get_diagnostics` answered **"No LSP servers found for
+> extensions: html, js"** for a file the engine analysed correctly.
+> `typescript`, `bash`, `lua` and `zig` had only ever been added to the
+> project file — including by the pass meant to close exactly that gap,
+> which verified the engine and called the subsystem healthy.
+>
+> Reconcile **both** after installing any language server:
+>
+> ```bash
+> python3 scripts/sync_cclsp.py --mcp            # report
+> python3 scripts/sync_cclsp.py --write --mcp    # apply
+> ```
+>
+> `--mcp` resolves each command through `shutil.which`, which honours
+> `PATHEXT`. On Windows that is load-bearing: `cclsp` spawns the binary
+> by the configured name, and a bare `typescript-language-server` does
+> not resolve to its `.CMD` shim. The MCP reloads its config only at
+> startup, so restart the Claude Code session (and VS Code) afterwards.
 
 ---
 

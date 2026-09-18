@@ -125,7 +125,7 @@ v0.7; v1.9 only adds consumer wiring.
   "state_base": null,                // override ~/.claude/lsp-engine
   "spawn_timeout_s": 5.0,            // connect_or_spawn cap
   "diagnostics_timeout_ms": 500,     // lock_timeout_ms
-  "diagnostics_wait_s": 2.0,         // diag_timeout_s
+  "diagnostics_wait_s": 8.0,         // diag_timeout_s
   "extensions_blacklist": [],        // skip these even if cclsp claims them
   "max_diagnostics_per_file": 50,    // truncate noisy files
   "log_path": "~/.claude/claude-hooks-lsp-engine.log"
@@ -459,9 +459,28 @@ python -m claude_hooks.lsp_engine status --project /path/to/project
 #   "sessions": ["session-A", "session-B"],
 #   "open_files": ["file:///.../foo.py", ...],
 #   "active_servers": ["pyright-langserver", "gopls"],
-#   "held_uris": ["/path/to/project/foo.py"]
+#   "held_uris": ["/path/to/project/foo.py"],
+#   "engines": [                      # one per package actually touched
+#     {"root": "/path/to/project/packages/a",
+#      "servers": ["typescript-language-server"],
+#      "open_files": 12, "idle_s": 4.1}
+#   ]
 # }
+
+# Stop the language servers and re-read cclsp.json + lsp-engine.toml,
+# WITHOUT stopping the daemon or dropping its sessions. Use after
+# editing the config or upgrading a server binary.
+python -m claude_hooks.lsp_engine reload --project /path/to/project
+python -m claude_hooks.lsp_engine reload --project /path/to/project --keep-config
+
+# Stop the daemon entirely and clear its state dir. The next hook
+# lazy-spawns a fresh one.
+python -m claude_hooks.lsp_engine restart --project /path/to/project
 ```
+
+`--project` accepts any path inside the repository, including a source
+file: it is resolved to the repository boundary by the same function the
+daemon and the client use. See *One daemon per repository*.
 
 ---
 
@@ -478,12 +497,357 @@ status`) uses. You'd only call them directly when debugging.
 | `did_change` | `path`, `content` | `{ok: true, forwarded: bool, queued_behind: str|null}` |
 | `did_close` | `path` | `{ok: true, closed: bool}` |
 | `diagnostics` | `path`, `timeout_ms?`, `diag_timeout_s?` | `{ok: true, diagnostics: [...], stale: bool}` |
+| `nav` | `method`, `args` | `{ok: true, nav: {...}}` — routed by `args.path` |
+| `restart` | `extensions?` | `{ok: true, restarted: [server, ...]}` |
+| `reload` | `config?` | `{ok: true, stopped: [root, ...], reloaded_config: bool, cclsp_config: str}` |
 | `status` | — | full status payload |
 | `shutdown` | — | graceful daemon stop |
 
 `stale: true` on `diagnostics` means the affinity lock didn't
 release within `query_timeout_ms` and we forwarded anyway, serving
 the owner's view (Decision 5).
+
+---
+
+## Which cclsp.json, and which project root
+
+**One resolver, shared.** `resolve_cclsp_path()` in
+`lsp_engine/config.py` is the only implementation, used by both the
+daemon and the MCP server. Order, most specific first:
+
+1. `<project_root>/cclsp.json` — the project-local file wins; it is what
+   `sync_cclsp.py` reconciles against the servers actually installed.
+2. `$CCLSP_CONFIG_PATH` — how cclsp itself was configured; the shared
+   fallback.
+3. `~/.config/cclsp/cclsp.json`.
+
+They were once two implementations in opposite orders, so the MCP could
+validate one file while the daemon served another — invisible while both
+files happened to list the same servers. The MCP now also **pins** the
+file it validated when it spawns a daemon, and if it attaches to a
+daemon that was already running with a different one, it says so rather
+than serving the difference silently.
+
+**In a monorepo the root is the package, and results say so.** The walk
+stops at the *nearest* marker, so a file in `packages/shared` roots at
+`packages/shared` — its own `package.json` shadows anything above it,
+including a repo-root `cclsp.json`. The server is then rooted at the
+package and answers correctly *for the package*, which is not the
+question the caller asked. Measured: a symbol with 443 occurrences
+across a monorepo returned **9**, all inside the declaring package.
+
+Widening the root is **not** the fix, and that was measured too. Rooted
+at that repo (6.1 GB, no root `tsconfig.json`) tsserver returned **0
+references in 81.7 s and then failed** — it falls back to an inferred
+project over the whole tree, which is the same collapse that made
+TypeScript silently useless here before. A bounded answer that says it
+is bounded beats an empty one that does not.
+
+So project-scoped results carry a `SEARCHED …` line naming the root, and
+flag when that root is a package inside a larger repository. The real
+remedy is at the language level — a `tsconfig.json` spanning the
+packages, or project references. Where one wide engine genuinely is
+viable, declare it:
+
+```bash
+touch <repo>/.claude-hooks/lsp-root   # this directory is the engine root
+```
+
+That outranks the marker walk, and a root declared this way is not
+flagged as bounded.
+
+**Project root** is not git-specific. `find_project_root()` walks up for
+any of `cclsp.json`, `.git`, `pyproject.toml`, `go.mod`, `Cargo.toml`,
+`package.json`, `compile_commands.json`, and returns None when nothing
+marks a root — deliberately, since guessing would start a language
+server over the whole disk. Dropping a `cclsp.json` in a directory is
+therefore itself the escape hatch for an otherwise unmarked folder.
+
+## One engine per project
+
+The daemon owns the project's `Engine`. The MCP server (`claude_hooks.
+lsp_mcp`) is a **client** of that daemon, not an owner of language
+servers — it attaches over the socket exactly as the PostToolUse hook
+does, spawning the daemon if it is the first to arrive.
+
+It did not always work that way. The MCP built an `Engine` in-process,
+so a project being used through both paths ran **two** fleets of
+language servers over the same tree: double the memory, double the
+indexing, two warm-ups to pay, and two diagnostic caches free to
+disagree about the same file. On the development host that was 12
+servers across three fleets holding 357 MB.
+
+Sharing one engine also means the caches are shared, so work done by one
+path is not repeated by the other: diagnostics fetched through the MCP
+come back to the hook as `source: cached`.
+
+The daemon serves navigation over a `nav` op whose method table doubles
+as the whitelist — a name not in it is unreachable, so a malformed
+request cannot reach arbitrary engine methods. Results cross the socket
+through `claude_hooks/lsp_engine/wire.py`, which preserves the
+provenance fields (`consulted`, `failures`, `progress`, `not_running`,
+`scan_truncated_at`); dropping them would let an empty result arrive
+looking like a fact about the code.
+
+If the daemon cannot be reached the MCP fails loudly with the `status`
+command to run, rather than quietly starting its own servers again.
+
+### One daemon per repository, one engine per package
+
+The two roots are not the same root, and treating them as one was the
+defect.
+
+A **language server** must be rooted narrowly. `find_project_root` stops
+at the nearest marker — a package's own `package.json` — and that is
+correct: rooted at a 6.1 GB monorepo, tsserver falls back to an inferred
+project over the whole tree and answered **0 references in 81.7 s**.
+Widening the server's root is not the fix and never was.
+
+A **daemon** keyed that narrowly is a process per package. Measured on
+the cline checkout: 3 536 source files across **30** distinct project
+roots, so 30 Python processes for one repository, each with its own
+socket, lock file, sweeper thread, idle timer and fleet — and no single
+process that could say what the repository as a whole was running, or be
+told to stop it. Nothing bounded the count because nothing counted it: a
+root is discovered per request, and each one looks reasonable alone.
+
+So the daemon moves out to the repository boundary and holds a pool:
+
+```
+~/.claude/lsp-engine/<hash of /repo>/daemon.sock     one daemon
+    ├── Engine(/repo)                                one per package
+    ├── Engine(/repo/sdk/packages/shared)              actually touched
+    └── Engine(/repo/sdk/packages/core)
+```
+
+`boundary_root_for()` picks the daemon key: `.claude-hooks/lsp-root` if
+an operator declared one, else the enclosing `.git`, else the narrow
+root. `find_project_root()` still picks each engine's key. The servers
+are configured once for the whole repository — one `cclsp.json`, read at
+the boundary — and rooted per package, because a spec's `rootDir` is
+resolved against the engine's own root.
+
+Measured after the change, same repository: **1** daemon, three engines,
+`references` in 2.09 s with `trustworthy=True`.
+
+The pool is bounded twice, since the failure it prevents is memory and
+process count rather than an error anyone would see:
+
+| knob | default | what it bounds |
+|---|---|---|
+| `pool.max_engines` | 4 | live engines; the least recently used is stopped |
+| `pool.idle_seconds` | 900 | seconds without a request before an engine is reaped |
+
+Both live in `.claude-hooks/lsp-engine.toml`:
+
+```toml
+[pool]
+max_engines = 4
+idle_seconds = 900
+```
+
+Eviction is safe by construction: the servers die, the open files are
+forgotten, and the next request rebuilds from disk — `did_change` falls
+back to `did_open`, and `_ensure_open` re-reads content it has no stamp
+for. What it costs is a cold start, which is why the bounds are on count
+and idleness rather than on time.
+
+**Every address goes through `daemon_root_for()`** — the state
+directory, the socket, the Windows pipe name, the lock file, the client
+resolving where to connect, and the daemon deciding what it owns. That
+is not tidiness. Two resolvers on one path is a bug this engine has
+already shipped twice: once as `cclsp.json` (the MCP and the daemon
+disagreeing about which file was in play) and once here, where
+`Daemon.__init__` normalised its root and `load_daemon_config` did not —
+so the daemon reported the repository's `cclsp_config` in `status` while
+holding **zero servers**, because it had read `messages.ts/cclsp.json`.
+Nothing errored. Every lookup simply returned nothing, which is what a
+project with no servers also returns.
+
+### The shim holds one connection per repository
+
+The MCP registry keys its entries on the **narrow** root, because that
+is what a result's scope warning and its relative paths are about. Every
+one of those roots now resolves to the same daemon socket, so the
+entries share one connection, refcounted, and the **last** holder
+detaches.
+
+That is not an optimisation. Every client from this process attaches
+with the same session id (`lsp-mcp-<pid>`), the daemon holds attached
+sessions in a set, and detach releases that session's file locks — so
+the first package reaped would drop the locks of every other package in
+the repository, and the daemon has no way to tell that apart from the
+session ending.
+
+The same move fixed a second disagreement: the shim resolved
+`cclsp.json` beside the *package* while the daemon resolved it at the
+*boundary*. In a monorepo with one config at the top, that made the MCP
+refuse to serve a project the daemon would have served fine. Both now
+resolve at the boundary.
+
+### Lifecycle: `reload` vs `restart`
+
+Three different things, and reaching for the wrong one is why "I have to
+close the connection to update the LSP" became routine.
+
+| verb | what it replaces | keeps |
+|---|---|---|
+| `restart_server` (MCP) / `restart` (op) | the engine's language-server clients | the daemon, its config, its sessions |
+| `reload_servers` (MCP) / `reload` (op) | every server **and** the parsed config | the daemon and its sessions |
+| `lsp_engine restart` (CLI) | the daemon process and its state dir | nothing |
+
+`restart` is the right tool for a wedged server. It is the wrong tool
+for a *changed* one: a language server is configured when it is spawned,
+and the daemon read `cclsp.json` once, at startup. So an edited config
+or an upgraded server binary reaches neither — and until `reload`
+existed the only way to apply either was to kill the daemon, which on
+Windows had no supported route at all.
+
+```bash
+# after editing cclsp.json, or upgrading a server
+python -m claude_hooks.lsp_engine reload --project /path/to/repo
+
+# stop the servers but keep the config already loaded
+python -m claude_hooks.lsp_engine reload --project /path/to/repo --keep-config
+```
+
+From inside a session, the MCP tool does the same thing:
+`reload_servers(file_path=...)`. Both report which package engines were
+stopped and which config was re-read; the servers start again on the
+next request. A `cclsp.json` that fails to parse is reported as a failed
+reload rather than adopted — a daemon that quietly adopted an empty
+server list would answer every question with silence while claiming
+health.
+
+### De-duplication
+
+Because both callers share the engine, the daemon can answer the second
+asker without repeating the work. A diagnostics request carries
+`dedup_window_s` (config `hooks.lsp_engine.dedup_window_s`, default 60,
+`0` disables); if the file's `(mtime, size)` has not moved since a
+result was served for it, the daemon replays that result and marks it
+`deduped`. The PostToolUse hook then emits **no block at all** — the
+answer is already in the conversation, and repeating it spends tokens to
+say nothing new.
+
+Keyed on the content stamp rather than a timer, so the replay is
+identical by construction rather than merely probably identical: an edit
+changes the stamp and defeats it.
+
+**Only a settled result is ever replayed.** A cold server publishes
+nothing and then publishes everything for the same content once it has
+indexed, so pinning the empty answer would turn a timing artefact into a
+persistent wrong one.
+
+Measured on a scratch project, MCP first and the hook immediately after:
+0.50 s and a full diagnostics block with de-dup off, 0.00 s and no block
+with it on.
+
+## Supervision from the claude-hooks daemon
+
+The LSP daemons are lazy-spawned by whoever needs one first and outlive
+that process on purpose — a warm language server is the entire point.
+Nothing owned them afterwards, and the bill arrived as three separate
+problems with one root.
+
+Measured on the development host the day this was written:
+
+```
+state dirs            : 307
+live daemons          : 175
+  orphaned (tree gone): 156   -> 3.37 GB RSS
+  with a session      :  14
+  idle, tree present  :   5
+dead state dirs       : 132
+roots nested inside a repository boundary: 74
+    37 roots -> /srv/…/dev/opencoti
+    14 roots -> /srv/…/dev/omnimergekit
+```
+
+156 of the 175 live daemons were holding language servers for project
+directories that no longer existed — test fixtures under `/tmp`, scratch
+checkouts. Nothing listed them, nothing reaped them, and nothing could
+reload them. The 74 nested roots are the other half of the same story:
+37 separate daemons for one checkout of opencoti, which the boundary
+keying collapses to one.
+
+So `LspEngineManager` rides in the claude-hooks daemon alongside
+`EmbeddingManager` and `ChatModelManager`. It differs from both in one
+way that matters: **it does not spawn.** Only the caller with a project
+in hand knows the root, so the supervisor discovers what exists from the
+state directories the daemons themselves write. Discovery over a
+registry is deliberate — a registry can disagree with reality, and the
+failure mode of that disagreement is a daemon nobody can see.
+
+```bash
+claude-hooks-daemon-ctl lsp list      # every daemon, with its engines
+claude-hooks-daemon-ctl lsp reload    # fleet-wide: stop servers, re-read config
+claude-hooks-daemon-ctl lsp reload --project /path/to/repo
+claude-hooks-daemon-ctl lsp stop --project /path/to/repo
+claude-hooks-daemon-ctl lsp reap      # run the reaper pass now
+```
+
+The reaper runs every 5 minutes and distinguishes two cases:
+
+* **Orphaned** — the project directory is gone. Stopped immediately,
+  with no idle grace, because there is nothing left to be warm *for*.
+* **Idle** — the project is still there but no session has attached for
+  `idle_seconds` (default 4 h). Stopped, and re-spawned lazily by
+  whoever next needs it.
+
+A daemon with an attached session is never reaped for idleness, however
+quiet it has been: someone is in it. A daemon that is *wedged* — socket
+down, process up — keeps its state directory, because removing the lock
+of a live process invites a second daemon for the same project; it is
+reported with `wedged: true` so the distinction between "reap it" and
+"why is nothing answering" is visible.
+
+`lsp list` also reports a `stateless` list: daemons whose state
+directory has been removed — by `cleanup`, by `restart`, or by this
+reaper. On POSIX the socket inode goes with the directory, so nothing
+can connect to one again; it keeps serving the connections it already
+has and can never be reached. That is "it cannot be updated and I have
+to close the session" in its purest form, and two such daemons existed
+on this host the day the manager was written, which is why discovery
+reads the process table as well as the filesystem. They are reported and
+never auto-reaped: an unlinked socket does not mean nobody is attached,
+so stopping one takes a signal, and that is the operator's call.
+
+Stopping the claude-hooks daemon stops the *supervision*, not the LSP
+daemons. A deploy restarts the hook daemon, and that must not cost every
+open session its warm language servers.
+
+```toml
+# config/claude-hooks.json -> hooks.lsp_engine.supervision
+{"enabled": true, "idle_seconds": 14400, "reap_orphans": true}
+```
+
+### Tests must stop the daemons they start
+
+A test that exercises the MCP registry spawns a **real** daemon, and
+`reg.shutdown_all()` does not stop it — `DaemonEngine.shutdown` detaches
+only, on purpose. Correct in production; a leak in a test, whose
+`tmp_path` is deleted moments later so nothing will ever attach to that
+daemon again or stop it. That is where the 156 orphans came from.
+
+Two layers, in `tests/conftest.py`:
+
+* `stop_lsp_daemon_for(root)` — what a test calls, registered **after**
+  `tmp.cleanup` so `addCleanup`'s LIFO order stops the daemon before the
+  tree it serves disappears.
+* a session-scoped autouse fixture that stops any temp-rooted daemon the
+  run started and reaps it. Per-test bookkeeping for a process-level
+  resource is the wrong layer: the next test to spawn one has to
+  remember. A daemon for a *non-temp* project is reported and left
+  alone — stopping it would take a developer's warm servers with it.
+
+Related, and found the same way: `pid_is_alive()` now excludes zombies.
+`os.kill(pid, 0)` succeeds on one, because the PID stays allocated until
+the parent collects the exit status — and `start_new_session=True`
+detaches the session without reparenting, so a long-lived spawner (the
+MCP server, a pytest run) stays the parent. `status` reported a live
+daemon that answered nothing, and `cleanup` refused to remove the state
+dir forever.
 
 ---
 
@@ -499,13 +863,40 @@ python -m claude_hooks.lsp_engine status --project .
 ```
 
 If that PID is dead but the lock file is still around (rare crash
-scenario), `flock` will release on process death — try again. If
-the lock genuinely is held by a live but stuck daemon:
+scenario), `flock` will release on process death — try again.
+
+If `status` returns nothing at all while the lock names a live PID,
+the daemon is **wedged**: the process is up, the socket is not, and
+because it still holds the lock, nothing can spawn to replace it. The
+whole repository is out until it goes. `lsp list` names that state
+explicitly:
 
 ```bash
-kill <pid>
-# Daemon catches SIGTERM and shuts down cleanly.
+claude-hooks-daemon-ctl lsp list      # look for "wedged": true
+claude-hooks-daemon-ctl lsp stop --project /path/to/repo
 ```
+
+`stop` escalates — it asks over the socket, waits for the process to
+actually exit, then sends SIGTERM, then SIGKILL — and it reports which
+rung it had to reach. The escalation is not paranoia. A wedged daemon
+is by definition running the code from before whatever fix is being
+deployed, and **SIGTERM may do nothing at all**: if the process is
+already inside interpreter shutdown, Python's signal handlers no longer
+run. The one on solidpc on 2026-09-17 ignored SIGTERM and needed
+SIGKILL. Nothing is signalled on a PID alone — the lock's recorded
+start time must match the live process, and the process must still
+identify as an lsp_engine daemon at the moment the signal is sent.
+
+The reaper clears wedged daemons on its own sweep, so this is a way to
+not wait for it rather than the only remedy.
+
+**What caused it, and why it should not recur:** `socketserver` gives
+request threads `daemon_threads = False` and `block_on_close = True`,
+and the connection read has no timeout. One client that connected and
+went away without closing therefore pinned the process open through
+both `server_close()` and interpreter shutdown. The server subclass now
+sets both flags the other way and closes lingering connections (after a
+grace period, so in-flight replies still land) when it shuts down.
 
 ### `forwarded: false, queued_behind: <other-session>`
 
@@ -541,6 +932,185 @@ Check `cclsp.json`:
 ```bash
 cat $CCLSP_CONFIG_PATH | jq '.servers[].extensions'
 ```
+
+### TypeScript/JavaScript specifically returns empty — on one host only
+
+If `support_report()` shows `typescript-language-server` with
+`running: true`, a full capability list and an empty `stderr_tail`,
+the server is healthy and the problem is the *project boundary*.
+
+With no `tsconfig.json` / `jsconfig.json` anywhere above the file,
+tsserver opens an **inferred project** rooted at the repo and walks
+the tree. That is survivable on a clean checkout and fatal on a
+working one: on solidpc (2026-09-13) the tracked source is ~40 MB but
+the tree was **4.2 GB**, because `vendor/`, `benchmarks/`, `docs/` and
+`graphify-out/` accumulate untracked output. tsserver never finished
+the scan, so it never published — **120 s of silence**, which the
+engine reports exactly the way it reports a clean file. Nothing
+errored anywhere; TypeScript support was simply absent, and only on
+the host with the big tree. The same binary answered in **1.1 s**
+against a two-file throwaway project.
+
+The fix is a `tsconfig.json` at the repo root whose `exclude` names
+the heavy directories; the repo ships one. Confirm the split before
+blaming the binary:
+
+```bash
+du -sh --exclude=.git * | sort -rh | head        # is the tree huge?
+git ls-files '*.ts' '*.js' '*.mjs' | wc -l       # vs. what you author
+```
+
+Note `allowJs` there too. Without it `// @ts-check` in a `.js` file
+has nothing to attach to, so JavaScript reports zero diagnostics
+while TypeScript works — a quieter version of the same bug.
+
+### You shipped a fix and the behaviour did not change
+
+`python -m claude_hooks.lsp_mcp` imports the package once, at process
+start, and holds that code for the life of the process. Upgrading the
+package underneath it — `pip install -e .`, a `git pull`, a
+`scripts/deploy.py` run — does **not** reach an MCP server that is
+already running. Neither does `restart_server`: that restarts the
+*language servers* under the engine, not the Python process hosting the
+MCP tools.
+
+So a session started before the fix keeps serving pre-fix code, and the
+symptom is indistinguishable from "the fix does not work" — which costs a
+second debugging session on an already-fixed bug.
+
+Observed 2026-09-16: a `did_open` fix landed at 13:37; a peer session
+whose MCP server had started at 12:56 could only verify it by driving
+`Engine` directly in a fresh interpreter, because no amount of
+restarting language servers moved the shim. A client restart at 15:24
+picked it up immediately.
+
+**Two processes can be stale, and they have different remedies.** The
+MCP server holds its imported code, and so does the **daemon behind it**
+— which matters more now that every tool call routes through the daemon,
+because restarting the client does not restart it.
+
+Each announces itself. The MCP server prefixes its notice to tool
+output once per session; the daemon tells **each attached session once**,
+over its own responses, and both the MCP and the PostToolUse hook
+surface what it sends. A stale MCP shim and a stale daemon are reported
+separately rather than one standing in for the other.
+
+**Remedy for the MCP server: restart the client** (the Claude Code
+session), not the language servers.
+
+**Remedy for the daemon:** stop it — it respawns on the next request
+with the current code:
+
+```bash
+python -m claude_hooks.lsp_engine stop --project .
+claude-hooks-daemon-ctl lsp stop        # every daemon on this host
+```
+
+`reload` is the **wrong** verb here, and reaching for it is the natural
+mistake now that it exists: it replaces the language servers and re-reads
+`cclsp.json`, but the daemon *process* survives — and the process is what
+holds the stale code. Restarting your Claude Code session does not help
+either; the daemon outlives it deliberately.
+
+A **deploy stops them for you** (`scripts/deploy.py` → step 4), so this
+should only ever be needed for a daemon started between deploys. It did
+not always: until 2026-09-17 deploy touched only systemd units, and an
+lsp_engine daemon is not one — so a session restarted after two deploys
+still drew this banner. To see what a running server actually imported:
+
+```bash
+ps -o pid,lstart,cmd -C python | grep claude_hooks.lsp_mcp
+```
+
+Compare that start time against the commit you expect it to be running.
+If you run this from inside an agent shell, your own command line can
+match the pattern too — trust the start time, not the match count.
+
+This is the same shape as cclsp's config staleness, one level down:
+*cclsp caches config, `lsp_mcp` caches code.*
+
+**The server tells you.** The MCP server checks itself and prefixes a
+notice to its **tool output** — not only the log, because a log nobody
+reads is how a wrong clangd survived for months here — on the first
+affected call, naming both versions and the remedy:
+
+```text
+⚠  claude-hooks-lsp is serving code older than the tree on disk.
+   imported: 1.16.0 (this process, started 2026-09-16 16:16:34)
+   on disk:  1.16.0 (same version, but claude_hooks/lsp_mcp/server.py
+             changed at 2026-09-16 16:42:28, after this process
+             imported it)
+
+   Restart the MCP client — this Claude Code session — to pick it up.
+   restart_server restarts the language servers, not this process,
+   so it will not help here.
+```
+
+Shown **once per session**, on the first affected call: a banner on
+every `get_hover` becomes noise, and noise is how a real warning gets
+filtered out. It rides on every outcome — result, `ToolError` and
+unexpected exception alike — since a process serving old code is just
+as able to produce the error as the wrong answer.
+
+Two signals, because either alone has a blind spot:
+
+| Signal | Catches | Blind to |
+|---|---|---|
+| installed vs imported **version** | an upgrade under a running process | a fix with no version bump |
+| newest package **`.py` mtime** vs import time | any code-only change | — this is the load-bearing one |
+
+The version check alone would have been silent through the incident
+above: `f3c4bd3` touched twelve files and not one of them was
+`pyproject.toml`. `.pyc` is deliberately not consulted — a recompile is
+not a source change. Set `LSP_MCP_STALENESS_CHECK=0` to silence the
+notice.
+
+Deliberately an announcement and **not** an automatic re-exec: a re-exec
+would drop in-flight language servers — including a warm clangd index —
+and the client's `initialize` state, making two identical tool calls
+return differently for reasons the caller cannot see. That is the same
+failure class as "no diagnostics" meaning both *clean* and *never
+parsed*, and it cannot be fixed by adding another instance of it.
+
+### Results reflect an older version of the file
+
+Only edits routed through `did_change` reach a language server. The
+PostToolUse hook fires it for `Edit` / `Write` / `MultiEdit` — but an
+edit made with `sed`, a shell heredoc, another session, another editor
+or a `git checkout` sends nothing, and the server keeps answering from
+the content it first read.
+
+This does not surface as an error or as an empty result. Positions come
+back shifted and newly added references are simply absent, which is a
+wrong answer wearing the shape of a right one. Measured 2026-09-16 by a
+session editing through Bash in auto mode: `find_references` returned
+pre-edit line numbers and missed three call sites that had just been
+added, while symbol lookup and workspace search stayed correct — so
+nothing about the output looked suspect.
+
+The engine now **re-checks before answering**. Every request that opens
+a path compares the on-disk `(mtime, size)` against the stamp the
+server's copy corresponds to and re-sends when it moved — and a
+*project-scoped* request (references, implementation, rename, workspace
+symbols, call hierarchy, definition) re-checks **every open document**,
+not only the one it was handed.
+
+That second part matters because a sweep reads across files, and the
+server holds documents it opened itself while answering an earlier
+sweep. Left unchecked they freeze until something names them directly,
+so the sweep is wrong in both directions: a call site added to an
+unnamed file is missed, and one removed from it is still reported.
+Measured on a two-file scratch project: after deleting a file, the old
+behaviour still reported two references *inside the deleted file*. A
+file that has vanished is now closed rather than left open. The check is a `stat`, so the common path costs nothing, and
+`did_open` is idempotent — identical content is a no-op, different
+content becomes a `did_change`. Both parts of the stamp matter: an edit
+can land inside one clock tick, and a truncation that keeps the mtime
+still changes the size.
+
+Cross-checking reference sweeps with `grep` is no longer necessary for
+this reason. (`refresh_open_files()` still exists for the whole-project
+case after a branch switch; this is the per-request version of it.)
 
 ### The daemon survived my Claude Code crash
 
@@ -615,3 +1185,60 @@ python scripts/bench_lsp_engine.py --json   # machine-readable
   this page covers the "how".
 - [`COMPANION_TOOLS.md`](../COMPANION_TOOLS.md) §8 — short pitch
   for `cclsp` as the recommended baseline.
+
+## Diagnostics: "no diagnostics" vs "no answer yet"
+
+An empty diagnostics list has three meanings and only one of them is
+good news. The engine keeps them apart, because conflating them is what
+hid a dead clangd for months and then hid a live one.
+
+| what happened | `DiagnosticsResult` | rendered as |
+|---|---|---|
+| server answered, nothing wrong | `settled=True`, `items=[]` | `No diagnostics for X.` / hook silence |
+| server has not answered yet | `settled=False`, `items=[]` | `NO ANSWER YET — <server> did not publish within Ns` |
+| TU never parsed | `items` carry a driver error at 1:1 | `## LSP analysis FAILED` |
+| no compile DB | — | `not trustworthy` warning |
+| no server claims the extension | — | `NOT ANALYSED` |
+
+Use `get_diagnostics_result()` anywhere the answer is **rendered**.
+`get_diagnostics()` still returns a plain list for callers that only
+want the items — but a bare list cannot carry `settled`, and that is
+precisely the field a renderer must consult before phrasing an empty
+result as good news.
+
+### Why the wait is per-server
+
+clangd builds an AST and runs clang-tidy before its first publish; on a
+large TU with a 24 MB preamble that is many seconds. pyright publishes
+in milliseconds. A single flat timeout was wrong in both directions —
+2 s made every large C++ file report clean, and 15 s everywhere would
+stall the PostToolUse hook behind a server that had already answered.
+
+Floors live in `_DIAGNOSTICS_TIMEOUT_BY_SERVER` (clangd 15 s,
+rust-analyzer / jdtls / metals 20 s, default 5 s), keyed on the binary
+*basename* so an absolute pin like
+`.toolchains/clangd_22.1.6/bin/clangd` still matches. The floor is
+raised by measurement — twice the slowest publish yet observed on that
+client — and capped at 30 s. An explicit caller budget always wins, so
+the post-edit hook keeps its short wait on purpose.
+
+Override per server in `cclsp.json`:
+
+```json
+{ "extensions": ["cpp", "cu"], "command": ["clangd"],
+  "diagnosticsTimeout": 25 }
+```
+
+### `did_open` is idempotent, and must stay that way
+
+LSP forbids opening the same document twice, and clangd ignores the
+duplicate. An unconditional `did_open` therefore cleared the cached
+diagnostics, bumped the version, and waited for a republish that was
+never coming — so the *second* request for a file always looked clean.
+Since `get_diagnostics` opens the file first, any file already touched
+by `hover` or `find_definition` hit this.
+
+Now: identical content on an open document is a no-op, different
+content becomes a `didChange`, and `did_close` forgets the cached copy.
+`tests/test_lsp_diagnostics_settled.py::ReopenPreservesDiagnosticsTests`
+pins it.

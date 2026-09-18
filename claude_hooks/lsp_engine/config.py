@@ -55,6 +55,22 @@ class LspServerSpec:
     extensions: tuple[str, ...]
     command: tuple[str, ...]
     root_dir: str = "."
+    #: Passed through to ``initialize``. Several servers are inert
+    #: without it — pylsp's plugin set, jdtls's runtime list,
+    #: rust-analyzer's cargo settings all arrive this way and have no
+    #: other channel. cclsp reads this key, so a config written for
+    #: cclsp carries it; ignoring it would mean the field is present,
+    #: documented, and does nothing.
+    initialization_options: Optional[dict] = None
+    #: Minutes between forced restarts, cclsp's workaround for servers
+    #: that leak (it ships ``restartInterval: 5`` for pylsp). 0 = never.
+    restart_interval_minutes: float = 0.0
+    #: Seconds to wait for this server's *first* diagnostics publish.
+    #: None means "use the built-in floor for this binary, raised by
+    #: whatever we measure". Present because the built-in floors are
+    #: guesses about a machine, and the operator watching a 20-minute
+    #: cold index knows better than the table does.
+    diagnostics_timeout: Optional[float] = None
 
     def matches(self, path: str | os.PathLike) -> bool:
         suffix = Path(path).suffix.lower().lstrip(".")
@@ -84,12 +100,45 @@ class MemoryConfig:
     max_files_per_lsp: int = 500
 
 
+#: How many narrowly-rooted engines may be live at once. Each one is a
+#: fleet of language servers — a single TypeScript engine measured
+#: ~120 MB on this host — so the cap is a memory bound, not a tuning
+#: knob. Four covers the shapes that occur: a package, its sibling, the
+#: repository root, and one more being visited.
+DEFAULT_MAX_ENGINES = 4
+
+#: Idle seconds before an engine's servers are shut down. A package
+#: touched once during a sweep should not hold a tsserver for the rest
+#: of the day. Well above the gap between related requests in one task,
+#: well below a working session.
+DEFAULT_ENGINE_IDLE_S = 900.0
+
+
+@dataclass(frozen=True)
+class PoolConfig:
+    """Bounds on how many narrowly-rooted engines a daemon holds.
+
+    These are the knobs that keep a monorepo from costing what a daemon
+    per package costs. They are operator-settable because the right
+    number depends on the tree: a repo of small Python packages can
+    afford more live engines than one where every package starts a
+    tsserver.
+    """
+
+    #: Live engines before the least-recently-used one is stopped.
+    max_engines: int = DEFAULT_MAX_ENGINES
+    #: Seconds of no requests before an engine's servers are shut down.
+    #: Zero or less disables idle reaping.
+    idle_seconds: float = DEFAULT_ENGINE_IDLE_S
+
+
 @dataclass(frozen=True)
 class EngineConfig:
     preload: PreloadConfig = field(default_factory=PreloadConfig)
     compile_aware: CompileAwareConfig = field(default_factory=CompileAwareConfig)
     session_locks: SessionLockConfig = field(default_factory=SessionLockConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    pool: PoolConfig = field(default_factory=PoolConfig)
 
 
 class CclspConfigError(ValueError):
@@ -135,11 +184,41 @@ def load_cclsp_config(path: str | os.PathLike) -> list[LspServerSpec]:
             raise CclspConfigError(
                 f"{p}: servers[{i}].command must be a non-empty array",
             )
+        init_opts = entry.get("initializationOptions")
+        if init_opts is not None and not isinstance(init_opts, dict):
+            raise CclspConfigError(
+                f"{p}: servers[{i}].initializationOptions must be an object",
+            )
+        interval = entry.get("restartInterval", 0)
+        try:
+            interval = float(interval or 0)
+        except (TypeError, ValueError):
+            raise CclspConfigError(
+                f"{p}: servers[{i}].restartInterval must be a number of "
+                f"minutes",
+            ) from None
+        diag_timeout = entry.get("diagnosticsTimeout")
+        if diag_timeout is not None:
+            try:
+                diag_timeout = float(diag_timeout)
+            except (TypeError, ValueError):
+                raise CclspConfigError(
+                    f"{p}: servers[{i}].diagnosticsTimeout must be a number "
+                    f"of seconds",
+                ) from None
+            if diag_timeout <= 0:
+                raise CclspConfigError(
+                    f"{p}: servers[{i}].diagnosticsTimeout must be positive "
+                    f"— 0 would make every file report clean instantly",
+                )
         out.append(
             LspServerSpec(
                 extensions=tuple(s.lower().lstrip(".") for s in exts),
                 command=tuple(str(c) for c in cmd),
                 root_dir=str(entry.get("rootDir", ".")),
+                initialization_options=init_opts,
+                restart_interval_minutes=max(0.0, interval),
+                diagnostics_timeout=diag_timeout,
             )
         )
     return out
@@ -220,6 +299,14 @@ def load_engine_config(
                 ).items()
             },
         ),
+        pool=PoolConfig(
+            max_engines=int(
+                (merged.get("pool") or {}).get("max_engines", DEFAULT_MAX_ENGINES)
+            ),
+            idle_seconds=float(
+                (merged.get("pool") or {}).get("idle_seconds", DEFAULT_ENGINE_IDLE_S)
+            ),
+        ),
         session_locks=SessionLockConfig(
             debounce_seconds=float(
                 (merged.get("session_locks") or {}).get("debounce_seconds", 30.0)
@@ -247,3 +334,172 @@ def _deep_merge(a: dict, b: dict) -> dict:
         else:
             out[k] = v
     return out
+
+
+# ─── where cclsp.json lives ──────────────────────────────────────────
+
+
+def candidate_cclsp_paths(project_root: str | os.PathLike) -> list[Path]:
+    """Every place a project's server list may live, best first.
+
+    There is exactly one of these functions on purpose. The MCP server
+    and the daemon used to resolve this independently and in opposite
+    orders — the MCP preferring ``<root>/cclsp.json`` and the daemon
+    preferring ``$CCLSP_CONFIG_PATH`` — so the MCP could validate one
+    file while the daemon served another. Nothing failed: the two files
+    happened to list the same servers, which is precisely how that kind
+    of disagreement waits to bite.
+
+    The project-local file wins because it is the more specific
+    statement, and because it is the one ``sync_cclsp.py`` reconciles
+    against the servers actually installed. ``$CCLSP_CONFIG_PATH`` is
+    how cclsp itself was configured and stays as the shared fallback.
+    """
+    root = Path(project_root).resolve()
+    out = [root / "cclsp.json"]
+    env = os.environ.get("CCLSP_CONFIG_PATH")
+    if env:
+        out.append(Path(env).expanduser())
+    out.append(Path.home() / ".config" / "cclsp" / "cclsp.json")
+    return out
+
+
+def resolve_cclsp_path(
+    project_root: str | os.PathLike,
+) -> Optional[Path]:
+    """The first candidate that exists, or None."""
+    for candidate in candidate_cclsp_paths(project_root):
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:      # pragma: no cover — unreadable parent
+            continue
+    return None
+
+
+# ─── project roots ───────────────────────────────────────────────────
+#
+# One implementation, in the engine layer, because both the daemon and
+# the MCP server need it. They used to be separate for cclsp.json and
+# disagreed silently; this does not repeat that.
+
+#: Files that mark a directory as a project root, most specific first.
+#: ``cclsp.json`` wins because it is the thing that actually configures
+#: an engine; a repo without one has no servers to route to anyway.
+_ROOT_MARKERS = ("cclsp.json", ".git", "pyproject.toml", "go.mod",
+                 "Cargo.toml", "package.json", "compile_commands.json")
+
+
+
+def find_project_root(path: str | os.PathLike) -> Optional[Path]:
+    """Walk up from ``path`` to the nearest project root.
+
+    Returns None when nothing marks a root, which the caller reports as
+    such — guessing the filesystem root would start a language server
+    over the whole disk, which is the 4.2 GB inferred-project problem
+    that made TypeScript silently useless on solidpc.
+    """
+    p = Path(path)
+    p = p if p.is_dir() else p.parent
+    try:
+        p = p.resolve()
+    except OSError:
+        return None
+    # An explicit declaration outranks every heuristic. This is the
+    # escape hatch for a monorepo that wants ONE engine over several
+    # packages — see ``describe_scope`` for why that is not the default.
+    for candidate in (p, *p.parents):
+        if (candidate / ROOT_SENTINEL).exists():
+            return candidate
+    for candidate in (p, *p.parents):
+        for marker in _ROOT_MARKERS:
+            if (candidate / marker).exists():
+                return candidate
+    return None
+
+
+#: Written by an operator to say "the engine root is here", overriding
+#: the marker walk.
+ROOT_SENTINEL = Path(".claude-hooks") / "lsp-root"
+
+#: Markers that indicate a root is nested inside something larger. A
+#: package directory inside a repository answers correctly *for that
+#: package*, which is not the question a caller usually asked.
+_OUTER_MARKERS = (".git", ROOT_SENTINEL)
+
+
+def describe_scope(root: Path) -> Optional[str]:
+    """Say when ``root`` is a package inside a bigger tree.
+
+    ``find_project_root`` stops at the nearest marker, and in a monorepo
+    that is the package's own ``package.json`` — so a reference search
+    is complete for the package and silently incomplete for the repo.
+    Measured on a real monorepo: a symbol with 443 occurrences across
+    the tree returned 9, all inside the declaring package, with nothing
+    in the result indicating the search had a boundary. That is a
+    plausible number a caller acts on, which makes it worse than an
+    obviously absurd one.
+
+    Widening the root is NOT the fix, and was measured too: rooted at
+    that repo (6.1 GB, no root tsconfig) tsserver answered 0 references
+    in 81.7 s and then failed, because it falls back to an inferred
+    project over the whole tree. A bounded answer that says it is
+    bounded beats an empty one that does not.
+
+    So the engine keeps the narrow root and reports the boundary. The
+    real remedy is at the language level — a tsconfig spanning the
+    packages, or project references — plus ``.claude-hooks/lsp-root``
+    for a repo where one wide engine is actually viable.
+    """
+    try:
+        if (root / ROOT_SENTINEL).exists():
+            # Declared deliberately, so there is no boundary to warn
+            # about even when it sits inside a larger repository.
+            return None
+        for parent in root.parents:
+            if (parent / ".git").is_dir():
+                return (f"{root.name} — a package inside {parent}. "
+                        f"Sibling packages were not searched: the server "
+                        f"is rooted here, so its program does not contain "
+                        f"their sources. Cross-package uses of a symbol "
+                        f"will be missing rather than reported. Put a "
+                        f"`.claude-hooks/lsp-root` file at the level you "
+                        f"want one engine over, if the server can handle "
+                        f"that tree.")
+    except OSError:  # pragma: no cover - defensive
+        return None
+    return None
+
+
+
+
+def boundary_root_for(path: str | os.PathLike) -> Optional[Path]:
+    """The OUTERMOST root a daemon should own.
+
+    Language servers must stay rooted narrowly — rooting tsserver at a
+    6.1 GB monorepo measured 0 references in 81.7 s, because it falls
+    back to an inferred project over the whole tree. But one *daemon*
+    per narrow root is a different question, and the answer there was
+    dozens of daemons for one repository — 37 for one checkout of
+    opencoti on this host — each a Python process with its own fleet,
+    its own cache and its own idle timer.
+
+    So the daemon is keyed here, at the repository (or an explicitly
+    declared root), and holds one narrowly-rooted engine per package
+    inside it. One process per repo, one status, one reaper, one shared
+    diagnostics cache — with the server rooting that actually works.
+    """
+    p = Path(path)
+    p = p if p.is_dir() else p.parent
+    try:
+        p = p.resolve()
+    except OSError:
+        return None
+    for candidate in (p, *p.parents):
+        if (candidate / ROOT_SENTINEL).exists():
+            return candidate
+    for candidate in (p, *p.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    # No repository above it: the narrow root is also the boundary.
+    return find_project_root(p)

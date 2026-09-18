@@ -50,6 +50,38 @@ def _scripted_input(answers: Iterable[str]):
     return _fn
 
 
+def _prompt_names(state: dict) -> list[str]:
+    """Specs the install loop will actually prompt for, in dialog order.
+
+    A spec prompts only when it is missing *and* has an installer to
+    dispatch; the rest are auto-skipped with a manual pointer.
+    """
+    return [
+        name for name, st in state.items()
+        if not st.installed and st.installer_for_missing is not None
+    ]
+
+
+def _answers(state: dict, *, prefix: Iterable[str] = (),
+             decline: Iterable[str] = (),
+             suffix: Iterable[str] = ("", "")) -> list[str]:
+    """Build a scripted-answer list for the install-loop dialog.
+
+    Derived from ``state`` rather than spelled out. A hardcoded list is
+    a trap that springs the next time SPECS grows: adding the three
+    vscode-langservers-extracted specs turned nine of these tests into
+    "dialog asked an unscripted question", which reads like a dialog
+    regression rather than a stale fixture. ``decline`` names the specs
+    answered "n"; everything else gets "y".
+    """
+    decline = set(decline)
+    return [
+        *prefix,
+        *("n" if name in decline else "y" for name in _prompt_names(state)),
+        *suffix,
+    ]
+
+
 def _state_all_installed() -> dict:
     """Build an ``InstalledState`` dict where every Tier-1 LS is
     present and Tier-2 LSs are missing."""
@@ -225,18 +257,23 @@ class TestInstallLoop:
         monkeypatch.chdir(tmp_path)
         cfg = {}
         # Only pyright installed; user opts into install loop and accepts
-        # every install prompt. Post-v1.9.x the loop covers Tier 2 too
-        # (lua / zls / omnisharp), so there are 8 install prompts
-        # (5 Tier-1 + 3 Tier-2) rather than 5.
+        # every install prompt. Post-v1.9.x the loop covers Tier 2 too,
+        # so every spec but pyright prompts.
+        #
+        # The answer count is *derived*, not spelled out: a hardcoded
+        # list silently becomes a trap the next time SPECS grows. It did
+        # — adding the three vscode-langservers-extracted specs turned
+        # this into "dialog asked an unscripted question", which reads
+        # like a dialog bug rather than a stale fixture.
+        n_prompts = sum(1 for s in ls.SPECS if s.name != "pyright")
         monkeypatch.setattr(
             "builtins.input",
-            _scripted_input([
-                "y",                                  # opt into install loop
-                "y", "y", "y", "y", "y",              # 5 Tier-1
-                "y", "y", "y",                        # 3 Tier-2
-                "",        # accept starter cclsp.json default Y
-                "",        # accept enable default Y
-            ]),
+            _scripted_input(
+                ["y"]                      # opt into install loop
+                + ["y"] * n_prompts        # one per missing spec
+                + ["",                     # accept starter cclsp.json default Y
+                   ""]                     # accept enable default Y
+            ),
         )
         install_calls = []
 
@@ -266,6 +303,15 @@ class TestInstallLoop:
         assert "lua-language-server" in names
         assert "zls" in names
         assert "omnisharp" in names
+        # The web trio — one npm package, three binaries, so all three
+        # must dispatch independently even though the install command
+        # repeats.
+        assert "vscode-html-language-server" in names
+        assert "vscode-css-language-server" in names
+        assert "vscode-json-language-server" in names
+        # Nothing may be skipped: every spec but pyright is missing here.
+        assert len(install_calls) == sum(
+            1 for s in ls.SPECS if s.name != "pyright")
 
     def test_install_loop_skipped_when_no_tier1_missing(self, monkeypatch,
                                                        tmp_path):
@@ -292,18 +338,11 @@ class TestInstallLoop:
         monkeypatch.chdir(tmp_path)
         cfg = {}
         # Only pyright installed; user opts into install loop but
-        # declines gopls — others still get installed (4 remaining
-        # Tier-1 + 3 Tier-2 under v1.9.x semantics).
+        # declines gopls — every other missing spec still installs.
         monkeypatch.setattr(
             "builtins.input",
-            _scripted_input([
-                "y",                          # opt into install loop
-                "n",                          # decline gopls
-                "y", "y", "y", "y",           # remaining 4 Tier-1
-                "y", "y", "y",                # 3 Tier-2
-                "",        # starter cclsp.json default Y
-                "",        # enable default Y
-            ]),
+            _scripted_input(_answers(_state_only_pyright(),
+                                     prefix=["y"], decline=["gopls"])),
         )
         install_calls = []
 
@@ -328,13 +367,7 @@ class TestInstallLoop:
         cfg = {}
         monkeypatch.setattr(
             "builtins.input",
-            _scripted_input([
-                "y",                                  # opt in
-                "y", "y", "y", "y", "y",              # 5 Tier-1
-                "y", "y", "y",                        # 3 Tier-2
-                "",        # starter cclsp.json default Y
-                "",        # enable default Y
-            ]),
+            _scripted_input(_answers(_state_only_pyright(), prefix=["y"])),
         )
 
         def flaky_install(spec, installer, *, dry_run=False):
@@ -370,13 +403,8 @@ class TestInstallLoop:
         )
         monkeypatch.setattr(
             "builtins.input",
-            _scripted_input([
-                "y",                                  # opt in
-                "y", "y", "y", "y",                   # remaining 4 Tier-1 (gopls auto-skips)
-                "y", "y", "y",                        # 3 Tier-2
-                "",        # starter cclsp.json default Y
-                "",        # enable default Y
-            ]),
+            # gopls auto-skips: no installer, so it never prompts.
+            _scripted_input(_answers(state, prefix=["y"])),
         )
         with patch.object(ls, "detect_language_servers",
                           side_effect=[state, state]), \
@@ -445,20 +473,15 @@ class TestScoopBootstrapDialog:
         cfg = {}
         # Decline the bootstrap, then accept the rest so the install
         # loop still runs against the LSs that have non-scoop
-        # installers (omnisharp gets skipped because no installer).
-        # Tier-1 missing (5): gopls, rust-analyzer, clangd, ts-LS, bash-LS.
-        # Tier-2 missing (3): lua, zls, omnisharp — but omnisharp has
-        # no installer so the loop skips it (no prompt). 7 install prompts.
+        # installers. omnisharp has no installer in this state, so
+        # _answers() omits it — it is skipped without a prompt.
         monkeypatch.setattr(
             "builtins.input",
-            _scripted_input([
-                "y",                     # opt into install loop
-                "n",                     # decline scoop bootstrap
-                "y", "y", "y", "y", "y", # 5 Tier-1
-                "y", "y",                # lua + zls Tier-2
-                "",   # accept cclsp default Y
-                "",   # accept engine default Y
-            ]),
+            _scripted_input(_answers(
+                _state_omnisharp_blocked_on_windows(),
+                prefix=["y",    # opt into install loop
+                        "n"],   # decline scoop bootstrap
+            )),
         )
 
         install_calls = []
@@ -513,17 +536,15 @@ class TestScoopBootstrapDialog:
             installer_for_missing=ls.Installer.SCOOP,
         )
 
-        # 8 install prompts now (omnisharp included).
+        # Prompts come from the post-bootstrap state — omnisharp is
+        # included there, having been promoted to SCOOP.
         monkeypatch.setattr(
             "builtins.input",
-            _scripted_input([
-                "y",                                  # opt into install loop
-                "y",                                  # accept scoop bootstrap
-                "y", "y", "y", "y", "y",              # 5 Tier-1
-                "y", "y", "y",                        # lua + zls + omnisharp
-                "",   # cclsp default Y
-                "",   # enable default Y
-            ]),
+            _scripted_input(_answers(
+                post_bootstrap,
+                prefix=["y",   # opt into install loop
+                        "y"],  # accept scoop bootstrap
+            )),
         )
 
         install_calls = []
@@ -562,19 +583,12 @@ class TestScoopBootstrapDialog:
         monkeypatch.chdir(tmp_path)
         cfg = {}
         # On POSIX, omnisharp's installer_for_missing stays None (no
-        # scoop/winget available). Loop skips it with a manual pointer.
-        # Tier-1 (5) all dispatch; Tier-2: lua + zls dispatch (via brew
-        # on macOS, but we don't actually invoke brew in the test);
-        # omnisharp gets the manual-pointer path.
+        # scoop/winget available), so it is skipped with a manual
+        # pointer and never prompts.
         monkeypatch.setattr(
             "builtins.input",
-            _scripted_input([
-                "y",                                  # opt into install loop
-                "y", "y", "y", "y", "y",              # 5 Tier-1
-                "y", "y",                             # lua + zls Tier-2
-                "",   # cclsp
-                "",   # enable
-            ]),
+            _scripted_input(_answers(_state_omnisharp_blocked_on_windows(),
+                                     prefix=["y"])),
         )
 
         def fake_install(spec, installer, *, dry_run=False):
@@ -618,13 +632,9 @@ class TestScoopBootstrapDialog:
 
         monkeypatch.setattr(
             "builtins.input",
-            _scripted_input([
-                "y",                                  # opt into install loop
-                "y", "y", "y", "y", "y",              # 5 Tier-1
-                "y", "y", "y",                        # 3 Tier-2 (incl omnisharp)
-                "",   # cclsp
-                "",   # enable
-            ]),
+            # omnisharp prompts here: scoop is already on PATH, so its
+            # installer_for_missing is SCOOP rather than None.
+            _scripted_input(_answers(state_with_scoop, prefix=["y"])),
         )
 
         install_calls = []
@@ -663,16 +673,14 @@ class TestScoopBootstrapDialog:
         cfg = {}
         monkeypatch.setattr(
             "builtins.input",
-            _scripted_input([
-                "y",                                  # opt into install loop
-                "y",                                  # accept scoop bootstrap
-                "y", "y", "y", "y", "y",              # 5 Tier-1
-                "y", "y",                             # lua + zls Tier-2
-                # omnisharp not dispatched in dry-run path because state
-                # didn't get re-detected (we don't actually install scoop).
-                "",
-                "",
-            ]),
+            # omnisharp is not dispatched on the dry-run path: the state
+            # is never re-detected, because scoop is not actually
+            # installed. So it has no installer and never prompts.
+            _scripted_input(_answers(
+                _state_omnisharp_blocked_on_windows(),
+                prefix=["y",   # opt into install loop
+                        "y"],  # accept scoop bootstrap
+            )),
         )
 
         def fake_install(spec, installer, *, dry_run=False):
@@ -829,13 +837,7 @@ class TestDryRun:
         cfg = {}
         monkeypatch.setattr(
             "builtins.input",
-            _scripted_input([
-                "y",                                  # opt into install loop
-                "y", "y", "y", "y", "y",              # 5 Tier-1
-                "y", "y", "y",                        # 3 Tier-2 (v1.9.x)
-                "",                    # cclsp.json default Y
-                "",                    # enable default Y
-            ]),
+            _scripted_input(_answers(_state_only_pyright(), prefix=["y"])),
         )
         with patch.object(ls, "detect_language_servers",
                           side_effect=[_state_only_pyright(),

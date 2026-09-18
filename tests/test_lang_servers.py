@@ -202,15 +202,38 @@ class TestSelectInstallerFor:
         finally:
             _exit(entered)
 
-    def test_tier2_always_returns_none(self):
-        """MANUAL-only specs never have an installer to dispatch."""
-        ctxs = _patch_platform_and_path("linux", {"npm", "go", "rustup"})
+    def test_tier2_resolves_only_against_an_available_manager(self):
+        """Tier is priority, not install method.
+
+        This used to assert that *every* tier-2 spec returns None on a
+        host with only npm/go/rustup, under the name
+        ``test_tier2_always_returns_none``. That held by accident: the
+        tier-2 specs of the day (lua / zls / omnisharp) happened to be
+        brew/winget/scoop-only, and v1.9.x had already made the install
+        loop cover tier 2 — so the docstring's "MANUAL-only" was stale
+        before the vscode-langservers-extracted specs (tier 2, npm)
+        made it fail.
+
+        What actually matters is the invariant below: an installer is
+        returned exactly when one of the spec's installers is present.
+        """
+        available = {"npm", "go", "rustup"}
+        ctxs = _patch_platform_and_path("linux", available)
         entered = _apply(ctxs)
         try:
+            checked = 0
             for spec in ls.SPECS:
                 if spec.tier != 2:
                     continue
-                assert ls.select_installer_for(spec) is None, spec.name
+                checked += 1
+                chosen = ls.select_installer_for(spec)
+                if chosen is None:
+                    assert not any(i.value in available
+                                   for i in spec.installers), spec.name
+                else:
+                    assert chosen.value in available, spec.name
+                    assert spec.name in ls.INSTALL_COMMANDS[chosen], spec.name
+            assert checked, "no tier-2 specs — the test stopped covering anything"
         finally:
             _exit(entered)
 

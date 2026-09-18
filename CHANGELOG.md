@@ -16,6 +16,132 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [1.17.0] — 2026-09-18
+
+Two themes. The `lsp` MCP surface stops being a third-party binary and
+becomes ours, and the engine stops being one daemon per *package* — it
+becomes one per **repository**, with a bounded pool of narrowly-rooted
+engines inside it. Alongside, a new **session mailbox** lets Claude Code
+sessions address each other across hosts.
+
+### Added
+
+- **Our own `lsp` MCP server** (`claude_hooks/lsp_mcp/`), all twelve
+  cclsp tools on our engine, replacing `node /usr/local/bin/cclsp`. A
+  conformance suite pins 12/12 parity. cclsp read its config once at
+  startup and cached it, so `restart_server` relaunched the *language
+  server* with the command cclsp had cached and reported success —
+  config changes could not take effect without restarting the MCP
+  client. Here the file's mtime is checked per request and the affected
+  engine rebuilt, so `sync_cclsp.py --write` is enough. One server now
+  spans many projects instead of one.
+
+- **A navigation surface on the engine** — definition, references,
+  implementation, hover, call hierarchy, workspace symbols, rename —
+  with provenance on every answer (`consulted`, `failures`, `progress`,
+  `not_running`, `scan_truncated_at`) and a `trustworthy` flag. A
+  reference search that stopped at a package boundary says so instead
+  of returning a short list that looks complete.
+
+- **The session mailbox** — inter-session messaging with a store,
+  host-scoped addressing, 8 MCP tools, hook announcements, a quarterly
+  archive and a daemon-owned sweep. Verified solidpc↔pandorum.
+
+- **Daemon supervision from the claude-hooks daemon**
+  (`LspEngineManager`): `lsp list|reload|stop|reap` over the daemon RPC
+  and `claude-hooks-daemon-ctl`, an idle reaper, and the distinction
+  between a daemon that is running, **wedged** (process up, socket down,
+  lock held) and stateless. It supervises but never spawns — a
+  supervisor that started what it was asked to inspect would report a
+  fleet into existence.
+
+- **The daemon announces its own stale code**, once per attached
+  session, comparing the version and source mtimes it imported against
+  the tree on disk. `reload` is explicitly *not* the remedy and says so:
+  it replaces the language servers and re-reads `cclsp.json`, but the
+  process survives, and the process is what holds the stale Python.
+
+### Changed
+
+- **One daemon per repository, one engine per package.** The daemon is
+  keyed at the repository boundary (`.claude-hooks/lsp-root` > `.git` >
+  narrow root); language servers stay rooted narrowly, because rooting
+  tsserver at a 6.1 GB monorepo measured 0 references in 81.7 s. Keying
+  the daemon narrowly too had produced 30 daemons for one checkout of
+  cline and 37 for one of opencoti. An `EnginePool` bounds what one
+  daemon holds (LRU + idle reap). Measured after: cline's 30 roots
+  collapse to 1 daemon holding 3 engines, references in 2.09 s.
+
+- **`scripts/deploy.py` stops the lsp_engine daemons.** They are the
+  artifact class the script exists for — long-lived processes holding
+  the Python they imported at spawn, owned by no systemd unit, spawned
+  lazily per project. Restarting services never touched one, so a
+  deploy shipped new code and every daemon kept serving the old
+  indefinitely. `scripts/verify_deploy.py` fails on a daemon older than
+  the tree, and on a wedged one.
+
+- **Diagnostics are de-duplicated** between the PostToolUse hook and the
+  MCP, which share one engine per project.
+
+### Fixed
+
+- **A daemon that could not be stopped.** `socketserver`'s
+  `ThreadingMixIn` defaults (`daemon_threads = False`,
+  `block_on_close = True`) mean a request thread is joined by both
+  `server_close()` and interpreter shutdown, and the connection read has
+  no timeout — so one client that connected and went away without
+  closing pinned the process open forever, listener closed and lock
+  still held, with nothing able to respawn. Lingering connections are
+  now closed at teardown after a grace period, because cutting them
+  immediately truncates the `shutdown` ack and turns every successful
+  stop into a reported failure.
+
+- **`Daemon.stop()` guarded on the flag SIGTERM's own handler sets**, so
+  every signal-initiated shutdown skipped the entire teardown. "Stop
+  requested" and "teardown performed" are different facts.
+
+- **An ack is not an exit.** The supervisor took the `shutdown` reply —
+  sent *before* teardown begins — as proof the process had gone, and
+  reported "stopped 2 daemons" while one ran for another half day. It
+  now waits for the process, escalates SIGTERM → SIGKILL, and reports
+  which rung it reached. Nothing is signalled on a pid alone: the lock's
+  recorded start time must match the live process, or the command line
+  must still name the engine.
+
+- **`/proc/<pid>` mtime is not the process start time.** The kernel
+  updates it afterwards — a daemon started 19:40:20 read 02:03:30 the
+  next morning. It had been used by the deploy's staleness check (where
+  it under-reports) and by the PID-reuse guard, which concluded a
+  daemon's own lock belonged to a stranger and hid a wedged daemon from
+  `lsp list`. Single implementation now: `btime` + field 22 of
+  `/proc/<pid>/stat`, and `GetProcessTimes` on Windows.
+
+- **On Windows, an open handle is not a running process.** `OpenProcess`
+  succeeds for a process that has exited while any handle remains — the
+  counterpart of a POSIX zombie, and the same wrong answer: a daemon
+  that had stopped read as one that refused to. Now `GetExitCodeProcess`.
+
+- **`sync_cclsp.py --mcp` wrote to a file the MCP does not read.** It
+  found the MCP entry by `"cclsp" in command`, which stopped matching
+  when our own launcher replaced the binary, so it fell through to the
+  conventional default — creating a config at a path nothing reads while
+  the real one stayed stale, and reporting "in sync". Its stale-process
+  warning also reported *itself*, because the script's own path contains
+  "cclsp".
+
+- **Test fixtures no longer leak daemons.** A registry teardown only
+  detaches, which is correct in production and a leak in a test rooted
+  at a temp directory. Measured before the guard: 156 live daemons
+  rooted at deleted temp directories, holding 3.37 GB.
+
+- Windows parity: the IPC module must import where unix sockets do not
+  exist; `signal.SIGKILL` does not exist there; MCP/hook stdin decoded
+  as UTF-8 rather than the locale codepage; the engine LRU ordered by
+  use rather than by a clock with ~15.6 ms resolution.
+
+- A path with no boundary keys a daemon on a *directory*, not on the
+  file itself.
+
 ## [1.16.0] — 2026-09-13
 
 ### Added

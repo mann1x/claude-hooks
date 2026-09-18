@@ -37,13 +37,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
-from typing import Optional
+from pathlib import Path, PurePath
+from typing import Iterable, Optional
 
 
 log = logging.getLogger("claude_hooks.lang_servers")
@@ -152,7 +153,11 @@ SPECS: tuple[LangServerSpec, ...] = (
         name="clangd",
         display="clangd (C/C++)",
         bin="clangd",
-        extensions=("c", "cc", "cpp", "cxx", "h", "hh", "hpp"),
+        extensions=("c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx",
+                    # clangd handles CUDA. These were missing from every
+                    # config until 2026-09-16, so .cu/.cuh had no server
+                    # at all — which reads as "no problems found".
+                    "cu", "cuh"),
         cclsp_command=("clangd",),
         tier=1,
         # Windows: prefer winget (ships clangd in the LLVM bundle) over
@@ -210,6 +215,41 @@ SPECS: tuple[LangServerSpec, ...] = (
         installers=(Installer.BREW, Installer.WINGET, Installer.SCOOP),
         docs_url="https://github.com/zigtools/zls",
     ),
+    # vscode-langservers-extracted — one npm package, three binaries.
+    # Microsoft ships these as part of VS Code and does not publish them
+    # standalone; hrsh7th's extraction is the canonical source and what
+    # every editor distribution uses. Installing any one of the three
+    # installs all of them, so the install command repeats by design.
+    LangServerSpec(
+        name="vscode-html-language-server",
+        display="vscode-html-language-server (HTML)",
+        bin="vscode-html-language-server",
+        extensions=("html", "htm"),
+        cclsp_command=("vscode-html-language-server", "--stdio"),
+        tier=2,
+        installers=(Installer.NPM,),
+        docs_url="https://github.com/hrsh7th/vscode-langservers-extracted",
+    ),
+    LangServerSpec(
+        name="vscode-css-language-server",
+        display="vscode-css-language-server (CSS/SCSS/Less)",
+        bin="vscode-css-language-server",
+        extensions=("css", "scss", "less"),
+        cclsp_command=("vscode-css-language-server", "--stdio"),
+        tier=2,
+        installers=(Installer.NPM,),
+        docs_url="https://github.com/hrsh7th/vscode-langservers-extracted",
+    ),
+    LangServerSpec(
+        name="vscode-json-language-server",
+        display="vscode-json-language-server (JSON)",
+        bin="vscode-json-language-server",
+        extensions=("json", "jsonc"),
+        cclsp_command=("vscode-json-language-server", "--stdio"),
+        tier=2,
+        installers=(Installer.NPM,),
+        docs_url="https://github.com/hrsh7th/vscode-langservers-extracted",
+    ),
     LangServerSpec(
         name="omnisharp",
         display="OmniSharp (C#)",
@@ -221,6 +261,171 @@ SPECS: tuple[LangServerSpec, ...] = (
         docs_url="https://github.com/OmniSharp/omnisharp-roslyn",
     ),
 )
+
+
+# --------------------------------------------------------------------- #
+# Version probing
+#
+# A language server too old for the standard in use does not fail
+# loudly: it rejects the compilation command and abandons the
+# translation unit, which reads as "no diagnostics" — the same thing
+# clean code produces.
+#
+# The trap is that the *default* is the bad one. On Debian bullseye
+# /usr/bin/clangd is clangd 11 (2020), and clang only learned the
+# `c++23`/`gnu++23` spelling in clang 17 — before that the same standard
+# is spelled `c++2b`. Any modern C++ tree therefore dies at line 1
+# against the distro default, silently. Observed on solidpc 2026-09-16.
+# --------------------------------------------------------------------- #
+
+_VERSION_RE = re.compile(r"version\s+(\d+)(?:\.(\d+))?", re.IGNORECASE)
+
+#: Minimum major version that can analyse a contemporary tree at all.
+#: clangd only grew the ``c++23``/``gnu++23`` spelling in **clang 17**;
+#: before that the same standard is ``c++2b``, so anything older rejects
+#: the -std flag outright and abandons the translation unit.
+MIN_USEFUL_VERSION = {
+    "clangd": 17,
+}
+
+#: Extensions whose analysis needs a *newer* server than the general
+#: floor. Measured on solidpc 2026-09-16 against CUDA 13.3 headers:
+#: clangd 19.1.7 produced 20 hard errors on a .cu TU that clangd 22.1.6
+#: parses clean. 19 fixed the ``gnu++23`` half and still could not read
+#: the CUDA headers, so "new enough for C++" is not "new enough for
+#: CUDA" — and the failure mode is a screen of fabricated errors about
+#: std::atomic and std::_Vector_base that look like real code bugs.
+EXTENSION_MIN_VERSION = {
+    "cu": ("clangd", 22),
+    "cuh": ("clangd", 22),
+}
+
+
+def server_version(binary: str, *, timeout: float = 10.0) -> Optional[str]:
+    """Return the first line of ``<binary> --version``, or ``None``."""
+    resolved = shutil.which(binary) or binary
+    try:
+        out = subprocess.run(
+            [resolved, "--version"], capture_output=True, text=True,
+            timeout=timeout,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    text = (out.stdout or out.stderr or "").strip()
+    return text.splitlines()[0] if text else None
+
+
+def version_major(version_line: Optional[str]) -> Optional[int]:
+    m = _VERSION_RE.search(version_line or "")
+    return int(m.group(1)) if m else None
+
+
+#: ``clangd-16``, ``clangd-22`` … Distros ship versioned siblings next
+#: to an unversioned default that is often much older.
+_VERSIONED_BIN_RE = re.compile(r"^(?P<stem>[A-Za-z_][\w.+-]*?)-(?P<major>\d+)$")
+
+
+def versioned_siblings(binary: str) -> list[tuple[int, str]]:
+    """Find ``<binary>-<N>`` executables on PATH, newest first.
+
+    Pinning a config at a specific version is the only way to escape an
+    ancient distro default, and it is also how a config goes stale: the
+    pin keeps working while a much newer server sits unused beside it.
+    The major version is read from the *name*, so this costs a directory
+    scan rather than N subprocess launches.
+    """
+    stem = PurePath(binary).name
+    for suffix in (".exe", ".cmd", ".bat"):
+        if stem.lower().endswith(suffix):
+            stem = stem[: -len(suffix)]
+    m = _VERSIONED_BIN_RE.match(stem)
+    if m:                       # already versioned — compare siblings
+        stem = m.group("stem")
+
+    found: dict[int, str] = {}
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory:
+            continue
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            continue
+        for entry in entries:
+            match = _VERSIONED_BIN_RE.match(entry.name)
+            if not match or match.group("stem") != stem:
+                continue
+            major = int(match.group("major"))
+            if major not in found and os.access(entry.path, os.X_OK):
+                found[major] = entry.path
+    return sorted(found.items(), key=lambda kv: kv[0], reverse=True)
+
+
+def newer_sibling_note(configured_bin: str,
+                       configured_version: Optional[str]) -> Optional[str]:
+    """Advise when a newer versioned server is installed but unused."""
+    current = version_major(configured_version)
+    if current is None:
+        return None
+    siblings = versioned_siblings(configured_bin)
+    if not siblings:
+        return None
+    best_major, best_path = siblings[0]
+    if best_major <= current:
+        return None
+    return (
+        f"{PurePath(configured_bin).name} is v{current}, but v{best_major} is "
+        f"installed at {best_path} and unused. A pinned version does not "
+        f"follow upgrades — repoint the config if the newer one is intended."
+    )
+
+
+def version_warning(spec_name: str,
+                    version_line: Optional[str]) -> Optional[str]:
+    """Warn when a server is too old to be *trusted*, not merely old."""
+    floor = MIN_USEFUL_VERSION.get(spec_name)
+    if floor is None or not version_line:
+        return None
+    major = version_major(version_line)
+    if major is None or major >= floor:
+        return None
+    return (
+        f"{spec_name} is version {major} (< {floor}). It cannot parse a "
+        f"modern C/C++ tree: the c++23/gnu++23 spelling only arrived in "
+        f"clang 17, so an older server rejects the -std flag and abandons "
+        f"the translation unit — which surfaces as ZERO diagnostics, "
+        f"indistinguishable from clean code. Debian bullseye's default is "
+        f"clangd 11. Official standalone builds (no distro packaging) are "
+        f"at https://github.com/clangd/clangd/releases; point the config "
+        f"at one by absolute path."
+    )
+
+
+def extension_version_warning(
+        extensions: Iterable[str], spec_name: str,
+        version_line: Optional[str]) -> Optional[str]:
+    """Warn when a server is new enough generally but not for a lane.
+
+    Being past the general floor is not sufficient everywhere: clangd 19
+    parses ``gnu++23`` fine and still cannot read CUDA 13.3 headers.
+    """
+    major = version_major(version_line)
+    if major is None:
+        return None
+    worst: Optional[tuple[str, int]] = None
+    for ext in extensions:
+        entry = EXTENSION_MIN_VERSION.get(ext)
+        if entry and entry[0] == spec_name and major < entry[1]:
+            if worst is None or entry[1] > worst[1]:
+                worst = (ext, entry[1])
+    if worst is None:
+        return None
+    return (
+        f"{spec_name} v{major} claims .{worst[0]} but CUDA analysis needs "
+        f"v{worst[1]}+. Measured against CUDA 13.3 headers: v19 emitted 20 "
+        f"hard errors on a .cu file that v22 parses clean. The errors are "
+        f"fabricated — they name std::atomic and std::_Vector_base and read "
+        f"exactly like real code bugs."
+    )
 
 
 # --------------------------------------------------------------------- #
@@ -293,6 +498,16 @@ INSTALL_COMMANDS: dict[Installer, dict[str, list[str]]] = {
             "typescript-language-server", "typescript",
         ],
         "bash-language-server": ["npm", "install", "-g", "bash-language-server"],
+        # One package, three binaries — see the SPECS note.
+        "vscode-html-language-server": [
+            "npm", "install", "-g", "vscode-langservers-extracted",
+        ],
+        "vscode-css-language-server": [
+            "npm", "install", "-g", "vscode-langservers-extracted",
+        ],
+        "vscode-json-language-server": [
+            "npm", "install", "-g", "vscode-langservers-extracted",
+        ],
     },
     Installer.GO: {
         "gopls": ["go", "install", "golang.org/x/tools/gopls@latest"],

@@ -382,6 +382,31 @@ class _RequestHandler(socketserver.StreamRequestHandler):
                 # Surface the message verbatim so the CLI can show it.
                 return {"available": False, "reason": str(e)}
 
+        # LSP-engine supervision ops. The manager reports on daemons
+        # it did not spawn, so "not configured" and "none running" are
+        # different answers and both are said plainly — a supervisor
+        # that returned an empty list for a disabled subsystem would
+        # read as "nothing is running", which is the opposite of what
+        # anyone debugging needs to hear.
+        if event in ("_lsp_list", "_lsp_reload", "_lsp_stop", "_lsp_reap"):
+            mgr = getattr(self.server, "lsp_engine_manager", None)
+            if mgr is None:
+                return {"available": False,
+                        "reason": "lsp engine manager not configured"}
+            payload = payload or {}
+            try:
+                if event == "_lsp_list":
+                    return mgr.list()
+                if event == "_lsp_reload":
+                    return mgr.reload(payload.get("project"),
+                                      config=payload.get("config", True))
+                if event == "_lsp_stop":
+                    return mgr.stop(payload.get("project"))
+                if event == "_lsp_reap":
+                    return mgr.reap()
+            except Exception as e:
+                return {"available": False, "reason": str(e)}
+
         from claude_hooks.dispatcher import dispatch_capture
         return dispatch_capture(event, payload)
 
@@ -415,6 +440,7 @@ class DaemonServer(socketserver.ThreadingTCPServer):
         replay_window: int = DEFAULT_REPLAY_WINDOW_SECONDS,
         embedding_manager=None,
         chat_model_manager=None,
+        lsp_engine_manager=None,
     ):
         if host not in ("127.0.0.1", "localhost", "::1"):
             raise ValueError(
@@ -431,6 +457,7 @@ class DaemonServer(socketserver.ThreadingTCPServer):
         # Same fail-open shape — ``None`` means the chat ops report
         # ``available: false`` to the client.
         self.chat_model_manager = chat_model_manager
+        self.lsp_engine_manager = lsp_engine_manager
         self._stop_event = threading.Event()
         super().__init__((host, port), _RequestHandler)
 
@@ -450,6 +477,15 @@ class DaemonServer(socketserver.ThreadingTCPServer):
                 self.embedding_manager.shutdown()
             except Exception as e:  # pragma: no cover - defensive
                 log.warning("embedding manager shutdown failed: %s", e)
+        if self.lsp_engine_manager is not None:
+            try:
+                # Stops supervising; deliberately does NOT stop the LSP
+                # daemons. They outlive us — a claude-hooks restart
+                # during a deploy must not cost every open session its
+                # warm language servers.
+                self.lsp_engine_manager.shutdown()
+            except Exception:  # pragma: no cover — defensive
+                log.exception("error shutting down lsp engine manager")
         if self.chat_model_manager is not None:
             try:
                 self.chat_model_manager.shutdown()
@@ -516,6 +552,43 @@ def _build_chat_model_manager(cfg: dict):
         return None
 
 
+def _build_lsp_engine_manager(cfg: dict):
+    """Build an LspEngineManager from ``hooks.lsp_engine.supervision``.
+
+    Unlike its two siblings this one supervises processes it does not
+    spawn: the lsp_engine daemons are lazy-spawned by whoever has a
+    project in hand. Before this, nothing owned them afterwards — there
+    was no way to list what was running on the host, and a daemon whose
+    project directory had been deleted kept its language servers alive
+    indefinitely (ten such daemons observed here).
+
+    Same fail-open shape as the others: any import or construction error
+    is logged and downgraded to ``None`` so the daemon still serves
+    hooks.
+    """
+    block = cfg.get("hooks", {}).get("lsp_engine") if isinstance(cfg, dict) else None
+    sup = (block or {}).get("supervision") if isinstance(block, dict) else None
+    if isinstance(sup, dict) and not sup.get("enabled", True):
+        return None
+    try:
+        from claude_hooks.lsp_engine_manager import (
+            DEFAULT_IDLE_SECONDS,
+            LspEngineManager,
+        )
+    except Exception as e:
+        log.warning("lsp_engine_manager import failed: %s", e)
+        return None
+    sup = sup if isinstance(sup, dict) else {}
+    try:
+        return LspEngineManager(
+            idle_seconds=float(sup.get("idle_seconds", DEFAULT_IDLE_SECONDS)),
+            reap_orphans=bool(sup.get("reap_orphans", True)),
+        )
+    except Exception as e:
+        log.warning("LspEngineManager construction failed: %s", e)
+        return None
+
+
 def serve(
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
@@ -532,12 +605,14 @@ def serve(
     # daemon's "fail open" stance on optional subsystems.
     embedding_mgr = None
     chat_mgr = None
+    lsp_mgr = None
     try:
         from claude_hooks.config import load_config
 
         cfg = load_config()
         embedding_mgr = _build_embedding_manager(cfg or {})
         chat_mgr = _build_chat_model_manager(cfg or {})
+        lsp_mgr = _build_lsp_engine_manager(cfg or {})
     except Exception as e:
         log.debug("could not load config for manager(s): %s", e)
 
@@ -547,6 +622,7 @@ def serve(
             secret=secret, replay_window=replay_window,
             embedding_manager=embedding_mgr,
             chat_model_manager=chat_mgr,
+            lsp_engine_manager=lsp_mgr,
         )
 
     try:
@@ -585,6 +661,10 @@ def serve(
             chat_mgr._effective_max_loaded(),
             chat_mgr.cfg.registry_path,
         )
+    if lsp_mgr is not None:
+        lsp_mgr.start_reaper()
+        log.info("lsp engine manager attached (idle_timeout=%.0fs)",
+                 lsp_mgr._idle_seconds)
 
     # Background update-check thread: re-reads config on every tick so
     # the user can flip ``update_check.enabled`` at runtime without
@@ -602,6 +682,24 @@ def serve(
         update_thread.start()
     except Exception as e:
         log.debug("update_check thread not started: %s", e)
+
+    # Mailbox housekeeping: expired mail archived then deleted, the
+    # archive trimmed to its cap, dead registry entries forgotten. Here
+    # rather than in a hook because the deadlines are measured in days,
+    # and a hook that has to run for maintenance to happen makes
+    # maintenance a function of how often someone types.
+    mailbox_thread = None
+    try:
+        from claude_hooks.config import load_config
+        from claude_hooks.mailbox.maintenance import MailboxMaintenanceThread
+
+        mailbox_thread = MailboxMaintenanceThread(
+            config_loader=load_config,
+            stop_event=server.stop_event,
+        )
+        mailbox_thread.start()
+    except Exception as e:
+        log.debug("mailbox maintenance thread not started: %s", e)
 
     try:
         server.serve_forever(poll_interval=0.5)
@@ -624,6 +722,8 @@ def serve(
             # The thread reads stop_event already; just give it a
             # moment to wake from sleep before we return.
             update_thread.join(timeout=2.0)
+        if mailbox_thread is not None:
+            mailbox_thread.join(timeout=2.0)
     return 0
 
 

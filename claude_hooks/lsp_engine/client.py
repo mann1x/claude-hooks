@@ -26,6 +26,7 @@ from typing import Optional
 
 from claude_hooks._popen import popen_detached, windowless_python_executable
 from claude_hooks.lsp_engine.daemon import (
+    daemon_root_for,
     lock_path_for,
     socket_path_for,
 )
@@ -75,8 +76,22 @@ class LspEngineClient:
             self._attached = False
 
     def close(self) -> None:
+        """Detach and release the connection. Never raises.
+
+        ``detach`` is a courtesy — it lets the daemon drop this
+        session's locks early instead of at the next sweep — so failing
+        to deliver it must not fail the close. A daemon that has gone
+        away is the normal case here, not an error: a deploy stops the
+        daemons, and every client still holding a connection then closes
+        it. Before this, that raised ``IpcProtocolError("daemon closed
+        connection")`` out of teardown, turning an orderly stop into an
+        exception in whatever was shutting down.
+        """
         try:
             self.detach()
+        except Exception:
+            log.debug("detach failed during close; daemon likely gone",
+                      exc_info=True)
         finally:
             self._ipc.close()
 
@@ -113,14 +128,116 @@ class LspEngineClient:
         """Returns ``(diagnostics, stale)``. ``stale=True`` means we
         served the owner's view because the affinity lock didn't
         release within ``lock_timeout_ms``.
+
+        See :meth:`diagnostics_full` when an *empty* list has to be
+        told apart from a server that never answered.
+        """
+        diags, stale, _ = self.diagnostics_full(
+            path, lock_timeout_ms=lock_timeout_ms,
+            diag_timeout_s=diag_timeout_s)
+        return diags, stale
+
+    def diagnostics_full(
+        self,
+        path: str | os.PathLike,
+        *,
+        lock_timeout_ms: int = 500,
+        diag_timeout_s: float = 2.0,
+        dedup_window_s: float = 0.0,
+    ) -> tuple[list[dict], bool, dict]:
+        """``(diagnostics, stale, meta)``.
+
+        ``meta`` carries ``settled`` — whether the language server
+        actually published — plus which server and what budget. An
+        older daemon omits it, so ``settled`` defaults to True: a
+        version skew should not make every file look unanalysed.
         """
         resp = self._call(
             "diagnostics",
             path=str(path),
             timeout_ms=lock_timeout_ms,
             diag_timeout_s=diag_timeout_s,
+            dedup_window_s=dedup_window_s,
         )
-        return list(resp.get("diagnostics") or []), bool(resp.get("stale"))
+        meta = {
+            "settled": bool(resp.get("settled", True)),
+            "server": resp.get("diag_server") or "",
+            "timeout": float(resp.get("diag_timeout_s") or diag_timeout_s),
+            # True when this is a replay of a result already served for
+            # the same content. An older daemon omits it, which reads as
+            # "not deduped" and simply costs nothing.
+            "deduped": bool(resp.get("deduped", False)),
+        }
+        return list(resp.get("diagnostics") or []), bool(resp.get("stale")), meta
+
+    # ─── navigation ──────────────────────────────────────────────────
+    #
+    # These exist so the MCP server can use the daemon's Engine instead
+    # of building its own. Two engines per project meant two fleets of
+    # language servers, two warm-ups, and two caches that could disagree
+    # about the same file.
+
+    def nav(self, method: str, **args):
+        """Run one navigation method on the daemon's engine.
+
+        Returns a ``NavResponse`` with its provenance intact — the
+        fields that keep an empty result from being read as a fact
+        about the code survive the socket.
+        """
+        from claude_hooks.lsp_engine import wire
+        resp = self._call("nav", method=method, args=args)
+        return wire.nav_from_json(resp["nav"])
+
+    def restart(self, extensions: Optional[list[str]] = None) -> list[str]:
+        """Stop servers so the next request starts them fresh."""
+        resp = self._call("restart", extensions=extensions)
+        return list(resp.get("restarted") or [])
+
+    def reload(self, *, config: bool = True) -> dict:
+        """Stop every engine and re-read the configuration from disk.
+
+        The lifecycle op that ``restart`` is not. ``restart`` replaces
+        clients the engine is holding, which fixes a hung server but
+        keeps the server list the daemon parsed at startup. A changed
+        ``cclsp.json``, or an upgraded server binary, reaches neither a
+        running process nor a stale config — so until this existed the
+        only way to apply either was to kill the daemon, and the only
+        reliable way to do *that* was to close the session.
+
+        Returns ``{stopped, reloaded_config, cclsp_config}``.
+        """
+        return self._call("reload", config=config)
+
+    def shutdown_daemon(self) -> bool:
+        """Stop the daemon itself.
+
+        Deliberately bypasses attach/detach: we are terminating the
+        thing that tracks sessions, so registering as one first would
+        only leave a lock to release against a process that is going
+        away.
+        """
+        resp = self._ipc.call("shutdown", session=self.session_id)
+        return bool(resp.get("ok"))
+
+    def diagnostics_result(
+        self,
+        path: str | os.PathLike,
+        *,
+        lock_timeout_ms: int = 500,
+        diag_timeout_s: float = 8.0,
+    ):
+        """``DiagnosticsResult``, so callers can check ``settled``."""
+        from claude_hooks.lsp_engine import wire
+        from claude_hooks.lsp_engine.lsp import DiagnosticsResult
+        diags, _stale, meta = self.diagnostics_full(
+            path, lock_timeout_ms=lock_timeout_ms,
+            diag_timeout_s=diag_timeout_s)
+        return DiagnosticsResult(
+            items=[wire.diagnostic_from_json(d) for d in diags],
+            settled=bool(meta.get("settled", True)),
+            timeout=float(meta.get("timeout") or diag_timeout_s),
+            server=str(meta.get("server") or ""),
+        )
 
     def status(self) -> dict:
         return self._call("status")
@@ -133,8 +250,20 @@ class LspEngineClient:
     def __exit__(self, *exc) -> None:
         self.close()
 
+    def take_stale_notice(self) -> Optional[str]:
+        """The daemon's stale-code notice, once, if it sent one.
+
+        Cleared on read: the consumer surfaces it, and a notice repeated
+        on every call would become noise and get filtered out.
+        """
+        notice, self._stale_notice = getattr(self, "_stale_notice", None), None
+        return notice
+
     def _call(self, op: str, **params) -> dict:
         resp = self._ipc.call(op, session=self._session, **params)
+        notice = resp.get("stale_notice")
+        if notice:
+            self._stale_notice = notice
         if not resp.get("ok"):
             raise RuntimeError(
                 f"daemon op {op!r} failed: {resp.get('error')}",
@@ -150,6 +279,7 @@ def connect_or_spawn(
     spawn_wait_s: float = DEFAULT_SPAWN_WAIT_S,
     spawn_env: Optional[dict] = None,
     log_path: Optional[Path] = None,
+    cclsp_config_path: Optional[str | os.PathLike] = None,
 ) -> LspEngineClient:
     """Return a connected, attached client for the project's daemon,
     spawning the daemon detached if it isn't already running.
@@ -163,6 +293,7 @@ def connect_or_spawn(
         _spawn_daemon(
             project_root, state_base=state_base,
             extra_env=spawn_env, log_path=log_path,
+            cclsp_config_path=cclsp_config_path,
         )
         _wait_for_socket(sock_path, deadline=time.monotonic() + spawn_wait_s)
 
@@ -178,6 +309,7 @@ def _spawn_daemon(
     state_base: Optional[Path] = None,
     extra_env: Optional[dict] = None,
     log_path: Optional[Path] = None,
+    cclsp_config_path: Optional[str | os.PathLike] = None,
 ) -> None:
     """Fork-and-exec a detached daemon. Returns immediately; the
     caller then polls for the socket via ``_wait_for_socket``.
@@ -204,11 +336,23 @@ def _spawn_daemon(
         "-m",
         "claude_hooks.lsp_engine",
         "daemon",
+        # The boundary, not whatever path the caller happened to hold.
+        # The daemon normalises this itself, so passing the raw path
+        # still works — but then ``ps`` shows a daemon "for" a source
+        # file that is actually serving the whole repository, and the
+        # first thing anyone does when the engine misbehaves is read
+        # the process list.
         "--project",
-        str(Path(project_root).resolve()),
+        str(daemon_root_for(project_root)),
     ]
     if state_base is not None:
         cmd.extend(["--state-base", str(state_base)])
+    if cclsp_config_path is not None:
+        # Pin the file the caller already resolved and validated.
+        # Without this the daemon re-resolves, and a caller whose
+        # environment carries CCLSP_CONFIG_PATH would hand its child an
+        # env the resolver reads differently than the caller did.
+        cmd.extend(["--cclsp-config", str(cclsp_config_path)])
 
     env = dict(os.environ)
     if extra_env:

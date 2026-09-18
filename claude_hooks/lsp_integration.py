@@ -185,6 +185,85 @@ _SEVERITY_LABEL = {
 }
 
 
+# Extensions whose analysis depends on a compile database. Without one
+# clangd invents flags, and with invented flags *navigation still mostly
+# works* — so the breakage is invisible unless diagnostics are tested.
+_COMPILE_DB_EXTS = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp",
+                    ".hxx", ".cu", ".cuh"}
+_COMPILE_DB_NAMES = ("compile_commands.json", "compile_flags.txt")
+
+# Phrases that mark a *driver* failure rather than a finding about the
+# code. Observed on solidpc 2026-09-16: clangd 11 against a -std=gnu++23
+# tree emitted 24 diagnostics, 23 of them the driver listing spellings it
+# would have accepted.
+_DRIVER_ERROR_HINTS = (
+    "invalid value",
+    "unknown argument",
+    "unsupported option",
+    "no such file or directory",
+    "file not found",
+    "unable to handle compilation",
+    "cannot find",
+)
+
+
+def _field(d, name: str, default=None):
+    """Read ``name`` from a dict *or* a ``Diagnostic`` dataclass.
+
+    The two shapes both exist in this codebase — the hook path carries
+    raw dicts off the wire, while ``Engine.get_diagnostics`` returns
+    parsed ``Diagnostic`` objects. A helper that silently only
+    understood dicts returned False for every dataclass, i.e. reported
+    "not a translation-unit failure" for one that was.
+    """
+    if isinstance(d, dict):
+        return d.get(name, default)
+    return getattr(d, name, default)
+
+
+def is_translation_unit_failure(d) -> bool:
+    """True when a diagnostic means *the file never parsed*.
+
+    Driver errors are reported at 1:1 (LSP 0:0) with severity Error and
+    no meaningful range. They are categorically different from a finding
+    about the code: everything after them is unanalysed.
+
+    Accepts either wire dicts or ``Diagnostic`` instances; see
+    :func:`_field`.
+    """
+    if int(_field(d, "severity") or 2) != 1:          # 1 = Error
+        return False
+    if int(_field(d, "line") or 0) != 0 or int(_field(d, "character") or 0) != 0:
+        return False
+    msg = (_field(d, "message") or "").lower()
+    return any(h in msg for h in _DRIVER_ERROR_HINTS)
+
+
+#: Where a compile database actually lives. CMake writes it into the
+#: build directory, not the source root, and that is the overwhelmingly
+#: common layout — so searching only the file's own ancestors reports
+#: "no compile DB" for a correctly-configured project.
+#:
+#: That false positive is worse than it looks. The warning it produces
+#: says results are not trustworthy; firing it on every CMake project
+#: teaches the reader to skip it, which costs the *honest* warnings
+#: their meaning. clangd itself searches these same subdirectories.
+_COMPILE_DB_SUBDIRS = ("", "build", "out", "cmake-build-debug",
+                       "cmake-build-release", "builddir", ".build")
+
+
+def missing_compile_db(path: Path) -> bool:
+    """True for a C/C++/CUDA file with no compile database above it."""
+    if path.suffix.lower() not in _COMPILE_DB_EXTS:
+        return False
+    for parent in [path.parent, *path.parent.parents]:
+        for sub in _COMPILE_DB_SUBDIRS:
+            base = parent / sub if sub else parent
+            if any((base / n).is_file() for n in _COMPILE_DB_NAMES):
+                return False
+    return True
+
+
 def format_diagnostics_block(
     *,
     path: str | os.PathLike,
@@ -192,15 +271,78 @@ def format_diagnostics_block(
     stale: bool,
     cwd: Optional[str | os.PathLike] = None,
     max_per_file: int = 50,
+    settled: bool = True,
+    server: str = "",
+    wait_budget: float = 0.0,
 ) -> Optional[str]:
     """Build the markdown block PostToolUse adds to ``additionalContext``.
 
-    Returns ``None`` when there's nothing to surface (no diagnostics).
-    Mirrors the shape of ``post_tool_use._run_ruff``'s output so the
-    model treats the two layers uniformly.
+    Returns ``None`` when there's nothing to surface, *and nothing to
+    warn about*. Mirrors the shape of ``post_tool_use._run_ruff``'s
+    output so the model treats the two layers uniformly.
+
+    An empty diagnostic list is **not** evidence that a file is clean —
+    it is equally what a file that never parsed produces, and what an
+    unconfigured extension produces. Both are reported here rather than
+    rendered as silence, because a confident false negative is worse
+    than no answer: on 2026-09-16 a C++ tree read as clean for a while
+    when in fact clangd 11 had rejected `-std=gnu++23` and abandoned
+    every translation unit at line 1.
     """
+    p = Path(str(path))
+    display = _relative_or_absolute(p, cwd)
+
     if not diagnostics:
+        if not settled:
+            # Third member of the same family as the two below: an
+            # empty list that is not a statement about the code. The
+            # hook's wait is deliberately short (it runs after every
+            # edit), so on a cold C++ TU this is the *expected* outcome
+            # rather than an error — but rendering it as silence is how
+            # a model concludes the file is fine.
+            who = server or "the language server"
+            budget = f" within {wait_budget:.0f}s" if wait_budget else ""
+            return (
+                f"## LSP diagnostics — `{display}`\n\n"
+                f"**No answer yet — not a clean result.** {who} had not "
+                f"published diagnostics for this file{budget}. A cold "
+                f"translation unit (large preamble, background index) "
+                f"routinely takes longer than the post-edit wait, so this "
+                f"says nothing about the code. Ask again once the server "
+                f"has warmed up, or raise `diagnostics_wait_s`."
+            )
+        if missing_compile_db(p):
+            return (
+                f"## LSP diagnostics — `{display}`\n\n"
+                "**No diagnostics, but this result is not trustworthy.** No "
+                "`compile_commands.json` was found in this file's directory "
+                "or any parent, so clangd is analysing with invented flags. "
+                "Navigation still works under invented flags, which is why "
+                "this failure is normally invisible — but diagnostics are "
+                "not meaningful. Generate a compile database before reading "
+                "'no problems' as 'no problems'."
+            )
         return None
+
+    tu_failures = [d for d in diagnostics if is_translation_unit_failure(d)]
+    if tu_failures:
+        first = (tu_failures[0].get("message") or "").strip().splitlines()[0]
+        note = (
+            f"## LSP analysis FAILED — `{display}`\n\n"
+            f"**The file was not analysed.** The language server rejected "
+            f"the compilation command and abandoned the translation unit at "
+            f"line 1, so the absence of further diagnostics says nothing "
+            f"about this code:\n\n"
+            f"```\n{first}\n```\n\n"
+            f"Typical causes: a language-server version older than the "
+            f"standard in use (clangd only learned the `c++23` spelling in "
+            f"clang 17; before that it is `c++2b`), a missing or stale "
+            f"compile database, or an include path that does not resolve. "
+            f"Fix the configuration before trusting any result for this file."
+        )
+        if len(tu_failures) > 1:
+            note += f"\n\n_({len(tu_failures)} driver-level errors in total.)_"
+        return note
 
     p = Path(str(path))
     display = _relative_or_absolute(p, cwd)

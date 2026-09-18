@@ -71,13 +71,14 @@ class TestAddressHelpers(unittest.TestCase):
             )
 
     def test_socket_path_for_returns_pipe_on_windows(self) -> None:
-        # Patching os.name globally on POSIX breaks pathlib (it tries to
-        # instantiate WindowsPath which is unsupported here), so this
-        # test patches just the daemon module's os reference. The same
-        # patch on a real Windows host has no such side-effect.
+        # Patching os.name globally on POSIX breaks pathlib (it tries
+        # to instantiate WindowsPath, which is unsupported here), and
+        # ``daemon_mod.os`` IS the os module — the patch was never
+        # scoped to this module. ``_is_windows`` exists so the branch
+        # can be selected without that side-effect.
         from claude_hooks.lsp_engine import daemon as daemon_mod
         with TemporaryDirectory() as tmp:
-            with patch.object(daemon_mod.os, "name", "nt"):
+            with patch.object(daemon_mod, "_is_windows", lambda: True):
                 addr = socket_path_for(tmp)
             self.assertIsInstance(addr, str)
             self.assertTrue(addr.startswith("\\\\.\\pipe\\"))

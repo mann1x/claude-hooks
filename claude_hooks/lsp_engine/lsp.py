@@ -17,8 +17,12 @@ The contract is intentionally narrow for Phase 0:
   timeout expires; returns the latest list.
 - ``stop()`` sends ``shutdown`` + ``exit`` and reaps the child.
 
-No goto-def / hover / references yet — those land once the IPC layer
-is in place in Phase 1 and we have a real consumer for them.
+The navigation surface — definition, references, implementation, hover,
+document/workspace symbols, call hierarchy and rename — sits alongside
+it. Every one of those returns a union type; decoding lives in
+:mod:`claude_hooks.lsp_engine.protocol` as pure functions, so the arms
+belonging to servers we do not have installed are still covered by
+tests. The methods here are the transport half only.
 """
 
 from __future__ import annotations
@@ -35,10 +39,24 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import unquote
 
+from . import protocol
+from .protocol import (
+    CallHierarchyCall,
+    CallHierarchyItem,
+    Location,
+    Symbol,
+    WorkspaceEdit,
+)
+
 log = logging.getLogger("claude_hooks.lsp_engine.lsp")
+
+#: Declared to servers so they may use the full SymbolKind range. A
+#: server clamps to what the client lists, so an omitted kind comes back
+#: as a different kind rather than as an error.
+_SYMBOL_KIND_VALUE_SET = sorted(protocol.SYMBOL_KINDS)
 
 #: How many stderr lines to keep per server for diagnosis. Small on
 #: purpose — this is a breadcrumb for "why is this server silent", not
@@ -66,6 +84,12 @@ _LANGUAGE_ID_BY_EXT = {
     "hh": "cpp",
     "hpp": "cpp",
     "hxx": "cpp",
+    "hxx": "cpp",
+    # CUDA. clangd handles .cu/.cuh, but they were absent from every
+    # config until 2026-09-16, so CUDA files had no server at all — and
+    # an unmapped extension is a silent no-diagnostics, not an error.
+    "cu": "cuda",
+    "cuh": "cuda",
     "cs": "csharp",
     "ts": "typescript",
     "tsx": "typescriptreact",
@@ -82,6 +106,98 @@ _LANGUAGE_ID_BY_EXT = {
     "bash": "shellscript",
     "lua": "lua",
     "zig": "zig",
+    # Web trio, served by vscode-langservers-extracted. `html` is NOT
+    # mapped to a JS languageId: tsserver silently declines a document
+    # announced as anything it doesn't claim, so pointing html at it
+    # would buy an accepted file and an empty diagnostic list — the
+    # failure shape this module exists to prevent. Embedded <script>
+    # analysis is a client-side virtual-document trick in VS Code, not
+    # something a standalone server does.
+    "html": "html",
+    "htm": "html",
+    "css": "css",
+    "scss": "scss",
+    "less": "less",
+    "json": "json",
+    "jsonc": "jsonc",
+    # ─── parity with cclsp's map (audited 2026-09-16) ───────────────
+    # cclsp mapped 47 extensions to our 32. An extension missing here
+    # is announced as "plaintext", which most servers decline — so
+    # configuring jdtls and opening a .java file produced an accepted
+    # document and an empty result, with nothing anywhere saying why.
+    # These are the ones it had and we did not; they cost nothing when
+    # no server claims the extension, because routing is by cclsp.json
+    # and this map only names what is already being opened.
+    "java": "java",
+    "kt": "kotlin",
+    "kts": "kotlin",
+    "scala": "scala",
+    "sc": "scala",
+    "groovy": "groovy",
+    "rb": "ruby",
+    "erb": "erb",
+    "php": "php",
+    "swift": "swift",
+    "dart": "dart",
+    "hs": "haskell",
+    "lhs": "haskell",
+    "ml": "ocaml",
+    "mli": "ocaml",
+    "clj": "clojure",
+    "cljs": "clojure",
+    "cljc": "clojure",
+    "edn": "clojure",
+    "fs": "fsharp",
+    "fsi": "fsharp",
+    "fsx": "fsharp",
+    "elm": "elm",
+    "ex": "elixir",
+    "exs": "elixir",
+    "erl": "erlang",
+    "r": "r",
+    "jl": "julia",
+    "nim": "nim",
+    "v": "v",
+    "vue": "vue",
+    "svelte": "svelte",
+    "astro": "astro",
+    "tf": "terraform",
+    "tfvars": "terraform",
+    "hcl": "hcl",
+    "sql": "sql",
+    "graphql": "graphql",
+    "gql": "graphql",
+    "proto": "proto3",
+    "md": "markdown",
+    "markdown": "markdown",
+    "mdx": "mdx",
+    "tex": "latex",
+    "bib": "bibtex",
+    "xml": "xml",
+    "xsl": "xml",
+    "svg": "xml",
+    "yaml": "yaml",
+    "yml": "yaml",
+    "toml": "toml",
+    "ini": "ini",
+    "dockerfile": "dockerfile",
+    "makefile": "makefile",
+    "cmake": "cmake",
+    "nix": "nix",
+    "ps1": "powershell",
+    "psm1": "powershell",
+    "zsh": "shellscript",
+    "fish": "fish",
+    "vim": "vim",
+    "m": "objective-c",
+    "mm": "objective-cpp",
+    "pl": "perl",
+    "pm": "perl",
+    # Deliberately NOT inherited from cclsp: `jar` and `class` mapped to
+    # "java". Both are binary. Reading one as UTF-8 text and sending it
+    # in a didOpen hands the server megabytes of mojibake to parse, and
+    # nothing good follows. The user's rule applies — we do not match
+    # cclsp on unwanted behaviour.
 }
 
 
@@ -137,6 +253,137 @@ def uri_key(uri: str) -> str:
     return s
 
 
+def client_capabilities() -> dict:
+    """What this client tells a server it can do.
+
+    Module-level and returned fresh, so the declaration can be
+    asserted directly rather than grepped for. It is not
+    bookkeeping: a server withholds any provider whose client
+    capability is absent, so this dict *is* the feature set.
+    """
+    return {
+
+        "textDocument": {
+            "synchronization": {
+                "didSave": False,
+                "willSave": False,
+            },
+            "publishDiagnostics": {
+                "relatedInformation": False,
+                # We already drop publishes older than the
+                # last didChange; saying so lets servers
+                # stamp the version rather than guess.
+                "versionSupport": True,
+                "codeDescriptionSupport": False,
+                "dataSupport": False,
+            },
+            # LSP 3.17 pull diagnostics. A server only
+            # advertises ``diagnosticProvider`` when the
+            # *client* declares support — so omitting this
+            # guaranteed every server looked push-only, and
+            # the engine had no choice but to wait out a
+            # timeout and call the silence an answer.
+            "diagnostic": {
+                "dynamicRegistration": False,
+                "relatedDocumentSupport": False,
+            },
+            # ─── navigation ──────────────────────────────
+            # Same rule as pull diagnostics above: a server
+            # only advertises a provider when the client
+            # declares the matching capability, so omitting
+            # any of these makes the feature look absent
+            # rather than undeclared.
+            #
+            # ``linkSupport`` opts into ``LocationLink``,
+            # whose ``targetSelectionRange`` points at the
+            # *name* instead of the whole definition body —
+            # strictly better answers, and the reason
+            # ``parse_locations`` reads both shapes.
+            "definition": {"linkSupport": True},
+            "typeDefinition": {"linkSupport": True},
+            "implementation": {"linkSupport": True},
+            "references": {"dynamicRegistration": False},
+            "hover": {
+                "contentFormat": ["markdown", "plaintext"],
+            },
+            "documentSymbol": {
+                # Without this a server may flatten to
+                # SymbolInformation, losing the nesting that
+                # tells `Engine.start` from `Client.start`.
+                "hierarchicalDocumentSymbolSupport": True,
+                "symbolKind": {"valueSet": _SYMBOL_KIND_VALUE_SET},
+            },
+            "callHierarchy": {"dynamicRegistration": False},
+            "rename": {
+                # prepareSupport lets us ask "is this
+                # renameable, and what is its extent?"
+                # before editing anything.
+                "prepareSupport": True,
+                "dynamicRegistration": False,
+            },
+        },
+        "workspace": {
+            "symbol": {
+                "symbolKind": {"valueSet": _SYMBOL_KIND_VALUE_SET},
+            },
+            # Declared as well as sent: a server may check
+            # the capability rather than the field, and
+            # gopls in particular decides its module scope
+            # from it.
+            "workspaceFolders": True,
+            "workspaceEdit": {
+                "documentChanges": True,
+                # Deliberately NOT declaring
+                # resourceOperations. A server that believes
+                # we can create/rename/delete files will
+                # emit those operations as part of a rename
+                # (jdtls renames the file holding a renamed
+                # public class), and we do not apply file
+                # operations. Not declaring it means the
+                # server keeps the rename to text edits;
+                # `WorkspaceEdit.file_operations` still
+                # reports any that arrive anyway, so the
+                # caller learns the edit was partial rather
+                # than being told it succeeded.
+                "failureHandling": "abort",
+            },
+        },
+        # Servers only emit `$/progress` when the client
+        # says it can receive it. cclsp left this off and
+        # ignored the notification, which is why "still
+        # indexing" and "dead" were the same observation.
+        "window": {"workDoneProgress": True},
+        "general": {
+            "positionEncodings": ["utf-16"],
+        },
+    }
+
+
+def _call_item_wire(item: CallHierarchyItem) -> dict:
+    """A ``CallHierarchyItem`` back on the wire.
+
+    The incoming/outgoing requests take the item the *server* handed us
+    in ``prepareCallHierarchy``, so this has to round-trip faithfully:
+    some servers (rust-analyzer, jdtls) key their internal lookup on the
+    exact range they sent, and a reconstructed-but-different item comes
+    back as an empty call list rather than an error.
+    """
+    def _r(r) -> dict:
+        return {"start": {"line": r.start.line, "character": r.start.character},
+                "end": {"line": r.end.line, "character": r.end.character}}
+
+    wire = {
+        "name": item.name,
+        "kind": item.kind,
+        "uri": item.uri,
+        "range": _r(item.range),
+        "selectionRange": _r(item.selection),
+    }
+    if item.detail:
+        wire["detail"] = item.detail
+    return wire
+
+
 def _resolve_binary(name: str) -> str:
     """Return an executable path for ``name``, or ``name`` unchanged.
 
@@ -187,6 +434,74 @@ class Diagnostic:
     source: Optional[str] = None
 
 
+@dataclass
+class DiagnosticsResult:
+    """Diagnostics *plus whether the server actually answered*.
+
+    The bare list could not carry that, and an empty list meant both
+    "this file is clean" and "nobody replied in time". Those were
+    rendered identically — `"No diagnostics"` — which is the exact
+    false negative that hid a dead clangd for months, and then hid a
+    live one whose first publish simply took longer than the wait.
+
+    ``settled`` is the only field callers must consult before phrasing
+    an empty result as good news.
+    """
+
+    items: list[Diagnostic]
+    settled: bool
+    waited: float = 0.0
+    timeout: float = 0.0
+    server: str = ""
+    source: str = "push"  # push | pull | cached | unrouted
+
+    def __bool__(self) -> bool:  # pragma: no cover - trivial
+        return bool(self.items)
+
+    def __iter__(self):
+        return iter(self.items)
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+
+#: First-publish budgets, by language-server binary. A whole-tree
+#: default was wrong in both directions: 2 s let clangd time out on
+#: every large TU and report it as clean, while 15 s everywhere would
+#: stall the PostToolUse hook behind pyright, which publishes in
+#: milliseconds. clangd builds an AST and runs clang-tidy before its
+#: first push; rust-analyzer waits on cargo; jdtls on a workspace
+#: build. These are floors — :meth:`LspClient.diagnostics_timeout`
+#: raises them from measurement.
+_DIAGNOSTICS_TIMEOUT_BY_SERVER = {
+    "clangd": 15.0,
+    "rust-analyzer": 20.0,
+    "jdtls": 20.0,
+    "metals": 20.0,
+    "sourcekit-lsp": 15.0,
+}
+_DIAGNOSTICS_TIMEOUT_DEFAULT = 5.0
+#: Floor for a server's FIRST publish, before anything has been measured.
+#:
+#: The adaptive budget below raises itself from observed latency — which
+#: it can only observe from a request that finished. A server whose cold
+#: first publish exceeds the default therefore times out forever and
+#: never learns, which is the shape of every bug in this file.
+#:
+#: Measured on the cline monorepo: a cold first publish took 3.78 s
+#: against the 5 s default, warm 0.00 s, and a second file on the warm
+#: server 0.35 s. 3.78 under 5.00 is the same thin margin clangd had at
+#: 2.74 under 2.00 — and a heavier TU in that repo did exceed it. So the
+#: floor is set well clear of the measurement rather than just above it.
+#:
+#: This costs nothing when the server is quick: the budget bounds the
+#: wait, it does not schedule one. It applies once per server, because
+#: the first publish is also the first measurement.
+_DIAGNOSTICS_COLD_FLOOR = 15.0
+#: Never wait longer than this, however slow the server has been.
+_DIAGNOSTICS_TIMEOUT_CEILING = 30.0
+
+
 class LspError(RuntimeError):
     """Raised when the LSP returns an error response or fails to start."""
 
@@ -210,8 +525,12 @@ class LspClient:
         *,
         startup_timeout: float = 10.0,
         request_timeout: float = 5.0,
+        initialization_options: Optional[dict] = None,
+        diagnostics_timeout: Optional[float] = None,
     ) -> None:
         self._command = list(command)
+        self._initialization_options = initialization_options
+        self._diagnostics_timeout_override = diagnostics_timeout
         self._root_dir = Path(root_dir).resolve()
         self._startup_timeout = startup_timeout
         self._request_timeout = request_timeout
@@ -220,6 +539,12 @@ class LspClient:
         self._reader_thread: Optional[threading.Thread] = None
         self._stderr_thread: Optional[threading.Thread] = None
         self._stop_requested = threading.Event()
+        #: Set when the reader exits, for any reason. Distinct from
+        #: ``_stop_requested``, which is *us* asking it to stop.
+        self._reader_stopped = threading.Event()
+        #: A malformed frame was read. Terminal: the stream cannot be
+        #: resynchronised, only replaced.
+        self._desynced = False
 
         #: What the server said it can do, from the ``initialize``
         #: result. Previously validated and thrown away, which left the
@@ -231,6 +556,13 @@ class LspClient:
         #: broken says so here and nowhere else — there is no LSP
         #: message for "I started fine but a helper binary is missing".
         self._stderr_tail: deque = deque(maxlen=_STDERR_TAIL_LINES)
+
+        #: In-flight ``$/progress`` work, keyed by token. Bounded by the
+        #: server's own begin/end pairs rather than by us, which is safe
+        #: because a token that never ends belongs to a server that is
+        #: still claiming to work — exactly what we want to report.
+        self._progress: dict = {}
+        self._progress_lock = threading.Lock()
 
         self._next_id = 1
         self._id_lock = threading.Lock()
@@ -248,12 +580,22 @@ class LspClient:
         self._diag_lock = threading.Lock()
 
         self._open_versions: dict[str, int] = {}
+        #: Last content we sent per URI, so a repeat ``did_open`` can
+        #: tell "same file again" from "the file changed" without
+        #: asking the server, which cannot answer that question.
+        self._open_content: dict[str, str] = {}
         # Drop publishDiagnostics whose ``version`` is older than the
         # last did_change we sent. Without this guard, a delayed
         # publish for didOpen v1 can land *after* we reset for
         # didChange v2 and pollute state with stale len-5 diagnostics
         # the test thread then reads.
         self._diag_min_version: dict[str, int] = {}
+        #: Longest gap yet observed between opening a file and this
+        #: server's first publish for it. A measurement beats the
+        #: table: the same clangd is fast on a small TU and slow on a
+        #: 24 MB preamble, and only the tree in front of us knows which.
+        self._observed_publish_latency: float = 0.0
+        self._diag_wait_started: dict[str, float] = {}
 
     # ─── lifecycle ───────────────────────────────────────────────────
 
@@ -335,38 +677,23 @@ class LspClient:
             {
                 "processId": os.getpid(),
                 "rootUri": self._root_dir.as_uri(),
-                "capabilities": {
-                    "textDocument": {
-                        "synchronization": {
-                            "didSave": False,
-                            "willSave": False,
-                        },
-                        "publishDiagnostics": {
-                            "relatedInformation": False,
-                            # We already drop publishes older than the
-                            # last didChange; saying so lets servers
-                            # stamp the version rather than guess.
-                            "versionSupport": True,
-                            "codeDescriptionSupport": False,
-                            "dataSupport": False,
-                        },
-                        # LSP 3.17 pull diagnostics. A server only
-                        # advertises ``diagnosticProvider`` when the
-                        # *client* declares support — so omitting this
-                        # guaranteed every server looked push-only, and
-                        # the engine had no choice but to wait out a
-                        # timeout and call the silence an answer.
-                        "diagnostic": {
-                            "dynamicRegistration": False,
-                            "relatedDocumentSupport": False,
-                        },
-                    },
-                    "window": {"workDoneProgress": False},
-                    "general": {
-                        "positionEncodings": ["utf-16"],
-                    },
-                },
+                # `rootUri` has been deprecated since LSP 3.6 in favour
+                # of `workspaceFolders`, and pyright reads only the
+                # latter when deciding where its `pyrightconfig.json`
+                # is. With rootUri alone it starts, handshakes, answers
+                # every request — and resolves no first-party import, so
+                # `find_references` returns just the matches inside the
+                # file you asked about. A shorter list, not an error,
+                # which is indistinguishable from a symbol that really
+                # has one reference.
+                "workspaceFolders": [{
+                    "uri": self._root_dir.as_uri(),
+                    "name": self._root_dir.name,
+                }],
+                "capabilities": client_capabilities(),
                 "clientInfo": {"name": "claude-hooks-lsp-engine", "version": "0.1.0"},
+                **({"initializationOptions": self._initialization_options}
+                   if self._initialization_options is not None else {}),
             },
             timeout=max(0.1, deadline - time.monotonic()),
         )
@@ -479,10 +806,38 @@ class LspClient:
     # ─── document operations ─────────────────────────────────────────
 
     def did_open(self, path: str | os.PathLike, content: str) -> None:
+        """Open ``path``, or bring an already-open copy up to date.
+
+        **Idempotent, and it has to be.** LSP forbids opening the same
+        document twice and clangd simply ignores the duplicate — but the
+        old unconditional version still cleared the cached diagnostics
+        and bumped the version first. So a second call discarded a real
+        answer and then waited for a republish that the server had no
+        reason to send, and the caller read the resulting empty list as
+        a clean file.
+
+        That is the bug the opencoti session hit on 2026-09-16: by the
+        time they asked for diagnostics, hover had already opened the
+        file, so ``get_diagnostics`` re-opened it, dropped clangd's 24
+        diagnostics — including a severity-1 error — and reported "No
+        diagnostics". Driving the same clangd by hand showed them all.
+        """
         uri = path_to_uri(path)
         key = uri_key(uri)
+        if key in self._open_versions:
+            if self._open_content.get(key) == content:
+                # Same bytes, already open: the server's view is current
+                # and so are its diagnostics. Touching nothing is the
+                # whole fix.
+                return
+            # Genuinely different content for an open document is a
+            # change, and didChange is the notification that makes a
+            # server republish.
+            self.did_change(path, content)
+            return
         version = self._open_versions.get(key, 0) + 1
         self._open_versions[key] = version
+        self._open_content[key] = content
         self._reset_diagnostics(key, expected_version=version)
         self._send_notification(
             "textDocument/didOpen",
@@ -505,6 +860,7 @@ class LspClient:
             )
         self._open_versions[key] += 1
         version = self._open_versions[key]
+        self._open_content[key] = content
         self._reset_diagnostics(key, expected_version=version)
         self._send_notification(
             "textDocument/didChange",
@@ -517,6 +873,7 @@ class LspClient:
     def did_close(self, path: str | os.PathLike) -> None:
         uri = path_to_uri(path)
         self._open_versions.pop(uri_key(uri), None)
+        self._open_content.pop(uri_key(uri), None)
         self._send_notification(
             "textDocument/didClose",
             {"textDocument": {"uri": uri}},
@@ -524,44 +881,123 @@ class LspClient:
 
     # ─── diagnostics ─────────────────────────────────────────────────
 
+    @property
+    def server_name(self) -> str:
+        """Basename of the server binary, for messages and timeouts.
+
+        Separators are normalised by hand rather than left to ``Path``:
+        the configured command is usually an absolute pin (this repo's
+        clangd lives under ``.toolchains/clangd_22.1.6/bin/``), and a
+        Windows-spelled pin read on POSIX — or the reverse, in a test —
+        would leave the whole path as the "name" and silently fall back
+        to the default budget.
+        """
+        try:
+            raw = str(self._command[0])
+        except (IndexError, TypeError):  # pragma: no cover - defensive
+            return ""
+        base = raw.replace("\\", "/").rsplit("/", 1)[-1]
+        for suffix in (".exe", ".cmd", ".bat", ".ps1"):
+            if base.lower().endswith(suffix):
+                base = base[: -len(suffix)]
+                break
+        return base.lower()
+
+    def diagnostics_timeout(self, requested: Optional[float] = None) -> float:
+        """How long to wait for this server's first publish.
+
+        ``requested`` wins when given, so an explicit caller budget is
+        still honoured. Otherwise: the per-server floor, raised by
+        anything slower we have actually measured, capped so a
+        pathological server cannot hang the caller.
+        """
+        if requested is not None and requested > 0:
+            return requested
+        base = _DIAGNOSTICS_TIMEOUT_BY_SERVER.get(
+            self.server_name, _DIAGNOSTICS_TIMEOUT_DEFAULT)
+        if self._diagnostics_timeout_override is not None:
+            # An operator naming a value for this server in cclsp.json
+            # is a statement about this project, and outranks a floor
+            # we picked from somebody else's monorepo.
+            base = self._diagnostics_timeout_override
+        elif not self._observed_publish_latency:
+            base = max(base, _DIAGNOSTICS_COLD_FLOOR)
+        # Double the worst latency seen: a server that once took 9 s
+        # will take longer on a colder file, and the cost of waiting is
+        # a slow answer while the cost of not waiting is a wrong one.
+        measured = self._observed_publish_latency * 2.0
+        return min(max(base, measured), _DIAGNOSTICS_TIMEOUT_CEILING)
+
     def get_diagnostics(
         self,
         path: str | os.PathLike,
         *,
-        timeout: float = 2.0,
+        timeout: Optional[float] = None,
     ) -> list[Diagnostic]:
+        """Latest diagnostics for ``path`` as a plain list.
+
+        Kept for callers that genuinely only want the items. Anything
+        that *renders* the result must use
+        :meth:`get_diagnostics_result` instead — a bare list cannot say
+        whether an empty one means "clean" or "no answer yet", and
+        those two were rendered identically for months.
+        """
+        return self.get_diagnostics_result(path, timeout=timeout).items
+
+    def get_diagnostics_result(
+        self,
+        path: str | os.PathLike,
+        *,
+        timeout: Optional[float] = None,
+    ) -> DiagnosticsResult:
         """Block until the server publishes diagnostics for ``path``,
-        or ``timeout`` elapses; return the latest list.
+        or the deadline elapses, and report **which of those happened**.
 
         If the server has already published since the last reset (i.e.
-        since the last ``did_open`` / ``did_change`` for this URI),
-        return immediately. Returns an empty list on timeout — callers
-        should distinguish "no diagnostics yet" from "no diagnostics"
-        via the timeout themselves if they care.
+        since the last ``did_open`` / ``did_change`` for this URI), this
+        returns immediately.
         """
+        budget = self.diagnostics_timeout(timeout)
         key = uri_key(path_to_uri(path))
+        started = time.monotonic()
         with self._diag_lock:
             event = self._diagnostics_event.setdefault(key, threading.Event())
             if event.is_set():
-                return list(self._diagnostics.get(key, []))
+                return DiagnosticsResult(
+                    items=list(self._diagnostics.get(key, [])),
+                    settled=True, waited=0.0, timeout=budget,
+                    server=self.server_name, source="cached")
 
         # Prefer asking over waiting. With push diagnostics an empty
         # result and a server that never answers are the same
-        # observation — we wait out the timeout and return [], which the
-        # caller renders as "no problems". Pull diagnostics (LSP 3.17)
-        # turn that into a question with an answer, and a failure into
-        # an exception instead of a plausible silence. Only available
-        # because the client now declares `textDocument.diagnostic`;
-        # servers withhold `diagnosticProvider` otherwise.
+        # observation. Pull diagnostics (LSP 3.17) turn that into a
+        # question with an answer, and a failure into an exception
+        # instead of a plausible silence. Only available because the
+        # client declares `textDocument.diagnostic` — and note that
+        # clangd answers `diagnosticProvider: null` even then, so the
+        # push path below is not a rare fallback but the normal road
+        # for C/C++.
         if self.supports_pull_diagnostics:
-            pulled = self._pull_diagnostics(path, key, timeout=timeout)
+            pulled = self._pull_diagnostics(path, key, timeout=budget)
             if pulled is not None:
-                return pulled
+                return DiagnosticsResult(
+                    items=pulled, settled=True,
+                    waited=time.monotonic() - started, timeout=budget,
+                    server=self.server_name, source="pull")
 
-        if not event.wait(timeout=timeout):
-            return []
+        settled = event.wait(timeout=budget)
+        waited = time.monotonic() - started
+        if not settled:
+            return DiagnosticsResult(
+                items=[], settled=False, waited=waited, timeout=budget,
+                server=self.server_name, source="push")
+        if waited > self._observed_publish_latency:
+            self._observed_publish_latency = waited
         with self._diag_lock:
-            return list(self._diagnostics.get(key, []))
+            return DiagnosticsResult(
+                items=list(self._diagnostics.get(key, [])),
+                settled=True, waited=waited, timeout=budget,
+                server=self.server_name, source="push")
 
     def _pull_diagnostics(
         self, path, key: str, *, timeout: float,
@@ -598,6 +1034,130 @@ class LspClient:
             self._diagnostics[key] = diags
             self._diagnostics_event.setdefault(key, threading.Event()).set()
         return list(diags)
+
+    # ─── navigation ──────────────────────────────────────────────────
+    #
+    # All positions crossing this boundary are LSP-native: 0-based line
+    # *and* 0-based character. The MCP surface is 1-based on both axes,
+    # and converting anywhere other than at that one edge is how a
+    # result ends up one line off in a way nobody notices until it lands
+    # on the wrong function.
+
+    def _position_params(self, path, line: int, character: int) -> dict:
+        return {
+            "textDocument": {"uri": path_to_uri(path)},
+            "position": {"line": line, "character": character},
+        }
+
+    def _request_at(self, method: str, path, line: int, character: int,
+                    *, timeout: Optional[float] = None,
+                    extra: Optional[dict] = None) -> Any:
+        params = self._position_params(path, line, character)
+        if extra:
+            params.update(extra)
+        return self._send_request(method, params, timeout=timeout)
+
+    def definition(self, path, line: int, character: int,
+                   *, timeout: Optional[float] = None) -> list[Location]:
+        return protocol.parse_locations(
+            self._request_at("textDocument/definition", path, line, character,
+                             timeout=timeout))
+
+    def type_definition(self, path, line: int, character: int,
+                        *, timeout: Optional[float] = None) -> list[Location]:
+        return protocol.parse_locations(
+            self._request_at("textDocument/typeDefinition", path, line,
+                             character, timeout=timeout))
+
+    def implementation(self, path, line: int, character: int,
+                       *, timeout: Optional[float] = None) -> list[Location]:
+        return protocol.parse_locations(
+            self._request_at("textDocument/implementation", path, line,
+                             character, timeout=timeout))
+
+    def references(self, path, line: int, character: int,
+                   *, include_declaration: bool = True,
+                   timeout: Optional[float] = None) -> list[Location]:
+        return protocol.parse_locations(self._request_at(
+            "textDocument/references", path, line, character, timeout=timeout,
+            extra={"context": {"includeDeclaration": include_declaration}}))
+
+    def hover(self, path, line: int, character: int,
+              *, timeout: Optional[float] = None) -> str:
+        return protocol.parse_hover(
+            self._request_at("textDocument/hover", path, line, character,
+                             timeout=timeout))
+
+    def document_symbols(self, path,
+                         *, timeout: Optional[float] = None) -> list[Symbol]:
+        uri = path_to_uri(path)
+        return protocol.parse_document_symbols(
+            self._send_request("textDocument/documentSymbol",
+                               {"textDocument": {"uri": uri}}, timeout=timeout),
+            uri=uri)
+
+    def workspace_symbols(self, query: str,
+                          *, timeout: Optional[float] = None) -> list[Symbol]:
+        return protocol.parse_workspace_symbols(
+            self._send_request("workspace/symbol", {"query": query},
+                               timeout=timeout))
+
+    def prepare_call_hierarchy(
+        self, path, line: int, character: int,
+        *, timeout: Optional[float] = None,
+    ) -> list[CallHierarchyItem]:
+        return protocol.parse_call_hierarchy_items(
+            self._request_at("textDocument/prepareCallHierarchy", path, line,
+                             character, timeout=timeout))
+
+    def incoming_calls(self, item: CallHierarchyItem,
+                       *, timeout: Optional[float] = None
+                       ) -> list[CallHierarchyCall]:
+        return protocol.parse_calls(
+            self._send_request("callHierarchy/incomingCalls",
+                               {"item": _call_item_wire(item)}, timeout=timeout),
+            direction="incoming")
+
+    def outgoing_calls(self, item: CallHierarchyItem,
+                       *, timeout: Optional[float] = None
+                       ) -> list[CallHierarchyCall]:
+        return protocol.parse_calls(
+            self._send_request("callHierarchy/outgoingCalls",
+                               {"item": _call_item_wire(item)}, timeout=timeout),
+            direction="outgoing")
+
+    def prepare_rename(self, path, line: int, character: int,
+                       *, timeout: Optional[float] = None) -> bool:
+        """Is the symbol at this position renameable?
+
+        Returns True when the server says yes *or* when it does not
+        implement the check — an unimplemented precondition must not
+        read as a refusal. Only an explicit ``null`` is a no.
+        """
+        if not self.supports("renameProvider"):
+            return True
+        provider = self._server_capabilities.get("renameProvider")
+        if not (isinstance(provider, dict) and provider.get("prepareProvider")):
+            return True
+        try:
+            res = self._request_at("textDocument/prepareRename", path, line,
+                                   character, timeout=timeout)
+        except LspError as e:
+            log.debug("prepareRename unavailable: %s", e)
+            return True
+        if res is None:
+            return False
+        # {defaultBehavior: false} is the server declining in the one
+        # shape that is not null.
+        if isinstance(res, dict) and res.get("defaultBehavior") is False:
+            return False
+        return True
+
+    def rename(self, path, line: int, character: int, new_name: str,
+               *, timeout: Optional[float] = None) -> WorkspaceEdit:
+        return protocol.parse_workspace_edit(self._request_at(
+            "textDocument/rename", path, line, character, timeout=timeout,
+            extra={"newName": new_name}))
 
     def _reset_diagnostics(self, key: str, *, expected_version: int) -> None:
         """``key`` is a :func:`uri_key` result, never a raw URI — the
@@ -640,6 +1200,20 @@ class LspClient:
         except Empty:
             with self._pending_lock:
                 self._pending.pop(rid, None)
+            # Tell the server to stop. Without this the request keeps
+            # running — a `find_references` over a large workspace can
+            # occupy a single-threaded server for minutes after we have
+            # given up on it, so the *next* request queues behind work
+            # nobody is waiting for and times out in turn. That is how
+            # one slow call degrades into a server that looks hung.
+            #
+            # Best-effort by definition: the server may answer anyway,
+            # and the reply is discarded because `rid` is no longer
+            # pending.
+            try:
+                self._send_notification("$/cancelRequest", {"id": rid})
+            except (LspError, OSError) as e:      # pragma: no cover - rare
+                log.debug("could not cancel request %s (%s): %s", rid, method, e)
             raise LspError(f"timeout waiting for response to {method!r}")
         if "error" in response:
             err = response["error"]
@@ -667,14 +1241,65 @@ class LspClient:
     def _read_loop(self) -> None:
         assert self._proc and self._proc.stdout
         stdout = self._proc.stdout
+        reason = "reader stopped"
         try:
             while not self._stop_requested.is_set():
                 msg = self._read_frame(stdout)
                 if msg is None:
-                    return  # EOF
+                    reason = "server closed its output stream"
+                    return
                 self._dispatch(msg)
-        except Exception:  # pragma: no cover — defensive
+        except LspProtocolError as e:
+            # The read position is no longer on a message boundary, so
+            # every later read is garbage. This is not recoverable by
+            # waiting — it is the state cclsp got stuck in, where one
+            # bad frame turned into a server that timed out forever.
+            # Mark it so the engine replaces the process instead.
+            self._desynced = True
+            reason = f"protocol desync: {e}"
+            log.warning("lsp %s desynced: %s", self._command[0], e)
+        except Exception as e:  # pragma: no cover — defensive
+            reason = f"reader thread crashed: {e}"
             log.exception("lsp reader thread crashed")
+        finally:
+            self._reader_stopped.set()
+            # Nothing will ever answer these now. Waking them with an
+            # error beats letting each one burn its full timeout —
+            # which, with the reader dead, is every request from here on.
+            self._fail_pending(reason)
+
+    def _fail_pending(self, reason: str) -> None:
+        with self._pending_lock:
+            pending = list(self._pending.items())
+            self._pending.clear()
+        for rid, q in pending:
+            try:
+                q.put_nowait({
+                    "jsonrpc": "2.0", "id": rid,
+                    "error": {"code": -32603, "message": reason},
+                })
+            except Exception:  # pragma: no cover — full queue, caller gone
+                pass
+
+    # ─── health ──────────────────────────────────────────────────────
+
+    @property
+    def is_desynced(self) -> bool:
+        """True once a malformed frame proved the stream is unusable."""
+        return self._desynced
+
+    @property
+    def is_alive(self) -> bool:
+        """Can this client still carry a request?
+
+        Requires both a living process *and* a running reader: a server
+        whose reader thread has died is a process we can write to and
+        never hear from, which presents as a hang rather than a failure.
+        """
+        if self._desynced or self._reader_stopped.is_set():
+            return False
+        proc = self._proc
+        return proc is not None and proc.poll() is None
 
     @staticmethod
     def _read_frame(stream) -> Optional[dict]:
@@ -718,19 +1343,110 @@ class LspClient:
         if method == "textDocument/publishDiagnostics":
             self._on_publish_diagnostics(msg.get("params") or {})
             return
+        if method == "$/progress":
+            self._on_progress(msg.get("params") or {})
+            return
         if method == "window/logMessage" or method == "window/showMessage":
             log.debug("lsp %s: %s", method, (msg.get("params") or {}).get("message"))
             return
         if "id" in msg and "method" in msg:
-            # Server-to-client request — we don't implement any yet.
-            # Reply with method-not-found so the server doesn't hang.
-            self._write_frame(
-                {
-                    "jsonrpc": "2.0",
-                    "id": msg["id"],
-                    "error": {"code": -32601, "message": "not implemented"},
-                }
-            )
+            self._answer_server_request(msg, method)
+
+    def _answer_server_request(self, msg: dict, method) -> None:
+        """Reply to a server-to-client request.
+
+        Three of these must be answered *successfully* rather than with
+        method-not-found, because the error is not neutral — a server
+        that asks and is refused changes its behaviour:
+
+        ``window/workDoneProgress/create``
+            We declared ``window.workDoneProgress``, so refusing the
+            token we just asked to be sent is incoherent, and a server
+            that takes the error seriously stops reporting progress —
+            re-creating the exact blind spot the declaration was added
+            to remove.
+        ``workspace/configuration``
+            gopls and pyright ask for their settings on startup. An
+            error there is not "no settings", it is a failed request
+            during initialisation, and both degrade quietly afterwards.
+            A list of nulls is the spec's way of saying "defaults".
+        ``client/registerCapability``
+            Dynamic registration. We do not track registrations, but
+            acknowledging is correct: the server is informing us, not
+            asking permission.
+        """
+        rid = msg["id"]
+        if method == "workspace/configuration":
+            items = (msg.get("params") or {}).get("items")
+            n = len(items) if isinstance(items, list) else 1
+            result: Any = [None] * n
+        elif method in ("window/workDoneProgress/create",
+                        "client/registerCapability",
+                        "client/unregisterCapability"):
+            result = None
+        else:
+            self._write_frame({
+                "jsonrpc": "2.0", "id": rid,
+                "error": {"code": -32601, "message": "not implemented"},
+            })
+            return
+        self._write_frame({"jsonrpc": "2.0", "id": rid, "result": result})
+
+    # ─── progress ────────────────────────────────────────────────────
+
+    def _on_progress(self, params: dict) -> None:
+        """Track the server's own account of what it is doing.
+
+        This is the difference between "timed out" and "timed out while
+        clangd was 40% through indexing 12k files". cclsp had zero
+        references to ``$/progress``, so every slow answer and every
+        dead server produced the same message.
+        """
+        value = params.get("value")
+        if not isinstance(value, dict):
+            return
+        kind = value.get("kind")
+        token = params.get("token")
+        with self._progress_lock:
+            if kind == "end":
+                self._progress.pop(token, None)
+                return
+            if kind not in ("begin", "report"):
+                return
+            prev = self._progress.get(token) or {}
+            pct = value.get("percentage")
+            self._progress[token] = {
+                "title": value.get("title") or prev.get("title") or "",
+                "message": value.get("message") or prev.get("message") or "",
+                "percentage": pct if isinstance(pct, (int, float)) else prev.get("percentage"),
+                "since": prev.get("since") or time.monotonic(),
+            }
+
+    def progress_snapshot(self) -> Optional[dict]:
+        """The most advanced in-flight progress, or None if idle.
+
+        Includes ``eta_seconds`` when the server reports a percentage,
+        derived from elapsed-versus-percentage. That is a rough figure
+        and labelled as one — but "roughly two minutes" is a decision a
+        caller can act on, and a bare timeout is not.
+        """
+        with self._progress_lock:
+            entries = list(self._progress.values())
+        if not entries:
+            return None
+        best = max(entries, key=lambda e: e.get("percentage") or 0)
+        elapsed = max(1.0, time.monotonic() - best["since"])
+        pct = best.get("percentage")
+        eta = None
+        if isinstance(pct, (int, float)) and 0 < pct < 100:
+            eta = max(1, int(elapsed * (100 - pct) / pct))
+        return {
+            "title": best["title"],
+            "message": best["message"],
+            "percentage": pct,
+            "elapsed_seconds": int(elapsed),
+            "eta_seconds": eta,
+        }
 
     @staticmethod
     def _parse_diagnostics(uri: str, raw: list) -> list[Diagnostic]:

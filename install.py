@@ -338,7 +338,7 @@ POST_TOOL_USE_TEMPLATE = {
                 {
                     "type": "command",
                     "command": "{cmd} PostToolUse",
-                    "timeout": 10,
+                    "timeout": 30,
                     "_managedBy": MANAGED_BY,
                 }
             ],

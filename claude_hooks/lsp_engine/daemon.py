@@ -49,12 +49,19 @@ else:
 
 from claude_hooks.lsp_engine.compile import CompileOrchestrator
 from claude_hooks.lsp_engine.config import (
+    resolve_cclsp_path,
+    boundary_root_for,
     EngineConfig,
     LspServerSpec,
     load_cclsp_config,
     load_engine_config,
 )
-from claude_hooks.lsp_engine.engine import Engine
+from claude_hooks.lsp_engine import wire
+from claude_hooks.lsp_engine.engine import (  # noqa: F401 — Engine re-exported
+    Engine,
+    merge_nav,
+)
+from claude_hooks.lsp_engine.pool import EnginePool
 from claude_hooks.lsp_engine.git_watch import GitWatcher
 from claude_hooks.lsp_engine.ipc import IpcServer, windows_pipe_name_for
 from claude_hooks.lsp_engine.locks import (
@@ -68,6 +75,65 @@ log = logging.getLogger("claude_hooks.lsp_engine.daemon")
 
 SWEEPER_INTERVAL_S = 1.0
 DEFAULT_DIAG_TIMEOUT_S = 2.0
+
+
+def daemon_root_for(project_root: str | os.PathLike) -> Path:
+    """The root a **daemon** is keyed on: the repository, not the package.
+
+    Every path into the daemon's identity — the state directory, the
+    socket, the named pipe, the lock file — goes through here, and so
+    does the client resolving where to connect. That is deliberate: the
+    client and the daemon computing this differently would produce a
+    daemon nobody connects to and a spawn on every request, which is
+    the exact class of bug that ``project_dir``'s ``normcase`` note
+    already records from pandorum.
+
+    The narrow root the language server needs is a different question,
+    answered per file by :class:`~claude_hooks.lsp_engine.pool.EnginePool`.
+    Keying the daemon on it too is what produced a daemon per package:
+    30 roots in one checkout of cline, 37 in one of opencoti.
+    """
+    root = Path(project_root).resolve()
+    if not root.exists():
+        # Nothing to walk up from. Finding a boundary for a path that
+        # does not exist means walking up from the *process's* cwd
+        # instead, which lands on whatever repository the caller
+        # happens to be sitting in — a wrong answer that looks like a
+        # right one, and the class of bug this whole module is about.
+        #
+        # The test is existence, not directory-ness: callers legitimately
+        # pass a file (``connect_or_spawn(some_source_file)``), and
+        # ``boundary_root_for`` starts from its parent. Guarding on
+        # ``is_dir()`` instead let a file through as a root, and the
+        # daemon then rooted itself at ``…/messages.ts`` and looked for
+        # ``messages.ts/cclsp.json``. Measured, not hypothesised.
+        return root
+    try:
+        boundary = boundary_root_for(root)
+    except OSError:  # pragma: no cover — unreadable parent
+        boundary = None
+    if boundary is not None:
+        return boundary
+    # No boundary at all: nothing above this path is a repository, a
+    # declared root, or a package. Falling back to ``root`` puts the
+    # file itself back in the daemon's identity — the same
+    # ``messages.ts/cclsp.json`` failure the guard above exists to
+    # prevent, reached through a different door. Found on a real tree:
+    # ``backup_models/manic-harness`` is a symlink to another disk, so
+    # resolving it escapes the declared root and leaves nothing to walk
+    # up to, and 179 files there each keyed a daemon on themselves.
+    return root if root.is_dir() else root.parent
+
+
+def _is_windows() -> bool:
+    """Indirection so a test can pick the branch without patching ``os``.
+
+    ``os.name`` is global: patching it for the duration of a call also
+    reaches ``pathlib``, which then tries to build a ``WindowsPath`` on
+    POSIX and raises. The address helpers construct paths, so they
+    cannot be exercised under that patch at all.
+    """
+    return os.name == "nt"
 
 
 def project_dir(project_root: str | os.PathLike, base: Optional[Path] = None) -> Path:
@@ -90,7 +156,7 @@ def project_dir(project_root: str | os.PathLike, base: Optional[Path] = None) ->
     applied in :func:`claude_hooks.lsp_engine.ipc.windows_pipe_name_for`
     to keep the pipe name consistent.
     """
-    abs_root = Path(project_root).resolve()
+    abs_root = daemon_root_for(project_root)
     key = os.path.normcase(str(abs_root))
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
     base = base or (Path.home() / ".claude" / "lsp-engine")
@@ -105,8 +171,8 @@ def socket_path_for(project_root: str | os.PathLike, base: Optional[Path] = None
     Windows: a ``str`` named pipe like ``\\\\.\\pipe\\claude-hooks-lsp-engine-<hash>``
     (no filesystem entry — pipes live in the kernel's pipe namespace).
     """
-    if os.name == "nt":
-        return windows_pipe_name_for(project_root)
+    if _is_windows():
+        return windows_pipe_name_for(daemon_root_for(project_root))
     return project_dir(project_root, base=base) / "daemon.sock"
 
 
@@ -154,8 +220,26 @@ def pid_is_alive(pid: int) -> bool:
             PROCESS_QUERY_LIMITED_INFORMATION, False, pid,
         )
         if handle:
-            kernel32.CloseHandle(handle)
-            return True
+            try:
+                # An open handle keeps the PID valid after the process
+                # has exited, so OpenProcess succeeding is not the same
+                # as the process running — the Windows counterpart of a
+                # POSIX zombie, and the same wrong answer: a daemon that
+                # has stopped reads as one that refused to, which the
+                # supervisor now reports as a survivor and the deploy
+                # fails on. GetExitCodeProcess is the question actually
+                # being asked. (A process that genuinely exits with 259
+                # is indistinguishable; that is the documented cost of
+                # STILL_ACTIVE sharing the value space.)
+                STILL_ACTIVE = 259
+                code = wintypes.DWORD()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return code.value == STILL_ACTIVE
+                # Could not ask: fall back to the old answer rather
+                # than report a live daemon dead.
+                return True
+            finally:
+                kernel32.CloseHandle(handle)
         # NULL handle: distinguish "access denied" (5) from "no such
         # PID" (87 — ERROR_INVALID_PARAMETER for OpenProcess).
         err = kernel32.GetLastError()
@@ -171,7 +255,146 @@ def pid_is_alive(pid: int) -> bool:
         return True
     except OSError:
         return False
-    return True
+    # A zombie answers ``kill(pid, 0)`` — the PID is still allocated so
+    # its parent can read the exit status — but the daemon is gone: no
+    # memory, no language servers, no socket. Both callers of this
+    # function want "is a daemon still serving", and for both the wrong
+    # answer is sticky: ``status`` reports a live daemon that answers
+    # nothing, and ``cleanup`` refuses to remove a state dir forever.
+    #
+    # It arises whenever the spawner outlives the daemon without
+    # reaping it. ``start_new_session=True`` detaches the session but
+    # does NOT reparent, so a long-lived spawner — the MCP server, a
+    # pytest run — stays the parent. Measured: a daemon stopped via the
+    # shutdown op reported ``pid_is_alive`` true for the rest of the
+    # session, in state Z, parented to the process that spawned it.
+    return not _is_zombie(pid)
+
+
+def process_start_time(pid: int) -> Optional[float]:
+    """When ``pid`` actually started, as a unix timestamp.
+
+    Linux-only; None elsewhere, and callers must treat None as "cannot
+    tell" rather than as an answer.
+
+    NOT ``Path(f"/proc/{pid}").stat().st_mtime``. That looks like the
+    start time and is not: the kernel updates the directory's mtime
+    afterwards, so a daemon started 2026-09-16 19:40:20 reported
+    02:03:30 the following morning. Two things were built on that
+    mistake within an hour of each other — the deploy's staleness check
+    (which then *under*-reports, the dangerous direction) and the PID
+    reuse guard (which concluded a live daemon's own lock belonged to
+    someone else, and so hid a genuinely wedged daemon from ``lsp
+    list``).
+
+    Field 22 of ``/proc/<pid>/stat`` is the start time in clock ticks
+    since boot; ``btime`` in ``/proc/stat`` is when boot was. The comm
+    field is parenthesised and may contain spaces or ``)``, so the
+    fields are counted from the LAST ``)``.
+
+    On Windows the same fact comes from ``GetProcessTimes``, whose
+    creation time is a FILETIME — 100 ns ticks since 1601-01-01. It is
+    worth having there for more than parity: with no ``/proc/<pid>/
+    cmdline`` to read, a start time that matches the one recorded in
+    the lock file is the only proof available that a pid is still the
+    daemon that wrote it, and without some such proof nothing on
+    Windows may be signalled at all.
+    """
+    if pid is None or pid <= 0:
+        return None
+    if os.name == "nt":
+        return _process_start_time_windows(pid)
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        ticks = float(stat.rsplit(")", 1)[1].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+    try:
+        for line in Path("/proc/stat").read_text(encoding="ascii").splitlines():
+            if line.startswith("btime "):
+                return float(line.split()[1]) + ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return None
+
+
+#: Seconds between the FILETIME epoch (1601-01-01) and the unix epoch.
+_FILETIME_EPOCH_DELTA = 11644473600.0
+
+
+def _process_start_time_windows(pid: int) -> Optional[float]:  # pragma: no cover — Windows
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return None
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        created = wintypes.FILETIME()
+        exited = wintypes.FILETIME()
+        kernel = wintypes.FILETIME()
+        user = wintypes.FILETIME()
+        ok = kernel32.GetProcessTimes(
+            handle, ctypes.byref(created), ctypes.byref(exited),
+            ctypes.byref(kernel), ctypes.byref(user))
+        if not ok:
+            return None
+        ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime
+        return ticks / 1e7 - _FILETIME_EPOCH_DELTA
+    except Exception:
+        return None
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _is_zombie(pid: int) -> bool:
+    """True when ``pid`` has exited but has not been reaped.
+
+    Linux-only; ``/proc`` is the only dependency-free way to ask, and
+    returning False elsewhere preserves the previous behaviour rather
+    than guessing. Windows has no equivalent state — a handle keeps the
+    PID valid, but ``OpenProcess`` on an exited process still succeeds
+    only while a handle is open, which is the same trade.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    except (OSError, ValueError):
+        return False
+    try:
+        # The comm field is parenthesised and may itself contain spaces
+        # or ')', so state is the first field after the LAST ')'.
+        return stat.rsplit(")", 1)[1].split()[0] == "Z"
+    except IndexError:  # pragma: no cover — defensive
+        return False
+
+
+class _PreloadRouter:
+    """Adapts the pool to what ``preload_engine`` expects.
+
+    Preload ranks the repository's hottest files by in-degree, and in a
+    monorepo those span packages — so the one thing it must not do is
+    push every file into a single engine, which would hand a package's
+    sources to a server rooted somewhere else. Each file goes to the
+    engine that owns it, and the pool's cap still applies: preload is a
+    warm-up, not a licence to start a fleet per package.
+    """
+
+    def __init__(self, pool: EnginePool) -> None:
+        self._pool = pool
+
+    def did_open(self, path, content) -> bool:
+        engine = self._pool.existing_for_path(path)
+        if engine is None:
+            # Only warm roots the pool is already willing to hold.
+            if len(self._pool.live_roots()) >= self._pool.max_engines:
+                return False
+            engine = self._pool.for_path(path)
+        return engine.did_open(path, content)
 
 
 class DaemonAlreadyRunning(RuntimeError):
@@ -194,8 +417,15 @@ class Daemon:
         startup_timeout: float = 10.0,
         request_timeout: float = 5.0,
         git_poll_interval: float = 1.0,
+        cclsp_config_path: Optional[str | os.PathLike] = None,
+        max_engines: Optional[int] = None,
+        engine_idle_seconds: Optional[float] = None,
     ) -> None:
-        self._project_root = Path(project_root).resolve()
+        # The daemon is keyed at the repository boundary; the engines
+        # inside it stay narrowly rooted. Normalising here and in
+        # ``connect_or_spawn`` through the same function is what keeps
+        # the client and the daemon agreeing on one socket.
+        self._project_root = daemon_root_for(project_root)
         self._dir = project_dir(self._project_root, base=state_base)
         # IPC address: filesystem socket path on POSIX, ``\\.\pipe\<name>``
         # on Windows. Going through ``socket_path_for`` is load-bearing —
@@ -213,14 +443,60 @@ class Daemon:
         self._lock_manager = SessionLockManager(
             debounce_seconds=cfg.session_locks.debounce_seconds,
         )
-        self._engine = Engine(
-            project_root=self._project_root,
-            servers=servers,
-            config=cfg,
+        # One engine per package actually touched, bounded by count and
+        # by idleness. The servers are configured once for the whole
+        # repository and rooted per package: a spec's ``rootDir`` is
+        # resolved against the engine's own root, so the same cclsp.json
+        # gives tsserver the package's tsconfig rather than the
+        # repository's absent one.
+        self._pool = EnginePool(
+            self._project_root,
+            servers,
+            cfg,
             startup_timeout=startup_timeout,
             request_timeout=request_timeout,
+            max_engines=(cfg.pool.max_engines if max_engines is None
+                         else max_engines),
+            idle_seconds=(cfg.pool.idle_seconds if engine_idle_seconds is None
+                          else engine_idle_seconds),
         )
         self._engine_config = cfg
+        # path -> the last diagnostics payload served for it, with the
+        # content stamp it corresponds to. Lets a second asker for
+        # unchanged content be answered without re-running the wait;
+        # see _op_diagnostics.
+        self._served: dict[str, dict] = {}
+        # The daemon holds the code it imported, like every long-lived
+        # process here — and it is the consequential one now that the
+        # MCP server is one of its clients: everything routes through
+        # it, and restarting the client does not restart it. Each
+        # attached session is told once, over its own responses.
+        import claude_hooks
+        from claude_hooks import staleness as _staleness
+        self._staleness = _staleness.StalenessDetector(
+            pkg_root=Path(claude_hooks.__file__).resolve().parent,
+            imported_version=claude_hooks.__version__,
+            import_time=_staleness.IMPORT_TIME,
+            subject=f"the lsp_engine daemon for {self._project_root}",
+            remedy=(
+                "Stop the daemon — it respawns on the next request with "
+                "the current code:",
+                f"  python -m claude_hooks.lsp_engine stop --project "
+                f"{self._project_root}",
+                "  claude-hooks-daemon-ctl lsp stop        # every daemon "
+                "on this host",
+                "Restarting your MCP client does NOT restart the daemon, "
+                "and neither does restarting your session.",
+                "`reload` is the WRONG verb here: it replaces the "
+                "language servers and re-reads cclsp.json, but this "
+                "process keeps the Python it already imported.",
+            ),
+        )
+        self._stale_told: set[str] = set()
+        # Reported in status so a client can check that the file it
+        # validated is the file actually being served.
+        self._cclsp_config_path = daemon_cclsp_path(
+            self._project_root, cclsp_config_path)
 
         self._ipc = IpcServer(
             self._socket_path,
@@ -240,6 +516,10 @@ class Daemon:
         self._sweeper_stop = threading.Event()
         self._lock_fd: Optional[int] = None
         self._stopping = threading.Event()
+        #: Set once the teardown below has actually *run*. Distinct
+        #: from ``_stopping``, which only means it was asked for.
+        self._stopped = threading.Event()
+        self._stop_lock = threading.Lock()
 
         # Phase 2 additions: adaptive preload + git watcher.
         self._preload_thread: Optional[threading.Thread] = None
@@ -267,6 +547,28 @@ class Daemon:
                 cfg.compile_aware.commands,
                 toml_path=self._project_root / ".claude-hooks" / "lsp-engine.toml",
             )
+
+    # ─── engine routing ──────────────────────────────────────────────
+
+    def _engine_for(self, path: str | os.PathLike):
+        """The engine that owns ``path``, started if needed."""
+        return self._pool.for_path(path)
+
+    def _open_engine_for(self, path: str | os.PathLike):
+        """The engine that owns ``path``, or None if it is not running.
+
+        For ``did_close`` and the like: starting a fleet of language
+        servers in order to tell one that a file it never opened is now
+        closed would be an expensive way to do nothing.
+        """
+        return self._pool.existing_for_path(path)
+
+    def _engines(self) -> list:
+        return self._pool.live_engines()
+
+    def open_files(self) -> list[str]:
+        """Every file open across the repository's engines."""
+        return sorted(f for e in self._engines() for f in e.open_files())
 
     # ─── lifecycle ───────────────────────────────────────────────────
 
@@ -313,8 +615,22 @@ class Daemon:
         log.info("lsp-engine daemon started for %s", self._project_root)
 
     def stop(self) -> None:
-        if self._stopping.is_set():
-            return
+        """Tear the daemon down. Safe to call twice; does the work once.
+
+        The guard is on ``_stopped`` — teardown already *performed* —
+        and not on ``_stopping``, which only records that a stop was
+        *asked for*. Keying it on the latter meant the SIGTERM path did
+        nothing at all: the signal handler sets ``_stopping``, the run
+        loop sees it and exits, and the ``finally: self.stop()`` then
+        found the flag set and returned immediately. Every SIGTERM
+        therefore skipped the language servers' shutdown/exit
+        handshake, the git watcher, and the socket unlink, and the
+        process fell out of ``run()`` with the teardown never run.
+        """
+        with self._stop_lock:
+            if self._stopped.is_set():
+                return
+            self._stopped.set()
         self._stopping.set()
         self._sweeper_stop.set()
         if self._git_watcher is not None:
@@ -343,7 +659,7 @@ class Daemon:
                 log.exception("error stopping compile orchestrator")
             self._compile = None
         try:
-            self._engine.shutdown()
+            self._pool.shutdown()
         except Exception:  # pragma: no cover — defensive
             log.exception("error shutting down engine")
         self._release_lock_file()
@@ -459,6 +775,14 @@ class Daemon:
         while not self._sweeper_stop.wait(timeout=SWEEPER_INTERVAL_S):
             drained = self._lock_manager.tick()
             self._apply_drained(drained)
+            # Engines whose package has not been touched in a while.
+            # The daemon outlives any one task, so without this a
+            # single sweep across a monorepo leaves every package it
+            # visited holding a fleet for the rest of the day.
+            try:
+                self._pool.reap_idle()
+            except Exception:  # pragma: no cover — defensive
+                log.exception("engine idle reap failed")
 
     # ─── preload + git refresh ───────────────────────────────────────
 
@@ -471,9 +795,10 @@ class Daemon:
         """
         try:
             cfg = self._engine_config.preload
-            extensions = self._engine.configured_extensions()
+            boundary_engine = self._pool.for_root(self._project_root)
+            extensions = boundary_engine.configured_extensions()
             preload_engine(
-                self._engine,
+                _PreloadRouter(self._pool),
                 self._project_root,
                 max_files=cfg.max_files,
                 extension_filter=extensions if extensions else None,
@@ -494,7 +819,8 @@ class Daemon:
         with self._refresh_lock:
             log.info("git_watch: %s — refreshing open files", reason)
             try:
-                refreshed = self._engine.refresh_open_files()
+                refreshed = sum(e.refresh_open_files()
+                                for e in self._engines())
             except Exception:  # pragma: no cover — defensive
                 log.exception("git_watch: refresh_open_files raised")
                 return
@@ -508,7 +834,7 @@ class Daemon:
         """
         for path, change in drained:
             try:
-                self._engine.did_change(path, change.content)
+                self._engine_for(path).did_change(path, change.content)
             except Exception:  # pragma: no cover — defensive
                 log.exception("failed to apply drained change for %s", path)
 
@@ -541,6 +867,22 @@ class Daemon:
     # ─── request dispatch ────────────────────────────────────────────
 
     def _handle_request(self, req: dict) -> dict:
+        """Dispatch, then tell this session once if we are stale."""
+        resp = self._dispatch_request(req)
+        session = req.get("session")
+        if isinstance(session, str) and session and session not in (
+                self._stale_told):
+            try:
+                notice = self._staleness.notice()
+            except Exception:  # pragma: no cover - never fail a request
+                notice = None
+            if notice:
+                self._stale_told.add(session)
+                resp = dict(resp)
+                resp["stale_notice"] = notice
+        return resp
+
+    def _dispatch_request(self, req: dict) -> dict:
         rid = req.get("id")
         op = req.get("op")
         session = req.get("session")
@@ -564,6 +906,12 @@ class Daemon:
                 return self._op_did_close(rid, session, req)
             if op == "diagnostics":
                 return self._op_diagnostics(rid, session, req)
+            if op == "nav":
+                return self._op_nav(rid, req)
+            if op == "restart":
+                return self._op_restart(rid, req)
+            if op == "reload":
+                return self._op_reload(rid, req)
             if op == "status":
                 return self._op_status(rid)
             if op == "shutdown":
@@ -587,7 +935,7 @@ class Daemon:
         self._apply_drained(drained)
         opened = False
         if forward:
-            opened = self._engine.did_open(path, content)
+            opened = self._engine_for(path).did_open(path, content)
             if opened and self._compile is not None:
                 self._compile.notify_change(path)
         return {"id": rid, "ok": True, "opened": opened}
@@ -600,12 +948,14 @@ class Daemon:
         forward, drained = self._lock_manager.did_change(session, path, content)
         self._apply_drained(drained)
         if forward:
-            forwarded = self._engine.did_change(path, content)
+            engine = self._engine_for(path)
+            forwarded = engine.did_change(path, content)
             if not forwarded:
                 # File was never opened — fall back to did_open so
                 # the LSP sees something. Common when a session
-                # attaches mid-edit on a file from disk.
-                self._engine.did_open(path, content)
+                # attaches mid-edit on a file from disk, and now also
+                # when its engine was reaped or evicted between edits.
+                engine.did_open(path, content)
                 forwarded = True
             if self._compile is not None:
                 self._compile.notify_change(path)
@@ -622,7 +972,8 @@ class Daemon:
         path = req.get("path")
         if not isinstance(path, str):
             return {"id": rid, "ok": False, "error": "did_close requires path"}
-        closed = self._engine.did_close(path)
+        engine = self._open_engine_for(path)
+        closed = bool(engine is not None and engine.did_close(path))
         return {"id": rid, "ok": True, "closed": closed}
 
     def _op_diagnostics(self, rid, session, req: dict) -> dict:
@@ -633,24 +984,183 @@ class Daemon:
                          or self._engine_config.session_locks.query_timeout_ms)
         diag_timeout_s = float(req.get("diag_timeout_s") or DEFAULT_DIAG_TIMEOUT_S)
 
+        # De-duplication. The MCP server and the PostToolUse hook now
+        # share this engine, so the same file gets asked about twice
+        # whenever the model inspects what it just edited. Keyed on the
+        # content stamp: if the file has not changed since diagnostics
+        # were served for it, the answer is identical by construction,
+        # so re-running the wait is pure load.
+        #
+        # Only a SETTLED result is ever replayed. A cold server can
+        # publish nothing and then publish 24 diagnostics for the same
+        # content once it has indexed, and pinning the empty one would
+        # turn a timing artefact into a persistent wrong answer.
+        window = float(req.get("dedup_window_s") or 0.0)
+        stamp = self._dedup_stamp(path)
+        if window > 0.0 and stamp is not None:
+            prev = self._served.get(path)
+            if (prev is not None and prev["stamp"] == stamp
+                    and prev["settled"]
+                    and time.monotonic() - prev["at"] <= window):
+                payload = dict(prev["payload"])
+                payload["id"] = rid
+                payload["deduped"] = True
+                return payload
+
         can_forward, drained = self._lock_manager.query(
             session, path, timeout_ms=timeout_ms,
         )
         self._apply_drained(drained)
         stale = not can_forward  # we forward anyway per Decision 5
-        diags = self._engine.get_diagnostics(path, timeout=diag_timeout_s)
+        res = self._engine_for(path).get_diagnostics_result(
+            path, timeout=diag_timeout_s)
+        diags = res.items
         # Merge compile-aware diagnostics on top, distinguished by
         # ``Diagnostic.source`` so the consumer can filter (cargo /
         # tsc / mypy show up as their tool name; the LSP entries
         # carry pyright / rust-analyzer / etc).
         if self._compile is not None:
             diags = list(diags) + self._compile.get_diagnostics(path)
-        return {
+        payload = {
             "id": rid,
             "ok": True,
             "diagnostics": [_diag_to_json(d) for d in diags],
             "stale": stale,
+            # Whether the server actually answered. Without this the
+            # hook cannot tell a clean file from one whose server was
+            # still thinking, and it renders both as silence.
+            "settled": res.settled,
+            "diag_server": res.server,
+            "diag_timeout_s": res.timeout,
+            "deduped": False,
         }
+        if stamp is not None:
+            self._served[path] = {
+                "stamp": stamp,
+                "settled": bool(res.settled),
+                "at": time.monotonic(),
+                "payload": payload,
+            }
+        return payload
+
+    def _dedup_stamp(self, path) -> Optional[str]:
+        """Content identity for de-duplication: mtime plus size.
+
+        Both halves, for the same reason the resync uses both — an edit
+        can land inside one clock tick, and a truncation can keep the
+        mtime while changing the size.
+        """
+        try:
+            st = Path(path).stat()
+        except OSError:
+            return None
+        return f"{st.st_mtime_ns}:{st.st_size}"
+
+    #: method -> the kind of item its NavResponse carries. This is the
+    #: whitelist as well as the codec table: an op name that is not here
+    #: is not reachable, so a malformed request cannot call arbitrary
+    #: engine methods.
+    _NAV_METHODS = {
+        "find_symbols": "symbol",
+        "definition": "location",
+        "implementation": "location",
+        "references": "location",
+        "hover": "text",
+        "prepare_call_hierarchy": "call_item",
+        "calls": "call",
+        "rename": "edit",
+        "workspace_symbols": "symbol",
+    }
+
+    def _op_nav(self, rid, req: dict) -> dict:
+        """Serve the navigation surface.
+
+        Before this op existed the MCP server built its own Engine
+        in-process, which meant two fleets of language servers per
+        project and two caches that could disagree about the same file.
+        Navigation had to cross the socket for them to share.
+
+        Routing is by the file in the request, because that is what
+        decides which package's server has the answer. A workspace-wide
+        query has no file, so it asks every engine that is already
+        running and merges — starting the rest would turn one symbol
+        lookup into a fleet per package.
+        """
+        method = req.get("method")
+        if method not in self._NAV_METHODS:
+            return {"id": rid, "ok": False,
+                    "error": f"unknown nav method: {method!r}"}
+        args = req.get("args") or {}
+        if not isinstance(args, dict):
+            return {"id": rid, "ok": False, "error": "args must be an object"}
+        try:
+            targets = self._nav_targets(args)
+            res = merge_nav([getattr(e, method)(**args) for e in targets])
+        except TypeError as e:
+            # A bad argument set is the caller's to fix, and saying so
+            # beats a stack trace in the daemon log.
+            return {"id": rid, "ok": False, "error": f"bad arguments: {e}"}
+        return {"id": rid, "ok": True,
+                "nav": wire.nav_to_json(res,
+                                        item_kind=self._NAV_METHODS[method])}
+
+    def _nav_targets(self, args: dict) -> list:
+        """Which engines answer this navigation request."""
+        path = args.get("path")
+        if isinstance(path, (str, os.PathLike)):
+            return [self._engine_for(path)]
+        running = self._engines()
+        # Nothing running yet: the boundary engine is the only sensible
+        # answer to a question that named no file.
+        return running or [self._pool.for_root(self._project_root)]
+
+    def _op_restart(self, rid, req: dict) -> dict:
+        exts = req.get("extensions")
+        if exts is not None and not isinstance(exts, list):
+            return {"id": rid, "ok": False,
+                    "error": "extensions must be a list"}
+        restarted: list[str] = []
+        for engine in self._engines():
+            for name in engine.restart(exts):
+                if name not in restarted:
+                    restarted.append(name)
+        return {"id": rid, "ok": True, "restarted": restarted}
+
+    def _op_reload(self, rid, req: dict) -> dict:
+        """Stop every language server; they rebuild on the next request.
+
+        ``restart`` asks the engine to replace clients it is holding,
+        which is the right tool for a hung server. It is the wrong tool
+        for a *changed* one: a server binary that was upgraded, or a
+        ``cclsp.json`` that was edited, is only picked up by a process
+        that starts after the change — and the daemon read its config
+        once, at startup. Until now the only way to apply either was to
+        kill the daemon, which on Windows had no supported route at all
+        and in practice meant closing the session.
+
+        Re-reading config is the half that makes this a reload rather
+        than a restart: the engines are rebuilt from what is on disk
+        now, so the whole loop is servable from a client.
+        """
+        stopped = self._pool.restart_all()
+        reloaded_config = False
+        if req.get("config", True):
+            try:
+                servers, cfg = load_daemon_config(
+                    self._project_root,
+                    cclsp_config_path=self._cclsp_config_path)
+                self._pool.reconfigure(servers, cfg)
+                self._engine_config = cfg
+                reloaded_config = True
+            except Exception as e:
+                log.exception("reload: config reload failed")
+                return {"id": rid, "ok": False,
+                        "error": f"config reload failed: {type(e).__name__}: {e}",
+                        "stopped": [str(r) for r in stopped]}
+        return {"id": rid, "ok": True,
+                "stopped": [str(r) for r in stopped],
+                "reloaded_config": reloaded_config,
+                "cclsp_config": str(self._cclsp_config_path)}
 
     def _op_status(self, rid) -> dict:
         with self._sessions_lock:
@@ -665,17 +1175,25 @@ class Daemon:
             "ok": True,
             "project": str(self._project_root),
             "pid": os.getpid(),
+            "cclsp_config": str(self._cclsp_config_path),
             "sessions": sessions,
-            "open_files": self._engine.open_files(),
-            "active_servers": [
-                spec.command[0] for spec in self._engine.active_servers()
-            ],
+            "open_files": sorted(
+                f for e in self._engines() for f in e.open_files()
+            ),
+            "active_servers": sorted({
+                spec.command[0]
+                for e in self._engines() for spec in e.active_servers()
+            }),
+            # One daemon per repository means this question has an
+            # answer at all: with a daemon per package there was no
+            # process that could say what the repository was running.
+            "engines": self._pool.stats(),
             "held_uris": self._lock_manager.held_uris(),
             # What each configured server claims (extensions) versus
             # what it actually advertises once running (capabilities),
             # plus the stderr tail — the only channel on which a server
             # that started fine but is degraded can say so.
-            "support": self._engine.support_report(),
+            "support": self._pool.support_report(),
             "compile_aware_languages": (
                 sorted(self._compile.runners().keys()) if self._compile else []
             ),
@@ -697,6 +1215,22 @@ def _diag_to_json(d) -> dict:
 # ─── helpers for the spawn flow ──────────────────────────────────────
 
 
+def daemon_cclsp_path(
+    project_root: str | os.PathLike,
+    cclsp_config_path: Optional[str | os.PathLike] = None,
+) -> Path:
+    """Which cclsp.json this daemon is serving.
+
+    One function, so the file the daemon loads is the same file it
+    reports in ``status`` — and the same one the MCP resolves, since
+    both go through :func:`resolve_cclsp_path`.
+    """
+    root = Path(project_root).resolve()
+    if cclsp_config_path:
+        return Path(cclsp_config_path)
+    return resolve_cclsp_path(root) or (root / "cclsp.json")
+
+
 def load_daemon_config(
     project_root: str | os.PathLike,
     *,
@@ -704,18 +1238,17 @@ def load_daemon_config(
 ) -> tuple[list[LspServerSpec], EngineConfig]:
     """Resolve the cclsp.json + lsp-engine.toml for ``project_root``.
 
-    cclsp.json is found via the env var the user already sets for
-    cclsp itself (``CCLSP_CONFIG_PATH``) or, failing that, falls
-    back to ``<project_root>/cclsp.json``. lsp-engine.toml lives at
+    cclsp.json is resolved by :func:`resolve_cclsp_path` — the single
+    resolver the MCP server shares, so both agree on which file is in
+    play. An explicit ``cclsp_config_path`` outranks it, which is how a
+    caller pins the file it already validated. lsp-engine.toml lives at
     ``<project_root>/.claude-hooks/lsp-engine.toml`` by convention.
     Both are optional; an empty servers list yields a daemon that
     starts but answers nothing useful.
     """
     root = Path(project_root).resolve()
     cclsp_path = (
-        Path(cclsp_config_path)
-        if cclsp_config_path
-        else Path(os.environ.get("CCLSP_CONFIG_PATH", str(root / "cclsp.json")))
+        daemon_cclsp_path(root, cclsp_config_path)
     )
     servers = load_cclsp_config(cclsp_path)
     engine_cfg = load_engine_config(

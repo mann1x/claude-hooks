@@ -121,6 +121,7 @@ from claude_hooks.lsp_engine.client import (
 from claude_hooks.lsp_engine.daemon import (
     Daemon,
     DaemonAlreadyRunning,
+    daemon_root_for,
     load_daemon_config,
     pid_is_alive,
     project_dir,
@@ -215,7 +216,71 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override base directory for daemon state.",
     )
 
+    rl = sub.add_parser(
+        "reload",
+        help="Stop the language servers and re-read cclsp.json + "
+             "lsp-engine.toml, without stopping the daemon. Use this "
+             "after editing the config or upgrading a server binary.",
+    )
+    rl.add_argument(
+        "--project", required=True,
+        help="Absolute path to the project root (or any path inside it).",
+    )
+    rl.add_argument(
+        "--state-base", default=None,
+        help="Override base directory for daemon state.",
+    )
+    rl.add_argument(
+        "--keep-config", action="store_true",
+        help="Stop the servers but keep the config already loaded.",
+    )
+
     return p
+
+
+def _run_reload(args: argparse.Namespace) -> int:
+    """Apply a changed configuration to a running daemon.
+
+    ``restart`` kills the daemon and cleans its state, which works but
+    takes everything with it — every attached session's warm servers,
+    for a config edit affecting one. It also cannot be driven from
+    inside a session on Windows, which is how "I have to close the
+    connection to update the LSP" became the routine.
+
+    This is the narrow version: the daemon stays up and keeps its
+    sessions, the servers stop, the config is re-read, and the next
+    request starts what the file now says.
+    """
+    state_base = Path(args.state_base) if args.state_base else None
+    sock = socket_path_for(args.project, base=state_base)
+    if not _is_socket_alive(sock):
+        print(json.dumps({
+            "reloaded": False,
+            "reason": "no daemon is running for this project",
+            "next": "the next hook will spawn one, reading the current config",
+        }, indent=2))
+        return 1
+    client = LspEngineClient(sock, session_id="cli-reload")
+    client.connect()
+    try:
+        result = client.reload(config=not args.keep_config)
+    except RuntimeError as e:
+        if "unknown op" not in str(e):
+            raise
+        # The daemon is a long-lived process running the code it
+        # imported, which predates this op. Saying so beats the raw
+        # protocol error, because the remedy is not obvious from it.
+        print(json.dumps({
+            "reloaded": False,
+            "reason": "the running daemon predates 'reload'",
+            "next": (f"python -m claude_hooks.lsp_engine restart --project "
+                     f"{args.project}"),
+        }, indent=2), file=sys.stderr)
+        return 2
+    finally:
+        client.close()
+    print(json.dumps({"reloaded": True, **result}, indent=2))
+    return 0
 
 
 def _run_daemon(args: argparse.Namespace) -> int:
@@ -224,6 +289,16 @@ def _run_daemon(args: argparse.Namespace) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     state_base = Path(args.state_base) if args.state_base else None
+    # Resolve the boundary ONCE, here, and use it for both the config
+    # and the Daemon. ``Daemon.__init__`` normalises too, so leaving
+    # this line out does not look broken — it produces a daemon rooted
+    # correctly whose *servers* were loaded from the un-normalised
+    # path. Measured on cline: ``--project .../messages.ts`` reported
+    # ``cclsp_config: /…/cline/cclsp.json`` in status while holding
+    # zero servers, because the config had been read from
+    # ``messages.ts/cclsp.json``. Two resolvers on one path, with the
+    # strict half looking like the bug.
+    args.project = str(daemon_root_for(args.project))
     servers, engine_cfg = load_daemon_config(
         args.project, cclsp_config_path=args.cclsp_config,
     )
@@ -232,6 +307,7 @@ def _run_daemon(args: argparse.Namespace) -> int:
         servers=servers,
         engine_config=engine_cfg,
         state_base=state_base,
+        cclsp_config_path=args.cclsp_config,
     )
     try:
         daemon.run()
@@ -268,12 +344,24 @@ def _run_status(args: argparse.Namespace) -> int:
         # When the lock PID is dead, report pid=None so consumers don't
         # mistake it for a live daemon.
         reported_pid = None if stale_lock else lock_pid
-        print(json.dumps({
+        payload = {
             "running": False,
             "pid": reported_pid,
             "socket": str(sock),
             "stale_lock": stale_lock,
-        }))
+        }
+        if stale_lock:
+            # "running: false" alone reads as "nothing to see here", so
+            # a reader who does not already know the command concludes
+            # all is well and leaves the lock in place. Say what it is
+            # and what clears it.
+            payload["hint"] = (
+                "A lock file remains from a daemon that is gone. It does "
+                "not stop a new daemon starting, but it makes this "
+                "output ambiguous. Clear it with: python -m "
+                f"claude_hooks.lsp_engine restart --project "
+                f"{args.project}")
+        print(json.dumps(payload, indent=2))
         return 0
 
     # Socket alive — talk to the daemon for the rich payload.
@@ -324,9 +412,8 @@ def _run_stop(args: argparse.Namespace) -> int:
     client = LspEngineClient(sock, session_id="stop-cli")
     try:
         client.connect()
-        # Direct IPC call — bypass attach/detach since we're terminating.
-        resp = client._ipc.call("shutdown", session="stop-cli")
-        ok = bool(resp.get("ok"))
+        ok = client.shutdown_daemon()
+        resp = {}
     except (OSError, RuntimeError) as e:
         print(json.dumps({
             "stopped": False,
@@ -336,7 +423,7 @@ def _run_stop(args: argparse.Namespace) -> int:
         return 2
     finally:
         try:
-            client._ipc.close()
+            client.close()
         except Exception:
             pass
 
@@ -672,6 +759,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_cleanup(args)
     if args.subcommand == "restart":
         return _run_restart(args)
+    if args.subcommand == "reload":
+        return _run_reload(args)
     return 1  # pragma: no cover — argparse forbids this
 
 

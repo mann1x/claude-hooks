@@ -161,6 +161,15 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
                     parts.append(cg_block)
                 if lsp_block:
                     parts.append(lsp_block)
+                # This branch returns early; without the announcement
+                # here, a session resumed from a compaction would never
+                # be told about mail — the exact gap the Stop hook was
+                # added to close, in a different place.
+                from claude_hooks.mailbox import hook as _mb
+                _mb_block = _mb.announce_block(
+                    event=event, config=config, providers=providers)
+                if _mb_block:
+                    parts.append(_mb_block)
                 return {
                     "hookSpecificOutput": {
                         "hookEventName": "SessionStart",
@@ -173,6 +182,16 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     show_status = hook_cfg.get("show_status_line", True)
     from claude_hooks.now_block import format_now_block
     now = format_now_block(config)
+
+    # Register this session and pick up anything that arrived while it
+    # was closed. Both are soft-fail: a mailbox problem must never cost
+    # the session its status line or its code-graph block.
+    from claude_hooks.mailbox import hook as _mailbox
+    collision = _mailbox.register_session(
+        event=event, config=config, providers=providers)
+    mailbox_block = _mailbox.announce_block(
+        event=event, config=config, providers=providers)
+
     parts = []
     if now:
         parts.append(now)
@@ -182,6 +201,10 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
         parts.append(cg_block)
     if lsp_block:
         parts.append(lsp_block)
+    if collision:
+        parts.append(collision)
+    if mailbox_block:
+        parts.append(mailbox_block)
     if not parts:
         return None
 
