@@ -28,11 +28,15 @@ Stop pipeline:
 Daemon stack (Tier 3.8 long-lived hook executor):
 - `daemon.py`, `daemon_client.py`, `daemon_ctl.py` — single Python process owns providers + config across hook invocations; each hook answers in milliseconds instead of paying the 100–300 ms Python cold-start
 
-LSP engine (v0.7+, opt-in, session-scoped):
+LSP engine (v0.7+, opt-in; v1.17+ daemon keyed on the repository boundary):
 - `lsp_engine/config.py`, `lsp.py`, `engine.py` — TOML config, per-language LSP child wrapper, multi-LSP routing
 - `lsp_engine/daemon.py`, `ipc.py`, `locks.py`, `client.py` — daemon lifecycle, UNIX socket IPC (POSIX) / named pipes (Windows), per-file session-affinity locks, hook-side client + spawn helper
 - `lsp_engine/preload.py`, `git_watch.py` — adaptive preload from code-graph hot set; polling git watcher for branch-switch refresh
 - `lsp_engine/compile.py` — opt-in compile-aware orchestrator that merges `cargo check` / `tsc --noEmit` / `mypy` / `go vet` diagnostics on top of the LSP layer
+- `lsp_engine/pool.py`, `protocol.py`, `wire.py` — bounded pool of narrowly-rooted engines per daemon; navigation payload parsing; JSON encoding so the daemon serves the navigation surface
+- `lsp_engine_manager.py` — host-level supervision of the per-repository daemons (`lsp list|reload|stop|reap`)
+- `lsp_mcp/` — `lsp` MCP server (`bin/claude-hook-lsp-mcp`) replacing cclsp; same twelve-tool catalog
+- `mailbox/` — session mailbox (inter-session messaging MCP tools + daemon-owned sweep)
 
 Concurrency / utility:
 - `_parallel.py` (provider fan-out), `mcp_client.py`, `embedders.py`
