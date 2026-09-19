@@ -66,6 +66,11 @@ def os_name() -> str:
     return {"win32": "windows", "darwin": "darwin"}.get(sys.platform, "linux")
 
 
+def _chunks(items: Sequence, size: int):
+    for i in range(0, len(items), size):
+        yield list(items[i:i + size])
+
+
 @contextmanager
 def _cursor(conn):
     """A cursor that closes, on either driver.
@@ -346,6 +351,102 @@ class MailboxStore:
         if n:
             log.info("mailbox: evicted %d stale registration(s)", n)
         return n
+
+    def dedupe_messages(self) -> dict:
+        """Collapse the duplicate rows the old fan-out left behind.
+
+        A repair, not a routine: ``send()`` can no longer produce these.
+        It exists because the rows it removes are already in every
+        mailbox that ran the old code — 30 of 65 on solidpc, three sends
+        of eleven copies each — and an upgrade that fixes the cause
+        without clearing the effect leaves the recipient re-reading the
+        same message eleven times.
+
+        Two rows are the same message when the sender, destination,
+        subject, body **and** ``created_at`` all match. The timestamp
+        carries microseconds on both dialects, so two deliberate sends of
+        identical text cannot collide; only rows written by one
+        ``INSERT`` loop can.
+
+        Which copy survives is the whole difficulty. Read state lives on
+        the row, and the copies do not share it: on solidpc one set had
+        one read copy in eleven, so keeping the lowest id had a ~91%
+        chance of resurfacing a message the recipient had already read.
+        A read copy wins, then an acked one, then the original.
+
+        A ``broadcast_group`` is cleared only when the group is left with
+        a single row. A genuine broadcast fans out across *hosts*, whose
+        rows differ in ``to_host`` and so are never duplicates of each
+        other — but a broadcast sent while the fan-out bug was live has
+        both kinds of multiplicity at once, and only the second is
+        spurious.
+        """
+        self.ensure_schema()
+        with self._lock:
+            conn = self._connect()
+            try:
+                with _cursor(conn) as cur:
+                    cur.execute(self._q(
+                        "SELECT id, created_at, from_alias, to_alias, "
+                        "to_host, subject, body, read_at, ack_body, "
+                        "broadcast_group FROM session_messages ORDER BY id"))
+                    rows = cur.fetchall()
+
+                groups: dict = {}
+                for r in rows:
+                    key = (str(r[1]), r[2], r[3], r[4], r[5], r[6])
+                    groups.setdefault(key, []).append(r)
+
+                doomed: list = []
+                touched_groups: set = set()
+                for members in groups.values():
+                    if len(members) < 2:
+                        continue
+                    # read first, then acked, then the original row
+                    members = sorted(
+                        members,
+                        key=lambda m: (m[7] is None, m[8] is None, m[0]))
+                    for m in members[1:]:
+                        doomed.append(m[0])
+                        if m[9]:
+                            touched_groups.add(m[9])
+                    if members[0][9]:
+                        touched_groups.add(members[0][9])
+
+                if not doomed:
+                    return {"removed": 0, "kept": 0, "groups_cleared": 0}
+
+                with _cursor(conn) as cur:
+                    for chunk in _chunks(doomed, 500):
+                        # Portable ``?`` — ``_q`` rewrites it per dialect.
+                        ph = ", ".join(["?"] * len(chunk))
+                        cur.execute(self._q(
+                            f"DELETE FROM session_messages "
+                            f"WHERE id IN ({ph})"), tuple(chunk))
+                    cleared = 0
+                    for grp in sorted(touched_groups):
+                        cur.execute(self._q(
+                            "SELECT id FROM session_messages "
+                            "WHERE broadcast_group = ?"), (grp,))
+                        left = [row[0] for row in cur.fetchall()]
+                        if len(left) == 1:
+                            # One destination is not a broadcast; the
+                            # group id was an artefact of counting
+                            # registrations rather than mailboxes.
+                            cur.execute(self._q(
+                                "UPDATE session_messages "
+                                "SET broadcast_group = NULL WHERE id = ?"),
+                                (left[0],))
+                            cleared += 1
+                conn.commit()
+            except Exception:
+                self._rollback(conn)
+                raise
+        log.info("mailbox: removed %d duplicate row(s), cleared %d "
+                 "broadcast group(s)", len(doomed), cleared)
+        return {"removed": len(doomed),
+                "kept": sum(1 for m in groups.values() if len(m) > 1),
+                "groups_cleared": cleared}
 
     # ─── sending ─────────────────────────────────────────────────────
 

@@ -182,6 +182,19 @@ def sweep(store, *, directory: Optional[Path] = None,
     except Exception:  # pragma: no cover — older store, or unreachable
         log.debug("mailbox: stale eviction failed", exc_info=True)
         evicted = 0
+    # Repair, not routine: ``send()`` can no longer fan out over
+    # registrations, but the rows it already wrote are in every mailbox
+    # that ran the old code, and an upgrade that fixes the cause without
+    # clearing the effect leaves the recipient re-reading the same
+    # message eleven times. Idempotent, so it costs one scan once the
+    # duplicates are gone.
+    try:
+        deduped = store.dedupe_messages()
+    except Exception:  # pragma: no cover — older store, or unreachable
+        log.debug("mailbox: duplicate repair failed", exc_info=True)
+        deduped = {"removed": 0, "groups_cleared": 0}
     return {"expired": len(expired), "archived": [p.name for p in archived],
             "deleted": deleted, "dropped": dropped,
-            "sessions_forgotten": forgotten, "sessions_evicted": evicted}
+            "sessions_forgotten": forgotten, "sessions_evicted": evicted,
+            "duplicates_removed": deduped.get("removed", 0),
+            "broadcast_groups_cleared": deduped.get("groups_cleared", 0)}

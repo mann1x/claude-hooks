@@ -781,6 +781,186 @@ class StaleEvictionTests(StoreHarness):
         self.assertIn("evict_stale", src)
 
 
+class DedupeMessagesTests(StoreHarness):
+    """The repair for mailboxes that already ran the fan-out.
+
+    Fixing `send()` stops new duplicates; it does nothing about the rows
+    already written. On solidpc that was 30 redundant rows of 65 — three
+    sends of eleven copies each — and leaving them makes the recipient
+    re-read the same message eleven times after the upgrade.
+
+    This was first done as one-off SQL against the live table, which is
+    exactly the kind of change nothing covers. Hence these.
+    """
+
+    def _register_many(self, alias, host, n):
+        for i in range(n):
+            self.register(alias, host, sid=f"{alias}-{host}-{i}")
+
+    def _fan_out(self, n=11, *, alias="xollama", subject="s", body="b"):
+        """Write the duplicate rows the old send() produced.
+
+        One INSERT per registration, identical but for the id — what the
+        code did before, reproduced directly so the repair is tested
+        against the shape it exists for rather than a guess at it.
+        """
+        from claude_hooks.mailbox.store import utcnow
+        created = self.store._at(utcnow())
+        expires = self.store._at(utcnow())
+        group = "grp-1"
+        ids = []
+        with self.db.lock:
+            conn = self.db()
+            cur = conn.cursor()
+            for _ in range(n):
+                cur.execute(
+                    "INSERT INTO session_messages "
+                    "(created_at, from_alias, from_host, to_alias, to_host, "
+                    " broadcast_group, subject, body, priority, expires_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+                    (created, "opencoti", self.HOST, alias, self.HOST,
+                     group, subject, body, expires))
+                ids.append(cur.lastrowid)
+            conn.commit()
+        return ids
+
+    def _all_rows(self, alias):
+        """Every row for ``alias`` on any host.
+
+        ``inbox()`` is deliberately host-scoped — mail for
+        ``alias@pandorum`` is not solidpc's to read — so a test about
+        what *exists* cannot go through it.
+        """
+        with self.db.lock:
+            conn = self.db()
+            cur = conn.cursor()
+            cur.execute("SELECT id, to_host, broadcast_group, read_at "
+                        "FROM session_messages WHERE to_alias = ? "
+                        "ORDER BY id", (alias,))
+            return [dict(zip(("id", "to_host", "broadcast_group", "read_at"),
+                             r)) for r in cur.fetchall()]
+
+    def _mark_read(self, message_id):
+        with self.db.lock:
+            conn = self.db()
+            cur = conn.cursor()
+            cur.execute("UPDATE session_messages SET read_at = ?, "
+                        "read_by = ? WHERE id = ?",
+                        (self.store._now(), "reader", message_id))
+            conn.commit()
+
+    def test_eleven_copies_collapse_to_one(self):
+        self._fan_out(11)
+        self.assertEqual(len(self.store.inbox(alias="xollama")), 11)
+        res = self.store.dedupe_messages()
+        self.assertEqual(res["removed"], 10)
+        self.assertEqual(len(self.store.inbox(alias="xollama")), 1)
+
+    def test_the_read_copy_is_the_one_kept(self):
+        """The trap that made this worth doing carefully.
+
+        Read state lives on the row and the copies do not share it. One
+        live set had a single read copy in eleven, so keeping the lowest
+        id had a ~91% chance of resurfacing a message already read.
+        """
+        ids = self._fan_out(11)
+        self._mark_read(ids[7])          # deliberately not the lowest id
+        self.store.dedupe_messages()
+        left = self.store.inbox(alias="xollama", include_read=True)
+        self.assertEqual(len(left), 1)
+        self.assertEqual(left[0]["id"], ids[7])
+        self.assertIsNotNone(left[0]["read_at"])
+        # ...and it does not come back as unread.
+        self.assertEqual(self.store.inbox(alias="xollama"), [])
+
+    def test_a_collapsed_group_is_no_longer_a_broadcast(self):
+        self._fan_out(11)
+        self.store.dedupe_messages()
+        left = self.store.inbox(alias="xollama", include_read=True)
+        self.assertIsNone(left[0]["broadcast_group"],
+                          "one destination is not a broadcast")
+
+    def test_a_genuine_two_host_broadcast_is_untouched(self):
+        # Different hosts mean different destinations, so those rows are
+        # not duplicates of each other and the group is real.
+        self.register("osync", "solidpc")
+        self.register("osync", "pandorum")
+        res = self.store.send("osync*", "s", "b", from_alias="me")
+        self.assertEqual(len(res["ids"]), 2)
+        self.assertEqual(self.store.dedupe_messages()["removed"], 0)
+        rows = self._all_rows("osync")
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(r["broadcast_group"] for r in rows),
+                        "cleared a group that still has two destinations")
+
+    def test_a_broadcast_that_also_fanned_out_keeps_its_group(self):
+        """Both kinds of multiplicity at once — only one is spurious."""
+        from claude_hooks.mailbox.store import utcnow
+        created = self.store._at(utcnow())
+        with self.db.lock:
+            conn = self.db()
+            cur = conn.cursor()
+            for host, n in (("solidpc", 4), ("pandorum", 3)):
+                for _ in range(n):
+                    cur.execute(
+                        "INSERT INTO session_messages "
+                        "(created_at, from_alias, from_host, to_alias, "
+                        " to_host, broadcast_group, subject, body, priority, "
+                        " expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+                        (created, "me", self.HOST, "osync", host, "grp-2",
+                         "s", "b", created))
+            conn.commit()
+        res = self.store.dedupe_messages()
+        self.assertEqual(res["removed"], 5, "4+3 rows are 2 destinations")
+        rows = self._all_rows("osync")
+        self.assertEqual(sorted(r["to_host"] for r in rows),
+                         ["pandorum", "solidpc"])
+        self.assertTrue(all(r["broadcast_group"] == "grp-2" for r in rows),
+                        "a two-host broadcast is still a broadcast")
+
+    def test_distinct_messages_are_never_merged(self):
+        self.register("osync", self.HOST)
+        self.store.send("osync", "first", "body", from_alias="me")
+        self.store.send("osync", "second", "body", from_alias="me")
+        self.store.send("osync", "first", "different", from_alias="me")
+        self.assertEqual(self.store.dedupe_messages()["removed"], 0)
+        self.assertEqual(len(self.store.inbox(alias="osync")), 3)
+
+    def test_two_deliberate_sends_of_identical_text_both_survive(self):
+        # Same sender, destination, subject and body — different instants.
+        # created_at carries microseconds, so they are distinguishable.
+        self.register("osync", self.HOST)
+        self.store.send("osync", "same", "same", from_alias="me")
+        self.store.send("osync", "same", "same", from_alias="me")
+        self.assertEqual(self.store.dedupe_messages()["removed"], 0)
+        self.assertEqual(len(self.store.inbox(alias="osync")), 2)
+
+    def test_it_is_idempotent(self):
+        self._fan_out(11)
+        self.assertEqual(self.store.dedupe_messages()["removed"], 10)
+        self.assertEqual(self.store.dedupe_messages()["removed"], 0)
+        self.assertEqual(self.store.dedupe_messages()["groups_cleared"], 0)
+
+    def test_an_empty_mailbox_is_not_an_error(self):
+        self.assertEqual(self.store.dedupe_messages(),
+                         {"removed": 0, "kept": 0, "groups_cleared": 0})
+
+    def test_the_maintenance_sweep_repairs(self):
+        # A repair nothing calls repairs nothing: every host that ran the
+        # old code has these rows, and only the sweep reaches them.
+        import inspect
+        from claude_hooks.mailbox import archive
+        src = inspect.getsource(archive.sweep)
+        self.assertIn("dedupe_messages", src)
+
+    def test_it_spans_more_than_one_delete_chunk(self):
+        # The delete is chunked at 500 ids; a mailbox that ran the bug
+        # for a while has more than that.
+        self._fan_out(600)
+        self.assertEqual(self.store.dedupe_messages()["removed"], 599)
+        self.assertEqual(len(self.store.inbox(alias="xollama")), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
 
