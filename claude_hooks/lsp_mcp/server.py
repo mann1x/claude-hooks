@@ -633,8 +633,12 @@ class LspMcpServer:
                                     s.selection.start.character,
                                     include_declaration=include)
             for s in syms])
-        return T.render_locations(merged, root=entry.root, title="References",
-                                  scope=describe_scope(entry.root))
+        return T.render_locations(
+            merged, root=entry.root, title="References",
+            # The boundary note is suppressed for a symbol nothing
+            # outside the package can reach — see ``describe_scope``.
+            scope=describe_scope(entry.root, declared_in=path,
+                                 symbol=args.get("symbol_name")))
 
     # -- position-addressed --------------------------------------------
 
@@ -642,9 +646,11 @@ class LspMcpServer:
         path = self._file_path(args)
         entry = self.registry.for_path(path)
         line, ch = self._position(entry, path, args)
-        return T.render_locations(entry.engine.implementation(path, line, ch),
-                                  scope=describe_scope(entry.root),
-                                  root=entry.root, title="Implementations")
+        return T.render_locations(
+            entry.engine.implementation(path, line, ch),
+            scope=describe_scope(entry.root, declared_in=path,
+                                 symbol=args.get("symbol_name")),
+            root=entry.root, title="Implementations")
 
     def _tool_get_hover(self, args: dict) -> str:
         path = self._file_path(args)

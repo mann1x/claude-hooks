@@ -556,6 +556,48 @@ touch <repo>/.claude-hooks/lsp-root   # this directory is the engine root
 That outranks the marker walk, and a root declared this way is not
 flagged as bounded.
 
+### When the boundary is not a boundary
+
+A warning that fires on answers that are in fact complete is one a caller
+learns to skip on the answers that are not. So `find_references` and
+`find_implementation` suppress the flag for a symbol nothing outside the
+package **can** reference: if the declaring file is unreachable from the
+package's published entry points, no sibling can import it and the narrow
+search saw every use that exists.
+
+The check (`lsp_engine/package_exports.py`) is the inversion of the
+expensive question. Proving a symbol *is* used across the boundary needs
+exactly the cross-package resolution the narrow root exists to avoid;
+proving it *cannot* be is one manifest read plus a walk of the re-export
+graph. It is biased entirely one way — **unsure keeps the warning** —
+because a false suppression hides the incompleteness the flag exists to
+report, while a false warning costs a paragraph. It keeps the warning for
+a package with no `exports` map (deep imports are legal, so every file is
+public), a `*` anywhere in that map, a `typesVersions` block, an ancestor
+`tsconfig` `paths` alias aiming into the package's sources, an entry it
+cannot map back to a source file, an unresolvable re-export, or a symbol
+the queried file *imports* — the declaration is then elsewhere and this
+file's reachability says nothing about it.
+
+Measured across cline, 2026-09-20: nothing in `sdk/packages/*` is
+suppressed, because `sdk/tsconfig.json` carries
+`"@cline/shared/*": ["./packages/shared/src/*"]` and the compiler honours
+that alias over `exports` — every file in those packages really is
+importable by name. The leaf applications are the opposite case:
+`apps/cli` publishes `.` only, its entry has no `export` statement at
+all, and nothing in the repo imports it, so all 55 symbols sampled there
+are package-private and the flag stays quiet.
+
+Two traps are worth naming, both found while validating this. `exports`
+names *build output*, so a target has to be mapped back through
+`outDir`/`rootDir` — and it must never fall through to the artifact
+itself: a bundled `dist/index.js` has no relative re-exports left, so
+walking it reaches nothing and every file in the package reads as
+private. And any path containment test here resolves both operands
+first, because a checkout reached through a symlink spells the same
+directory two ways, and the miss is invisible — "no alias found" is also
+the correct answer for a package that has none.
+
 **Project root** is not git-specific. `find_project_root()` walks up for
 any of `cclsp.json`, `.git`, `pyproject.toml`, `go.mod`, `Cargo.toml`,
 `package.json`, `compile_commands.json`, and returns None when nothing
