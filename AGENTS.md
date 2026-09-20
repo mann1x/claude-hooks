@@ -34,6 +34,7 @@ LSP engine (v0.7+, opt-in; v1.17+ daemon keyed on the repository boundary):
 - `lsp_engine/preload.py`, `git_watch.py` — adaptive preload from code-graph hot set; polling git watcher for branch-switch refresh
 - `lsp_engine/compile.py` — opt-in compile-aware orchestrator that merges `cargo check` / `tsc --noEmit` / `mypy` / `go vet` diagnostics on top of the LSP layer
 - `lsp_engine/pool.py`, `protocol.py`, `wire.py` — bounded pool of narrowly-rooted engines per daemon; navigation payload parsing; JSON encoding so the daemon serves the navigation surface
+- `lsp_engine/package_exports.py` — suppresses the package-boundary note on `find_references` / `find_implementation` for a symbol unreachable from the package's published entry points; unsure keeps the warning
 - `lsp_engine_manager.py` — host-level supervision of the per-repository daemons (`lsp list|reload|stop|reap`)
 - `lsp_mcp/` — `lsp` MCP server (`bin/claude-hook-lsp-mcp`) replacing cclsp; same twelve-tool catalog
 - `mailbox/` — session mailbox (inter-session messaging MCP tools + daemon-owned sweep)

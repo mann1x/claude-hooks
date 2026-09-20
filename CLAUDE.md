@@ -343,7 +343,9 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > hierarchy / symbols / rename) whose answers carry provenance —
 > `consulted`, `failures`, `not_running`, `scan_truncated_at` and a
 > `trustworthy` flag — so a search that stopped at a package boundary
-> says so rather than returning a short list that looks complete.
+> says so rather than returning a short list that looks complete —
+> and stays quiet when `lsp_engine/package_exports.py` proves the
+> symbol is unreachable from the package's published entry points.
 > The daemon is re-keyed to the **repository** boundary
 > (`.claude-hooks/lsp-root` > `.git` > narrow root) holding a bounded
 > pool of narrowly-rooted engines: language servers must stay narrow
@@ -482,7 +484,7 @@ payload.
   - **Opt-in advisory**: `stop_guard.py`, `safety_scan.py` + `safety_patterns.py`, `rtk_rewrite.py`
   - **Index management**: `claudemem_reindex.py`
 - `claude_hooks/code_graph/` — built-in stdlib `ast`-based code graph (`builder.py`, `impact.py`, `mermaid.py`, `inject.py`, `symbol_lookup.py`, `mcp_server.py`, `clustering.py`, …)
-- `claude_hooks/lsp_engine/` — session-scoped LSP daemon (`config.py`, `lsp.py`, `engine.py`, `daemon.py`, `ipc.py`, `locks.py`, `preload.py`, `compile.py`, `git_watch.py`, `client.py`)
+- `claude_hooks/lsp_engine/` — session-scoped LSP daemon (`config.py`, `lsp.py`, `engine.py`, `daemon.py`, `ipc.py`, `locks.py`, `preload.py`, `compile.py`, `git_watch.py`, `client.py`, `package_exports.py`)
 - `claude_hooks/proxy/` — opt-in HTTP proxy in front of `api.anthropic.com` (`server.py`, `forwarder.py`, `metadata.py`, `stats_db.py`, `dashboard.py`, `sse.py`, `stop_phrase_guard.py`, `ratelimit_state.py`)
 - `claude_hooks/caliber_proxy/` — Caliber grounding proxy (`server.py`, `tools.py`, `prompt.py`, `ollama.py`, `recall.py`)
 - `claude_hooks/pgvector_mcp/` — system-wide stdio MCP server exposing pgvector recall + KG ops to any MCP-aware client
