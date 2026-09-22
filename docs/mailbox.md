@@ -231,9 +231,23 @@ single turn checking, reading and sending mail moved the timestamp
 exactly once, at the start, and then read as idle for a quarter of an
 hour while it was the busiest thing in the registry. Using the mailbox
 is the strongest evidence a session is alive, and it was the one signal
-not recorded. It costs one indexed UPDATE on a primary key, and it
-soft-fails: looking stale is a smaller problem than a mailbox that
-refuses to work.
+not recorded. It costs one indexed UPDATE, and it soft-fails: looking
+stale is a smaller problem than a mailbox that refuses to work.
+
+Tool calls refresh **by alias**, because Claude Code does not export
+`CLAUDE_SESSION_ID` to an MCP child — verified on three live stdio
+servers, none of which had it. Keying the refresh on the session id
+would therefore have been dead code on exactly the path that carries the
+mail. `(alias, host)` works instead only because the unique index above
+makes it identify one row or none; with five rows to choose from,
+refreshing "this alias's registration" was a guess. A tool call never
+*creates* a registration — a session that cannot state its id cannot be
+cleaned up later — so an unregistered alias stays unregistered until its
+`SessionStart`. One imprecision: the alias comes from the server
+process's own directory, so the shared `--http` server refreshes the
+alias of the directory it was started in rather than the caller's. That
+derivation predates this refresh, and it can only ever be wrong about
+who is *alive*, never about delivery.
 
 A sweep that cannot reach a store returns `None` rather than an empty
 report, and logs at INFO only when it actually did something — an

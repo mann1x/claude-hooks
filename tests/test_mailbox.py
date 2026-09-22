@@ -1795,3 +1795,70 @@ class AliasBelongsToTheSessionTests(StoreHarness):
             integration.store_for_provider = real_store
 
         self.assertEqual(captured["alias"], "xollama")
+
+
+class RefreshWithoutASessionIdTests(StoreHarness):
+    """The tool path has no session id to key on.
+
+    Claude Code does not export ``CLAUDE_SESSION_ID`` to an MCP child —
+    checked on three live stdio servers, none of which had it — so the
+    per-call refresh keyed on ``session_id`` was dead code on the one
+    path where the mail actually happens.
+    """
+
+    def _tools(self, alias="xollama", sid=""):
+        from claude_hooks.mailbox.tools import MailboxTools
+        return MailboxTools(self.store, alias=alias, session_id=sid,
+                            host=self.HOST)
+
+    def _age(self, sid, minutes):
+        stale = utcnow() - timedelta(minutes=minutes)
+        with self.db.lock:
+            conn = self.db()
+            conn.execute("UPDATE session_registry SET last_seen = ?"
+                         " WHERE session_id = ?",
+                         (stale.isoformat(), sid))
+            conn.commit()
+
+    def _last_seen(self, sid):
+        rows = [r for r in self.store.sessions(include_stale=True)
+                if r.session_id == sid]
+        self.assertEqual(len(rows), 1)
+        return rows[0].last_seen
+
+    def test_a_tool_call_with_no_session_id_still_refreshes_the_row(self):
+        self.register("xollama", self.HOST, sid="registered-by-the-hook")
+        self._age("registered-by-the-hook", minutes=15)
+        stale = self._last_seen("registered-by-the-hook")
+
+        self._tools().call("mailbox-list", {})
+
+        self.assertGreater(self._last_seen("registered-by-the-hook"), stale)
+
+    def test_it_refreshes_without_creating_a_second_row(self):
+        self.register("xollama", self.HOST, sid="registered-by-the-hook")
+        self._tools().call("mailbox-list", {})
+        rows = self.store.sessions(alias="xollama")
+        self.assertEqual([r.session_id for r in rows],
+                         ["registered-by-the-hook"])
+
+    def test_an_unregistered_alias_is_not_invented(self):
+        """A session that cannot state its id must not be registered:
+        the row would have no id anything could later clean up."""
+        self.assertFalse(self.store.touch_alias("nobody", self.HOST))
+        self._tools(alias="nobody").call("mailbox-list", {})
+        self.assertEqual(self.store.sessions(include_stale=True), [])
+
+    def test_another_host_holding_the_alias_is_not_refreshed(self):
+        self.register("xollama", self.HOST, sid="here")
+        self.register("xollama", "elsewhere", sid="there")
+        self._age("there", minutes=45)
+        stale = self._last_seen("there")
+
+        self._tools().call("mailbox-list", {})
+
+        self.assertEqual(self._last_seen("there"), stale)
+
+    def test_an_empty_alias_refreshes_nothing(self):
+        self.register("xollama", self.HOST, sid="here")
+        self.assertFalse(self.store.touch_alias("", self.HOST))

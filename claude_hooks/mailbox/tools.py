@@ -215,6 +215,14 @@ class MailboxTools:
         mailbox that refuses to work.
         """
         if not self.session_id:
+            # No id to key on — Claude Code does not give an MCP child
+            # one. Refresh by alias instead, which the unique index
+            # makes unambiguous. See ``MailboxStore.touch_alias``.
+            try:
+                self.store.touch_alias(self.alias, self.host)
+            except Exception:
+                log.debug("mailbox: could not refresh %s@%s by alias",
+                          self.alias, self.host, exc_info=True)
             return
         if not self._registered:
             self._registered = True

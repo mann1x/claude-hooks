@@ -338,6 +338,53 @@ class MailboxStore:
                 self._rollback(conn)
                 raise
 
+    def touch_alias(self, alias: str, host: Optional[str] = None) -> bool:
+        """Refresh ``alias@host``'s row without knowing the session id.
+
+        Claude Code does not export ``CLAUDE_SESSION_ID`` to an MCP
+        child — verified on three live stdio servers, none of which had
+        it — so on the tool path ``session_id`` is empty and
+        :meth:`touch` has nothing to key on. That is the path where the
+        mail actually happens: a session reading and sending for fifteen
+        minutes inside one turn does all of it through the tools, and
+        only the once-per-turn hook was moving ``last_seen``.
+
+        Addressing the row by ``(alias, host)`` is exactly what the
+        unique index makes safe. Before it, "this alias's registration"
+        was a set of up to five rows and refreshing one of them was a
+        guess; now it identifies one row or none.
+
+        Returns False when there is no row, and deliberately does not
+        create one: a session that cannot state its id cannot be
+        registered, and inventing an id would put a row in the registry
+        that nothing can ever clean up. ``SessionStart`` creates it.
+
+        The imprecision to know about: the alias comes from the server
+        process's own directory, so the shared ``--http`` server refreshes
+        the alias of the directory *it* was started in, not of whoever
+        called it. That is how those clients have always been identified
+        — the derivation is older than this refresh — and it is only ever
+        wrong about which session is alive, never about delivery.
+        """
+        if not alias:
+            return False
+        self.ensure_schema()
+        h = host or host_name()
+        with self._lock:
+            conn = self._connect()
+            try:
+                with _cursor(conn) as cur:
+                    cur.execute(self._q(
+                        "UPDATE session_registry SET last_seen = ? "
+                        "WHERE alias = ? AND host = ?"),
+                        (self._now(), alias, h))
+                    moved = (cur.rowcount or 0) > 0
+                conn.commit()
+            except Exception:
+                self._rollback(conn)
+                raise
+        return moved
+
     def sessions(self, *, alias: Optional[str] = None,
                  os_filter: Optional[str] = None,
                  include_stale: bool = False,
