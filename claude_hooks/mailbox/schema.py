@@ -13,7 +13,43 @@ which is honest rather than silently half-working.
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+#: One registration per ``(alias, host)``, and the migration that makes
+#: it possible.
+#:
+#: ``session_id`` is the primary key, so a client that restarts under a
+#: new id simply inserted another row: observed live as five
+#: ``xollama@solidpc`` rows in one cwd, four of them an hour stale
+#: behind the one doing the work. Delivery already collapses to distinct
+#: ``(alias, host)`` pairs, so the duplicates stopped double-sending —
+#: they corrupt what is *readable* instead. ``mailbox-sessions`` shows a
+#: crowd where there is one session, the SessionStart collision note
+#: warns about peers that are the same session, and every liveness
+#: question — is this alias alive, should it be evicted — gets answered
+#: from whichever row happens to be found first, which is usually a dead
+#: one.
+#:
+#: The DELETE runs before the index because the index cannot be created
+#: while duplicates exist, and it keeps the most recently seen row,
+#: breaking ties on ``session_id`` so the choice is deterministic rather
+#: than storage order. It is a no-op once the index exists, which is why
+#: it is safe on the schema path that every process runs.
+_DEDUPE_REGISTRY = """
+    DELETE FROM session_registry
+     WHERE EXISTS (
+        SELECT 1 FROM session_registry AS newer
+         WHERE newer.alias = session_registry.alias
+           AND newer.host  = session_registry.host
+           AND (newer.last_seen > session_registry.last_seen
+                OR (newer.last_seen = session_registry.last_seen
+                    AND newer.session_id > session_registry.session_id)))
+"""
+
+_UNIQUE_REGISTRY = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS session_registry_alias_host_uidx "
+    "ON session_registry (alias, host)"
+)
 
 #: ``ack_needs_read`` is the one invariant worth enforcing in the
 #: database: an acknowledgement on an unread message would be a receipt
@@ -71,6 +107,8 @@ _PG = [
     "CREATE INDEX IF NOT EXISTS session_messages_receipt_idx "
     "ON session_messages (from_alias) "
     "WHERE ack_body IS NOT NULL AND receipt_read_at IS NULL",
+    _DEDUPE_REGISTRY,
+    _UNIQUE_REGISTRY,
 ]
 
 #: SQLite has no TIMESTAMPTZ and no BIGSERIAL. Times are ISO-8601 UTC
@@ -123,6 +161,8 @@ _SQLITE = [
     "ON session_messages (to_session)",
     "CREATE INDEX IF NOT EXISTS session_messages_expiry_idx "
     "ON session_messages (expires_at)",
+    _DEDUPE_REGISTRY,
+    _UNIQUE_REGISTRY,
 ]
 
 #: Columns read back, in one place so every SELECT agrees with the

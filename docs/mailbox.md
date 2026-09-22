@@ -46,6 +46,16 @@ with nothing registered by hand. Override per project in
 alias = "osync"
 ```
 
+The directory name is only the **default**, applied when a session
+registers. After that the session keeps the name it registered with:
+the alias is read back from the registry, not re-derived. Deriving it
+every time meant a session that changed directory quietly changed its name
+— it registered again under the new one, and everything addressed to the
+name it started with parked on an alias nobody was listening to. A
+rename in `mailbox.toml` therefore takes effect at that session's next
+`SessionStart`, which is the right way round: a rename that took effect
+mid-session would strand the mail already addressed to the old name.
+
 | form | means |
 |---|---|
 | `osync` | the alias, when it exists on exactly one host |
@@ -70,6 +80,32 @@ usually the one that is closed.
 withdrawing, and consuming your own read receipts — is scoped on both.
 Scoping on the alias alone gave one host authority over another's mail;
 see `bug-871`.
+
+### One registration per `alias@host`
+
+Enforced by a unique index, not only by the code that writes it.
+`session_id` is the primary key, so a client that restarted under a new
+id used to leave the old row behind — observed live as five
+`xollama@solidpc` rows in one directory, four of them an hour stale
+behind the one doing the work.
+
+Registering **replaces** any other row for the same `alias@host`, and
+the schema step deduplicates what an upgrade finds, keeping the most
+recently seen row. Delivery already collapses to distinct
+`(alias, host)` pairs, so duplicates had stopped double-sending; what
+they corrupted was everything *readable* — `mailbox-sessions` showing a
+crowd where there is one session, the `SessionStart` collision note
+warning about peers that are the same session, and every liveness
+decision answered from whichever row was found first, usually a dead
+one.
+
+The consequence worth knowing: two genuinely concurrent sessions in the
+same directory on the same host take turns owning the row, each
+reclaiming it on its next action. Their mail is unaffected — an inbox is
+read by alias — but only one appears in `mailbox-sessions`, and a
+message addressed to the evicted `session_id` has nowhere to resolve.
+Give them distinct aliases in `.claude-hooks/mailbox.toml` if both need
+to be addressable at once.
 
 ---
 
@@ -183,10 +219,21 @@ connection. Config is re-read every tick, so the switch and the cadence
 take effect without restarting the daemon (which would also kill the
 managed llamafile).
 
-`last_seen` is refreshed on **every announcement**, not only at
-`SessionStart`. Without that, a session held open longer than
-`registry_days` was swept away while someone was actively using it, and
-the next sender was told the alias did not exist.
+`last_seen` is refreshed on **every announcement and every tool call**,
+not only at `SessionStart`. Without the announcement refresh, a session
+held open longer than `registry_days` was swept away while someone was
+actively using it, and the next sender was told the alias did not exist.
+
+The per-tool-call refresh closes the other half. Announcements ride the
+hook path, which fires once per turn — a good approximation of activity
+only if turns are short. A session that spent fifteen minutes inside a
+single turn checking, reading and sending mail moved the timestamp
+exactly once, at the start, and then read as idle for a quarter of an
+hour while it was the busiest thing in the registry. Using the mailbox
+is the strongest evidence a session is alive, and it was the one signal
+not recorded. It costs one indexed UPDATE on a primary key, and it
+soft-fails: looking stale is a smaller problem than a mailbox that
+refuses to work.
 
 A sweep that cannot reach a store returns `None` rather than an empty
 report, and logs at INFO only when it actually did something — an

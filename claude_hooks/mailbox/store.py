@@ -157,6 +157,34 @@ class MailboxStore:
 
     # ─── registry ────────────────────────────────────────────────────
 
+    def _claim_alias_host(self, cur, alias: str, host: str,
+                          session_id: str) -> int:
+        """Make ``(alias, host)`` this session's, evicting any other.
+
+        A restarted or upgraded client comes back with a new
+        ``session_id``, and ``session_id`` is the primary key — so the
+        old row survived and the alias accumulated one registration per
+        restart. ``xollama@solidpc`` had five.
+
+        Evicting is right because ``(alias, host)`` is the unit the rest
+        of the mailbox already addresses: ``send()`` collapses recipients
+        to distinct ``(alias, host)`` pairs, so a second row was never a
+        second addressee — only a second *claim* about who is alive
+        there, and the older claim is the false one.
+
+        The consequence to know about: two genuinely concurrent sessions
+        in the same cwd on the same host now take turns owning the row,
+        each reclaiming it on its next action. Their mail is unaffected —
+        an inbox is read by alias, not by registration — but
+        ``mailbox-sessions`` shows one of them, and a message addressed
+        to the evicted ``session_id`` has nowhere to resolve.
+        """
+        cur.execute(self._q(
+            "DELETE FROM session_registry "
+            "WHERE alias = ? AND host = ? AND session_id <> ?"),
+            (alias, host, session_id))
+        return cur.rowcount or 0
+
     def register(self, session_id: str, alias: str, *, cwd: str = "",
                  host: Optional[str] = None) -> list[Session]:
         """Record this session and return the *other* live sessions that
@@ -175,21 +203,71 @@ class MailboxStore:
                     cur.execute(self._q(
                         "DELETE FROM session_registry WHERE session_id = ?"),
                         (session_id,))
+                    evicted = self._claim_alias_host(cur, alias, h,
+                                                     session_id)
                     cur.execute(self._q(
                         "INSERT INTO session_registry "
                         "(session_id, alias, host, os, cwd, started_at, "
                         " last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)"),
                         (session_id, alias, h, os_name(), cwd, now, now))
+                    # Same-host duplicates are gone by construction now,
+                    # so this only ever returns *other hosts* — which is
+                    # the collision actually worth warning about, since
+                    # ``xollama@solidpc`` and ``xollama@pandorum`` really
+                    # are two different correspondents.
                     cur.execute(self._q(
                         "SELECT " + ", ".join(schema.SESSION_COLUMNS) +
                         " FROM session_registry WHERE alias = ? "
                         "AND session_id <> ?"), (alias, session_id))
                     others = self._rows(cur, schema.SESSION_COLUMNS)
+                if evicted:
+                    log.info("mailbox: %s@%s reclaimed from %d stale "
+                             "registration(s)", alias, h, evicted)
                 conn.commit()
             except Exception:
                 self._rollback(conn)
                 raise
         return [_as_session(r) for r in others]
+
+    def registered_alias(self, session_id: str) -> Optional[str]:
+        """The alias this session registered under, if it has one.
+
+        The default alias is the *current directory's* name, recomputed
+        from the event on every call — so a session that changed
+        directory changed its name, registered under the new one, and
+        left the old registration behind. Two rows, one session, and
+        everything addressed to the name it started with parks on an
+        alias nobody is listening to.
+
+        A session's identity is decided once, when it registers, and
+        then remembered. Directory is a property of the session, not the
+        key to it. The derived name is only a *default* for a session
+        that has no registration yet, which also repairs the MCP-side
+        binding, where there is no event to take a cwd from and the
+        server process's own cwd was standing in for one.
+
+        The cost of remembering is that renaming a live session — via
+        ``.claude-hooks/mailbox.toml`` — takes effect at its next
+        SessionStart rather than its next turn. That is the right way
+        round: a rename that took effect mid-session would strand
+        everything already addressed to the old name.
+        """
+        if not session_id:
+            return None
+        self.ensure_schema()
+        with self._lock:
+            conn = self._connect()
+            try:
+                with _cursor(conn) as cur:
+                    cur.execute(self._q(
+                        "SELECT alias FROM session_registry "
+                        "WHERE session_id = ?"), (session_id,))
+                    row = cur.fetchone()
+                conn.commit()
+            except Exception:
+                self._rollback(conn)
+                raise
+        return row[0] if row else None
 
     def forget(self, session_id: str) -> bool:
         """Drop this session's registration. Called at SessionEnd.
@@ -242,12 +320,19 @@ class MailboxStore:
                     missing = (cur.rowcount or 0) == 0
                     if missing and alias:
                         now = self._now()
+                        h = host or host_name()
+                        # Claim first. Re-inserting blind would violate
+                        # the one-row-per-(alias, host) index the moment
+                        # anything else holds the slot — and this path
+                        # exists precisely for the case where something
+                        # does: the row was evicted, by the sweep or by a
+                        # newer session, while this one was quiet.
+                        self._claim_alias_host(cur, alias, h, session_id)
                         cur.execute(self._q(
                             "INSERT INTO session_registry "
                             "(session_id, alias, host, os, cwd, started_at, "
                             " last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)"),
-                            (session_id, alias, host or host_name(),
-                             os_name(), cwd, now, now))
+                            (session_id, alias, h, os_name(), cwd, now, now))
                 conn.commit()
             except Exception:
                 self._rollback(conn)

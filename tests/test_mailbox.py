@@ -598,8 +598,25 @@ class OneMailboxPerAliasTests(StoreHarness):
     """
 
     def _register_many(self, alias, host, n):
-        for i in range(n):
-            self.register(alias, host, sid=f"{alias}-{host}-{i}")
+        """Eleven registrations of one alias, as the registry used to
+        allow.
+
+        The unique index added with the ``(alias, host)`` rule means the
+        *store* can no longer be talked into this state — see
+        :class:`OneRegistrationPerAliasHostTests`. That makes storage
+        the first line of defence and leaves this class testing the
+        second: ``send()`` must still collapse repeated destinations,
+        because resolution — broadcast especially — can hand it the same
+        mailbox more than once without any row being duplicated. A guard
+        that is only correct while its input is well-formed is the guard
+        that failed here the first time.
+        """
+        fanout = getattr(self, "_fanout", None)
+        if fanout is None:
+            fanout = self._fanout = []
+            self.store.sessions = lambda **kw: list(self._fanout)
+        fanout.extend(sess(alias, host, sid=f"{alias}-{host}-{i}")
+                      for i in range(n))
 
     def test_eleven_registrations_deliver_once(self):
         self._register_many("xollama", self.HOST, 11)
@@ -667,8 +684,11 @@ class ForgetTests(StoreHarness):
     """
 
     def test_forget_removes_only_that_session(self):
+        # Two aliases rather than two registrations of one: since the
+        # ``(alias, host)`` rule, the second would have evicted the
+        # first and this would pass without forget() doing anything.
         self.register("osync", self.HOST, sid="live")
-        self.register("osync", self.HOST, sid="dead")
+        self.register("xollama", self.HOST, sid="dead")
         self.assertTrue(self.store.forget("dead"))
         left = [s.session_id for s in self.store.sessions()]
         self.assertEqual(left, ["live"])
@@ -709,8 +729,10 @@ class StaleEvictionTests(StoreHarness):
             conn.commit()
 
     def test_a_stale_row_is_not_an_addressee(self):
+        # One alias, two hosts — the only way one alias can now hold a
+        # live row and a dead one at the same time.
         self.register("osync", self.HOST, sid="live")
-        self.register("osync", self.HOST, sid="ended")
+        self.register("osync", "elsewhere", sid="ended")
         self._age("ended", 48)
         live = [s.session_id for s in self.store.sessions()]
         self.assertEqual(live, ["live"])
@@ -726,17 +748,22 @@ class StaleEvictionTests(StoreHarness):
     def test_a_stale_row_does_not_multiply_delivery(self):
         # The reported bug, from the other direction: even before the
         # physical eviction runs, a dead row cannot take a copy.
+        #
+        # Ten dead rows beside the live one cannot be *registered* any
+        # more, so they are aged across hosts instead. Rebuilding this
+        # with repeated registrations on one host would leave a single
+        # row and pass without exercising anything.
         self.register("xollama", self.HOST, sid="live")
         for i in range(10):
-            self.register("xollama", self.HOST, sid=f"ended-{i}")
+            self.register("xollama", f"ended-host-{i}", sid=f"ended-{i}")
             self._age(f"ended-{i}", 48)
-        res = self.store.send(f"xollama@{self.HOST}", "s", "b",
-                              from_alias="me")
+        res = self.store.send("xollama*", "s", "b", from_alias="me")
         self.assertEqual(len(res["ids"]), 1)
+        self.assertEqual(res["destinations"], [("xollama", self.HOST)])
 
     def test_evict_stale_removes_only_the_stale(self):
         self.register("osync", self.HOST, sid="live")
-        self.register("osync", self.HOST, sid="ended")
+        self.register("osync", "elsewhere", sid="ended")
         self._age("ended", 48)
         self.assertEqual(self.store.evict_stale(hours=24), 1)
         self.assertEqual(
@@ -1551,3 +1578,220 @@ class SharedAliasToolsTests(StoreHarness):
                                 {"id": mid, "subject": "hijacked"})
         self.assertIn("cannot rewrite", refusal)
         self.assertIn("original", self.sol.call("mailbox-sent", {}))
+
+
+class OneRegistrationPerAliasHostTests(StoreHarness):
+    """A restart must replace a registration, not add one.
+
+    ``session_id`` is the primary key, so a client that came back under
+    a new id left the old row behind: observed live as five
+    ``xollama@solidpc`` rows in one directory, four of them an hour
+    stale behind the one doing the work.
+    """
+
+    def test_a_new_session_id_replaces_the_old_row(self):
+        self.register("xollama", "solidpc", sid="before-restart")
+        self.register("xollama", "solidpc", sid="after-restart")
+
+        rows = self.store.sessions(alias="xollama")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].session_id, "after-restart")
+
+    def test_five_restarts_still_leave_one_row(self):
+        for i in range(5):
+            self.register("xollama", "solidpc", sid=f"run-{i}")
+        rows = self.store.sessions(alias="xollama")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].session_id, "run-4")
+
+    def test_the_same_alias_on_another_host_is_untouched(self):
+        """``xollama@solidpc`` and ``xollama@pandorum`` are two
+        correspondents, not one — the whole point of qualifying by
+        host."""
+        self.register("xollama", "solidpc", sid="sol")
+        self.register("xollama", "pandorum", sid="pan")
+
+        hosts = sorted(r.host for r in self.store.sessions(alias="xollama"))
+        self.assertEqual(hosts, ["pandorum", "solidpc"])
+
+    def test_the_database_refuses_a_duplicate(self):
+        """Enforced by the index, not only by the code path that writes
+        it — a second writer must not be able to recreate the state."""
+        self.register("xollama", "solidpc", sid="one")
+        with self.assertRaises(sqlite3.IntegrityError):
+            with self.db.lock:
+                conn = self.db()
+                conn.execute(
+                    "INSERT INTO session_registry (session_id, alias, host,"
+                    " os, cwd, started_at, last_seen)"
+                    " VALUES ('two', 'xollama', 'solidpc', 'linux', '',"
+                    " '2026-09-22T00:00:00+00:00',"
+                    " '2026-09-22T00:00:00+00:00')")
+
+    def test_collisions_reported_at_registration_are_now_cross_host_only(self):
+        self.register("xollama", "solidpc", sid="sol-old")
+        others = self.register("xollama", "pandorum", sid="pan")
+        self.assertEqual([o.host for o in others], ["solidpc"])
+
+        # Re-registering on solidpc reports pandorum, and does not
+        # report the predecessor it just replaced.
+        others = self.register("xollama", "solidpc", sid="sol-new")
+        self.assertEqual([o.host for o in others], ["pandorum"])
+
+    def test_existing_duplicates_are_cleared_when_the_schema_is_applied(self):
+        """The migration. An upgrade meets a table that already has
+        them, and the unique index cannot be built until they are
+        gone."""
+        older = "2026-09-22T09:00:00+00:00"
+        newer = "2026-09-22T10:00:00+00:00"
+        with self.db.lock:
+            conn = self.db()
+            conn.execute("DROP INDEX IF EXISTS "
+                         "session_registry_alias_host_uidx")
+            for sid, seen in (("a", older), ("b", newer), ("c", older)):
+                conn.execute(
+                    "INSERT INTO session_registry (session_id, alias, host,"
+                    " os, cwd, started_at, last_seen)"
+                    " VALUES (?, 'xollama', 'solidpc', 'linux', '', ?, ?)",
+                    (sid, seen, seen))
+            conn.commit()
+        self.assertEqual(len(self.store.sessions(alias="xollama")), 3)
+
+        self.store._ready = False          # as a fresh process would
+        self.store.ensure_schema()
+
+        rows = self.store.sessions(alias="xollama")
+        self.assertEqual(len(rows), 1)
+        # The most recently seen row survives — the live one.
+        self.assertEqual(rows[0].session_id, "b")
+
+    def test_touch_rebuilds_an_evicted_row_without_duplicating(self):
+        """A quiet session whose row was taken over comes back on its
+        next action, and comes back as one row."""
+        self.register("xollama", "solidpc", sid="quiet")
+        self.register("xollama", "solidpc", sid="loud")
+
+        self.store.touch("quiet", alias="xollama", host="solidpc")
+
+        rows = self.store.sessions(alias="xollama")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].session_id, "quiet")
+
+
+class ActivityRefreshesLastSeenTests(StoreHarness):
+    """Using the mailbox is the strongest evidence a session is alive,
+    and it was the one signal the registry did not record."""
+
+    def _tools(self, sid="s-live", alias="xollama"):
+        from claude_hooks.mailbox.tools import MailboxTools
+        return MailboxTools(self.store, alias=alias, session_id=sid,
+                            host="solidpc")
+
+    def _last_seen(self, sid):
+        rows = [r for r in self.store.sessions(include_stale=True)
+                if r.session_id == sid]
+        self.assertEqual(len(rows), 1)
+        return rows[0].last_seen
+
+    def _age(self, sid, minutes):
+        stale = utcnow() - timedelta(minutes=minutes)
+        with self.db.lock:
+            conn = self.db()
+            conn.execute("UPDATE session_registry SET last_seen = ?"
+                         " WHERE session_id = ?",
+                         (stale.isoformat(), sid))
+            conn.commit()
+
+    def test_a_second_tool_call_moves_last_seen(self):
+        """The first call registers. Every one after it used to leave
+        the timestamp where SessionStart put it, so a session working
+        inside a single long turn read as idle the whole time."""
+        tools = self._tools()
+        tools.call("mailbox-list", {})
+        self._age("s-live", minutes=15)
+        stale = self._last_seen("s-live")
+
+        tools.call("mailbox-list", {})
+
+        self.assertGreater(self._last_seen("s-live"), stale)
+
+    def test_reading_and_sending_both_count_as_activity(self):
+        self.register("peer", "solidpc", sid="s-peer")
+        tools = self._tools()
+        tools.call("mailbox-list", {})
+
+        for name, args in (("mailbox-send", {"to": "peer", "subject": "s",
+                                             "body": "b"}),
+                           ("mailbox-sessions", {}),
+                           ("mailbox-sent", {})):
+            with self.subTest(tool=name):
+                self._age("s-live", minutes=20)
+                stale = self._last_seen("s-live")
+                tools.call(name, args)
+                self.assertGreater(self._last_seen("s-live"), stale)
+
+    def test_activity_rebuilds_a_registration_that_was_swept(self):
+        """Eviction is only safe if activity undoes it — otherwise a
+        session that went quiet is unaddressable for the rest of its
+        life."""
+        tools = self._tools()
+        tools.call("mailbox-list", {})
+        self.store.forget("s-live")
+        self.assertEqual(self.store.sessions(alias="xollama"), [])
+
+        tools.call("mailbox-list", {})
+
+        rows = self.store.sessions(alias="xollama")
+        self.assertEqual([r.session_id for r in rows], ["s-live"])
+
+    def test_a_tool_failure_does_not_cost_the_refresh(self):
+        """Soft-fail runs the other way too: the refresh must not be
+        skipped because the call it accompanies was rejected."""
+        tools = self._tools()
+        tools.call("mailbox-list", {})
+        self._age("s-live", minutes=30)
+        stale = self._last_seen("s-live")
+
+        out = tools.call("mailbox-send", {"to": "nobody-here",
+                                          "subject": "s", "body": "b"})
+
+        self.assertGreater(self._last_seen("s-live"), stale)
+        self.assertTrue(out)
+
+
+class AliasBelongsToTheSessionTests(StoreHarness):
+    """Directory is a property of a session, not the key to it."""
+
+    def test_a_registered_session_keeps_its_name_after_a_cd(self):
+        self.register("xollama", "solidpc", sid="s1")
+        self.assertEqual(self.store.registered_alias("s1"), "xollama")
+
+    def test_an_unregistered_session_has_no_pinned_name(self):
+        self.assertIsNone(self.store.registered_alias("never-seen"))
+        self.assertIsNone(self.store.registered_alias(""))
+
+    def test_the_binding_prefers_the_registration_over_the_directory(self):
+        """``alias_for(cwd)`` is the *default* for a session with no
+        registration; it must not rename one that has."""
+        from claude_hooks.mailbox import integration
+
+        self.register("xollama", "solidpc", sid="s1")
+        captured = {}
+
+        class _Tools:
+            def __init__(self, store, *, alias, session_id, host):
+                captured["alias"] = alias
+
+        import claude_hooks.mailbox.tools as tools_mod
+        real_tools, real_store = tools_mod.MailboxTools, None
+        tools_mod.MailboxTools = _Tools
+        real_store = integration.store_for_provider
+        integration.store_for_provider = lambda provider: self.store
+        try:
+            integration.tools_for_provider(object(), cwd="/somewhere/else",
+                                           session_id="s1")
+        finally:
+            tools_mod.MailboxTools = real_tools
+            integration.store_for_provider = real_store
+
+        self.assertEqual(captured["alias"], "xollama")

@@ -180,15 +180,15 @@ class MailboxTools:
         return name in TOOL_NAMES
 
     def call(self, name: str, args: dict) -> str:
-        self._ensure_registered()
+        self._mark_active()
         try:
             return getattr(self, "_" + name.replace("-", "_"))(args)
         except (MailboxError, AddressError) as e:
             # Both are the caller's to fix, so they go back as prose.
             return str(e)
 
-    def _ensure_registered(self) -> None:
-        """Announce this session the first time it uses the mailbox.
+    def _mark_active(self) -> None:
+        """Register once, and prove liveness on *every* tool call.
 
         Registration otherwise happens only in the SessionStart hook,
         which leaves a session using the MCP tools without the hooks —
@@ -198,16 +198,41 @@ class MailboxTools:
         can *discover* it, and a correspondent reading the session list
         concludes it is not there.
 
-        Once per process, and soft-fail: being unlisted is a smaller
-        problem than a mailbox that refuses to work.
+        The refresh is the part that has to happen every time. The hook
+        path touches ``last_seen`` once per turn, which is only an
+        approximation of activity and a bad one: a session that spends
+        fifteen minutes inside a single turn checking, reading and
+        sending mail did all of it without moving the timestamp, so it
+        read as idle for a quarter of an hour while it was the busiest
+        thing in the registry. Anything that decides who is alive —
+        eviction, the live-session window, ``mailbox-sessions`` — was
+        answering from that. Using the mailbox is the strongest possible
+        evidence a session is alive, and it was the one signal not
+        recorded.
+
+        One indexed UPDATE on a primary key, and soft-fail throughout:
+        being unlisted, or looking stale, is a smaller problem than a
+        mailbox that refuses to work.
         """
-        if self._registered or not self.session_id:
+        if not self.session_id:
             return
-        self._registered = True
+        if not self._registered:
+            self._registered = True
+            try:
+                self.store.register(self.session_id, self.alias,
+                                    host=self.host)
+                return          # register() already stamps last_seen
+            except Exception:
+                log.debug("mailbox: could not self-register %s@%s",
+                          self.alias, self.host, exc_info=True)
         try:
-            self.store.register(self.session_id, self.alias, host=self.host)
+            # Carry the identity: if this row was evicted while the
+            # session was quiet, the touch rebuilds it rather than
+            # leaving a live session unaddressable.
+            self.store.touch(self.session_id, alias=self.alias,
+                             host=self.host)
         except Exception:
-            log.debug("mailbox: could not self-register %s@%s",
+            log.debug("mailbox: could not refresh %s@%s",
                       self.alias, self.host, exc_info=True)
 
     # ─── tools ───────────────────────────────────────────────────────

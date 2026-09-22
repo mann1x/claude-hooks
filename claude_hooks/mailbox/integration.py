@@ -84,7 +84,15 @@ def tools_for_provider(provider, *, cwd: Optional[str] = None,
     if store is None:
         return None
     from claude_hooks.mailbox.tools import MailboxTools
-    return MailboxTools(store, alias=alias_for(cwd),
-                        session_id=session_id or os.environ.get(
-                            "CLAUDE_SESSION_ID", ""),
-                        host=host_name())
+    sid = session_id or os.environ.get("CLAUDE_SESSION_ID", "")
+    # A registered session keeps the name it registered with. Deriving
+    # it from cwd every time renamed any session that changed directory
+    # — see ``MailboxStore.registered_alias``.
+    alias = None
+    try:
+        alias = store.registered_alias(sid)
+    except Exception:
+        log.debug("mailbox: could not read the registered alias",
+                  exc_info=True)
+    return MailboxTools(store, alias=alias or alias_for(cwd),
+                        session_id=sid, host=host_name())
