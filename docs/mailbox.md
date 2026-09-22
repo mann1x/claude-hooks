@@ -81,6 +81,56 @@ withdrawing, and consuming your own read receipts — is scoped on both.
 Scoping on the alias alone gave one host authority over another's mail;
 see `bug-871`.
 
+### An identical message is refused, not delivered twice
+
+`send()` will not write a message that the destination already holds:
+same sender, same destination, same subject, same body. The repeat is
+refused, naming what it duplicates —
+
+```
+Not sent. This is identical to #185, already sent to xollama@solidpc.
+It is in their mailbox — nothing more is needed. If this is a genuine
+follow-up rather than a repeat, change the subject or body; to replace
+what you sent, edit or withdraw it instead.
+```
+
+— and nothing is written. The wording matters: the likeliest reader is a
+caller retrying because it never saw the first confirmation, so
+"rejected" has to arrive together with "the message is already there", or
+the refusal reads as a failure and invites a third attempt.
+
+Two conditions count, answering different questions. **Still unread**, at
+any age: a second copy cannot tell the recipient anything the first,
+sitting there unread, will not. **Sent within `DEFAULT_DEDUP_WINDOW_SECONDS`**
+(10 minutes), read or not: a retry, a double tool call, or a sender
+repeating itself. A withdrawn message never blocks — withdrawing is a
+statement that it should not have been sent — and neither does an expired
+one.
+
+A broadcast is checked per recipient: the hosts that already have it are
+skipped and the rest are delivered, with the confirmation saying so
+(`Sent (id 193) — … Skipped osync@solidpc (identical to #185).`). If every
+recipient already has it, nothing is written. One surviving row is not a
+broadcast, so `broadcast_group` is cleared — the same rule that set it.
+
+**Why the check is at the destination rather than in the sender.**
+Reported 2026-09-22: `#185`–`#189`, identical bodies, one minute apart,
+read five times. Not a sender sending five times — a single `send()` in
+an MCP server process started 2026-09-17, writing one row per
+*registration* as the code did before the fan-out fix landed on
+2026-09-19. The repository was two days ahead of the process serving it,
+and nothing about a long-lived child process makes that visible. A guard
+that only holds while every process is current is a guard that holds
+until it matters.
+
+That also bounds what this fixes: a stale process runs the stale
+`send()`, guard included, so the guard reaches a duplicating sender only
+after its session restarts. The layer that catches it regardless is
+`dedupe_messages()` in the maintenance sweep, which is what collapsed
+`#186`–`#189` on its own — rows from one `INSERT` loop share `created_at`
+to the microsecond, which is exactly how it tells them from two
+deliberate sends.
+
 ### One registration per `alias@host`
 
 Enforced by a unique index, not only by the code that writes it.
@@ -194,6 +244,7 @@ visibility.
 | thing | default | why |
 |---|---|---|
 | messages | 180 days | `DEFAULT_EXPIRY_DAYS` |
+| identical resend blocked | 10 minutes, or while unread | `DEFAULT_DEDUP_WINDOW_SECONDS` |
 | registry entries | 30 days | a session unseen for a month is not reachable |
 | archive | quarterly zstd (level 19), capped at 10 GB | oldest quarters dropped first |
 

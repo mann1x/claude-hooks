@@ -954,13 +954,37 @@ class DedupeMessagesTests(StoreHarness):
         self.assertEqual(len(self.store.inbox(alias="osync")), 3)
 
     def test_two_deliberate_sends_of_identical_text_both_survive(self):
-        # Same sender, destination, subject and body — different instants.
-        # created_at carries microseconds, so they are distinguishable.
+        """``dedupe_messages`` must still not collapse two genuine sends.
+
+        It keys on ``created_at`` to the microsecond precisely so that it
+        only ever removes rows from one ``INSERT`` loop. That property is
+        unchanged — but reaching it now takes a first message that is read
+        and older than the dedup window, because ``send()`` refuses an
+        immediate identical repeat (see
+        :class:`RefuseIdenticalResendTests`). The behaviour this test
+        asserted before that guard — a second identical send going
+        straight through — is deliberately gone.
+        """
         self.register("osync", self.HOST)
+        first = self.store.send("osync", "same", "same",
+                                from_alias="me")["ids"][0]
+        self.store.read([first], reader_session="osync-solidpc",
+                        alias="osync", host=self.HOST)
+        self._age_message(first, seconds=3600)
+
         self.store.send("osync", "same", "same", from_alias="me")
-        self.store.send("osync", "same", "same", from_alias="me")
+
         self.assertEqual(self.store.dedupe_messages()["removed"], 0)
-        self.assertEqual(len(self.store.inbox(alias="osync")), 2)
+        self.assertEqual(
+            len(self.store.inbox(alias="osync", include_read=True)), 2)
+
+    def _age_message(self, message_id, *, seconds):
+        old = utcnow() - timedelta(seconds=seconds)
+        with self.db.lock:
+            conn = self.db()
+            conn.execute("UPDATE session_messages SET created_at = ?"
+                         " WHERE id = ?", (old.isoformat(), message_id))
+            conn.commit()
 
     def test_it_is_idempotent(self):
         self._fan_out(11)
@@ -1862,3 +1886,184 @@ class RefreshWithoutASessionIdTests(StoreHarness):
     def test_an_empty_alias_refreshes_nothing(self):
         self.register("xollama", self.HOST, sid="here")
         self.assertFalse(self.store.touch_alias("", self.HOST))
+
+
+class RefuseIdenticalResendTests(StoreHarness):
+    """An identical message is refused, naming the one it repeats.
+
+    Reported 2026-09-22: ``#185``–``#189``, identical bodies, one minute.
+    Not a sender sending five times — one ``send()`` in an MCP server
+    started 2026-09-17 wrote one row per *registration*, and the fan-out
+    fix had landed on 2026-09-19. The writer was five days stale and
+    nothing about a long-lived child process says so, which is the
+    argument for checking at the destination instead of trusting the
+    writer.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.register("osync", self.HOST, sid="s-osync")
+
+    def _send(self, subject="s", body="b", to="osync"):
+        return self.store.send(to, subject, body, from_alias="me")
+
+    def _age_message(self, message_id, *, seconds):
+        old = utcnow() - timedelta(seconds=seconds)
+        with self.db.lock:
+            conn = self.db()
+            conn.execute("UPDATE session_messages SET created_at = ?"
+                         " WHERE id = ?", (old.isoformat(), message_id))
+            conn.commit()
+
+    def _read(self, message_id):
+        self.store.read([message_id], reader_session="s-osync",
+                        alias="osync", host=self.HOST)
+
+    def test_an_immediate_repeat_is_refused(self):
+        first = self._send()["ids"][0]
+        with self.assertRaises(MailboxError) as cm:
+            self._send()
+        msg = str(cm.exception)
+        self.assertIn(f"#{first}", msg)
+        self.assertIn("Not sent", msg)
+
+    def test_the_refusal_says_the_message_is_already_there(self):
+        """The likeliest reader of this text is a caller retrying because
+        it never saw the first confirmation. "Rejected" alone would read
+        as a failure and invite a third attempt."""
+        self._send()
+        with self.assertRaises(MailboxError) as cm:
+            self._send()
+        msg = str(cm.exception)
+        self.assertIn("in their mailbox", msg)
+        self.assertIn("nothing more is needed", msg.lower())
+
+    def test_nothing_is_written_when_it_is_refused(self):
+        self._send()
+        before = len(self.store.inbox(alias="osync", include_read=True))
+        with self.assertRaises(MailboxError):
+            self._send()
+        self.assertEqual(
+            len(self.store.inbox(alias="osync", include_read=True)), before)
+
+    def test_an_unread_copy_blocks_a_repeat_at_any_age(self):
+        """A second copy cannot tell the recipient anything the first,
+        still sitting unread, will not."""
+        first = self._send()["ids"][0]
+        self._age_message(first, seconds=90 * 24 * 3600)
+        with self.assertRaises(MailboxError) as cm:
+            self._send()
+        self.assertIn(f"#{first}", str(cm.exception))
+
+    def test_a_read_copy_outside_the_window_does_not_block(self):
+        first = self._send()["ids"][0]
+        self._read(first)
+        self._age_message(first, seconds=3600)
+        self._send()          # a deliberate re-send, delayed not forbidden
+        self.assertEqual(
+            len(self.store.inbox(alias="osync", include_read=True)), 2)
+
+    def test_a_read_copy_inside_the_window_still_blocks(self):
+        """Read is not the same as answered: a retry whose first attempt
+        was read in the meantime is still a retry."""
+        first = self._send()["ids"][0]
+        self._read(first)
+        with self.assertRaises(MailboxError):
+            self._send()
+
+    def test_a_withdrawn_message_does_not_block(self):
+        """Withdrawing is a statement that it should not have been sent,
+        so it cannot stand in the way of sending it properly."""
+        first = self._send()["ids"][0]
+        self.store.cancel(first, from_alias="me", from_host=self.HOST)
+        self._send()
+        self.assertEqual(len(self.store.inbox(alias="osync")), 1)
+
+    def test_a_different_body_is_not_a_duplicate(self):
+        self._send(body="one")
+        self._send(body="two")
+        self.assertEqual(len(self.store.inbox(alias="osync")), 2)
+
+    def test_a_different_subject_is_not_a_duplicate(self):
+        self._send(subject="one")
+        self._send(subject="two")
+        self.assertEqual(len(self.store.inbox(alias="osync")), 2)
+
+    def test_another_sender_repeating_the_text_is_not_a_duplicate(self):
+        """Two sessions independently reporting the same result are two
+        messages, and the recipient needs both."""
+        self._send()
+        self.store.send("osync", "s", "b", from_alias="someone-else")
+        self.assertEqual(len(self.store.inbox(alias="osync")), 2)
+
+    def test_the_same_text_to_a_different_recipient_is_not_a_duplicate(self):
+        self.register("xollama", self.HOST, sid="s-x")
+        self._send(to="osync")
+        self._send(to="xollama")
+        self.assertEqual(len(self.store.inbox(alias="osync")), 1)
+        self.assertEqual(len(self.store.inbox(alias="xollama")), 1)
+
+    def test_a_parked_message_blocks_its_own_repeat(self):
+        """Nobody registered, so it parks on the alias — and a retry of a
+        parked message duplicates just as well as a delivered one."""
+        first = self.store.send("nobody-home", "s", "b",
+                                from_alias="me")["ids"][0]
+        with self.assertRaises(MailboxError) as cm:
+            self.store.send("nobody-home", "s", "b", from_alias="me")
+        self.assertIn(f"#{first}", str(cm.exception))
+
+    def test_a_session_addressed_repeat_is_refused(self):
+        first = self.store.send("s-osync", "s", "b",
+                                from_alias="me")["ids"][0]
+        with self.assertRaises(MailboxError) as cm:
+            self.store.send("s-osync", "s", "b", from_alias="me")
+        self.assertIn(f"#{first}", str(cm.exception))
+
+
+class PartialBroadcastTests(StoreHarness):
+    """A broadcast where only some recipients already have it."""
+
+    def setUp(self):
+        super().setUp()
+        self.register("osync", "solidpc", sid="s-sol")
+        self.register("osync", "pandorum", sid="s-pan")
+
+    def test_only_the_fresh_hosts_are_written(self):
+        first = self.store.send("osync@solidpc", "s", "b",
+                                from_alias="me")["ids"][0]
+        res = self.store.send("osync*", "s", "b", from_alias="me")
+
+        self.assertEqual(len(res["ids"]), 1)
+        self.assertEqual(res["destinations"], [("osync", "pandorum")])
+        self.assertEqual(res["skipped"], [(("osync", None, "solidpc"), first)])
+
+    def test_a_single_surviving_row_is_not_a_broadcast(self):
+        """``broadcast_group`` means "this went to more than one
+        mailbox". After the duplicate is dropped it went to one."""
+        self.store.send("osync@solidpc", "s", "b", from_alias="me")
+        res = self.store.send("osync*", "s", "b", from_alias="me")
+        self.assertIsNone(res["broadcast_group"])
+
+    def test_the_confirmation_says_what_was_skipped(self):
+        from claude_hooks.mailbox.tools import MailboxTools
+        tools = MailboxTools(self.store, alias="me", session_id="s-me",
+                            host=self.HOST)
+        first = self.store.send("osync@solidpc", "s", "b",
+                                from_alias="me")["ids"][0]
+
+        out = tools.call("mailbox-send", {"to": "osync*", "subject": "s",
+                                         "body": "b"})
+
+        self.assertIn("Sent", out)
+        self.assertIn("Skipped", out)
+        self.assertIn(f"#{first}", out)
+        self.assertIn("solidpc", out)
+
+    def test_a_fully_duplicate_broadcast_is_refused(self):
+        self.store.send("osync*", "s", "b", from_alias="me")
+        with self.assertRaises(MailboxError) as cm:
+            self.store.send("osync*", "s", "b", from_alias="me")
+        msg = str(cm.exception)
+        self.assertIn("Every recipient already has", msg)
+        self.assertIn("solidpc", msg)
+        self.assertIn("pandorum", msg)

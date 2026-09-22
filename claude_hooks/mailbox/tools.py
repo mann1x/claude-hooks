@@ -17,7 +17,9 @@ from typing import Any, Optional, Sequence
 
 from claude_hooks.mailbox.addressing import AddressError, describe_recipients
 from claude_hooks.mailbox.announce import ago
-from claude_hooks.mailbox.store import MailboxError, MailboxStore, host_name
+from claude_hooks.mailbox.store import (
+    MailboxError, MailboxStore, describe_skipped, host_name,
+)
 
 log = logging.getLogger("claude_hooks.mailbox.tools")
 
@@ -255,8 +257,14 @@ class MailboxTools:
             priority=int(args.get("priority") or 0),
         )
         ids = ", ".join(str(i) for i in res["ids"])
-        return (f"Sent (id {ids}) — "
-                + describe_recipients(res["recipients"], res["address"]))
+        out = (f"Sent (id {ids}) — "
+               + describe_recipients(res["recipients"], res["address"]))
+        skipped = res.get("skipped") or []
+        if skipped:
+            # A partial send has to say what it did *not* do, or the
+            # confirmation is a claim about recipients that never got it.
+            out += f" Skipped {describe_skipped(skipped)}."
+        return out
 
     def _mailbox_list(self, args: dict) -> str:
         rows = self.store.inbox(

@@ -48,6 +48,25 @@ DEFAULT_LIVE_HOURS = 12
 #: delivery were the only evidence of what had happened.
 DEFAULT_EVICT_HOURS = 24
 
+#: How long an identical message from the same sender to the same
+#: destination blocks a repeat.
+#:
+#: The duplication that prompted this was not a sender sending twice: one
+#: ``send()`` in a process still running the pre-fan-out-fix code wrote
+#: one row per *registration*, five of them, and the recipient read the
+#: same text five times. The code had been fixed two days earlier — the
+#: MCP server holding the old ``send()`` had simply never restarted, and
+#: nothing about a long-lived child process makes it obvious that it is
+#: serving code the repository no longer contains.
+#:
+#: Which is the argument for checking at the destination rather than
+#: trusting the writer: a guard that only holds while every process is
+#: current is a guard that holds until it matters. Ten minutes covers a
+#: retry, a double tool call, and a sender that repeats itself after an
+#: answer it did not see — and it is short enough that a deliberate
+#: re-send of the same text is only delayed, never prevented.
+DEFAULT_DEDUP_WINDOW_SECONDS = 600
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -105,11 +124,13 @@ class MailboxStore:
     """
 
     def __init__(self, connect, lock, *, dialect: str = "postgres",
-                 expiry_days: int = DEFAULT_EXPIRY_DAYS):
+                 expiry_days: int = DEFAULT_EXPIRY_DAYS,
+                 dedup_window_seconds: int = DEFAULT_DEDUP_WINDOW_SECONDS):
         self._connect = connect
         self._lock = lock
         self.dialect = dialect
         self._expiry_days = expiry_days
+        self._dedup_window = dedup_window_seconds
         self._ready = False
 
     # ─── plumbing ────────────────────────────────────────────────────
@@ -628,23 +649,46 @@ class MailboxStore:
         now = self._now()
         host = host_name()
 
-        rows: list[tuple] = []
+        # (target, row) pairs, so a target that already holds this exact
+        # message can be dropped before anything is written.
+        planned: list[tuple[tuple, tuple]] = []
         if address.is_session:
-            rows.append((now, from_alias, from_session, host, None,
-                         address.session_id, None, None, subject, body,
-                         int(priority), expires))
+            planned.append((
+                (None, address.session_id, None),
+                (now, from_alias, from_session, host, None,
+                 address.session_id, None, None, subject, body,
+                 int(priority), expires)))
         elif destinations:
             for to_alias, to_host in destinations:
-                rows.append((now, from_alias, from_session, host, to_alias,
-                             None, to_host, group, subject, body,
-                             int(priority), expires))
+                planned.append((
+                    (to_alias, None, to_host),
+                    (now, from_alias, from_session, host, to_alias,
+                     None, to_host, group, subject, body,
+                     int(priority), expires)))
         else:
             # Nobody registered: park it on the alias. This is the point
             # of a mailbox — the session you have something for is
             # usually the one that is closed.
-            rows.append((now, from_alias, from_session, host, address.alias,
-                         None, address.host, None, subject, body,
-                         int(priority), expires))
+            planned.append((
+                (address.alias, None, address.host),
+                (now, from_alias, from_session, host, address.alias,
+                 None, address.host, None, subject, body,
+                 int(priority), expires)))
+
+        already = self._recent_identical(
+            from_alias=from_alias, from_host=host, subject=subject,
+            body=body, targets=[t for t, _ in planned])
+        fresh = [(t, r) for t, r in planned if t not in already]
+        skipped = [(t, already[t]) for t, _ in planned if t in already]
+        if not fresh:
+            raise MailboxError(_duplicate_refusal(skipped))
+
+        # A single surviving row is not a broadcast, by the same rule that
+        # decided ``group`` in the first place.
+        if group is not None and len(fresh) < 2:
+            group = None
+            fresh = [(t, r[:7] + (None,) + r[8:]) for t, r in fresh]
+        rows = [r for _, r in fresh]
 
         sql = self._q(
             "INSERT INTO session_messages "
@@ -668,8 +712,89 @@ class MailboxStore:
             except Exception:
                 self._rollback(conn)
                 raise
+        # ``destinations`` keeps its shape — a list of ``(alias, host)`` —
+        # and now lists the ones actually written. Reporting a skipped
+        # destination here would make the confirmation a claim about a
+        # mailbox that did not receive anything; that is what ``skipped``
+        # is for.
+        delivered = [(t[0], t[2]) for t, _ in fresh] if not address.is_session \
+            else destinations
         return {"ids": ids, "address": address, "recipients": recipients,
-                "destinations": destinations, "broadcast_group": group}
+                "destinations": delivered,
+                "broadcast_group": group, "skipped": skipped}
+
+    def _recent_identical(self, *, from_alias: str, from_host: str,
+                          subject: str, body: str,
+                          targets: Sequence[tuple]) -> dict:
+        """Map each target that already holds this exact message to its id.
+
+        Two conditions count, and they answer different questions.
+
+        *Still unread*, at any age: the recipient has not seen the first
+        copy, so a second cannot tell them anything the first will not.
+        This is the one that catches a duplicate whatever produced it —
+        including a sender running code from before a fix, which is what
+        actually happened here.
+
+        *Sent within the window*, read or not: a retry, a double tool
+        call, or a sender repeating itself because it never saw the
+        confirmation. Bounded, so a deliberate re-send of the same text
+        is delayed rather than forbidden.
+
+        Cancelled messages do not count — withdrawing one is a statement
+        that it should not have been sent — and neither do expired ones,
+        which are only still present because the sweep has not run.
+
+        The target comparison is done here rather than in SQL because
+        ``to_host`` is NULL for a parked message, and NULL-safe equality
+        is spelled ``IS NOT DISTINCT FROM`` in Postgres and ``IS`` in
+        SQLite. The candidate set is one sender's messages with one
+        subject inside the window, so matching the body in Python costs
+        nothing and keeps one predicate meaning one thing in both
+        dialects.
+
+        Not atomic, deliberately. This runs in its own transaction and the
+        insert in the next, so two senders sharing an alias could both
+        look, both see nothing and both write. A unique index would close
+        that, and was rejected: rows from the old fan-out share
+        ``created_at`` exactly, so the constraint would abort the whole
+        ``INSERT`` loop of a stale sender and deliver *nothing* rather
+        than too much — trading a duplicate for an outage. The residue is
+        one extra copy in a race, against five from the bug this guards,
+        and :meth:`dedupe_messages` is the layer that mops up regardless.
+        """
+        if not targets:
+            return {}
+        cutoff = self._at(utcnow() - timedelta(seconds=self._dedup_window))
+        now = self._now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                with _cursor(conn) as cur:
+                    cur.execute(self._q(
+                        "SELECT id, to_alias, to_session, to_host, body "
+                        "FROM session_messages "
+                        "WHERE from_alias = ? AND from_host = ? "
+                        "AND subject = ? AND cancelled_at IS NULL "
+                        "AND expires_at > ? "
+                        "AND (read_at IS NULL OR created_at >= ?) "
+                        "ORDER BY id"),
+                        (from_alias, from_host, subject, now, cutoff))
+                    candidates = cur.fetchall()
+                conn.commit()
+            except Exception:
+                self._rollback(conn)
+                raise
+
+        wanted = set(targets)
+        found: dict = {}
+        for mid, to_alias, to_session, to_host, cand_body in candidates:
+            if cand_body != body:
+                continue
+            key = (to_alias, to_session, to_host)
+            if key in wanted and key not in found:
+                found[key] = mid          # earliest, by the ORDER BY
+        return found
 
     # ─── reading ─────────────────────────────────────────────────────
 
@@ -1119,6 +1244,42 @@ class MailboxStore:
         if row["cancelled_at"]:
             raise MailboxError(f"Message {message_id} was already withdrawn.")
         return row
+
+
+def _describe_target(target: tuple) -> str:
+    """``alias@host``, a session id, or a parked alias — as addressed."""
+    to_alias, to_session, to_host = target
+    if to_session:
+        return to_session
+    return f"{to_alias}@{to_host}" if to_host else str(to_alias)
+
+
+def describe_skipped(skipped: Sequence[tuple]) -> str:
+    """``xollama@solidpc (identical to #185)``, comma-joined."""
+    return ", ".join(f"{_describe_target(t)} (identical to #{mid})"
+                     for t, mid in skipped)
+
+
+def _duplicate_refusal(skipped: Sequence[tuple]) -> str:
+    """Why nothing was written, naming the message this repeats.
+
+    Phrased so a *retrying* caller reads it correctly. The likeliest
+    reason to see this is that the first attempt succeeded and its
+    confirmation was lost, so "rejected" has to arrive together with
+    "the message is already there" — otherwise the refusal reads as a
+    failure and invites a third attempt.
+    """
+    one = len(skipped) == 1
+    head = (f"Not sent. This is identical to #{skipped[0][1]}, already "
+            f"sent to {_describe_target(skipped[0][0])}"
+            if one else
+            "Not sent. Every recipient already has this exact message: "
+            + describe_skipped(skipped))
+    return (f"{head}{'.' if one else ''} It is in their mailbox — nothing "
+            f"more is needed. If this is a genuine follow-up rather than a "
+            f"repeat, change the subject or body; to replace what you sent, "
+            f"edit or withdraw "
+            f"{'it' if one else 'the originals'} instead.")
 
 
 def _as_session(row: dict) -> Session:
