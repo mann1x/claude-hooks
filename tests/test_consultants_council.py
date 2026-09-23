@@ -1260,3 +1260,27 @@ class TestRecorderIntegration:
             assert "upstream 500" in err
         finally:
             rec.close()
+
+
+
+# CONSULTANTS_FANOUT_MAX_LANES lowers the lane cap for one process, so a
+# benchmark can stay inside the account's connection limit.
+
+def test_fanout_env_unset_keeps_the_default(monkeypatch):
+    monkeypatch.delenv("CONSULTANTS_FANOUT_MAX_LANES", raising=False)
+    assert council._fanout_max_lanes() == council.FANOUT_DEFAULT_MAX_LANES
+
+
+def test_fanout_env_value_is_used(monkeypatch):
+    monkeypatch.setenv("CONSULTANTS_FANOUT_MAX_LANES", "2")
+    assert council._fanout_max_lanes() == 2
+
+
+def test_fanout_env_never_drops_below_one(monkeypatch):
+    monkeypatch.setenv("CONSULTANTS_FANOUT_MAX_LANES", "0")
+    assert council._fanout_max_lanes() == 1
+
+
+def test_fanout_env_garbage_falls_back(monkeypatch):
+    monkeypatch.setenv("CONSULTANTS_FANOUT_MAX_LANES", "two")
+    assert council._fanout_max_lanes() == council.FANOUT_DEFAULT_MAX_LANES

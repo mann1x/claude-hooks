@@ -34,6 +34,7 @@ researcher round counts live in the state dict.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -853,7 +854,30 @@ FANOUT_MIN_ITEMS = 2
 # LLM time / 2.5x effective parallelism = 9.6 min researcher wall —
 # WORSE than the un-fanned 3.1 min baseline. Capped to 3 lanes,
 # items beyond the first are folded back into earlier lanes.
-FANOUT_MAX_LANES = 3
+#
+# ``CONSULTANTS_FANOUT_MAX_LANES`` lowers it for one engine process. The
+# lanes run concurrently, one cloud connection each, and an Ollama Pro
+# account allows 3 connections in total. The hooks already hold one, so
+# a benchmark that must not queue on the account runs its engine at 2.
+# Read once at import: it is a property of the process, not of a consult.
+FANOUT_DEFAULT_MAX_LANES = 3
+
+
+def _fanout_max_lanes() -> int:
+    raw = os.environ.get("CONSULTANTS_FANOUT_MAX_LANES", "").strip()
+    if not raw:
+        return FANOUT_DEFAULT_MAX_LANES
+    try:
+        value = int(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "CONSULTANTS_FANOUT_MAX_LANES=%r is not an integer; using %d",
+            raw, FANOUT_DEFAULT_MAX_LANES)
+        return FANOUT_DEFAULT_MAX_LANES
+    return max(1, value)
+
+
+FANOUT_MAX_LANES = _fanout_max_lanes()
 
 
 def group_items_into_lanes(items: list[str], max_lanes: int) -> list[list[str]]:
