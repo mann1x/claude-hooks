@@ -62,6 +62,8 @@ from benchmarks.consultants.harness import (
     SuiteManifest,
     ToolExecTrial,
     append_trial,
+    record_usage,
+    set_role_usage,
     estimate_tool_exec_cost,
     load_questions,
     load_suite_manifest,
@@ -709,6 +711,9 @@ def run_trial(question: BenchQuestion,
     trial.iterations = capture.iter_count
     trial.tokens_prompt = capture.tokens_prompt
     trial.tokens_completion = capture.tokens_completion
+    set_role_usage(trial.usage, "tool_executor", trial.model,
+                   calls=capture.iter_count, prompt=capture.tokens_prompt,
+                   completion=capture.tokens_completion)
     trial.tool_calls_count = len(capture.tool_calls)
     trial.tool_calls_unique = len({
         (c["tool"], c.get("args") or "")
@@ -862,6 +867,7 @@ def _judge_trial_quality(*, judge_chat_client, judge_model: str,
         log.exception("judge call raised on %s × %s",
                       question.id, trial.model)
         return None, f"judge raised: {type(e).__name__}: {e}"
+    record_usage(trial.usage, "judge", judge_model, resp)
     if not isinstance(resp, dict):
         return None, "judge returned non-dict response"
     choices = resp.get("choices") or []

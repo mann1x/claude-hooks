@@ -521,9 +521,48 @@ class CoderTrial:
     error: Optional[str] = None
     # The files the coder wrote: list of {"path": str, "bytes": int}
     files_written: list[dict] = field(default_factory=list)
+    # Every LLM call this trial made, by role — see ``record_usage``.
+    usage: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+# ============================================================== #
+# Per-role token spend
+# ============================================================== #
+
+def record_usage(usage: dict, role: str, model: str, resp: Any) -> None:
+    """Add one LLM response's tokens to a trial's per-role ``usage``.
+
+    Every LLM call a bench makes is spend, the judges' as much as the
+    model under test's, and they are usually different models at
+    different prices. A bench that records only the subject's tokens
+    understates what a run costs, and understates it most for exactly
+    the runs that judge the most. So every call site records here,
+    retries included: a retried call was paid for twice.
+
+    ``usage`` maps role → ``{"model", "calls", "prompt", "completion"}``.
+    A response without a ``usage`` block still counts as a call, with
+    zero tokens, so an under-reporting backend shows up as calls that
+    cost nothing rather than as calls that never happened.
+    """
+    u = resp.get("usage") if isinstance(resp, dict) else None
+    u = u if isinstance(u, dict) else {}
+    slot = usage.setdefault(
+        role, {"model": model, "calls": 0, "prompt": 0, "completion": 0})
+    slot["calls"] += 1
+    slot["prompt"] += int(u.get("prompt_tokens") or 0)
+    slot["completion"] += int(u.get("completion_tokens") or 0)
+
+
+def set_role_usage(usage: dict, role: str, model: str, *, calls: int,
+                   prompt: int, completion: int) -> None:
+    """Record a role's totals when they were summed elsewhere — the
+    coder's agent loop reports tokens through a callback, not a
+    response, so its total arrives already added up."""
+    usage[role] = {"model": model, "calls": int(calls),
+                   "prompt": int(prompt), "completion": int(completion)}
 
 
 # ============================================================== #
@@ -693,6 +732,8 @@ class ToolExecTrial:
     quality_score: Optional[float] = None
     quality_rationale: str = ""
     quality_judge_model: str = ""
+    # Every LLM call this trial made, by role — see ``record_usage``.
+    usage: dict = field(default_factory=dict)
     # Bookkeeping
     error: Optional[str] = None
 

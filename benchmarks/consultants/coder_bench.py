@@ -68,7 +68,8 @@ from benchmarks.consultants.harness import (  # noqa: E402
     estimate_cost, judge_lang_for_path, load_questions,
     load_suite_manifest, make_dry_run_loop_runner, measure_complexity,
     parse_constraint_tests, parse_judge_response,
-    parse_meta_judge_response, run_pytest_against_sandbox,
+    parse_meta_judge_response, record_usage, run_pytest_against_sandbox,
+    set_role_usage,
 )
 
 log = logging.getLogger("benchmarks.consultants.coder_bench")
@@ -149,6 +150,7 @@ def _build_trial_sandbox(output_dir: Path,
 
 
 def _judge_trial_quality(*, judge_chat_client, judge_model: str,
+        usage: Optional[dict] = None,
                          task: str, sandbox: Path,
                          sandbox_path: str) -> tuple[Optional[float], str]:
     """Call the judge LLM on the produced code; return
@@ -187,6 +189,8 @@ def _judge_trial_quality(*, judge_chat_client, judge_model: str,
         except Exception as e:
             log.exception("judge call raised; treating as no-score")
             raise RuntimeError(f"judge call raised: {e}") from e
+        if usage is not None:
+            record_usage(usage, "judge", judge_model, resp)
         if not isinstance(resp, dict):
             return ""
         choices = resp.get("choices") or []
@@ -227,6 +231,7 @@ def _judge_trial_quality(*, judge_chat_client, judge_model: str,
 
 
 def _audit_judge_trial(*, judge_chat_client, judge_model: str,
+        usage: Optional[dict] = None,
                        task: str, sandbox: Path,
                        sandbox_path: str,
                        passes_algorithm: bool,
@@ -316,6 +321,8 @@ def _audit_judge_trial(*, judge_chat_client, judge_model: str,
         except Exception as e:
             log.exception("audit judge call raised; treating as no-score")
             raise RuntimeError(f"audit judge raised: {e}") from e
+        if usage is not None:
+            record_usage(usage, "audit_judge", judge_model, resp)
         if not isinstance(resp, dict):
             return ""
         choices = resp.get("choices") or []
@@ -347,6 +354,7 @@ def _audit_judge_trial(*, judge_chat_client, judge_model: str,
 
 
 def _meta_judge_trial(*, judge_chat_client, judge_model: str,
+        usage: Optional[dict] = None,
                       task: str, sandbox: Path, sandbox_path: str,
                       judge_a_score: Optional[float],
                       judge_a_rationale: str,
@@ -415,6 +423,8 @@ def _meta_judge_trial(*, judge_chat_client, judge_model: str,
         except Exception as e:
             log.exception("meta judge call raised; treating as no-score")
             raise RuntimeError(f"meta judge raised: {e}") from e
+        if usage is not None:
+            record_usage(usage, "meta_judge", judge_model, resp)
         if not isinstance(resp, dict):
             return ""
         choices = resp.get("choices") or []
@@ -554,6 +564,8 @@ def _run_one_trial(*,
         trial.iterations = iterations
         trial.tokens_prompt = tokens_prompt
         trial.tokens_completion = tokens_completion
+        set_role_usage(trial.usage, "coder", model, calls=iterations,
+                       prompt=tokens_prompt, completion=tokens_completion)
         trial.error = f"{type(e).__name__}: {e}"
         return trial
     trial.wall_s = time.monotonic() - t0
@@ -563,6 +575,8 @@ def _run_one_trial(*,
     trial.iterations = iterations
     trial.tokens_prompt = tokens_prompt
     trial.tokens_completion = tokens_completion
+    set_role_usage(trial.usage, "coder", model, calls=iterations,
+                   prompt=tokens_prompt, completion=tokens_completion)
 
     # Extract artifact + files-written summary.
     artifacts = result.get("coder_artifacts") or []
@@ -696,6 +710,7 @@ def _run_one_trial(*,
             score, rationale = _judge_trial_quality(
                 judge_chat_client=judge_chat_client,
                 judge_model=judge_model,
+                usage=trial.usage,
                 task=question.task,
                 sandbox=produced_dir,
                 sandbox_path=question.sandbox_path,
@@ -721,6 +736,7 @@ def _run_one_trial(*,
             a_score, a_rat, a_target, a_mode = _audit_judge_trial(
                 judge_chat_client=audit_judge_chat_client,
                 judge_model=audit_judge_model,
+                usage=trial.usage,
                 task=question.task,
                 sandbox=produced_dir,
                 sandbox_path=question.sandbox_path,
@@ -750,6 +766,7 @@ def _run_one_trial(*,
              m_rat, m_meta_rat, m_mode) = _meta_judge_trial(
                 judge_chat_client=meta_judge_chat_client,
                 judge_model=meta_judge_model,
+                usage=trial.usage,
                 task=question.task,
                 sandbox=produced_dir,
                 sandbox_path=question.sandbox_path,

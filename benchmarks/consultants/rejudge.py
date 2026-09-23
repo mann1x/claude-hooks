@@ -60,6 +60,7 @@ from benchmarks.consultants.harness import (  # noqa: E402
     build_ladder_messages,
     judge_lang_for_path,
     load_questions,
+    record_usage,
     parse_judge_response,
     parse_ladder_response,
 )
@@ -198,7 +199,8 @@ def _make_judge(model: str, ollama_base: str, timeout_s: float):
 
 
 def _judge_call(client, model: str, messages: list, num_predict: int,
-                empty_retries: int = 1) -> tuple[str, str]:
+                empty_retries: int = 1, *, usage: Optional[dict] = None,
+                role: str = "rejudge") -> tuple[str, str]:
     """One judge call with an empty-content retry. Returns
     ``(text, "")`` or ``("", reason)``."""
     payload = {
@@ -215,6 +217,8 @@ def _judge_call(client, model: str, messages: list, num_predict: int,
         except Exception as e:  # noqa: BLE001 — judge errors are soft
             last_reason = f"judge raised: {e}"
             continue
+        if usage is not None:
+            record_usage(usage, role, model, resp)
         if not isinstance(resp, dict):
             last_reason = "non-dict response"
             continue
@@ -229,8 +233,18 @@ def _judge_call(client, model: str, messages: list, num_predict: int,
     return "", last_reason
 
 
+def _usage_kw(usage_out: Optional[dict], key, role: str) -> dict:
+    """Per-key usage slot for one judge call, or nothing when the
+    caller is not collecting. One dict per key, so the thread-pool
+    workers never share one."""
+    if usage_out is None:
+        return {}
+    return {"usage": usage_out.setdefault(key, {}), "role": role}
+
+
 def _judge_many(work: list, *, make_client, model: str, num_predict: int,
-                concurrency: int) -> dict:
+                concurrency: int, usage_out: Optional[dict] = None,
+                role: str = "rejudge") -> dict:
     """Run a batch of judge calls. ``work`` is a list of
     ``(key, messages)``; returns ``{key: (text, reason)}``.
 
@@ -247,7 +261,8 @@ def _judge_many(work: list, *, make_client, model: str, num_predict: int,
     if concurrency <= 1:
         client = make_client()
         for key, msgs in work:
-            results[key] = _judge_call(client, model, msgs, num_predict)
+            results[key] = _judge_call(client, model, msgs, num_predict,
+                                       **_usage_kw(usage_out, key, role))
         return results
     import threading
     from concurrent.futures import ThreadPoolExecutor
@@ -260,7 +275,8 @@ def _judge_many(work: list, *, make_client, model: str, num_predict: int,
         if client is None:
             client = make_client()
             tl.client = client
-        return key, _judge_call(client, model, msgs, num_predict)
+        return key, _judge_call(client, model, msgs, num_predict,
+                                **_usage_kw(usage_out, key, role))
 
     with ThreadPoolExecutor(max_workers=concurrency) as ex:
         for key, res in ex.map(_worker, work):
@@ -344,12 +360,14 @@ def cmd_rescore(args) -> int:
     # Pass 2: run the judge calls (sequential or thread-pooled).
     log.info("judging %d trials (concurrency=%d, model=%s)",
              len(work), concurrency, args.judge_model)
+    rescore_usage: dict = {}
     judged = _judge_many(
         work,
         make_client=lambda: _make_judge(
             args.judge_model, args.ollama_base, args.timeout_s),
         model=args.judge_model, num_predict=args.num_predict,
         concurrency=concurrency,
+        usage_out=rescore_usage, role="secondary_judge",
     )
 
     # Pass 3: fold results back in.
@@ -357,6 +375,9 @@ def cmd_rescore(args) -> int:
     for idx, (text, jreason) in judged.items():
         out_row = rejudged[idx]
         out_row["quality_secondary_judge_model"] = args.judge_model
+        # Fold the second judge into the trial's own usage record,
+        # so one row still prices every call made about it.
+        (out_row.setdefault("usage", {})).update(rescore_usage.get(idx, {}))
         if not text:
             out_row["quality_secondary_score"] = None
             out_row["quality_secondary_rationale"] = f"judge: {jreason}"
@@ -685,12 +706,14 @@ def cmd_ladder(args) -> int:
 
     log.info("laddering %d questions (concurrency=%d, model=%s)",
              len(work), concurrency, args.judge_model)
+    ladder_usage: dict = {}
     judged = _judge_many(
         work,
         make_client=lambda: _make_judge(
             args.judge_model, args.ollama_base, args.timeout_s),
         model=args.judge_model, num_predict=args.num_predict,
         concurrency=concurrency,
+        usage_out=ladder_usage, role="ladder_judge",
     )
 
     per_question: list[dict] = []
@@ -705,6 +728,7 @@ def cmd_ladder(args) -> int:
             "question_id": qid,
             "language": lang,
             "labels": label_to_model,
+            "usage": ladder_usage.get(qid, {}),
             "raw_ranking": parsed.raw,
             "rationale": parsed.rationale,
             "valid": parsed.valid,
