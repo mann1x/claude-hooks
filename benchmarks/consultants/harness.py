@@ -532,7 +532,8 @@ class CoderTrial:
 # Per-role token spend
 # ============================================================== #
 
-def record_usage(usage: dict, role: str, model: str, resp: Any) -> None:
+def record_usage(usage: dict, role: str, model: str, resp: Any, *,
+                 wall_s: Optional[float] = None) -> None:
     """Add one LLM response's tokens to a trial's per-role ``usage``.
 
     Every LLM call a bench makes is spend, the judges' as much as the
@@ -554,9 +555,19 @@ def record_usage(usage: dict, role: str, model: str, resp: Any) -> None:
     slot["calls"] += 1
     slot["prompt"] += int(u.get("prompt_tokens") or 0)
     slot["completion"] += int(u.get("completion_tokens") or 0)
+    _add_wall(slot, wall_s)
 
 
-def record_failed_call(usage: dict, role: str, model: str) -> None:
+def _add_wall(slot: dict, wall_s: Optional[float]) -> None:
+    """Sum the seconds a role's calls took. Speed is half of what a
+    cheaper model is chosen for, so it is measured per call rather than
+    read off the gaps between trial timestamps."""
+    if wall_s is not None:
+        slot["wall_s"] = round(slot.get("wall_s", 0.0) + wall_s, 3)
+
+
+def record_failed_call(usage: dict, role: str, model: str, *,
+                       wall_s: Optional[float] = None) -> None:
     """Count a call that raised (timeout, connection reset) before it
     returned usage.
 
@@ -569,6 +580,26 @@ def record_failed_call(usage: dict, role: str, model: str) -> None:
         role, {"model": model, "calls": 0, "prompt": 0, "completion": 0})
     slot["calls"] += 1
     slot["failed"] = slot.get("failed", 0) + 1
+    _add_wall(slot, wall_s)
+
+
+def timed_chat(client: Any, payload: dict, usage: Optional[dict],
+               role: str, model: str) -> Any:
+    """``client.chat(payload)``, recorded under ``role`` with its tokens
+    and wall time — or as a failed call, with the time it burned, when
+    it raises (the exception propagates). ``usage=None`` records
+    nothing."""
+    t0 = time.monotonic()
+    try:
+        resp = client.chat(payload)
+    except Exception:
+        if usage is not None:
+            record_failed_call(usage, role, model,
+                               wall_s=time.monotonic() - t0)
+        raise
+    if usage is not None:
+        record_usage(usage, role, model, resp, wall_s=time.monotonic() - t0)
+    return resp
 
 
 def set_role_usage(usage: dict, role: str, model: str, *, calls: int,

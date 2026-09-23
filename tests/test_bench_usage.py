@@ -19,7 +19,7 @@ if str(_REPO) not in sys.path:
 
 from benchmarks.consultants import coder_bench, rejudge  # noqa: E402
 from benchmarks.consultants.harness import (  # noqa: E402
-    CoderTrial, ToolExecTrial, record_usage, set_role_usage,
+    CoderTrial, ToolExecTrial, record_usage, set_role_usage, timed_chat,
 )
 
 
@@ -72,6 +72,39 @@ class RecordUsageTests(unittest.TestCase):
                                              model="m").to_dict())
 
 
+class TimedChatTests(unittest.TestCase):
+    """Speed is measured per call, so a cheaper judge's claim to be
+    faster rests on the calls it made, not on trial-timestamp gaps."""
+
+    def test_wall_time_accumulates_per_role(self):
+        usage: dict = {}
+        stub = _Stub(_resp("a", 1, 1), _resp("b", 1, 1))
+        timed_chat(stub, {}, usage, "judge", "glm")
+        timed_chat(stub, {}, usage, "judge", "glm")
+        self.assertEqual(usage["judge"]["calls"], 2)
+        self.assertGreaterEqual(usage["judge"]["wall_s"], 0.0)
+
+    def test_a_raising_call_records_its_time_and_reraises(self):
+        class _Raises:
+            def chat(self, payload):
+                raise TimeoutError("slow")
+
+        usage: dict = {}
+        with self.assertRaises(TimeoutError):
+            timed_chat(_Raises(), {}, usage, "judge", "glm")
+        self.assertEqual(usage["judge"]["failed"], 1)
+        self.assertIn("wall_s", usage["judge"])
+
+    def test_no_usage_records_nothing(self):
+        self.assertEqual(timed_chat(_Stub(_resp("a", 1, 1)), {}, None,
+                                    "judge", "glm")["usage"]["prompt_tokens"], 1)
+
+    def test_untimed_records_carry_no_wall_field(self):
+        usage: dict = {}
+        record_usage(usage, "judge", "kimi", _resp("a", 1, 1))
+        self.assertNotIn("wall_s", usage["judge"])
+
+
 class CoderBenchJudgesRecordTests(unittest.TestCase):
 
     def setUp(self):
@@ -90,9 +123,11 @@ class CoderBenchJudgesRecordTests(unittest.TestCase):
             task="t", sandbox=self.sandbox, sandbox_path="solution.py",
             usage=usage)
         self.assertEqual(score, 4.0)
-        self.assertEqual(usage["judge"], {"model": "kimi-k2.6:cloud",
-                                          "calls": 2, "prompt": 800,
-                                          "completion": 20})
+        judge = dict(usage["judge"])
+        self.assertIn("wall_s", judge)
+        judge.pop("wall_s")
+        self.assertEqual(judge, {"model": "kimi-k2.6:cloud", "calls": 2,
+                                 "prompt": 800, "completion": 20})
 
     def test_the_audit_judge_records_under_its_own_role(self):
         usage: dict = {}

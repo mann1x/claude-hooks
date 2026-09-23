@@ -62,8 +62,7 @@ from benchmarks.consultants.harness import (
     SuiteManifest,
     ToolExecTrial,
     append_trial,
-    record_failed_call,
-    record_usage,
+    timed_chat,
     set_role_usage,
     estimate_tool_exec_cost,
     load_questions,
@@ -859,17 +858,15 @@ def _judge_trial_quality(*, judge_chat_client, judge_model: str,
         return None, "no answer to judge"
     msgs = _build_judge_messages(question, trial)
     try:
-        resp = judge_chat_client.chat({
+        resp = timed_chat(judge_chat_client, {
             "model": judge_model,
             "messages": msgs,
             "stream": False,
-        })
+        }, trial.usage, "judge", judge_model)
     except Exception as e:  # noqa: BLE001
         log.exception("judge call raised on %s × %s",
                       question.id, trial.model)
-        record_failed_call(trial.usage, "judge", judge_model)
         return None, f"judge raised: {type(e).__name__}: {e}"
-    record_usage(trial.usage, "judge", judge_model, resp)
     if not isinstance(resp, dict):
         return None, "judge returned non-dict response"
     choices = resp.get("choices") or []

@@ -60,8 +60,7 @@ from benchmarks.consultants.harness import (  # noqa: E402
     build_ladder_messages,
     judge_lang_for_path,
     load_questions,
-    record_failed_call,
-    record_usage,
+    timed_chat,
     parse_judge_response,
     parse_ladder_response,
 )
@@ -214,14 +213,10 @@ def _judge_call(client, model: str, messages: list, num_predict: int,
     last_reason = "empty"
     for _ in range(attempts):
         try:
-            resp = client.chat(payload)
+            resp = timed_chat(client, payload, usage, role, model)
         except Exception as e:  # noqa: BLE001 — judge errors are soft
             last_reason = f"judge raised: {e}"
-            if usage is not None:
-                record_failed_call(usage, role, model)
             continue
-        if usage is not None:
-            record_usage(usage, role, model, resp)
         if not isinstance(resp, dict):
             last_reason = "non-dict response"
             continue
