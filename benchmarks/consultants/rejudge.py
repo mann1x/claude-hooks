@@ -192,7 +192,7 @@ def _question_map(questions_dir: Path) -> dict[str, BenchQuestion]:
 # ============================================================== #
 
 def _make_judge(model: str, ollama_base: str, timeout_s: float):
-    from claude_hooks.get_advice.chat_client import make_agent_chat_client
+    from benchmarks.consultants.harness import bench_client as make_agent_chat_client
     return make_agent_chat_client(
         model, ollama_base, timeout_s=timeout_s, max_retries=3,
     )

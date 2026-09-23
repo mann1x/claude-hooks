@@ -25,12 +25,26 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_REPO))
 
-from benchmarks.consultants.coder_bench import _judge_trial_quality  # noqa: E402
+from benchmarks.consultants.coder_bench import (  # noqa: E402
+    _judge_trial_quality, _panel_trial_quality)
 from benchmarks.consultants.harness import load_questions  # noqa: E402
 
 
 def needs_judge(t: dict) -> bool:
     return bool(t.get("compiles")) and t.get("quality_score") is None
+
+
+def is_complete(run: Path) -> bool:
+    """Every question in metadata has a trial. A shorter file is a run
+    still appending (or one that died): not safe to rewrite."""
+    try:
+        meta = json.loads((run / "metadata.json").read_text(encoding="utf-8"))
+        n = sum(1 for l in (run / "trials.jsonl").read_text(
+            encoding="utf-8").splitlines() if l.strip())
+    except (OSError, json.JSONDecodeError):
+        return False
+    want = len(meta.get("questions") or []) * len(meta.get("models") or [1])
+    return n >= want > 0
 
 
 def main(argv=None) -> int:
@@ -44,30 +58,46 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     run = Path(args.run_dir)
     meta = json.loads((run / "metadata.json").read_text(encoding="utf-8"))
+    panel = [] if args.judge_model else list(meta.get("judge_panel") or [])
+    synth = meta.get("synth_judge_model") or ""
     judge = args.judge_model or meta.get("judge_model")
-    if not judge:
-        print("no single judge_model in metadata (a panel run?); pass "
-              "--judge-model", file=sys.stderr)
+    if not judge and not panel:
+        print("no judge in metadata; pass --judge-model", file=sys.stderr)
         return 2
     path = run / "trials.jsonl"
     trials = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines()
               if l.strip()]
     todo = [t for t in trials if needs_judge(t)]
-    print(f"{len(todo)} of {len(trials)} trials need the judge ({judge})")
+    who = f"panel {'+'.join(panel)} > {synth}" if panel else judge
+    print(f"{len(todo)} of {len(trials)} trials need the judge ({who})")
     if not todo:
         return 0
-    from claude_hooks.get_advice.chat_client import make_agent_chat_client
-    client = make_agent_chat_client(judge, args.ollama_base,
-                                    timeout_s=args.timeout_s, max_retries=3)
+    from benchmarks.consultants.harness import bench_client as make_agent_chat_client
+    kw = dict(timeout_s=args.timeout_s, max_retries=3)
+    if panel:
+        members = [(m, make_agent_chat_client(m, args.ollama_base, **kw))
+                   for m in panel]
+        synth_c = ((synth, make_agent_chat_client(synth, args.ollama_base, **kw))
+                   if synth else None)
+    else:
+        client = make_agent_chat_client(judge, args.ollama_base, **kw)
     qs = {q.id: q for q in load_questions(Path(args.questions_dir))}
     for t in todo:
         q = qs[t["question_id"]]
         produced = (Path(t["sandbox_dir"]) / ".claude-hooks" / "consultants"
                     / "bench" / "coder-out")
         usage = t.setdefault("usage", {})
-        score, rationale = _judge_trial_quality(
-            judge_chat_client=client, judge_model=judge, usage=usage,
-            task=q.task, sandbox=produced, sandbox_path=q.sandbox_path)
+        if panel:
+            res = _panel_trial_quality(
+                panel=members, synth=synth_c, usage=usage, task=q.task,
+                sandbox=produced, sandbox_path=q.sandbox_path,
+                key=f"{t['question_id']}|{t['model']}")
+            score, rationale = res["score"], res["rationale"]
+            t["quality_panel"] = res
+        else:
+            score, rationale = _judge_trial_quality(
+                judge_chat_client=client, judge_model=judge, usage=usage,
+                task=q.task, sandbox=produced, sandbox_path=q.sandbox_path)
         t["quality_score"], t["quality_rationale"] = score, rationale
         t["quality_filled"] = True  # judged after the run, see fill_judge.py
         print(f"  {t['question_id']} -> {score} {rationale[:70]}")

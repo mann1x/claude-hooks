@@ -876,7 +876,7 @@ def _make_live_clients(models: list[str], ollama_base: str,
       audit_judge  = glm-5.2:cloud        (in cohort)
       meta_judge   = gemma4:31b-cloud     (OUT of cohort)
     """
-    from claude_hooks.get_advice.chat_client import make_agent_chat_client
+    from benchmarks.consultants.harness import bench_client as make_agent_chat_client
     coder_clients: dict[str, Any] = {}
     for m in models:
         # Coders keep default budgets — agent loops can be long.
@@ -1163,7 +1163,7 @@ def run_bench(*,
         )
         judge_panel_clients, synth_judge = None, None
         if panel_models:
-            from claude_hooks.get_advice.chat_client import make_agent_chat_client
+            from benchmarks.consultants.harness import bench_client as make_agent_chat_client
             kw = dict(timeout_s=judge_timeout_s, max_retries=judge_max_retries)
             judge_panel_clients = [(m, make_agent_chat_client(m, ollama_base, **kw))
                                    for m in panel_models]

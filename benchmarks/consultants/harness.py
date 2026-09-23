@@ -587,6 +587,29 @@ def record_failed_call(usage: dict, role: str, model: str, *,
     _add_wall(slot, wall_s)
 
 
+#: How long a benchmark call waits out a network outage (see
+#: ChatClient.outage_wait_s). A dead WAN line comes back in minutes, and
+#: a verdict lost to it becomes a hole a repair pass has to fill; a late
+#: verdict costs nothing. CLAUDE_HOOKS_BENCH_OUTAGE_WAIT_S overrides.
+BENCH_OUTAGE_WAIT_S = 1800.0
+
+
+def bench_outage_wait_s() -> float:
+    raw = os.environ.get("CLAUDE_HOOKS_BENCH_OUTAGE_WAIT_S", "").strip()
+    try:
+        return float(raw) if raw else BENCH_OUTAGE_WAIT_S
+    except ValueError:
+        return BENCH_OUTAGE_WAIT_S
+
+
+def bench_client(model: str, base: str, **kwargs):
+    """``make_agent_chat_client`` for a benchmark: the same client, with
+    the outage budget on."""
+    from claude_hooks.get_advice import chat_client as cc
+    kwargs.setdefault("outage_wait_s", bench_outage_wait_s())
+    return cc.make_agent_chat_client(model, base, **kwargs)
+
+
 def timed_chat(client: Any, payload: dict, usage: Optional[dict],
                role: str, model: str) -> Any:
     """``client.chat(payload)``, recorded under ``role`` with its tokens

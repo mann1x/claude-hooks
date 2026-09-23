@@ -274,7 +274,7 @@ def _load_verdicts(path: Path) -> list[dict]:
 
 
 def _make_client(model: str, base: str, timeout_s: float):
-    from claude_hooks.get_advice.chat_client import make_agent_chat_client
+    from benchmarks.consultants.harness import bench_client as make_agent_chat_client
     # One transport retry: a retried call is paid for again, and a
     # judge that needs several is a finding, not noise to hide.
     return make_agent_chat_client(model, base, timeout_s=timeout_s,
@@ -358,7 +358,10 @@ def cmd_synth(args) -> int:
     verdicts = _load_verdicts(vpath)
     members = [m.strip() for m in args.members.split(",") if m.strip()]
     plabel = judge_panel.label(members, args.synth)
-    done = {v["key"] for v in verdicts if v["judge"] == plabel}
+    # Settled = has a score. A panel verdict with none (both members had
+    # failed) is a hole a repair pass settles again.
+    done = {v["key"] for v in verdicts
+            if v["judge"] == plabel and v.get("score") is not None}
     by = {}
     for v in verdicts:
         if v["judge"] in members:

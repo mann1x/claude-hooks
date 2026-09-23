@@ -55,3 +55,26 @@ benchmarks or consultations on the same account, split the budget:
 on one of them. `CLAUDE_HOOKS_OLLAMA_CLOUD_SLOTS=N` sets the limit for a
 single process, and `CLAUDE_HOOKS_OLLAMA_SLOTS_DISABLE=1` turns the
 limiter off (the test suite does this).
+
+## Outages
+
+A dead WAN line looks different depending on the path. A call to
+ollama.com fails with a DNS or connect error. A relay such as eleven2go
+answers `502 dial tcp: lookup ollama.com: no such host`.
+`ChatClient(outage_wait_s=N)` treats both as an outage (`is_outage`). It
+backs off, capped at 60 s per wait, and re-sends without spending its
+ordinary retries until the line returns or N seconds pass. It holds no
+slot while waiting, and a streamed call can still be cancelled. A timeout
+while reading a response is a slow model, not an outage, so the ordinary
+retry budget applies.
+
+- Interactive callers (engine, get-advice): off (`0`). A dead line
+  should surface, not hang.
+- Benchmarks: 30 min, via `harness.bench_client`
+  (`CLAUDE_HOOKS_BENCH_OUTAGE_WAIT_S` overrides).
+
+Whatever an outage still breaks, `benchmarks/consultants/repair.py`
+repairs afterwards. It re-asks exactly the verdicts and coder judgments
+left without a score, with the same judge, sampling and prompt, and
+loops a few rounds with a pause between them. End every benchmark chain
+with it.

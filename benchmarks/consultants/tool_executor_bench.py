@@ -419,7 +419,7 @@ def _make_live_chat_client(model: str, ollama_base: str) -> Any:
     """Build a real ChatClient for ``model`` pointed at the
     Ollama-Pro proxy. Lazy-imports so dry-run + tests don't pay
     the get_advice import cost."""
-    from claude_hooks.get_advice.chat_client import make_agent_chat_client
+    from benchmarks.consultants.harness import bench_client as make_agent_chat_client
     return make_agent_chat_client(model, ollama_base)
 
 
