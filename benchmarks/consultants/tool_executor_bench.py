@@ -62,6 +62,7 @@ from benchmarks.consultants.harness import (
     SuiteManifest,
     ToolExecTrial,
     append_trial,
+    record_failed_call,
     record_usage,
     set_role_usage,
     estimate_tool_exec_cost,
@@ -866,6 +867,7 @@ def _judge_trial_quality(*, judge_chat_client, judge_model: str,
     except Exception as e:  # noqa: BLE001
         log.exception("judge call raised on %s × %s",
                       question.id, trial.model)
+        record_failed_call(trial.usage, "judge", judge_model)
         return None, f"judge raised: {type(e).__name__}: {e}"
     record_usage(trial.usage, "judge", judge_model, resp)
     if not isinstance(resp, dict):

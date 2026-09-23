@@ -106,6 +106,21 @@ class CoderBenchJudgesRecordTests(unittest.TestCase):
         self.assertEqual(usage["audit_judge"]["model"], "gemma4:31b-cloud")
         self.assertNotIn("judge", usage)
 
+    def test_a_timed_out_call_is_counted_as_unknown_spend(self):
+        class _Raises:
+            def chat(self, payload):
+                raise TimeoutError("timed out")
+
+        usage: dict = {}
+        score, why = coder_bench._judge_trial_quality(
+            judge_chat_client=_Raises(), judge_model="kimi-k2.6:cloud",
+            task="t", sandbox=self.sandbox, sandbox_path="solution.py",
+            usage=usage)
+        self.assertIsNone(score)
+        self.assertIn("timed out", why)
+        self.assertEqual(usage["judge"]["calls"], 1)
+        self.assertEqual(usage["judge"]["failed"], 1)
+
     def test_usage_is_optional(self):
         stub = _Stub(_resp("SCORE: 5\ngood", 10, 1))
         score, _ = coder_bench._judge_trial_quality(

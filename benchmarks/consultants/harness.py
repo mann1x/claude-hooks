@@ -556,6 +556,21 @@ def record_usage(usage: dict, role: str, model: str, resp: Any) -> None:
     slot["completion"] += int(u.get("completion_tokens") or 0)
 
 
+def record_failed_call(usage: dict, role: str, model: str) -> None:
+    """Count a call that raised (timeout, connection reset) before it
+    returned usage.
+
+    The cloud may have generated — and billed — tokens the client never
+    saw, so this is spend of unknown size, not no spend. It is counted
+    as a call and as ``failed`` so a report can say how much of a role's
+    bill it could not see.
+    """
+    slot = usage.setdefault(
+        role, {"model": model, "calls": 0, "prompt": 0, "completion": 0})
+    slot["calls"] += 1
+    slot["failed"] = slot.get("failed", 0) + 1
+
+
 def set_role_usage(usage: dict, role: str, model: str, *, calls: int,
                    prompt: int, completion: int) -> None:
     """Record a role's totals when they were summed elsewhere — the

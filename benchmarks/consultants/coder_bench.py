@@ -68,8 +68,8 @@ from benchmarks.consultants.harness import (  # noqa: E402
     estimate_cost, judge_lang_for_path, load_questions,
     load_suite_manifest, make_dry_run_loop_runner, measure_complexity,
     parse_constraint_tests, parse_judge_response,
-    parse_meta_judge_response, record_usage, run_pytest_against_sandbox,
-    set_role_usage,
+    parse_meta_judge_response, record_failed_call, record_usage,
+    run_pytest_against_sandbox, set_role_usage,
 )
 
 log = logging.getLogger("benchmarks.consultants.coder_bench")
@@ -188,6 +188,8 @@ def _judge_trial_quality(*, judge_chat_client, judge_model: str,
             })
         except Exception as e:
             log.exception("judge call raised; treating as no-score")
+            if usage is not None:
+                record_failed_call(usage, "judge", judge_model)
             raise RuntimeError(f"judge call raised: {e}") from e
         if usage is not None:
             record_usage(usage, "judge", judge_model, resp)
@@ -320,6 +322,8 @@ def _audit_judge_trial(*, judge_chat_client, judge_model: str,
             })
         except Exception as e:
             log.exception("audit judge call raised; treating as no-score")
+            if usage is not None:
+                record_failed_call(usage, "audit_judge", judge_model)
             raise RuntimeError(f"audit judge raised: {e}") from e
         if usage is not None:
             record_usage(usage, "audit_judge", judge_model, resp)
@@ -422,6 +426,8 @@ def _meta_judge_trial(*, judge_chat_client, judge_model: str,
             })
         except Exception as e:
             log.exception("meta judge call raised; treating as no-score")
+            if usage is not None:
+                record_failed_call(usage, "meta_judge", judge_model)
             raise RuntimeError(f"meta judge raised: {e}") from e
         if usage is not None:
             record_usage(usage, "meta_judge", judge_model, resp)
