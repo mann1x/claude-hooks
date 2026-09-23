@@ -336,8 +336,12 @@ main() {
     }
 
     # Health check before we burn cloud tokens.
-    if ! curl -fsS http://127.0.0.1:38095/v1/health >/dev/null 2>&1; then
-        echo "!!! consultants engine not responding on :38095" >&2
+    # CONSULTANTS_URL points the whole run (health check + every CLI call,
+    # which honours the same variable) at a non-default engine, e.g. a
+    # bench instance with its own HOME and upstream.
+    local engine="${CONSULTANTS_URL:-http://127.0.0.1:38095}"
+    if ! curl -fsS "${engine}/v1/health" >/dev/null 2>&1; then
+        echo "!!! consultants engine not responding at ${engine}" >&2
         echo "    start it with: systemctl --user start claude-hooks-consultants" >&2
         exit 1
     fi
