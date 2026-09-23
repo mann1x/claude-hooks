@@ -811,6 +811,29 @@ touch your-project/.claude-hooks-disable
 ```
 
 Any directory with this marker file (or any ancestor) will skip all hooks.
+The nearest marker wins, so a subdirectory can say something different.
+
+An empty marker turns everything off. To keep some parts, name them:
+
+```bash
+echo 'keep: memory, mailbox' > your-project/.claude-hooks-disable
+```
+
+| part | what stays on |
+|---|---|
+| `memory` | recall on every prompt, recall after a compaction, and the per-turn store at Stop |
+| `mailbox` | registration (on every SessionStart, resume and compaction included), mail announcements, the during-turn notice, and unregistering at SessionEnd |
+
+Everything else stays off, and that is guaranteed by construction rather
+than by switches: a project with a marker never runs the normal hook
+handlers, only a restricted path (`claude_hooks/hook_parts.py`) that can
+call the memory and mailbox functions and nothing else. The code graph,
+LSP engine, linters, guards, companion reindexing and the episodic
+transcript push are off, and so is any feature added to the hooks later
+until it is added to that path on purpose. Unknown names are logged and
+ignored; they never enable anything. This is the setting for developing
+claude-hooks itself.
+
 The filename can be changed via the top-level `disable_marker_filename`
 config key (default `.claude-hooks-disable`) if you need a different
 sentinel name for your organisation.

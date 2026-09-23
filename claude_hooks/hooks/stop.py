@@ -172,19 +172,35 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
                 "reason": f"STOP HOOK VIOLATION: {correction}",
             }
 
+    return _finish(store_turn(event=event, config=config, providers=providers,
+                              transcript=transcript),
+                   event, config, providers)
+
+
+def store_turn(*, event: dict, config: dict, providers: list[Provider],
+               transcript: Optional[list[dict]]) -> str:
+    """Write this turn to memory, if it earned it; return the status line.
+
+    This is the memory half of the Stop hook, and only that: no
+    reindexing, no guards, no notices. It is a function of its own so a
+    project that keeps only ``memory`` enabled (see
+    ``claude_hooks.hook_parts``) runs exactly this and nothing beside
+    it. Returns "" when nothing was stored.
+    """
+    hook_cfg = (config.get("hooks") or {}).get("stop") or {}
     threshold = (hook_cfg.get("store_threshold") or "noteworthy").lower()
     if threshold == "off":
-        return _with_update_notice(None, config)
+        return ""
 
     if threshold == "noteworthy":
         if not _is_noteworthy(transcript):
             log.debug("turn not noteworthy — skipping store")
-            return _with_update_notice(None, config)
+            return ""
 
     summary_format = str(hook_cfg.get("summary_format", "markdown")).lower()
     summary = _build_summary(event, transcript, fmt=summary_format)
     if not summary:
-        return _with_update_notice(None, config)
+        return ""
 
     # Bound what we hand the embedder. Recall has clamped its queries
     # since v1.x (``max_query_chars``); the store path never did, and the
@@ -262,10 +278,7 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
             })
             if ok:
                 names = ", ".join(p.name for p in auto_providers)
-                return _with_update_notice(
-                    {"systemMessage": f"[claude-hooks] storing to {names} (async)"},
-                    config,
-                )
+                return f"[claude-hooks] storing to {names} (async)"
             log.debug("store_async spawn returned False — falling back to inline")
         except Exception as e:
             log.debug("store_async spawn raised — falling back to inline: %s", e)
@@ -365,22 +378,28 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
         except Exception as e:
             log.debug("instinct extraction skipped: %s", e)
 
-    mailbox_notice = _mailbox_notice(event, config, providers)
-
     if not stored and not failed:
-        result = ({"systemMessage": mailbox_notice} if mailbox_notice
-                  else None)
-        return _with_update_notice(result, config)
-
+        return ""
     parts = []
     if stored:
         parts.append(f"stored to {', '.join(stored)}")
     if failed:
         parts.append(f"failed: {', '.join(n for n, _ in failed)}")
-    message = f"[claude-hooks] {' · '.join(parts)}"
-    if mailbox_notice:
-        message = f"{message}\n{mailbox_notice}"
-    return _with_update_notice({"systemMessage": message}, config)
+    return f"[claude-hooks] {' · '.join(parts)}"
+
+
+def _finish(status: str, event: dict, config: dict, providers) -> Optional[dict]:
+    """Combine the store status with mail that arrived during the turn.
+
+    The mail notice is added on every path, the async one included —
+    the detached store used to return before it, so on the default
+    configuration a turn that stored something never mentioned the
+    mail that arrived while it ran.
+    """
+    mailbox_notice = _mailbox_notice(event, config, providers)
+    message = "\n".join(m for m in (status, mailbox_notice) if m)
+    return _with_update_notice(
+        {"systemMessage": message} if message else None, config)
 
 
 # ---------------------------------------------------------------------- #

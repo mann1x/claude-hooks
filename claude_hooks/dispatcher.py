@@ -19,7 +19,7 @@ import sys
 import traceback
 from typing import Optional
 
-from claude_hooks.config import expand_user_path, load_config, project_disabled
+from claude_hooks.config import expand_user_path, load_config
 from claude_hooks.mcp_stdio import force_utf8_stdio
 from claude_hooks.providers import (
     Provider,
@@ -55,12 +55,22 @@ def dispatch_capture(event_name: str, event: dict) -> Optional[dict]:
 
     log.debug("dispatch: event=%s session=%s", event_name, event.get("session_id"))
 
-    # Project-level opt-out via marker file.
+    # Project-level opt-out via marker file. An empty marker turns
+    # everything off; one that names parts keeps only those, and hands
+    # the event to the restricted path so no normal handler runs.
     cwd = event.get("cwd") or ""
     marker = cfg.get("disable_marker_filename") or ".claude-hooks-disable"
-    if cwd and project_disabled(cwd, marker):
-        log.info("project disabled via %s — exiting silently", marker)
-        return None
+    from claude_hooks.hook_parts import kept_parts
+    keep = kept_parts(cwd, marker)
+    if keep is not None:
+        if not keep:
+            log.info("project disabled via %s — exiting silently", marker)
+            return None
+        log.debug("project partially disabled via %s — keeping %s",
+                  marker, ", ".join(sorted(keep)))
+        from claude_hooks import hook_parts
+        return hook_parts.run(event_name, event=event, config=cfg,
+                              providers=build_providers(cfg), keep=keep)
 
     handler_name = HANDLERS.get(event_name)
     if not handler_name:

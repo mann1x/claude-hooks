@@ -764,7 +764,10 @@ The 4 methods a provider must implement (`detect`, `verify`, `recall`,
 
 2. **Per-project vs user-global**: **user-global**.
    `~/.claude/settings.json` is the install target. Per-project opt-out
-   via a `.claude-hooks-disable` marker file in the project root.
+   via a `.claude-hooks-disable` marker file in the project root. An
+   empty marker disables everything; `keep: memory, mailbox` keeps just
+   those parts, routed through the allow-list in
+   `claude_hooks/hook_parts.py` so no normal handler runs.
 
 3. **Recall format**: markdown headings + bullet lists, exactly the
    shape that openwolf and CLAUDE.md inject. Models parse it reliably.

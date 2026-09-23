@@ -166,6 +166,11 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
                 # be told about mail — the exact gap the Stop hook was
                 # added to close, in a different place.
                 from claude_hooks.mailbox import hook as _mb
+                # Register too: the row may have been swept or forgotten
+                # while the session was compacting, and this early return
+                # used to skip the registration below entirely.
+                _mb.register_session(
+                    event=event, config=config, providers=providers)
                 _mb_block = _mb.announce_block(
                     event=event, config=config, providers=providers)
                 if _mb_block:
