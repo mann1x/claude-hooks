@@ -82,3 +82,42 @@ def test_every_judge_gets_the_same_samples(monkeypatch):
 
     assert shape(a) == shape(b)
     assert sum(x["kind"] == "retest" for x in a) == 3
+
+
+def test_synth_settles_paired_member_verdicts_once(monkeypatch, tmp_path):
+    import argparse
+    import json as _json
+
+    class Q:
+        task, sandbox_path = "t", "solution.py"
+
+    rows = [{"question_id": "python-med-01", "model": "m",
+             "passes_tests": True, "sandbox_dir": ""}]
+    monkeypatch.setattr(je, "_resolve_source", lambda r: ("x = 1\n", ""))
+    monkeypatch.setattr(je, "load_raw_trials", lambda p: rows)
+    monkeypatch.setattr(je, "_question_map", lambda p: {"python-med-01": Q()})
+    calls = []
+
+    class Stub:
+        def chat(self, payload, **kw):
+            calls.append(payload["model"])
+            return {"choices": [{"message": {"content":
+                    "SCORE: 3\nCLAIMS: A=HOLDS, B=REFUTED\nok"}}]}
+    monkeypatch.setattr(je, "_make_client", lambda *a: Stub())
+    base = {"kind": "base", "variant": "", "rep": 0,
+            "question_id": "python-med-01", "subject": "m", "usage": {}}
+    (tmp_path / "verdicts.jsonl").write_text(
+        _json.dumps({**base, "judge": "a", "score": 3.0, "rationale": "x"}) + "\n"
+        + _json.dumps({**base, "judge": "b", "score": 5.0, "rationale": "y"}) + "\n"
+        + _json.dumps({**base, "judge": "a", "score": 3.0, "kind": "retest",
+                       "rep": 1}) + "\n")  # b has no retest: not paired
+    args = argparse.Namespace(out=str(tmp_path), members="a,b", synth="s",
+                              trials="x", questions_dir="x", kinds="base,retest",
+                              ollama_base="x", timeout_s=1.0, concurrency=1)
+    je.cmd_synth(args)
+    je.cmd_synth(args)  # resumable: nothing left to settle
+    vs = je._load_verdicts(tmp_path / "verdicts.jsonl")
+    panel = [v for v in vs if v["judge"] == "s#panel=a+b"]
+    assert calls == ["s"] and len(panel) == 1
+    assert panel[0]["score"] == 3.0 and panel[0]["member_scores"] == [3.0, 5.0]
+    assert panel[0]["source"] == "synth" and panel[0]["discordant"] is True

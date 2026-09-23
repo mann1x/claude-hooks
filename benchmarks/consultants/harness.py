@@ -515,6 +515,10 @@ class CoderTrial:
                                            # prior two judges
     quality_meta_judge_model: str = ""     # which model judged
     quality_meta_mode: str = "skipped"     # "meta_judge" / "skipped"
+    # A judge panel's full verdict (judge_panel.resolve): each member's
+    # score + rationale, the synthesizer's claims check, and where the
+    # final quality_score came from. Empty on the one-judge path.
+    quality_panel: dict = field(default_factory=dict)
     # Bookkeeping
     sandbox_dir: str = ""
     timestamp: str = ""        # ISO-8601 UTC; set at trial start

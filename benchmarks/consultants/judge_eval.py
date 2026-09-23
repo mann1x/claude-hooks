@@ -347,6 +347,89 @@ def cmd_judge(args) -> int:
     return 0
 
 
+def cmd_synth(args) -> int:
+    """Settle verdicts the panel members already gave on the same
+    solution with the synthesizer — ``judge_panel.resolve``, the same
+    code coder_bench runs live — and file them under the panel label, so
+    ``report --judge <label>`` grades the panel like any judge."""
+    from benchmarks.consultants import judge_panel
+    out = Path(args.out)
+    vpath = out / "verdicts.jsonl"
+    verdicts = _load_verdicts(vpath)
+    members = [m.strip() for m in args.members.split(",") if m.strip()]
+    plabel = judge_panel.label(members, args.synth)
+    done = {v["key"] for v in verdicts if v["judge"] == plabel}
+    by = {}
+    for v in verdicts:
+        if v["judge"] in members:
+            by[(v["judge"], v["kind"], v["variant"], v["question_id"],
+                v["subject"], v.get("rep", 0))] = v
+    rows = load_raw_trials(Path(args.trials))
+    qmap = _question_map(Path(args.questions_dir))
+    kinds = {k.strip() for k in args.kinds.split(",") if k.strip()}
+    work = []
+    for r in rows:
+        q = qmap.get(r.get("question_id", ""))
+        code, _ = _resolve_source(r)
+        if q is None or code is None:
+            continue
+        for (j, kind, variant, qid, subj, rep) in list(by):
+            if (j != members[0] or kind not in kinds or variant
+                    or qid != r["question_id"] or subj != r["model"]):
+                continue
+            mv = [by.get((m, kind, variant, qid, subj, rep)) for m in members]
+            if None in mv:
+                continue
+            key = verdict_key(kind, variant, qid, subj, plabel, rep)
+            if key not in done:
+                work.append({"key": key, "kind": kind, "variant": variant,
+                             "rep": rep, "question_id": qid, "subject": subj,
+                             "judge": plabel, "judge_model": args.synth,
+                             "task": q.task, "code": code,
+                             "path": q.sandbox_path, "members": mv})
+    log.info("%d panel verdicts to settle (%d on disk)", len(work), len(done))
+    lock = threading.Lock()
+    tl = threading.local()
+
+    def run(item):
+        if getattr(tl, "client", None) is None:
+            tl.client = _make_client(args.synth, args.ollama_base, args.timeout_s)
+        usage: dict = {}
+        for i, v in enumerate(item["members"]):
+            for u in (v.get("usage") or {}).values():
+                usage[f"judge_{chr(97 + i)}"] = dict(u)
+
+        def call(msgs):
+            resp = timed_chat(tl.client, {"model": args.synth, "messages": msgs,
+                                          "stream": False},
+                              usage, "judge_synth", args.synth)
+            choices = (resp or {}).get("choices") or [{}]
+            return ((choices[0] or {}).get("message") or {}).get("content") or ""
+        language, fence = judge_lang_for_path(item["path"])
+        res = judge_panel.resolve(
+            [(v["judge"], v["score"], v.get("rationale") or "")
+             for v in item["members"]],
+            key=f"{item['question_id']}|{item['subject']}", synth=call,
+            task=item["task"], code=item["code"], language=language,
+            fence=fence)
+        rec = {k: v for k, v in item.items()
+               if k not in ("task", "code", "path", "members")}
+        rec.update(score=res["score"], rationale=res["rationale"],
+                   source=res["source"], discordant=res["discordant"],
+                   claims=res["claims"], error=res["synth_error"],
+                   member_scores=[v["score"] for v in item["members"]],
+                   usage=usage, at=datetime.now(timezone.utc).isoformat())
+        with lock, open(vpath, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec) + "\n")
+        log.info("%s %s × %s %s -> %s (%s)", rec["kind"], rec["question_id"],
+                 rec["subject"], rec["member_scores"], rec["score"],
+                 rec["source"])
+
+    with ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as ex:
+        list(ex.map(run, work))
+    return 0
+
+
 # ============================================================== #
 # Statistics (stdlib only)
 # ============================================================== #
@@ -391,7 +474,8 @@ def auc(scores: list[float], labels: list[bool]) -> Optional[float]:
 
 
 def family(model: str) -> str:
-    model = model_sampling.model_of(model)
+    # A panel label is filed under its synthesizer (judge_panel.label).
+    model = model_sampling.model_of(model.split("#", 1)[0])
     key = model_key(model) or model
     return re.split(r"[-:.]", key, maxsplit=1)[0]
 
@@ -625,6 +709,19 @@ def build_parser() -> argparse.ArgumentParser:
     j.add_argument("--retry-failed", action="store_true",
                    help="also redo verdicts that returned no score")
     j.set_defaults(fn=cmd_judge)
+    y = sub.add_parser("synth", help="settle member verdicts with the "
+                                     "panel synthesizer (resumable)")
+    y.add_argument("--members", required=True,
+                   help="comma list of member judge labels, panel order")
+    y.add_argument("--synth", default="deepseek-v4.1-flash:cloud")
+    y.add_argument("--trials", required=True)
+    y.add_argument("--out", required=True)
+    y.add_argument("--questions-dir", required=True)
+    y.add_argument("--kinds", default="base,retest")
+    y.add_argument("--ollama-base", default="http://192.168.178.161:11434")
+    y.add_argument("--timeout-s", type=float, default=300.0)
+    y.add_argument("--concurrency", type=int, default=1)
+    y.set_defaults(fn=cmd_synth)
     r = sub.add_parser("report", help="render report.md from verdicts")
     r.add_argument("--out", required=True)
     r.add_argument("--trials", required=True)
