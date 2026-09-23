@@ -401,5 +401,9 @@
     "max_bytes": 2097152,
     "backup_count": 3
   },
-  "disable_marker_filename": ".claude-hooks-disable"
+  "disable_marker_filename": ".claude-hooks-disable",
+  "model_sampling": {
+    "_comment": "Your overrides for the shipped sampling templates in config/model-sampling.json. Same pattern keys merge field by field; a new pattern adds a template; null on a field drops it (provider default), null on a pattern disables it. Example: {\"glm-5.3*\": {\"top_p\": 0.95}, \"gemma4*\": null}",
+    "templates": {}
+  }
 }

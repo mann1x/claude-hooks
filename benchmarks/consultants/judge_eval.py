@@ -68,6 +68,7 @@ from benchmarks.consultants.harness import (  # noqa: E402
     timed_chat,
 )
 from benchmarks.consultants.pricing import model_key, usage_cost  # noqa: E402
+from claude_hooks import model_sampling  # noqa: E402
 from benchmarks.consultants.rejudge import (  # noqa: E402
     _question_map,
     _resolve_source,
@@ -205,7 +206,8 @@ def verdict_key(kind: str, variant: str, qid: str, subject: str,
 
 
 def build_work(rows: list[dict], qmap: dict, *, judge: str, kinds: set,
-               models: Optional[set], retest_n: int, variant_n: int
+               models: Optional[set], retest_n: int, variant_n: int,
+               options: Optional[dict] = None, retest_repeats: int = 1
                ) -> list[dict]:
     """Every verdict the requested kinds call for, as dicts carrying
     the messages to send. Samples are chosen by hash, so every judge
@@ -220,16 +222,20 @@ def build_work(rows: list[dict], qmap: dict, *, judge: str, kinds: set,
             continue
         usable.append((r, q, code))
     usable.sort(key=lambda t: _h(t[0]["question_id"], t[0]["model"]))
+    options = options or {}
+    # The judge's name in every key and record carries its sampling, so
+    # verdicts under different settings never collide or pool.
+    judge_label = model_sampling.label(judge, options)
     work = []
 
     def add(kind, variant, r, q, code, rep=0):
         language, fence = judge_lang_for_path(q.sandbox_path)
         work.append({
             "key": verdict_key(kind, variant, r["question_id"], r["model"],
-                               judge, rep),
+                               judge_label, rep),
             "kind": kind, "variant": variant, "rep": rep,
             "question_id": r["question_id"], "subject": r["model"],
-            "judge": judge,
+            "judge": judge_label, "judge_model": judge, "options": options,
             "messages": build_judge_messages(q.task, code, language=language,
                                              fence=fence),
         })
@@ -239,7 +245,8 @@ def build_work(rows: list[dict], qmap: dict, *, judge: str, kinds: set,
             add("base", "", r, q, code)
     if "retest" in kinds:
         for r, q, code in usable[:retest_n]:
-            add("retest", "", r, q, code, rep=1)
+            for rep_i in range(1, max(1, retest_repeats) + 1):
+                add("retest", "", r, q, code, rep=rep_i)
     if "variant" in kinds:
         passing = [t for t in usable if t[0].get("passes_tests")]
         for r, q, code in passing[:variant_n]:
@@ -278,16 +285,17 @@ def _judge_one(client, item: dict) -> dict:
     usage: dict = {}
     text, err = "", ""
     try:
-        resp = timed_chat(client, {"model": item["judge"],
-                                   "messages": item["messages"],
-                                   "stream": False},
-                          usage, "judge", item["judge"])
+        payload = {"model": item["judge_model"], "messages": item["messages"],
+                   "stream": False}
+        if item.get("wire_options"):
+            payload["options"] = dict(item["wire_options"])
+        resp = timed_chat(client, payload, usage, "judge", item["judge_model"])
         choices = (resp or {}).get("choices") or [{}]
         text = ((choices[0] or {}).get("message") or {}).get("content") or ""
     except Exception as e:  # noqa: BLE001 — a failed verdict is data
         err = f"{type(e).__name__}: {e}"
     score, rationale = parse_judge_response(text) if text else (None, "")
-    rec = {k: v for k, v in item.items() if k != "messages"}
+    rec = {k: v for k, v in item.items() if k not in ("messages", "wire_options")}
     rec.update(score=score, rationale=rationale[:300], error=err or None,
                usage=usage, at=datetime.now(timezone.utc).isoformat())
     return rec
@@ -304,12 +312,23 @@ def cmd_judge(args) -> int:
     kinds = {k.strip() for k in args.kinds.split(",") if k.strip()}
     models = ({m.strip() for m in args.models.split(",") if m.strip()}
               if args.models else None)
+    template = model_sampling.sampling_for(args.judge)
+    options = dict(template) if args.sampling == "template" else {}
+    options.update(model_sampling.parse_options(args.option or []))
+    if args.temperature is not None:
+        options["temperature"] = args.temperature
+    # What goes on the wire: a template field this run does not set must
+    # be cancelled explicitly, or the chat client would add it back.
+    wire = {**{k: None for k in template}, **options}
     work = [w for w in build_work(rows, qmap, judge=args.judge, kinds=kinds,
                                   models=models, retest_n=args.retest_n,
-                                  variant_n=args.variant_n)
+                                  variant_n=args.variant_n, options=options,
+                                  retest_repeats=args.retest_repeats)
             if w["key"] not in done]
+    for w in work:
+        w["wire_options"] = wire
     log.info("%d verdicts to get from %s (%d already on disk)",
-             len(work), args.judge, len(done))
+             len(work), model_sampling.label(args.judge, options), len(done))
     lock = threading.Lock()
     tl = threading.local()
 
@@ -372,6 +391,7 @@ def auc(scores: list[float], labels: list[bool]) -> Optional[float]:
 
 
 def family(model: str) -> str:
+    model = model_sampling.model_of(model)
     key = model_key(model) or model
     return re.split(r"[-:.]", key, maxsplit=1)[0]
 
@@ -590,6 +610,18 @@ def build_parser() -> argparse.ArgumentParser:
     j.add_argument("--concurrency", type=int, default=1,
                    help="≤2: Ollama Pro allows 3 connections and the "
                         "hooks hold one")
+    j.add_argument("--sampling", choices=("template", "none"),
+                   default="template",
+                   help="template: send the model's sampling template "
+                        "(claude_hooks.model_sampling); none: provider default")
+    j.add_argument("--option", action="append", metavar="FIELD=VALUE",
+                   help="a sampler option over the --sampling base, e.g. "
+                        "repeat_penalty=1.1 (repeatable; any field in "
+                        "claude_hooks.model_sampling.FIELDS)")
+    j.add_argument("--temperature", type=float, default=None,
+                   help="shorthand for --option temperature=T")
+    j.add_argument("--retest-repeats", type=int, default=1,
+                   help="judge each retest solution this many extra times")
     j.add_argument("--retry-failed", action="store_true",
                    help="also redo verdicts that returned no score")
     j.set_defaults(fn=cmd_judge)

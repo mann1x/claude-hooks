@@ -709,6 +709,13 @@ class ChatClient:
             "stream": False,
         }
         opts = dict(payload.get("options") or {})
+        # The model's sampling template (config ``model_sampling``);
+        # anything the caller set explicitly wins over it.
+        from claude_hooks.model_sampling import sampling_for
+        opts = {**sampling_for(body["model"] or ""), **opts}
+        # An explicit None means "send nothing for this field": the way
+        # a caller asks for the provider default despite a template.
+        opts = {k: v for k, v in opts.items() if v is not None}
         if opts:
             body["options"] = opts
         if "tools" in payload and payload["tools"]:
