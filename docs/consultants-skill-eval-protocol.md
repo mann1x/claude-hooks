@@ -98,11 +98,20 @@ the full manifest and the rubric thresholds.
 > `pass_rate ≥ 0.70` AND `avg_quality_score ≥ 3.5`.
 >
 > Among qualifying models, the **recommended default** is the one
-> with the highest `pass_rate`. Ties break on `median_tokens`
-> (cheaper wins). If no model qualifies, the role's default stays
+> with the highest `pass_rate`. Ties break on the **subject's dollars
+> per passing trial** (cheaper wins), then `median_tokens`. If no model qualifies, the role's default stays
 > at the project-global `DEFAULT_MODEL` and a follow-up run
 > evaluates a different candidate set — never silently flip the
 > default on a sub-threshold model.
+
+**Which dollars.** A trial's `usage` has two kinds of spend. The
+subject's is what the model will cost in production; the judges' is
+what the *benchmark* costs, and no judge runs in production. The
+recommendation ranks on the subject's dollars per passing trial —
+a cheap model that fails costs its retries — and the judges' dollars
+are reported beside it as the price of the run. `analyze.py` still
+breaks ties on `median_tokens` in code; read the dollar ranking from
+`scripts/bench_costs.py` until the report renders it inline.
 
 ---
 
@@ -270,8 +279,9 @@ unrelated refactors of the claude-hooks repo itself.
 > knows both.
 >
 > Among qualifying models, the **recommended default** is the
-> one with the highest `pass_rate`. Ties break on
-> `median_tokens` (cheaper wins). If no model qualifies, the
+> one with the highest `pass_rate`. Ties break on the
+> subject's dollars per passing trial (cheaper wins), then
+> `median_tokens`. If no model qualifies, the
 > role stays disabled-by-default and
 > `RECOMMENDED_DEFAULT_ON` in `tool_executor_defaults.py`
 > remains `False`.
@@ -495,10 +505,19 @@ The summary:
   one role node at a time so the signal is clean. End-to-end
   council behavior is verified by the M12 parity suite (a separate
   milestone) and the M13 live smoke (also separate).
-- **It does not measure cost in dollars.** Ollama Pro is a
-  weekly-quota subscription, not a per-call $ price. The harness
-  reports token totals; you compare against your Ollama Pro plan
-  separately.
+- **It does not leave any call's cost out.** (Until 2026-09-23 this
+  said the protocol "does not measure cost in dollars", because Ollama
+  Pro was a weekly quota. It is now a dollar budget drawn per token at
+  each model's price, so cost is measured.) Every trial records `usage`
+  by role: the model under test **and every judge** (quality, audit,
+  meta, rejudge, ladder), retries included, through
+  `harness.record_usage`. The judges are not a rounding error: on
+  coder_med the kimi-k2.6 judge emits 1.3–2.2 k completion tokens per
+  trial against the coder's 180–460. `scripts/bench_costs.py` prices a
+  run at the dated snapshot in `benchmarks/consultants/pricing.py`
+  ([EVALUATION.md §2.1 and Appendix A](benchmarks/EVALUATION.md#21-cost--what-a-run-costs-in-dollars)).
+  Runs recorded before 2026-09-23 have the subject's tokens only; their
+  judge spend is reported as *not recorded*, never as zero.
 - **It does not replace human judgement.** The rubric is a
   decision-support tool. A model that scored 71% pass_rate and 3.6
   quality on a 8-question suite is "qualifying" on paper, but you

@@ -53,11 +53,46 @@ automatically by `scripts/consultants_benchmark.sh`.
 
 Derived KPIs:
 
-- `cost_proxy = prompt_tok * 1.0 + completion_tok * 4.0` — a
-  unit-free proxy for cloud cost (Anthropic-style 1:4 ratio; only
-  useful for cross-model relative ordering, not absolute USD).
+- **`cost_usd`** — dollars, per query and per run, priced **per role**:
+  each turn's `prompt_tokens` / `completion_tokens` from
+  `<slug>.metadata.json::turns`, times the price of the model that role
+  ran on, at the time the query ran (peak or off-peak). See §2.1.
 - `tokens_per_second = (prompt_tok + completion_tok) / wall_s` —
   rough throughput; inflated by reasoning tokens.
+
+(`cost_proxy = prompt_tok + 4 × completion_tok`, the unit-free proxy
+used through v1.2, is retired: Ollama now bills each model at its own
+input/output price, and the 1:4 ratio it assumed ranges from 1:3 to
+1:40 across the models we run.)
+
+### 2.1 Cost — what a run costs in dollars
+
+The Ollama account is a monthly **dollar budget**, and every call draws
+on it at the model's own per-token price (Appendix A). Cost is therefore
+a first-class comparison axis beside quality and wall time, and it
+follows three rules:
+
+1. **Every LLM call is counted, by role.** The planner, every researcher
+   lane, the critic, the synthesizer, and — in the skill-eval benches —
+   every judge, rejudge and retry. A figure that leaves a role out is
+   not a cost. The council metadata records every turn; the skill-eval
+   trials record `usage` by role (`harness.record_usage`).
+2. **Priced at a dated snapshot.** `benchmarks/consultants/pricing.py`
+   holds the table, its source and its date. A report states the
+   snapshot it used, so a later price change never silently rewrites an
+   old comparison.
+3. **Upper bound.** Prompt tokens are priced uncached, because the traces
+   do not record cache hits.
+
+`scripts/bench_costs.py` prices every recorded run, council and
+skill-eval alike; the result is committed at
+[`costs.md`](costs.md). When choosing between models of equal grade,
+**cost decides before wall time** (see §3.5 "Composing the role
+grades").
+
+Off-peak pricing applies outside 12:00–18:00 UTC on weekdays and all
+weekend, and currently halves the deepseek models only. Schedule sweeps
+that lean on them off-peak and record the window (§6.4).
 
 ---
 
@@ -260,8 +295,12 @@ To find a viable mix, scan the cross-label `index.md`'s per-role
 columns:
 
 - **Cheapest A grade per role** → use that model for that role.
+  "Cheapest" means **dollars per fire** for that role (§2.1), not
+  tokens: a model that uses 2× the tokens at a fifth of the price is
+  the cheaper one.
 - If no model gets A on a role, use the highest-grading model
-  available; if multiple tie, prefer the one with lower wall.
+  available; if multiple tie, prefer the one with lower cost, then
+  lower wall.
 
 A composed mix should be re-baselined as its own label
 (`mix-2026-05-XX-PA-RA-CA-SA`) before being declared usable.
@@ -530,9 +569,8 @@ of pointers.
 
 ## 12. Future protocol extensions (not yet enforced)
 
-- Cost-per-run in actual currency once proxy logging is reliable
-  enough to derive (requires hooking into the caliber proxy's
-  rollup DB).
+- Cached-input pricing, once traces record cache hits (the current
+  figures are uncached upper bounds).
 - A/B significance test (Mann-Whitney U) when comparing labels
   with N ≥ 3 runs. Skipped for now because the small N makes any
   test underpowered; trust the median/MAD eyeball.
@@ -541,11 +579,61 @@ of pointers.
 
 ---
 
-**Protocol version:** 1.2 (2026-05-09)
+## Appendix A — Price snapshot 2026-09-23
+
+Read from <https://ollama.com/pricing> on **2026-09-23**; the same table
+is `benchmarks/consultants/pricing.py`. US$ per million tokens.
+
+| Model | Input | Cached input | Output | Off-peak input | Off-peak output |
+|---|---|---|---|---|---|
+| deepseek-v4.1-flash | 0.30 | 0.006 | 1.20 | 0.15 | 0.60 |
+| deepseek-v4-flash | 0.44 | 0.014 | 1.32 | 0.22 | 0.66 |
+| deepseek-v4-pro | 1.32 | 0.044 | 3.96 | 0.66 | 1.98 |
+| gemma4 | 0.14 | 0.05 | 0.40 | — | — |
+| glm-5.3 | 1.40 | 0.26 | 4.40 | — | — |
+| glm-5.3-flash | 0.15 | 0.03 | 0.50 | — | — |
+| glm-5.2 | 1.40 | 0.26 | 4.40 | — | — |
+| glm-5.1 | 1.00 | 0.20 | 3.20 | — | — |
+| gpt-oss:120b | 0.15 | 0.014 | 0.60 | — | — |
+| gpt-oss:20b | 0.07 | 0.035 | 0.30 | — | — |
+| kimi-k3 | 3.00 | 0.30 | 15.00 | — | — |
+| kimi-k2.7-code | 0.95 | 0.19 | 4.00 | — | — |
+| kimi-k2.6 | 0.95 | 0.16 | 4.00 | — | — |
+| minimax-m3 | 0.60 | 0.12 | 2.40 | — | — |
+| minimax-m2.7 | 0.30 | 0.06 | 1.20 | — | — |
+| mistral-large-3 | 0.50 | — | 1.50 | — | — |
+| nemotron-3-nano | 0.06 | — | 0.24 | — | — |
+| nemotron-3-super | 0.015 | 0.015 | 0.60 | — | — |
+| nemotron-3-ultra | 0.10 | 0.10 | 3.00 | — | — |
+| qwen3.5:397b | 0.60 | — | 3.60 | — | — |
+
+Not on the page, and therefore **unpriced** in every report:
+`gemini-3-flash-preview`, `qwen3.5` (bare), `qwen3-coder-next`.
+
+Off-peak: outside 12:00–18:00 UTC on weekdays, and all weekend.
+Plans: Free ($0 + starter credits, 1 concurrent), Pro ($60/month, 3
+concurrent), Max ($300/month, 10 concurrent), Team ($1,000/month shared,
+10 concurrent). Unused monthly credit does not carry forward; overage
+draws on purchased balance.
+
+When the prices change, add a new appendix with its date and keep this
+one: costs already published were computed against it.
+
+---
+
+**Protocol version:** 1.3 (2026-09-23)
 **Authoritative file:** `docs/benchmarks/EVALUATION.md`
-**Last reviewed:** 2026-05-09
+**Last reviewed:** 2026-09-23
 
 ### Changelog
+
+- **1.3 (2026-09-23)** — Cost in dollars becomes a first-class KPI
+  (§2.1). Every LLM call is counted by role and priced per model at a
+  dated snapshot (Appendix A, `benchmarks/consultants/pricing.py`);
+  `cost_proxy` is retired. "Cheapest A per role" now means dollars per
+  fire, and ties break on cost before wall. Grading criteria are
+  unchanged, so no existing label needs re-grading; every prior run was
+  re-priced at the 2026-09-23 snapshot in [`costs.md`](costs.md).
 
 - **1.2 (2026-05-09)** — Q3 grading gains a correctness sub-rubric.
   The v1.0/v1.1 shape-only grade gave A to several recommendations

@@ -6,7 +6,6 @@ path, which can call memory and mailbox functions and nothing else.
 """
 from __future__ import annotations
 
-import io
 import tempfile
 import unittest
 from copy import deepcopy

@@ -1,0 +1,14 @@
+{
+ "params": "{\"frequency_penalty\":0.1,\"num_ctx\":1048576,\"num_predict\":131072,\"presence_penalty\":0.1,\"repeat_last_n\":2048,\"repeat_penalty\":1.1,\"temperature\":1,\"top_p\":0.95}\n",
+ "config": {
+  "model_format": "",
+  "model_family": "",
+  "model_families": null,
+  "model_type": "",
+  "file_type": "",
+  "remote_host": "https://ollama.com:443",
+  "remote_model": "glm-5.3-flash",
+  "architecture": "amd64",
+  "os": "linux"
+ }
+}
