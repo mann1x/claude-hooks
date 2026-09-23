@@ -51,10 +51,12 @@ Per run directory: every role's tokens from `turns`, priced per role's model at 
 
 | Label | smoke | audit-medium | audit-high | Total | Prompt tok | Completion tok | Unpriced models |
 |---|---|---|---|---|---|---|---|
+| `deepseek-v4-1-flash-cloud-2026-09-23-screening` | $0.0451 | $0.0822 | $0.0667 | $0.1939 | 532,809 | 28,409 |  |
 | `deepseek-v4-flash-cloud-2026-05-09-r2` | $0.0163 | $0.0604 | $0.0534 | $0.1301 | 494,196 | 32,442 |  |
 | `deepseek-v4-flash-cloud-2026-05-09-r3` | $0.0189 | $0.0462 | $0.0519 | $0.1170 | 430,247 | 33,909 |  |
 | `deepseek-v4-flash-cloud-2026-05-09-screening` | $0.0188 | $0.0442 | $0.0477 | $0.1108 | 414,202 | 29,798 |  |
 | `deepseek-v4-pro-cloud-2026-05-09-screening` | $0.0582 | $0.2620 | $0.1334 | $0.4536 | 596,769 | 30,188 |  |
+| `deepseek-v4-pro-cloud-2026-09-23-screening` | $0.0930 | $0.3147 | $0.2564 | $0.6641 | 406,602 | 32,175 |  |
 | `gemini-3-flash-preview-cloud-2026-05-09-r2` | unpriced | unpriced | unpriced | unpriced | 617,485 | 34,462 | gemini-3-flash-preview:cloud |
 | `gemini-3-flash-preview-cloud-2026-05-09-r3` | unpriced | unpriced | unpriced | unpriced | 476,707 | 31,435 | gemini-3-flash-preview:cloud |
 | `gemini-3-flash-preview-cloud-2026-05-09-screening` | unpriced | unpriced | unpriced | unpriced | 513,243 | 33,107 | gemini-3-flash-preview:cloud |
@@ -62,7 +64,15 @@ Per run directory: every role's tokens from `turns`, priced per role's model at 
 | `gemma4-31b-cloud-2026-05-09-r1` | $0.0154 | $0.0174 | $0.0216 | $0.0543 | 353,662 | 12,044 |  |
 | `gemma4-31b-cloud-2026-05-09-r2` | $0.0155 | $0.0310 | $0.0238 | $0.0703 | 471,519 | 10,630 |  |
 | `gemma4-31b-cloud-2026-05-09-r3` | $0.0166 | $0.0266 | $0.0274 | $0.0706 | 464,501 | 13,859 |  |
+| `gemma4-31b-cloud-2026-09-23-r1` | $0.0068 | $0.0214 | $0.0165 | $0.0447 | 305,974 | 4,623 |  |
+| `gemma4-31b-cloud-2026-09-23-r2` | $0.0068 | $0.0166 | $0.0167 | $0.0401 | 273,558 | 4,521 |  |
+| `gemma4-31b-cloud-2026-09-23-r3` | $0.0068 | $0.0177 | $0.0147 | $0.0392 | 266,024 | 4,989 |  |
 | `glm-5-1-cloud-2026-05-07` | $0.1122 | $0.1232 | $0.1821 | $0.4175 | 365,043 | 16,390 |  |
+| `glm-5-3-cloud-2026-09-23-screening` | $0.0722 | $0.2290 | $0.2021 | $0.5033 | 296,116 | 20,164 |  |
+| `glm-5-3-flash-cloud-2026-09-23-r1` | $0.0108 | $0.0222 | $0.0194 | $0.0524 | 280,556 | 20,642 |  |
+| `glm-5-3-flash-cloud-2026-09-23-r2` | $0.0043 | $0.0267 | $0.0193 | $0.0502 | 276,723 | 17,446 |  |
+| `glm-5-3-flash-cloud-2026-09-23-r3` | $0.0084 | $0.0231 | $0.0217 | $0.0532 | 285,587 | 20,767 |  |
+| `glm-5-3-flash-cloud-2026-09-23-screening` | $0.0075 | $0.0209 | $0.0233 | $0.0517 | 279,755 | 19,466 |  |
 | `kimi-k2.6-cloud-2026-05-07` | $0.0790 | $0.1077 | $0.2443 | $0.4310 | 240,508 | 50,629 |  |
 | `kimi-k2.6-cloud-2026-05-07-pre-harden` | $0.0905 | $0.1797 | $0.3021 | $0.5724 | 339,553 | 62,449 |  |
 | `minimax-m2-7-cloud-2026-05-07` | $0.0262 | $0.0326 | $0.1003 | $0.1591 | 424,493 | 26,500 |  |

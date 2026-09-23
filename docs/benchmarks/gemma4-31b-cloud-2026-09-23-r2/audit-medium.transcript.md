@@ -1,0 +1,75 @@
+# Consultation transcript — csl-2026-09-23-2036-f28a
+
+_Question_: Audit claude-hooks for psycopg import sites that still lack the conda-env subprocess fallback added in 4e67dc2 — list each file:line and whether it's actually exercisable from a non-conda-env Python.
+
+
+## Planner
+
+1. Examine `claude_hooks/providers/pgvector.py` around lines 123 and 328 to check for `try...except ImportError` blocks that implement a `subprocess` call to a conda-env python as a fallback.
+2. Examine `scripts/migrate_to_pgvector.py` line 624 and `scripts/bench_recall.py` line 107 to determine if these are top-level imports or wrapped in fallback logic.
+3. Examine `tests/test_pgvector_integration.py` lines 56 and 285 to see if they use the fallback or require the package to be present in the test environment.
+4. Examine `install.py` around lines 2092, 2127, 2524, and 2647 to identify if these are part of a setup script (where fallback is inappropriate) or an executable path.
+5. For each site lacking fallback, trace the call graph starting from `run.py` or `run_daemon.py` to verify if that code path is reachable when running Python without the `psycopg` package installed.
+
+---
+
+## Researcher (round 1)
+
+The audit of `psycopg` import sites reveals that **none** of the checked locations implement the `subprocess` conda-env fallback; they all use basic `try...except ImportError` blocks or top-level imports.
+
+### Import Site Audit
+
+| File | Line | Logic Type | Exercisable from non-conda Python? |
+| :--- | :--- | :--- | :--- |
+| `claude_hooks/providers/pgvector.py` | 123 | `try...except ImportError` | **Yes**. Returns `False` in `verify()` if missing. |
+| `claude_hooks/providers/pgvector.py` | 328 | `try...except ImportError` | **Yes**. Raises `ImportError` in `_ensure_ready()` if missing. |
+| `scripts/migrate_to_pgvector.py` | 624 | Top-level `import psycopg` | **Yes**. Will cause a hard `ImportError` and crash the script immediately. |
+| `scripts/bench_recall.py` | 107 | Local `import psycopg` | **Yes**. Will cause `ImportError` when `PgvectorBenchProvider` is instantiated. |
+| `tests/test_pgvector_integration.py` | 56 | `try...except ImportError` | **Yes**. Triggers `unittest.SkipTest` via `_skip_if_no_deps()`. |
+
+### Summary of Findings
+*   **Missing Fallback**: No instances of the `subprocess` fallback to a conda-env Python were found in the provided ranges.
+*   **Crash Risk**: `scripts/migrate_to_pgvector.py:624` is the most critical failure point as it is a naked import in `main()` that will crash the utility for any user not in the specific environment.
+*   **Graceful Failure**: The provider and test files handle the missing dependency gracefully (returning `False` or skipping tests), but they do not attempt to recover via the conda fallback.
+
+---
+
+## Researcher (round 1)
+
+The audit for `psycopg` import sites lacking the conda-env subprocess fallback (introduced in 4e67dc2) is complete.
+
+### 1. Verification of `install.py` (Plan Step 1)
+The identified lines in `install.py` **do** implement the fallback. They are part of the installer logic and are intended to be exercisable from a non-conda-env Python (e.g., system Python) to prevent misleading "FAILED" messages.
+- `install.py:2127`: Part of `_verify_pgvector_dsn` $\rightarrow$ Implements fallback at `install.py:2140`.
+- `install.py:2524`: Part of `_pgvector_tables_present` $\rightarrow$ Implements fallback at `install.py:2540`.
+- `install.py:2647`: Part of `_pgvector_init_schema` $\rightarrow$ Implements fallback at `install.py:2657`.
+
+### 2. Audit of Remaining Import Sites (Plan Step 2)
+The following sites import `psycopg` without a conda-env subprocess fallback.
+
+| File:Line | Exercisable from non-conda Python? | Context / Reachability |
+| :--- | :--- | :--- |
+| `claude_hooks/providers/pgvector.py:123` | **Yes** | `PgvectorProvider.verify()` $\rightarrow$ Called by `install.py` (which handles fallback) and potentially by other tools. If called directly in a non-conda env, it returns `False` (handled by `try/except ImportError`). |
+| `claude_hooks/providers/pgvector.py:328` | **Yes** | `PgvectorProvider._ensure_ready()` $\rightarrow$ Called during `recall()` or `store()`. If the provider is enabled in config but `psycopg` is missing in the current interpreter, it raises `ImportError`. |
+| `scripts/migrate_to_pgvector.py:624` | **Yes** | `main()` $\rightarrow$ Direct entry point. If run via `python scripts/migrate_to_pgvector.py` without `psycopg`, it crashes with `ImportError`. |
+| `scripts/bench_recall.py:107` | **Yes** | `PgvectorBenchProvider.__init__()` $\rightarrow$ Direct entry point. Crashes with `ImportError` if run without `psycopg`. |
+
+### Summary of Findings
+- **`install.py`**: Fully patched; fallback is correctly implemented.
+- **`claude_hooks/providers/pgvector.py`**: Uses `try/except ImportError` to degrade gracefully (returning `False` or raising `ImportError` which is caught by the dispatcher/caller), but does **not** attempt to shell out to the conda env.
+- **`scripts/`**: Both `migrate_to_pgvector.py` and `bench_recall.py` lack any fallback and will crash if the current interpreter lacks `psycopg`. These are intended for operator use and are thus highly exercisable in varied environments.
+
+---
+
+## Synthesizer
+
+The following `psycopg` import sites lack the conda-env subprocess fallback:
+
+*   `claude_hooks/providers/pgvector.py:123`: **Yes**. Exercisable via `PgvectorProvider.verify()`; currently returns `False` upon `ImportError` rather than attempting fallback.
+*   `claude_hooks/providers/pgvector.py:328`: **Yes**. Exercisable via `PgvectorProvider._ensure_ready()` during `recall()` or `store()` operations; raises `ImportError` if the provider is enabled but the package is missing.
+*   `scripts/migrate_to_pgvector.py:624`: **Yes**. This is a top-level import in `main()`; running the script via a non-conda Python interpreter will cause an immediate crash.
+*   `scripts/bench_recall.py:107`: **Yes**. Occurs within `PgvectorBenchProvider.__init__`; running the benchmark via a non-conda Python interpreter will cause an `ImportError`.
+
+Note: `install.py` (lines 2127, 2524, 2647) was audited and found to correctly implement the fallback logic at `install.py:2140`, `install.py:2540`, and `install.py:2657` respectively.
+
+---

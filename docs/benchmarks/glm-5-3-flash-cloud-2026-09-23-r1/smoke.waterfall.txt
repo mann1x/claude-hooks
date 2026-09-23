@@ -1,0 +1,31 @@
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/glm-5-3-flash-cloud-2026-09-23-r1/smoke.transcript.db
+
+sid: csl-2026-09-23-2016-9dc3
+status: completed
+total wall: 12.1s
+
+  planner       node=6.7s    (entries) llm=3x=6.1s    tool=4x=572ms   tok=p25331/c756
+      LLM round=1 model=glm-5.3-flash:cloud          3.7s  p=16813  c=497   
+      LLM round=1 model=glm-5.3-flash:cloud          1.3s  p=7379   c=127   
+      LLM round=1 model=glm-5.3-flash:cloud          1.0s  p=1139   c=132   
+      tool grep               x3     564ms chars=53027
+      tool survey_project     x1       8ms chars=3783
+
+  researcher    node=8.5s    (2xentries) llm=4x=8.5s    tool=6x=7ms     tok=p82892/c550
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud          2.6s  p=26532  c=195   
+      LLM round=1 lane=0 model=glm-5.3-flash:cloud          2.5s  p=23106  c=165   
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud          1.8s  p=16629  c=120   
+      LLM round=1 lane=0 model=glm-5.3-flash:cloud          1.6s  p=16625  c=70    
+      tool grep               x1       7ms chars=3115
+      tool read_file          x5       0ms chars=50930
+
+  synthesizer   node=836ms   (entries) llm=1x=835ms   tool=0x=0ms     tok=p2220/c98
+      LLM round=1 model=glm-5.3-flash:cloud         835ms  p=2220   c=98    
+
+totals
+  wall                  12.1s
+  sum of node spans     16.0s
+  sum of LLM call time  15.4s  (127.0% of wall)
+  sum of tool call time 579ms
+  total prompt tokens   110443
+  total completion tok  1404
