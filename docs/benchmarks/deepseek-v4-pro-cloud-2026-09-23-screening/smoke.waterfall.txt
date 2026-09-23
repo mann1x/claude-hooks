@@ -1,0 +1,36 @@
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/deepseek-v4-pro-cloud-2026-09-23-screening/smoke.transcript.db
+
+sid: csl-2026-09-23-1814-541c
+status: completed
+total wall: 15.7s
+
+  planner       node=5.3s    (entries) llm=2x=5.1s    tool=2x=125ms   tok=p9433/c464
+      LLM round=1 model=deepseek-v4-pro:cloud        4.0s  p=8155   c=371   
+      LLM round=1 model=deepseek-v4-pro:cloud        1.1s  p=1278   c=93    
+      tool grep               x1     120ms chars=19283
+      tool survey_project     x1       5ms chars=3801
+
+  researcher    node=12.8s   (2xentries) llm=5x=12.7s   tool=7x=40ms    tok=p111782/c804
+      LLM round=1 lane=0 model=deepseek-v4-pro:cloud        3.4s  p=34926  c=291   
+      LLM round=1 lane=1 model=deepseek-v4-pro:cloud        3.1s  p=17551  c=166   
+      LLM round=1 lane=0 model=deepseek-v4-pro:cloud        2.8s  p=17590  c=107   
+      LLM round=1 lane=1 model=deepseek-v4-pro:cloud        1.8s  p=22401  c=131   
+      LLM round=1 lane=0 model=deepseek-v4-pro:cloud        1.6s  p=19314  c=109   
+      tool grep               x2      32ms chars=17617
+      tool glob               x1       7ms chars=300
+      tool read_file          x2       1ms chars=54654
+      tool survey_project     x1       0ms chars=3801
+      tool list_files         x1       0ms chars=131
+
+  synthesizer   node=2.5s    (entries) llm=2x=2.5s    tool=1x=0ms     tok=p4848/c136
+      LLM round=1 model=deepseek-v4-pro:cloud        1.7s  p=2334   c=100   
+      LLM round=1 model=deepseek-v4-pro:cloud       846ms  p=2514   c=36    
+      tool read_file          x1       0ms chars=301
+
+totals
+  wall                  15.7s
+  sum of node spans     20.6s
+  sum of LLM call time  20.4s  (130.2% of wall)
+  sum of tool call time 165ms
+  total prompt tokens   126063
+  total completion tok  1404

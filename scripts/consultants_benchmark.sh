@@ -104,6 +104,16 @@ else
     git -C "${REPO}" worktree add --detach "${WORKTREE}" "${BASELINE_TAG}" \
         >/dev/null
     CWD="${WORKTREE}"
+    # The audited tree must not contain the answers. The baseline tag
+    # carries the rubric (EVALUATION.md lists the Q1 roles and the Q2
+    # ground-truth sites), every earlier label's transcripts and
+    # answers, and the query-set doc that restates the Q2 sites. On
+    # 2026-09-23 two labels found and used them. Only files the queries
+    # never audit are removed; the code under test is untouched.
+    ANSWER_KEY_PATHS=(docs/benchmarks docs/consultants-benchmarks.md)
+    for rel in "${ANSWER_KEY_PATHS[@]}"; do
+        rm -rf "${WORKTREE:?}/${rel}"
+    done
     echo "::: subject codebase: worktree at tag '${BASELINE_TAG}' "
     echo "    commit=$(git -C "${WORKTREE}" rev-parse --short HEAD)"
     echo "    path=${WORKTREE}"
@@ -251,6 +261,7 @@ write_results_md() {
             local cwd_commit
             cwd_commit="$(git -C "${CWD}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
             echo "Subject baseline: \`${BASELINE_TAG}\` (commit \`${cwd_commit}\`) — frozen worktree at \`${CWD}\`"
+            [[ -n "${ANSWER_KEY_PATHS+x}" ]] && echo "Answer key removed from the worktree: \`${ANSWER_KEY_PATHS[*]}\`"
         else
             echo "Subject baseline: live HEAD (screening run, NOT comparable across labels)"
         fi

@@ -1,0 +1,42 @@
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/glm-5-3-cloud-2026-09-23-screening/audit-medium.transcript.db
+
+sid: csl-2026-09-23-1823-b6c2
+status: completed
+total wall: 92.2s
+
+  planner       node=54.4s   (entries) llm=4x=54.2s   tool=8x=176ms   tok=p43944/c3036
+      LLM round=1 model=glm-5.3:cloud               35.3s  p=10883  c=761   
+      LLM round=1 model=glm-5.3:cloud               14.4s  p=15645  c=1744  
+      LLM round=1 model=glm-5.3:cloud                3.2s  p=16252  c=366   
+      LLM round=1 model=glm-5.3:cloud                1.3s  p=1164   c=165   
+      tool grep               x6     176ms chars=44764
+      tool survey_project     x1       0ms chars=3801
+      tool read_file          x1       0ms chars=2416
+
+  researcher    node=32.4s   (2xentries) llm=9x=48.8s   tool=31x=354ms   tok=p290150/c5169
+      LLM round=1 lane=1 model=glm-5.3:cloud               16.8s  p=42591  c=2318  
+      LLM round=1 lane=0 model=glm-5.3:cloud               12.4s  p=40008  c=1381  
+      LLM round=1 lane=1 model=glm-5.3:cloud                4.8s  p=37654  c=154   
+      LLM round=1 lane=1 model=glm-5.3:cloud                4.0s  p=29221  c=325   
+      LLM round=1 lane=0 model=glm-5.3:cloud                4.0s  p=34722  c=410   
+      LLM round=1 lane=1 model=glm-5.3:cloud                2.6s  p=32191  c=285   
+      LLM round=1 lane=0 model=glm-5.3:cloud                2.3s  p=39844  c=213   
+      LLM round=1 lane=0 model=glm-5.3:cloud                1.1s  p=17001  c=61    
+      LLM round=1 lane=1 model=glm-5.3:cloud               780ms  p=16918  c=22    
+      tool grep               x7     351ms chars=101516
+      tool read_file          x22      3ms chars=47422
+      tool survey_project     x2       0ms chars=7602
+
+  synthesizer   node=8.5s    (entries) llm=3x=8.5s    tool=6x=0ms     tok=p18031/c1383
+      LLM round=1 model=glm-5.3:cloud                5.7s  p=6680   c=1079  
+      LLM round=1 model=glm-5.3:cloud                2.0s  p=5173   c=243   
+      LLM round=1 model=glm-5.3:cloud               820ms  p=6178   c=61    
+      tool read_file          x6       0ms chars=4731
+
+totals
+  wall                  92.2s
+  sum of node spans     1.6m
+  sum of LLM call time  1.9m  (121.0% of wall)
+  sum of tool call time 530ms
+  total prompt tokens   352125
+  total completion tok  9588

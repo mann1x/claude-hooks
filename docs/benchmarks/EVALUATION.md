@@ -377,6 +377,17 @@ cost; treat it as a sweep-suite version bump.
 `results.md` records `Subject baseline: <tag> (commit <sha>)` so
 you can tell at a glance which tree the run audited.
 
+**The audited tree must not contain the answers.** The baseline tag
+is a snapshot of this repo, so it carries this file (the Q1 role list
+and the Q2 ground-truth sites), every earlier label's transcripts and
+answers under `docs/benchmarks/`, and `docs/consultants-benchmarks.md`,
+which restates the Q2 sites. The runner deletes those paths from the
+worktree before the first query and `results.md` records that it did
+(`Answer key removed from the worktree: …`). Runs before 2026-09-23
+audited a tree that still held them: on 2026-09-23 `glm-5.3` read the
+key for Q1 and Q2 and `deepseek-v4.1-flash` found it, so an earlier
+label's Q1/Q2 grade cannot rule out the same.
+
 ### 6.2 Engine code (the consultants engine itself)
 
 The engine's prompts / caps / fan-out / reducers all influence
@@ -621,11 +632,17 @@ one: costs already published were computed against it.
 
 ---
 
-**Protocol version:** 1.3 (2026-09-23)
+**Protocol version:** 1.4 (2026-09-23)
 **Authoritative file:** `docs/benchmarks/EVALUATION.md`
 **Last reviewed:** 2026-09-23
 
 ### Changelog
+
+- **1.4 (2026-09-23)** — The answer key is removed from the audited
+  worktree (§6.1): `docs/benchmarks/` and `docs/consultants-benchmarks.md`
+  are deleted from it before the first query. Grading criteria are
+  unchanged; Q1/Q2 grades from earlier runs carry the caveat that the
+  key was reachable.
 
 - **1.3 (2026-09-23)** — Cost in dollars becomes a first-class KPI
   (§2.1). Every LLM call is counted by role and priced per model at a
