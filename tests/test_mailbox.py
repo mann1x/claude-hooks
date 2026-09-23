@@ -1666,8 +1666,11 @@ class OneRegistrationPerAliasHostTests(StoreHarness):
         """The migration. An upgrade meets a table that already has
         them, and the unique index cannot be built until they are
         gone."""
-        older = "2026-09-22T09:00:00+00:00"
-        newer = "2026-09-22T10:00:00+00:00"
+        # Relative to now: sessions() hides rows outside the live
+        # window, so fixed dates stopped being "live" a day later.
+        now = utcnow()
+        older = (now - timedelta(minutes=10)).isoformat()
+        newer = (now - timedelta(minutes=1)).isoformat()
         with self.db.lock:
             conn = self.db()
             conn.execute("DROP INDEX IF EXISTS "

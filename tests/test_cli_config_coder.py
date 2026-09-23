@@ -26,6 +26,7 @@ from consultants.cli import (
     cmd_config_coder_set,
     cmd_config_coder_set_default,
     cmd_config_coder_unset,
+    cmd_config_show,
 )
 
 
@@ -136,6 +137,32 @@ class TestHandlers(unittest.TestCase):
             body["coder"]["routes_by_language"]["csharp"]["primary"],
             "kimi-k2.6:cloud",
         )
+
+    def test_show_carries_the_same_routes_as_list(self):
+        # The skill renders the coder's routing from `config show`; it
+        # used to be present only in `config coder list`, so the status
+        # block showed a coder with no per-language routes at all.
+        shown, listed = io.StringIO(), io.StringIO()
+        with self._isolated_config():
+            self.assertEqual(self._run(
+                cmd_config_show, {"cwd": None, "user": False}, shown), 0)
+            self.assertEqual(self._run(
+                cmd_config_coder_list, {"cwd": None}, listed), 0)
+        coder = json.loads(shown.getvalue())["roles"]["coder"]
+        expected = json.loads(listed.getvalue())["coder"]
+        self.assertTrue(expected["routes_by_language"])
+        self.assertEqual(coder["default_route"], expected["default_route"])
+        self.assertEqual(
+            coder["routes_by_language"], expected["routes_by_language"])
+
+    def test_show_gives_routes_to_the_coder_only(self):
+        captured = io.StringIO()
+        with self._isolated_config():
+            self._run(cmd_config_show, {"cwd": None, "user": False}, captured)
+        roles = json.loads(captured.getvalue())["roles"]
+        for role, block in roles.items():
+            if role != "coder":
+                self.assertNotIn("routes_by_language", block, role)
 
     def test_set_invokes_set_coder_route(self):
         with mock.patch.object(cc, "set_coder_route",
