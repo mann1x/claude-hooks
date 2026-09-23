@@ -203,7 +203,7 @@ def main(argv=None) -> int:
                     help="skip suite dirs whose path contains this (repeatable)")
     args = ap.parse_args(argv)
 
-    parts = ["# Benchmark costs", "",
+    parts = ["# Benchmark costs", "", "> ↟ [Benchmark index](index.md)", "",
              f"Prices: [{pricing.PRICING_SOURCE}]({pricing.PRICING_SOURCE}) "
              f"snapshot of **{pricing.PRICING_DATE}** "
              "(`benchmarks/consultants/pricing.py`). Prompt tokens are priced "

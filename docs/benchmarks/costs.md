@@ -1,5 +1,7 @@
 # Benchmark costs
 
+> ↟ [Benchmark index](index.md)
+
 Prices: [https://ollama.com/pricing](https://ollama.com/pricing) snapshot of **2026-09-23** (`benchmarks/consultants/pricing.py`). Prompt tokens are priced uncached, because the traces do not record cache hits, so every figure is an upper bound. A model with no row on the pricing page is listed as unpriced and the total is marked *(floor)*.
 
 ## Council-role sweeps
