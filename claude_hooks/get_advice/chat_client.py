@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.request
 from typing import Callable, Optional
+from claude_hooks import ollama_slots
 
 log = logging.getLogger("claude_hooks.get_advice.chat_client")
 
@@ -373,10 +374,13 @@ class ChatClient:
                 method="POST",
                 headers={"Content-Type": "application/json"},
             )
-            attempt_start = time.monotonic()
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
-                    data = json.loads(resp.read())
+                # One connection slot per attempt, released during the
+                # backoff below: a sleeping retry holds no connection.
+                with ollama_slots.slot(self.base_url, model_tag):
+                    attempt_start = time.monotonic()
+                    with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
+                        data = json.loads(resp.read())
                 # Inference-time accounting: ONLY the successful
                 # attempt's duration counts. Prior failed attempts
                 # (timeouts, retryable 5xx, network resets) and the
@@ -479,8 +483,13 @@ class ChatClient:
                       *,
                       on_token: Optional[Callable[[str], None]] = None,
                       cancel_check: Optional[Callable[[], bool]] = None,
+                      on_admitted: Optional[Callable[[], None]] = None,
                       ) -> dict:
         """Streaming counterpart to ``chat()``.
+
+        ``on_admitted`` is called once per attempt when the call holds
+        its connection slot (``claude_hooks.ollama_slots``) and is about
+        to send — a stall watchdog restarts its clock there.
 
         POSTs to ``/api/chat`` with ``stream=true``, reads the NDJSON
         response line by line, calls ``on_token(text_delta)`` for each
@@ -531,13 +540,27 @@ class ChatClient:
                 headers={"Content-Type": "application/json",
                          "Accept": "application/x-ndjson"},
             )
-            attempt_start = time.monotonic()
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
-                    final = self._consume_ndjson(
-                        resp, on_token=on_token,
-                        cancel_check=cancel_check,
-                    )
+                try:
+                    admitted = ollama_slots.slot(self.base_url, model_tag,
+                                                 cancel_check=cancel_check)
+                    admitted.__enter__()
+                except ollama_slots.Cancelled as e:
+                    raise CancelledByOrchestrator(
+                        f"cancelled while queued for a {e} slot") from e
+                try:
+                    # The stall clock starts when the call is admitted:
+                    # time queued for a slot is not a silent model.
+                    if on_admitted is not None:
+                        on_admitted()
+                    attempt_start = time.monotonic()
+                    with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
+                        final = self._consume_ndjson(
+                            resp, on_token=on_token,
+                            cancel_check=cancel_check,
+                        )
+                finally:
+                    admitted.__exit__(None, None, None)
                 # Inference-time accounting — same semantic as chat():
                 # only the successful attempt's duration is recorded.
                 self.last_inference_s = time.monotonic() - attempt_start
