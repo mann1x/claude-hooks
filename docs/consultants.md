@@ -379,6 +379,27 @@ guard. So an `xhigh` config with no extras runs a single-model
 researcher; a `medium` config with extras runs a single-model
 researcher anyway.
 
+### Concurrency — how many cloud calls a consult has in flight
+
+Researcher lanes run in parallel, one cloud connection each. An Ollama
+Pro account allows **3 concurrent connections in total**, and the
+claude-hooks hooks already hold one. Past that, calls queue on the
+account: they get slow, and then they time out. So the lane cap
+(`FANOUT_MAX_LANES`) defaults to **2**. Plan items beyond it are folded
+into the two lanes rather than dropped.
+
+The cap counts plan-item lanes, not calls. At an **x-tier** each lane
+runs once per model (primary + `extra_models`), so the calls in flight
+are *lanes × models*. With 2 lanes and one extra that is 4, already over
+a Pro account's budget. At xmax the critic fan-out adds its own. Keep
+`extra_models` short on a Pro account, or use base tiers for work that
+must not queue.
+
+`CONSULTANTS_FANOUT_MAX_LANES` overrides the cap for one engine
+process: higher for an account with more connections, `1` to serialize
+a benchmark. It is read when the engine starts, so restart the service
+after changing it.
+
 ---
 
 ## Running a consultation

@@ -555,7 +555,9 @@ class TestFanoutDispatcher:
         }
         return _fanout(state)
 
-    def test_no_extras_one_send_per_lane(self):
+    def test_no_extras_one_send_per_lane(self, monkeypatch):
+        # About models per lane, not the lane cap: pin it at 3.
+        monkeypatch.setattr(council, "FANOUT_MAX_LANES", 3)
         deps = self._build_deps(extras=[])
         sends = self._run_dispatcher(
             deps, plan_items=["a", "b", "c"],
@@ -566,7 +568,9 @@ class TestFanoutDispatcher:
             assert s.arg["model_override"] == "primary:cloud"
         assert [s.arg["lane_idx"] for s in sends] == [0, 1, 2]
 
-    def test_two_extras_three_sends_per_lane(self):
+    def test_two_extras_three_sends_per_lane(self, monkeypatch):
+        # About models per lane, not the lane cap: pin it at 3.
+        monkeypatch.setattr(council, "FANOUT_MAX_LANES", 3)
         deps = self._build_deps(extras=["kimi:cloud", "deepseek:cloud"])
         sends = self._run_dispatcher(
             deps, plan_items=["a", "b", "c"],

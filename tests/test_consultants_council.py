@@ -190,11 +190,11 @@ class TestGroupItemsIntoLanes:
         text = council.join_lane_items(["foo", "bar"])
         assert text == "1. foo\n2. bar"
 
-    def test_fanout_max_lanes_constant(self):
-        # 3 lanes is the cloud-serialization-effective cap measured
-        # against an Ollama proxy on the maintainer's LAN. Bumping
-        # this constant requires re-measuring on the target host.
-        assert council.FANOUT_MAX_LANES == 3
+    def test_fanout_max_lanes_default(self):
+        # 2 lanes: an Ollama Pro account has 3 connections and the hooks
+        # hold one. Raising the default needs an account that can serve
+        # it; override per process with CONSULTANTS_FANOUT_MAX_LANES.
+        assert council.FANOUT_DEFAULT_MAX_LANES == 2
 
 
 # ----------------------- routing ---------------------------------- #
