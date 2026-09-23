@@ -57,6 +57,20 @@ PRICES: dict[str, Price] = {
 }
 
 
+#: Models Ollama has announced it will retire, with the date. A retiring
+#: model keeps its price row, so its past runs stay priceable, but it is
+#: not a candidate: ladders and recommendations leave it out.
+RETIRING: dict[str, str] = {
+    "deepseek-v4-flash": "2026-09-25",
+}
+
+
+def is_current(tag: str) -> bool:
+    """Priced in this snapshot and not announced for retirement."""
+    key = model_key(tag)
+    return key is not None and key in PRICES and key not in RETIRING
+
+
 def model_key(tag: str) -> Optional[str]:
     """Map an Ollama tag to its row in :data:`PRICES`, or None.
 

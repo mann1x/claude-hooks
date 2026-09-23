@@ -14,7 +14,10 @@ Two sources:
 
 Usage::
 
-    scripts/bench_costs.py > docs/benchmarks/costs.md
+    scripts/bench_costs.py \
+        --ladders benchmarks/consultants/results/2026-09-23/coder_med \
+        --ladders benchmarks/consultants/results/2026-06-04/coder_med \
+        > docs/benchmarks/costs.md
     scripts/bench_costs.py --suite-dir benchmarks/consultants/results/2026-09-23/coder_med
 """
 from __future__ import annotations
@@ -31,6 +34,7 @@ from zoneinfo import ZoneInfo
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "scripts"))
 
 from benchmarks.consultants import pricing  # noqa: E402
 
@@ -199,6 +203,9 @@ def main(argv=None) -> int:
     ap.add_argument("--suite-dir", action="append", default=[],
                     help="price only these suite run dirs (repeatable)")
     ap.add_argument("--no-council", action="store_true")
+    ap.add_argument("--ladders", action="append", default=[],
+                    help="coder_bench run dirs for the ladders at the top "
+                         "(reference first; repeatable)")
     ap.add_argument("--exclude", action="append", default=[],
                     help="skip suite dirs whose path contains this (repeatable)")
     args = ap.parse_args(argv)
@@ -211,6 +218,10 @@ def main(argv=None) -> int:
              "figure is an upper bound. A model with no row on the pricing "
              "page is listed as unpriced and the total is marked *(floor)*.",
              ""]
+    if args.ladders:
+        import bench_ladders
+        rows, cals = bench_ladders.combine([Path(d) for d in args.ladders])
+        parts += [bench_ladders.render(rows, cals), ""]
     if not args.no_council and not args.suite_dir:
         parts += [render_council(council_runs(REPO / "docs" / "benchmarks")), ""]
     suite_dirs = [Path(s).resolve() for s in args.suite_dir] or sorted(

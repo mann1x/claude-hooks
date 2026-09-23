@@ -4,6 +4,47 @@
 
 Prices: [https://ollama.com/pricing](https://ollama.com/pricing) snapshot of **2026-09-23** (`benchmarks/consultants/pricing.py`). Prompt tokens are priced uncached, because the traces do not record cache hits, so every figure is an upper bound. A model with no row on the pricing page is listed as unpriced and the total is marked *(floor)*.
 
+## Ladders — what quality costs
+
+Every coder_med model that was measured, is still offered and has a price: 9 models, 60 trials each, all judged by kimi-k2.6. Reference run `benchmarks/consultants/results/2026-09-23/coder_med`. Prices: snapshot of **2026-09-23**, list (peak) rate, subject spend only (the judge does not run in production). Retiring models are left out: `deepseek-v4-flash` (2026-09-25). Method: `scripts/bench_ladders.py`.
+
+† from `benchmarks/consultants/results/2026-06-04/coder_med`, calibrated on 2 models measured in both runs (`deepseek-v4-pro:cloud`, `minimax-m3:cloud`): Q × 1.224, seconds × 0.106. 2 anchor(s) make this an estimate: a † rung says where to re-run, not what the model measures today.
+
+**Q** = mean of *judge score ÷ 5* over trials whose tests pass (failing trials count 0) — working code, weighted by how good it is. ⚠ = below the skill-eval bar (pass ≥ 70%, mean judge score ≥ 3.5).
+
+### Value ladder — cost / quality
+
+Ranked by **$ per quality point** (mean $ per trial ÷ Q): what one unit of delivered quality costs. Lower is better.
+
+| # | Model | Q | Pass | Judge | $ / trial | **$ / Q point** | off-peak $ / Q |
+|---|---|---|---|---|---|---|---|
+| 1 | `glm-5.3-flash:cloud` | 0.770 | 97% | 3.88 | $0.0005 | **$0.0007** | $0.0007 |
+| 2 | `nemotron-3-super:cloud` † | 0.714 | 88% | 3.62 | $0.0006 | **$0.0009** | $0.0009 |
+| 3 | `deepseek-v4.1-flash:cloud` | 0.827 | 100% | 4.13 | $0.0013 | **$0.0016** | $0.0008 |
+| 4 | `minimax-m2.7:cloud` † ⚠ below bar | 0.628 | 77% | 3.30 | $0.0019 | **$0.0030** | $0.0030 |
+| 5 | `glm-5.1:cloud` † | 0.747 | 95% | 3.85 | $0.0039 | **$0.0052** | $0.0052 |
+| 6 | `minimax-m3:cloud` | 0.813 | 97% | 4.10 | $0.0044 | **$0.0054** | $0.0054 |
+| 7 | `glm-5.3:cloud` | 0.723 | 92% | 3.86 | $0.0049 | **$0.0068** | $0.0068 |
+| 8 | `kimi-k2.6:cloud` † | 0.906 | 100% | 4.19 | $0.0080 | **$0.0089** | $0.0089 |
+| 9 | `deepseek-v4-pro:cloud` | 0.833 | 98% | 4.25 | $0.0075 | **$0.0090** | $0.0045 |
+
+### Throughput ladder — cost / quality / speed
+
+Ranked by **Q ÷ √(cost_rel × time_rel)**, cost and time each relative to the field median; indexed so the median model is 100. Cost and speed weigh equally. Higher is better.
+
+| # | Model | Q | $ / trial | cost_rel | median s | p90 s | time_rel | **index** |
+|---|---|---|---|---|---|---|---|---|
+| 1 | `glm-5.3-flash:cloud` | 0.770 | $0.0005 | 0.14 | 3.8 | 8.5 | 0.88 | **273** |
+| 2 | `deepseek-v4.1-flash:cloud` | 0.827 | $0.0013 | 0.35 | 2.1 | 3.6 | 0.49 | **252** |
+| 3 | `nemotron-3-super:cloud` † | 0.714 | $0.0006 | 0.16 | 4.1 | 7.3 | 0.95 | **228** |
+| 4 | `glm-5.3:cloud` | 0.723 | $0.0049 | 1.27 | 2.4 | 11.1 | 0.56 | **107** |
+| 5 | `minimax-m2.7:cloud` † ⚠ below bar | 0.628 | $0.0019 | 0.48 | 5.5 | 9.6 | 1.28 | **100** |
+| 6 | `glm-5.1:cloud` † | 0.747 | $0.0039 | 1.00 | 4.3 | 8.1 | 1.00 | **93** |
+| 7 | `minimax-m3:cloud` | 0.813 | $0.0044 | 1.15 | 5.8 | 23.4 | 1.34 | **82** |
+| 8 | `kimi-k2.6:cloud` † | 0.906 | $0.0080 | 2.09 | 5.1 | 8.4 | 1.18 | **72** |
+| 9 | `deepseek-v4-pro:cloud` | 0.833 | $0.0075 | 1.95 | 6.2 | 25.6 | 1.43 | **63** |
+
+
 ## Council-role sweeps
 
 Per run directory: every role's tokens from `turns`, priced per role's model at the time the query ran (peak/off-peak).
@@ -41,7 +82,7 @@ Per run directory: every role's tokens from `turns`, priced per role's model at 
 
 Judge spend before 2026-09-23 was not recorded by the harness (bug-925): those totals are the coder's spend only.
 
-Skipped 5 `*-aborted-*` run dir(s): partial runs that were never published.
+Skipped 7 `*-aborted-*` run dir(s): partial runs that were never published.
 
 ### `benchmarks/consultants/results/2026-05-16/coder`
 
@@ -192,4 +233,14 @@ Skipped 5 `*-aborted-*` run dir(s): partial runs that were never published.
 | Model | Trials | Pass | Subject $ | Judge $ | Total $ | $/trial (median) | $/pass |
 |---|---|---|---|---|---|---|---|
 | `gemma4:31b-cloud` | 72 | 0 | $0.0000 | $0.0000 | $0.0000 | $0.0000 | — |
+
+### `benchmarks/consultants/results/2026-09-23/coder_med`
+
+| Model | Trials | Pass | Subject $ | Judge $ | Total $ | $/trial (median) | $/pass |
+|---|---|---|---|---|---|---|---|
+| `glm-5.3-flash:cloud` | 60 | 58 | $0.0329 | $1.10 | $1.13 | $0.0172 | $0.0195 |
+| `deepseek-v4.1-flash:cloud` | 60 | 60 | $0.0399 | $0.9204 | $0.9603 | $0.0154 | $0.0160 |
+| `deepseek-v4-pro:cloud` | 60 | 59 | $0.2250 | $0.8223 | $1.05 | $0.0163 | $0.0178 |
+| `minimax-m3:cloud` | 60 | 58 | $0.2652 | $0.8781 | $1.14 | $0.0169 | $0.0197 |
+| `glm-5.3:cloud` | 60 | 55 | $0.2943 | $0.9175 | $1.21 | $0.0188 | $0.0220 |
 
