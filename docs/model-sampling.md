@@ -23,13 +23,14 @@ Each layer merges over the one above **field by field**:
 "model_sampling": {
   "templates": {
     "glm-5.3*":             {"top_p": 0.95},
-    "deepseek-v4.1-flash*": {"temperature": 0.7},
+    "minimax-m3*":          {"temperature": 0.6},
     "gemma4*":              null
   }
 }
 ```
 
 - The first entry keeps the shipped `temperature: 0.7` and adds `top_p`.
+- The second adds a template the release does not ship.
 - `null` on a field drops it (the provider default is used). `null` on a
   pattern disables the template.
 - Patterns are `fnmatch` globs. The one with the most literal characters

@@ -19,7 +19,7 @@ Two layers, one table:
     "model_sampling": {
       "templates": {
         "glm-5.3*":             {"top_p": 0.95},          // adds to shipped 0.7
-        "deepseek-v4.1-flash*": {"temperature": 0.7},     // a new template
+        "minimax-m3*":          {"temperature": 0.6},     // a new template
         "gemma4*":              null                      // turn one off
       }
     }

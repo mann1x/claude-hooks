@@ -16,7 +16,7 @@ This page answers two questions:
 | coder_bench judge | **panel: glm-5.3-flash + deepseek-v4.1-flash, settled by deepseek-v4.1-flash** (`judge_panel.py`, default since 44c943e) | separates passing from failing code as well as kimi (AUC 0.958 vs 0.955) at 1/7 the cost per verdict |
 | glm-5.3* sampling | **temperature 0.7**, shipped in `config/model-sampling.json` | Cerebriline's hand test (0.2 broken, 1.0 poor, 0.7 good). As a judge: repeat agreement 67 → 78 %, separation within noise. As a coder: no change |
 | repetition penalties for glm-5.3-flash | **not shipped** | as a coder, one run 0.770 → 0.740 quality, 58 → 56/60 passed; as a judge no better than 0.7 alone |
-| deepseek-v4.1-flash sampling | **pending**: coder test at 0.7 running | as a judge 0.7 is steadier (65 → 73 %) and cheaper. A template applies to every role, and ds is the primary coder on most routes |
+| deepseek-v4.1-flash sampling | **temperature 0.7**, shipped 2026-09-24 | as a coder identical to the default (Q 0.827, 60/60 both); as a judge steadier (65 → 73 %), cheaper and faster |
 
 ## Method
 
@@ -86,8 +86,8 @@ counting 0.
 | glm-5.3-flash | cloud default | 0.770 | 58/60 | 3.88 | 0.00055 |
 | glm-5.3-flash | temperature 0.7 | 0.767 | 58/60 | 3.87 | 0.00052 |
 | glm-5.3-flash | 0.7 + penalties | 0.740 | 56/60 | 3.82 | 0.00049 |
-| deepseek-v4.1-flash | cloud default | see [coder-med](coder-med-results.md#2026-09-23-re-baseline) | | | |
-| deepseek-v4.1-flash | temperature 0.7 | *running* | | | |
+| deepseek-v4.1-flash | cloud default | 0.827 | 60/60 | 4.13 | 0.00133 |
+| deepseek-v4.1-flash | temperature 0.7 | 0.827 | 60/60 | 4.13 | 0.00134 |
 
 Per language, Q:
 
@@ -97,8 +97,16 @@ Per language, Q:
 | 0.7 | 0.74 | 0.84 | 0.78 | 0.76 | 0.86 | 0.62 |
 | 0.7 + penalties | 0.68 | 0.74 | 0.64 | 0.76 | 0.92 | 0.70 |
 
-Each arm is one run (N=1). A 0.03 gap in Q is one or two questions.
-Only the penalty arm's two extra failures lean one way.
+| deepseek-v4.1-flash | c | cpp | csharp | go | python | rust |
+|---|---|---|---|---|---|---|
+| default | 0.88 | 0.88 | 0.80 | 0.72 | 0.90 | 0.78 |
+| 0.7 | 0.86 | 0.88 | 0.80 | 0.78 | 0.94 | 0.70 |
+
+Each arm is one run (N=1). A 0.03 gap in Q is one or two questions,
+and per-language cells move by one question either way. Only the glm
+penalty arm's two extra failures lean one way. deepseek at 0.7 matches
+its default to the third decimal, so shipping its template for the
+judge role costs the coder role nothing.
 
 ## Why sampling lives in the request
 

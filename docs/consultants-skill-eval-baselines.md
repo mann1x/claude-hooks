@@ -245,7 +245,8 @@ weakest cell for both (0.72 / 0.62 against glm-5.3 0.82).
 **Sampling.** glm-5.3* runs at temperature 0.7 from 2026-09-23
 (`config/model-sampling.json`). As a coder, 0.7 left glm-5.3-flash
 unchanged (Q 0.770 → 0.767), and adding repetition penalties lowered it
-(0.740). deepseek-v4.1-flash at 0.7 is being measured.
+(0.740). deepseek-v4.1-flash at 0.7 matched its default exactly (Q 0.827,
+60/60), and ships at 0.7 from 2026-09-24.
 [`benchmarks/judge-and-sampling.md`](benchmarks/judge-and-sampling.md).
 
 **Judge.** From 2026-09-23 coder_bench is judged by a glm-5.3-flash +

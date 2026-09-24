@@ -23,6 +23,9 @@ def test_the_shipped_file_is_valid_and_measured_only():
     data = json.loads(ms.SHIPPED_FILE.read_text(encoding="utf-8"))
     table = ms.templates(cfg={}, shipped=data["templates"])
     assert table["glm-5.3*"] == {"temperature": 0.7}
+    assert table["deepseek-v4.1-flash*"] == {"temperature": 0.7}
+    assert ms.match("deepseek-v4.1-flash:cloud", table) == "deepseek-v4.1-flash*"
+    assert ms.match("deepseek-v4-pro:cloud", table) is None  # not measured
     for opts in table.values():
         assert set(opts) <= ms.FIELDS
 

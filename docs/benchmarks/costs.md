@@ -258,9 +258,9 @@ Skipped 7 `*-aborted-*` run dir(s): partial runs that were never published.
 
 | Model | Trials | Pass | Subject $ | Judge $ | Total $ | $/trial (median) | $/pass |
 |---|---|---|---|---|---|---|---|
-| `deepseek-v4.1-flash:cloud` arm `deepseek-v4.1-flash-t07` | running: 2/60 | — | — | — | — | — | — |
 | `glm-5.3-flash:cloud` arm `glm-5.3-flash-t07-pen` | 60 | 56 | $0.0296 | $1.09 | $1.11 | $0.0179 | $0.0199 |
 | `glm-5.3-flash:cloud` arm `glm-5.3-flash-t07` | 60 | 58 | $0.0313 | $1.01 | $1.04 | $0.0154 | $0.0179 |
+| `deepseek-v4.1-flash:cloud` arm `deepseek-v4.1-flash-t07` | 60 | 60 | $0.0402 | $0.9283 | $0.9685 | $0.0152 | $0.0161 |
 
 ## Judge evaluations
 
