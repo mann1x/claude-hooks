@@ -138,19 +138,36 @@ def _suite_trials(suite_dir: Path) -> list[dict]:
     files = [top] if top.is_file() else sorted(suite_dir.glob("*/trials.jsonl"))
     trials = []
     for f in files:
+        # An arm dir (sampling.json beside it) is one setting of a model:
+        # its trials must not pool with the model's other arms.
+        arm = f.parent.name if (f.parent / "sampling.json").is_file() else None
         for line in f.read_text().splitlines():
             if line.strip():
-                trials.append(json.loads(line))
+                t = json.loads(line)
+                if arm:
+                    t["_arm"] = arm
+                    t["_arm_expected"] = _expected(f.parent)
+                trials.append(t)
     return trials
+
+
+def _expected(run: Path) -> int:
+    try:
+        meta = json.loads((run / "metadata.json").read_text(encoding="utf-8"))
+        return len(meta.get("questions") or []) * len(meta.get("models") or [1])
+    except (OSError, json.JSONDecodeError):
+        return 0
 
 
 def suite_costs(suite_dir: Path) -> dict:
     per_model: dict[str, dict] = {}
     for t in _suite_trials(suite_dir):
         m = t.get("model", "?")
-        row = per_model.setdefault(m, {"n": 0, "subject": 0.0, "judges": 0.0,
+        key = f"{m}` arm `{t['_arm']}" if t.get("_arm") else m
+        row = per_model.setdefault(key, {"n": 0, "subject": 0.0, "judges": 0.0,
                                        "judge_recorded": True, "pass": 0,
                                        "unpriced": set(), "costs": []})
+        row["expected"] = t.get("_arm_expected") or 0
         row["n"] += 1
         row["pass"] += bool(t.get("passes_algorithm", t.get("passes_tests")))
         at = _when(t.get("timestamp"))
@@ -182,6 +199,9 @@ def render_suite(suite_dir: Path) -> str:
            "(median) | $/pass |",
            "|---|---|---|---|---|---|---|---|"]
     for m, r in sorted(rows.items(), key=lambda kv: kv[1]["subject"]):
+        if r.get("expected") and r["n"] < r["expected"]:
+            out.append(f"| `{m}` | running: {r['n']}/{r['expected']} | — | — | — | — | — | — |")
+            continue
         judge = _money(r["judges"]) if r["judge_recorded"] else "not recorded"
         total = r["subject"] + r["judges"]
         per_pass = total / r["pass"] if r["pass"] else None
@@ -195,6 +215,55 @@ def render_suite(suite_dir: Path) -> str:
             f"{'unpriced' if r.get('subject_unpriced') else _money(r['subject'])} | "
             f"{judge} | {_money(total)}{flag} | "
             f"{_money(statistics.median(r['costs']))} | {_money(per_pass)} |")
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------- #
+# Judge evaluations (judge_eval / repair verdicts)
+# ---------------------------------------------------------------- #
+
+def judge_eval_costs(verdict_files: list[Path]) -> dict:
+    """Per judge label: every verdict record is a paid call — failed ones
+    and the repairs that replaced them included."""
+    rows: dict[str, dict] = {}
+    for f in verdict_files:
+        for line in f.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                v = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            r = rows.setdefault(v.get("judge", "?"), {"records": 0, "failed": 0,
+                                                      "repaired": 0, "usd": 0.0,
+                                                      "unpriced": False})
+            r["records"] += 1
+            r["failed"] += v.get("score") is None
+            r["repaired"] += bool(v.get("repaired"))
+            c = pricing.usage_cost(v.get("usage") or {}, _when(v.get("at")))
+            r["usd"] += c["total"]
+            r["unpriced"] |= bool(c["unpriced"])
+    return rows
+
+
+def render_judge_evals(root: Path) -> str:
+    files = sorted(root.glob("*/judge_eval*/verdicts.jsonl"))
+    if not files:
+        return ""
+    rows = judge_eval_costs(files)
+    out = ["## Judge evaluations", "",
+           "`benchmarks/consultants/judge_eval.py` verdicts (" + ", ".join(
+               f"`{f.parent.relative_to(REPO)}`" for f in files) + "). "
+           "Each record is one paid call: failed verdicts and the repairs "
+           "that replaced them are both counted. A panel row carries its "
+           "members' calls as well as the synthesizer's, so it overlaps the "
+           "members' rows. Findings: [`judge-and-sampling.md`](judge-and-sampling.md).",
+           "", "| Judge (label) | Verdicts | Failed | Repaired | Total $ | $/verdict |",
+           "|---|---|---|---|---|---|"]
+    for lab, r in sorted(rows.items(), key=lambda kv: kv[1]["usd"] / max(1, kv[1]["records"])):
+        flag = " (floor)" if r["unpriced"] else ""
+        out.append(f"| `{lab}` | {r['records']} | {r['failed']} | {r['repaired']} "
+                   f"| {_money(r['usd'])}{flag} | {_money(r['usd'] / max(1, r['records']))} |")
     return "\n".join(out)
 
 
@@ -242,6 +311,10 @@ def main(argv=None) -> int:
         if d in aborted:
             continue
         block = render_suite(d)
+        if block:
+            parts += [block, ""]
+    if not args.suite_dir:
+        block = render_judge_evals(REPO / "benchmarks/consultants/results")
         if block:
             parts += [block, ""]
     print("\n".join(parts))

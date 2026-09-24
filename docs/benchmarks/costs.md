@@ -254,3 +254,25 @@ Skipped 7 `*-aborted-*` run dir(s): partial runs that were never published.
 | `minimax-m3:cloud` | 60 | 58 | $0.2652 | $0.8781 | $1.14 | $0.0169 | $0.0197 |
 | `glm-5.3:cloud` | 60 | 55 | $0.2943 | $0.9175 | $1.21 | $0.0188 | $0.0220 |
 
+### `benchmarks/consultants/results/2026-09-23/coder_med-sampling`
+
+| Model | Trials | Pass | Subject $ | Judge $ | Total $ | $/trial (median) | $/pass |
+|---|---|---|---|---|---|---|---|
+| `deepseek-v4.1-flash:cloud` arm `deepseek-v4.1-flash-t07` | running: 2/60 | — | — | — | — | — | — |
+| `glm-5.3-flash:cloud` arm `glm-5.3-flash-t07-pen` | 60 | 56 | $0.0296 | $1.09 | $1.11 | $0.0179 | $0.0199 |
+| `glm-5.3-flash:cloud` arm `glm-5.3-flash-t07` | 60 | 58 | $0.0313 | $1.01 | $1.04 | $0.0154 | $0.0179 |
+
+## Judge evaluations
+
+`benchmarks/consultants/judge_eval.py` verdicts (`benchmarks/consultants/results/2026-09-23/judge_eval`, `benchmarks/consultants/results/2026-09-23/judge_eval_june`). Each record is one paid call: failed verdicts and the repairs that replaced them are both counted. A panel row carries its members' calls as well as the synthesizer's, so it overlaps the members' rows. Findings: [`judge-and-sampling.md`](judge-and-sampling.md).
+
+| Judge (label) | Verdicts | Failed | Repaired | Total $ | $/verdict |
+|---|---|---|---|---|---|
+| `deepseek-v4.1-flash:cloud@temperature=0.7` | 781 | 1 | 1 | $0.2329 | $0.0003 |
+| `deepseek-v4.1-flash:cloud` | 827 | 0 | 0 | $0.3531 | $0.0004 |
+| `glm-5.3-flash:cloud@temperature=0.7` | 905 | 125 | 125 | $0.4638 | $0.0005 |
+| `glm-5.3-flash:cloud@frequency_penalty=0.1,repeat_last_n=2048,repeat_penalty=1.1,temperature=0.7` | 780 | 0 | 0 | $0.4490 | $0.0006 |
+| `glm-5.3-flash:cloud` | 828 | 1 | 1 | $0.4945 | $0.0006 |
+| `deepseek-v4.1-flash:cloud#panel=glm-5.3-flash:cloud+deepseek-v4.1-flash:cloud` | 780 | 0 | 0 | $1.57 | $0.0020 |
+| `kimi-k2.6:cloud` | 71 | 4 | 4 | $1.03 | $0.0145 |
+

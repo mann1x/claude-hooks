@@ -94,6 +94,67 @@ Off-peak pricing applies outside 12:00–18:00 UTC on weekdays and all
 weekend, and currently halves the deepseek models only. Schedule sweeps
 that lean on them off-peak and record the window (§6.4).
 
+### 2.2 The skill-eval judge
+
+A coder_bench quality score is only as good as its judge, and a judge
+is only trustworthy once it has been checked against the one thing
+that is not an opinion: whether the code passes its tests.
+`benchmarks/consultants/judge_eval.py` does that. It measures a
+candidate's separation (AUC of its score against *tests pass*),
+repeat agreement, self-bias, style affinity, speed and cost on solutions
+whose correctness is already known. Findings:
+[`judge-and-sampling.md`](judge-and-sampling.md).
+
+1. **Default judge (2026-09-23): the panel.** glm-5.3-flash and
+   deepseek-v4.1-flash score every compiled trial independently on the
+   same blind rubric. When both return a score, deepseek-v4.1-flash
+   settles it: it verifies each review's claim against the code, sees
+   the reviews as A/B in a hashed order, and never sees model names
+   (`judge_panel.py`). One score alone stands; a failed synthesizer
+   leaves an agreed score, or the mean, flagged.
+2. **kimi-k2.6 remains the reference** for comparisons with runs judged
+   before 2026-09-23. A run that is compared with an older one names the
+   older run's judge (`--judge-model kimi-k2.6:cloud`). Scores from
+   different judges are never compared directly: calibrate on shared
+   models (`scripts/bench_ladders.py`) or re-judge.
+3. **A new judge is admitted by `judge_eval`**, not by reputation: its
+   AUC interval must overlap the reference's, and its self-bias must be
+   reported.
+
+### 2.3 Sampling is part of the subject
+
+A cloud model runs at the provider default unless the request says
+otherwise, and the default is not always one the model does well at.
+The sampling a run used is therefore recorded with the run:
+
+- Templates travel in the request, from `config/model-sampling.json`
+  plus user overrides (`claude_hooks/model_sampling.py`), never from an
+  Ollama Modelfile overlay.
+- A judge's label carries its sampling
+  (`glm-5.3-flash:cloud@temperature=0.7`), and a coder arm's directory
+  carries a `sampling.json`. Results under different sampling never
+  pool.
+- A sampling comparison changes only the subject's sampling. The judge
+  must be one without a template, or be pinned with `--sampling none`.
+- A shipped template changes the model in **every** role. Measure it in
+  each role the model is routed to before shipping it.
+
+### 2.4 Outages and repair
+
+A network outage does not invalidate a run, but it does leave holes:
+judge calls that returned no score. Two rules keep them from becoming
+results.
+
+1. **Wait it out.** Benchmark clients use `harness.bench_client`, which
+   waits out a dead line for up to 30 min
+   (`ChatClient.outage_wait_s`) instead of failing within seconds.
+2. **Repair, never re-run.** Every benchmark chain ends with
+   `benchmarks/consultants/repair.py`. It re-asks exactly the verdicts
+   and coder judgments left without a score, using the same judge,
+   sampling and prompt, append-only, over a few rounds. A trial scored
+   after the run is marked `quality_filled`. A run with holes left is
+   not reported as complete.
+
 ---
 
 ## 3. Quality criteria — per query
@@ -632,11 +693,20 @@ one: costs already published were computed against it.
 
 ---
 
-**Protocol version:** 1.4 (2026-09-23)
+**Protocol version:** 1.5 (2026-09-24)
 **Authoritative file:** `docs/benchmarks/EVALUATION.md`
-**Last reviewed:** 2026-09-23
+**Last reviewed:** 2026-09-24
 
 ### Changelog
+
+- **1.5 (2026-09-24)** — Three rules for the skill-eval benches. The
+  judge is checked against tests passing, and coder_bench's default
+  becomes the glm-5.3-flash + deepseek-v4.1-flash panel; kimi-k2.6
+  stays the reference for comparisons with older runs (§2.2). Sampling
+  is recorded as part of the subject and never pools across settings
+  (§2.3). Outages are waited out, and every chain ends with
+  `repair.py` (§2.4). Council grading is unchanged, and no label needs
+  re-grading.
 
 - **1.4 (2026-09-23)** — The answer key is removed from the audited
   worktree (§6.1): `docs/benchmarks/` and `docs/consultants-benchmarks.md`

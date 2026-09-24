@@ -36,18 +36,15 @@ infrastructure.
 
 ### Recommended default
 
-**`glm-5.1:cloud`** as of 2026-05-16, baked into
-[`consultants/engine/coder_defaults.py`](../consultants/engine/coder_defaults.py).
-Wins the v1.0 rubric on `avg_quality` (4.88) and the tokens
-tie-breaker (1841 median); ~2× faster median wall than the
-runner-up. All 4 candidates qualified at `pass_rate ≥ 70%` AND
-`avg_quality ≥ 3.5`, so this is a "pick the best of qualifying"
-decision, not "the only one that worked".
+**`deepseek-v4.1-flash:cloud`** as of 2026-09-23, with per-language routes
+(see the [2026-09-23 re-baseline](#v10-med-re-baseline-2026-09-23--new-models-routes-by-quality-per-dollar)),
+baked into [`consultants/engine/coder_defaults.py`](../consultants/engine/coder_defaults.py).
+It passes 60/60 on `coder_med`, is within 0.006 Q of the best model, and
+costs a sixth as much.
 
-Bench commit: `554a354` (signature fix that unblocked live runs).
-Live-run commit: see the M11b live-run commit that appended this
-row. Results dir:
-[`benchmarks/consultants/results/2026-05-16/coder/`](../benchmarks/consultants/results/2026-05-16/coder/).
+Earlier defaults: `glm-5.1:cloud` (2026-05-16, Python v1.0 rubric winner,
+q 4.88), then kimi-k2.6-led per-language routes (2026-06-04). Those rows
+remain below as history.
 
 ### v1.0.1-mlang baseline (2026-05-17) — per-language winners
 
@@ -218,6 +215,43 @@ installs seed the same per-language picks — `RECOMMENDED_AS_OF = 2026-06-04`,
 suite `1.0-med`, hash `0e6ab0fd` (provenance test + the `coder_unique_models`
 set updated accordingly). `default_route` stays `glm-5.1:cloud` (the efficiency
 winner, used only for languages with no explicit entry).
+
+### v1.0-med re-baseline (2026-09-23) — new models, routes by quality per dollar
+
+> Same suite (`coder_med@1.0`, hash `0e6ab0fd`) and judge (`kimi-k2.6`) as the
+> 2026-06-04 row, with five models, all still offered and priced. Incumbents
+> were not re-run. kimi-k2.6 is too expensive to route to, and
+> deepseek-v4-flash retires 2026-09-25. Q = mean of *judge ÷ 5* over trials
+> whose tests pass. Walls are not comparable with June's, which ran heavily
+> concurrent ([`costs.md`](benchmarks/costs.md) calibrates it, ×0.106).
+> Detail: [`benchmarks/coder-med-results.md`](benchmarks/coder-med-results.md#2026-09-23-re-baseline).
+
+| Date | Suite | Model | Pass rate | Kimi q | Q | $ / trial | comp-tok | wall | Suite hash | Notes |
+|------|-------|-------|----------:|-------:|--:|----------:|---------:|-----:|------------|-------|
+| 2026-09-23 | med 1.0 | `deepseek-v4-pro:cloud` | 98% (59/60) | 4.25 | **0.833** | $0.0075 | 587 | 6.2s | `0e6ab0fd` | best Q, 6× ds41f's price |
+| 2026-09-23 | med 1.0 | `deepseek-v4.1-flash:cloud` | **100% (60/60)** | 4.13 | 0.827 | $0.0013 | 317 | **2.1s** | `0e6ab0fd` | **recommended default + primary on 5/6 languages**; #1 value ladder |
+| 2026-09-23 | med 1.0 | `minimax-m3:cloud` | 97% (58/60) | 4.10 | 0.813 | $0.0044 | 534 | 5.8s | `0e6ab0fd` | best on c/python, not by enough for 3–6× |
+| 2026-09-23 | med 1.0 | `glm-5.3-flash:cloud` | 97% (58/60) | 3.88 | 0.770 | **$0.0005** | 261 | 3.8s | `0e6ab0fd` | cheapest qualifier; #1 throughput ladder; csharp primary, fallback everywhere else |
+| 2026-09-23 | med 1.0 | `glm-5.3:cloud` | 92% (55/60) | 3.86 | 0.723 | $0.0049 | 260 | 2.4s | `0e6ab0fd` | pricier and weaker than its flash sibling here |
+
+**Adopted 2026-09-23**, in the shipped defaults
+([`coder_defaults.py`](../consultants/engine/coder_defaults.py),
+`RECOMMENDED_AS_OF = 2026-09-23`, cohort `QUALIFYING_MODELS_2026_09_23_MED`),
+both hosts' user-global config and this repo's per-project override:
+deepseek-v4.1-flash → glm-5.3-flash for c / cpp / go / python / rust and the
+default route, and glm-5.3-flash → deepseek-v4.1-flash for csharp. Go is the
+weakest cell for both (0.72 / 0.62 against glm-5.3 0.82).
+
+**Sampling.** glm-5.3* runs at temperature 0.7 from 2026-09-23
+(`config/model-sampling.json`). As a coder, 0.7 left glm-5.3-flash
+unchanged (Q 0.770 → 0.767), and adding repetition penalties lowered it
+(0.740). deepseek-v4.1-flash at 0.7 is being measured.
+[`benchmarks/judge-and-sampling.md`](benchmarks/judge-and-sampling.md).
+
+**Judge.** From 2026-09-23 coder_bench is judged by a glm-5.3-flash +
+deepseek-v4.1-flash panel settled by deepseek-v4.1-flash. It matches kimi's
+separation of passing from failing code (AUC 0.958 vs 0.955) at 1/7 the cost.
+The rows above are kimi-judged, to stay comparable with June.
 
 ---
 

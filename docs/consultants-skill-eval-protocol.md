@@ -81,7 +81,14 @@ the full manifest and the rubric thresholds.
    - Optionally measures cyclomatic complexity via `radon` (soft
      dep).
    - On a successful compile, calls the **judge LLM** with a strict
-     1-5 rubric (`SCORE: <n>` + a one-sentence rationale).
+     1-5 rubric (`SCORE: <n>` + a one-sentence rationale). Since
+     2026-09-23 the default judge is a **panel**: glm-5.3-flash and
+     deepseek-v4.1-flash score independently, and deepseek-v4.1-flash
+     settles the final score, checking each review's claim against the
+     code (`judge_panel.py`). A single `--judge-model` is still the
+     one-judge path; use kimi-k2.6 to compare with runs judged before
+     that date. Why, and the measurements:
+     [`benchmarks/judge-and-sampling.md`](benchmarks/judge-and-sampling.md).
 5. Trial result is appended to `trials.jsonl` immediately so a
    Ctrl-C mid-run loses at most the in-progress trial.
 
@@ -335,11 +342,21 @@ has drifted. Investigate before spending tokens on a live run.
 
 ```bash
 python benchmarks/consultants/coder_bench.py --live --accept-cost \
-    --models kimi-k2.6:cloud,qwen3-coder-next:cloud,glm-5.1:cloud,gemma4:31b-cloud \
-    --ollama-base http://192.168.178.2:11433 \
-    --judge-model kimi-k2.6:cloud \
+    --models deepseek-v4.1-flash:cloud,glm-5.3-flash:cloud \
+    --ollama-base http://192.168.178.161:11434 \
     --commit-report
+# default judge = the panel; add --judge-model kimi-k2.6:cloud to stay
+# comparable with a run judged before 2026-09-23
+python benchmarks/consultants/repair.py \
+    --questions-dir benchmarks/consultants/questions/coder \
+    --coder-run benchmarks/consultants/results/<date>/coder
 ```
+
+Always finish with `repair.py`. Benchmark clients wait out a network
+outage for up to 30 min, and repair re-asks whatever an outage still
+left without a score ([`benchmarks/EVALUATION.md` §2.4](benchmarks/EVALUATION.md#24-outages-and-repair)).
+At most 2 concurrent cloud calls: the Pro plan allows 3 and the hooks
+hold one (`claude_hooks/ollama_slots.py` enforces it per host).
 
 The summary line at run start declares the estimated token cost.
 `--accept-cost` is mandatory with `--live`; without it the script
@@ -536,6 +553,10 @@ The summary:
 | `benchmarks/consultants/stall_bench.py` | M11a runner CLI |
 | `benchmarks/consultants/tool_executor_bench.py` | M11c runner CLI |
 | `benchmarks/consultants/analyze.py` | Markdown report renderer + rubric applier |
+| `benchmarks/consultants/judge_panel.py` | Default coder_bench judge: two peer judges + a synthesizer |
+| `benchmarks/consultants/judge_eval.py` | Measures a candidate judge against tests passing (`judge` / `synth` / `report`) |
+| `benchmarks/consultants/repair.py` | Last step of every chain: re-asks verdicts / judgments an outage left without a score |
+| `benchmarks/consultants/fill_judge.py` | Scores coder trials whose judge call failed, in place (used by `repair.py`) |
 | `benchmarks/consultants/questions/coder/SUITE.md` | Coder suite v1.0 manifest + rubric |
 | `benchmarks/consultants/questions/stall/SUITE.md` | Stall suite v1.0 manifest + rubric |
 | `benchmarks/consultants/questions/tool_executor/SUITE.md` | Tool_executor suite v1.0 manifest + rubric |

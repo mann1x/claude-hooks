@@ -82,6 +82,14 @@ the score to
 - `--judge-model ''` — skip the judge LLM (quality_score will be
   None on every trial, rubric will report "no qualifying model").
   Cheap when you only want the pass/fail signal.
+- `--judge-model a,b` — a judge panel (the default is
+  `glm-5.3-flash:cloud,deepseek-v4.1-flash:cloud`); `--synth-judge-model`
+  settles it (default `deepseek-v4.1-flash:cloud`). One model = one judge.
+- Sampling: `CLAUDE_HOOKS_MODEL_SAMPLING='{"glm-5.3*":{"temperature":0.7}}'`
+  runs one arm at other sampling; give it its own `--output-dir` with a
+  `sampling.json` so its trials never pool with another arm's.
+- Finish every run with `repair.py --coder-run <output-dir>`: it scores
+  the trials an outage left without a judge score.
 
 ## Adding a question
 
