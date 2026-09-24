@@ -82,7 +82,7 @@ class TestDefaults:
         from consultants.engine.coder_defaults import RECOMMENDED_CODER_MODEL
         cfg = cc.ConsultantsConfig()
         assert cfg.roles["coder"].model == RECOMMENDED_CODER_MODEL
-        assert RECOMMENDED_CODER_MODEL == "glm-5.2:cloud"
+        assert RECOMMENDED_CODER_MODEL == "deepseek-v4.1-flash:cloud"
 
     def test_coder_limits_defaults(self):
         # M10: 50 KB per file, 1 MB total, 16 files max — the

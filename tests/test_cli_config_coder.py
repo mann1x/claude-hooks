@@ -131,11 +131,11 @@ class TestHandlers(unittest.TestCase):
         self.assertIn("routes_by_language", body["coder"])
         # Seeded defaults present:
         self.assertEqual(
-            body["coder"]["default_route"]["primary"], "glm-5.2:cloud",
+            body["coder"]["default_route"]["primary"], "deepseek-v4.1-flash:cloud",
         )
         self.assertEqual(
             body["coder"]["routes_by_language"]["csharp"]["primary"],
-            "kimi-k2.6:cloud",
+            "glm-5.3-flash:cloud",
         )
 
     def test_show_carries_the_same_routes_as_list(self):
