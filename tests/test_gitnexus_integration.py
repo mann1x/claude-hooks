@@ -224,6 +224,25 @@ class TestReindex:
         gn.reindex_if_dirty_async(cwd=str(tmp_path), turn_modified=True)
         assert len(spawned) == 1
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX zombie semantics")
+    def test_an_exited_child_of_this_process_does_not_hold_the_lock(self, tmp_path):
+        """The daemon spawns analyze and never waits for it: once it exits
+        it is a zombie, which kill(pid, 0) still reports as alive."""
+        import subprocess as sp
+        import time as _t
+        pid = sp.Popen(["true"], stdin=sp.DEVNULL, stdout=sp.DEVNULL,
+                       stderr=sp.DEVNULL, start_new_session=True).pid
+        _t.sleep(0.5)  # exited, not waited for
+        (tmp_path / gn._LOCK_FILENAME).write_text(f"{pid}\n0", encoding="utf-8")
+        assert gn._acquire_lock(tmp_path, min_age_seconds=0)
+
+    def test_a_pid_recorded_hours_ago_is_not_trusted(self, tmp_path):
+        """A reused PID (reboot, wrap) must not hold the lock forever."""
+        old = int(gn.time.time()) - gn._LOCK_PID_MAX_AGE_SECONDS - 60
+        (tmp_path / gn._LOCK_FILENAME).write_text(f"{os.getpid()}\n{old}",
+                                                  encoding="utf-8")
+        assert gn._acquire_lock(tmp_path, min_age_seconds=60)
+
     def test_no_op_when_project_not_indexed(self, monkeypatch, tmp_path):
         monkeypatch.setattr(gn.shutil, "which",
                             lambda name: "/usr/bin/gitnexus" if name == "gitnexus" else None)
