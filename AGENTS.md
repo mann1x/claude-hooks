@@ -41,6 +41,8 @@ LSP engine (v0.7+, opt-in; v1.17+ daemon keyed on the repository boundary):
 
 Concurrency / utility:
 - `_parallel.py` (provider fan-out), `mcp_client.py`, `embedders.py`
+- `model_sampling.py` — per-model sampling templates (shipped `config/model-sampling.json` < user `model_sampling.templates` in `config/claude-hooks.json` < `CLAUDE_HOOKS_MODEL_SAMPLING`), applied in `get_advice/chat_client.py`; caller `options` win (see `docs/model-sampling.md`)
+- `ollama_slots.py` — cross-process Ollama connection slots (file locks under `~/.claude/ollama-slots/<scope>/`) held for every `ChatClient` HTTP attempt; cloud limit = plan connections − `reserve_for_hooks`, local = `local_limit`; recall hooks bypass it; config under `ollama_slots` in `config/claude-hooks.json` (see `docs/ollama-slots.md`)
 
 Companion integrations (opt-in):
 - `openwolf.py` — reads .wolf/ project data (cerebrum, buglog)
