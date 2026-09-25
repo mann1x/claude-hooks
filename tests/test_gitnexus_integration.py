@@ -170,6 +170,60 @@ class TestReindex:
         # First call spawned; second hit fresh lock and bailed
         assert len(spawned) == 1
 
+    def test_live_pid_blocks_respawn_after_cooldown_expires(
+        self, monkeypatch, tmp_path,
+    ):
+        """A rebuild that outlives the cooldown must not get a rival.
+
+        Regression for 2026-09-25: gitnexus v1.6.12 turned the first
+        analyze per repo into a multi-minute FULL rebuild, so the 60s
+        age guard expired while the previous run was still writing
+        ``.gitnexus/graph-csv``. The second run then deleted or collided
+        with the first one's staging CSVs and both failed.
+        """
+        monkeypatch.setattr(gn.shutil, "which",
+                            lambda name: "/usr/bin/gitnexus" if name == "gitnexus" else None)
+        (tmp_path / ".gitnexus").mkdir()
+        (tmp_path / ".git").mkdir()
+
+        spawned = []
+
+        class _FakePopen:
+            # os.getpid() is guaranteed alive, so it stands in for a
+            # still-running analyze.
+            pid = os.getpid()
+
+            def __init__(self, args, **kwargs):
+                spawned.append(args)
+
+        monkeypatch.setattr(gn.subprocess, "Popen", _FakePopen)
+
+        gn.reindex_if_dirty_async(cwd=str(tmp_path), turn_modified=True)
+        assert len(spawned) == 1
+
+        # Cooldown fully expired — only the liveness guard can save us.
+        gn.reindex_if_dirty_async(
+            cwd=str(tmp_path), turn_modified=True, lock_min_age_seconds=0,
+        )
+        assert len(spawned) == 1, "live pid must block a second analyze"
+
+    def test_dead_pid_allows_respawn_after_cooldown(self, monkeypatch, tmp_path):
+        """The liveness guard must not wedge the lock forever: once the
+        recorded pid is gone and the cooldown has passed, reindex runs."""
+        monkeypatch.setattr(gn.shutil, "which",
+                            lambda name: "/usr/bin/gitnexus" if name == "gitnexus" else None)
+        (tmp_path / ".gitnexus").mkdir()
+        (tmp_path / ".git").mkdir()
+        # A high, unallocated pid stands in for a finished analyze.
+        (tmp_path / gn._LOCK_FILENAME).write_text("4194303\n0", encoding="utf-8")
+
+        spawned = []
+        monkeypatch.setattr(gn.subprocess, "Popen",
+                            lambda *a, **kw: spawned.append(a))
+
+        gn.reindex_if_dirty_async(cwd=str(tmp_path), turn_modified=True)
+        assert len(spawned) == 1
+
     def test_no_op_when_project_not_indexed(self, monkeypatch, tmp_path):
         monkeypatch.setattr(gn.shutil, "which",
                             lambda name: "/usr/bin/gitnexus" if name == "gitnexus" else None)

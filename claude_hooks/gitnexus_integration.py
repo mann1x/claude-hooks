@@ -29,6 +29,11 @@ from pathlib import Path
 from typing import Optional
 
 from claude_hooks._popen import detach_kwargs
+# The liveness-aware reindex lock is shared with the claudemem engine: same
+# two-line ``<pid>\n<unix-ts>`` format, same stdlib-only cross-platform PID
+# probe. Imported rather than re-rolled here, following the consolidation
+# precedent in claude_hooks/_popen.py (#221).
+from claude_hooks.claudemem_reindex import _pid_running, _read_lock
 
 log = logging.getLogger("claude_hooks.gitnexus")
 
@@ -101,14 +106,36 @@ def _probe_version() -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _acquire_lock(root: Path, min_age_seconds: int) -> bool:
+    """Return True if a reindex may start now.
+
+    Two guards combine, matching :mod:`claude_hooks.claudemem_reindex`:
+
+    1. **Live-process check** — if the lock names a PID that is still
+       running, refuse regardless of age. Without this a rebuild that
+       outlives the cooldown gets a second ``analyze`` spawned on top of
+       it, and the two share ``.gitnexus/graph-csv`` and destroy each
+       other's staging files. Observed 2026-09-25 once the gitnexus
+       v1.6.12 upgrade made the first analyze per repo a *full* rebuild
+       (minutes, not seconds): one run died on a deleted
+       ``rel_CodeElement_Class.csv``, its rival on ``EEXIST`` for
+       ``rel_File_Route.csv``. The age guard alone cannot see this.
+    2. **Cooldown** — refuse while the recorded timestamp is younger
+       than ``min_age_seconds``, so rapid Stop-hook reentry cannot pile
+       up when no PID was recorded (legacy single-line lock format).
+    """
     lock = root / _LOCK_FILENAME
     now = time.time()
-    if lock.exists():
-        try:
-            if now - lock.stat().st_mtime < min_age_seconds:
-                return False
-        except OSError:
-            pass
+    pid, ts = _read_lock(lock)
+
+    if pid is not None and _pid_running(pid):
+        log.debug("gitnexus reindex lock held by live pid %d — skipping", pid)
+        return False
+
+    if ts is not None and now - ts < min_age_seconds:
+        log.debug("gitnexus reindex lock fresh (%ds old) — skipping",
+                  int(now - ts))
+        return False
+
     try:
         lock.write_text(str(int(now)), encoding="utf-8")
         return True
@@ -116,10 +143,30 @@ def _acquire_lock(root: Path, min_age_seconds: int) -> bool:
         return False
 
 
-def _spawn_analyze(binary: str, root: Path) -> None:
-    """Detached ``gitnexus analyze`` for incremental update."""
+def _record_lock_pid(root: Path, pid: int) -> None:
+    """Stamp the spawned PID into the lock so guard 1 above can see it.
+
+    Safe-by-design: any failure leaves the timestamp-only lock, which
+    still serves the cooldown role.
+    """
     try:
-        subprocess.Popen(
+        (root / _LOCK_FILENAME).write_text(
+            f"{pid}\n{int(time.time())}", encoding="utf-8",
+        )
+    except OSError as e:
+        log.debug("could not stamp pid into gitnexus reindex lock: %s", e)
+
+
+def _spawn_analyze(binary: str, root: Path) -> Optional[int]:
+    """Detached ``gitnexus analyze`` for incremental update.
+
+    Returns the child's PID so the caller can stamp it into the lock, or
+    None if the spawn failed. On hosts where ``gitnexus`` is a wrapper
+    that ``exec``s a container runtime the PID is preserved across the
+    exec, so it stays a valid liveness handle for the whole run.
+    """
+    try:
+        proc = subprocess.Popen(
             [binary, "analyze"],
             cwd=str(root),
             stdin=subprocess.DEVNULL,
@@ -128,8 +175,10 @@ def _spawn_analyze(binary: str, root: Path) -> None:
             **detach_kwargs(),
         )
         log.info("gitnexus: spawned analyze in %s", root)
+        return getattr(proc, "pid", None)
     except OSError as e:
         log.debug("could not spawn gitnexus analyze: %s", e)
+        return None
 
 
 def reindex_if_dirty_async(
@@ -158,7 +207,9 @@ def reindex_if_dirty_async(
             return
         if not _acquire_lock(marker_root, lock_min_age_seconds):
             return
-        _spawn_analyze(bin_, marker_root)
+        pid = _spawn_analyze(bin_, marker_root)
+        if pid is not None:
+            _record_lock_pid(marker_root, pid)
     except Exception as e:
         log.debug("gitnexus reindex_if_dirty_async failed: %s", e)
 
