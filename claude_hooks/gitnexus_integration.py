@@ -22,7 +22,6 @@ Public API:
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import subprocess
 import time
@@ -34,7 +33,7 @@ from claude_hooks._popen import detach_kwargs
 # two-line ``<pid>\n<unix-ts>`` format, same stdlib-only cross-platform PID
 # probe. Imported rather than re-rolled here, following the consolidation
 # precedent in claude_hooks/_popen.py (#221).
-from claude_hooks.claudemem_reindex import _pid_running, _read_lock
+from claude_hooks.claudemem_reindex import _lock_holder_alive, _read_lock
 
 log = logging.getLogger("claude_hooks.gitnexus")
 
@@ -105,44 +104,6 @@ def _probe_version() -> Optional[str]:
 # ---------------------------------------------------------------------------
 # Reindex spawn (Stop-hook side)
 # ---------------------------------------------------------------------------
-
-#: A recorded PID older than this is not trusted: a full rebuild takes
-#: minutes, so after hours the number can only have been reused (reboot,
-#: PID wrap) — and a reused PID would hold the lock forever.
-_LOCK_PID_MAX_AGE_SECONDS = 6 * 3600
-
-
-def _lock_holder_alive(pid: int, ts: Optional[float], now: float) -> bool:
-    """Whether the recorded ``analyze`` is still running.
-
-    ``kill(pid, 0)`` alone says yes for two things that are not running:
-
-    - **Our own exited child.** The Stop hook usually runs inside the
-      long-lived hooks daemon, which spawned ``analyze`` and never waits
-      for it (``start_new_session`` detaches without reparenting). Once
-      it exits it stays a zombie until the next ``Popen`` in the daemon
-      happens to reap it, and nothing on this path spawns one before the
-      lock check. ``waitpid(WNOHANG)`` reaps it here; a zombie that is
-      not our child is read from ``/proc``.
-    - **A reused PID**, once the record is older than any rebuild.
-    """
-    if ts is not None and now - ts > _LOCK_PID_MAX_AGE_SECONDS:
-        return False
-    if os.name != "nt":
-        try:
-            done, _ = os.waitpid(pid, os.WNOHANG)
-            if done == pid:
-                return False  # our child, exited and now reaped
-        except (ChildProcessError, OSError):
-            pass  # not our child
-        try:
-            stat = Path(f"/proc/{pid}/stat").read_text()
-            if stat.rsplit(")", 1)[1].split()[0] == "Z":
-                return False
-        except (OSError, IndexError):
-            pass  # no /proc (macOS) or already gone
-    return _pid_running(pid)
-
 
 def _acquire_lock(root: Path, min_age_seconds: int) -> bool:
     """Return True if a reindex may start now.

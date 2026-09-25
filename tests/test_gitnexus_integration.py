@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from claude_hooks import claudemem_reindex as cr
 from claude_hooks import gitnexus_integration as gn
 
 
@@ -238,7 +239,7 @@ class TestReindex:
 
     def test_a_pid_recorded_hours_ago_is_not_trusted(self, tmp_path):
         """A reused PID (reboot, wrap) must not hold the lock forever."""
-        old = int(gn.time.time()) - gn._LOCK_PID_MAX_AGE_SECONDS - 60
+        old = int(gn.time.time()) - cr._LOCK_PID_MAX_AGE_SECONDS - 60
         (tmp_path / gn._LOCK_FILENAME).write_text(f"{os.getpid()}\n{old}",
                                                   encoding="utf-8")
         assert gn._acquire_lock(tmp_path, min_age_seconds=60)
