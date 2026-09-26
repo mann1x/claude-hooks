@@ -494,7 +494,7 @@ payload.
 - `config/` — `claude-hooks.json` (gitignored) + `claude-hooks.example.json` + `stop_phrases.yaml` (canary phrases for the in-stream stop_phrase_guard)
 - `patches/` — project-specific patches for third-party npm globals (e.g. `apply-caliber-patch.sh`)
 - `docs/` — runbooks (`daemon.md`, `proxy.md`, `hyde.md`, `caliber-proxy.md`, `episodic-server.md`, `pgvector-runbook.md`, `deployment.md`, `env-vars.md`, `lsp-engine.md`, `lsp-mcp.md`, `gemma4-tool-use-notes.md`), plans (`PLAN-*.md`), issue drafts (`issue-warmup-token-drain.md`, `cc-xhigh-regression-issue.md`, `openwolf-managedby-issue.md`), and the audit at `doc-audit-2026-05-01.md`
-- `scripts/` — operator tooling (`proxy_rollup.py`, `proxy_health_oneliner.py`, `proxy_stats.py`, `bench_recall.py`, `bench_lsp_engine.py`, `migrate_to_pgvector.py`, `weekly_token_usage.py`, `statusline_*.py`, …)
+- `scripts/` — operator tooling (`proxy_rollup.py`, `proxy_health_oneliner.py`, `proxy_stats.py`, `bench_recall.py`, `bench_lsp_engine.py`, `migrate_to_pgvector.py`, `episodic_doctor.py`, `weekly_token_usage.py`, `statusline_*.py`, …)
 - `tests/` — unittest-based, run with `pytest`
 
 ---

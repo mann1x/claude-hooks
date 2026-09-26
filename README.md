@@ -460,6 +460,7 @@ layer; it asks for explicit confirmation before writing.
 | `scripts/bench_recall.py` | End-to-end recall latency benchmark across the configured providers. p50/p90/p99 + per-stage breakdown. |
 | `scripts/bench_lsp_engine.py` | LSP engine vs ruff-only baseline. Measures `did_change` IPC-only and full round-trip (with diagnostics). Use after a new pyright / engine release. |
 | `scripts/migrate_to_pgvector.py` | One-shot dump-and-load from Qdrant or Memory KG into the pgvector backend, with delta sync. See [`docs/pgvector-runbook.md`](docs/pgvector-runbook.md). |
+| `scripts/episodic_doctor.py` | Checks that episodic-memory's host-built native Node modules (better-sqlite3) load; `--rebuild` rebuilds the ones that don't after a Node major upgrade. See [`docs/episodic-server.md`](docs/episodic-server.md). |
 | `scripts/install-caliber-hook.sh` | Installs the Caliber pre-commit hook into the current repo so agent configs stay in sync. |
 | `scripts/openwolfstatus.{py,sh,bat}` | OpenWolf status utility. |
 
@@ -761,10 +762,11 @@ python3 install.py --episodic-client URL    # configure as episodic-memory clien
 python3 episodic_server/server.py --host 0.0.0.0 --port 11435
 systemctl status episodic-server            # if installed as systemd service
 journalctl -u episodic-server -f            # follow server logs
+python3 scripts/episodic_doctor.py          # do the native Node modules load? --rebuild fixes them
 
 # Episodic API (from any host)
 curl "http://SERVER:11435/search?q=bcache&limit=5"   # search conversations
-curl http://SERVER:11435/health                       # health check
+curl "http://SERVER:11435/health?fresh=1"             # health check (runs the CLI; 503 when it fails)
 curl http://SERVER:11435/stats                        # index statistics
 curl -X POST http://SERVER:11435/sync                 # trigger re-index
 
