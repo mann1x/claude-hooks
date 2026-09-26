@@ -10,7 +10,7 @@ on every prompt and stores noteworthy turns back.
 - **Handlers**: `claude_hooks/hooks/` — one per event (user_prompt_submit, session_start, stop, etc.)
 - **Providers**: `claude_hooks/providers/` — memory backends (qdrant, memory_kg, pgvector, sqlite_vec)
 - **Config**: `config/claude-hooks.json` (gitignored), deep-merged over defaults in `claude_hooks/config.py`
-- **Episodic**: `episodic_server/` (HTTP front-end) + `episodic-memory/` (vendored obra/episodic-memory subtree, `dist/` committed); `scripts/deploy.py` builds + `npm link`s it on the server host via `install_vendored()` in `scripts/episodic_doctor.py`, and `scripts/verify_deploy.py` fails when the CLI on PATH is not that copy
+- **Episodic**: `episodic_server/` (HTTP front-end) + `episodic-memory/` (vendored obra/episodic-memory subtree, `dist/` committed); `scripts/deploy.py` builds + `npm link`s it on the server host via `install_vendored()` in `scripts/episodic_doctor.py`, and `scripts/verify_deploy.py` fails when the CLI on PATH is not that copy. `episodic.compress_after_days` (default 7, `0` = never) reaches every sync claude-hooks starts as `EPISODIC_MEMORY_COMPRESS_AFTER_DAYS` — `sync_env()` in `claude_hooks/hooks/session_end.py` and in `episodic_server/server.py` (`/ingest` + `/sync`) — so archived transcripts idle that long are stored as `<name>.jsonl.zst` and still read by their `.jsonl` name
 
 ## Intelligence Modules
 
