@@ -10,6 +10,7 @@ on every prompt and stores noteworthy turns back.
 - **Handlers**: `claude_hooks/hooks/` — one per event (user_prompt_submit, session_start, stop, etc.)
 - **Providers**: `claude_hooks/providers/` — memory backends (qdrant, memory_kg, pgvector, sqlite_vec)
 - **Config**: `config/claude-hooks.json` (gitignored), deep-merged over defaults in `claude_hooks/config.py`
+- **Episodic**: `episodic_server/` (HTTP front-end) + `episodic-memory/` (vendored obra/episodic-memory subtree, `dist/` committed); `scripts/deploy.py` builds + `npm link`s it on the server host via `install_vendored()` in `scripts/episodic_doctor.py`, and `scripts/verify_deploy.py` fails when the CLI on PATH is not that copy
 
 ## Intelligence Modules
 

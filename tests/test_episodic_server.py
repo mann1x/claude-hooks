@@ -306,3 +306,41 @@ def test_a_link_that_does_not_take_fails(vendored, monkeypatch, tmp_path):
     with mock.patch.object(doctor.subprocess, "run",
                            return_value=subprocess.CompletedProcess([], 0, "", "")):
         assert not doctor.install_vendored(vendored, note=lambda m: None)
+
+
+# ------------------------------------------------------------------ #
+# Archive compression: the threshold reaches every sync we start
+# ------------------------------------------------------------------ #
+def test_server_sync_env_reads_the_threshold_from_config(tmp_path, monkeypatch):
+    cfg = tmp_path / "claude-hooks.json"
+    monkeypatch.setattr(es, "CONFIG_PATH", cfg)
+    cfg.write_text(json.dumps({"episodic": {"compress_after_days": 3}}))
+    assert es.sync_env()["EPISODIC_MEMORY_COMPRESS_AFTER_DAYS"] == "3"
+    cfg.write_text(json.dumps({"episodic": {}}))
+    assert es.sync_env()["EPISODIC_MEMORY_COMPRESS_AFTER_DAYS"] == "7"
+    monkeypatch.setenv("EPISODIC_MEMORY_COMPRESS_AFTER_DAYS", "9")
+    cfg.write_text(json.dumps({"episodic": {"compress_after_days": 0}}))
+    assert "EPISODIC_MEMORY_COMPRESS_AFTER_DAYS" not in es.sync_env()
+
+
+def test_ingest_drops_a_stale_compressed_copy(http, archive):
+    old = archive / "h-proj" / "sid.jsonl.zst"
+    old.parent.mkdir()
+    old.write_bytes(b"stale")
+    req = urllib.request.Request(
+        http + "/ingest", data=b'{"type":"user"}\n' * 10, method="POST",
+        headers={"X-Project": "proj", "X-Session-Id": "sid", "X-Source-Host": "h"})
+    with mock.patch.object(es.subprocess, "Popen") as popen:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            assert r.status == 200
+    assert (archive / "h-proj" / "sid.jsonl").exists()
+    assert not old.exists()
+    assert "EPISODIC_MEMORY_COMPRESS_AFTER_DAYS" in popen.call_args.kwargs["env"]
+
+
+def test_session_end_sync_env():
+    from claude_hooks.hooks.session_end import sync_env
+    assert sync_env({"compress_after_days": 5})["EPISODIC_MEMORY_COMPRESS_AFTER_DAYS"] == "5"
+    assert sync_env({})["EPISODIC_MEMORY_COMPRESS_AFTER_DAYS"] == "7"
+    assert "EPISODIC_MEMORY_COMPRESS_AFTER_DAYS" not in sync_env({"compress_after_days": 0})
+    assert "EPISODIC_MEMORY_COMPRESS_AFTER_DAYS" not in sync_env({"compress_after_days": "x"})

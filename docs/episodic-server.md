@@ -193,7 +193,8 @@ CLI args:
   "server_host": "0.0.0.0",                      // server only
   "server_port": 11435,                          // server only
   "binary": "episodic-memory",                   // server only
-  "timeout": 10.0                                // client push timeout
+  "timeout": 10.0,                               // client push timeout
+  "compress_after_days": 7                       // server: zstd archived transcripts idle this long (0 = never)
 }
 ```
 
@@ -282,6 +283,35 @@ Our patches (all upstreamable):
 |---|---|
 | `EPISODIC_MEMORY_TOOL_INPUT_CHARS` (default 0) caps stored `tool_calls.tool_input` / `tool_result` | nothing reads them back; on solidpc they were 6.5 GB of an 8.0 GB index |
 | `episodic-memory compact [--dry-run] [--no-backup]` | applies the cap to existing rows, rebuilds with `VACUUM INTO` + rename, backs the untouched db up to `<db>.pre-compact` first. solidpc: 8.02 → 2.04 GB in 76 s |
+| compressed archive: `<name>.jsonl.zst`, read transparently | the archive was 15 GB of JSON lines that compress ~6.7× at zstd level 3 |
+| `episodic-memory compress-archive [--after-days N] [--level L] [--dry-run]`, and sync compresses on its own when `EPISODIC_MEMORY_COMPRESS_AFTER_DAYS` is set | see below |
+| the indexer re-copies an archived transcript only when its source is newer | it re-copied every previously indexed file on every run, which would also silently undo compression |
+
+### Compressed archive
+
+A transcript's name is always `<name>.jsonl` — in the database, in
+`-summary.txt` paths, in sync's copy logic — and only opening it
+resolves to `<name>.jsonl.zst` when that is what is on disk
+(`src/transcript-io.ts`). Parser, search, `show`, the MCP `read` tool,
+verify and `findJsonlFiles` all go through it, so search, show and
+indexing work unchanged. Decompression is Node's built-in zstd (Node
+≥ 22.15). For a human: `zstdcat x.jsonl.zst | jq`, `zstdgrep`.
+
+- **What gets compressed:** archived transcripts not modified for
+  `episodic.compress_after_days` (default 7). claude-hooks passes it to
+  every sync it starts (SessionEnd on the server, `/ingest`, `/sync`) as
+  `EPISODIC_MEMORY_COMPRESS_AFTER_DAYS`, and sync compresses at the end
+  of its run, under its lock. Each file is decompressed and hashed
+  against the original before the original is removed, and keeps the
+  original's mtime, so sync still sees the copy as current.
+- **A resumed session:** its source becomes newer, sync copies a fresh
+  plain `.jsonl` and drops the stale `.zst`. A re-pushed `/ingest` does
+  the same.
+- **Live transcripts** in `~/.claude/projects` are never touched:
+  Claude Code appends to them and reads them to resume a session.
+- **The first run** over an existing archive is large; do it by hand
+  rather than inside a SessionEnd-triggered sync:
+  `episodic-memory compress-archive --dry-run`, then without.
 
 Upstream re-embeds at most `EPISODIC_MEMORY_MIGRATION_BATCH` (500)
 stale exchanges per sync after an encoder change. Until all are done,

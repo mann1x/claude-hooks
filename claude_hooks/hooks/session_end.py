@@ -169,6 +169,22 @@ def _push_transcript(event: dict, ep_cfg: dict) -> Optional[dict]:
     return None
 
 
+def sync_env(ep_cfg: dict) -> dict:
+    """The environment for an ``episodic-memory sync``: ours, plus the
+    idle threshold after which sync compresses archived transcripts."""
+    env = dict(os.environ)
+    days = ep_cfg.get("compress_after_days", 7)
+    try:
+        days = float(days)
+    except (TypeError, ValueError):
+        days = 0
+    if days > 0:
+        env["EPISODIC_MEMORY_COMPRESS_AFTER_DAYS"] = f"{days:g}"
+    else:
+        env.pop("EPISODIC_MEMORY_COMPRESS_AFTER_DAYS", None)
+    return env
+
+
 def _local_sync(ep_cfg: dict) -> Optional[dict]:
     """Trigger a local episodic-memory sync (server mode)."""
     episodic_bin = ep_cfg.get("binary", "episodic-memory")
@@ -180,6 +196,7 @@ def _local_sync(ep_cfg: dict) -> Optional[dict]:
             [episodic_bin, "sync", "--background"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=sync_env(ep_cfg),
             **detach_kwargs(),
         )
         log.debug("triggered local episodic-memory sync")

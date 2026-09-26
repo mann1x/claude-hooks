@@ -67,11 +67,43 @@ STDERR_TAIL_CHARS = 2000
 
 _probe_cache: dict = {}
 
+# claude-hooks config, read for the episodic block (the server runs from
+# the repo; see episodic-server.service).
+CONFIG_PATH = Path(
+    os.environ.get(
+        "CLAUDE_HOOKS_CONFIG",
+        str(Path(__file__).resolve().parent.parent / "config" / "claude-hooks.json"),
+    )
+)
 
-def _run_cli(args: list[str], timeout: float) -> subprocess.CompletedProcess:
+
+def compress_after_days() -> float:
+    """``episodic.compress_after_days`` (default 7), else the env var."""
+    try:
+        ep = json.loads(CONFIG_PATH.read_text(encoding="utf-8")).get("episodic") or {}
+        return float(ep.get("compress_after_days", 7))
+    except (OSError, ValueError, TypeError, AttributeError):
+        try:
+            return float(os.environ.get("EPISODIC_MEMORY_COMPRESS_AFTER_DAYS", "0"))
+        except ValueError:
+            return 0.0
+
+
+def sync_env() -> dict:
+    """Environment for a sync: sync compresses transcripts idle this long."""
+    env = dict(os.environ)
+    days = compress_after_days()
+    if days > 0:
+        env["EPISODIC_MEMORY_COMPRESS_AFTER_DAYS"] = f"{days:g}"
+    else:
+        env.pop("EPISODIC_MEMORY_COMPRESS_AFTER_DAYS", None)
+    return env
+
+
+def _run_cli(args: list[str], timeout: float, env: dict | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         [EPISODIC_BIN, *args],
-        capture_output=True, text=True, timeout=timeout,
+        capture_output=True, text=True, timeout=timeout, env=env,
     )
 
 
@@ -241,6 +273,9 @@ class EpisodicHandler(BaseHTTPRequestHandler):
         # Write the transcript.
         dest = archive_dir / f"{session_id}.jsonl"
         dest.write_bytes(body)
+        # A re-pushed session supersedes a copy sync compressed earlier;
+        # the plain file wins on read, so the .zst would only waste space.
+        Path(f"{dest}.zst").unlink(missing_ok=True)
         size = len(body)
 
         # Trigger re-index in background. stderr stays on the service's
@@ -248,6 +283,7 @@ class EpisodicHandler(BaseHTTPRequestHandler):
         subprocess.Popen(
             [EPISODIC_BIN, "sync", "--background"],
             stdout=subprocess.DEVNULL,
+            env=sync_env(),
         )
 
         self._json_response(200, {
@@ -261,7 +297,7 @@ class EpisodicHandler(BaseHTTPRequestHandler):
     def _sync(self):
         """Trigger a manual sync/re-index."""
         try:
-            result = _run_cli(["sync"], SYNC_TIMEOUT_S)
+            result = _run_cli(["sync"], SYNC_TIMEOUT_S, env=sync_env())
         except subprocess.TimeoutExpired:
             self._json_response(504, {"error": "sync timed out"})
             return

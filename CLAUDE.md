@@ -490,6 +490,7 @@ payload.
 - `claude_hooks/pgvector_mcp/` — system-wide stdio MCP server exposing pgvector recall + KG ops to any MCP-aware client
 - `claude_hooks/sqlite_vec_mcp/` — v1.6+: parity launcher for the sqlite_vec store (stdio + optional HTTP on 32777). Same shape as `pgvector_mcp`, trimmed to 3 memory tools (`sqlite-vec-find` / `-store` / `-count`). Lets Cursor / Codex / OpenWebUI / Claude Desktop share the same `.db` file the hook pipeline reads in-process
 - `episodic_server/` — HTTP front-end for [obra/episodic-memory](https://github.com/obra/episodic-memory) (`server.py`, `Dockerfile`, systemd unit)
+- `episodic-memory/` — vendored git subtree of [obra/episodic-memory](https://github.com/obra/episodic-memory) (upstream `7e06519`, v1.6.0+2) with our patches on top; `dist/` is committed, so deploy never runs `npm run build`. Built + `npm link`ed on the episodic server host by `scripts/deploy.py` via `install_vendored()` in `scripts/episodic_doctor.py`; subtree workflow in `docs/episodic-server.md`
 - `systemd/` — service templates: `claude-hooks-proxy`, `claude-hooks-dashboard`, `claude-hooks-rollup{.service,.timer}`, `claude-hooks-health{.service,.timer}`, `claude-hooks-daemon`, `claude-hooks-pgvector-mcp`, `caliber-grounding-proxy`, `axon-host`
 - `config/` — `claude-hooks.json` (gitignored) + `claude-hooks.example.json` + `stop_phrases.yaml` (canary phrases for the in-stream stop_phrase_guard)
 - `patches/` — project-specific patches for third-party npm globals (e.g. `apply-caliber-patch.sh`)
@@ -865,8 +866,11 @@ loads**:
 `scripts/deploy.py` covers all of them, discovers rather than hardcodes
 (envs, units, skills are all globbed), searches **both** systemd scopes
 — this host splits them, the consultants engine is a `--user` unit while
-daemon/proxy/dashboard are system units — and finishes by running
-`scripts/verify_deploy.py`. A failed step fails the whole deploy; there
+daemon/proxy/dashboard are system units — builds and `npm link`s the
+vendored `episodic-memory/` on the server host (`episodic.mode ==
+"server"`) before restarting services, and finishes by running
+`scripts/verify_deploy.py`, which fails when the `episodic-memory` on
+PATH is not the vendored copy. A failed step fails the whole deploy; there
 is no partial success, because a partial deploy reporting success is the
 exact failure it replaces.
 
