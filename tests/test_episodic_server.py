@@ -236,3 +236,73 @@ def test_doctor_prefers_a_compiler_that_can_do_cxx20(monkeypatch):
                                       "/c/bin/x86_64-conda-linux-gnu-g++")
     majors["/c/bin/x86_64-conda-linux-gnu-g++"] = 9
     assert doctor.pick_compiler() is None
+
+
+# ------------------------------------------------------------------ #
+# install_vendored: what deploy and install.py run on the server host
+# ------------------------------------------------------------------ #
+@pytest.fixture
+def vendored(tmp_path, monkeypatch):
+    root = tmp_path / "episodic-memory"
+    mod = root / "node_modules" / "better-sqlite3" / "build" / "Release" / "better_sqlite3.node"
+    mod.parent.mkdir(parents=True)
+    mod.write_bytes(b"")
+    (root / "package.json").write_text('{"name": "episodic-memory"}')
+    monkeypatch.setattr(doctor, "deploy_stamp", lambda root=None: "tree=abc abi=147")
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/bin/npm")
+    monkeypatch.setattr(doctor, "pick_compiler", lambda: ("cc", "c++"))
+    monkeypatch.setattr(doctor, "linked_root", lambda: root)
+    return root
+
+
+def _npm_calls(run):
+    return [c.args[0][1] for c in run.call_args_list]
+
+
+def test_install_skips_npm_when_the_stamp_matches_and_modules_load(vendored, monkeypatch):
+    (vendored / "node_modules" / doctor.STAMP_NAME).write_text("tree=abc abi=147\n")
+    monkeypatch.setattr(doctor, "load_error", lambda m: None)
+    with mock.patch.object(doctor.subprocess, "run") as run:
+        assert doctor.install_vendored(vendored, note=lambda m: None)
+    assert run.call_count == 0
+
+
+def test_install_rebuilds_with_the_static_runtime_when_the_stamp_is_stale(vendored, monkeypatch):
+    monkeypatch.setattr(doctor, "load_error", lambda m: None)
+    with mock.patch.object(doctor.subprocess, "run",
+                           return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
+        assert doctor.install_vendored(vendored, note=lambda m: None)
+    assert _npm_calls(run) == ["install"]
+    env = run.call_args_list[0].kwargs["env"]
+    assert doctor.STATIC_RUNTIME in env["LDFLAGS"] and env["CXX"] == "c++"
+    assert (vendored / "node_modules" / doctor.STAMP_NAME).read_text().strip() == "tree=abc abi=147"
+
+
+def test_an_install_that_does_not_load_fails_and_writes_no_stamp(vendored, monkeypatch):
+    monkeypatch.setattr(doctor, "load_error", lambda m: "NODE_MODULE_VERSION 127")
+    notes = []
+    with mock.patch.object(doctor.subprocess, "run",
+                           return_value=subprocess.CompletedProcess([], 0, "", "")):
+        assert not doctor.install_vendored(vendored, note=notes.append)
+    assert not (vendored / "node_modules" / doctor.STAMP_NAME).exists()
+    assert any("does not load" in n for n in notes)
+
+
+def test_a_cli_linked_elsewhere_is_relinked_and_checked(vendored, monkeypatch, tmp_path):
+    (vendored / "node_modules" / doctor.STAMP_NAME).write_text("tree=abc abi=147\n")
+    monkeypatch.setattr(doctor, "load_error", lambda m: None)
+    where = iter([tmp_path / "old-checkout", vendored])
+    monkeypatch.setattr(doctor, "linked_root", lambda: next(where))
+    with mock.patch.object(doctor.subprocess, "run",
+                           return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
+        assert doctor.install_vendored(vendored, note=lambda m: None)
+    assert _npm_calls(run) == ["link"]
+
+
+def test_a_link_that_does_not_take_fails(vendored, monkeypatch, tmp_path):
+    (vendored / "node_modules" / doctor.STAMP_NAME).write_text("tree=abc abi=147\n")
+    monkeypatch.setattr(doctor, "load_error", lambda m: None)
+    monkeypatch.setattr(doctor, "linked_root", lambda: tmp_path / "old-checkout")
+    with mock.patch.object(doctor.subprocess, "run",
+                           return_value=subprocess.CompletedProcess([], 0, "", "")):
+        assert not doctor.install_vendored(vendored, note=lambda m: None)

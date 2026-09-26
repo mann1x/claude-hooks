@@ -424,6 +424,23 @@ def check_episodic(r: Results) -> None:
         r.add(PASS, "episodic", f"mode {mode!r}: nothing to check")
         return
     bad = FAIL if mode == "server" else WARN
+    if mode == "server":
+        # The CLI must be the vendored copy this repo deploys, not an
+        # out-of-tree checkout nothing updates (that one sat 79 commits
+        # behind upstream).
+        sys.path.insert(0, str(REPO / "scripts"))
+        try:
+            import episodic_doctor
+        finally:
+            sys.path.pop(0)
+        linked = episodic_doctor.linked_root()
+        vendored = episodic_doctor.VENDORED
+        if linked is None or linked.resolve() != vendored.resolve():
+            r.add(FAIL, "episodic CLI",
+                  f"episodic-memory on PATH is {linked}, not {vendored} "
+                  "(scripts/deploy.py links it)")
+        else:
+            r.add(PASS, "episodic CLI", f"vendored ({vendored})")
     try:
         with urllib.request.urlopen(f"{url}/health?fresh=1", timeout=90) as resp:
             body = json.loads(resp.read())

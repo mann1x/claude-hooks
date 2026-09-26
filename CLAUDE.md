@@ -858,6 +858,7 @@ loads**:
 | package code | services (editable, live) | loudly |
 | entry points / deps | shell + services | loudly |
 | **`.claude/skills/*/SKILL.md`** | **Claude Code, at session start** | **silently** |
+| `episodic-memory/` (vendored Node, native module) | episodic-server + CLI, server host only | silently (a dead CLI looked healthy for 12 days) |
 | systemd units | systemd | loudly |
 | config mirrors | `install.py` | silently |
 

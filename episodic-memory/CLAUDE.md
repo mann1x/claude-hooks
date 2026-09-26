@@ -90,6 +90,10 @@ The `exchanges.embedding_version` column tracks which encoder produced each row'
 
 If you change anything in the embedding pipeline (model, dtype, prefix, pooling, normalization, truncation), **bump `EMBEDDING_VERSION`**. That triggers automatic re-embedding for everyone on upgrade. Don't change pipeline behavior silently — search results would degrade against indexed vectors from the old pipeline.
 
+### Stored tool inputs and `compact`
+
+`tool_calls.tool_input` / `tool_result` are not read back by search, show, or the embedding migration — only `tool_name` is. `src/tool-input.ts` caps what `insertExchange` keeps to `EPISODIC_MEMORY_TOOL_INPUT_CHARS` (default `0` = store `NULL`). `src/compact.ts` / `src/compact-cli.ts` apply the cap to existing rows and rebuild the file via `VACUUM INTO` + atomic rename under the sync lock; it refuses the swap while another connection holds the database open. Don't add readers of those columns without raising the default. Spec: `test/compact.test.ts`.
+
 ### `dist/` is committed
 
 Hand-edits to `dist/` get clobbered by `npm run build`. Always edit `src/`, then build, then commit both together. CI doesn't rebuild for you.
@@ -109,6 +113,8 @@ src/
   sync.ts / sync-cli.ts  # source→archive copy + index, with reentrancy guard
   summarizer.ts          # Claude Agent SDK calls; persistSession: false guard
   db.ts                  # schema + migrations (incl. cascade + embedding_version)
+  tool-input.ts          # EPISODIC_MEMORY_TOOL_INPUT_CHARS cap for tool_input/tool_result
+  compact.ts / compact-cli.ts  # trim stored tool inputs + VACUUM INTO rebuild
   paths.ts               # config/index/archive directory resolution
   parser.ts              # JSONL transcript → exchanges
   mcp-server.ts          # MCP tool surface (search, read)
@@ -126,4 +132,4 @@ scripts/
 
 ## When in doubt
 
-Read the relevant test file. Tests in this repo are the executable spec — particularly `test/embedding-migration.test.ts`, `test/sync-cli-reentrancy.test.ts`, and `test/tool-calls-cascade.test.ts`. They cover the load-bearing invariants (lock contention, recursion-guard, schema migrations) and exercise the real subsystems rather than mocking them.
+Read the relevant test file. Tests in this repo are the executable spec — particularly `test/embedding-migration.test.ts`, `test/sync-cli-reentrancy.test.ts`, `test/tool-calls-cascade.test.ts`, and `test/compact.test.ts`. They cover the load-bearing invariants (lock contention, recursion-guard, schema migrations, index compaction) and exercise the real subsystems rather than mocking them.

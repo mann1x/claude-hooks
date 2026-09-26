@@ -8931,7 +8931,7 @@ COMPANION_TOOLS = [
     ("mnemex",          "mnemex",                   "HIGH",   "semantic code search (AST-aware, embedding-based)"),
     ("caliber",         "@rely-ai/caliber",         "MEDIUM", "config quality scoring and drift detection"),
     ("claudekit",       "claudekit",                "MEDIUM", "git checkpoints and hook profiling"),
-    ("episodic-memory", None,                       "HIGH",   "transcript search across past sessions (build from source)"),
+    ("episodic-memory", None,                       "HIGH",   "transcript search across past sessions (vendored; --episodic-server builds it)"),
 ]
 
 # --------------------------------------------------------------------- #
@@ -9503,10 +9503,18 @@ def _setup_episodic(cfg: dict, cfg_path: Path, args, *, dry_run: bool) -> None:
 
     if args.episodic_server:
         print("\n==> Episodic memory: SERVER mode")
-        if not shutil.which("episodic-memory"):
-            print("  [!!] episodic-memory not found. Install it first:")
-            print("       git clone https://github.com/obra/episodic-memory")
-            print("       cd episodic-memory && npm install && npm link")
+        # episodic-memory is vendored (git subtree at episodic-memory/):
+        # build and link that copy rather than asking for a separate
+        # checkout, which is how the old one went 79 commits stale.
+        sys.path.insert(0, str(HERE / "scripts"))
+        try:
+            import episodic_doctor
+        finally:
+            sys.path.pop(0)
+        if not episodic_doctor.install_vendored(
+                dry=dry_run, note=lambda m: print(f"  {m}")):
+            print("  [!!] could not build the vendored episodic-memory "
+                  "(see above); server mode not configured")
             return
         ep_cfg["mode"] = "server"
 

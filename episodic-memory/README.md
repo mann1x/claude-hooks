@@ -190,6 +190,10 @@ episodic-memory show --format html conversation.jsonl > output.html
 
 # View statistics
 episodic-memory stats
+
+# Shrink the index (drop stored tool inputs, rebuild the database file)
+episodic-memory compact --dry-run
+episodic-memory compact
 ```
 
 ### Legacy Commands
@@ -252,6 +256,14 @@ export EPISODIC_MEMORY_DISABLE_AUTO_SYNC=1
 # turns in the same conversation still index, and search over real conversations
 # is unaffected.
 export EPISODIC_MEMORY_MAX_MESSAGE_BYTES=262144
+
+# How many characters of each tool call's input and result the index keeps
+# (default: 0 = none). Nothing reads these columns back — search, show and the
+# embedding migration use only the tool name, and the full call stays in the
+# archived transcript — so storing them only grows the database. Set N to keep
+# a prefix if you query the tool_calls table directly. `episodic-memory compact`
+# applies the cap to rows indexed before the change.
+export EPISODIC_MEMORY_TOOL_INPUT_CHARS=0
 
 # Wall-clock timeout per Claude summarizer call (milliseconds, default: 120000).
 # A wedged summarizer subprocess is aborted after this, so it can't stall
@@ -334,6 +346,18 @@ Display index statistics including conversation counts, date ranges, and project
 ```bash
 episodic-memory stats
 ```
+
+### `episodic-memory compact`
+
+Shrink the index. Trims stored tool inputs/results in existing rows to `EPISODIC_MEMORY_TOOL_INPUT_CHARS` (default 0 = drop them), then rebuilds the database file without the freed space.
+
+```bash
+episodic-memory compact --dry-run    # report how many rows would be trimmed; change nothing
+episodic-memory compact              # trim, back up to <db>.pre-compact, rebuild
+episodic-memory compact --no-backup  # skip the .pre-compact copy
+```
+
+Takes the sync lock. Stop anything else holding the database open first (for example a server that runs searches): the swap refuses to run otherwise. The rebuild's temporary files are placed next to the database rather than in `/tmp`.
 
 ### `episodic-memory doctor`
 
