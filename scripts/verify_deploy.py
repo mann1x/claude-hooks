@@ -391,6 +391,65 @@ def check_embedder(r: Results) -> None:
         r.add(PASS, "embedder", "no client-side embedder on this host")
 
 
+def check_episodic(r: Results) -> None:
+    """Does episodic-memory actually run?
+
+    The server's ``/health`` used to report ``ok`` whenever the archive
+    directory existed. On solidpc better-sqlite3 was built for Node 22,
+    Node went to 26, and every CLI call threw for 12 days behind that
+    ``ok``. ``/health?fresh=1`` now runs the CLI, and this reads it. On a
+    server host a dead CLI fails the deploy; on a client it only warns,
+    because the fix is on another machine.
+    """
+    import json
+    import urllib.error
+    import urllib.request
+
+    print("episodic")
+    try:
+        from claude_hooks.config import load_config as load_hooks_config
+        ep = load_hooks_config().get("episodic") or {}
+    except Exception as e:
+        r.add(WARN, "episodic", f"config unavailable: {type(e).__name__}")
+        return
+    mode = ep.get("mode") or "off"
+    if mode == "server":
+        host = ep.get("server_host") or "127.0.0.1"
+        if host in ("0.0.0.0", "::"):
+            host = "127.0.0.1"
+        url = f"http://{host}:{int(ep.get('server_port') or 11435)}"
+    elif mode == "client" and ep.get("server_url"):
+        url = ep["server_url"].rstrip("/")
+    else:
+        r.add(PASS, "episodic", f"mode {mode!r}: nothing to check")
+        return
+    bad = FAIL if mode == "server" else WARN
+    try:
+        with urllib.request.urlopen(f"{url}/health?fresh=1", timeout=90) as resp:
+            body = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read())
+        except ValueError:
+            r.add(bad, f"episodic {url}", f"HTTP {e.code}")
+            return
+    except (OSError, ValueError) as e:
+        r.add(bad, f"episodic {url}", f"unreachable: {e}")
+        return
+    if "cli_ok" not in body:
+        # A server from before the CLI probe: its "ok" means only that a
+        # directory exists.
+        r.add(WARN, f"episodic {url}", "server predates the CLI probe; redeploy it")
+        return
+    if not body.get("cli_ok"):
+        detail = body.get("hint") or body.get("error") or "CLI failed"
+        r.add(bad, f"episodic {url}", detail)
+        return
+    age = body.get("index_age_hours")
+    r.add(PASS, f"episodic {url}",
+          "CLI ok" + (f", index updated {age} h ago" if age is not None else ""))
+
+
 def check_version(r: Results) -> None:
     print("version")
     try:
@@ -485,6 +544,7 @@ def main() -> int:
         check_providers(r)
         check_embedder(r)
         check_lsp_daemons(r)
+        check_episodic(r)
         check_skills(r)
         check_store(r)
 

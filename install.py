@@ -9646,6 +9646,49 @@ SYSTEMD_UNIT = "episodic-server.service"
 SYSTEMD_PATH = Path("/etc/systemd/system") / SYSTEMD_UNIT
 
 
+def _episodic_rw_paths(home: Path) -> list[str]:
+    """The paths episodic-server must be able to write, each as spelled
+    and — when it is a symlink, e.g. an archive moved to another
+    filesystem — also resolved. ProtectSystem=strict builds the service's
+    mount namespace from the literal ReadWritePaths, so granting only the
+    symlink leaves the real directory read-only."""
+    out: list[str] = []
+    for p in (home / ".config" / "superpowers", home / ".claude"):
+        for q in (p, p.resolve()):
+            if str(q) not in out:
+                out.append(str(q))
+    return out
+
+
+def _render_episodic_unit(template: str, *, repo: Path, host: str, port: int,
+                          home: Path) -> str:
+    content = template.replace("__REPO_PATH__", str(repo))
+    content = content.replace("__HOST__", host)
+    content = content.replace("__PORT__", str(port))
+    rw = " ".join(_episodic_rw_paths(home) + ["/var/log"])
+    return "\n".join(
+        f"ReadWritePaths={rw}" if line.startswith("ReadWritePaths=") else line
+        for line in content.split("\n")
+    )
+
+
+def _episodic_unit_missing_paths(unit_path: Path, needed: list[str]) -> list[str]:
+    """The ``needed`` paths granted neither by the unit nor its drop-ins."""
+    granted: set[str] = set()
+    files = [unit_path] + sorted(Path(f"{unit_path}.d").glob("*.conf"))
+    for f in files:
+        try:
+            text = f.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("ReadWritePaths="):
+                # systemd prefixes: "-" (ignore missing), "+" (no chroot).
+                granted.update(x.lstrip("-+") for x in line.split("=", 1)[1].split())
+    return [p for p in needed if p not in granted]
+
+
 def _install_episodic_systemd(host: str, port: int, *, non_interactive: bool, dry_run: bool) -> None:
     """Install the episodic-server as a systemd service."""
     template_path = HERE / "episodic_server" / "episodic-server.service"
@@ -9655,6 +9698,19 @@ def _install_episodic_systemd(host: str, port: int, *, non_interactive: bool, dr
 
     already_installed = SYSTEMD_PATH.exists()
     if already_installed:
+        missing = _episodic_unit_missing_paths(SYSTEMD_PATH, _episodic_rw_paths(Path.home()))
+        if missing:
+            # A relocated archive (e.g. ~/.config/superpowers symlinked to
+            # another filesystem) is read-only to the service under
+            # ProtectSystem=strict until its real path is granted.
+            print("  [!!] episodic-server.service does not grant write access to:")
+            for m in missing:
+                print(f"         {m}")
+            print(f"       Add a drop-in: {SYSTEMD_PATH}.d/override.conf with")
+            print("         [Service]")
+            print(f"         ReadWritePaths={' '.join(missing)}")
+            print("       then: systemctl daemon-reload && systemctl restart "
+                  f"{SYSTEMD_UNIT}")
         # Check if it's running.
         rc = subprocess.run(
             ["systemctl", "is-active", "--quiet", SYSTEMD_UNIT],
@@ -9690,17 +9746,10 @@ def _install_episodic_systemd(host: str, port: int, *, non_interactive: bool, dr
         print(f"  [dry-run] Would install {SYSTEMD_PATH}")
         return
 
-    # Read template, substitute placeholders.
-    content = template_path.read_text(encoding="utf-8")
-    content = content.replace("__REPO_PATH__", str(HERE.resolve()))
-    content = content.replace("__HOST__", host)
-    content = content.replace("__PORT__", str(port))
-
-    # Expand ReadWritePaths for the actual user.
-    home = str(Path.home())
-    content = content.replace("/root/.config/superpowers", f"{home}/.config/superpowers")
-    content = content.replace("/root/.claude", f"{home}/.claude")
-
+    content = _render_episodic_unit(
+        template_path.read_text(encoding="utf-8"),
+        repo=HERE.resolve(), host=host, port=port, home=Path.home(),
+    )
     SYSTEMD_PATH.write_text(content, encoding="utf-8")
     print(f"  Installed: {SYSTEMD_PATH}")
 

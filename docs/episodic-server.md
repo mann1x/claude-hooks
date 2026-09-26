@@ -65,13 +65,20 @@ Verify:
 
 ```bash
 systemctl status episodic-server
-curl -s http://localhost:11435/health | jq
+curl -s 'http://localhost:11435/health?fresh=1' | jq
 # {
-#   "status": "ok",
 #   "archive": "/root/.config/superpowers/conversation-archive",
-#   "archive_exists": true
+#   "archive_exists": true,
+#   "index_db": "/root/.config/superpowers/conversation-index/db.sqlite",
+#   "index_age_hours": 0.4,
+#   "cli_ok": true,
+#   "checked_at": 1790000000.0,
+#   "status": "ok"
 # }
 ```
+
+`scripts/verify_deploy.py` reads the same endpoint on every deploy: a
+dead CLI fails the deploy on the server host and warns on a client.
 
 ### Docker alternative
 
@@ -116,11 +123,19 @@ All endpoints return JSON.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | Liveness probe — returns archive path + existence |
+| `GET` | `/health` | Runs `episodic-memory stats` (cached 5 min; `?fresh=1` forces it). 200 `ok`, or **503 `degraded`** with the CLI's stderr and a `hint`. Also reports `index_age_hours` |
 | `GET` | `/stats` | Runs `episodic-memory stats` and returns stdout |
 | `GET` | `/search?q=<query>&limit=<N>` | Search across all indexed conversations. `limit` defaults to 10 |
 | `POST` | `/ingest` | Save a transcript JSONL and trigger re-index |
 | `POST` | `/sync` | Force a synchronous `episodic-memory sync` (timeout 120 s) |
+
+When the CLI exits non-zero, `/stats`, `/search` and `/sync` answer
+**502** with `returncode`, the tail of `stderr`, and a `hint` for known
+causes. Until 2026-09-26 they answered 200 with an empty `stdout` and
+dropped stderr, and `/health` only checked that the archive directory
+existed, so a CLI that threw on every call looked healthy for 12 days.
+The first `/search` in a process loads the embedding model (~35 s on
+solidpc); give any probe of it at least 60 s.
 
 ### `POST /ingest`
 
@@ -159,6 +174,7 @@ Read by `server.py`:
 | Var | Default | Purpose |
 |---|---|---|
 | `EPISODIC_ARCHIVE` | `~/.config/superpowers/conversation-archive` | Where transcripts are written and `episodic-memory` reads from |
+| `EPISODIC_INDEX_DB` | `<archive>/../conversation-index/db.sqlite` | The index whose age `/health` reports |
 | `EPISODIC_BIN` | `episodic-memory` | Path/name of the indexer binary. Override if not on PATH |
 
 CLI args:
@@ -219,8 +235,42 @@ new transcripts within seconds on small archives.
 - `StartLimitBurst=5` over 300 s — won't loop forever on
   permanent failures (e.g. archive path inaccessible)
 
-If you run as a non-root user, edit `ReadWritePaths` to point at the
-right home directory.
+`install.py` writes `ReadWritePaths` for the installing user's home, and
+adds the **resolved** target of `~/.config/superpowers` and `~/.claude`
+when either is a symlink. `ProtectSystem=strict` builds the mount
+namespace from the literal paths, so granting only the symlink leaves a
+relocated archive read-only. On a host whose unit is already installed,
+`install.py` checks the unit plus its drop-ins and prints the drop-in to
+add when a path is missing:
+
+```ini
+# /etc/systemd/system/episodic-server.service.d/override.conf
+[Service]
+ReadWritePaths=/srv/<spool>/superpowers
+```
+
+## Native modules after a Node upgrade
+
+better-sqlite3 binds V8 directly, not N-API, so its build works with
+exactly one Node ABI. After a Node major upgrade every CLI call fails
+with `NODE_MODULE_VERSION … ERR_DLOPEN_FAILED`, and `/health` answers
+503 with a hint. The fix:
+
+```bash
+scripts/episodic_doctor.py            # which host-built modules load
+scripts/episodic_doctor.py --rebuild  # rebuild the ones that don't
+```
+
+Why not just `npm rebuild`: Node ≥ 26's headers need C++20
+(`<source_location>`, GCC ≥ 11), and Debian 11 has GCC 10 with nothing
+newer in apt. The doctor picks `$CXX`, then the system `g++`, then a
+conda-forge `*-conda-linux-gnu-g++` from any conda env, and always links
+with `-static-libstdc++ -static-libgcc`. Without those two flags a
+module built by conda's GCC links a libstdc++ newer than the system's:
+it builds cleanly and then fails to load. There may be no prebuilt
+binary for a new ABI (better-sqlite3 12.8.0 has none for Node 26), so
+waiting for one is not a fix either. After a rebuild the index may be
+stale: `episodic-memory sync`.
 
 ## Troubleshooting
 

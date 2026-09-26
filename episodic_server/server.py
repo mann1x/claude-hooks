@@ -4,7 +4,15 @@ Tiny HTTP server that fronts episodic-memory with two endpoints:
 
     POST /ingest   — accept a transcript JSONL, save to archive, re-index
     GET  /search    — semantic search across all indexed conversations
-    GET  /health    — liveness check
+    GET  /stats     — ``episodic-memory stats``
+    GET  /health    — does the CLI actually run? (cached probe)
+
+Every endpoint that shells out to the CLI answers 502 with the CLI's
+stderr when it exits non-zero. It used to answer 200 with an empty
+``stdout`` and drop stderr, and ``/health`` only checked that the archive
+directory existed — so from 2026-09-14 to 09-26, with better-sqlite3
+built for the wrong Node ABI and every CLI call throwing, the server
+looked healthy while nothing was indexed.
 
 Stdlib only. Designed to run as a systemd service or Docker container on
 the host that has episodic-memory installed.
@@ -36,8 +44,90 @@ DEFAULT_ARCHIVE = Path(
     )
 )
 
+# episodic-memory's index, a sibling of the archive.
+INDEX_DB = Path(
+    os.environ.get(
+        "EPISODIC_INDEX_DB",
+        str(DEFAULT_ARCHIVE.parent / "conversation-index" / "db.sqlite"),
+    )
+)
+
 # episodic-memory binary.
 EPISODIC_BIN = os.environ.get("EPISODIC_BIN", "episodic-memory")
+
+# ``stats`` takes ~4 s, so /health reuses a probe this young (?fresh=1
+# forces a new one).
+HEALTH_PROBE_TTL_S = 300.0
+STATS_TIMEOUT_S = 60
+# The first search in a process loads the embedding model: ~35 s on
+# solidpc. 60 s left no margin.
+SEARCH_TIMEOUT_S = 180
+SYNC_TIMEOUT_S = 120
+STDERR_TAIL_CHARS = 2000
+
+_probe_cache: dict = {}
+
+
+def _run_cli(args: list[str], timeout: float) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [EPISODIC_BIN, *args],
+        capture_output=True, text=True, timeout=timeout,
+    )
+
+
+def cli_failure(result: subprocess.CompletedProcess) -> dict:
+    """What a non-zero CLI exit is reported as: the tail of stderr, and a
+    pointer to the fix when it is the known native-module mismatch."""
+    stderr = (result.stderr or "").strip()
+    out = {
+        "error": "episodic-memory exited non-zero",
+        "returncode": result.returncode,
+        "stderr": stderr[-STDERR_TAIL_CHARS:],
+    }
+    if "NODE_MODULE_VERSION" in stderr or "ERR_DLOPEN_FAILED" in stderr:
+        out["hint"] = ("a native module was built for another Node version; "
+                       "run scripts/episodic_doctor.py --rebuild")
+    return out
+
+
+def probe(*, fresh: bool = False, now: float | None = None) -> dict:
+    """Run ``episodic-memory stats`` and say whether it worked. Cached for
+    HEALTH_PROBE_TTL_S."""
+    now = time.time() if now is None else now
+    cached = _probe_cache.get("result")
+    if cached and not fresh and now - cached["checked_at"] < HEALTH_PROBE_TTL_S:
+        return cached
+    try:
+        r = _run_cli(["stats"], STATS_TIMEOUT_S)
+        res = {"cli_ok": r.returncode == 0}
+        if r.returncode != 0:
+            res.update(cli_failure(r))
+    except subprocess.TimeoutExpired:
+        res = {"cli_ok": False, "error": f"stats timed out after {STATS_TIMEOUT_S}s"}
+    except OSError as e:
+        res = {"cli_ok": False, "error": f"cannot run {EPISODIC_BIN}: {e}"}
+    res["checked_at"] = now
+    _probe_cache["result"] = res
+    return res
+
+
+def health(*, fresh: bool = False, now: float | None = None) -> tuple[int, dict]:
+    now = time.time() if now is None else now
+    body = {
+        "archive": str(DEFAULT_ARCHIVE),
+        "archive_exists": DEFAULT_ARCHIVE.exists(),
+        "index_db": str(INDEX_DB),
+    }
+    try:
+        # The index's age is the only sign of a sync that stopped running
+        # while the CLI itself still works.
+        body["index_age_hours"] = round((now - INDEX_DB.stat().st_mtime) / 3600, 1)
+    except OSError:
+        body["index_age_hours"] = None
+    body.update(probe(fresh=fresh, now=now))
+    ok = body["cli_ok"] and body["archive_exists"]
+    body["status"] = "ok" if ok else "degraded"
+    return (200 if ok else 503), body
 
 
 class EpisodicHandler(BaseHTTPRequestHandler):
@@ -54,7 +144,7 @@ class EpisodicHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/health":
-            self._health()
+            self._health(parsed)
         elif parsed.path == "/search":
             self._search(parsed)
         elif parsed.path == "/stats":
@@ -74,19 +164,21 @@ class EpisodicHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------ #
     # Endpoints
     # ------------------------------------------------------------------ #
-    def _health(self):
-        self._json_response(200, {
-            "status": "ok",
-            "archive": str(DEFAULT_ARCHIVE),
-            "archive_exists": DEFAULT_ARCHIVE.exists(),
-        })
+    def _health(self, parsed):
+        fresh = (parse_qs(parsed.query).get("fresh") or ["0"])[0] not in ("0", "")
+        code, body = health(fresh=fresh)
+        self._json_response(code, body)
 
     def _stats(self):
         """Run episodic-memory stats and return the output."""
-        result = subprocess.run(
-            [EPISODIC_BIN, "stats"],
-            capture_output=True, text=True, timeout=30,
-        )
+        try:
+            result = _run_cli(["stats"], STATS_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            self._json_response(504, {"error": "stats timed out"})
+            return
+        if result.returncode != 0:
+            self._json_response(502, cli_failure(result))
+            return
         self._json_response(200, {
             "stdout": result.stdout.strip(),
             "returncode": result.returncode,
@@ -102,21 +194,24 @@ class EpisodicHandler(BaseHTTPRequestHandler):
         limit = int((params.get("limit") or ["10"])[0])
 
         try:
-            result = subprocess.run(
-                [EPISODIC_BIN, "search", query],
-                capture_output=True, text=True, timeout=60,
-            )
-            # Parse the output into structured results.
-            results = _parse_search_output(result.stdout, limit)
-            self._json_response(200, {
-                "query": query,
-                "count": len(results),
-                "results": results,
-            })
+            result = _run_cli(["search", query], SEARCH_TIMEOUT_S)
         except subprocess.TimeoutExpired:
             self._json_response(504, {"error": "search timed out"})
+            return
         except Exception as e:
             self._json_response(500, {"error": str(e)})
+            return
+        if result.returncode != 0:
+            # Not "0 results": a CLI that cannot open its database prints
+            # nothing, which parses to an empty list.
+            self._json_response(502, cli_failure(result))
+            return
+        results = _parse_search_output(result.stdout, limit)
+        self._json_response(200, {
+            "query": query,
+            "count": len(results),
+            "results": results,
+        })
 
     def _ingest(self):
         """Accept a transcript JSONL and save to the archive."""
@@ -148,11 +243,11 @@ class EpisodicHandler(BaseHTTPRequestHandler):
         dest.write_bytes(body)
         size = len(body)
 
-        # Trigger re-index in background.
+        # Trigger re-index in background. stderr stays on the service's
+        # (the journal): discarding it is how a failing sync went unseen.
         subprocess.Popen(
             [EPISODIC_BIN, "sync", "--background"],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
         )
 
         self._json_response(200, {
@@ -165,10 +260,14 @@ class EpisodicHandler(BaseHTTPRequestHandler):
 
     def _sync(self):
         """Trigger a manual sync/re-index."""
-        result = subprocess.run(
-            [EPISODIC_BIN, "sync"],
-            capture_output=True, text=True, timeout=120,
-        )
+        try:
+            result = _run_cli(["sync"], SYNC_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            self._json_response(504, {"error": "sync timed out"})
+            return
+        if result.returncode != 0:
+            self._json_response(502, cli_failure(result))
+            return
         self._json_response(200, {
             "status": "synced",
             "stdout": result.stdout.strip(),
