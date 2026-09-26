@@ -1,0 +1,84 @@
+{
+  "name": "episodic-memory",
+  "version": "1.6.0",
+  "description": "Semantic search for Claude Code, Codex, and opencode conversations",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/opencode-plugin.d.ts",
+      "import": "./dist/opencode-plugin.js",
+      "default": "./dist/opencode-plugin.js"
+    },
+    "./dist/*": "./dist/*",
+    "./package.json": "./package.json"
+  },
+  "allowScripts": {
+    "better-sqlite3": true,
+    "onnxruntime-node": true,
+    "sharp": false
+  },
+  "bin": {
+    "episodic-memory": "./cli/episodic-memory.js",
+    "episodic-memory-index": "./cli/index-conversations.js",
+    "episodic-memory-search": "./cli/search-conversations",
+    "episodic-memory-mcp-server": "./cli/mcp-server"
+  },
+  "scripts": {
+    "generate-version": "node scripts/generate-version.js",
+    "prebuild": "npm run generate-version",
+    "build": "tsc && npm run bundle",
+    "bundle": "esbuild src/mcp-server.ts --bundle --platform=node --format=esm --outfile=dist/mcp-server.js --external:fsevents --external:@anthropic-ai/claude-agent-sdk --external:sharp --external:onnxruntime-node --external:better-sqlite3 --external:@huggingface/transformers --external:sqlite-vec --external:proper-lockfile",
+    "postinstall": "node scripts/postinstall.js",
+    "pretest": "npm run generate-version",
+    "test": "vitest run",
+    "test:claude-e2e": "node scripts/claude-e2e.js",
+    "test:codex-e2e": "node scripts/codex-e2e.js",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "opencode",
+    "conversations",
+    "search",
+    "semantic-search",
+    "embeddings"
+  ],
+  "author": {
+    "name": "Jesse Vincent",
+    "email": "jesse@fsck.com"
+  },
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.126",
+    "@huggingface/transformers": "^4.2.0",
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "better-sqlite3": "^12.4.1",
+    "marked": "^16.4.0",
+    "proper-lockfile": "^4.1.2",
+    "sqlite-vec": "^0.1.7-alpha.2",
+    "zod": "^4.4.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/marked": "^5.0.2",
+    "@types/node": "^24.7.0",
+    "@types/proper-lockfile": "^4.1.4",
+    "esbuild": "^0.25.11",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/obra/episodic-memory"
+  },
+  "homepage": "https://github.com/obra/episodic-memory"
+}
