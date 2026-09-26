@@ -4,6 +4,7 @@ import { parseConversation } from './parser.js';
 import { initDatabase, getAllExchanges, getFileLastIndexed } from './db.js';
 import { getArchiveDir, getExcludedProjects, findJsonlFiles, statIfExists } from './paths.js';
 import { isErroredSentinel } from './summary-sentinel.js';
+import { statTranscript } from './transcript-io.js';
 
 export interface VerificationResult {
   missing: Array<{ path: string; reason: string }>;
@@ -78,8 +79,8 @@ export async function verifyIndex(): Promise<VerificationResult> {
       // Check if file is outdated (modified after last_indexed)
       const lastIndexed = getFileLastIndexed(db, conversationPath);
       if (lastIndexed !== null) {
-        const fileStat = fs.statSync(conversationPath);
-        if (fileStat.mtimeMs > lastIndexed) {
+        const fileStat = statTranscript(conversationPath);
+        if (fileStat && fileStat.mtimeMs > lastIndexed) {
           result.outdated.push({
             path: conversationPath,
             fileTime: fileStat.mtimeMs,

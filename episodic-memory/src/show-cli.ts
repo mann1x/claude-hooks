@@ -1,4 +1,4 @@
-import { readFileSync } from 'fs';
+import { readTranscript } from './transcript-io.js';
 import { formatConversationAsMarkdown, formatConversationAsHTML } from './show.js';
 
 const args = process.argv.slice(2);
@@ -46,7 +46,7 @@ if (!filePath) {
 }
 
 try {
-  const jsonl = readFileSync(filePath, 'utf-8');
+  const jsonl = await readTranscript(filePath);
 
   if (format === 'html') {
     console.log(formatConversationAsHTML(jsonl));

@@ -30511,8 +30511,56 @@ function isErroredSentinel(content) {
 }
 
 // src/search.ts
-import fs3 from "fs";
+import fs4 from "fs";
 import readline from "readline";
+
+// src/transcript-io.ts
+import fs3 from "fs";
+import zlib from "zlib";
+var ZST_SUFFIX = ".zst";
+function hasZstd() {
+  return typeof zlib.createZstdDecompress === "function";
+}
+function requireZstd(file2) {
+  if (!hasZstd()) {
+    throw new Error(`${file2} is zstd-compressed and this Node (${process.version}) has no zstd; use Node >= 22.15`);
+  }
+}
+function resolveTranscript(canonical) {
+  if (fs3.existsSync(canonical)) return canonical;
+  const zst = canonical + ZST_SUFFIX;
+  return fs3.existsSync(zst) ? zst : null;
+}
+function transcriptExists(canonical) {
+  return resolveTranscript(canonical) !== null;
+}
+function statTranscript(canonical) {
+  const actual = resolveTranscript(canonical);
+  if (!actual) return null;
+  try {
+    return fs3.statSync(actual);
+  } catch {
+    return null;
+  }
+}
+function openTranscriptStream(canonical) {
+  const actual = resolveTranscript(canonical) ?? canonical;
+  const raw = fs3.createReadStream(actual);
+  if (!actual.endsWith(ZST_SUFFIX)) return raw;
+  requireZstd(actual);
+  const out = zlib.createZstdDecompress();
+  raw.on("error", (err) => out.destroy(err));
+  return raw.pipe(out);
+}
+async function readTranscript(canonical) {
+  const chunks = [];
+  for await (const chunk of openTranscriptStream(canonical)) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString("utf-8");
+}
+
+// src/search.ts
 var SIDECHAIN_DISTANCE_PENALTY = 0.05;
 function buildSearchFilters(options) {
   const parts = [];
@@ -30688,8 +30736,8 @@ async function searchConversations(query, options = {}) {
     const exchange = exchangeFromRow(row);
     const summaryPath = row.archive_path.replace(".jsonl", "-summary.txt");
     let summary;
-    if (fs3.existsSync(summaryPath)) {
-      const raw = fs3.readFileSync(summaryPath, "utf-8");
+    if (fs4.existsSync(summaryPath)) {
+      const raw = fs4.readFileSync(summaryPath, "utf-8");
       if (!isErroredSentinel(raw)) {
         summary = raw.trim();
       }
@@ -30706,7 +30754,7 @@ async function searchConversations(query, options = {}) {
 }
 async function countLines(filePath) {
   try {
-    const fileStream = fs3.createReadStream(filePath);
+    const fileStream = openTranscriptStream(filePath);
     const rl = readline.createInterface({
       input: fileStream,
       crlfDelay: Infinity
@@ -30722,7 +30770,8 @@ async function countLines(filePath) {
 }
 function getFileSizeInKB(filePath) {
   try {
-    const stats = fs3.statSync(filePath);
+    const stats = statTranscript(filePath);
+    if (!stats) return 0;
     return Math.round(stats.size / 1024 * 10) / 10;
   } catch (error62) {
     return 0;
@@ -32672,7 +32721,6 @@ function formatCursorConversationAsMarkdown(lines) {
 var VERSION = "1.6.0";
 
 // src/mcp-server.ts
-import fs4 from "fs";
 var SearchModeEnum = external_exports.enum(["vector", "text", "both"]);
 var ResponseFormatEnum = external_exports.enum(["markdown", "json"]);
 var SearchInputSchema = external_exports.object({
@@ -32851,10 +32899,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     if (name === "read") {
       const params = ShowConversationInputSchema.parse(args);
-      if (!fs4.existsSync(params.path)) {
+      if (!transcriptExists(params.path)) {
         throw new Error(`File not found: ${params.path}`);
       }
-      const jsonlContent = fs4.readFileSync(params.path, "utf-8");
+      const jsonlContent = await readTranscript(params.path);
       const markdownContent = formatConversationAsMarkdown(
         jsonlContent,
         params.startLine,

@@ -9,6 +9,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import { formatLogLine, getSyncLogPath, getSyncLockPath } from './logging.js';
 import { acquireFileLock, readLockHolder, releaseFileLock } from './file-lock.js';
+import { compressArchive, getCompressAfterDays } from './compress-archive.js';
 const args = process.argv.slice(2);
 // Reentrancy guard (#87): if this sync was triggered by a SessionStart hook
 // inside a Claude subprocess that the summarizer just spawned, exit silently.
@@ -227,6 +228,16 @@ async function syncAll() {
     // still on the old encoder. Lock-protected; if another process is already
     // migrating, this is a no-op.
     await runEmbeddingMigrationPhase();
+    // Compress transcripts that have gone idle (opt-in), still under the lock.
+    const afterDays = getCompressAfterDays();
+    if (afterDays > 0) {
+        const r = await compressArchive(destDir, {
+            afterDays,
+            maxFiles: parseInt(process.env.EPISODIC_MEMORY_COMPRESS_MAX_FILES || '0', 10) || 0,
+            log: (m) => console.log(`\n${m}`),
+        });
+        r.errors.forEach(e => console.log(`  ${e.file}: ${e.error}`));
+    }
 }
 const MIGRATION_BATCH_SIZE = parseInt(process.env.EPISODIC_MEMORY_MIGRATION_BATCH || '500', 10);
 async function runEmbeddingMigrationPhase() {

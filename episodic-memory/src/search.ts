@@ -5,6 +5,7 @@ import { SearchResult, ConversationExchange, MultiConceptResult } from './types.
 import { isErroredSentinel } from './summary-sentinel.js';
 import fs from 'fs';
 import readline from 'readline';
+import { openTranscriptStream, statTranscript } from './transcript-io.js';
 
 export interface SearchOptions {
   limit?: number;
@@ -292,7 +293,7 @@ export async function searchConversations(
 // Helper function to count lines in a file efficiently
 async function countLines(filePath: string): Promise<number> {
   try {
-    const fileStream = fs.createReadStream(filePath);
+    const fileStream = openTranscriptStream(filePath);
     const rl = readline.createInterface({
       input: fileStream,
       crlfDelay: Infinity
@@ -311,7 +312,8 @@ async function countLines(filePath: string): Promise<number> {
 // Helper function to get file size in KB
 function getFileSizeInKB(filePath: string): number {
   try {
-    const stats = fs.statSync(filePath);
+    const stats = statTranscript(filePath);
+    if (!stats) return 0;
     return Math.round(stats.size / 1024 * 10) / 10; // Round to 1 decimal place
   } catch (error) {
     return 0;

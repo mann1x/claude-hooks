@@ -3,6 +3,7 @@ import { initEmbeddings, generateQueryEmbedding } from './embeddings.js';
 import { isErroredSentinel } from './summary-sentinel.js';
 import fs from 'fs';
 import readline from 'readline';
+import { openTranscriptStream, statTranscript } from './transcript-io.js';
 /**
  * Distance penalty (L2, in the same units as vec.distance) added to a
  * sidechain row's score so that an equally-relevant main-thread exchange
@@ -246,7 +247,7 @@ export async function searchConversations(query, options = {}) {
 // Helper function to count lines in a file efficiently
 async function countLines(filePath) {
     try {
-        const fileStream = fs.createReadStream(filePath);
+        const fileStream = openTranscriptStream(filePath);
         const rl = readline.createInterface({
             input: fileStream,
             crlfDelay: Infinity
@@ -265,7 +266,9 @@ async function countLines(filePath) {
 // Helper function to get file size in KB
 function getFileSizeInKB(filePath) {
     try {
-        const stats = fs.statSync(filePath);
+        const stats = statTranscript(filePath);
+        if (!stats)
+            return 0;
         return Math.round(stats.size / 1024 * 10) / 10; // Round to 1 decimal place
     }
     catch (error) {

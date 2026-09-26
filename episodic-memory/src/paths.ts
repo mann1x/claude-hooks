@@ -133,9 +133,15 @@ export function findJsonlFiles(dir: string, excludedDirNames?: ReadonlySet<strin
   const results: string[] = [];
   try {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
+    const names = new Set(entries.map(e => e.name));
     for (const entry of entries) {
       if (entry.isFile() && entry.name.endsWith('.jsonl')) {
         results.push(entry.name);
+      } else if (entry.isFile() && entry.name.endsWith('.jsonl.zst')) {
+        // A compressed archive copy is reported under its canonical
+        // .jsonl name (see transcript-io.ts); skip it when both exist.
+        const canonical = entry.name.slice(0, -'.zst'.length);
+        if (!names.has(canonical)) results.push(canonical);
       } else if (entry.isDirectory()) {
         if (excludedDirNames?.has(entry.name)) continue;
         const subDir = path.join(dir, entry.name);

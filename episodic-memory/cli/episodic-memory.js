@@ -43,6 +43,7 @@ COMMANDS:
   show                   Display a conversation in readable format
   stats                  Show index statistics
   compact                Shrink the index (drop stored tool inputs, rebuild)
+  compress-archive       zstd-compress archived transcripts idle for N days
   doctor                 Diagnose Claude Code or Codex integration issues
   import-cursor-history  Export legacy Cursor conversations from state.vscdb for indexing
 
@@ -85,6 +86,10 @@ async function main() {
 
       case 'compact':
         await runScript(join(distDir, 'compact-cli.js'), args);
+        break;
+
+      case 'compress-archive':
+        await runScript(join(distDir, 'compress-archive-cli.js'), args);
         break;
 
       case 'doctor':

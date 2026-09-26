@@ -5,6 +5,7 @@ import { SUMMARIZER_CONTEXT_MARKER } from './constants.js';
 import { getExcludedProjects, findJsonlFiles, statIfExists } from './paths.js';
 import { formatErrorSentinel, shouldQueueForSummary } from './summary-sentinel.js';
 import { getMaxMessageBytes, isOversizeExchange } from './message-size.js';
+import { removeCompressedCopy, statTranscript } from './transcript-io.js';
 
 const EXCLUSION_MARKERS = [
   '<INSTRUCTIONS-TO-EPISODIC-MEMORY>DO NOT INDEX THIS CHAT</INSTRUCTIONS-TO-EPISODIC-MEMORY>',
@@ -139,19 +140,18 @@ function copyIfNewer(src: string, dest: string): boolean {
     fs.mkdirSync(destDir, { recursive: true });
   }
 
-  // Check if destination exists and is up-to-date
-  if (fs.existsSync(dest)) {
-    const srcStat = fs.statSync(src);
-    const destStat = fs.statSync(dest);
-    if (destStat.mtimeMs >= srcStat.mtimeMs) {
-      return false; // Dest is current, skip
-    }
+  // Check if destination exists and is up-to-date. It may be stored
+  // compressed (dest + '.zst'); compression keeps the mtime.
+  const destStat = statTranscript(dest);
+  if (destStat && destStat.mtimeMs >= fs.statSync(src).mtimeMs) {
+    return false; // Dest is current, skip
   }
 
   // Atomic copy: temp file + rename
   const tempDest = dest + '.tmp.' + process.pid;
   fs.copyFileSync(src, tempDest);
   fs.renameSync(tempDest, dest); // Atomic on same filesystem
+  removeCompressedCopy(dest); // a fresh plain copy supersedes a compressed one
 
   // Preserve source mtime: harnesses without per-message timestamps (Cursor
   // agent transcripts) fall back to file mtime. Round up to the next whole
@@ -239,7 +239,9 @@ export async function syncConversations(
         // an empty zero-exchange sentinel, and retries stale error sentinels (#96).
         if (!options.skipSummaries) {
           const summaryPath = destFile.replace('.jsonl', '-summary.txt');
-          if (shouldQueueForSummary(summaryPath) && !shouldSkipConversation(destFile)) {
+          // The marker scan reads the source: the archive copy was just made
+          // current from it, and may be stored compressed.
+          if (shouldQueueForSummary(summaryPath) && !shouldSkipConversation(srcFile)) {
             // sessionId enables Claude session-resume summarization; when the
             // filename has no UUID to extract (e.g. subagent transcripts named
             // agent-<hex>.jsonl), queue anyway — summarizeConversation falls

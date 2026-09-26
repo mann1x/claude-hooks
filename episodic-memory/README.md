@@ -194,6 +194,10 @@ episodic-memory stats
 # Shrink the index (drop stored tool inputs, rebuild the database file)
 episodic-memory compact --dry-run
 episodic-memory compact
+
+# zstd-compress archived transcripts idle for 7+ days (~6-7x smaller)
+episodic-memory compress-archive --dry-run
+episodic-memory compress-archive
 ```
 
 ### Legacy Commands
@@ -264,6 +268,12 @@ export EPISODIC_MEMORY_MAX_MESSAGE_BYTES=262144
 # a prefix if you query the tool_calls table directly. `episodic-memory compact`
 # applies the cap to rows indexed before the change.
 export EPISODIC_MEMORY_TOOL_INPUT_CHARS=0
+
+# Compress archived transcripts not modified for this many days at the end
+# of every sync (default: unset = never). They are stored as
+# <name>.jsonl.zst and every command still reads them by their .jsonl name.
+# Needs Node >= 22.15 (built-in zstd).
+export EPISODIC_MEMORY_COMPRESS_AFTER_DAYS=7
 
 # Wall-clock timeout per Claude summarizer call (milliseconds, default: 120000).
 # A wedged summarizer subprocess is aborted after this, so it can't stall
@@ -358,6 +368,18 @@ episodic-memory compact --no-backup  # skip the .pre-compact copy
 ```
 
 Takes the sync lock. Stop anything else holding the database open first (for example a server that runs searches): the swap refuses to run otherwise. The rebuild's temporary files are placed next to the database rather than in `/tmp`.
+
+### `episodic-memory compress-archive`
+
+Store archived transcripts not modified for N days as `<name>.jsonl.zst`. JSON lines compress about 6-7x at zstd level 3. Search, show, indexing and the MCP `read` tool read them transparently by their `.jsonl` name; sync re-copies a transcript as plain `.jsonl` if its session is resumed.
+
+```bash
+episodic-memory compress-archive --dry-run          # what would be compressed
+episodic-memory compress-archive --after-days 14    # default: EPISODIC_MEMORY_COMPRESS_AFTER_DAYS, else 7
+episodic-memory compress-archive --level 9          # default 3
+```
+
+Each file is verified by decompressing it before the original is removed, and keeps its original mtime. Takes the sync lock. To read one by hand: `zstdcat conversation.jsonl.zst`.
 
 ### `episodic-memory doctor`
 

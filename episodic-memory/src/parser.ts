@@ -3,6 +3,7 @@ import readline from 'readline';
 import path from 'path';
 import { ConversationExchange, ConversationHarness, ToolCall } from './types.js';
 import crypto from 'crypto';
+import { openTranscriptStream, statTranscript } from './transcript-io.js';
 
 interface JSONLMessage {
   type: string;
@@ -91,7 +92,7 @@ interface ExchangeBuilder {
 }
 
 async function detectConversationHarness(filePath: string): Promise<ConversationHarness> {
-  const fileStream = fs.createReadStream(filePath);
+  const fileStream = openTranscriptStream(filePath);
   const rl = readline.createInterface({
     input: fileStream,
     crlfDelay: Infinity
@@ -175,7 +176,7 @@ async function parseClaudeConversation(
   archivePath: string
 ): Promise<ConversationExchange[]> {
   const exchanges: ConversationExchange[] = [];
-  const fileStream = fs.createReadStream(filePath);
+  const fileStream = openTranscriptStream(filePath);
   const rl = readline.createInterface({
     input: fileStream,
     crlfDelay: Infinity
@@ -479,7 +480,7 @@ async function parseOpencodeConversation(
   archivePath: string
 ): Promise<ConversationExchange[]> {
   const exchanges: ConversationExchange[] = [];
-  const fileStream = fs.createReadStream(filePath);
+  const fileStream = openTranscriptStream(filePath);
   const rl = readline.createInterface({
     input: fileStream,
     crlfDelay: Infinity
@@ -687,7 +688,7 @@ async function parseOmpConversation(
   archivePath: string
 ): Promise<ConversationExchange[]> {
   const exchanges: ConversationExchange[] = [];
-  const fileStream = fs.createReadStream(filePath);
+  const fileStream = openTranscriptStream(filePath);
   const rl = readline.createInterface({
     input: fileStream,
     crlfDelay: Infinity
@@ -811,7 +812,7 @@ async function parseCodexConversation(
   archivePath: string
 ): Promise<ConversationExchange[]> {
   const exchanges: ConversationExchange[] = [];
-  const fileStream = fs.createReadStream(filePath);
+  const fileStream = openTranscriptStream(filePath);
   const rl = readline.createInterface({
     input: fileStream,
     crlfDelay: Infinity
@@ -1092,7 +1093,7 @@ async function parseCursorConversation(
   archivePath: string
 ): Promise<ConversationExchange[]> {
   const exchanges: ConversationExchange[] = [];
-  const fileStream = fs.createReadStream(filePath);
+  const fileStream = openTranscriptStream(filePath);
   const rl = readline.createInterface({
     input: fileStream,
     crlfDelay: Infinity
@@ -1103,7 +1104,9 @@ async function parseCursorConversation(
   // exports from import-cursor-history embed real per-message timestamps.
   let fallbackTimestamp: string;
   try {
-    fallbackTimestamp = fs.statSync(filePath).mtime.toISOString();
+    const st = statTranscript(filePath);
+    if (!st) throw new Error('missing');
+    fallbackTimestamp = st.mtime.toISOString();
   } catch {
     fallbackTimestamp = new Date().toISOString();
   }

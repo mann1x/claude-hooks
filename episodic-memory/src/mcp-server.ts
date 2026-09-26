@@ -23,6 +23,7 @@ import {
 import { formatConversationAsMarkdown } from './show.js';
 import { VERSION } from './version.js';
 import fs from 'fs';
+import { readTranscript, transcriptExists } from './transcript-io.js';
 
 // Zod Schemas for Input Validation
 
@@ -286,12 +287,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const params = ShowConversationInputSchema.parse(args);
 
       // Verify file exists
-      if (!fs.existsSync(params.path)) {
+      if (!transcriptExists(params.path)) {
         throw new Error(`File not found: ${params.path}`);
       }
 
       // Read and format conversation with optional line range
-      const jsonlContent = fs.readFileSync(params.path, 'utf-8');
+      const jsonlContent = await readTranscript(params.path);
       const markdownContent = formatConversationAsMarkdown(
         jsonlContent,
         params.startLine,

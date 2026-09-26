@@ -11,6 +11,12 @@ import { getMaxMessageBytes, isOversizeExchange } from './message-size.js';
 process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = '20000';
 // Increase max listeners for concurrent API calls
 import { EventEmitter } from 'events';
+import { removeCompressedCopy, statTranscript, transcriptExists } from './transcript-io.js';
+/** Copy a source transcript into the archive, replacing any compressed copy. */
+function copyToArchive(sourcePath, archivePath) {
+    fs.copyFileSync(sourcePath, archivePath);
+    removeCompressedCopy(archivePath);
+}
 EventEmitter.defaultMaxListeners = 20;
 // Process items in batches with limited concurrency
 async function processBatch(items, processor, concurrency) {
@@ -74,9 +80,9 @@ export async function indexConversations(limitToProject, maxConversations, concu
                 let exchanges;
                 try {
                     // Copy to archive (ensure parent dirs exist for subagent files)
-                    if (!fs.existsSync(archivePath)) {
+                    if (!transcriptExists(archivePath)) {
                         fs.mkdirSync(path.dirname(archivePath), { recursive: true });
-                        fs.copyFileSync(sourcePath, archivePath);
+                        copyToArchive(sourcePath, archivePath);
                         console.log(`  Archived: ${file}`);
                     }
                     // Parse conversation
@@ -187,9 +193,9 @@ export async function indexSession(sessionId, concurrency = 1, noSummaries = fal
                 // Archive + parse — source may vanish mid-run (Claude Code cleanup).
                 let exchanges;
                 try {
-                    if (!fs.existsSync(archivePath)) {
+                    if (!transcriptExists(archivePath)) {
                         fs.mkdirSync(path.dirname(archivePath), { recursive: true });
-                        fs.copyFileSync(sourcePath, archivePath);
+                        copyToArchive(sourcePath, archivePath);
                     }
                     exchanges = await parseConversation(sourcePath, project, archivePath);
                 }
@@ -283,9 +289,13 @@ export async function indexUnprocessed(concurrency = 1, noSummaries = false) {
                 // Ensure parent dirs exist for subagent files
                 try {
                     fs.mkdirSync(path.dirname(archivePath), { recursive: true });
-                    // Refresh the archive when the source may have grown beyond what we've seen.
-                    if (!fs.existsSync(archivePath) || maxIndexedLine > 0) {
-                        fs.copyFileSync(sourcePath, archivePath);
+                    // Refresh the archive when the source has changed since it was
+                    // copied. (This used to copy whenever the file had been indexed
+                    // before, changed or not — which would also silently decompress a
+                    // compressed archive copy on every run.)
+                    const archived = statTranscript(archivePath);
+                    if (!archived || fs.statSync(sourcePath).mtimeMs > archived.mtimeMs) {
+                        copyToArchive(sourcePath, archivePath);
                     }
                     // Parse and filter to exchanges past the high-water mark
                     const exchanges = await parseConversation(sourcePath, project, archivePath);
