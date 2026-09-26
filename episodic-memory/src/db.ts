@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import * as sqliteVec from 'sqlite-vec';
 import { getDbPath } from './paths.js';
+import { capToolText, getToolInputMaxChars } from './tool-input.js';
 import { EMBEDDING_VERSION } from './embedding-migration.js';
 
 export function migrateSchema(db: Database.Database): void {
@@ -271,13 +272,14 @@ export function insertExchange(
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
 
+    const maxChars = getToolInputMaxChars();
     for (const toolCall of exchange.toolCalls) {
       toolStmt.run(
         toolCall.id,
         toolCall.exchangeId,
         toolCall.toolName,
-        toolCall.toolInput ? JSON.stringify(toolCall.toolInput) : null,
-        toolCall.toolResult || null,
+        capToolText(toolCall.toolInput, maxChars),
+        capToolText(toolCall.toolResult, maxChars),
         toolCall.isError ? 1 : 0,
         toolCall.timestamp
       );

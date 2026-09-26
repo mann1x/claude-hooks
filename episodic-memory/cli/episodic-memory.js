@@ -42,6 +42,7 @@ COMMANDS:
   search                 Search indexed conversations
   show                   Display a conversation in readable format
   stats                  Show index statistics
+  compact                Shrink the index (drop stored tool inputs, rebuild)
   doctor                 Diagnose Claude Code or Codex integration issues
   import-cursor-history  Export legacy Cursor conversations from state.vscdb for indexing
 
@@ -80,6 +81,10 @@ async function main() {
 
       case 'stats':
         await runScript(join(distDir, 'stats-cli.js'), args);
+        break;
+
+      case 'compact':
+        await runScript(join(distDir, 'compact-cli.js'), args);
         break;
 
       case 'doctor':

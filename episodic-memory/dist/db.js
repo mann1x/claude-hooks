@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import * as sqliteVec from 'sqlite-vec';
 import { getDbPath } from './paths.js';
+import { capToolText, getToolInputMaxChars } from './tool-input.js';
 import { EMBEDDING_VERSION } from './embedding-migration.js';
 export function migrateSchema(db) {
     const columns = db.prepare(`SELECT name FROM pragma_table_info('exchanges')`).all();
@@ -210,8 +211,9 @@ export function insertExchange(db, exchange, embedding, toolNames) {
       (id, exchange_id, tool_name, tool_input, tool_result, is_error, timestamp)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
+        const maxChars = getToolInputMaxChars();
         for (const toolCall of exchange.toolCalls) {
-            toolStmt.run(toolCall.id, toolCall.exchangeId, toolCall.toolName, toolCall.toolInput ? JSON.stringify(toolCall.toolInput) : null, toolCall.toolResult || null, toolCall.isError ? 1 : 0, toolCall.timestamp);
+            toolStmt.run(toolCall.id, toolCall.exchangeId, toolCall.toolName, capToolText(toolCall.toolInput, maxChars), capToolText(toolCall.toolResult, maxChars), toolCall.isError ? 1 : 0, toolCall.timestamp);
         }
     }
 }
