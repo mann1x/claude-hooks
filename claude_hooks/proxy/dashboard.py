@@ -15,7 +15,6 @@ Routes:
   GET /api/agents.json    per-agent rollup (?date= default=today UTC)
   GET /api/models.json    per-model rollup (?date= default=today UTC)
   GET /api/betas.json     beta-feature tokens seen (sorted by recency)
-  GET /api/ratelimit.json latest ratelimit-state.json + burn rate
   GET /healthz            "OK"
 
 Never mutates the DB, never touches upstream. Safe to run unattended.
@@ -360,12 +359,6 @@ class _Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/sp_effort.json":
                 days = int(qs.get("days", ["14"])[0])
                 self._send_json(lambda conn: _query_sp_effort(conn, days))
-            elif parsed.path == "/api/ratelimit.json":
-                state = _load_ratelimit_state(self.ratelimit_path)
-                self._send_plain_json({
-                    "state": state,
-                    "burn": _compute_burn(state),
-                })
             else:
                 self._send_text("not found\n", status=404)
         except sqlite3.OperationalError as e:

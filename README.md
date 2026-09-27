@@ -253,9 +253,9 @@ Claude responds (knowing the prior context, deterministically)
   > for the per-day evidence and the upstream issue thread.
 - **Live weekly-limit %** — proxy captures Anthropic's
   `anthropic-ratelimit-unified-*` headers into a rolling state file;
-  `scripts/statusline_usage.py` reads it for a compact statusline
-  segment, `scripts/weekly_token_usage.py --current-usage-pct`
-  auto-populates from the same file.
+  the dashboard and `scripts/weekly_token_usage.py --current-usage-pct`
+  read it. (The status line reads Claude Code's own `rate_limits`
+  instead — see [`docs/statusline.md`](docs/statusline.md).)
 - **Structured observations** (port from thedotmack/claude-mem) —
   `hooks.stop.summary_format: "xml"` stores memories as
   `<observation><type><title><files_modified>…` so downstream recall
@@ -455,8 +455,8 @@ layer; it asks for explicit confirmation before writing.
 | `scripts/proxy_stats.py` | Ad-hoc proxy-log summaries (per-day requests, Warmup-blocked savings, synthetic-rate-limit detection, per-model counts). `--json` for scripting. |
 | `scripts/proxy_rollup.py` | Ingest the proxy's daily JSONL files into `stats.db` (rollups + per-request rows). Driven by `claude-hooks-rollup.timer` (every 5 min, persistent across reboots). |
 | `scripts/proxy_health_oneliner.py` | One-line daily health summary: per-effort `ownD`/`permS` rates, model divergences, 4xx/5xx, with `↑` arrows for ≥2× baseline regressions. Driven by `claude-hooks-health.timer`. |
-| `scripts/statusline_usage.py` | Compact statusline segment showing live 5h / 7d %. Safe-by-design (never crashes the caller). |
-| `scripts/statusline_compose.py` | Stitches the statusline pieces (model, weekly %, recall hit count, …) into the single string Claude Code reads from `statusLine.command`. |
+| `scripts/statusline_usage.py` | Usage segment (5h / 7d %) from Claude Code's status-line `rate_limits`. Safe-by-design (never crashes the caller). |
+| `scripts/statusline_compose.py` | Complete `statusLine` command: project, context %, model, 5h / 7d usage and an unread-mail badge. No proxy needed; see [`docs/statusline.md`](docs/statusline.md). |
 | `scripts/bench_recall.py` | End-to-end recall latency benchmark across the configured providers. p50/p90/p99 + per-stage breakdown. |
 | `scripts/bench_lsp_engine.py` | LSP engine vs ruff-only baseline. Measures `did_change` IPC-only and full round-trip (with diagnostics). Use after a new pyright / engine release. |
 | `scripts/migrate_to_pgvector.py` | One-shot dump-and-load from Qdrant or Memory KG into the pgvector backend, with delta sync. See [`docs/pgvector-runbook.md`](docs/pgvector-runbook.md). |
@@ -1311,7 +1311,8 @@ coverage report
 | `tests/test_proxy.py` | `claude_hooks/proxy/` (P0) | 17 | Pass-through, JSONL logging, Warmup + synthetic detection |
 | `tests/test_proxy_p1.py` | SSE tail + rate-limit state + weekly auto-populate | 22 | P1 observability half |
 | `tests/test_proxy_p3.py` | `block_warmup` short-circuit | 7 | Stub builders + upstream-not-called invariant |
-| `tests/test_statusline_usage.py` | `scripts/statusline_usage.py` | 16 | P4 segment rendering, stale detection, CLI safety |
+| `tests/test_statusline_usage.py` | `scripts/statusline_usage.py` | 55 | segment rendering, peak markers, CLI safety, proxy-era flags |
+| `tests/test_statusline.py` | `claude_hooks/statusline.py`, `scripts/statusline_compose.py` | 23 | native `rate_limits`, cached per-session unread count, compose |
 | `tests/test_proxy_stats.py` | `scripts/proxy_stats.py` | 9 | Aggregation, per-model, JSON output, since/until window |
 | `tests/test_claude_mem_ports.py` | ports 1-5 from thedotmack/claude-mem | 37 | XML summary, metadata filter, tag strip, composite hash, file-read gate |
 

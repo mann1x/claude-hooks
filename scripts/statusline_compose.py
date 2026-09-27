@@ -3,11 +3,14 @@
 
 Reads Claude Code's status JSON on stdin and prints one line of the form:
 
-    proj | ctx: 23% used | claude-sonnet-4-6 | 7d 2%
+    proj | ctx: 23% used | Opus 5.5 | 5h 19% · 7d 90% 🔴 | 📬 2
 
-Useful where the bash + jq combo isn't available (e.g. Windows / msys2).
-The proxy-utilization segment comes from a remote dashboard endpoint
-(``--proxy-url``); when omitted, falls back to a local state file.
+The usage segment is Claude Code's own ``rate_limits`` block (see
+``scripts/statusline_usage.py``); the mail segment is this session's
+unread mailbox count, shown only when there is some. Set
+``"refreshInterval"`` on the ``statusLine`` setting so mail that arrives
+while the session is idle shows up without a prompt — the status line
+costs no tokens, asking the model does.
 
 Exit code is always 0; on any error, prints a minimal line so the
 statusLine never breaks the UI.
@@ -15,7 +18,6 @@ statusLine never breaks the UI.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -26,17 +28,15 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
 from scripts.statusline_usage import (  # noqa: E402
-    DEFAULT_REMOTE_TIMEOUT,
-    DEFAULT_STALE_SECONDS,
-    DEFAULT_STATE_PATH,
+    _effective_format,
+    add_legacy_flags,
     default_format,
-    format_segment,
-    read_state,
-    read_state_remote,
+    read_payload,
+    usage_segment,
 )
 
 
-def compose(payload: dict, *, proxy_segment: str) -> str:
+def compose(payload: dict, *, usage: str = "", mail: str = "") -> str:
     cwd = (payload.get("workspace") or {}).get("current_dir") or payload.get("cwd") or ""
     model = (payload.get("model") or {}).get("display_name") or ""
     ctx = (payload.get("context_window") or {}).get("used_percentage")
@@ -48,17 +48,19 @@ def compose(payload: dict, *, proxy_segment: str) -> str:
         parts.append(f"ctx: {int(ctx)}% used")
     if model:
         parts.append(model)
-    if proxy_segment:
-        parts.append(proxy_segment)
+    if usage:
+        parts.append(usage)
+    if mail:
+        parts.append(mail)
     return " | ".join(parts)
 
 
-def _resolve_proxy_segment(args) -> str:
-    if args.proxy_url:
-        state = read_state_remote(args.proxy_url, timeout=args.proxy_timeout)
-    else:
-        state = read_state(args.state_file)
-    return format_segment(state, fmt=args.format, stale_seconds=args.stale_seconds)
+def _mail(payload: dict, args) -> str:
+    if args.no_mail:
+        return ""
+    from claude_hooks.statusline import mail_segment, unread_count
+    return mail_segment(unread_count(payload, ttl=args.mail_ttl),
+                        fmt=_effective_format(args.format))
 
 
 def main(argv=None) -> int:
@@ -67,34 +69,32 @@ def main(argv=None) -> int:
     except Exception:
         pass
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--proxy-url", default=None,
-                    help="dashboard endpoint, e.g. http://solidpc:38081/api/ratelimit.json")
-    ap.add_argument("--proxy-timeout", type=float, default=DEFAULT_REMOTE_TIMEOUT)
-    ap.add_argument("--state-file", type=Path, default=DEFAULT_STATE_PATH)
-    ap.add_argument("--stale-seconds", type=int, default=DEFAULT_STALE_SECONDS)
     ap.add_argument(
         "--format", choices=("emoji", "plain", "ascii"),
         default=default_format(),
         help="glyph style (default: emoji on Linux/macOS, ascii on "
              "Windows; override with CLAUDE_HOOKS_STATUSLINE_FORMAT)",
     )
+    ap.add_argument("--no-mail", action="store_true",
+                    help="omit the unread-mail segment")
+    ap.add_argument("--mail-ttl", type=float, default=20.0,
+                    help="seconds an unread count is reused (default 20)")
+    ap.add_argument("--stale-seconds", type=int, default=None,
+                    help=argparse.SUPPRESS)
+    add_legacy_flags(ap)
     args = ap.parse_args(argv)
 
+    payload = read_payload()
     try:
-        raw = sys.stdin.read()
-        payload = json.loads(raw) if raw.strip() else {}
-        if not isinstance(payload, dict):
-            payload = {}
-    except (OSError, json.JSONDecodeError):
-        payload = {}
-
-    try:
-        seg = _resolve_proxy_segment(args)
+        usage = usage_segment(payload, fmt=args.format)
     except Exception:
-        seg = ""
-
+        usage = ""
     try:
-        sys.stdout.write(compose(payload, proxy_segment=seg))
+        mail = _mail(payload, args)
+    except Exception:
+        mail = ""
+    try:
+        sys.stdout.write(compose(payload, usage=usage, mail=mail))
     except Exception:
         sys.stdout.write("?")
     return 0

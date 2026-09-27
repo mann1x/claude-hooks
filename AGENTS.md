@@ -38,7 +38,7 @@ LSP engine (v0.7+, opt-in; v1.17+ daemon keyed on the repository boundary):
 - `lsp_engine/package_exports.py` — suppresses the package-boundary note on `find_references` / `find_implementation` for a symbol unreachable from the package's published entry points; unsure keeps the warning
 - `lsp_engine_manager.py` — host-level supervision of the per-repository daemons (`lsp list|reload|stop|reap`)
 - `lsp_mcp/` — `lsp` MCP server (`bin/claude-hook-lsp-mcp`) replacing cclsp; same twelve-tool catalog
-- `mailbox/` — session mailbox (inter-session messaging MCP tools + daemon-owned sweep)
+- `mailbox/` — session mailbox (inter-session messaging MCP tools + daemon-owned sweep); on unread mail, Stop blocks once per message per session to nudge a `mailbox-read` (`hooks.mailbox.stop_nudge`, nudged ids in `~/.claude/claude-hooks-mailbox/nudged-<session>.json`)
 
 Concurrency / utility:
 - `_parallel.py` (provider fan-out), `mcp_client.py`, `embedders.py`
