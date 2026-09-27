@@ -83,16 +83,24 @@ def announce_block(*, event: dict, config: dict, providers,
                     cwd=(event.get("cwd") or "") if event else "")
             except Exception:
                 log.debug("mailbox: touch failed", exc_info=True)
-        messages = tools.store.inbox(
+        # One page, not the backlog: a session holding hundreds of
+        # unread messages would otherwise get all of them injected into
+        # every prompt. The rest are a count and a pointer to the pager.
+        from claude_hooks.mailbox.filters import ANNOUNCE_MAX
+        page = tools.store.inbox_page(
             alias=tools.alias, session_id=tools.session_id or None,
-            host=tools.host, since=since)
+            host=tools.host, since=since, page_size=ANNOUNCE_MAX)
+        messages = page.rows
         receipts = (tools.store.pending_receipts(from_alias=tools.alias,
                                                  from_host=tools.host)
                     if include_receipts else [])
+        # Receipts are marked seen once announced, so capping them just
+        # spreads a pile of them over the next few turns.
+        receipts = list(receipts)[:ANNOUNCE_MAX]
         if not messages and not receipts:
             return ""
         block = render(messages, receipts, alias=tools.alias,
-                       host=tools.host)
+                       host=tools.host, total=page.total)
         if receipts:
             # Announcing a receipt *is* delivering it — the note is
             # already shown in full, so a tool call to mark it read

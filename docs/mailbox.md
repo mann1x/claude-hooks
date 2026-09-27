@@ -169,16 +169,47 @@ failure the hooks exist to fix.
 | tool | does |
 |---|---|
 | `mailbox-send` | send to an alias, `alias@host`, `alias*`, or a session id |
-| `mailbox-list` | unread subjects addressed to this session — no bodies |
+| `mailbox-list` | subjects addressed to this session, one page at a time — no bodies |
 | `mailbox-read` | full bodies by id; **marks them read** |
 | `mailbox-ack` | attach a short note the sender will see |
 | `mailbox-edit` | change an unread message you sent |
 | `mailbox-cancel` | withdraw an unread message you sent |
-| `mailbox-sent` | your outbox, with read state and any note |
+| `mailbox-sent` | your outbox, paged, with read state and any note |
 | `mailbox-sessions` | who is registered: alias, host, OS, last seen |
 
 Tool names are prefixed by the server, e.g.
 `mcp__pgvector__mailbox-send`.
+
+### Listings are pages
+
+A session that has used the mailbox for weeks can hold hundreds of
+messages, and a listing that returned all of them was a wall of text to
+scroll past. `mailbox-list` and `mailbox-sent` return **one page**
+(20 by default, `limit` up to 100) with the total it was cut from, and
+end with the exact call for the next page:
+
+```
+11–20 of 36 unread message(s) for me@solidpc (matching 'misc') — page 2 of 4:
+  #412 [unread] 'subject' — from beta@solidpc, 3 hours ago
+  …
+More: mailbox-list {"query": "misc", "limit": 10, "page": 3} for the next page, or narrow it with query / since / until.
+```
+
+| argument | narrows to |
+|---|---|
+| `page` | 1-based page |
+| `limit` | page size, default 20, at most 100 |
+| `query` | keywords, **all** of which must appear (case-insensitive) in subject, body or sender (`to` for `mailbox-sent`); `"quotes"` keep a phrase; `%` and `_` are literal |
+| `from` / `to` | sender (list) or recipient (sent) alias; `@host` is ignored |
+| `since` / `until` | an age (`30m`, `12h`, `3d`, `2w` — that long ago), a date (`2026-09-27`; as `until` it includes the whole day) or `2026-09-27T14:30` (host-local unless it carries `Z` / `+02:00`) |
+| `order` | `newest` / `oldest` |
+| `include_read` | list only: history as well as unread |
+
+Unread mail is a queue, so the default order is most urgent then oldest
+first; a listing with `include_read` is history, newest first. `id`
+breaks timestamp ties, so pages never overlap or skip. Filtering and
+paging run in SQL (`LOWER() LIKE … ESCAPE`, portable across Postgres and
+SQLite), so a large mailbox is never fetched to be trimmed.
 
 ---
 
@@ -251,6 +282,14 @@ urgent; the handover that triggered all of this was 12 KB.
 Receipts are the one thing shown inline, which is consistent rather than
 an exception: an ack is short by construction and has already been
 delivered in full, so fetching it would cost more than it saves.
+
+**Announcements are capped at 10 messages** (`filters.ANNOUNCE_MAX`) —
+the `## Messages` block, its receipts and the Stop nudge. Beyond that
+they give the count and point at `mailbox-list`; a session holding a
+backlog would otherwise have all of it injected into every prompt. The
+nudge still claims the whole batch, so it stays one nudge per batch;
+receipts beyond the cap are announced on the following turns. The
+status-line badge uses a `COUNT(*)` rather than fetching the rows.
 
 When there is nothing to say the block is **absent**, not empty. A
 section that appears every turn saying "no messages" trains the reader

@@ -16,6 +16,26 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added
+
+- **Mailbox listings are pages.** A session that had used the mailbox for
+  weeks got its whole history back from `mailbox-list`. `mailbox-list`
+  and `mailbox-sent` now return one page (20 by default, `limit` up to
+  100) with the total and the exact call for the next page. They filter
+  by `query` (keywords, all must match subject, body or sender;
+  `"phrases"`), `from` / `to`, and `since` / `until` (`3d`, `12h`,
+  `2026-09-27`, `2026-09-27T14:30`), and take `order`. Filtering and
+  paging run in SQL on both Postgres and SQLite. See `docs/mailbox.md`
+  "Listings are pages".
+
+### Changed
+
+- **Mailbox announcements are capped at 10 messages.** The `## Messages`
+  block, its receipts and the Stop nudge list the first 10 and give the
+  rest as a count pointing at `mailbox-list`; a backlog was otherwise
+  injected into every prompt in full. The status-line badge counts with
+  `COUNT(*)` instead of fetching every unread row.
+
 ## [1.18.0] — 2026-09-27
 
 Four themes. **episodic-memory is vendored** into this repository and

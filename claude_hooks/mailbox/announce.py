@@ -71,7 +71,8 @@ def _sender(msg: dict) -> str:
 
 def render(messages: Sequence[dict], receipts: Sequence[dict] = (), *,
            alias: str, host: str,
-           now: Optional[datetime] = None) -> str:
+           now: Optional[datetime] = None,
+           total: Optional[int] = None) -> str:
     """The `## Messages` block, or "" when there is nothing to say.
 
     Returning "" rather than an empty heading matters: a section that
@@ -85,8 +86,10 @@ def render(messages: Sequence[dict], receipts: Sequence[dict] = (), *,
     lines = ["## Messages", ""]
 
     if messages:
-        n = len(messages)
-        lines.append(f"**{n} unread** for `{alias}@{host}`:")
+        n = max(total or 0, len(messages))
+        lines.append(f"**{n} unread** for `{alias}@{host}`"
+                     + (f" — the first {len(messages)}:" if n > len(messages)
+                        else ":"))
         lines.append("")
         for m in messages:
             tag = _priority(m.get("priority"))
@@ -94,6 +97,10 @@ def render(messages: Sequence[dict], receipts: Sequence[dict] = (), *,
             lines.append(
                 f"- {prefix}`{m.get('subject') or '(no subject)'}` — from "
                 f"`{_sender(m)}`, {ago(m.get('created_at'), now=now)}")
+        if n > len(messages):
+            lines.append(
+                f"- …and {n - len(messages)} more. `mailbox-list` pages "
+                "through them (`page`, `query`, `from`, `since`).")
         lines.append("")
         lines.append(
             "Read them with `mcp__pgvector__mailbox-read` when you reach a "
