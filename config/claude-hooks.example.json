@@ -277,7 +277,8 @@
       "maintenance_interval_seconds": 3600,
       "maintenance_limit": 1000,
       "registry_days": 30,
-      "archive_cap_bytes": 10737418240
+      "archive_cap_bytes": 10737418240,
+      "stop_nudge": true
     },
     "claudemem_reindex": {
       "enabled": true,

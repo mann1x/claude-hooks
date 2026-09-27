@@ -66,8 +66,8 @@ def _mailbox_notice(event: dict, config: dict, providers) -> str:
 
     Scoped to arrivals after the turn began so it never repeats what
     UserPromptSubmit already showed, and rendered as a one-line summary
-    rather than the full block: the turn is over, so this is a nudge to
-    the operator, not context for a model that has stopped.
+    for the operator. The model gets its own one-time nudge from
+    ``_with_mailbox_nudge``.
     """
     try:
         from claude_hooks.mailbox import hook as _mailbox
@@ -84,6 +84,63 @@ def _mailbox_notice(event: dict, config: dict, providers) -> str:
     except Exception as e:
         log.debug("mailbox stop notice skipped: %s", e)
         return ""
+
+
+def _mailbox_nudge_reason(event: dict, config: dict, providers) -> str:
+    """Why the Stop should be blocked once, or "".
+
+    The notice above is shown to the operator only; the model never sees
+    it, so mail that arrived during a long turn sat unread until the
+    next prompt. Blocking the stop hands the model a reason and it
+    continues — but only once per message: never when this stop is
+    already the continuation of a block (``stop_hook_active``), and never
+    twice for the same message (``claim_nudge``). One nudge, not a loop.
+    """
+    mb_cfg = (config.get("hooks") or {}).get("mailbox") or {}
+    if not mb_cfg.get("stop_nudge", True) or event.get("stop_hook_active"):
+        return ""
+    try:
+        from claude_hooks.mailbox import hook as _mailbox
+        from claude_hooks.mailbox.announce import ago
+        msgs = _mailbox.unread_messages(
+            event=event, config=config, providers=providers,
+            since=_mailbox.turn_start(event))
+        fresh = set(_mailbox.claim_nudge(event.get("session_id") or "",
+                                         [m.get("id") for m in msgs]))
+        msgs = [m for m in msgs if m.get("id") in fresh]
+        if not msgs:
+            return ""
+        lines = []
+        for m in msgs:
+            sender = m.get("from_alias") or "?"
+            if m.get("from_host"):
+                sender += f"@{m['from_host']}"
+            lines.append(f"- #{m['id']} `{m.get('subject') or '(no subject)'}` "
+                         f"— from `{sender}`, {ago(m.get('created_at'))}")
+        ids = ", ".join(str(m["id"]) for m in msgs)
+        return (
+            f"[claude-hooks] You have {len(msgs)} unread mailbox message(s) "
+            f"you have not read yet:\n" + "\n".join(lines) + "\n\n"
+            f"Read them now with the mailbox-read tool (ids: [{ids}]). If one "
+            "asks something of you or changes what you just did, act on it or "
+            "reply (mailbox-ack for a short note, mailbox-send otherwise); "
+            "then tell the user briefly what arrived and finish. "
+            "This reminder is sent once per message.")
+    except Exception as e:
+        log.debug("mailbox stop nudge skipped: %s", e)
+        return ""
+
+
+def _with_mailbox_nudge(result: Optional[dict], event: dict, config: dict,
+                        providers) -> Optional[dict]:
+    """Add a one-time ``decision: block`` for unread mail to a Stop result."""
+    reason = _mailbox_nudge_reason(event, config, providers)
+    if not reason:
+        return result
+    out = dict(result or {})
+    out["decision"] = "block"
+    out["reason"] = reason
+    return out
 
 
 def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[dict]:
@@ -398,8 +455,9 @@ def _finish(status: str, event: dict, config: dict, providers) -> Optional[dict]
     """
     mailbox_notice = _mailbox_notice(event, config, providers)
     message = "\n".join(m for m in (status, mailbox_notice) if m)
-    return _with_update_notice(
-        {"systemMessage": message} if message else None, config)
+    return _with_mailbox_nudge(_with_update_notice(
+        {"systemMessage": message} if message else None, config),
+        event, config, providers)
 
 
 # ---------------------------------------------------------------------- #

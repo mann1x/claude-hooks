@@ -221,6 +221,26 @@ Three points, all soft-fail — a mailbox problem never blocks a turn.
 | `UserPromptSubmit` | announces mail that arrived since the last turn |
 | `Stop` | announces mail that arrived *during* the turn |
 
+**`Stop` also nudges the model, once.** Its announcement is a
+`systemMessage`, which you see and the model does not, so mail that
+arrived during a long turn used to wait for the next prompt. When unread
+mail is waiting, Stop returns `decision: block` with a reason listing
+the messages (id, subject, sender, age — still no body) and telling the
+session to read them with `mailbox-read`, act or reply, and finish.
+One nudge, not a loop:
+
+- never when the stop is itself the continuation of a block
+  (`stop_hook_active`);
+- never twice for the same message in the same session — nudged ids are
+  kept in `~/.claude/claude-hooks-mailbox/nudged-<session>.json`
+  (`CLAUDE_HOOKS_MAILBOX_STATE_DIR` overrides; files unused for 7 days
+  are pruned). A session that leaves a message unread is not asked
+  again; a new message gets its own nudge.
+
+`hooks.mailbox.stop_nudge: false` turns it off (the visible notice
+stays). Both Stop paths nudge: the normal one and a repo whose
+`.claude-hooks-disable` keeps `mailbox`.
+
 **No hook ever injects a message body.** Not for high priority, not for
 a short one. The announcement carries four fields — subject, sender,
 time, priority — because that is enough to decide *whether to interrupt

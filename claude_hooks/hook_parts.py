@@ -176,7 +176,10 @@ def _stop(event, config, providers, keep):
     if "mailbox" in keep:
         lines.append(stop._mailbox_notice(event, config, providers))
     message = "\n".join(line for line in lines if line)
-    return {"systemMessage": message} if message else None
+    result = {"systemMessage": message} if message else None
+    if "mailbox" in keep:
+        result = stop._with_mailbox_nudge(result, event, config, providers)
+    return result
 
 
 def _session_end(event, config, providers, keep):

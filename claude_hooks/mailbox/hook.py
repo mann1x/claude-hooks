@@ -169,3 +169,77 @@ def turn_start(event: dict) -> Optional[datetime]:
         except ValueError:
             pass
     return None
+
+
+def unread_messages(*, event: dict, config: dict, providers,
+                    since: Optional[datetime] = None) -> list:
+    """The unread rows themselves (for the Stop nudge), or [] — never an
+    exception. Read-only: no touch, no receipts; announce_block does
+    those on the same Stop."""
+    if not _enabled(config):
+        return []
+    try:
+        tools = _tools(config, providers, event)
+        if tools is None:
+            return []
+        return list(tools.store.inbox(
+            alias=tools.alias, session_id=tools.session_id or None,
+            host=tools.host, since=since))
+    except Exception:
+        log.debug("mailbox unread lookup failed", exc_info=True)
+        return []
+
+
+#: Per-session record of messages the Stop hook has already nudged
+#: about. Small and local: a nudge is a hint to one session, not mailbox
+#: state, so it does not belong in the shared store.
+NUDGE_STATE_MAX_IDS = 500
+NUDGE_STATE_MAX_AGE_SECONDS = 7 * 86400
+
+
+def nudge_state_dir():
+    import os
+    from pathlib import Path
+    override = os.environ.get("CLAUDE_HOOKS_MAILBOX_STATE_DIR")
+    return Path(override) if override else Path.home() / ".claude" / "claude-hooks-mailbox"
+
+
+def claim_nudge(session_id: str, ids) -> list:
+    """The ids in ``ids`` this session has not been nudged about yet, and
+    record them as nudged. One nudge per message per session: a session
+    that reads the mail, or decides not to, is never asked twice.
+    Fails closed (returns []): a broken state file must not turn into a
+    nudge on every Stop."""
+    import json
+    import re
+    import time
+    ids = [i for i in ids if i is not None]
+    if not session_id or not ids:
+        return []
+    try:
+        d = nudge_state_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id)[:128]
+        path = d / f"nudged-{safe}.json"
+        try:
+            seen = set(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            seen = set()
+        fresh = [i for i in ids if i not in seen]
+        if fresh:
+            keep = (list(seen) + fresh)[-NUDGE_STATE_MAX_IDS:]
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(keep), encoding="utf-8")
+            tmp.replace(path)
+        # Sessions end without telling us; drop their records eventually.
+        now = time.time()
+        for old in d.glob("nudged-*.json"):
+            try:
+                if now - old.stat().st_mtime > NUDGE_STATE_MAX_AGE_SECONDS:
+                    old.unlink()
+            except OSError:
+                pass
+        return fresh
+    except Exception:
+        log.debug("mailbox nudge state failed", exc_info=True)
+        return []
