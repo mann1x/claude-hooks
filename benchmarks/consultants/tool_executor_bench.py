@@ -62,6 +62,8 @@ from benchmarks.consultants.harness import (
     SuiteManifest,
     ToolExecTrial,
     append_trial,
+    timed_chat,
+    set_role_usage,
     estimate_tool_exec_cost,
     load_questions,
     load_suite_manifest,
@@ -417,7 +419,7 @@ def _make_live_chat_client(model: str, ollama_base: str) -> Any:
     """Build a real ChatClient for ``model`` pointed at the
     Ollama-Pro proxy. Lazy-imports so dry-run + tests don't pay
     the get_advice import cost."""
-    from claude_hooks.get_advice.chat_client import make_agent_chat_client
+    from benchmarks.consultants.harness import bench_client as make_agent_chat_client
     return make_agent_chat_client(model, ollama_base)
 
 
@@ -709,6 +711,9 @@ def run_trial(question: BenchQuestion,
     trial.iterations = capture.iter_count
     trial.tokens_prompt = capture.tokens_prompt
     trial.tokens_completion = capture.tokens_completion
+    set_role_usage(trial.usage, "tool_executor", trial.model,
+                   calls=capture.iter_count, prompt=capture.tokens_prompt,
+                   completion=capture.tokens_completion)
     trial.tool_calls_count = len(capture.tool_calls)
     trial.tool_calls_unique = len({
         (c["tool"], c.get("args") or "")
@@ -853,11 +858,11 @@ def _judge_trial_quality(*, judge_chat_client, judge_model: str,
         return None, "no answer to judge"
     msgs = _build_judge_messages(question, trial)
     try:
-        resp = judge_chat_client.chat({
+        resp = timed_chat(judge_chat_client, {
             "model": judge_model,
             "messages": msgs,
             "stream": False,
-        })
+        }, trial.usage, "judge", judge_model)
     except Exception as e:  # noqa: BLE001
         log.exception("judge call raised on %s × %s",
                       question.id, trial.model)

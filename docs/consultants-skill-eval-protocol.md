@@ -81,7 +81,14 @@ the full manifest and the rubric thresholds.
    - Optionally measures cyclomatic complexity via `radon` (soft
      dep).
    - On a successful compile, calls the **judge LLM** with a strict
-     1-5 rubric (`SCORE: <n>` + a one-sentence rationale).
+     1-5 rubric (`SCORE: <n>` + a one-sentence rationale). Since
+     2026-09-23 the default judge is a **panel**: glm-5.3-flash and
+     deepseek-v4.1-flash score independently, and deepseek-v4.1-flash
+     settles the final score, checking each review's claim against the
+     code (`judge_panel.py`). A single `--judge-model` is still the
+     one-judge path; use kimi-k2.6 to compare with runs judged before
+     that date. Why, and the measurements:
+     [`benchmarks/judge-and-sampling.md`](benchmarks/judge-and-sampling.md).
 5. Trial result is appended to `trials.jsonl` immediately so a
    Ctrl-C mid-run loses at most the in-progress trial.
 
@@ -98,11 +105,20 @@ the full manifest and the rubric thresholds.
 > `pass_rate ≥ 0.70` AND `avg_quality_score ≥ 3.5`.
 >
 > Among qualifying models, the **recommended default** is the one
-> with the highest `pass_rate`. Ties break on `median_tokens`
-> (cheaper wins). If no model qualifies, the role's default stays
+> with the highest `pass_rate`. Ties break on the **subject's dollars
+> per passing trial** (cheaper wins), then `median_tokens`. If no model qualifies, the role's default stays
 > at the project-global `DEFAULT_MODEL` and a follow-up run
 > evaluates a different candidate set — never silently flip the
 > default on a sub-threshold model.
+
+**Which dollars.** A trial's `usage` has two kinds of spend. The
+subject's is what the model will cost in production; the judges' is
+what the *benchmark* costs, and no judge runs in production. The
+recommendation ranks on the subject's dollars per passing trial —
+a cheap model that fails costs its retries — and the judges' dollars
+are reported beside it as the price of the run. `analyze.py` still
+breaks ties on `median_tokens` in code; read the dollar ranking from
+`scripts/bench_costs.py` until the report renders it inline.
 
 ---
 
@@ -270,8 +286,9 @@ unrelated refactors of the claude-hooks repo itself.
 > knows both.
 >
 > Among qualifying models, the **recommended default** is the
-> one with the highest `pass_rate`. Ties break on
-> `median_tokens` (cheaper wins). If no model qualifies, the
+> one with the highest `pass_rate`. Ties break on the
+> subject's dollars per passing trial (cheaper wins), then
+> `median_tokens`. If no model qualifies, the
 > role stays disabled-by-default and
 > `RECOMMENDED_DEFAULT_ON` in `tool_executor_defaults.py`
 > remains `False`.
@@ -325,11 +342,21 @@ has drifted. Investigate before spending tokens on a live run.
 
 ```bash
 python benchmarks/consultants/coder_bench.py --live --accept-cost \
-    --models kimi-k2.6:cloud,qwen3-coder-next:cloud,glm-5.1:cloud,gemma4:31b-cloud \
-    --ollama-base http://192.168.178.2:11433 \
-    --judge-model kimi-k2.6:cloud \
+    --models deepseek-v4.1-flash:cloud,glm-5.3-flash:cloud \
+    --ollama-base http://192.168.178.161:11434 \
     --commit-report
+# default judge = the panel; add --judge-model kimi-k2.6:cloud to stay
+# comparable with a run judged before 2026-09-23
+python benchmarks/consultants/repair.py \
+    --questions-dir benchmarks/consultants/questions/coder \
+    --coder-run benchmarks/consultants/results/<date>/coder
 ```
+
+Always finish with `repair.py`. Benchmark clients wait out a network
+outage for up to 30 min, and repair re-asks whatever an outage still
+left without a score ([`benchmarks/EVALUATION.md` §2.4](benchmarks/EVALUATION.md#24-outages-and-repair)).
+At most 2 concurrent cloud calls: the Pro plan allows 3 and the hooks
+hold one (`claude_hooks/ollama_slots.py` enforces it per host).
 
 The summary line at run start declares the estimated token cost.
 `--accept-cost` is mandatory with `--live`; without it the script
@@ -495,10 +522,19 @@ The summary:
   one role node at a time so the signal is clean. End-to-end
   council behavior is verified by the M12 parity suite (a separate
   milestone) and the M13 live smoke (also separate).
-- **It does not measure cost in dollars.** Ollama Pro is a
-  weekly-quota subscription, not a per-call $ price. The harness
-  reports token totals; you compare against your Ollama Pro plan
-  separately.
+- **It does not leave any call's cost out.** (Until 2026-09-23 this
+  said the protocol "does not measure cost in dollars", because Ollama
+  Pro was a weekly quota. It is now a dollar budget drawn per token at
+  each model's price, so cost is measured.) Every trial records `usage`
+  by role: the model under test **and every judge** (quality, audit,
+  meta, rejudge, ladder), retries included, through
+  `harness.record_usage`. The judges are not a rounding error: on
+  coder_med the kimi-k2.6 judge emits 1.3–2.2 k completion tokens per
+  trial against the coder's 180–460. `scripts/bench_costs.py` prices a
+  run at the dated snapshot in `benchmarks/consultants/pricing.py`
+  ([EVALUATION.md §2.1 and Appendix A](benchmarks/EVALUATION.md#21-cost--what-a-run-costs-in-dollars)).
+  Runs recorded before 2026-09-23 have the subject's tokens only; their
+  judge spend is reported as *not recorded*, never as zero.
 - **It does not replace human judgement.** The rubric is a
   decision-support tool. A model that scored 71% pass_rate and 3.6
   quality on a 8-question suite is "qualifying" on paper, but you
@@ -517,6 +553,10 @@ The summary:
 | `benchmarks/consultants/stall_bench.py` | M11a runner CLI |
 | `benchmarks/consultants/tool_executor_bench.py` | M11c runner CLI |
 | `benchmarks/consultants/analyze.py` | Markdown report renderer + rubric applier |
+| `benchmarks/consultants/judge_panel.py` | Default coder_bench judge: two peer judges + a synthesizer |
+| `benchmarks/consultants/judge_eval.py` | Measures a candidate judge against tests passing (`judge` / `synth` / `report`) |
+| `benchmarks/consultants/repair.py` | Last step of every chain: re-asks verdicts / judgments an outage left without a score |
+| `benchmarks/consultants/fill_judge.py` | Scores coder trials whose judge call failed, in place (used by `repair.py`) |
 | `benchmarks/consultants/questions/coder/SUITE.md` | Coder suite v1.0 manifest + rubric |
 | `benchmarks/consultants/questions/stall/SUITE.md` | Stall suite v1.0 manifest + rubric |
 | `benchmarks/consultants/questions/tool_executor/SUITE.md` | Tool_executor suite v1.0 manifest + rubric |

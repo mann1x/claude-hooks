@@ -269,36 +269,12 @@ Then you can drop `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` from
 `~/.claude/settings.json` and get Ctrl+B + Bash `run_in_background`
 back, because the proxy is killing Warmup on its own.
 
-## What's new in P4 (statusline segment)
+## Statusline segment (P4, retired in v1.18)
 
-A compact segment script at `scripts/statusline_usage.py` reads the
-proxy's `ratelimit-state.json` and prints one short line suitable
-for embedding in a custom `statusLine`:
-
-```bash
-python3 scripts/statusline_usage.py            # emoji format (default)
-python3 scripts/statusline_usage.py --format plain
-python3 scripts/statusline_usage.py --format ascii
-python3 scripts/statusline_usage.py --state-file /custom/path.json
-```
-
-Output:
-- `5h 42%` — only 5h window known
-- `5h 42% · 7d 18%` — both windows present
-- `5h 65% ⚠` — ≥ 50% on the binding window
-- `5h 85% 🔴` — ≥ 80%
-- empty string on stale / missing / broken state (never crashes)
-
-Exit code is always 0 — the script is safe to call from any
-statusline runner.
-
-### Wiring example (bash statusline)
-
-```bash
-usage_seg=$(python3 /path/to/claude-hooks/scripts/statusline_usage.py 2>/dev/null)
-[ -n "$usage_seg" ] && usage_part=" | ${usage_seg}"
-printf "%s%s" "$other_parts" "$usage_part"
-```
+The status line no longer reads the proxy: Claude Code passes the same
+5h / 7d numbers to a `statusLine` command in its own `rate_limits`
+block. See [`statusline.md`](statusline.md). The proxy still writes
+`ratelimit-state.json` for the dashboard and the reporting scripts.
 
 ## Plan status
 
@@ -352,7 +328,6 @@ Routes:
 | `GET /api/agents.json?date=YYYY-MM-DD` | per-agent breakdown (default: today UTC) |
 | `GET /api/models.json?date=YYYY-MM-DD` | per-model breakdown |
 | `GET /api/betas.json` | distinct `anthropic-beta` tokens observed, with first/last-seen ts |
-| `GET /api/ratelimit.json` | latest `ratelimit-state.json` + 5h/7d burn projection |
 | `GET /healthz` | `OK` (liveness probe) |
 
 Manual:

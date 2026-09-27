@@ -190,11 +190,11 @@ class TestGroupItemsIntoLanes:
         text = council.join_lane_items(["foo", "bar"])
         assert text == "1. foo\n2. bar"
 
-    def test_fanout_max_lanes_constant(self):
-        # 3 lanes is the cloud-serialization-effective cap measured
-        # against an Ollama proxy on the maintainer's LAN. Bumping
-        # this constant requires re-measuring on the target host.
-        assert council.FANOUT_MAX_LANES == 3
+    def test_fanout_max_lanes_default(self):
+        # 2 lanes: an Ollama Pro account has 3 connections and the hooks
+        # hold one. Raising the default needs an account that can serve
+        # it; override per process with CONSULTANTS_FANOUT_MAX_LANES.
+        assert council.FANOUT_DEFAULT_MAX_LANES == 2
 
 
 # ----------------------- routing ---------------------------------- #
@@ -1260,3 +1260,27 @@ class TestRecorderIntegration:
             assert "upstream 500" in err
         finally:
             rec.close()
+
+
+
+# CONSULTANTS_FANOUT_MAX_LANES lowers the lane cap for one process, so a
+# benchmark can stay inside the account's connection limit.
+
+def test_fanout_env_unset_keeps_the_default(monkeypatch):
+    monkeypatch.delenv("CONSULTANTS_FANOUT_MAX_LANES", raising=False)
+    assert council._fanout_max_lanes() == council.FANOUT_DEFAULT_MAX_LANES
+
+
+def test_fanout_env_value_is_used(monkeypatch):
+    monkeypatch.setenv("CONSULTANTS_FANOUT_MAX_LANES", "2")
+    assert council._fanout_max_lanes() == 2
+
+
+def test_fanout_env_never_drops_below_one(monkeypatch):
+    monkeypatch.setenv("CONSULTANTS_FANOUT_MAX_LANES", "0")
+    assert council._fanout_max_lanes() == 1
+
+
+def test_fanout_env_garbage_falls_back(monkeypatch):
+    monkeypatch.setenv("CONSULTANTS_FANOUT_MAX_LANES", "two")
+    assert council._fanout_max_lanes() == council.FANOUT_DEFAULT_MAX_LANES

@@ -35,6 +35,38 @@ log = logging.getLogger("claude_hooks.mailbox")
 DEFAULT_EXPIRY_DAYS = 180
 DEFAULT_REGISTRY_DAYS = 30
 
+#: How long since ``last_seen`` a registration still counts as a live
+#: session. ``touch()`` runs once per turn, so an *open but idle* session
+#: goes untouched for as long as its user is away — which is why nothing
+#: may be lost by falling outside this window: a stale row is ignored for
+#: addressing, and :meth:`touch` re-creates one that has been evicted.
+DEFAULT_LIVE_HOURS = 12
+
+#: Grace before a stale registration is physically deleted. Deliberately
+#: longer than the window above, so a row stops being *used* before it
+#: stops being *readable* — the ten dead rows behind the eleven-fold
+#: delivery were the only evidence of what had happened.
+DEFAULT_EVICT_HOURS = 24
+
+#: How long an identical message from the same sender to the same
+#: destination blocks a repeat.
+#:
+#: The duplication that prompted this was not a sender sending twice: one
+#: ``send()`` in a process still running the pre-fan-out-fix code wrote
+#: one row per *registration*, five of them, and the recipient read the
+#: same text five times. The code had been fixed two days earlier — the
+#: MCP server holding the old ``send()`` had simply never restarted, and
+#: nothing about a long-lived child process makes it obvious that it is
+#: serving code the repository no longer contains.
+#:
+#: Which is the argument for checking at the destination rather than
+#: trusting the writer: a guard that only holds while every process is
+#: current is a guard that holds until it matters. Ten minutes covers a
+#: retry, a double tool call, and a sender that repeats itself after an
+#: answer it did not see — and it is short enough that a deliberate
+#: re-send of the same text is only delayed, never prevented.
+DEFAULT_DEDUP_WINDOW_SECONDS = 600
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -51,6 +83,11 @@ def host_name() -> str:
 
 def os_name() -> str:
     return {"win32": "windows", "darwin": "darwin"}.get(sys.platform, "linux")
+
+
+def _chunks(items: Sequence, size: int):
+    for i in range(0, len(items), size):
+        yield list(items[i:i + size])
 
 
 @contextmanager
@@ -87,11 +124,13 @@ class MailboxStore:
     """
 
     def __init__(self, connect, lock, *, dialect: str = "postgres",
-                 expiry_days: int = DEFAULT_EXPIRY_DAYS):
+                 expiry_days: int = DEFAULT_EXPIRY_DAYS,
+                 dedup_window_seconds: int = DEFAULT_DEDUP_WINDOW_SECONDS):
         self._connect = connect
         self._lock = lock
         self.dialect = dialect
         self._expiry_days = expiry_days
+        self._dedup_window = dedup_window_seconds
         self._ready = False
 
     # ─── plumbing ────────────────────────────────────────────────────
@@ -139,6 +178,34 @@ class MailboxStore:
 
     # ─── registry ────────────────────────────────────────────────────
 
+    def _claim_alias_host(self, cur, alias: str, host: str,
+                          session_id: str) -> int:
+        """Make ``(alias, host)`` this session's, evicting any other.
+
+        A restarted or upgraded client comes back with a new
+        ``session_id``, and ``session_id`` is the primary key — so the
+        old row survived and the alias accumulated one registration per
+        restart. ``xollama@solidpc`` had five.
+
+        Evicting is right because ``(alias, host)`` is the unit the rest
+        of the mailbox already addresses: ``send()`` collapses recipients
+        to distinct ``(alias, host)`` pairs, so a second row was never a
+        second addressee — only a second *claim* about who is alive
+        there, and the older claim is the false one.
+
+        The consequence to know about: two genuinely concurrent sessions
+        in the same cwd on the same host now take turns owning the row,
+        each reclaiming it on its next action. Their mail is unaffected —
+        an inbox is read by alias, not by registration — but
+        ``mailbox-sessions`` shows one of them, and a message addressed
+        to the evicted ``session_id`` has nowhere to resolve.
+        """
+        cur.execute(self._q(
+            "DELETE FROM session_registry "
+            "WHERE alias = ? AND host = ? AND session_id <> ?"),
+            (alias, host, session_id))
+        return cur.rowcount or 0
+
     def register(self, session_id: str, alias: str, *, cwd: str = "",
                  host: Optional[str] = None) -> list[Session]:
         """Record this session and return the *other* live sessions that
@@ -157,24 +224,112 @@ class MailboxStore:
                     cur.execute(self._q(
                         "DELETE FROM session_registry WHERE session_id = ?"),
                         (session_id,))
+                    evicted = self._claim_alias_host(cur, alias, h,
+                                                     session_id)
                     cur.execute(self._q(
                         "INSERT INTO session_registry "
                         "(session_id, alias, host, os, cwd, started_at, "
                         " last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)"),
                         (session_id, alias, h, os_name(), cwd, now, now))
+                    # Same-host duplicates are gone by construction now,
+                    # so this only ever returns *other hosts* — which is
+                    # the collision actually worth warning about, since
+                    # ``xollama@solidpc`` and ``xollama@pandorum`` really
+                    # are two different correspondents.
                     cur.execute(self._q(
                         "SELECT " + ", ".join(schema.SESSION_COLUMNS) +
                         " FROM session_registry WHERE alias = ? "
                         "AND session_id <> ?"), (alias, session_id))
                     others = self._rows(cur, schema.SESSION_COLUMNS)
+                if evicted:
+                    log.info("mailbox: %s@%s reclaimed from %d stale "
+                             "registration(s)", alias, h, evicted)
                 conn.commit()
             except Exception:
                 self._rollback(conn)
                 raise
         return [_as_session(r) for r in others]
 
-    def touch(self, session_id: str) -> None:
-        """Refresh ``last_seen``. Called off the hook path."""
+    def registered_alias(self, session_id: str) -> Optional[str]:
+        """The alias this session registered under, if it has one.
+
+        The default alias is the *current directory's* name, recomputed
+        from the event on every call — so a session that changed
+        directory changed its name, registered under the new one, and
+        left the old registration behind. Two rows, one session, and
+        everything addressed to the name it started with parks on an
+        alias nobody is listening to.
+
+        A session's identity is decided once, when it registers, and
+        then remembered. Directory is a property of the session, not the
+        key to it. The derived name is only a *default* for a session
+        that has no registration yet, which also repairs the MCP-side
+        binding, where there is no event to take a cwd from and the
+        server process's own cwd was standing in for one.
+
+        The cost of remembering is that renaming a live session — via
+        ``.claude-hooks/mailbox.toml`` — takes effect at its next
+        SessionStart rather than its next turn. That is the right way
+        round: a rename that took effect mid-session would strand
+        everything already addressed to the old name.
+        """
+        if not session_id:
+            return None
+        self.ensure_schema()
+        with self._lock:
+            conn = self._connect()
+            try:
+                with _cursor(conn) as cur:
+                    cur.execute(self._q(
+                        "SELECT alias FROM session_registry "
+                        "WHERE session_id = ?"), (session_id,))
+                    row = cur.fetchone()
+                conn.commit()
+            except Exception:
+                self._rollback(conn)
+                raise
+        return row[0] if row else None
+
+    def forget(self, session_id: str) -> bool:
+        """Drop this session's registration. Called at SessionEnd.
+
+        Without it a registration lived until the 30-day sweep, so every
+        session that had *ever* run in a directory stayed listed under
+        its alias. Ten short sessions in ten minutes left ten dead rows
+        beside the live one, which is how ``xollama@solidpc`` came to
+        have eleven registrations — visible in ``mailbox-sessions``, and
+        counted as ten peers by the SessionStart collision warning.
+
+        A session that ends and is later resumed re-registers at
+        SessionStart, so forgetting here loses nothing. A session that
+        dies without SessionEnd still falls to the sweep.
+        """
+        self.ensure_schema()
+        with self._lock:
+            conn = self._connect()
+            try:
+                with _cursor(conn) as cur:
+                    cur.execute(self._q(
+                        "DELETE FROM session_registry WHERE session_id = ?"),
+                        (session_id,))
+                    gone = cur.rowcount or 0
+                conn.commit()
+            except Exception:
+                self._rollback(conn)
+                raise
+        return gone > 0
+
+    def touch(self, session_id: str, *, alias: Optional[str] = None,
+              host: Optional[str] = None, cwd: str = "") -> None:
+        """Refresh ``last_seen``, re-registering if the row is gone.
+
+        Called once per turn off the hook path. The re-registration is
+        what makes eviction safe: a session open long enough to fall
+        outside the live window is not dead, it is quiet, and its next
+        turn must put it back rather than leave it unaddressable for the
+        rest of its life. Without ``alias`` there is nothing to rebuild
+        from, so the refresh is best-effort as before.
+        """
         self.ensure_schema()
         with self._lock:
             conn = self._connect()
@@ -183,13 +338,90 @@ class MailboxStore:
                     cur.execute(self._q(
                         "UPDATE session_registry SET last_seen = ? "
                         "WHERE session_id = ?"), (self._now(), session_id))
+                    missing = (cur.rowcount or 0) == 0
+                    if missing and alias:
+                        now = self._now()
+                        h = host or host_name()
+                        # Claim first. Re-inserting blind would violate
+                        # the one-row-per-(alias, host) index the moment
+                        # anything else holds the slot — and this path
+                        # exists precisely for the case where something
+                        # does: the row was evicted, by the sweep or by a
+                        # newer session, while this one was quiet.
+                        self._claim_alias_host(cur, alias, h, session_id)
+                        cur.execute(self._q(
+                            "INSERT INTO session_registry "
+                            "(session_id, alias, host, os, cwd, started_at, "
+                            " last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)"),
+                            (session_id, alias, h, os_name(), cwd, now, now))
                 conn.commit()
             except Exception:
                 self._rollback(conn)
                 raise
 
+    def touch_alias(self, alias: str, host: Optional[str] = None) -> bool:
+        """Refresh ``alias@host``'s row without knowing the session id.
+
+        Claude Code does not export ``CLAUDE_SESSION_ID`` to an MCP
+        child — verified on three live stdio servers, none of which had
+        it — so on the tool path ``session_id`` is empty and
+        :meth:`touch` has nothing to key on. That is the path where the
+        mail actually happens: a session reading and sending for fifteen
+        minutes inside one turn does all of it through the tools, and
+        only the once-per-turn hook was moving ``last_seen``.
+
+        Addressing the row by ``(alias, host)`` is exactly what the
+        unique index makes safe. Before it, "this alias's registration"
+        was a set of up to five rows and refreshing one of them was a
+        guess; now it identifies one row or none.
+
+        Returns False when there is no row, and deliberately does not
+        create one: a session that cannot state its id cannot be
+        registered, and inventing an id would put a row in the registry
+        that nothing can ever clean up. ``SessionStart`` creates it.
+
+        The imprecision to know about: the alias comes from the server
+        process's own directory, so the shared ``--http`` server refreshes
+        the alias of the directory *it* was started in, not of whoever
+        called it. That is how those clients have always been identified
+        — the derivation is older than this refresh — and it is only ever
+        wrong about which session is alive, never about delivery.
+        """
+        if not alias:
+            return False
+        self.ensure_schema()
+        h = host or host_name()
+        with self._lock:
+            conn = self._connect()
+            try:
+                with _cursor(conn) as cur:
+                    cur.execute(self._q(
+                        "UPDATE session_registry SET last_seen = ? "
+                        "WHERE alias = ? AND host = ?"),
+                        (self._now(), alias, h))
+                    moved = (cur.rowcount or 0) > 0
+                conn.commit()
+            except Exception:
+                self._rollback(conn)
+                raise
+        return moved
+
     def sessions(self, *, alias: Optional[str] = None,
-                 os_filter: Optional[str] = None) -> list[Session]:
+                 os_filter: Optional[str] = None,
+                 include_stale: bool = False,
+                 live_hours: Optional[float] = None) -> list[Session]:
+        """Live registrations, newest-seen first within an alias.
+
+        Stale rows are excluded by default, because a registration is
+        evidence that a session *was* running and addressing needs to
+        know which ones still are. Until this filter existed, an alias
+        accumulated a row per session that had ever run in its directory
+        — `xollama@solidpc` reached eleven — and every one of them was
+        treated as a live addressee.
+
+        Pass ``include_stale=True`` to see everything, which is what an
+        operator listing the registry wants; delivery never does.
+        """
         self.ensure_schema()
         sql = ("SELECT " + ", ".join(schema.SESSION_COLUMNS) +
                " FROM session_registry")
@@ -200,6 +432,10 @@ class MailboxStore:
         if os_filter:
             where.append("os = ?")
             params.append(os_filter)
+        if not include_stale:
+            hours = (DEFAULT_LIVE_HOURS if live_hours is None else live_hours)
+            where.append("last_seen >= ?")
+            params.append(self._at(utcnow() - timedelta(hours=hours)))
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY alias, host"
@@ -237,6 +473,134 @@ class MailboxStore:
                 raise
         return n
 
+    def evict_stale(self, *, hours: float = DEFAULT_EVICT_HOURS) -> int:
+        """Physically remove registrations nobody has touched in ``hours``.
+
+        The counterpart of :meth:`sweep_registry`, which keeps a 30-day
+        horizon for the archive pass. Thirty days is the wrong scale for
+        *addressing*: ten sessions that ran and ended inside ten minutes
+        left ten rows that a send then fanned out over, and they would
+        have sat there for a month.
+
+        Nothing is lost. Messages already addressed to a forgotten
+        session keep their own expiry, an alias's mail is addressed to
+        the alias rather than to a row, and a session still running
+        re-creates its registration on the next :meth:`touch`.
+        """
+        self.ensure_schema()
+        cutoff = self._at(utcnow() - timedelta(hours=hours))
+        with self._lock:
+            conn = self._connect()
+            try:
+                with _cursor(conn) as cur:
+                    cur.execute(self._q(
+                        "DELETE FROM session_registry WHERE last_seen < ?"),
+                        (cutoff,))
+                    n = cur.rowcount or 0
+                conn.commit()
+            except Exception:
+                self._rollback(conn)
+                raise
+        if n:
+            log.info("mailbox: evicted %d stale registration(s)", n)
+        return n
+
+    def dedupe_messages(self) -> dict:
+        """Collapse the duplicate rows the old fan-out left behind.
+
+        A repair, not a routine: ``send()`` can no longer produce these.
+        It exists because the rows it removes are already in every
+        mailbox that ran the old code — 30 of 65 on solidpc, three sends
+        of eleven copies each — and an upgrade that fixes the cause
+        without clearing the effect leaves the recipient re-reading the
+        same message eleven times.
+
+        Two rows are the same message when the sender, destination,
+        subject, body **and** ``created_at`` all match. The timestamp
+        carries microseconds on both dialects, so two deliberate sends of
+        identical text cannot collide; only rows written by one
+        ``INSERT`` loop can.
+
+        Which copy survives is the whole difficulty. Read state lives on
+        the row, and the copies do not share it: on solidpc one set had
+        one read copy in eleven, so keeping the lowest id had a ~91%
+        chance of resurfacing a message the recipient had already read.
+        A read copy wins, then an acked one, then the original.
+
+        A ``broadcast_group`` is cleared only when the group is left with
+        a single row. A genuine broadcast fans out across *hosts*, whose
+        rows differ in ``to_host`` and so are never duplicates of each
+        other — but a broadcast sent while the fan-out bug was live has
+        both kinds of multiplicity at once, and only the second is
+        spurious.
+        """
+        self.ensure_schema()
+        with self._lock:
+            conn = self._connect()
+            try:
+                with _cursor(conn) as cur:
+                    cur.execute(self._q(
+                        "SELECT id, created_at, from_alias, to_alias, "
+                        "to_host, subject, body, read_at, ack_body, "
+                        "broadcast_group FROM session_messages ORDER BY id"))
+                    rows = cur.fetchall()
+
+                groups: dict = {}
+                for r in rows:
+                    key = (str(r[1]), r[2], r[3], r[4], r[5], r[6])
+                    groups.setdefault(key, []).append(r)
+
+                doomed: list = []
+                touched_groups: set = set()
+                for members in groups.values():
+                    if len(members) < 2:
+                        continue
+                    # read first, then acked, then the original row
+                    members = sorted(
+                        members,
+                        key=lambda m: (m[7] is None, m[8] is None, m[0]))
+                    for m in members[1:]:
+                        doomed.append(m[0])
+                        if m[9]:
+                            touched_groups.add(m[9])
+                    if members[0][9]:
+                        touched_groups.add(members[0][9])
+
+                if not doomed:
+                    return {"removed": 0, "kept": 0, "groups_cleared": 0}
+
+                with _cursor(conn) as cur:
+                    for chunk in _chunks(doomed, 500):
+                        # Portable ``?`` — ``_q`` rewrites it per dialect.
+                        ph = ", ".join(["?"] * len(chunk))
+                        cur.execute(self._q(
+                            f"DELETE FROM session_messages "
+                            f"WHERE id IN ({ph})"), tuple(chunk))
+                    cleared = 0
+                    for grp in sorted(touched_groups):
+                        cur.execute(self._q(
+                            "SELECT id FROM session_messages "
+                            "WHERE broadcast_group = ?"), (grp,))
+                        left = [row[0] for row in cur.fetchall()]
+                        if len(left) == 1:
+                            # One destination is not a broadcast; the
+                            # group id was an artefact of counting
+                            # registrations rather than mailboxes.
+                            cur.execute(self._q(
+                                "UPDATE session_messages "
+                                "SET broadcast_group = NULL WHERE id = ?"),
+                                (left[0],))
+                            cleared += 1
+                conn.commit()
+            except Exception:
+                self._rollback(conn)
+                raise
+        log.info("mailbox: removed %d duplicate row(s), cleared %d "
+                 "broadcast group(s)", len(doomed), cleared)
+        return {"removed": len(doomed),
+                "kept": sum(1 for m in groups.values() if len(m) > 1),
+                "groups_cleared": cleared}
+
     # ─── sending ─────────────────────────────────────────────────────
 
     def send(self, to: str, subject: str, body: str, *,
@@ -256,30 +620,75 @@ class MailboxStore:
         address = parse_address(to)
         recipients = resolve(address, self.sessions())
 
-        group = str(uuid.uuid4()) if len(recipients) > 1 else None
+        # One row per DESTINATION, never per registration.
+        #
+        # The row that gets written carries ``to_alias`` and ``to_host``
+        # and nothing that distinguishes one session from another, so N
+        # registrations of one alias on one host produced N rows that
+        # were byte-identical apart from their id — and ``inbox()``
+        # reads by alias, so the recipient saw the same message N times.
+        # Observed live: ``xollama@solidpc`` had 11 registrations (one
+        # live session plus ten from sessions that had ended minutes
+        # apart), and a single send was delivered eleven times.
+        #
+        # A registration is not an addressee. The mailbox belongs to the
+        # alias — which is also why parking mail on an alias nobody has
+        # registered works at all — so the destination set is the
+        # distinct ``(alias, host)`` pairs, and a broadcast is a message
+        # reaching more than one of *those*, not more than one process.
+        destinations: list[tuple[str, Optional[str]]] = []
+        for r in recipients:
+            key = (r.alias, r.host)
+            if key not in destinations:
+                destinations.append(key)
+
+        group = str(uuid.uuid4()) if len(destinations) > 1 else None
         expires = self._at(utcnow() + timedelta(
             days=expires_days if expires_days is not None
             else self._expiry_days))
         now = self._now()
         host = host_name()
 
-        rows: list[tuple] = []
+        # (target, row) pairs, so a target that already holds this exact
+        # message can be dropped before anything is written.
+        planned: list[tuple[tuple, tuple]] = []
         if address.is_session:
-            rows.append((now, from_alias, from_session, host, None,
-                         address.session_id, None, None, subject, body,
-                         int(priority), expires))
-        elif recipients:
-            for r in recipients:
-                rows.append((now, from_alias, from_session, host, r.alias,
-                             None, r.host, group, subject, body,
-                             int(priority), expires))
+            planned.append((
+                (None, address.session_id, None),
+                (now, from_alias, from_session, host, None,
+                 address.session_id, None, None, subject, body,
+                 int(priority), expires)))
+        elif destinations:
+            for to_alias, to_host in destinations:
+                planned.append((
+                    (to_alias, None, to_host),
+                    (now, from_alias, from_session, host, to_alias,
+                     None, to_host, group, subject, body,
+                     int(priority), expires)))
         else:
             # Nobody registered: park it on the alias. This is the point
             # of a mailbox — the session you have something for is
             # usually the one that is closed.
-            rows.append((now, from_alias, from_session, host, address.alias,
-                         None, address.host, None, subject, body,
-                         int(priority), expires))
+            planned.append((
+                (address.alias, None, address.host),
+                (now, from_alias, from_session, host, address.alias,
+                 None, address.host, None, subject, body,
+                 int(priority), expires)))
+
+        already = self._recent_identical(
+            from_alias=from_alias, from_host=host, subject=subject,
+            body=body, targets=[t for t, _ in planned])
+        fresh = [(t, r) for t, r in planned if t not in already]
+        skipped = [(t, already[t]) for t, _ in planned if t in already]
+        if not fresh:
+            raise MailboxError(_duplicate_refusal(skipped))
+
+        # A single surviving row is not a broadcast, by the same rule that
+        # decided ``group`` in the first place.
+        if group is not None and len(fresh) < 2:
+            group = None
+            fresh = [(t, r[:7] + (None,) + r[8:]) for t, r in fresh]
+        rows = [r for _, r in fresh]
 
         sql = self._q(
             "INSERT INTO session_messages "
@@ -303,8 +712,89 @@ class MailboxStore:
             except Exception:
                 self._rollback(conn)
                 raise
+        # ``destinations`` keeps its shape — a list of ``(alias, host)`` —
+        # and now lists the ones actually written. Reporting a skipped
+        # destination here would make the confirmation a claim about a
+        # mailbox that did not receive anything; that is what ``skipped``
+        # is for.
+        delivered = [(t[0], t[2]) for t, _ in fresh] if not address.is_session \
+            else destinations
         return {"ids": ids, "address": address, "recipients": recipients,
-                "broadcast_group": group}
+                "destinations": delivered,
+                "broadcast_group": group, "skipped": skipped}
+
+    def _recent_identical(self, *, from_alias: str, from_host: str,
+                          subject: str, body: str,
+                          targets: Sequence[tuple]) -> dict:
+        """Map each target that already holds this exact message to its id.
+
+        Two conditions count, and they answer different questions.
+
+        *Still unread*, at any age: the recipient has not seen the first
+        copy, so a second cannot tell them anything the first will not.
+        This is the one that catches a duplicate whatever produced it —
+        including a sender running code from before a fix, which is what
+        actually happened here.
+
+        *Sent within the window*, read or not: a retry, a double tool
+        call, or a sender repeating itself because it never saw the
+        confirmation. Bounded, so a deliberate re-send of the same text
+        is delayed rather than forbidden.
+
+        Cancelled messages do not count — withdrawing one is a statement
+        that it should not have been sent — and neither do expired ones,
+        which are only still present because the sweep has not run.
+
+        The target comparison is done here rather than in SQL because
+        ``to_host`` is NULL for a parked message, and NULL-safe equality
+        is spelled ``IS NOT DISTINCT FROM`` in Postgres and ``IS`` in
+        SQLite. The candidate set is one sender's messages with one
+        subject inside the window, so matching the body in Python costs
+        nothing and keeps one predicate meaning one thing in both
+        dialects.
+
+        Not atomic, deliberately. This runs in its own transaction and the
+        insert in the next, so two senders sharing an alias could both
+        look, both see nothing and both write. A unique index would close
+        that, and was rejected: rows from the old fan-out share
+        ``created_at`` exactly, so the constraint would abort the whole
+        ``INSERT`` loop of a stale sender and deliver *nothing* rather
+        than too much — trading a duplicate for an outage. The residue is
+        one extra copy in a race, against five from the bug this guards,
+        and :meth:`dedupe_messages` is the layer that mops up regardless.
+        """
+        if not targets:
+            return {}
+        cutoff = self._at(utcnow() - timedelta(seconds=self._dedup_window))
+        now = self._now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                with _cursor(conn) as cur:
+                    cur.execute(self._q(
+                        "SELECT id, to_alias, to_session, to_host, body "
+                        "FROM session_messages "
+                        "WHERE from_alias = ? AND from_host = ? "
+                        "AND subject = ? AND cancelled_at IS NULL "
+                        "AND expires_at > ? "
+                        "AND (read_at IS NULL OR created_at >= ?) "
+                        "ORDER BY id"),
+                        (from_alias, from_host, subject, now, cutoff))
+                    candidates = cur.fetchall()
+                conn.commit()
+            except Exception:
+                self._rollback(conn)
+                raise
+
+        wanted = set(targets)
+        found: dict = {}
+        for mid, to_alias, to_session, to_host, cand_body in candidates:
+            if cand_body != body:
+                continue
+            key = (to_alias, to_session, to_host)
+            if key in wanted and key not in found:
+                found[key] = mid          # earliest, by the ORDER BY
+        return found
 
     # ─── reading ─────────────────────────────────────────────────────
 
@@ -754,6 +1244,42 @@ class MailboxStore:
         if row["cancelled_at"]:
             raise MailboxError(f"Message {message_id} was already withdrawn.")
         return row
+
+
+def _describe_target(target: tuple) -> str:
+    """``alias@host``, a session id, or a parked alias — as addressed."""
+    to_alias, to_session, to_host = target
+    if to_session:
+        return to_session
+    return f"{to_alias}@{to_host}" if to_host else str(to_alias)
+
+
+def describe_skipped(skipped: Sequence[tuple]) -> str:
+    """``xollama@solidpc (identical to #185)``, comma-joined."""
+    return ", ".join(f"{_describe_target(t)} (identical to #{mid})"
+                     for t, mid in skipped)
+
+
+def _duplicate_refusal(skipped: Sequence[tuple]) -> str:
+    """Why nothing was written, naming the message this repeats.
+
+    Phrased so a *retrying* caller reads it correctly. The likeliest
+    reason to see this is that the first attempt succeeded and its
+    confirmation was lost, so "rejected" has to arrive together with
+    "the message is already there" — otherwise the refusal reads as a
+    failure and invites a third attempt.
+    """
+    one = len(skipped) == 1
+    head = (f"Not sent. This is identical to #{skipped[0][1]}, already "
+            f"sent to {_describe_target(skipped[0][0])}"
+            if one else
+            "Not sent. Every recipient already has this exact message: "
+            + describe_skipped(skipped))
+    return (f"{head}{'.' if one else ''} It is in their mailbox — nothing "
+            f"more is needed. If this is a genuine follow-up rather than a "
+            f"repeat, change the subject or body; to replace what you sent, "
+            f"edit or withdraw "
+            f"{'it' if one else 'the originals'} instead.")
 
 
 def _as_session(row: dict) -> Session:

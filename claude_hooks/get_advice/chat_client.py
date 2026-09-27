@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.request
 from typing import Callable, Optional
+from claude_hooks import ollama_slots
 
 log = logging.getLogger("claude_hooks.get_advice.chat_client")
 
@@ -49,6 +50,53 @@ RETRYABLE_4XX_BODY_SUBSTRINGS = (
     "unexpected end",                # truncated stream from upstream
     "Bad Gateway",                   # 4xx body wrapping a 502 upstream
 )
+
+# Bodies of a relay's 502/503/504 that mean the relay could not reach
+# the cloud at all — a dead WAN line, not an overloaded model. eleven2go
+# answered 2026-09-23's outages with ``dial tcp: lookup ollama.com: no
+# such host``.
+OUTAGE_BODY_MARKERS = (
+    "no such host", "dial tcp", "connection refused",
+    "network is unreachable", "no route to host", "i/o timeout",
+    "connection reset", "temporary failure in name resolution",
+    "name or service not known", "server misbehaving",
+)
+OUTAGE_MAX_DELAY_S = 60.0
+
+
+def is_outage(exc: BaseException, body: str = "") -> bool:
+    """A failure to reach the model at all: the connection could not be
+    made, was refused or reset, or a relay says it could not reach the
+    cloud. A timeout *reading* a response is not one — that is a slow
+    model, and the ordinary retry budget applies."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return (exc.code in (502, 503, 504)
+                and any(m in (body or "").lower() for m in OUTAGE_BODY_MARKERS))
+    if isinstance(exc, urllib.error.URLError):
+        return True  # raised before a response: connect / DNS phase
+    return isinstance(exc, (ConnectionError, BrokenPipeError))
+
+
+class _Attempts:
+    """``range(max_retries + 1)`` whose current index can be held, so an
+    outage wait re-sends without spending a retry."""
+
+    def __init__(self, max_retries: int):
+        self.max_retries = max_retries
+        self._held = False
+
+    def hold(self) -> None:
+        self._held = True
+
+    def __iter__(self):
+        n = 0
+        while n <= self.max_retries:
+            yield n
+            if self._held:
+                self._held = False
+            else:
+                n += 1
+
 
 # Substrings in a 4xx body that mean "this model doesn't accept the
 # ``think`` / ``reasoning_effort`` field." Hit on a non-reasoning model
@@ -179,8 +227,15 @@ class ChatClient:
     def __init__(self, base_url: str, *, timeout_s: float = DEFAULT_TIMEOUT_S,
                  max_retries: int = DEFAULT_MAX_RETRIES,
                  retry_base_delay_s: float = DEFAULT_RETRY_BASE_DELAY_S,
-                 retry_max_delay_s: float = DEFAULT_RETRY_MAX_DELAY_S):
+                 retry_max_delay_s: float = DEFAULT_RETRY_MAX_DELAY_S,
+                 outage_wait_s: float = 0.0):
         self.base_url = base_url.rstrip("/")
+        # How long one call keeps waiting out a network outage
+        # (``is_outage``) before the ordinary retry budget applies again.
+        # Off by default: an interactive caller should hear about a dead
+        # line, not hang on it. Benchmarks turn it on — a lost verdict
+        # costs more than a late one.
+        self.outage_wait_s = float(outage_wait_s or 0.0)
         if self.base_url.endswith("/v1"):
             self.base_url = self.base_url[: -len("/v1")]
         self.timeout_s = timeout_s
@@ -229,6 +284,42 @@ class ChatClient:
         # ``/api/show`` probe, ``None`` for a model that declares no
         # thinking-budget message.
         self._budget_message: dict[str, Optional[str]] = {}
+
+    def _wait_out_outage(self, e: BaseException, body: str,
+                         attempts: "_Attempts", state: dict, *,
+                         what: str,
+                         cancel_check: Optional[Callable[[], bool]] = None
+                         ) -> bool:
+        """Sleep through a network outage and hold the attempt index.
+        Returns False (use the ordinary retry path) when the budget is
+        off or spent, or the failure is not an outage."""
+        if self.outage_wait_s <= 0 or not is_outage(e, body):
+            return False
+        now = time.monotonic()
+        t0 = state.setdefault("t0", now)
+        if now - t0 >= self.outage_wait_s:
+            if not state.get("spent"):
+                state["spent"] = True
+                log.error("%s: outage budget of %.0fs spent; ordinary "
+                          "retries from here", what, self.outage_wait_s)
+            return False
+        n = state["n"] = state.get("n", 0) + 1
+        delay = min(OUTAGE_MAX_DELAY_S, self.retry_base_delay_s * (2 ** (n - 1)),
+                    max(0.0, self.outage_wait_s - (now - t0)))
+        log.warning("%s: network outage (%s); waiting %.0fs, %.0f of %.0fs "
+                    "outage budget used", what, str(e)[:160] or body[:160],
+                    delay, now - t0, self.outage_wait_s)
+        end = time.monotonic() + delay
+        while True:
+            left = end - time.monotonic()
+            if left <= 0:
+                break
+            if cancel_check is not None and cancel_check():
+                from consultants.engine.stall import CancelledByOrchestrator
+                raise CancelledByOrchestrator("cancelled during an outage wait")
+            time.sleep(min(1.0, left))
+        attempts.hold()
+        return True
 
     def reset_inference_timer(self) -> None:
         """Reset the per-trial inference-time accumulators.
@@ -366,17 +457,21 @@ class ChatClient:
         encoded = json.dumps(body).encode()
 
         last_exc: Optional[Exception] = None
-        for attempt in range(self.max_retries + 1):
+        attempts, outage = _Attempts(self.max_retries), {}
+        for attempt in attempts:
             req = urllib.request.Request(
                 url,
                 data=encoded,
                 method="POST",
                 headers={"Content-Type": "application/json"},
             )
-            attempt_start = time.monotonic()
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
-                    data = json.loads(resp.read())
+                # One connection slot per attempt, released during the
+                # backoff below: a sleeping retry holds no connection.
+                with ollama_slots.slot(self.base_url, model_tag):
+                    attempt_start = time.monotonic()
+                    with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
+                        data = json.loads(resp.read())
                 # Inference-time accounting: ONLY the successful
                 # attempt's duration counts. Prior failed attempts
                 # (timeouts, retryable 5xx, network resets) and the
@@ -435,6 +530,9 @@ class ChatClient:
                         and any(s in err_body
                                 for s in RETRYABLE_4XX_BODY_SUBSTRINGS))
                 )
+                if self._wait_out_outage(e, err_body, attempts, outage,
+                                         what="ollama chat"):
+                    continue
                 if retryable and attempt < self.max_retries:
                     delay = min(
                         self.retry_base_delay_s * (2 ** attempt),
@@ -455,6 +553,9 @@ class ChatClient:
                 ) from e
             except (urllib.error.URLError, OSError) as e:
                 last_exc = e
+                if self._wait_out_outage(e, "", attempts, outage,
+                                         what="ollama chat"):
+                    continue
                 if attempt < self.max_retries:
                     delay = min(
                         self.retry_base_delay_s * (2 ** attempt),
@@ -479,8 +580,13 @@ class ChatClient:
                       *,
                       on_token: Optional[Callable[[str], None]] = None,
                       cancel_check: Optional[Callable[[], bool]] = None,
+                      on_admitted: Optional[Callable[[], None]] = None,
                       ) -> dict:
         """Streaming counterpart to ``chat()``.
+
+        ``on_admitted`` is called once per attempt when the call holds
+        its connection slot (``claude_hooks.ollama_slots``) and is about
+        to send — a stall watchdog restarts its clock there.
 
         POSTs to ``/api/chat`` with ``stream=true``, reads the NDJSON
         response line by line, calls ``on_token(text_delta)`` for each
@@ -525,19 +631,34 @@ class ChatClient:
         encoded = json.dumps(body).encode()
 
         last_exc: Optional[Exception] = None
-        for attempt in range(self.max_retries + 1):
+        attempts, outage = _Attempts(self.max_retries), {}
+        for attempt in attempts:
             req = urllib.request.Request(
                 url, data=encoded, method="POST",
                 headers={"Content-Type": "application/json",
                          "Accept": "application/x-ndjson"},
             )
-            attempt_start = time.monotonic()
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
-                    final = self._consume_ndjson(
-                        resp, on_token=on_token,
-                        cancel_check=cancel_check,
-                    )
+                try:
+                    admitted = ollama_slots.slot(self.base_url, model_tag,
+                                                 cancel_check=cancel_check)
+                    admitted.__enter__()
+                except ollama_slots.Cancelled as e:
+                    raise CancelledByOrchestrator(
+                        f"cancelled while queued for a {e} slot") from e
+                try:
+                    # The stall clock starts when the call is admitted:
+                    # time queued for a slot is not a silent model.
+                    if on_admitted is not None:
+                        on_admitted()
+                    attempt_start = time.monotonic()
+                    with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
+                        final = self._consume_ndjson(
+                            resp, on_token=on_token,
+                            cancel_check=cancel_check,
+                        )
+                finally:
+                    admitted.__exit__(None, None, None)
                 # Inference-time accounting — same semantic as chat():
                 # only the successful attempt's duration is recorded.
                 self.last_inference_s = time.monotonic() - attempt_start
@@ -582,6 +703,10 @@ class ChatClient:
                         and any(s in err_body
                                 for s in RETRYABLE_4XX_BODY_SUBSTRINGS))
                 )
+                if self._wait_out_outage(e, err_body, attempts, outage,
+                                         what="ollama chat_streamed",
+                                         cancel_check=cancel_check):
+                    continue
                 if retryable and attempt < self.max_retries:
                     delay = min(
                         self.retry_base_delay_s * (2 ** attempt),
@@ -604,6 +729,10 @@ class ChatClient:
                 ) from e
             except (urllib.error.URLError, OSError) as e:
                 last_exc = e
+                if self._wait_out_outage(e, "", attempts, outage,
+                                         what="ollama chat_streamed",
+                                         cancel_check=cancel_check):
+                    continue
                 if attempt < self.max_retries:
                     delay = min(
                         self.retry_base_delay_s * (2 ** attempt),
@@ -709,6 +838,13 @@ class ChatClient:
             "stream": False,
         }
         opts = dict(payload.get("options") or {})
+        # The model's sampling template (config ``model_sampling``);
+        # anything the caller set explicitly wins over it.
+        from claude_hooks.model_sampling import sampling_for
+        opts = {**sampling_for(body["model"] or ""), **opts}
+        # An explicit None means "send nothing for this field": the way
+        # a caller asks for the provider default despite a template.
+        opts = {k: v for k, v in opts.items() if v is not None}
         if opts:
             body["options"] = opts
         if "tools" in payload and payload["tools"]:
@@ -1048,5 +1184,7 @@ def make_agent_chat_client(
     """
     if model_ref and model_ref.startswith("llamafile://"):
         label = model_ref[len("llamafile://"):]
+        # A local llamafile has no WAN line to wait out.
+        kwargs.pop("outage_wait_s", None)
         return LlamafileAgentChatClient(label, **kwargs)
     return ChatClient(ollama_base_url, **kwargs)

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from claude_hooks import claudemem_reindex as cr
 from claude_hooks import gitnexus_integration as gn
 
 
@@ -169,6 +170,79 @@ class TestReindex:
         gn.reindex_if_dirty_async(cwd=str(tmp_path), turn_modified=True)
         # First call spawned; second hit fresh lock and bailed
         assert len(spawned) == 1
+
+    def test_live_pid_blocks_respawn_after_cooldown_expires(
+        self, monkeypatch, tmp_path,
+    ):
+        """A rebuild that outlives the cooldown must not get a rival.
+
+        Regression for 2026-09-25: gitnexus v1.6.12 turned the first
+        analyze per repo into a multi-minute FULL rebuild, so the 60s
+        age guard expired while the previous run was still writing
+        ``.gitnexus/graph-csv``. The second run then deleted or collided
+        with the first one's staging CSVs and both failed.
+        """
+        monkeypatch.setattr(gn.shutil, "which",
+                            lambda name: "/usr/bin/gitnexus" if name == "gitnexus" else None)
+        (tmp_path / ".gitnexus").mkdir()
+        (tmp_path / ".git").mkdir()
+
+        spawned = []
+
+        class _FakePopen:
+            # os.getpid() is guaranteed alive, so it stands in for a
+            # still-running analyze.
+            pid = os.getpid()
+
+            def __init__(self, args, **kwargs):
+                spawned.append(args)
+
+        monkeypatch.setattr(gn.subprocess, "Popen", _FakePopen)
+
+        gn.reindex_if_dirty_async(cwd=str(tmp_path), turn_modified=True)
+        assert len(spawned) == 1
+
+        # Cooldown fully expired — only the liveness guard can save us.
+        gn.reindex_if_dirty_async(
+            cwd=str(tmp_path), turn_modified=True, lock_min_age_seconds=0,
+        )
+        assert len(spawned) == 1, "live pid must block a second analyze"
+
+    def test_dead_pid_allows_respawn_after_cooldown(self, monkeypatch, tmp_path):
+        """The liveness guard must not wedge the lock forever: once the
+        recorded pid is gone and the cooldown has passed, reindex runs."""
+        monkeypatch.setattr(gn.shutil, "which",
+                            lambda name: "/usr/bin/gitnexus" if name == "gitnexus" else None)
+        (tmp_path / ".gitnexus").mkdir()
+        (tmp_path / ".git").mkdir()
+        # A high, unallocated pid stands in for a finished analyze.
+        (tmp_path / gn._LOCK_FILENAME).write_text("4194303\n0", encoding="utf-8")
+
+        spawned = []
+        monkeypatch.setattr(gn.subprocess, "Popen",
+                            lambda *a, **kw: spawned.append(a))
+
+        gn.reindex_if_dirty_async(cwd=str(tmp_path), turn_modified=True)
+        assert len(spawned) == 1
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX zombie semantics")
+    def test_an_exited_child_of_this_process_does_not_hold_the_lock(self, tmp_path):
+        """The daemon spawns analyze and never waits for it: once it exits
+        it is a zombie, which kill(pid, 0) still reports as alive."""
+        import subprocess as sp
+        import time as _t
+        pid = sp.Popen(["true"], stdin=sp.DEVNULL, stdout=sp.DEVNULL,
+                       stderr=sp.DEVNULL, start_new_session=True).pid
+        _t.sleep(0.5)  # exited, not waited for
+        (tmp_path / gn._LOCK_FILENAME).write_text(f"{pid}\n0", encoding="utf-8")
+        assert gn._acquire_lock(tmp_path, min_age_seconds=0)
+
+    def test_a_pid_recorded_hours_ago_is_not_trusted(self, tmp_path):
+        """A reused PID (reboot, wrap) must not hold the lock forever."""
+        old = int(gn.time.time()) - cr._LOCK_PID_MAX_AGE_SECONDS - 60
+        (tmp_path / gn._LOCK_FILENAME).write_text(f"{os.getpid()}\n{old}",
+                                                  encoding="utf-8")
+        assert gn._acquire_lock(tmp_path, min_age_seconds=60)
 
     def test_no_op_when_project_not_indexed(self, monkeypatch, tmp_path):
         monkeypatch.setattr(gn.shutil, "which",

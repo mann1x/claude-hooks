@@ -69,7 +69,7 @@ class TestCoderResolveRoute(unittest.TestCase):
     def test_per_language_entry_wins(self):
         cfg = cc.ConsultantsConfig()
         r = cc.coder_resolve_route(cfg, "csharp")
-        self.assertEqual(r.primary, "kimi-k2.6:cloud")
+        self.assertEqual(r.primary, "glm-5.3-flash:cloud")
 
     def test_unknown_language_falls_to_default(self):
         cfg = cc.ConsultantsConfig()
@@ -93,20 +93,17 @@ class TestCoderUniqueModels(unittest.TestCase):
     def test_returns_all_distinct_models(self):
         cfg = cc.ConsultantsConfig()
         models = cc.coder_unique_models(cfg)
-        # coder_med defaults: routes use kimi/pro/flash/minimax-m3;
-        # default_route + legacy model add glm → 5 unique models.
+        # 2026-09-23 defaults: every route, the default route and the
+        # legacy model use the same two cheap models.
         self.assertEqual(set(models),
-                         {"glm-5.2:cloud", "kimi-k2.6:cloud",
-                          "deepseek-v4-pro:cloud",
-                          "deepseek-v4-flash:cloud",
-                          "minimax-m3:cloud"})
+                         {"deepseek-v4.1-flash:cloud", "glm-5.3-flash:cloud"})
 
     def test_dedups_when_legacy_model_overlaps(self):
         cfg = cc.ConsultantsConfig()
-        # The legacy ``model`` field is glm-5.2:cloud, which is
-        # already in the default route + python route → de-duped.
+        # The legacy ``model`` field is deepseek-v4.1-flash, which is
+        # already in the default route + most routes → de-duped.
         models = cc.coder_unique_models(cfg)
-        self.assertEqual(models.count("glm-5.2:cloud"), 1)
+        self.assertEqual(models.count("deepseek-v4.1-flash:cloud"), 1)
 
 
 class TestTomlRoundTrip(unittest.TestCase):
@@ -240,8 +237,8 @@ class TestMutators(unittest.TestCase):
         route = cfg.roles["coder"].routes_by_language["python"]
         self.assertEqual(route.primary, "glm-5.2:cloud")
         # Original fallback preserved — we replaced primary only.
-        # coder_med default python fallback is deepseek-v4-flash.
-        self.assertEqual(route.fallback, "deepseek-v4-flash:cloud")
+        # 2026-09-23 default python fallback is glm-5.3-flash.
+        self.assertEqual(route.fallback, "glm-5.3-flash:cloud")
 
     def test_set_coder_route_clear_fallback_explicit_empty(self):
         # fallback="" is the explicit-clear contract.
@@ -281,9 +278,9 @@ class TestMutators(unittest.TestCase):
     def test_set_coder_default_route_partial_update(self):
         cc.set_coder_default_route(fallback="x:cloud")  # primary unchanged
         cfg = cc.load_config(None)
-        # Default primary was glm-5.2:cloud from the seed.
+        # Default primary is deepseek-v4.1-flash from the seed.
         self.assertEqual(cfg.roles["coder"].default_route.primary,
-                         "glm-5.2:cloud")
+                         "deepseek-v4.1-flash:cloud")
         self.assertEqual(cfg.roles["coder"].default_route.fallback,
                          "x:cloud")
 

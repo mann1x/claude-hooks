@@ -171,6 +171,14 @@ def resolve(address: Address,
         return candidates
 
     hosts = sorted({s.host for s in candidates})
+    if len(hosts) <= 1:
+        # Several registrations, one host: one mailbox, so there is
+        # nothing to disambiguate. Counting rows instead of hosts made
+        # this raise "`xollama` is registered on 1 hosts: solidpc" and
+        # refuse to send — a session that merely restarted eleven times
+        # made its own alias unaddressable.
+        return candidates
+
     raise AddressError(
         f"`{address.alias}` is registered on {len(hosts)} hosts: "
         f"{', '.join(hosts)}. Nothing was sent — say which you mean:\n"
@@ -190,8 +198,13 @@ def describe_recipients(recipients: Sequence[Session],
                 f"that name right now, so it waits until one is. "
                 f"(If that is a typo, nothing will ever read it: check "
                 f"`mailbox-sessions`.)")
-    if len(recipients) == 1:
-        r = recipients[0]
-        return f"delivered to `{r.label()}`"
-    return ("delivered to " +
-            ", ".join(f"`{r.label()}`" for r in recipients))
+    # By destination, not by registration: eleven registrations of one
+    # alias on one host are one mailbox, and listing the same label
+    # eleven times described a fan-out that no longer happens.
+    labels: list[str] = []
+    for r in recipients:
+        if r.label() not in labels:
+            labels.append(r.label())
+    if len(labels) == 1:
+        return f"delivered to `{labels[0]}`"
+    return "delivered to " + ", ".join(f"`{x}`" for x in labels)

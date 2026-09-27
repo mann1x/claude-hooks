@@ -1,0 +1,142 @@
+{
+  "captured_at": "2026-09-23T20:36:34+02:00",
+  "endpoint": "http://192.168.178.161:11434",
+  "models": {
+    "minimax-m3:cloud": {
+      "modified_at": "2026-06-01T00:00:00Z",
+      "capabilities": [
+        "completion",
+        "tools",
+        "thinking",
+        "vision"
+      ],
+      "details": {
+        "parent_model": "minimax-m3",
+        "format": "",
+        "family": "minimax-m3",
+        "families": null,
+        "parameter_size": "0",
+        "quantization_level": ""
+      },
+      "model_info": {
+        "general.architecture": "minimax-m3",
+        "general.parameter_count": 0,
+        "minimax-m3.context_length": 512000,
+        "minimax-m3.embedding_length": 0
+      },
+      "raw": {
+        "details": {
+          "parent_model": "minimax-m3",
+          "format": "",
+          "family": "minimax-m3",
+          "families": null,
+          "parameter_size": "0",
+          "quantization_level": ""
+        },
+        "model_info": {
+          "general.architecture": "minimax-m3",
+          "general.parameter_count": 0,
+          "minimax-m3.context_length": 512000,
+          "minimax-m3.embedding_length": 0
+        },
+        "capabilities": [
+          "completion",
+          "tools",
+          "thinking",
+          "vision"
+        ],
+        "modified_at": "2026-06-01T00:00:00Z"
+      }
+    },
+    "glm-5.2:cloud": {
+      "modified_at": "2026-06-16T08:00:00-07:00",
+      "capabilities": [
+        "thinking",
+        "completion",
+        "tools"
+      ],
+      "details": {
+        "parent_model": "glm-5.2",
+        "format": "",
+        "family": "glm5.2",
+        "families": null,
+        "parameter_size": "756162687872",
+        "quantization_level": ""
+      },
+      "model_info": {
+        "general.architecture": "glm5.2",
+        "general.parameter_count": 756162687872,
+        "glm5.2.context_length": 1048576,
+        "glm5.2.embedding_length": 0
+      },
+      "raw": {
+        "details": {
+          "parent_model": "glm-5.2",
+          "format": "",
+          "family": "glm5.2",
+          "families": null,
+          "parameter_size": "756162687872",
+          "quantization_level": ""
+        },
+        "model_info": {
+          "general.architecture": "glm5.2",
+          "general.parameter_count": 756162687872,
+          "glm5.2.context_length": 1048576,
+          "glm5.2.embedding_length": 0
+        },
+        "capabilities": [
+          "thinking",
+          "completion",
+          "tools"
+        ],
+        "modified_at": "2026-06-16T08:00:00-07:00"
+      }
+    },
+    "gemma4:31b-cloud": {
+      "modified_at": "2026-04-02T09:00:00-08:00",
+      "capabilities": [
+        "completion",
+        "thinking",
+        "tools",
+        "vision"
+      ],
+      "details": {
+        "parent_model": "gemma4:31b",
+        "format": "",
+        "family": "gemma4",
+        "families": null,
+        "parameter_size": "32682372656",
+        "quantization_level": "BF16"
+      },
+      "model_info": {
+        "gemma4.context_length": 262144,
+        "gemma4.embedding_length": 5376,
+        "general.architecture": "gemma4",
+        "general.parameter_count": 32682372656
+      },
+      "raw": {
+        "details": {
+          "parent_model": "gemma4:31b",
+          "format": "",
+          "family": "gemma4",
+          "families": null,
+          "parameter_size": "32682372656",
+          "quantization_level": "BF16"
+        },
+        "model_info": {
+          "gemma4.context_length": 262144,
+          "gemma4.embedding_length": 5376,
+          "general.architecture": "gemma4",
+          "general.parameter_count": 32682372656
+        },
+        "capabilities": [
+          "completion",
+          "thinking",
+          "tools",
+          "vision"
+        ],
+        "modified_at": "2026-04-02T09:00:00-08:00"
+      }
+    }
+  }
+}

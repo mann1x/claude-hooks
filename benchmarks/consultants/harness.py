@@ -515,15 +515,127 @@ class CoderTrial:
                                            # prior two judges
     quality_meta_judge_model: str = ""     # which model judged
     quality_meta_mode: str = "skipped"     # "meta_judge" / "skipped"
+    # A judge panel's full verdict (judge_panel.resolve): each member's
+    # score + rationale, the synthesizer's claims check, and where the
+    # final quality_score came from. Empty on the one-judge path.
+    quality_panel: dict = field(default_factory=dict)
     # Bookkeeping
     sandbox_dir: str = ""
     timestamp: str = ""        # ISO-8601 UTC; set at trial start
     error: Optional[str] = None
     # The files the coder wrote: list of {"path": str, "bytes": int}
     files_written: list[dict] = field(default_factory=list)
+    # Every LLM call this trial made, by role — see ``record_usage``.
+    usage: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+# ============================================================== #
+# Per-role token spend
+# ============================================================== #
+
+def record_usage(usage: dict, role: str, model: str, resp: Any, *,
+                 wall_s: Optional[float] = None) -> None:
+    """Add one LLM response's tokens to a trial's per-role ``usage``.
+
+    Every LLM call a bench makes is spend, the judges' as much as the
+    model under test's, and they are usually different models at
+    different prices. A bench that records only the subject's tokens
+    understates what a run costs, and understates it most for exactly
+    the runs that judge the most. So every call site records here,
+    retries included: a retried call was paid for twice.
+
+    ``usage`` maps role → ``{"model", "calls", "prompt", "completion"}``.
+    A response without a ``usage`` block still counts as a call, with
+    zero tokens, so an under-reporting backend shows up as calls that
+    cost nothing rather than as calls that never happened.
+    """
+    u = resp.get("usage") if isinstance(resp, dict) else None
+    u = u if isinstance(u, dict) else {}
+    slot = usage.setdefault(
+        role, {"model": model, "calls": 0, "prompt": 0, "completion": 0})
+    slot["calls"] += 1
+    slot["prompt"] += int(u.get("prompt_tokens") or 0)
+    slot["completion"] += int(u.get("completion_tokens") or 0)
+    _add_wall(slot, wall_s)
+
+
+def _add_wall(slot: dict, wall_s: Optional[float]) -> None:
+    """Sum the seconds a role's calls took. Speed is half of what a
+    cheaper model is chosen for, so it is measured per call rather than
+    read off the gaps between trial timestamps."""
+    if wall_s is not None:
+        slot["wall_s"] = round(slot.get("wall_s", 0.0) + wall_s, 3)
+
+
+def record_failed_call(usage: dict, role: str, model: str, *,
+                       wall_s: Optional[float] = None) -> None:
+    """Count a call that raised (timeout, connection reset) before it
+    returned usage.
+
+    The cloud may have generated — and billed — tokens the client never
+    saw, so this is spend of unknown size, not no spend. It is counted
+    as a call and as ``failed`` so a report can say how much of a role's
+    bill it could not see.
+    """
+    slot = usage.setdefault(
+        role, {"model": model, "calls": 0, "prompt": 0, "completion": 0})
+    slot["calls"] += 1
+    slot["failed"] = slot.get("failed", 0) + 1
+    _add_wall(slot, wall_s)
+
+
+#: How long a benchmark call waits out a network outage (see
+#: ChatClient.outage_wait_s). A dead WAN line comes back in minutes, and
+#: a verdict lost to it becomes a hole a repair pass has to fill; a late
+#: verdict costs nothing. CLAUDE_HOOKS_BENCH_OUTAGE_WAIT_S overrides.
+BENCH_OUTAGE_WAIT_S = 1800.0
+
+
+def bench_outage_wait_s() -> float:
+    raw = os.environ.get("CLAUDE_HOOKS_BENCH_OUTAGE_WAIT_S", "").strip()
+    try:
+        return float(raw) if raw else BENCH_OUTAGE_WAIT_S
+    except ValueError:
+        return BENCH_OUTAGE_WAIT_S
+
+
+def bench_client(model: str, base: str, **kwargs):
+    """``make_agent_chat_client`` for a benchmark: the same client, with
+    the outage budget on."""
+    from claude_hooks.get_advice import chat_client as cc
+    kwargs.setdefault("outage_wait_s", bench_outage_wait_s())
+    return cc.make_agent_chat_client(model, base, **kwargs)
+
+
+def timed_chat(client: Any, payload: dict, usage: Optional[dict],
+               role: str, model: str) -> Any:
+    """``client.chat(payload)``, recorded under ``role`` with its tokens
+    and wall time — or as a failed call, with the time it burned, when
+    it raises (the exception propagates). ``usage=None`` records
+    nothing."""
+    t0 = time.monotonic()
+    try:
+        resp = client.chat(payload)
+    except Exception:
+        if usage is not None:
+            record_failed_call(usage, role, model,
+                               wall_s=time.monotonic() - t0)
+        raise
+    if usage is not None:
+        record_usage(usage, role, model, resp, wall_s=time.monotonic() - t0)
+    return resp
+
+
+def set_role_usage(usage: dict, role: str, model: str, *, calls: int,
+                   prompt: int, completion: int) -> None:
+    """Record a role's totals when they were summed elsewhere — the
+    coder's agent loop reports tokens through a callback, not a
+    response, so its total arrives already added up."""
+    usage[role] = {"model": model, "calls": int(calls),
+                   "prompt": int(prompt), "completion": int(completion)}
 
 
 # ============================================================== #
@@ -693,6 +805,8 @@ class ToolExecTrial:
     quality_score: Optional[float] = None
     quality_rationale: str = ""
     quality_judge_model: str = ""
+    # Every LLM call this trial made, by role — see ``record_usage``.
+    usage: dict = field(default_factory=dict)
     # Bookkeeping
     error: Optional[str] = None
 

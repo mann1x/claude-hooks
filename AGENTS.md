@@ -10,6 +10,7 @@ on every prompt and stores noteworthy turns back.
 - **Handlers**: `claude_hooks/hooks/` — one per event (user_prompt_submit, session_start, stop, etc.)
 - **Providers**: `claude_hooks/providers/` — memory backends (qdrant, memory_kg, pgvector, sqlite_vec)
 - **Config**: `config/claude-hooks.json` (gitignored), deep-merged over defaults in `claude_hooks/config.py`
+- **Episodic**: `episodic_server/` (HTTP front-end) + `episodic-memory/` (vendored obra/episodic-memory subtree, `dist/` committed); `scripts/deploy.py` builds + `npm link`s it on the server host via `install_vendored()` in `scripts/episodic_doctor.py`, and `scripts/verify_deploy.py` fails when the CLI on PATH is not that copy. `episodic.compress_after_days` (default 7, `0` = never) reaches every sync claude-hooks starts as `EPISODIC_MEMORY_COMPRESS_AFTER_DAYS` — `sync_env()` in `claude_hooks/hooks/session_end.py` and in `episodic_server/server.py` (`/ingest` + `/sync`) — so archived transcripts idle that long are stored as `<name>.jsonl.zst` and still read by their `.jsonl` name
 
 ## Intelligence Modules
 
@@ -28,14 +29,21 @@ Stop pipeline:
 Daemon stack (Tier 3.8 long-lived hook executor):
 - `daemon.py`, `daemon_client.py`, `daemon_ctl.py` — single Python process owns providers + config across hook invocations; each hook answers in milliseconds instead of paying the 100–300 ms Python cold-start
 
-LSP engine (v0.7+, opt-in, session-scoped):
+LSP engine (v0.7+, opt-in; v1.17+ daemon keyed on the repository boundary):
 - `lsp_engine/config.py`, `lsp.py`, `engine.py` — TOML config, per-language LSP child wrapper, multi-LSP routing
 - `lsp_engine/daemon.py`, `ipc.py`, `locks.py`, `client.py` — daemon lifecycle, UNIX socket IPC (POSIX) / named pipes (Windows), per-file session-affinity locks, hook-side client + spawn helper
 - `lsp_engine/preload.py`, `git_watch.py` — adaptive preload from code-graph hot set; polling git watcher for branch-switch refresh
 - `lsp_engine/compile.py` — opt-in compile-aware orchestrator that merges `cargo check` / `tsc --noEmit` / `mypy` / `go vet` diagnostics on top of the LSP layer
+- `lsp_engine/pool.py`, `protocol.py`, `wire.py` — bounded pool of narrowly-rooted engines per daemon; navigation payload parsing; JSON encoding so the daemon serves the navigation surface
+- `lsp_engine/package_exports.py` — suppresses the package-boundary note on `find_references` / `find_implementation` for a symbol unreachable from the package's published entry points; unsure keeps the warning
+- `lsp_engine_manager.py` — host-level supervision of the per-repository daemons (`lsp list|reload|stop|reap`)
+- `lsp_mcp/` — `lsp` MCP server (`bin/claude-hook-lsp-mcp`) replacing cclsp; same twelve-tool catalog
+- `mailbox/` — session mailbox (inter-session messaging MCP tools + daemon-owned sweep); on unread mail, Stop blocks once per message per session to nudge a `mailbox-read` (`hooks.mailbox.stop_nudge`, nudged ids in `~/.claude/claude-hooks-mailbox/nudged-<session>.json`)
 
 Concurrency / utility:
 - `_parallel.py` (provider fan-out), `mcp_client.py`, `embedders.py`
+- `model_sampling.py` — per-model sampling templates (shipped `config/model-sampling.json` < user `model_sampling.templates` in `config/claude-hooks.json` < `CLAUDE_HOOKS_MODEL_SAMPLING`), applied in `get_advice/chat_client.py`; caller `options` win (see `docs/model-sampling.md`)
+- `ollama_slots.py` — cross-process Ollama connection slots (file locks under `~/.claude/ollama-slots/<scope>/`) held for every `ChatClient` HTTP attempt; cloud limit = plan connections − `reserve_for_hooks`, local = `local_limit`; recall hooks bypass it; config under `ollama_slots` in `config/claude-hooks.json` (see `docs/ollama-slots.md`)
 
 Companion integrations (opt-in):
 - `openwolf.py` — reads .wolf/ project data (cerebrum, buglog)
@@ -104,15 +112,6 @@ If `/usr/local/bin/caliber` is not found, read `.agents/skills/setup-caliber/SKI
 Read `CALIBER_LEARNINGS.md` for patterns and anti-patterns learned from previous sessions.
 These are auto-extracted from real tool usage — treat them as project-specific rules.
 <!-- /caliber:managed:learnings -->
-
-<!-- caliber:managed:model-config -->
-## Model Configuration
-
-Recommended default: `claude-sonnet-4-6` with high effort (stronger reasoning; higher cost and latency than smaller models).
-Smaller/faster models trade quality for speed and cost — pick what fits the task.
-Pin your choice (`/model` in Claude Code, or `CALIBER_MODEL` when using Caliber with an API provider) so upstream default changes do not silently change behavior.
-
-<!-- /caliber:managed:model-config -->
 
 <!-- caliber:managed:sync -->
 ## Context Sync

@@ -53,11 +53,107 @@ automatically by `scripts/consultants_benchmark.sh`.
 
 Derived KPIs:
 
-- `cost_proxy = prompt_tok * 1.0 + completion_tok * 4.0` — a
-  unit-free proxy for cloud cost (Anthropic-style 1:4 ratio; only
-  useful for cross-model relative ordering, not absolute USD).
+- **`cost_usd`** — dollars, per query and per run, priced **per role**:
+  each turn's `prompt_tokens` / `completion_tokens` from
+  `<slug>.metadata.json::turns`, times the price of the model that role
+  ran on, at the time the query ran (peak or off-peak). See §2.1.
 - `tokens_per_second = (prompt_tok + completion_tok) / wall_s` —
   rough throughput; inflated by reasoning tokens.
+
+(`cost_proxy = prompt_tok + 4 × completion_tok`, the unit-free proxy
+used through v1.2, is retired: Ollama now bills each model at its own
+input/output price, and the 1:4 ratio it assumed ranges from 1:3 to
+1:40 across the models we run.)
+
+### 2.1 Cost — what a run costs in dollars
+
+The Ollama account is a monthly **dollar budget**, and every call draws
+on it at the model's own per-token price (Appendix A). Cost is therefore
+a first-class comparison axis beside quality and wall time, and it
+follows three rules:
+
+1. **Every LLM call is counted, by role.** The planner, every researcher
+   lane, the critic, the synthesizer, and — in the skill-eval benches —
+   every judge, rejudge and retry. A figure that leaves a role out is
+   not a cost. The council metadata records every turn; the skill-eval
+   trials record `usage` by role (`harness.record_usage`).
+2. **Priced at a dated snapshot.** `benchmarks/consultants/pricing.py`
+   holds the table, its source and its date. A report states the
+   snapshot it used, so a later price change never silently rewrites an
+   old comparison.
+3. **Upper bound.** Prompt tokens are priced uncached, because the traces
+   do not record cache hits.
+
+`scripts/bench_costs.py` prices every recorded run, council and
+skill-eval alike; the result is committed at
+[`costs.md`](costs.md). When choosing between models of equal grade,
+**cost decides before wall time** (see §3.5 "Composing the role
+grades").
+
+Off-peak pricing applies outside 12:00–18:00 UTC on weekdays and all
+weekend, and currently halves the deepseek models only. Schedule sweeps
+that lean on them off-peak and record the window (§6.4).
+
+### 2.2 The skill-eval judge
+
+A coder_bench quality score is only as good as its judge, and a judge
+is only trustworthy once it has been checked against the one thing
+that is not an opinion: whether the code passes its tests.
+`benchmarks/consultants/judge_eval.py` does that. It measures a
+candidate's separation (AUC of its score against *tests pass*),
+repeat agreement, self-bias, style affinity, speed and cost on solutions
+whose correctness is already known. Findings:
+[`judge-and-sampling.md`](judge-and-sampling.md).
+
+1. **Default judge (2026-09-23): the panel.** glm-5.3-flash and
+   deepseek-v4.1-flash score every compiled trial independently on the
+   same blind rubric. When both return a score, deepseek-v4.1-flash
+   settles it: it verifies each review's claim against the code, sees
+   the reviews as A/B in a hashed order, and never sees model names
+   (`judge_panel.py`). One score alone stands; a failed synthesizer
+   leaves an agreed score, or the mean, flagged.
+2. **kimi-k2.6 remains the reference** for comparisons with runs judged
+   before 2026-09-23. A run that is compared with an older one names the
+   older run's judge (`--judge-model kimi-k2.6:cloud`). Scores from
+   different judges are never compared directly: calibrate on shared
+   models (`scripts/bench_ladders.py`) or re-judge.
+3. **A new judge is admitted by `judge_eval`**, not by reputation: its
+   AUC interval must overlap the reference's, and its self-bias must be
+   reported.
+
+### 2.3 Sampling is part of the subject
+
+A cloud model runs at the provider default unless the request says
+otherwise, and the default is not always one the model does well at.
+The sampling a run used is therefore recorded with the run:
+
+- Templates travel in the request, from `config/model-sampling.json`
+  plus user overrides (`claude_hooks/model_sampling.py`), never from an
+  Ollama Modelfile overlay.
+- A judge's label carries its sampling
+  (`glm-5.3-flash:cloud@temperature=0.7`), and a coder arm's directory
+  carries a `sampling.json`. Results under different sampling never
+  pool.
+- A sampling comparison changes only the subject's sampling. The judge
+  must be one without a template, or be pinned with `--sampling none`.
+- A shipped template changes the model in **every** role. Measure it in
+  each role the model is routed to before shipping it.
+
+### 2.4 Outages and repair
+
+A network outage does not invalidate a run, but it does leave holes:
+judge calls that returned no score. Two rules keep them from becoming
+results.
+
+1. **Wait it out.** Benchmark clients use `harness.bench_client`, which
+   waits out a dead line for up to 30 min
+   (`ChatClient.outage_wait_s`) instead of failing within seconds.
+2. **Repair, never re-run.** Every benchmark chain ends with
+   `benchmarks/consultants/repair.py`. It re-asks exactly the verdicts
+   and coder judgments left without a score, using the same judge,
+   sampling and prompt, append-only, over a few rounds. A trial scored
+   after the run is marked `quality_filled`. A run with holes left is
+   not reported as complete.
 
 ---
 
@@ -260,8 +356,12 @@ To find a viable mix, scan the cross-label `index.md`'s per-role
 columns:
 
 - **Cheapest A grade per role** → use that model for that role.
+  "Cheapest" means **dollars per fire** for that role (§2.1), not
+  tokens: a model that uses 2× the tokens at a fifth of the price is
+  the cheaper one.
 - If no model gets A on a role, use the highest-grading model
-  available; if multiple tie, prefer the one with lower wall.
+  available; if multiple tie, prefer the one with lower cost, then
+  lower wall.
 
 A composed mix should be re-baselined as its own label
 (`mix-2026-05-XX-PA-RA-CA-SA`) before being declared usable.
@@ -337,6 +437,17 @@ cost; treat it as a sweep-suite version bump.
 
 `results.md` records `Subject baseline: <tag> (commit <sha>)` so
 you can tell at a glance which tree the run audited.
+
+**The audited tree must not contain the answers.** The baseline tag
+is a snapshot of this repo, so it carries this file (the Q1 role list
+and the Q2 ground-truth sites), every earlier label's transcripts and
+answers under `docs/benchmarks/`, and `docs/consultants-benchmarks.md`,
+which restates the Q2 sites. The runner deletes those paths from the
+worktree before the first query and `results.md` records that it did
+(`Answer key removed from the worktree: …`). Runs before 2026-09-23
+audited a tree that still held them: on 2026-09-23 `glm-5.3` read the
+key for Q1 and Q2 and `deepseek-v4.1-flash` found it, so an earlier
+label's Q1/Q2 grade cannot rule out the same.
 
 ### 6.2 Engine code (the consultants engine itself)
 
@@ -530,9 +641,8 @@ of pointers.
 
 ## 12. Future protocol extensions (not yet enforced)
 
-- Cost-per-run in actual currency once proxy logging is reliable
-  enough to derive (requires hooking into the caliber proxy's
-  rollup DB).
+- Cached-input pricing, once traces record cache hits (the current
+  figures are uncached upper bounds).
 - A/B significance test (Mann-Whitney U) when comparing labels
   with N ≥ 3 runs. Skipped for now because the small N makes any
   test underpowered; trust the median/MAD eyeball.
@@ -541,11 +651,76 @@ of pointers.
 
 ---
 
-**Protocol version:** 1.2 (2026-05-09)
+## Appendix A — Price snapshot 2026-09-23
+
+Read from <https://ollama.com/pricing> on **2026-09-23**; the same table
+is `benchmarks/consultants/pricing.py`. US$ per million tokens.
+
+| Model | Input | Cached input | Output | Off-peak input | Off-peak output |
+|---|---|---|---|---|---|
+| deepseek-v4.1-flash | 0.30 | 0.006 | 1.20 | 0.15 | 0.60 |
+| deepseek-v4-flash | 0.44 | 0.014 | 1.32 | 0.22 | 0.66 |
+| deepseek-v4-pro | 1.32 | 0.044 | 3.96 | 0.66 | 1.98 |
+| gemma4 | 0.14 | 0.05 | 0.40 | — | — |
+| glm-5.3 | 1.40 | 0.26 | 4.40 | — | — |
+| glm-5.3-flash | 0.15 | 0.03 | 0.50 | — | — |
+| glm-5.2 | 1.40 | 0.26 | 4.40 | — | — |
+| glm-5.1 | 1.00 | 0.20 | 3.20 | — | — |
+| gpt-oss:120b | 0.15 | 0.014 | 0.60 | — | — |
+| gpt-oss:20b | 0.07 | 0.035 | 0.30 | — | — |
+| kimi-k3 | 3.00 | 0.30 | 15.00 | — | — |
+| kimi-k2.7-code | 0.95 | 0.19 | 4.00 | — | — |
+| kimi-k2.6 | 0.95 | 0.16 | 4.00 | — | — |
+| minimax-m3 | 0.60 | 0.12 | 2.40 | — | — |
+| minimax-m2.7 | 0.30 | 0.06 | 1.20 | — | — |
+| mistral-large-3 | 0.50 | — | 1.50 | — | — |
+| nemotron-3-nano | 0.06 | — | 0.24 | — | — |
+| nemotron-3-super | 0.015 | 0.015 | 0.60 | — | — |
+| nemotron-3-ultra | 0.10 | 0.10 | 3.00 | — | — |
+| qwen3.5:397b | 0.60 | — | 3.60 | — | — |
+
+Not on the page, and therefore **unpriced** in every report:
+`gemini-3-flash-preview`, `qwen3.5` (bare), `qwen3-coder-next`.
+
+Off-peak: outside 12:00–18:00 UTC on weekdays, and all weekend.
+Plans: Free ($0 + starter credits, 1 concurrent), Pro ($60/month, 3
+concurrent), Max ($300/month, 10 concurrent), Team ($1,000/month shared,
+10 concurrent). Unused monthly credit does not carry forward; overage
+draws on purchased balance.
+
+When the prices change, add a new appendix with its date and keep this
+one: costs already published were computed against it.
+
+---
+
+**Protocol version:** 1.5 (2026-09-24)
 **Authoritative file:** `docs/benchmarks/EVALUATION.md`
-**Last reviewed:** 2026-05-09
+**Last reviewed:** 2026-09-24
 
 ### Changelog
+
+- **1.5 (2026-09-24)** — Three rules for the skill-eval benches. The
+  judge is checked against tests passing, and coder_bench's default
+  becomes the glm-5.3-flash + deepseek-v4.1-flash panel; kimi-k2.6
+  stays the reference for comparisons with older runs (§2.2). Sampling
+  is recorded as part of the subject and never pools across settings
+  (§2.3). Outages are waited out, and every chain ends with
+  `repair.py` (§2.4). Council grading is unchanged, and no label needs
+  re-grading.
+
+- **1.4 (2026-09-23)** — The answer key is removed from the audited
+  worktree (§6.1): `docs/benchmarks/` and `docs/consultants-benchmarks.md`
+  are deleted from it before the first query. Grading criteria are
+  unchanged; Q1/Q2 grades from earlier runs carry the caveat that the
+  key was reachable.
+
+- **1.3 (2026-09-23)** — Cost in dollars becomes a first-class KPI
+  (§2.1). Every LLM call is counted by role and priced per model at a
+  dated snapshot (Appendix A, `benchmarks/consultants/pricing.py`);
+  `cost_proxy` is retired. "Cheapest A per role" now means dollars per
+  fire, and ties break on cost before wall. Grading criteria are
+  unchanged, so no existing label needs re-grading; every prior run was
+  re-priced at the 2026-09-23 snapshot in [`costs.md`](costs.md).
 
 - **1.2 (2026-05-09)** — Q3 grading gains a correctness sub-rubric.
   The v1.0/v1.1 shape-only grade gave A to several recommendations

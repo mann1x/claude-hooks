@@ -29,6 +29,51 @@ This page answers two things the easy suite could not:
 
 ---
 
+## 2026-09-23 re-baseline
+
+Same suite (`coder_med@1.0`, hash `0e6ab0fd`), same kimi-k2.6 judge, with
+five models: the new glm-5.3, glm-5.3-flash, deepseek-v4.1-flash and
+deepseek-v4-pro, plus minimax-m3. Incumbents were not re-run. kimi-k2.6 is
+too expensive to route to, and deepseek-v4-flash retires 2026-09-25.
+Q = mean of *judge score ÷ 5* over trials whose tests pass (failing trials
+count 0). Prices: [`costs.md`](costs.md), where both ladders rank the same
+models.
+
+| Model | Q | pass | judge avg | $ / trial | $ / Q point | median s | throughput index |
+|---|---|---|---|---|---|---|---|
+| `deepseek-v4-pro:cloud` | 0.833 | 98% | 4.25 | $0.0075 | $0.0090 | 6.2 | 58 |
+| `deepseek-v4.1-flash:cloud` | 0.827 | 100% | 4.13 | $0.0013 | $0.0016 | 2.1 | 234 |
+| `minimax-m3:cloud` | 0.813 | 97% | 4.10 | $0.0044 | $0.0054 | 5.8 | 76 |
+| `glm-5.3-flash:cloud` | 0.770 | 97% | 3.88 | $0.0005 | $0.0007 | 3.8 | 254 |
+| `glm-5.3:cloud` | 0.723 | 92% | 3.86 | $0.0049 | $0.0068 | 2.4 | 100 |
+
+Q per language (n = 10 each; a 0.1 gap is one question):
+
+| Model | c | cpp | csharp | go | python | rust |
+|---|---|---|---|---|---|---|
+| deepseek-v4-pro | 0.78 | 0.84 | **0.90** | 0.80 | 0.82 | **0.86** |
+| deepseek-v4.1-flash | 0.88 | **0.88** | 0.80 | 0.72 | 0.90 | 0.78 |
+| minimax-m3 | **0.90** | 0.76 | 0.76 | 0.78 | **0.98** | 0.70 |
+| glm-5.3-flash | 0.78 | 0.82 | 0.86 | 0.62 | 0.84 | 0.70 |
+| glm-5.3 | 0.54 | 0.72 | 0.86 | **0.82** | 0.74 | 0.66 |
+
+- **deepseek-v4.1-flash is within 0.006 Q of the best model at 1/6 of its
+  price.** It is the only model to pass all 60, and it leads the value
+  ladder by a wide margin.
+- **glm-5.3-flash is the cheapest model to reach the bar**, at 0.0007 $
+  per Q point, and it is the throughput-ladder leader. It also beats
+  deepseek-v4.1-flash on C#.
+- **Nothing pricier is much better anywhere.** minimax-m3 +0.08 on python
+  (3× the price), deepseek-v4-pro +0.08 on rust (8×), glm-5.3 +0.10 on go
+  (4×). Go is the weakest cell for both cheap models.
+- Sampling: this run is at the cloud default. glm-5.3-flash at 0.7 and
+  with repetition penalties is compared in
+  [`judge-and-sampling.md`](judge-and-sampling.md#sampling--coder).
+
+---
+
+## 2026-06-04 baseline
+
 ## ⚠️ Read this first — medium separates the *field*, leaders still tie per-language
 
 The medium suite fixes the easy suite's worst property: **every one of the 60
@@ -424,6 +469,34 @@ that route; it does not change it.
 
 ## Adopted routes
 
+On **2026-09-23** the routes moved to the re-baseline above, chosen on
+quality per dollar: the two cheap models, since no pricier model was much
+better. The fallback is always the other vendor.
+
+| lang | primary | fallback |
+|------|---------|----------|
+| c | `deepseek-v4.1-flash:cloud` | `glm-5.3-flash:cloud` |
+| cpp | `deepseek-v4.1-flash:cloud` | `glm-5.3-flash:cloud` |
+| csharp | `glm-5.3-flash:cloud` | `deepseek-v4.1-flash:cloud` |
+| go | `deepseek-v4.1-flash:cloud` | `glm-5.3-flash:cloud` |
+| python | `deepseek-v4.1-flash:cloud` | `glm-5.3-flash:cloud` |
+| rust | `deepseek-v4.1-flash:cloud` | `glm-5.3-flash:cloud` |
+| *default* | `deepseek-v4.1-flash:cloud` | `glm-5.3-flash:cloud` |
+
+These routes are applied in three places:
+- the shipped code defaults in
+  [`coder_defaults.py`](../../consultants/engine/coder_defaults.py)
+  (`RECOMMENDED_AS_OF = 2026-09-23`, cohort
+  `QUALIFYING_MODELS_2026_09_23_MED`; a test forbids a retiring model in
+  any route);
+- the user-global config on solidpc and pandorum;
+- this repo's per-project override.
+
+The researcher/critic extra lane also moved from deepseek-v4-flash to
+deepseek-v4.1-flash.
+
+### 2026-06-04 routes (superseded)
+
 On **2026-06-04** the per-language coder routes were realigned to the
 neutral-ladder winners above (primary = ladder winner, fallback = runner-up):
 
@@ -463,9 +536,12 @@ the whole table with `[role.coder].model = "glm-5.1:cloud"`.
 - **Per-language routes adopted (2026-06-04)** — done; the table above is live
   in code defaults + both hosts. Re-open only if a newer suite supersedes
   `coder_med` v1.0.
-- **Retire kimi as the sole judge.** Adopt a cross-judge panel
-  (`--audit-judge-model` / `--meta-judge-model`, or the offline gemini
-  re-score) for any quality-decided pick, given the measured self-bias.
+- **Retire kimi as the sole judge — done 2026-09-23.** coder_bench now
+  defaults to a glm-5.3-flash + deepseek-v4.1-flash panel settled by
+  deepseek-v4.1-flash. On 654 known-correct/incorrect solutions it matches
+  kimi's separation (AUC 0.958 vs 0.955) at 1/7 the cost per verdict; see
+  [`judge-and-sampling.md`](judge-and-sampling.md). The 2026-09-23 routes
+  above were still judged by kimi, so they stay comparable with June.
 - **Gemini judge coverage — solved for this run.** The reasoning model truncates
   before the verdict line at a low `num_predict`; raising it to 4000 (re-score)
   / 8000 (ladder) and a targeted retry of only the truncated items took the

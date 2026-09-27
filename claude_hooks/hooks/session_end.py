@@ -34,6 +34,12 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     # Best-effort, no-op when engine disabled / daemon already gone.
     _detach_lsp_engine_session(event, config)
 
+    # Mailbox — drop this session's registration, so an alias lists the
+    # sessions that exist rather than every session that ever ran in the
+    # directory. Delivery no longer fans out over the difference, but a
+    # registry full of dead rows still misreports peers at SessionStart.
+    _unregister_mailbox_session(event, config, providers)
+
     ep_cfg = config.get("episodic") or {}
     mode = (ep_cfg.get("mode") or "off").lower()
 
@@ -44,6 +50,18 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
 
     log.debug("session ended (episodic off): %s", event.get("session_id"))
     return None
+
+
+def _unregister_mailbox_session(event: dict, config: dict, providers) -> None:
+    try:
+        from claude_hooks.mailbox import hook as mailbox_hook
+    except Exception:  # pragma: no cover — mailbox optional
+        return
+    try:
+        mailbox_hook.unregister_session(
+            event=event, config=config, providers=providers)
+    except Exception:  # pragma: no cover — never fail the hook
+        log.debug("mailbox unregister failed", exc_info=True)
 
 
 def _detach_lsp_engine_session(event: dict, config: dict) -> None:
@@ -151,6 +169,22 @@ def _push_transcript(event: dict, ep_cfg: dict) -> Optional[dict]:
     return None
 
 
+def sync_env(ep_cfg: dict) -> dict:
+    """The environment for an ``episodic-memory sync``: ours, plus the
+    idle threshold after which sync compresses archived transcripts."""
+    env = dict(os.environ)
+    days = ep_cfg.get("compress_after_days", 7)
+    try:
+        days = float(days)
+    except (TypeError, ValueError):
+        days = 0
+    if days > 0:
+        env["EPISODIC_MEMORY_COMPRESS_AFTER_DAYS"] = f"{days:g}"
+    else:
+        env.pop("EPISODIC_MEMORY_COMPRESS_AFTER_DAYS", None)
+    return env
+
+
 def _local_sync(ep_cfg: dict) -> Optional[dict]:
     """Trigger a local episodic-memory sync (server mode)."""
     episodic_bin = ep_cfg.get("binary", "episodic-memory")
@@ -162,6 +196,7 @@ def _local_sync(ep_cfg: dict) -> Optional[dict]:
             [episodic_bin, "sync", "--background"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=sync_env(ep_cfg),
             **detach_kwargs(),
         )
         log.debug("triggered local episodic-memory sync")

@@ -199,6 +199,26 @@ class TestEveryArtifactClassIsDeployed(unittest.TestCase):
         self.assertIn("def check_embedder", src)
         self.assertIn("check_embedder(r)", src)
 
+    def test_the_vendored_episodic_memory_is_built_before_services(self):
+        """episodic-memory/ is code no pip install touches: node_modules
+        and a native module built for one Node ABI. As an out-of-tree
+        checkout nothing deployed, it went 79 commits stale and spent 12
+        days unable to load. It must be built before episodic-server is
+        restarted onto it."""
+        src = _src(DEPLOY)
+        self.assertIn("def step_episodic", src)
+        self.assertIn("install_vendored", src)
+        steps = src[src.index("steps = ["):]
+        self.assertLess(steps.index("step_episodic("), steps.index("step_services("))
+
+    def test_the_verifier_checks_episodic_too(self):
+        """A dead episodic CLI looked healthy for 12 days; the verifier
+        runs it and checks it is the vendored copy."""
+        src = _src(VERIFY)
+        self.assertIn("def check_episodic", src)
+        self.assertIn("check_episodic(r)", src)
+        self.assertIn("linked_root", src)
+
 
 class TestEmbedderRespawn(unittest.TestCase):
     """The respawn must be advisory where the embedder isn't ours, and

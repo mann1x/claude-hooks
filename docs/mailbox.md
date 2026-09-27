@@ -46,6 +46,16 @@ with nothing registered by hand. Override per project in
 alias = "osync"
 ```
 
+The directory name is only the **default**, applied when a session
+registers. After that the session keeps the name it registered with:
+the alias is read back from the registry, not re-derived. Deriving it
+every time meant a session that changed directory quietly changed its name
+— it registered again under the new one, and everything addressed to the
+name it started with parked on an alias nobody was listening to. A
+rename in `mailbox.toml` therefore takes effect at that session's next
+`SessionStart`, which is the right way round: a rename that took effect
+mid-session would strand the mail already addressed to the old name.
+
 | form | means |
 |---|---|
 | `osync` | the alias, when it exists on exactly one host |
@@ -70,6 +80,82 @@ usually the one that is closed.
 withdrawing, and consuming your own read receipts — is scoped on both.
 Scoping on the alias alone gave one host authority over another's mail;
 see `bug-871`.
+
+### An identical message is refused, not delivered twice
+
+`send()` will not write a message that the destination already holds:
+same sender, same destination, same subject, same body. The repeat is
+refused, naming what it duplicates —
+
+```
+Not sent. This is identical to #185, already sent to xollama@solidpc.
+It is in their mailbox — nothing more is needed. If this is a genuine
+follow-up rather than a repeat, change the subject or body; to replace
+what you sent, edit or withdraw it instead.
+```
+
+— and nothing is written. The wording matters: the likeliest reader is a
+caller retrying because it never saw the first confirmation, so
+"rejected" has to arrive together with "the message is already there", or
+the refusal reads as a failure and invites a third attempt.
+
+Two conditions count, answering different questions. **Still unread**, at
+any age: a second copy cannot tell the recipient anything the first,
+sitting there unread, will not. **Sent within `DEFAULT_DEDUP_WINDOW_SECONDS`**
+(10 minutes), read or not: a retry, a double tool call, or a sender
+repeating itself. A withdrawn message never blocks — withdrawing is a
+statement that it should not have been sent — and neither does an expired
+one.
+
+A broadcast is checked per recipient: the hosts that already have it are
+skipped and the rest are delivered, with the confirmation saying so
+(`Sent (id 193) — … Skipped osync@solidpc (identical to #185).`). If every
+recipient already has it, nothing is written. One surviving row is not a
+broadcast, so `broadcast_group` is cleared — the same rule that set it.
+
+**Why the check is at the destination rather than in the sender.**
+Reported 2026-09-22: `#185`–`#189`, identical bodies, one minute apart,
+read five times. Not a sender sending five times — a single `send()` in
+an MCP server process started 2026-09-17, writing one row per
+*registration* as the code did before the fan-out fix landed on
+2026-09-19. The repository was two days ahead of the process serving it,
+and nothing about a long-lived child process makes that visible. A guard
+that only holds while every process is current is a guard that holds
+until it matters.
+
+That also bounds what this fixes: a stale process runs the stale
+`send()`, guard included, so the guard reaches a duplicating sender only
+after its session restarts. The layer that catches it regardless is
+`dedupe_messages()` in the maintenance sweep, which is what collapsed
+`#186`–`#189` on its own — rows from one `INSERT` loop share `created_at`
+to the microsecond, which is exactly how it tells them from two
+deliberate sends.
+
+### One registration per `alias@host`
+
+Enforced by a unique index, not only by the code that writes it.
+`session_id` is the primary key, so a client that restarted under a new
+id used to leave the old row behind — observed live as five
+`xollama@solidpc` rows in one directory, four of them an hour stale
+behind the one doing the work.
+
+Registering **replaces** any other row for the same `alias@host`, and
+the schema step deduplicates what an upgrade finds, keeping the most
+recently seen row. Delivery already collapses to distinct
+`(alias, host)` pairs, so duplicates had stopped double-sending; what
+they corrupted was everything *readable* — `mailbox-sessions` showing a
+crowd where there is one session, the `SessionStart` collision note
+warning about peers that are the same session, and every liveness
+decision answered from whichever row was found first, usually a dead
+one.
+
+The consequence worth knowing: two genuinely concurrent sessions in the
+same directory on the same host take turns owning the row, each
+reclaiming it on its next action. Their mail is unaffected — an inbox is
+read by alias — but only one appears in `mailbox-sessions`, and a
+message addressed to the evicted `session_id` has nowhere to resolve.
+Give them distinct aliases in `.claude-hooks/mailbox.toml` if both need
+to be addressable at once.
 
 ---
 
@@ -135,6 +221,26 @@ Three points, all soft-fail — a mailbox problem never blocks a turn.
 | `UserPromptSubmit` | announces mail that arrived since the last turn |
 | `Stop` | announces mail that arrived *during* the turn |
 
+**`Stop` also nudges the model, once.** Its announcement is a
+`systemMessage`, which you see and the model does not, so mail that
+arrived during a long turn used to wait for the next prompt. When unread
+mail is waiting, Stop returns `decision: block` with a reason listing
+the messages (id, subject, sender, age — still no body) and telling the
+session to read them with `mailbox-read`, act or reply, and finish.
+One nudge, not a loop:
+
+- never when the stop is itself the continuation of a block
+  (`stop_hook_active`);
+- never twice for the same message in the same session — nudged ids are
+  kept in `~/.claude/claude-hooks-mailbox/nudged-<session>.json`
+  (`CLAUDE_HOOKS_MAILBOX_STATE_DIR` overrides; files unused for 7 days
+  are pruned). A session that leaves a message unread is not asked
+  again; a new message gets its own nudge.
+
+`hooks.mailbox.stop_nudge: false` turns it off (the visible notice
+stays). Both Stop paths nudge: the normal one and a repo whose
+`.claude-hooks-disable` keeps `mailbox`.
+
 **No hook ever injects a message body.** Not for high priority, not for
 a short one. The announcement carries four fields — subject, sender,
 time, priority — because that is enough to decide *whether to interrupt
@@ -158,6 +264,7 @@ visibility.
 | thing | default | why |
 |---|---|---|
 | messages | 180 days | `DEFAULT_EXPIRY_DAYS` |
+| identical resend blocked | 10 minutes, or while unread | `DEFAULT_DEDUP_WINDOW_SECONDS` |
 | registry entries | 30 days | a session unseen for a month is not reachable |
 | archive | quarterly zstd (level 19), capped at 10 GB | oldest quarters dropped first |
 
@@ -183,10 +290,35 @@ connection. Config is re-read every tick, so the switch and the cadence
 take effect without restarting the daemon (which would also kill the
 managed llamafile).
 
-`last_seen` is refreshed on **every announcement**, not only at
-`SessionStart`. Without that, a session held open longer than
-`registry_days` was swept away while someone was actively using it, and
-the next sender was told the alias did not exist.
+`last_seen` is refreshed on **every announcement and every tool call**,
+not only at `SessionStart`. Without the announcement refresh, a session
+held open longer than `registry_days` was swept away while someone was
+actively using it, and the next sender was told the alias did not exist.
+
+The per-tool-call refresh closes the other half. Announcements ride the
+hook path, which fires once per turn — a good approximation of activity
+only if turns are short. A session that spent fifteen minutes inside a
+single turn checking, reading and sending mail moved the timestamp
+exactly once, at the start, and then read as idle for a quarter of an
+hour while it was the busiest thing in the registry. Using the mailbox
+is the strongest evidence a session is alive, and it was the one signal
+not recorded. It costs one indexed UPDATE, and it soft-fails: looking
+stale is a smaller problem than a mailbox that refuses to work.
+
+Tool calls refresh **by alias**, because Claude Code does not export
+`CLAUDE_SESSION_ID` to an MCP child — verified on three live stdio
+servers, none of which had it. Keying the refresh on the session id
+would therefore have been dead code on exactly the path that carries the
+mail. `(alias, host)` works instead only because the unique index above
+makes it identify one row or none; with five rows to choose from,
+refreshing "this alias's registration" was a guess. A tool call never
+*creates* a registration — a session that cannot state its id cannot be
+cleaned up later — so an unregistered alias stays unregistered until its
+`SessionStart`. One imprecision: the alias comes from the server
+process's own directory, so the shared `--http` server refreshes the
+alias of the directory it was started in rather than the caller's. That
+derivation predates this refresh, and it can only ever be wrong about
+who is *alive*, never about delivery.
 
 A sweep that cannot reach a store returns `None` rather than an empty
 report, and logs at INFO only when it actually did something — an

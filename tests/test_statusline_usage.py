@@ -458,140 +458,48 @@ class TestEffectiveFormatRuntimeDowngrade:
         assert out.endswith(" ⚠")
 
 
-class TestReadState:
-    def test_missing_file_returns_empty_dict(self, mod, tmp_path):
-        assert mod.read_state(tmp_path / "nope.json") == {}
-
-    def test_corrupt_file_returns_empty_dict(self, mod, tmp_path):
-        p = tmp_path / "state.json"
-        p.write_text("not json")
-        assert mod.read_state(p) == {}
-
-    def test_valid_file_parsed(self, mod, tmp_path):
-        p = tmp_path / "state.json"
-        p.write_text(json.dumps({"five_hour_utilization": 0.5}))
-        assert mod.read_state(p) == {"five_hour_utilization": 0.5}
-
-
-class TestReadStateRemote:
-    def test_unwraps_dashboard_envelope(self, mod, monkeypatch):
-        body = json.dumps({"state": {"five_hour_utilization": 0.42}, "burn": {}}).encode()
-        self._install_fake_urlopen(monkeypatch, mod, body)
-        assert mod.read_state_remote("http://x/api/ratelimit.json") == {"five_hour_utilization": 0.42}
-
-    def test_accepts_bare_state_payload(self, mod, monkeypatch):
-        body = json.dumps({"five_hour_utilization": 0.10}).encode()
-        self._install_fake_urlopen(monkeypatch, mod, body)
-        assert mod.read_state_remote("http://x/api/ratelimit.json") == {"five_hour_utilization": 0.10}
-
-    def test_network_error_returns_empty(self, mod, monkeypatch):
-        import urllib.error
-        def raiser(*a, **kw):
-            raise urllib.error.URLError("boom")
-        monkeypatch.setattr(mod.urllib.request, "urlopen", raiser)
-        assert mod.read_state_remote("http://x/api/ratelimit.json") == {}
-
-    def test_bad_json_returns_empty(self, mod, monkeypatch):
-        self._install_fake_urlopen(monkeypatch, mod, b"not json")
-        assert mod.read_state_remote("http://x/api/ratelimit.json") == {}
-
-    @staticmethod
-    def _install_fake_urlopen(monkeypatch, mod, body):
-        class _Resp:
-            def __init__(self, body): self._body = body
-            def read(self): return self._body
-            def __enter__(self): return self
-            def __exit__(self, *a): return False
-        monkeypatch.setattr(mod.urllib.request, "urlopen",
-                            lambda req, timeout=None: _Resp(body))
+def _run(payload, *args, raw=None):
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *args],
+        input=raw if raw is not None else json.dumps(payload),
+        capture_output=True, text=True, timeout=10,
+    )
 
 
 class TestCliEntryPoint:
-    def test_exit_zero_on_missing_file(self, tmp_path):
-        out = subprocess.run(
-            [sys.executable, str(SCRIPT),
-             "--state-file", str(tmp_path / "nope.json")],
-            capture_output=True, text=True, timeout=5,
-        )
+    """The CLI reads Claude Code's status JSON on stdin — no proxy."""
+
+    def test_renders_native_rate_limits(self):
+        out = _run({"rate_limits": {
+            "five_hour": {"used_percentage": 19, "resets_at": 1790512200},
+            "seven_day": {"used_percentage": 90, "resets_at": 1790769600},
+        }}, "--format", "plain")
+        assert out.returncode == 0
+        assert out.stdout == "5h 19% · 7d 90%"
+
+    def test_empty_without_rate_limits(self):
+        out = _run({"session_id": "s"}, "--format", "plain")
         assert out.returncode == 0
         assert out.stdout == ""
 
-    def test_prints_segment_when_fresh(self, tmp_path):
-        p = tmp_path / "state.json"
-        p.write_text(json.dumps({
-            "last_updated": _dt.datetime.utcnow().isoformat() + "Z",
-            "five_hour_utilization": 0.42,
-            "representative_claim": "five_hour",
-        }))
-        out = subprocess.run(
-            [sys.executable, str(SCRIPT),
-             "--state-file", str(p), "--format", "plain"],
-            capture_output=True, text=True, timeout=5,
-        )
+    @pytest.mark.parametrize("raw", ["", "not json", "[1, 2]"])
+    def test_exit_zero_on_bad_stdin(self, raw):
+        out = _run(None, raw=raw)
+        assert out.returncode == 0
+        assert out.stdout == ""
+
+    def test_proxy_era_flags_are_accepted_and_ignored(self, tmp_path):
+        """A statusLine command written for the proxy-backed script
+        (<= v1.17) must keep working, now reading the payload."""
+        out = _run({"rate_limits": {"five_hour": {"used_percentage": 42}}},
+                   "--state-file", str(tmp_path / "nope.json"),
+                   "--remote-url", "http://x/api/ratelimit.json",
+                   "--remote-timeout", "1", "--show-blocked",
+                   "--stale-seconds", "600", "--format", "plain")
         assert out.returncode == 0
         assert out.stdout == "5h 42%"
 
-    def test_show_blocked_appends_segment(self, tmp_path, mod):
-        import datetime as _dt
-        p = tmp_path / "state.json"
-        p.write_text(json.dumps({
-            "last_updated": _dt.datetime.utcnow().isoformat() + "Z",
-            "five_hour_utilization": 0.42,
-            "representative_claim": "five_hour",
-        }))
-        today = _dt.datetime.utcnow().strftime("%Y-%m-%d")
-        (tmp_path / f"{today}.jsonl").write_text(
-            "\n".join(json.dumps({"ts": _dt.datetime.utcnow().isoformat() + "Z",
-                                  "warmup_blocked": True})
-                     for _ in range(3)) + "\n"
-        )
-        out = subprocess.run(
-            [sys.executable, str(SCRIPT),
-             "--state-file", str(p), "--format", "plain",
-             "--show-blocked"],
-            capture_output=True, text=True, timeout=5,
-        )
-        assert out.returncode == 0
-        assert "blk=3" in out.stdout
-
-    def test_show_blocked_zero_hides_segment(self, tmp_path):
-        import datetime as _dt
-        p = tmp_path / "state.json"
-        p.write_text(json.dumps({
-            "last_updated": _dt.datetime.utcnow().isoformat() + "Z",
-            "five_hour_utilization": 0.42,
-            "representative_claim": "five_hour",
-        }))
-        # No JSONL file — blocked=0 → no blk= segment
-        out = subprocess.run(
-            [sys.executable, str(SCRIPT),
-             "--state-file", str(p), "--format", "plain",
-             "--show-blocked"],
-            capture_output=True, text=True, timeout=5,
-        )
-        assert out.returncode == 0
-        assert "blk=" not in out.stdout
-
-    def test_count_blocked_unit(self, mod, tmp_path):
-        import datetime as _dt
-        today = _dt.datetime.utcnow().strftime("%Y-%m-%d")
-        (tmp_path / f"{today}.jsonl").write_text(
-            "\n".join(json.dumps({"ts": _dt.datetime.utcnow().isoformat() + "Z",
-                                  "warmup_blocked": v})
-                     for v in (True, True, False, True)) + "\n"
-            + "garbage line\n"
-        )
-        assert mod.count_blocked_today(tmp_path) == 3
-
-    def test_count_blocked_missing_file(self, mod, tmp_path):
-        assert mod.count_blocked_today(tmp_path) == 0
-
-    def test_exit_zero_on_corrupt_file(self, tmp_path):
-        p = tmp_path / "state.json"
-        p.write_text("not json")
-        out = subprocess.run(
-            [sys.executable, str(SCRIPT), "--state-file", str(p)],
-            capture_output=True, text=True, timeout=5,
-        )
-        assert out.returncode == 0
-        assert out.stdout == ""
+    def test_no_proxy_reader_left(self, mod):
+        for name in ("read_state", "read_state_remote", "count_blocked_today",
+                     "DEFAULT_STATE_PATH"):
+            assert not hasattr(mod, name), name

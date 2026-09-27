@@ -548,6 +548,20 @@ def _config_dump(cfg: cc.ConsultantsConfig, *, smart_block: dict) -> dict:
                 # uses presence to decide whether to render the
                 # extras list.
                 "extra_models": list(cfg.roles[r].extra_models),
+                # The coder routes per language. The skill's status
+                # block renders `coder.default_route` and each
+                # per-language entry from THIS output, so leaving them
+                # to `config coder list` alone showed a coder with no
+                # routing at all.
+                **({
+                    "default_route": _route_to_dict(
+                        cfg.roles[r].default_route),
+                    "routes_by_language": {
+                        lang: _route_to_dict(route)
+                        for lang, route in sorted(
+                            cfg.roles[r].routes_by_language.items())
+                    },
+                } if r == "coder" else {}),
             }
             for r in cc.ROLES
         },

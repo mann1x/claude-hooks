@@ -66,8 +66,8 @@ def _mailbox_notice(event: dict, config: dict, providers) -> str:
 
     Scoped to arrivals after the turn began so it never repeats what
     UserPromptSubmit already showed, and rendered as a one-line summary
-    rather than the full block: the turn is over, so this is a nudge to
-    the operator, not context for a model that has stopped.
+    for the operator. The model gets its own one-time nudge from
+    ``_with_mailbox_nudge``.
     """
     try:
         from claude_hooks.mailbox import hook as _mailbox
@@ -84,6 +84,63 @@ def _mailbox_notice(event: dict, config: dict, providers) -> str:
     except Exception as e:
         log.debug("mailbox stop notice skipped: %s", e)
         return ""
+
+
+def _mailbox_nudge_reason(event: dict, config: dict, providers) -> str:
+    """Why the Stop should be blocked once, or "".
+
+    The notice above is shown to the operator only; the model never sees
+    it, so mail that arrived during a long turn sat unread until the
+    next prompt. Blocking the stop hands the model a reason and it
+    continues — but only once per message: never when this stop is
+    already the continuation of a block (``stop_hook_active``), and never
+    twice for the same message (``claim_nudge``). One nudge, not a loop.
+    """
+    mb_cfg = (config.get("hooks") or {}).get("mailbox") or {}
+    if not mb_cfg.get("stop_nudge", True) or event.get("stop_hook_active"):
+        return ""
+    try:
+        from claude_hooks.mailbox import hook as _mailbox
+        from claude_hooks.mailbox.announce import ago
+        msgs = _mailbox.unread_messages(
+            event=event, config=config, providers=providers,
+            since=_mailbox.turn_start(event))
+        fresh = set(_mailbox.claim_nudge(event.get("session_id") or "",
+                                         [m.get("id") for m in msgs]))
+        msgs = [m for m in msgs if m.get("id") in fresh]
+        if not msgs:
+            return ""
+        lines = []
+        for m in msgs:
+            sender = m.get("from_alias") or "?"
+            if m.get("from_host"):
+                sender += f"@{m['from_host']}"
+            lines.append(f"- #{m['id']} `{m.get('subject') or '(no subject)'}` "
+                         f"— from `{sender}`, {ago(m.get('created_at'))}")
+        ids = ", ".join(str(m["id"]) for m in msgs)
+        return (
+            f"[claude-hooks] You have {len(msgs)} unread mailbox message(s) "
+            f"you have not read yet:\n" + "\n".join(lines) + "\n\n"
+            f"Read them now with the mailbox-read tool (ids: [{ids}]). If one "
+            "asks something of you or changes what you just did, act on it or "
+            "reply (mailbox-ack for a short note, mailbox-send otherwise); "
+            "then tell the user briefly what arrived and finish. "
+            "This reminder is sent once per message.")
+    except Exception as e:
+        log.debug("mailbox stop nudge skipped: %s", e)
+        return ""
+
+
+def _with_mailbox_nudge(result: Optional[dict], event: dict, config: dict,
+                        providers) -> Optional[dict]:
+    """Add a one-time ``decision: block`` for unread mail to a Stop result."""
+    reason = _mailbox_nudge_reason(event, config, providers)
+    if not reason:
+        return result
+    out = dict(result or {})
+    out["decision"] = "block"
+    out["reason"] = reason
+    return out
 
 
 def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[dict]:
@@ -172,19 +229,35 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
                 "reason": f"STOP HOOK VIOLATION: {correction}",
             }
 
+    return _finish(store_turn(event=event, config=config, providers=providers,
+                              transcript=transcript),
+                   event, config, providers)
+
+
+def store_turn(*, event: dict, config: dict, providers: list[Provider],
+               transcript: Optional[list[dict]]) -> str:
+    """Write this turn to memory, if it earned it; return the status line.
+
+    This is the memory half of the Stop hook, and only that: no
+    reindexing, no guards, no notices. It is a function of its own so a
+    project that keeps only ``memory`` enabled (see
+    ``claude_hooks.hook_parts``) runs exactly this and nothing beside
+    it. Returns "" when nothing was stored.
+    """
+    hook_cfg = (config.get("hooks") or {}).get("stop") or {}
     threshold = (hook_cfg.get("store_threshold") or "noteworthy").lower()
     if threshold == "off":
-        return _with_update_notice(None, config)
+        return ""
 
     if threshold == "noteworthy":
         if not _is_noteworthy(transcript):
             log.debug("turn not noteworthy — skipping store")
-            return _with_update_notice(None, config)
+            return ""
 
     summary_format = str(hook_cfg.get("summary_format", "markdown")).lower()
     summary = _build_summary(event, transcript, fmt=summary_format)
     if not summary:
-        return _with_update_notice(None, config)
+        return ""
 
     # Bound what we hand the embedder. Recall has clamped its queries
     # since v1.x (``max_query_chars``); the store path never did, and the
@@ -262,10 +335,7 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
             })
             if ok:
                 names = ", ".join(p.name for p in auto_providers)
-                return _with_update_notice(
-                    {"systemMessage": f"[claude-hooks] storing to {names} (async)"},
-                    config,
-                )
+                return f"[claude-hooks] storing to {names} (async)"
             log.debug("store_async spawn returned False — falling back to inline")
         except Exception as e:
             log.debug("store_async spawn raised — falling back to inline: %s", e)
@@ -365,22 +435,29 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
         except Exception as e:
             log.debug("instinct extraction skipped: %s", e)
 
-    mailbox_notice = _mailbox_notice(event, config, providers)
-
     if not stored and not failed:
-        result = ({"systemMessage": mailbox_notice} if mailbox_notice
-                  else None)
-        return _with_update_notice(result, config)
-
+        return ""
     parts = []
     if stored:
         parts.append(f"stored to {', '.join(stored)}")
     if failed:
         parts.append(f"failed: {', '.join(n for n, _ in failed)}")
-    message = f"[claude-hooks] {' · '.join(parts)}"
-    if mailbox_notice:
-        message = f"{message}\n{mailbox_notice}"
-    return _with_update_notice({"systemMessage": message}, config)
+    return f"[claude-hooks] {' · '.join(parts)}"
+
+
+def _finish(status: str, event: dict, config: dict, providers) -> Optional[dict]:
+    """Combine the store status with mail that arrived during the turn.
+
+    The mail notice is added on every path, the async one included —
+    the detached store used to return before it, so on the default
+    configuration a turn that stored something never mentioned the
+    mail that arrived while it ran.
+    """
+    mailbox_notice = _mailbox_notice(event, config, providers)
+    message = "\n".join(m for m in (status, mailbox_notice) if m)
+    return _with_mailbox_nudge(_with_update_notice(
+        {"systemMessage": message} if message else None, config),
+        event, config, providers)
 
 
 # ---------------------------------------------------------------------- #

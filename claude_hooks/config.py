@@ -602,6 +602,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "server_port": 11435,           # server: port to listen on
         "binary": "episodic-memory",    # server: path to episodic-memory binary
         "timeout": 10.0,               # client: push timeout in seconds
+        # server: store archived transcripts idle this many days as
+        # <name>.jsonl.zst (~6-7x smaller; every episodic-memory command
+        # still reads them). Passed to each sync as
+        # EPISODIC_MEMORY_COMPRESS_AFTER_DAYS. 0 = never compress.
+        "compress_after_days": 7,
     },
     "proxy": {
         # Optional local HTTP proxy sitting in front of api.anthropic.com.

@@ -468,3 +468,16 @@ def _reset_token_calibration():
     token_calib.reset_calibration()
     yield
     token_calib.reset_calibration()
+
+
+# --------------------------------------------------------------------------- #
+# Ollama connection slots off by default
+# --------------------------------------------------------------------------- #
+# ``ChatClient`` takes a cross-process slot per HTTP attempt
+# (claude_hooks.ollama_slots), which asks /api/tags, may ask ollama.com for
+# the plan and locks files under ~/.claude. None of that belongs in a unit
+# test: off unless a test turns it on (tests/test_ollama_slots.py does, with
+# a temp HOME).
+@pytest.fixture(autouse=True)
+def _ollama_slots_off(monkeypatch):
+    monkeypatch.setenv("CLAUDE_HOOKS_OLLAMA_SLOTS_DISABLE", "1")

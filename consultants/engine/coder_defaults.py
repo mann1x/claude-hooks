@@ -71,12 +71,14 @@ def qualifying_with_successors(models) -> set:
     return out
 
 
-RECOMMENDED_CODER_MODEL: str = "glm-5.2:cloud"
+# 2026-09-23 coder_med re-baseline: the cheapest model that tops both
+# cost ladders and the per-language table on 5/6 languages.
+RECOMMENDED_CODER_MODEL: str = "deepseek-v4.1-flash:cloud"
 
 # The date of the most-recent run that informed these defaults.
 # Stamp stays even if the constants don't change — proves the
 # recommendation is current.
-RECOMMENDED_AS_OF: str = "2026-06-04"
+RECOMMENDED_AS_OF: str = "2026-09-23"
 
 # Suite version the per-language routing was scored against. The
 # coder_med v1.0 cross-judge run supersedes the v1.0.1-mlang delta
@@ -123,6 +125,19 @@ QUALIFYING_MODELS_2026_06_04_MED: tuple[str, ...] = (
     "minimax-m2.7:cloud",
     "minimax-m3:cloud",
     "nemotron-3-super:cloud",
+)
+
+# Qualifying-models list for the 2026-09-23 coder_med v1.0 re-baseline
+# (same suite, hash 0e6ab0fd): the models measured on all 60 questions
+# that are still offered and priced. kimi-k2.6 was not re-run (too
+# expensive to route to), deepseek-v4-flash retires 2026-09-25. The
+# per-language routes below only reference models from this set.
+QUALIFYING_MODELS_2026_09_23_MED: tuple[str, ...] = (
+    "deepseek-v4.1-flash:cloud",
+    "deepseek-v4-pro:cloud",
+    "glm-5.3:cloud",
+    "glm-5.3-flash:cloud",
+    "minimax-m3:cloud",
 )
 
 
@@ -184,40 +199,28 @@ def language_from_path(path: str) -> Optional[str]:
     return LANGUAGE_BY_EXTENSION.get(ext.lower())
 
 
-# Per-language route table — the 2026-06-04 ``coder_med`` v1.0
-# neutral-gemini-ladder winners (head-to-head ranking, model names
-# anonymized + shuffled per question to kill name bias). ``primary``
-# is the per-language ladder winner; ``fallback`` is the ladder
-# runner-up, so a failover lands on the next-strongest model for that
-# language rather than a random survivor.
+# Per-language route table — the 2026-09-23 ``coder_med`` v1.0
+# re-baseline, chosen on quality per dollar: the cheap models
+# (deepseek-v4.1-flash, glm-5.3-flash) unless a pricier one is *much*
+# better, which none was (minimax-m3 +0.02 on c at 6x, +0.08 on python
+# at 3x; deepseek-v4-pro +0.08 on rust at 8x). The fallback is always
+# the other vendor, so a vendor incident never takes both legs.
 #
-# This is a QUALITY-FIRST table: ``kimi-k2.6`` is the primary for 5/6
-# languages (it won the neutral ladder everywhere except cpp). It is
-# also the most token-heavy of the cohort (~3.7× glm-5.1's completion
-# tokens). Operators who want the balanced token/wall-vs-quality pick
-# should override with ``[role.coder].model = "glm-5.2:cloud"`` (the
-# efficiency winner); see ``docs/benchmarks/coder-med-results.md``.
-#
-# Ladder basis (primary = winner / fallback = runner-up, mean rank):
-# - c:      kimi 2.10            / deepseek-v4-pro 3.25
-# - cpp:    deepseek-v4-pro 1.95 / deepseek-v4-flash 3.45
-# - csharp: kimi 2.40           / minimax-m3 2.75
-# - go:     kimi 2.44           / deepseek-v4-pro 2.89
-# - python: kimi 2.89           / deepseek-v4-flash 3.06
-# - rust:   kimi 2.60           / deepseek-v4-pro 2.75
+# Q per language (pass x judge/5, n=10 each; kimi-k2.6 judge):
+# - c:      ds41f 0.88 · glm-5.3-flash 0.78 · minimax-m3 0.90
+# - cpp:    ds41f 0.88 · glm-5.3-flash 0.82 · deepseek-v4-pro 0.84
+# - csharp: glm-5.3-flash 0.86 · ds41f 0.80 · deepseek-v4-pro 0.90
+# - go:     ds41f 0.72 · glm-5.3-flash 0.62 · glm-5.3 0.82  (weakest cell)
+# - python: ds41f 0.90 · glm-5.3-flash 0.84 · minimax-m3 0.98
+# - rust:   ds41f 0.78 · glm-5.3-flash 0.70 · deepseek-v4-pro 0.86
+# See docs/benchmarks/coder-med-results.md#2026-09-23-re-baseline.
 RECOMMENDED_CODER_ROUTES_BY_LANGUAGE: dict[str, CoderLanguageRoute] = {
-    "c":      CoderLanguageRoute(primary="kimi-k2.6:cloud",
-                                  fallback="deepseek-v4-pro:cloud"),
-    "cpp":    CoderLanguageRoute(primary="deepseek-v4-pro:cloud",
-                                  fallback="deepseek-v4-flash:cloud"),
-    "csharp": CoderLanguageRoute(primary="kimi-k2.6:cloud",
-                                  fallback="minimax-m3:cloud"),
-    "go":     CoderLanguageRoute(primary="kimi-k2.6:cloud",
-                                  fallback="deepseek-v4-pro:cloud"),
-    "python": CoderLanguageRoute(primary="kimi-k2.6:cloud",
-                                  fallback="deepseek-v4-flash:cloud"),
-    "rust":   CoderLanguageRoute(primary="kimi-k2.6:cloud",
-                                  fallback="deepseek-v4-pro:cloud"),
+    "c":      CoderLanguageRoute(primary="deepseek-v4.1-flash:cloud", fallback="glm-5.3-flash:cloud"),
+    "cpp":    CoderLanguageRoute(primary="deepseek-v4.1-flash:cloud", fallback="glm-5.3-flash:cloud"),
+    "csharp": CoderLanguageRoute(primary="glm-5.3-flash:cloud", fallback="deepseek-v4.1-flash:cloud"),
+    "go":     CoderLanguageRoute(primary="deepseek-v4.1-flash:cloud", fallback="glm-5.3-flash:cloud"),
+    "python": CoderLanguageRoute(primary="deepseek-v4.1-flash:cloud", fallback="glm-5.3-flash:cloud"),
+    "rust":   CoderLanguageRoute(primary="deepseek-v4.1-flash:cloud", fallback="glm-5.3-flash:cloud"),
 }
 
 # Global default route — fires when the language id is None (no
@@ -228,10 +231,8 @@ RECOMMENDED_CODER_ROUTES_BY_LANGUAGE: dict[str, CoderLanguageRoute] = {
 # vendor than the primary so a vendor-specific cloud incident
 # doesn't take down both legs.
 RECOMMENDED_CODER_DEFAULT_ROUTE: CoderLanguageRoute = CoderLanguageRoute(
-    # glm-5.2 by succession from the glm-5.1 cohort winner — see
-    # MODEL_SUCCESSIONS. Score inherited, not re-measured.
-    primary="glm-5.2:cloud",
-    fallback="kimi-k2.6:cloud",
+    primary="deepseek-v4.1-flash:cloud",
+    fallback="glm-5.3-flash:cloud",
 )
 
 

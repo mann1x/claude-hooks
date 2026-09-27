@@ -108,11 +108,11 @@ def make_stall_protected_chat_fn(
         def on_token(_delta: str) -> None:
             controller.mark_token()
 
-        return chat_streamed(
-            payload,
-            on_token=on_token,
-            cancel_check=controller.is_cancelled,
-        )
+        kwargs = {"on_token": on_token,
+                  "cancel_check": controller.is_cancelled}
+        if _accepts(chat_streamed, "on_admitted"):
+            kwargs["on_admitted"] = controller.restart_clock
+        return chat_streamed(payload, **kwargs)
 
     def chat_fn(payload: dict) -> dict:
         monitor = StallMonitor(cfg, on_event=on_event)
@@ -255,3 +255,15 @@ __all__ = [
     "HardCapExceeded",
     "StallRetryExhausted",
 ]
+
+
+def _accepts(fn, name: str) -> bool:
+    """Whether ``fn`` takes keyword ``name`` — a client that predates
+    connection slots (or a test fake) is called without it."""
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())

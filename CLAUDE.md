@@ -343,7 +343,9 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > hierarchy / symbols / rename) whose answers carry provenance —
 > `consulted`, `failures`, `not_running`, `scan_truncated_at` and a
 > `trustworthy` flag — so a search that stopped at a package boundary
-> says so rather than returning a short list that looks complete.
+> says so rather than returning a short list that looks complete —
+> and stays quiet when `lsp_engine/package_exports.py` proves the
+> symbol is unreachable from the package's published entry points.
 > The daemon is re-keyed to the **repository** boundary
 > (`.claude-hooks/lsp-root` > `.git` > narrow root) holding a bounded
 > pool of narrowly-rooted engines: language servers must stay narrow
@@ -482,17 +484,18 @@ payload.
   - **Opt-in advisory**: `stop_guard.py`, `safety_scan.py` + `safety_patterns.py`, `rtk_rewrite.py`
   - **Index management**: `claudemem_reindex.py`
 - `claude_hooks/code_graph/` — built-in stdlib `ast`-based code graph (`builder.py`, `impact.py`, `mermaid.py`, `inject.py`, `symbol_lookup.py`, `mcp_server.py`, `clustering.py`, …)
-- `claude_hooks/lsp_engine/` — session-scoped LSP daemon (`config.py`, `lsp.py`, `engine.py`, `daemon.py`, `ipc.py`, `locks.py`, `preload.py`, `compile.py`, `git_watch.py`, `client.py`)
+- `claude_hooks/lsp_engine/` — session-scoped LSP daemon (`config.py`, `lsp.py`, `engine.py`, `daemon.py`, `ipc.py`, `locks.py`, `preload.py`, `compile.py`, `git_watch.py`, `client.py`, `package_exports.py`)
 - `claude_hooks/proxy/` — opt-in HTTP proxy in front of `api.anthropic.com` (`server.py`, `forwarder.py`, `metadata.py`, `stats_db.py`, `dashboard.py`, `sse.py`, `stop_phrase_guard.py`, `ratelimit_state.py`)
 - `claude_hooks/caliber_proxy/` — Caliber grounding proxy (`server.py`, `tools.py`, `prompt.py`, `ollama.py`, `recall.py`)
 - `claude_hooks/pgvector_mcp/` — system-wide stdio MCP server exposing pgvector recall + KG ops to any MCP-aware client
 - `claude_hooks/sqlite_vec_mcp/` — v1.6+: parity launcher for the sqlite_vec store (stdio + optional HTTP on 32777). Same shape as `pgvector_mcp`, trimmed to 3 memory tools (`sqlite-vec-find` / `-store` / `-count`). Lets Cursor / Codex / OpenWebUI / Claude Desktop share the same `.db` file the hook pipeline reads in-process
 - `episodic_server/` — HTTP front-end for [obra/episodic-memory](https://github.com/obra/episodic-memory) (`server.py`, `Dockerfile`, systemd unit)
+- `episodic-memory/` — vendored git subtree of [obra/episodic-memory](https://github.com/obra/episodic-memory) (upstream `7e06519`, v1.6.0+2) with our patches on top; `dist/` is committed, so deploy never runs `npm run build`. Built + `npm link`ed on the episodic server host by `scripts/deploy.py` via `install_vendored()` in `scripts/episodic_doctor.py`; subtree workflow in `docs/episodic-server.md`
 - `systemd/` — service templates: `claude-hooks-proxy`, `claude-hooks-dashboard`, `claude-hooks-rollup{.service,.timer}`, `claude-hooks-health{.service,.timer}`, `claude-hooks-daemon`, `claude-hooks-pgvector-mcp`, `caliber-grounding-proxy`, `axon-host`
 - `config/` — `claude-hooks.json` (gitignored) + `claude-hooks.example.json` + `stop_phrases.yaml` (canary phrases for the in-stream stop_phrase_guard)
 - `patches/` — project-specific patches for third-party npm globals (e.g. `apply-caliber-patch.sh`)
 - `docs/` — runbooks (`daemon.md`, `proxy.md`, `hyde.md`, `caliber-proxy.md`, `episodic-server.md`, `pgvector-runbook.md`, `deployment.md`, `env-vars.md`, `lsp-engine.md`, `lsp-mcp.md`, `gemma4-tool-use-notes.md`), plans (`PLAN-*.md`), issue drafts (`issue-warmup-token-drain.md`, `cc-xhigh-regression-issue.md`, `openwolf-managedby-issue.md`), and the audit at `doc-audit-2026-05-01.md`
-- `scripts/` — operator tooling (`proxy_rollup.py`, `proxy_health_oneliner.py`, `proxy_stats.py`, `bench_recall.py`, `bench_lsp_engine.py`, `migrate_to_pgvector.py`, `weekly_token_usage.py`, `statusline_*.py`, …)
+- `scripts/` — operator tooling (`proxy_rollup.py`, `proxy_health_oneliner.py`, `proxy_stats.py`, `bench_recall.py`, `bench_lsp_engine.py`, `migrate_to_pgvector.py`, `episodic_doctor.py`, `weekly_token_usage.py`, `statusline_*.py`, …)
 - `tests/` — unittest-based, run with `pytest`
 
 ---
@@ -762,7 +765,10 @@ The 4 methods a provider must implement (`detect`, `verify`, `recall`,
 
 2. **Per-project vs user-global**: **user-global**.
    `~/.claude/settings.json` is the install target. Per-project opt-out
-   via a `.claude-hooks-disable` marker file in the project root.
+   via a `.claude-hooks-disable` marker file in the project root. An
+   empty marker disables everything; `keep: memory, mailbox` keeps just
+   those parts, routed through the allow-list in
+   `claude_hooks/hook_parts.py` so no normal handler runs.
 
 3. **Recall format**: markdown headings + bullet lists, exactly the
    shape that openwolf and CLAUDE.md inject. Models parse it reliably.
@@ -853,14 +859,18 @@ loads**:
 | package code | services (editable, live) | loudly |
 | entry points / deps | shell + services | loudly |
 | **`.claude/skills/*/SKILL.md`** | **Claude Code, at session start** | **silently** |
+| `episodic-memory/` (vendored Node, native module) | episodic-server + CLI, server host only | silently (a dead CLI looked healthy for 12 days) |
 | systemd units | systemd | loudly |
 | config mirrors | `install.py` | silently |
 
 `scripts/deploy.py` covers all of them, discovers rather than hardcodes
 (envs, units, skills are all globbed), searches **both** systemd scopes
 — this host splits them, the consultants engine is a `--user` unit while
-daemon/proxy/dashboard are system units — and finishes by running
-`scripts/verify_deploy.py`. A failed step fails the whole deploy; there
+daemon/proxy/dashboard are system units — builds and `npm link`s the
+vendored `episodic-memory/` on the server host (`episodic.mode ==
+"server"`) before restarting services, and finishes by running
+`scripts/verify_deploy.py`, which fails when the `episodic-memory` on
+PATH is not the vendored copy. A failed step fails the whole deploy; there
 is no partial success, because a partial deploy reporting success is the
 exact failure it replaces.
 

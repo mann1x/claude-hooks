@@ -11,7 +11,7 @@ import unittest
 
 from consultants.engine.coder_defaults import (
     LANGUAGE_BY_EXTENSION,
-    QUALIFYING_MODELS_2026_06_04_MED,
+    QUALIFYING_MODELS_2026_09_23_MED,
     RECOMMENDED_AS_OF,
     RECOMMENDED_CODER_DEFAULT_ROUTE,
     RECOMMENDED_CODER_MODEL,
@@ -104,53 +104,39 @@ class TestRecommendedRoutes(unittest.TestCase):
                 self.assertTrue(route.fallback.strip(),
                                 f"{lang} missing fallback")
 
-    def test_per_language_primaries_are_ladder_winners(self):
-        # 2026-06-04 coder_med v1.0 neutral-gemini-ladder winners.
-        # kimi-k2.6 wins 5/6 languages; deepseek-v4-pro takes cpp.
-        expected_primary = {
-            "c": "kimi-k2.6:cloud",
-            "cpp": "deepseek-v4-pro:cloud",
-            "csharp": "kimi-k2.6:cloud",
-            "go": "kimi-k2.6:cloud",
-            "python": "kimi-k2.6:cloud",
-            "rust": "kimi-k2.6:cloud",
-        }
-        for lang, prim in expected_primary.items():
+    def test_per_language_routes_are_the_2026_09_23_picks(self):
+        # coder_med v1.0 re-baseline, quality per dollar: ds41f leads,
+        # glm-5.3-flash takes csharp; the fallback is the other vendor.
+        ds, glm = "deepseek-v4.1-flash:cloud", "glm-5.3-flash:cloud"
+        expected = {"c": (ds, glm), "cpp": (ds, glm), "csharp": (glm, ds),
+                    "go": (ds, glm), "python": (ds, glm), "rust": (ds, glm)}
+        for lang, (prim, fb) in expected.items():
             with self.subTest(lang=lang):
-                self.assertEqual(
-                    RECOMMENDED_CODER_ROUTES_BY_LANGUAGE[lang].primary, prim,
-                )
+                route = RECOMMENDED_CODER_ROUTES_BY_LANGUAGE[lang]
+                self.assertEqual((route.primary, route.fallback), (prim, fb))
 
-    def test_per_language_fallbacks_are_ladder_runners_up(self):
-        expected_fallback = {
-            "c": "deepseek-v4-pro:cloud",
-            "cpp": "deepseek-v4-flash:cloud",
-            "csharp": "minimax-m3:cloud",
-            "go": "deepseek-v4-pro:cloud",
-            "python": "deepseek-v4-flash:cloud",
-            "rust": "deepseek-v4-pro:cloud",
-        }
-        for lang, fb in expected_fallback.items():
-            with self.subTest(lang=lang):
-                self.assertEqual(
-                    RECOMMENDED_CODER_ROUTES_BY_LANGUAGE[lang].fallback, fb,
-                )
+    def test_no_route_names_a_retiring_model(self):
+        from benchmarks.consultants.pricing import RETIRING, model_key
+        for lang, route in RECOMMENDED_CODER_ROUTES_BY_LANGUAGE.items():
+            for m in (route.primary, route.fallback):
+                with self.subTest(lang=lang, model=m):
+                    self.assertNotIn(model_key(m), RETIRING)
 
     def test_global_default_route_set(self):
         self.assertIsInstance(RECOMMENDED_CODER_DEFAULT_ROUTE,
                               CoderLanguageRoute)
         self.assertEqual(
-            RECOMMENDED_CODER_DEFAULT_ROUTE.primary, "glm-5.2:cloud",
+            RECOMMENDED_CODER_DEFAULT_ROUTE.primary, "deepseek-v4.1-flash:cloud",
         )
         self.assertEqual(
-            RECOMMENDED_CODER_DEFAULT_ROUTE.fallback, "kimi-k2.6:cloud",
+            RECOMMENDED_CODER_DEFAULT_ROUTE.fallback, "glm-5.3-flash:cloud",
         )
 
     def test_routes_only_use_qualifying_models(self):
         # Sanity check the recommended map only references models
-        # from the 2026-06-04 coder_med cohort — guard against typos
+        # from the 2026-09-23 coder_med cohort — guard against typos
         # that would land an unqualified model in defaults.
-        qualifying = set(QUALIFYING_MODELS_2026_06_04_MED)
+        qualifying = set(QUALIFYING_MODELS_2026_09_23_MED)
         for lang, route in RECOMMENDED_CODER_ROUTES_BY_LANGUAGE.items():
             with self.subTest(lang=lang):
                 self.assertIn(route.primary, qualifying,
@@ -162,14 +148,12 @@ class TestRecommendedRoutes(unittest.TestCase):
         # Don't accidentally rename the legacy fallback — it's the
         # v1 single-model winner and several callers still reference
         # it by name.
-        # Succession: routed tag is glm-5.2, the score behind it is
-        # glm-5.1's. See coder_defaults.MODEL_SUCCESSIONS.
-        self.assertEqual(RECOMMENDED_CODER_MODEL, "glm-5.2:cloud")
+        self.assertEqual(RECOMMENDED_CODER_MODEL, "deepseek-v4.1-flash:cloud")
 
     def test_provenance_stamps_current(self):
         # Date stamp + suite version + hash prefix all updated for
-        # the 2026-06-04 coder_med v1.0 per-language adoption.
-        self.assertEqual(RECOMMENDED_AS_OF, "2026-06-04")
+        # the 2026-09-23 coder_med v1.0 re-baseline.
+        self.assertEqual(RECOMMENDED_AS_OF, "2026-09-23")
         self.assertEqual(RECOMMENDED_SUITE_VERSION, "1.0-med")
         self.assertEqual(RECOMMENDED_SUITE_HASH_PREFIX, "0e6ab0fd")
 

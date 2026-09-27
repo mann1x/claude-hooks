@@ -407,3 +407,39 @@ Re-grading was applied 2026-05-09 per the [Q3 actionability audit](Q3-actionabil
 - **Three valid hardening recommendations on Q3.** The strong-Q3 answers each propose a fix at a different layer: nemotron-3-super wraps `_wrap_researcher` in `graph.py`; qwen3-coder-next changes `researcher_node` to re-raise; deepseek-v4-pro flips status logic in `runner.py`. All three diagnoses are correct; the disagreement is which layer should own the fix. Useful artifact for any future hardening PR.
 - **`deepseek-v4-pro:cloud` is no longer broken** on the local proxy as of 2026-05-09 — the previous block (memory entry from 2026-05-06) has cleared. Memory updated.
 - **`mistral-large-3:675b-cloud` fabricated** `return_exceptions=True` on `compiled.stream` — that parameter does not exist on LangGraph's `.stream()`. Disqualifying for any role that produces user-facing recommendations.
+
+## 2026-09-23 re-evaluation — new cloud models, answer key removed
+
+Four new models were screened as whole-council labels (N=1): glm-5.3,
+glm-5.3-flash, deepseek-v4.1-flash and deepseek-v4-pro. The winner then
+went to N=3 against the incumbent gemma4. The engine was HEAD `acc1473`
+(fan-out cap 2 lanes), run on eleven2go at ≤ 2 concurrent cloud
+connections. Costs are at the dated price snapshot in
+[`costs.md`](costs.md#council-role-sweeps).
+
+**The answer key was reachable.** The worktree the council audits
+included `docs/benchmarks/` and `docs/consultants-benchmarks.md`, which
+hold the ground truth. glm-5.3's planner looked it up; deepseek-v4.1-flash
+found it and flagged it. From `acc1473` on, the runner deletes both from
+the worktree before every run ([`EVALUATION.md`](EVALUATION.md) §6.1,
+protocol 1.4). Q1/Q2 grades from before 2026-09-23 carry that caveat.
+
+| Label | Runs | Smoke | Audit-med | Audit-hi | $ / run | Verdict |
+|---|---|---|---|---|---|---|
+| [`gemma4-31b-cloud-2026-09-23`](gemma4-31b-cloud-2026-09-23/results.md) | **3/3** | PASS | B | B | **$0.040** | **PROD-READY** — stays the council default; fastest (~75 s for all three queries) |
+| [`glm-5-3-flash-cloud-2026-09-23`](glm-5-3-flash-cloud-2026-09-23/results.md) | **3/3** | PASS | C | C+ | $0.052 | EVALUATED-ONLY — systematic Q2 errors, all three Q3s land on the status flip |
+| [`glm-5-3-flash-cloud-2026-09-23-screening`](glm-5-3-flash-cloud-2026-09-23-screening/results.md) | 1 | PASS | B | C+ | ≈ $0.05 | screening (key reachable) |
+| [`deepseek-v4-1-flash-cloud-2026-09-23-screening`](deepseek-v4-1-flash-cloud-2026-09-23-screening/results.md) | 1 | PASS | C | C+ | $0.19 | EVALUATED-ONLY — strong researcher, over-reasons about shim protection |
+| [`deepseek-v4-pro-cloud-2026-09-23-screening`](deepseek-v4-pro-cloud-2026-09-23-screening/results.md) | 1 | PASS | A | C+ | $0.66 | EVALUATED-ONLY — best Q2 auditor, 13× glm-5.3-flash's price |
+| [`glm-5-3-cloud-2026-09-23-screening`](glm-5-3-cloud-2026-09-23-screening/results.md) | 1 | PASS | A† | B+ | $0.50 | † contaminated: its planner read the answer key |
+
+- **gemma4 keeps the council.** It is the cheapest and fastest label, and
+  the best on the leak-free tree. It is down from May's PASS / A / A.
+  Whether May's A grades owed something to the reachable key, or the
+  3 → 2 lane cap narrowed its research, this data cannot separate.
+- **glm-5.3-flash is a better coder than councillor.** It leads the coder
+  cost ladders ([`coder-med-results.md`](coder-med-results.md#2026-09-23-re-baseline))
+  and is the distillation fallback, but loses both audits here.
+- **Nothing on the council changed.** The researcher/critic extra lane
+  moved from the retiring deepseek-v4-flash to deepseek-v4.1-flash, its
+  direct replacement.

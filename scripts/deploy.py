@@ -36,13 +36,17 @@ What it does, in order:
 3. **Skills** — sync ``.claude/skills/*/SKILL.md`` into
    ``~/.claude/skills/``. Only ones already installed: skills are opt-in
    per host and ``install.py`` is the thing that offers new ones.
-4. **Services** — restart every *active* long-running unit that
+4. **episodic-memory** — on the episodic server host, make the vendored
+   ``episodic-memory/`` the working CLI: ``npm install`` with a C++20
+   toolchain when its tree or the Node ABI changed, a load check of the
+   native modules, ``npm link``.
+5. **Services** — restart every *active* long-running unit that
    references this repo, at whichever scope (user / system) it lives in,
    then re-ensure the daemon-managed embedder, which the daemon restart
    takes down with it and nothing brings back until the next local
    embedding request (a LAN client cannot make one — it does not
    supervise the process).
-5. **Verify** — run ``verify_deploy.py`` and adopt its exit code.
+6. **Verify** — run ``verify_deploy.py`` and adopt its exit code.
 
 Usage::
 
@@ -55,6 +59,7 @@ Exit code: 0 only if every step succeeded and verification passed.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -128,7 +133,7 @@ def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
 # --------------------------------------------------------------------- #
 def step_repo(dry: bool) -> Step:
     s = Step("repo")
-    print("\n[1/5] repo state")
+    print("\n[1/6] repo state")
     head = _run(["git", "-C", str(REPO), "log", "--oneline", "-1"])
     if head.returncode != 0:
         s.fail(f"git log failed: {head.stderr.strip()}")
@@ -203,7 +208,7 @@ def _envs_with_package() -> list[Path]:
 
 def step_packages(dry: bool, only_env: str | None) -> Step:
     s = Step("packages")
-    print("\n[2/5] packages (editable installs)")
+    print("\n[2/6] packages (editable installs)")
     pys = _envs_with_package()
     if only_env:
         pys = [p for p in pys if only_env in str(p)]
@@ -241,7 +246,7 @@ def step_packages(dry: bool, only_env: str | None) -> Step:
 # --------------------------------------------------------------------- #
 def step_skills(dry: bool) -> Step:
     s = Step("skills")
-    print("\n[3/5] skills")
+    print("\n[3/6] skills")
     repo_skills = REPO / ".claude" / "skills"
     if not repo_skills.is_dir():
         s.note("no in-repo skills directory")
@@ -289,7 +294,40 @@ def step_skills(dry: bool) -> Step:
 
 
 # --------------------------------------------------------------------- #
-# 4. Services
+# 4. episodic-memory (vendored Node project, server host only)
+# --------------------------------------------------------------------- #
+def _episodic_mode() -> str:
+    try:
+        cfg = json.loads((REPO / "config" / "claude-hooks.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "off"
+    return ((cfg.get("episodic") or {}).get("mode") or "off")
+
+
+def step_episodic(dry: bool) -> Step:
+    """The vendored episodic-memory is code no pip install touches:
+    node_modules and its native module are built on the host. Until
+    2026-09-26 it was an out-of-tree checkout nothing deployed, 79 commits
+    behind upstream, and its better-sqlite3 sat on the wrong Node ABI for
+    12 days. Runs before services so episodic-server restarts on it."""
+    s = Step("episodic")
+    print("\n[4/6] episodic-memory (vendored)")
+    mode = _episodic_mode()
+    if mode != "server":
+        s.note(f"episodic.mode is {mode!r} — only the server host builds it")
+        return s
+    sys.path.insert(0, str(REPO / "scripts"))
+    try:
+        import episodic_doctor
+    finally:
+        sys.path.pop(0)
+    if not episodic_doctor.install_vendored(dry=dry, note=s.note):
+        s.ok = False
+    return s
+
+
+# --------------------------------------------------------------------- #
+# 5. Services
 # --------------------------------------------------------------------- #
 def _repo_units() -> list[tuple[str, str]]:
     """``(unit, scope)`` for every unit file referencing this repo.
@@ -322,7 +360,7 @@ def _repo_units() -> list[tuple[str, str]]:
 
 def step_services(dry: bool, skip: bool) -> Step:
     s = Step("services")
-    print("\n[4/5] services")
+    print("\n[5/6] services")
     if skip:
         s.note("--skip-restart: not touching any service")
         return s
@@ -470,11 +508,11 @@ def _stop_lsp_daemons(s: Step) -> None:
 
 
 # --------------------------------------------------------------------- #
-# 5. Verify
+# 6. Verify
 # --------------------------------------------------------------------- #
 def step_verify(dry: bool) -> Step:
     s = Step("verify")
-    print("\n[5/5] verify")
+    print("\n[6/6] verify")
     if dry:
         s.note("[dry-run] would run scripts/verify_deploy.py")
         return s
@@ -513,13 +551,14 @@ def main() -> int:
         step_repo(a.dry_run),
         step_packages(a.dry_run, a.env),
         step_skills(a.dry_run),
+        step_episodic(a.dry_run),
         step_services(a.dry_run, a.skip_restart),
     ]
     # Verification only means something once the rest actually ran.
     if all(s.ok for s in steps):
         steps.append(step_verify(a.dry_run))
     else:
-        print("\n[5/5] verify — SKIPPED (an earlier step failed)")
+        print("\n[6/6] verify — SKIPPED (an earlier step failed)")
 
     failed = [s.name for s in steps if not s.ok]
     print("\n" + "=" * 60)

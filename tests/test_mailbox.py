@@ -582,6 +582,436 @@ class SchemaConstraintTests(StoreHarness):
                 self.db.conn.commit()
 
 
+class OneMailboxPerAliasTests(StoreHarness):
+    """A registration is not an addressee.
+
+    Reported live on 2026-09-18: one `mailbox-send` call was delivered
+    **eleven times**. `xollama@solidpc` had eleven registrations — one
+    live session plus ten from sessions that had ended minutes apart —
+    and `send()` wrote one row per registration. The rows carry
+    `to_alias` and `to_host` and nothing that distinguishes one session
+    from another, so all eleven were byte-identical apart from their id,
+    and `inbox()` reads by alias, so the recipient saw eleven copies.
+
+    Nothing about that was a retry, and nothing about it was visible to
+    the sender: the confirmation listed the same label eleven times.
+    """
+
+    def _register_many(self, alias, host, n):
+        """Eleven registrations of one alias, as the registry used to
+        allow.
+
+        The unique index added with the ``(alias, host)`` rule means the
+        *store* can no longer be talked into this state — see
+        :class:`OneRegistrationPerAliasHostTests`. That makes storage
+        the first line of defence and leaves this class testing the
+        second: ``send()`` must still collapse repeated destinations,
+        because resolution — broadcast especially — can hand it the same
+        mailbox more than once without any row being duplicated. A guard
+        that is only correct while its input is well-formed is the guard
+        that failed here the first time.
+        """
+        fanout = getattr(self, "_fanout", None)
+        if fanout is None:
+            fanout = self._fanout = []
+            self.store.sessions = lambda **kw: list(self._fanout)
+        fanout.extend(sess(alias, host, sid=f"{alias}-{host}-{i}")
+                      for i in range(n))
+
+    def test_eleven_registrations_deliver_once(self):
+        self._register_many("xollama", self.HOST, 11)
+        self.assertEqual(len(self.store.sessions()), 11)
+        res = self.store.send(f"xollama@{self.HOST}", "s", "b",
+                              from_alias="me")
+        self.assertEqual(len(res["ids"]), 1,
+                         "one send, one row per mailbox")
+        self.assertIsNone(res["broadcast_group"],
+                          "a single mailbox is not a broadcast")
+        self.assertEqual(res["destinations"], [("xollama", self.HOST)])
+
+    def test_the_recipient_sees_one_copy(self):
+        self._register_many("xollama", self.HOST, 11)
+        self.store.send(f"xollama@{self.HOST}", "s", "b", from_alias="me")
+        self.assertEqual(len(self.store.inbox(alias="xollama")), 1)
+
+    def test_a_restarted_session_does_not_make_its_alias_unaddressable(self):
+        """The bare-alias guard counted rows where it meant hosts.
+
+        With eleven registrations on one host it raised "`xollama` is
+        registered on 1 hosts: solidpc" and refused to send — a session
+        that merely restarted eleven times locked its own alias out.
+        """
+        self._register_many("xollama", self.HOST, 11)
+        res = self.store.send("xollama", "s", "b", from_alias="me")
+        self.assertEqual(len(res["ids"]), 1)
+
+    def test_a_genuine_cross_host_ambiguity_still_refuses(self):
+        # The guard must keep working: same alias, two hosts, two
+        # mailboxes, and no way to pick one.
+        self.register("osync", "solidpc")
+        self.register("osync", "pandorum")
+        with self.assertRaises(AddressError):
+            self.store.send("osync", "s", "b", from_alias="me")
+
+    def test_broadcast_counts_hosts_not_registrations(self):
+        self._register_many("osync", "solidpc", 4)
+        self._register_many("osync", "pandorum", 3)
+        res = self.store.send("osync*", "s", "b", from_alias="me")
+        self.assertEqual(len(res["ids"]), 2, "one row per host, not per row")
+        self.assertIsNotNone(res["broadcast_group"])
+        self.assertEqual(sorted(h for _, h in res["destinations"]),
+                         ["pandorum", "solidpc"])
+
+    def test_the_confirmation_names_each_mailbox_once(self):
+        from claude_hooks.mailbox.addressing import (
+            describe_recipients,
+            parse_address,
+        )
+        self._register_many("xollama", self.HOST, 11)
+        sessions = self.store.sessions()
+        addr = parse_address(f"xollama@{self.HOST}")
+        text = describe_recipients(sessions, addr)
+        self.assertEqual(text.count("xollama"), 1,
+                         f"repeated the same mailbox: {text}")
+
+
+class ForgetTests(StoreHarness):
+    """SessionEnd drops the registration, or dead rows pile up.
+
+    Nothing unregistered a session, and a row lived until the 30-day
+    sweep, so an alias listed every session that had *ever* run in the
+    directory. Ten short sessions in ten minutes is all it took.
+    """
+
+    def test_forget_removes_only_that_session(self):
+        # Two aliases rather than two registrations of one: since the
+        # ``(alias, host)`` rule, the second would have evicted the
+        # first and this would pass without forget() doing anything.
+        self.register("osync", self.HOST, sid="live")
+        self.register("xollama", self.HOST, sid="dead")
+        self.assertTrue(self.store.forget("dead"))
+        left = [s.session_id for s in self.store.sessions()]
+        self.assertEqual(left, ["live"])
+
+    def test_forgetting_an_unknown_session_is_not_an_error(self):
+        self.assertFalse(self.store.forget("never-existed"))
+
+    def test_session_end_unregisters(self):
+        # The wiring, not the store: a fix nothing calls changes nothing.
+        import inspect
+        from claude_hooks.hooks import session_end
+        src = inspect.getsource(session_end)
+        self.assertIn("_unregister_mailbox_session", src)
+        self.assertIn("unregister_session", src)
+
+
+class StaleEvictionTests(StoreHarness):
+    """A registration is evidence a session *was* running.
+
+    Ten sessions that ran and ended inside ten minutes left ten rows
+    beside the live one, and the only eviction was a 30-day sweep — the
+    right horizon for archiving mail and the wrong one for addressing.
+    Three layers now: stale rows are not addressees, they are physically
+    evicted on hours, and a quiet session re-creates its own row so
+    eviction can never silence it.
+    """
+
+    def _age(self, session_id, hours):
+        """Backdate last_seen, the way a session that ended looks."""
+        from datetime import timedelta
+        from claude_hooks.mailbox.store import utcnow
+        cutoff = self.store._at(utcnow() - timedelta(hours=hours))
+        with self.db.lock:
+            conn = self.db()
+            cur = conn.cursor()
+            cur.execute("UPDATE session_registry SET last_seen = ? "
+                        "WHERE session_id = ?", (cutoff, session_id))
+            conn.commit()
+
+    def test_a_stale_row_is_not_an_addressee(self):
+        # One alias, two hosts — the only way one alias can now hold a
+        # live row and a dead one at the same time.
+        self.register("osync", self.HOST, sid="live")
+        self.register("osync", "elsewhere", sid="ended")
+        self._age("ended", 48)
+        live = [s.session_id for s in self.store.sessions()]
+        self.assertEqual(live, ["live"])
+
+    def test_an_operator_can_still_see_stale_rows(self):
+        self.register("osync", self.HOST, sid="ended")
+        self._age("ended", 48)
+        self.assertEqual(self.store.sessions(), [])
+        self.assertEqual(
+            [s.session_id for s in self.store.sessions(include_stale=True)],
+            ["ended"])
+
+    def test_a_stale_row_does_not_multiply_delivery(self):
+        # The reported bug, from the other direction: even before the
+        # physical eviction runs, a dead row cannot take a copy.
+        #
+        # Ten dead rows beside the live one cannot be *registered* any
+        # more, so they are aged across hosts instead. Rebuilding this
+        # with repeated registrations on one host would leave a single
+        # row and pass without exercising anything.
+        self.register("xollama", self.HOST, sid="live")
+        for i in range(10):
+            self.register("xollama", f"ended-host-{i}", sid=f"ended-{i}")
+            self._age(f"ended-{i}", 48)
+        res = self.store.send("xollama*", "s", "b", from_alias="me")
+        self.assertEqual(len(res["ids"]), 1)
+        self.assertEqual(res["destinations"], [("xollama", self.HOST)])
+
+    def test_evict_stale_removes_only_the_stale(self):
+        self.register("osync", self.HOST, sid="live")
+        self.register("osync", "elsewhere", sid="ended")
+        self._age("ended", 48)
+        self.assertEqual(self.store.evict_stale(hours=24), 1)
+        self.assertEqual(
+            [s.session_id for s in self.store.sessions(include_stale=True)],
+            ["live"])
+
+    def test_eviction_is_later_than_the_live_window(self):
+        # A row must stop being *used* before it stops being *readable*:
+        # those ten dead rows were the only evidence of what happened.
+        from claude_hooks.mailbox.store import (
+            DEFAULT_EVICT_HOURS,
+            DEFAULT_LIVE_HOURS,
+        )
+        self.assertGreater(DEFAULT_EVICT_HOURS, DEFAULT_LIVE_HOURS)
+
+    def test_touch_recreates_an_evicted_live_session(self):
+        """Eviction must not silence a session that is merely quiet.
+
+        ``touch`` runs once per turn, so an open session with an idle
+        user falls outside the window on its own. Its next turn has to
+        put it back.
+        """
+        self.register("osync", self.HOST, sid="quiet")
+        self.assertEqual(self.store.evict_stale(hours=0), 1)
+        self.assertEqual(self.store.sessions(include_stale=True), [])
+
+        self.store.touch("quiet", alias="osync", host=self.HOST)
+        back = self.store.sessions()
+        self.assertEqual([s.session_id for s in back], ["quiet"])
+        self.assertEqual(back[0].alias, "osync")
+
+    def test_touch_without_an_alias_cannot_rebuild(self):
+        # Nothing to rebuild from, so it stays best-effort as before
+        # rather than inventing a registration.
+        self.store.touch("unknown-session")
+        self.assertEqual(self.store.sessions(include_stale=True), [])
+
+    def test_the_maintenance_sweep_evicts(self):
+        import inspect
+        from claude_hooks.mailbox import archive
+        src = inspect.getsource(archive.sweep)
+        self.assertIn("evict_stale", src)
+
+
+class DedupeMessagesTests(StoreHarness):
+    """The repair for mailboxes that already ran the fan-out.
+
+    Fixing `send()` stops new duplicates; it does nothing about the rows
+    already written. On solidpc that was 30 redundant rows of 65 — three
+    sends of eleven copies each — and leaving them makes the recipient
+    re-read the same message eleven times after the upgrade.
+
+    This was first done as one-off SQL against the live table, which is
+    exactly the kind of change nothing covers. Hence these.
+    """
+
+    def _register_many(self, alias, host, n):
+        for i in range(n):
+            self.register(alias, host, sid=f"{alias}-{host}-{i}")
+
+    def _fan_out(self, n=11, *, alias="xollama", subject="s", body="b"):
+        """Write the duplicate rows the old send() produced.
+
+        One INSERT per registration, identical but for the id — what the
+        code did before, reproduced directly so the repair is tested
+        against the shape it exists for rather than a guess at it.
+        """
+        from claude_hooks.mailbox.store import utcnow
+        created = self.store._at(utcnow())
+        expires = self.store._at(utcnow())
+        group = "grp-1"
+        ids = []
+        with self.db.lock:
+            conn = self.db()
+            cur = conn.cursor()
+            for _ in range(n):
+                cur.execute(
+                    "INSERT INTO session_messages "
+                    "(created_at, from_alias, from_host, to_alias, to_host, "
+                    " broadcast_group, subject, body, priority, expires_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+                    (created, "opencoti", self.HOST, alias, self.HOST,
+                     group, subject, body, expires))
+                ids.append(cur.lastrowid)
+            conn.commit()
+        return ids
+
+    def _all_rows(self, alias):
+        """Every row for ``alias`` on any host.
+
+        ``inbox()`` is deliberately host-scoped — mail for
+        ``alias@pandorum`` is not solidpc's to read — so a test about
+        what *exists* cannot go through it.
+        """
+        with self.db.lock:
+            conn = self.db()
+            cur = conn.cursor()
+            cur.execute("SELECT id, to_host, broadcast_group, read_at "
+                        "FROM session_messages WHERE to_alias = ? "
+                        "ORDER BY id", (alias,))
+            return [dict(zip(("id", "to_host", "broadcast_group", "read_at"),
+                             r)) for r in cur.fetchall()]
+
+    def _mark_read(self, message_id):
+        with self.db.lock:
+            conn = self.db()
+            cur = conn.cursor()
+            cur.execute("UPDATE session_messages SET read_at = ?, "
+                        "read_by = ? WHERE id = ?",
+                        (self.store._now(), "reader", message_id))
+            conn.commit()
+
+    def test_eleven_copies_collapse_to_one(self):
+        self._fan_out(11)
+        self.assertEqual(len(self.store.inbox(alias="xollama")), 11)
+        res = self.store.dedupe_messages()
+        self.assertEqual(res["removed"], 10)
+        self.assertEqual(len(self.store.inbox(alias="xollama")), 1)
+
+    def test_the_read_copy_is_the_one_kept(self):
+        """The trap that made this worth doing carefully.
+
+        Read state lives on the row and the copies do not share it. One
+        live set had a single read copy in eleven, so keeping the lowest
+        id had a ~91% chance of resurfacing a message already read.
+        """
+        ids = self._fan_out(11)
+        self._mark_read(ids[7])          # deliberately not the lowest id
+        self.store.dedupe_messages()
+        left = self.store.inbox(alias="xollama", include_read=True)
+        self.assertEqual(len(left), 1)
+        self.assertEqual(left[0]["id"], ids[7])
+        self.assertIsNotNone(left[0]["read_at"])
+        # ...and it does not come back as unread.
+        self.assertEqual(self.store.inbox(alias="xollama"), [])
+
+    def test_a_collapsed_group_is_no_longer_a_broadcast(self):
+        self._fan_out(11)
+        self.store.dedupe_messages()
+        left = self.store.inbox(alias="xollama", include_read=True)
+        self.assertIsNone(left[0]["broadcast_group"],
+                          "one destination is not a broadcast")
+
+    def test_a_genuine_two_host_broadcast_is_untouched(self):
+        # Different hosts mean different destinations, so those rows are
+        # not duplicates of each other and the group is real.
+        self.register("osync", "solidpc")
+        self.register("osync", "pandorum")
+        res = self.store.send("osync*", "s", "b", from_alias="me")
+        self.assertEqual(len(res["ids"]), 2)
+        self.assertEqual(self.store.dedupe_messages()["removed"], 0)
+        rows = self._all_rows("osync")
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(r["broadcast_group"] for r in rows),
+                        "cleared a group that still has two destinations")
+
+    def test_a_broadcast_that_also_fanned_out_keeps_its_group(self):
+        """Both kinds of multiplicity at once — only one is spurious."""
+        from claude_hooks.mailbox.store import utcnow
+        created = self.store._at(utcnow())
+        with self.db.lock:
+            conn = self.db()
+            cur = conn.cursor()
+            for host, n in (("solidpc", 4), ("pandorum", 3)):
+                for _ in range(n):
+                    cur.execute(
+                        "INSERT INTO session_messages "
+                        "(created_at, from_alias, from_host, to_alias, "
+                        " to_host, broadcast_group, subject, body, priority, "
+                        " expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+                        (created, "me", self.HOST, "osync", host, "grp-2",
+                         "s", "b", created))
+            conn.commit()
+        res = self.store.dedupe_messages()
+        self.assertEqual(res["removed"], 5, "4+3 rows are 2 destinations")
+        rows = self._all_rows("osync")
+        self.assertEqual(sorted(r["to_host"] for r in rows),
+                         ["pandorum", "solidpc"])
+        self.assertTrue(all(r["broadcast_group"] == "grp-2" for r in rows),
+                        "a two-host broadcast is still a broadcast")
+
+    def test_distinct_messages_are_never_merged(self):
+        self.register("osync", self.HOST)
+        self.store.send("osync", "first", "body", from_alias="me")
+        self.store.send("osync", "second", "body", from_alias="me")
+        self.store.send("osync", "first", "different", from_alias="me")
+        self.assertEqual(self.store.dedupe_messages()["removed"], 0)
+        self.assertEqual(len(self.store.inbox(alias="osync")), 3)
+
+    def test_two_deliberate_sends_of_identical_text_both_survive(self):
+        """``dedupe_messages`` must still not collapse two genuine sends.
+
+        It keys on ``created_at`` to the microsecond precisely so that it
+        only ever removes rows from one ``INSERT`` loop. That property is
+        unchanged — but reaching it now takes a first message that is read
+        and older than the dedup window, because ``send()`` refuses an
+        immediate identical repeat (see
+        :class:`RefuseIdenticalResendTests`). The behaviour this test
+        asserted before that guard — a second identical send going
+        straight through — is deliberately gone.
+        """
+        self.register("osync", self.HOST)
+        first = self.store.send("osync", "same", "same",
+                                from_alias="me")["ids"][0]
+        self.store.read([first], reader_session="osync-solidpc",
+                        alias="osync", host=self.HOST)
+        self._age_message(first, seconds=3600)
+
+        self.store.send("osync", "same", "same", from_alias="me")
+
+        self.assertEqual(self.store.dedupe_messages()["removed"], 0)
+        self.assertEqual(
+            len(self.store.inbox(alias="osync", include_read=True)), 2)
+
+    def _age_message(self, message_id, *, seconds):
+        old = utcnow() - timedelta(seconds=seconds)
+        with self.db.lock:
+            conn = self.db()
+            conn.execute("UPDATE session_messages SET created_at = ?"
+                         " WHERE id = ?", (old.isoformat(), message_id))
+            conn.commit()
+
+    def test_it_is_idempotent(self):
+        self._fan_out(11)
+        self.assertEqual(self.store.dedupe_messages()["removed"], 10)
+        self.assertEqual(self.store.dedupe_messages()["removed"], 0)
+        self.assertEqual(self.store.dedupe_messages()["groups_cleared"], 0)
+
+    def test_an_empty_mailbox_is_not_an_error(self):
+        self.assertEqual(self.store.dedupe_messages(),
+                         {"removed": 0, "kept": 0, "groups_cleared": 0})
+
+    def test_the_maintenance_sweep_repairs(self):
+        # A repair nothing calls repairs nothing: every host that ran the
+        # old code has these rows, and only the sweep reaches them.
+        import inspect
+        from claude_hooks.mailbox import archive
+        src = inspect.getsource(archive.sweep)
+        self.assertIn("dedupe_messages", src)
+
+    def test_it_spans_more_than_one_delete_chunk(self):
+        # The delete is chunked at 500 ids; a mailbox that ran the bug
+        # for a while has more than that.
+        self._fan_out(600)
+        self.assertEqual(self.store.dedupe_messages()["removed"], 599)
+        self.assertEqual(len(self.store.inbox(alias="xollama")), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -1172,3 +1602,471 @@ class SharedAliasToolsTests(StoreHarness):
                                 {"id": mid, "subject": "hijacked"})
         self.assertIn("cannot rewrite", refusal)
         self.assertIn("original", self.sol.call("mailbox-sent", {}))
+
+
+class OneRegistrationPerAliasHostTests(StoreHarness):
+    """A restart must replace a registration, not add one.
+
+    ``session_id`` is the primary key, so a client that came back under
+    a new id left the old row behind: observed live as five
+    ``xollama@solidpc`` rows in one directory, four of them an hour
+    stale behind the one doing the work.
+    """
+
+    def test_a_new_session_id_replaces_the_old_row(self):
+        self.register("xollama", "solidpc", sid="before-restart")
+        self.register("xollama", "solidpc", sid="after-restart")
+
+        rows = self.store.sessions(alias="xollama")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].session_id, "after-restart")
+
+    def test_five_restarts_still_leave_one_row(self):
+        for i in range(5):
+            self.register("xollama", "solidpc", sid=f"run-{i}")
+        rows = self.store.sessions(alias="xollama")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].session_id, "run-4")
+
+    def test_the_same_alias_on_another_host_is_untouched(self):
+        """``xollama@solidpc`` and ``xollama@pandorum`` are two
+        correspondents, not one — the whole point of qualifying by
+        host."""
+        self.register("xollama", "solidpc", sid="sol")
+        self.register("xollama", "pandorum", sid="pan")
+
+        hosts = sorted(r.host for r in self.store.sessions(alias="xollama"))
+        self.assertEqual(hosts, ["pandorum", "solidpc"])
+
+    def test_the_database_refuses_a_duplicate(self):
+        """Enforced by the index, not only by the code path that writes
+        it — a second writer must not be able to recreate the state."""
+        self.register("xollama", "solidpc", sid="one")
+        with self.assertRaises(sqlite3.IntegrityError):
+            with self.db.lock:
+                conn = self.db()
+                conn.execute(
+                    "INSERT INTO session_registry (session_id, alias, host,"
+                    " os, cwd, started_at, last_seen)"
+                    " VALUES ('two', 'xollama', 'solidpc', 'linux', '',"
+                    " '2026-09-22T00:00:00+00:00',"
+                    " '2026-09-22T00:00:00+00:00')")
+
+    def test_collisions_reported_at_registration_are_now_cross_host_only(self):
+        self.register("xollama", "solidpc", sid="sol-old")
+        others = self.register("xollama", "pandorum", sid="pan")
+        self.assertEqual([o.host for o in others], ["solidpc"])
+
+        # Re-registering on solidpc reports pandorum, and does not
+        # report the predecessor it just replaced.
+        others = self.register("xollama", "solidpc", sid="sol-new")
+        self.assertEqual([o.host for o in others], ["pandorum"])
+
+    def test_existing_duplicates_are_cleared_when_the_schema_is_applied(self):
+        """The migration. An upgrade meets a table that already has
+        them, and the unique index cannot be built until they are
+        gone."""
+        # Relative to now: sessions() hides rows outside the live
+        # window, so fixed dates stopped being "live" a day later.
+        now = utcnow()
+        older = (now - timedelta(minutes=10)).isoformat()
+        newer = (now - timedelta(minutes=1)).isoformat()
+        with self.db.lock:
+            conn = self.db()
+            conn.execute("DROP INDEX IF EXISTS "
+                         "session_registry_alias_host_uidx")
+            for sid, seen in (("a", older), ("b", newer), ("c", older)):
+                conn.execute(
+                    "INSERT INTO session_registry (session_id, alias, host,"
+                    " os, cwd, started_at, last_seen)"
+                    " VALUES (?, 'xollama', 'solidpc', 'linux', '', ?, ?)",
+                    (sid, seen, seen))
+            conn.commit()
+        self.assertEqual(len(self.store.sessions(alias="xollama")), 3)
+
+        self.store._ready = False          # as a fresh process would
+        self.store.ensure_schema()
+
+        rows = self.store.sessions(alias="xollama")
+        self.assertEqual(len(rows), 1)
+        # The most recently seen row survives — the live one.
+        self.assertEqual(rows[0].session_id, "b")
+
+    def test_touch_rebuilds_an_evicted_row_without_duplicating(self):
+        """A quiet session whose row was taken over comes back on its
+        next action, and comes back as one row."""
+        self.register("xollama", "solidpc", sid="quiet")
+        self.register("xollama", "solidpc", sid="loud")
+
+        self.store.touch("quiet", alias="xollama", host="solidpc")
+
+        rows = self.store.sessions(alias="xollama")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].session_id, "quiet")
+
+
+class ActivityRefreshesLastSeenTests(StoreHarness):
+    """Using the mailbox is the strongest evidence a session is alive,
+    and it was the one signal the registry did not record."""
+
+    def _tools(self, sid="s-live", alias="xollama"):
+        from claude_hooks.mailbox.tools import MailboxTools
+        return MailboxTools(self.store, alias=alias, session_id=sid,
+                            host="solidpc")
+
+    def _last_seen(self, sid):
+        rows = [r for r in self.store.sessions(include_stale=True)
+                if r.session_id == sid]
+        self.assertEqual(len(rows), 1)
+        return rows[0].last_seen
+
+    def _age(self, sid, minutes):
+        stale = utcnow() - timedelta(minutes=minutes)
+        with self.db.lock:
+            conn = self.db()
+            conn.execute("UPDATE session_registry SET last_seen = ?"
+                         " WHERE session_id = ?",
+                         (stale.isoformat(), sid))
+            conn.commit()
+
+    def test_a_second_tool_call_moves_last_seen(self):
+        """The first call registers. Every one after it used to leave
+        the timestamp where SessionStart put it, so a session working
+        inside a single long turn read as idle the whole time."""
+        tools = self._tools()
+        tools.call("mailbox-list", {})
+        self._age("s-live", minutes=15)
+        stale = self._last_seen("s-live")
+
+        tools.call("mailbox-list", {})
+
+        self.assertGreater(self._last_seen("s-live"), stale)
+
+    def test_reading_and_sending_both_count_as_activity(self):
+        self.register("peer", "solidpc", sid="s-peer")
+        tools = self._tools()
+        tools.call("mailbox-list", {})
+
+        for name, args in (("mailbox-send", {"to": "peer", "subject": "s",
+                                             "body": "b"}),
+                           ("mailbox-sessions", {}),
+                           ("mailbox-sent", {})):
+            with self.subTest(tool=name):
+                self._age("s-live", minutes=20)
+                stale = self._last_seen("s-live")
+                tools.call(name, args)
+                self.assertGreater(self._last_seen("s-live"), stale)
+
+    def test_activity_rebuilds_a_registration_that_was_swept(self):
+        """Eviction is only safe if activity undoes it — otherwise a
+        session that went quiet is unaddressable for the rest of its
+        life."""
+        tools = self._tools()
+        tools.call("mailbox-list", {})
+        self.store.forget("s-live")
+        self.assertEqual(self.store.sessions(alias="xollama"), [])
+
+        tools.call("mailbox-list", {})
+
+        rows = self.store.sessions(alias="xollama")
+        self.assertEqual([r.session_id for r in rows], ["s-live"])
+
+    def test_a_tool_failure_does_not_cost_the_refresh(self):
+        """Soft-fail runs the other way too: the refresh must not be
+        skipped because the call it accompanies was rejected."""
+        tools = self._tools()
+        tools.call("mailbox-list", {})
+        self._age("s-live", minutes=30)
+        stale = self._last_seen("s-live")
+
+        out = tools.call("mailbox-send", {"to": "nobody-here",
+                                          "subject": "s", "body": "b"})
+
+        self.assertGreater(self._last_seen("s-live"), stale)
+        self.assertTrue(out)
+
+
+class AliasBelongsToTheSessionTests(StoreHarness):
+    """Directory is a property of a session, not the key to it."""
+
+    def test_a_registered_session_keeps_its_name_after_a_cd(self):
+        self.register("xollama", "solidpc", sid="s1")
+        self.assertEqual(self.store.registered_alias("s1"), "xollama")
+
+    def test_an_unregistered_session_has_no_pinned_name(self):
+        self.assertIsNone(self.store.registered_alias("never-seen"))
+        self.assertIsNone(self.store.registered_alias(""))
+
+    def test_the_binding_prefers_the_registration_over_the_directory(self):
+        """``alias_for(cwd)`` is the *default* for a session with no
+        registration; it must not rename one that has."""
+        from claude_hooks.mailbox import integration
+
+        self.register("xollama", "solidpc", sid="s1")
+        captured = {}
+
+        class _Tools:
+            def __init__(self, store, *, alias, session_id, host):
+                captured["alias"] = alias
+
+        import claude_hooks.mailbox.tools as tools_mod
+        real_tools, real_store = tools_mod.MailboxTools, None
+        tools_mod.MailboxTools = _Tools
+        real_store = integration.store_for_provider
+        integration.store_for_provider = lambda provider: self.store
+        try:
+            integration.tools_for_provider(object(), cwd="/somewhere/else",
+                                           session_id="s1")
+        finally:
+            tools_mod.MailboxTools = real_tools
+            integration.store_for_provider = real_store
+
+        self.assertEqual(captured["alias"], "xollama")
+
+
+class RefreshWithoutASessionIdTests(StoreHarness):
+    """The tool path has no session id to key on.
+
+    Claude Code does not export ``CLAUDE_SESSION_ID`` to an MCP child —
+    checked on three live stdio servers, none of which had it — so the
+    per-call refresh keyed on ``session_id`` was dead code on the one
+    path where the mail actually happens.
+    """
+
+    def _tools(self, alias="xollama", sid=""):
+        from claude_hooks.mailbox.tools import MailboxTools
+        return MailboxTools(self.store, alias=alias, session_id=sid,
+                            host=self.HOST)
+
+    def _age(self, sid, minutes):
+        stale = utcnow() - timedelta(minutes=minutes)
+        with self.db.lock:
+            conn = self.db()
+            conn.execute("UPDATE session_registry SET last_seen = ?"
+                         " WHERE session_id = ?",
+                         (stale.isoformat(), sid))
+            conn.commit()
+
+    def _last_seen(self, sid):
+        rows = [r for r in self.store.sessions(include_stale=True)
+                if r.session_id == sid]
+        self.assertEqual(len(rows), 1)
+        return rows[0].last_seen
+
+    def test_a_tool_call_with_no_session_id_still_refreshes_the_row(self):
+        self.register("xollama", self.HOST, sid="registered-by-the-hook")
+        self._age("registered-by-the-hook", minutes=15)
+        stale = self._last_seen("registered-by-the-hook")
+
+        self._tools().call("mailbox-list", {})
+
+        self.assertGreater(self._last_seen("registered-by-the-hook"), stale)
+
+    def test_it_refreshes_without_creating_a_second_row(self):
+        self.register("xollama", self.HOST, sid="registered-by-the-hook")
+        self._tools().call("mailbox-list", {})
+        rows = self.store.sessions(alias="xollama")
+        self.assertEqual([r.session_id for r in rows],
+                         ["registered-by-the-hook"])
+
+    def test_an_unregistered_alias_is_not_invented(self):
+        """A session that cannot state its id must not be registered:
+        the row would have no id anything could later clean up."""
+        self.assertFalse(self.store.touch_alias("nobody", self.HOST))
+        self._tools(alias="nobody").call("mailbox-list", {})
+        self.assertEqual(self.store.sessions(include_stale=True), [])
+
+    def test_another_host_holding_the_alias_is_not_refreshed(self):
+        self.register("xollama", self.HOST, sid="here")
+        self.register("xollama", "elsewhere", sid="there")
+        self._age("there", minutes=45)
+        stale = self._last_seen("there")
+
+        self._tools().call("mailbox-list", {})
+
+        self.assertEqual(self._last_seen("there"), stale)
+
+    def test_an_empty_alias_refreshes_nothing(self):
+        self.register("xollama", self.HOST, sid="here")
+        self.assertFalse(self.store.touch_alias("", self.HOST))
+
+
+class RefuseIdenticalResendTests(StoreHarness):
+    """An identical message is refused, naming the one it repeats.
+
+    Reported 2026-09-22: ``#185``–``#189``, identical bodies, one minute.
+    Not a sender sending five times — one ``send()`` in an MCP server
+    started 2026-09-17 wrote one row per *registration*, and the fan-out
+    fix had landed on 2026-09-19. The writer was five days stale and
+    nothing about a long-lived child process says so, which is the
+    argument for checking at the destination instead of trusting the
+    writer.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.register("osync", self.HOST, sid="s-osync")
+
+    def _send(self, subject="s", body="b", to="osync"):
+        return self.store.send(to, subject, body, from_alias="me")
+
+    def _age_message(self, message_id, *, seconds):
+        old = utcnow() - timedelta(seconds=seconds)
+        with self.db.lock:
+            conn = self.db()
+            conn.execute("UPDATE session_messages SET created_at = ?"
+                         " WHERE id = ?", (old.isoformat(), message_id))
+            conn.commit()
+
+    def _read(self, message_id):
+        self.store.read([message_id], reader_session="s-osync",
+                        alias="osync", host=self.HOST)
+
+    def test_an_immediate_repeat_is_refused(self):
+        first = self._send()["ids"][0]
+        with self.assertRaises(MailboxError) as cm:
+            self._send()
+        msg = str(cm.exception)
+        self.assertIn(f"#{first}", msg)
+        self.assertIn("Not sent", msg)
+
+    def test_the_refusal_says_the_message_is_already_there(self):
+        """The likeliest reader of this text is a caller retrying because
+        it never saw the first confirmation. "Rejected" alone would read
+        as a failure and invite a third attempt."""
+        self._send()
+        with self.assertRaises(MailboxError) as cm:
+            self._send()
+        msg = str(cm.exception)
+        self.assertIn("in their mailbox", msg)
+        self.assertIn("nothing more is needed", msg.lower())
+
+    def test_nothing_is_written_when_it_is_refused(self):
+        self._send()
+        before = len(self.store.inbox(alias="osync", include_read=True))
+        with self.assertRaises(MailboxError):
+            self._send()
+        self.assertEqual(
+            len(self.store.inbox(alias="osync", include_read=True)), before)
+
+    def test_an_unread_copy_blocks_a_repeat_at_any_age(self):
+        """A second copy cannot tell the recipient anything the first,
+        still sitting unread, will not."""
+        first = self._send()["ids"][0]
+        self._age_message(first, seconds=90 * 24 * 3600)
+        with self.assertRaises(MailboxError) as cm:
+            self._send()
+        self.assertIn(f"#{first}", str(cm.exception))
+
+    def test_a_read_copy_outside_the_window_does_not_block(self):
+        first = self._send()["ids"][0]
+        self._read(first)
+        self._age_message(first, seconds=3600)
+        self._send()          # a deliberate re-send, delayed not forbidden
+        self.assertEqual(
+            len(self.store.inbox(alias="osync", include_read=True)), 2)
+
+    def test_a_read_copy_inside_the_window_still_blocks(self):
+        """Read is not the same as answered: a retry whose first attempt
+        was read in the meantime is still a retry."""
+        first = self._send()["ids"][0]
+        self._read(first)
+        with self.assertRaises(MailboxError):
+            self._send()
+
+    def test_a_withdrawn_message_does_not_block(self):
+        """Withdrawing is a statement that it should not have been sent,
+        so it cannot stand in the way of sending it properly."""
+        first = self._send()["ids"][0]
+        self.store.cancel(first, from_alias="me", from_host=self.HOST)
+        self._send()
+        self.assertEqual(len(self.store.inbox(alias="osync")), 1)
+
+    def test_a_different_body_is_not_a_duplicate(self):
+        self._send(body="one")
+        self._send(body="two")
+        self.assertEqual(len(self.store.inbox(alias="osync")), 2)
+
+    def test_a_different_subject_is_not_a_duplicate(self):
+        self._send(subject="one")
+        self._send(subject="two")
+        self.assertEqual(len(self.store.inbox(alias="osync")), 2)
+
+    def test_another_sender_repeating_the_text_is_not_a_duplicate(self):
+        """Two sessions independently reporting the same result are two
+        messages, and the recipient needs both."""
+        self._send()
+        self.store.send("osync", "s", "b", from_alias="someone-else")
+        self.assertEqual(len(self.store.inbox(alias="osync")), 2)
+
+    def test_the_same_text_to_a_different_recipient_is_not_a_duplicate(self):
+        self.register("xollama", self.HOST, sid="s-x")
+        self._send(to="osync")
+        self._send(to="xollama")
+        self.assertEqual(len(self.store.inbox(alias="osync")), 1)
+        self.assertEqual(len(self.store.inbox(alias="xollama")), 1)
+
+    def test_a_parked_message_blocks_its_own_repeat(self):
+        """Nobody registered, so it parks on the alias — and a retry of a
+        parked message duplicates just as well as a delivered one."""
+        first = self.store.send("nobody-home", "s", "b",
+                                from_alias="me")["ids"][0]
+        with self.assertRaises(MailboxError) as cm:
+            self.store.send("nobody-home", "s", "b", from_alias="me")
+        self.assertIn(f"#{first}", str(cm.exception))
+
+    def test_a_session_addressed_repeat_is_refused(self):
+        first = self.store.send("s-osync", "s", "b",
+                                from_alias="me")["ids"][0]
+        with self.assertRaises(MailboxError) as cm:
+            self.store.send("s-osync", "s", "b", from_alias="me")
+        self.assertIn(f"#{first}", str(cm.exception))
+
+
+class PartialBroadcastTests(StoreHarness):
+    """A broadcast where only some recipients already have it."""
+
+    def setUp(self):
+        super().setUp()
+        self.register("osync", "solidpc", sid="s-sol")
+        self.register("osync", "pandorum", sid="s-pan")
+
+    def test_only_the_fresh_hosts_are_written(self):
+        first = self.store.send("osync@solidpc", "s", "b",
+                                from_alias="me")["ids"][0]
+        res = self.store.send("osync*", "s", "b", from_alias="me")
+
+        self.assertEqual(len(res["ids"]), 1)
+        self.assertEqual(res["destinations"], [("osync", "pandorum")])
+        self.assertEqual(res["skipped"], [(("osync", None, "solidpc"), first)])
+
+    def test_a_single_surviving_row_is_not_a_broadcast(self):
+        """``broadcast_group`` means "this went to more than one
+        mailbox". After the duplicate is dropped it went to one."""
+        self.store.send("osync@solidpc", "s", "b", from_alias="me")
+        res = self.store.send("osync*", "s", "b", from_alias="me")
+        self.assertIsNone(res["broadcast_group"])
+
+    def test_the_confirmation_says_what_was_skipped(self):
+        from claude_hooks.mailbox.tools import MailboxTools
+        tools = MailboxTools(self.store, alias="me", session_id="s-me",
+                            host=self.HOST)
+        first = self.store.send("osync@solidpc", "s", "b",
+                                from_alias="me")["ids"][0]
+
+        out = tools.call("mailbox-send", {"to": "osync*", "subject": "s",
+                                         "body": "b"})
+
+        self.assertIn("Sent", out)
+        self.assertIn("Skipped", out)
+        self.assertIn(f"#{first}", out)
+        self.assertIn("solidpc", out)
+
+    def test_a_fully_duplicate_broadcast_is_refused(self):
+        self.store.send("osync*", "s", "b", from_alias="me")
+        with self.assertRaises(MailboxError) as cm:
+            self.store.send("osync*", "s", "b", from_alias="me")
+        msg = str(cm.exception)
+        self.assertIn("Every recipient already has", msg)
+        self.assertIn("solidpc", msg)
+        self.assertIn("pandorum", msg)

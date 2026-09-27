@@ -208,6 +208,16 @@ class StallController:
                 tokens_emitted=self._tokens_emitted,
             )
 
+    def restart_clock(self) -> None:
+        """Start the stall and hard-cap clocks now. Called when the call
+        is admitted to a connection slot (``claude_hooks.ollama_slots``):
+        time spent queued behind other calls is not the model going
+        silent, and must not be cancelled as a stall."""
+        now = self._time_source()
+        with self._lock:
+            self._started_ts = now
+            self._last_token_ts = None
+
     def cancel(self) -> None:
         """Signal the chat fn to abort cooperatively. Idempotent."""
         self._cancelled.set()

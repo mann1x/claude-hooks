@@ -1,0 +1,58 @@
+{
+  "created": "2026-09-23T20:49:42",
+  "cwd": "/srv/dev-disk-by-label-opt/dev/bench-home-2026-09-23/tmp/claude-hooks-bench-bench-baseline-2026-05-07-n3hj",
+  "cwd_display": "/srv/dev-disk-by-label-opt/dev/bench-home-2026-09-23/tmp/claude-hooks-bench-bench-baseline-2026-05-07-n3hj",
+  "duration_seconds": 4.800705194473267,
+  "effort": "medium",
+  "error": null,
+  "extra_roots": [],
+  "extra_roots_display": [],
+  "final_answer": "The four roles of the consultants council are the planner, researcher, critic, and synthesizer (`consultants/engine/council.py:98`).",
+  "models": {
+    "planner": "gemma4:31b-cloud",
+    "researcher": "gemma4:31b-cloud",
+    "synthesizer": "gemma4:31b-cloud"
+  },
+  "parent_sid": null,
+  "question": "From the code in this repository, name the four roles of the consultants council in a single short sentence.",
+  "retries_by_role": {},
+  "root_sid": "csl-2026-09-23-2049-91ed",
+  "session_id": "csl-2026-09-23-2049-91ed",
+  "status": "completed",
+  "topology": "council",
+  "total_completion_tokens": 109,
+  "total_prompt_tokens": 48167,
+  "truncations_by_role": {},
+  "turns": [
+    {
+      "completion_tokens": 35,
+      "content": "The four roles of the consultants council are the planner, researcher, critic, and synthesizer (consultants/engine/council.py:98).",
+      "duration_seconds": 1.8247553128749132,
+      "prompt_tokens": 15545,
+      "role": "planner",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 35,
+      "content": "The four roles of the consultants council are the planner, researcher, critic, and synthesizer (`consultants/engine/council.py:98`).",
+      "duration_seconds": 2.460876068100333,
+      "prompt_tokens": 30961,
+      "role": "researcher",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "completion_tokens": 39,
+      "content": "The four roles of the consultants council are the planner, researcher, critic, and synthesizer (`consultants/engine/council.py:98`).",
+      "duration_seconds": 0.4819995351135731,
+      "prompt_tokens": 1661,
+      "role": "synthesizer",
+      "round": 1,
+      "tool_calls": [],
+      "tool_results": []
+    }
+  ]
+}

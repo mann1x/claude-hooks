@@ -294,26 +294,11 @@ gains a row, and (if rate-limit headers are present) the state
 file at `~/.claude/claude-hooks-proxy/ratelimit-state.json` appears
 on the **server**.
 
-## 6. Optional: statusline segment
+## 6. Optional: status line
 
-Append to your existing `statusLine` command script so the weekly %
-shows inline. Minimal shell wiring:
-
-```bash
-REPO="${CLAUDE_HOOKS_REPO:-/srv/.../claude-hooks}"
-usage_seg=$(python3 "$REPO/scripts/statusline_usage.py" 2>/dev/null)
-[ -n "$usage_seg" ] && usage_part=" | $usage_seg"
-```
-
-The script auto-picks emoji on Linux/macOS and ASCII on Windows
-(cmd.exe / legacy PowerShell render emoji as tofu boxes). Override
-with `CLAUDE_HOOKS_STATUSLINE_FORMAT={emoji,ascii,plain}`. Windows
-Terminal users with a Cascadia-Code-like font can keep emoji even
-when the script is invoked with a hardcoded `--format emoji` by
-exporting `CLAUDE_HOOKS_STATUSLINE_FORCE_EMOJI=1`.
-
-`statusline_usage.py` exits 0 on every error path, so it's safe to
-add to any statusline runner without guarding.
+`scripts/statusline_compose.py` is a complete `statusLine` command —
+usage limits from Claude Code's own `rate_limits` plus an unread-mail
+badge — and needs no proxy. Wiring and options: [statusline.md](statusline.md).
 
 ## 7. Optional: env-var tweaks
 

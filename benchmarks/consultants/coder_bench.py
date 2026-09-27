@@ -68,8 +68,10 @@ from benchmarks.consultants.harness import (  # noqa: E402
     estimate_cost, judge_lang_for_path, load_questions,
     load_suite_manifest, make_dry_run_loop_runner, measure_complexity,
     parse_constraint_tests, parse_judge_response,
-    parse_meta_judge_response, run_pytest_against_sandbox,
+    parse_meta_judge_response, timed_chat,
+    run_pytest_against_sandbox, set_role_usage,
 )
+from benchmarks.consultants import judge_panel  # noqa: E402
 
 log = logging.getLogger("benchmarks.consultants.coder_bench")
 
@@ -81,7 +83,9 @@ DEFAULT_MODELS = [
     "gemma4:31b-cloud",
 ]
 DEFAULT_OLLAMA_BASE = "http://192.168.178.2:11433"
-DEFAULT_JUDGE_MODEL = "kimi-k2.6:cloud"
+# Two peer judges + a synthesizer (judge_panel). A single model here
+# (``--judge-model kimi-k2.6:cloud``) is the one-judge path.
+DEFAULT_JUDGE_MODEL = ",".join(judge_panel.DEFAULT_PANEL)
 DEFAULT_QUESTIONS_DIR = (
     _REPO_ROOT / "benchmarks" / "consultants" / "questions" / "coder"
 )
@@ -149,8 +153,10 @@ def _build_trial_sandbox(output_dir: Path,
 
 
 def _judge_trial_quality(*, judge_chat_client, judge_model: str,
+        usage: Optional[dict] = None,
                          task: str, sandbox: Path,
-                         sandbox_path: str) -> tuple[Optional[float], str]:
+                         sandbox_path: str,
+                         role: str = "judge") -> tuple[Optional[float], str]:
     """Call the judge LLM on the produced code; return
     ``(score, rationale)``. ``score`` is None when:
 
@@ -179,11 +185,11 @@ def _judge_trial_quality(*, judge_chat_client, judge_model: str,
 
     def _call_once() -> str:
         try:
-            resp = judge_chat_client.chat({
+            resp = timed_chat(judge_chat_client, {
                 "model": judge_model,
                 "messages": msgs,
                 "stream": False,
-            })
+            }, usage, role, judge_model)
         except Exception as e:
             log.exception("judge call raised; treating as no-score")
             raise RuntimeError(f"judge call raised: {e}") from e
@@ -227,6 +233,7 @@ def _judge_trial_quality(*, judge_chat_client, judge_model: str,
 
 
 def _audit_judge_trial(*, judge_chat_client, judge_model: str,
+        usage: Optional[dict] = None,
                        task: str, sandbox: Path,
                        sandbox_path: str,
                        passes_algorithm: bool,
@@ -308,11 +315,11 @@ def _audit_judge_trial(*, judge_chat_client, judge_model: str,
 
     def _call_once() -> str:
         try:
-            resp = judge_chat_client.chat({
+            resp = timed_chat(judge_chat_client, {
                 "model": judge_model,
                 "messages": msgs,
                 "stream": False,
-            })
+            }, usage, "audit_judge", judge_model)
         except Exception as e:
             log.exception("audit judge call raised; treating as no-score")
             raise RuntimeError(f"audit judge raised: {e}") from e
@@ -347,6 +354,7 @@ def _audit_judge_trial(*, judge_chat_client, judge_model: str,
 
 
 def _meta_judge_trial(*, judge_chat_client, judge_model: str,
+        usage: Optional[dict] = None,
                       task: str, sandbox: Path, sandbox_path: str,
                       judge_a_score: Optional[float],
                       judge_a_rationale: str,
@@ -407,11 +415,11 @@ def _meta_judge_trial(*, judge_chat_client, judge_model: str,
 
     def _call_once() -> str:
         try:
-            resp = judge_chat_client.chat({
+            resp = timed_chat(judge_chat_client, {
                 "model": judge_model,
                 "messages": msgs,
                 "stream": False,
-            })
+            }, usage, "meta_judge", judge_model)
         except Exception as e:
             log.exception("meta judge call raised; treating as no-score")
             raise RuntimeError(f"meta judge raised: {e}") from e
@@ -459,7 +467,9 @@ def _run_one_trial(*,
                    meta_judge_chat_client,
                    meta_judge_model: Optional[str],
                    output_dir: Path,
-                   pytest_python: str) -> CoderTrial:
+                   pytest_python: str,
+                   judge_panel_clients: Optional[list] = None,
+                   synth_judge: Optional[tuple] = None) -> CoderTrial:
     """Execute one (question × model) trial.
 
     Returns a populated CoderTrial. Never raises — failures are
@@ -554,6 +564,8 @@ def _run_one_trial(*,
         trial.iterations = iterations
         trial.tokens_prompt = tokens_prompt
         trial.tokens_completion = tokens_completion
+        set_role_usage(trial.usage, "coder", model, calls=iterations,
+                       prompt=tokens_prompt, completion=tokens_completion)
         trial.error = f"{type(e).__name__}: {e}"
         return trial
     trial.wall_s = time.monotonic() - t0
@@ -563,6 +575,8 @@ def _run_one_trial(*,
     trial.iterations = iterations
     trial.tokens_prompt = tokens_prompt
     trial.tokens_completion = tokens_completion
+    set_role_usage(trial.usage, "coder", model, calls=iterations,
+                   prompt=tokens_prompt, completion=tokens_completion)
 
     # Extract artifact + files-written summary.
     artifacts = result.get("coder_artifacts") or []
@@ -692,10 +706,20 @@ def _run_one_trial(*,
 
         # Judge call — only on trials that compiled (no point
         # judging code that can't run). Skip if no judge model.
-        if judge_chat_client is not None and judge_model:
+        if judge_panel_clients:
+            panel = _panel_trial_quality(
+                panel=judge_panel_clients, synth=synth_judge,
+                usage=trial.usage, task=question.task,
+                sandbox=produced_dir, sandbox_path=question.sandbox_path,
+                key=f"{question.id}|{model}")
+            trial.quality_score = panel["score"]
+            trial.quality_rationale = panel["rationale"]
+            trial.quality_panel = panel
+        elif judge_chat_client is not None and judge_model:
             score, rationale = _judge_trial_quality(
                 judge_chat_client=judge_chat_client,
                 judge_model=judge_model,
+                usage=trial.usage,
                 task=question.task,
                 sandbox=produced_dir,
                 sandbox_path=question.sandbox_path,
@@ -721,6 +745,7 @@ def _run_one_trial(*,
             a_score, a_rat, a_target, a_mode = _audit_judge_trial(
                 judge_chat_client=audit_judge_chat_client,
                 judge_model=audit_judge_model,
+                usage=trial.usage,
                 task=question.task,
                 sandbox=produced_dir,
                 sandbox_path=question.sandbox_path,
@@ -750,6 +775,7 @@ def _run_one_trial(*,
              m_rat, m_meta_rat, m_mode) = _meta_judge_trial(
                 judge_chat_client=meta_judge_chat_client,
                 judge_model=meta_judge_model,
+                usage=trial.usage,
                 task=question.task,
                 sandbox=produced_dir,
                 sandbox_path=question.sandbox_path,
@@ -770,6 +796,45 @@ def _run_one_trial(*,
             trial.quality_meta_judge_model = meta_judge_model
             trial.quality_meta_mode = m_mode
     return trial
+
+
+def _panel_trial_quality(*, panel: list, synth: Optional[tuple],
+                         usage: Optional[dict], task: str, sandbox: Path,
+                         sandbox_path: str, key: str) -> dict:
+    """Two (or more) peer judges on the same blind rubric, then the
+    synthesizer — see ``judge_panel``. ``panel`` is ``[(model, client)]``
+    in panel order, ``synth`` is ``(model, client)``. Each call is
+    recorded under its own role: ``judge_a``, ``judge_b``, ...,
+    ``judge_synth``."""
+    verdicts = []
+    for i, (model, client) in enumerate(panel):
+        score, rationale = _judge_trial_quality(
+            judge_chat_client=client, judge_model=model, usage=usage,
+            task=task, sandbox=sandbox, sandbox_path=sandbox_path,
+            role=f"judge_{chr(97 + i)}")
+        verdicts.append((model, score, rationale))
+    code_path = sandbox / sandbox_path
+    try:
+        code = code_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        code = None
+    call = None
+    if synth is not None:
+        s_model, s_client = synth
+
+        def call(msgs):
+            resp = timed_chat(s_client, {"model": s_model, "messages": msgs,
+                                         "stream": False},
+                              usage, "judge_synth", s_model)
+            choices = (resp or {}).get("choices") or [{}]
+            return ((choices[0] or {}).get("message") or {}).get("content") or ""
+    language, fence = judge_lang_for_path(sandbox_path)
+    out = judge_panel.resolve(verdicts, key=key, synth=call, task=task,
+                              code=code, language=language, fence=fence)
+    out["verdicts"] = [{"model": m, "score": s, "rationale": r}
+                       for m, s, r in verdicts]
+    out["synth_model"] = synth[0] if synth else ""
+    return out
 
 
 # ============================================================== #
@@ -811,7 +876,7 @@ def _make_live_clients(models: list[str], ollama_base: str,
       audit_judge  = glm-5.2:cloud        (in cohort)
       meta_judge   = gemma4:31b-cloud     (OUT of cohort)
     """
-    from claude_hooks.get_advice.chat_client import make_agent_chat_client
+    from benchmarks.consultants.harness import bench_client as make_agent_chat_client
     coder_clients: dict[str, Any] = {}
     for m in models:
         # Coders keep default budgets — agent loops can be long.
@@ -1009,7 +1074,9 @@ def run_bench(*,
               meta_judge_model: Optional[str] = None,
               judge_timeout_s: float = 60.0,
               judge_max_retries: int = 3,
-              commit_report: bool = False) -> int:
+              commit_report: bool = False,
+              synth_judge_model: Optional[str] = judge_panel.DEFAULT_SYNTH
+              ) -> int:
     """Execute the bench. Returns the count of trials run.
 
     When ``commit_report`` is true: after the run finishes, render
@@ -1028,15 +1095,25 @@ def run_bench(*,
     if not questions:
         log.error("no questions matched the filters; nothing to run")
         return 0
+    judge_models = [m.strip() for m in (judge_model or "").split(",")
+                    if m.strip()]
+    panel_models = judge_models if len(judge_models) > 1 else []
+    if panel_models:
+        # A panel is judged by its members; the single-judge path is off.
+        judge_model = None
     metadata = _run_metadata(
         suite=suite, models=models, mode=mode,
         ollama_base=ollama_base, judge_model=judge_model,
     )
+    if panel_models:
+        metadata["judge_panel"] = panel_models
+        metadata["synth_judge_model"] = synth_judge_model
     if audit_judge_model:
         metadata["audit_judge_model"] = audit_judge_model
     if meta_judge_model:
         metadata["meta_judge_model"] = meta_judge_model
-    estimate = estimate_cost(questions, models, judge_model=judge_model)
+    estimate = estimate_cost(questions, models,
+                             judge_model=judge_model or (panel_models or [None])[0])
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "metadata.json").write_text(
         json.dumps(
@@ -1070,6 +1147,7 @@ def run_bench(*,
         judge_client = None  # dry-run skips the judge call
         audit_judge_client = None
         meta_judge_client = None
+        judge_panel_clients, synth_judge = None, None
     else:
         if not ollama_base:
             raise SystemExit("--live requires --ollama-base")
@@ -1083,6 +1161,16 @@ def run_bench(*,
             judge_timeout_s=judge_timeout_s,
             judge_max_retries=judge_max_retries,
         )
+        judge_panel_clients, synth_judge = None, None
+        if panel_models:
+            from benchmarks.consultants.harness import bench_client as make_agent_chat_client
+            kw = dict(timeout_s=judge_timeout_s, max_retries=judge_max_retries)
+            judge_panel_clients = [(m, make_agent_chat_client(m, ollama_base, **kw))
+                                   for m in panel_models]
+            if synth_judge_model:
+                synth_judge = (synth_judge_model,
+                               make_agent_chat_client(synth_judge_model,
+                                                      ollama_base, **kw))
 
     n_done = 0
     n_total = len(questions) * len(models)
@@ -1112,6 +1200,8 @@ def run_bench(*,
                     meta_judge_model=meta_judge_model,
                     output_dir=output_dir,
                     pytest_python=pytest_python,
+                    judge_panel_clients=judge_panel_clients,
+                    synth_judge=synth_judge,
                 )
             except KeyboardInterrupt:
                 print("INTERRUPTED", flush=True)
@@ -1268,8 +1358,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--judge-model", default=DEFAULT_JUDGE_MODEL,
-        help=("Model used as the code-quality judge. Set to '' to "
-              f"skip judging. Default: {DEFAULT_JUDGE_MODEL}"),
+        help=("Code-quality judge. A comma list of two or more models "
+              "is a panel: each scores independently and "
+              "--synth-judge-model settles the final score (judge_panel). "
+              "Set to '' to skip judging. "
+              f"Default: {DEFAULT_JUDGE_MODEL}"),
+    )
+    p.add_argument(
+        "--synth-judge-model", default=judge_panel.DEFAULT_SYNTH,
+        help=("Synthesizer for a judge panel: reads the code and the "
+              "anonymised reviews, verifies their claims when they "
+              f"disagree. Default: {judge_panel.DEFAULT_SYNTH}"),
     )
     p.add_argument(
         "--audit-judge-model", default="",
@@ -1403,6 +1502,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         id_filter=id_set,
         pytest_python=args.pytest_python,
         commit_report=args.commit_report,
+        synth_judge_model=args.synth_judge_model or None,
     )
     return 0 if n > 0 else 1
 

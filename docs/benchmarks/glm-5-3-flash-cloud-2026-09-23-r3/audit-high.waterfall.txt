@@ -1,0 +1,59 @@
+reading: /srv/dev-disk-by-label-opt/dev/claude-hooks/docs/benchmarks/glm-5-3-flash-cloud-2026-09-23-r3/audit-high.transcript.db
+
+sid: csl-2026-09-23-2043-ae24
+status: completed
+total wall: 116.6s
+
+  planner       node=12.9s   (entries) llm=5x=12.7s   tool=7x=134ms   tok=p17709/c1385
+      LLM round=1 model=glm-5.3-flash:cloud          8.4s  p=401    c=1166  
+      LLM round=1 model=glm-5.3-flash:cloud          1.5s  p=1293   c=110   
+      LLM round=1 model=glm-5.3-flash:cloud          1.2s  p=3506   c=76    
+      LLM round=1 model=glm-5.3-flash:cloud         849ms  p=3652   c=16    
+      LLM round=1 model=glm-5.3-flash:cloud         752ms  p=8857   c=17    
+      tool recall_memory      x1     133ms chars=3060
+      tool read_file          x2       1ms chars=59042
+      tool survey_project     x1       0ms chars=3783
+      tool list_files         x3       0ms chars=430
+
+  researcher    node=1.9m    (2xentries) llm=17x=1.9m    tool=31x=98ms    tok=p622235/c11524
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud         25.5s  p=47162  c=3114  
+      LLM round=1 lane=0 model=glm-5.3-flash:cloud         22.1s  p=49599  c=3413  
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud         17.2s  p=44413  c=1763  
+      LLM round=1 lane=0 model=glm-5.3-flash:cloud         13.6s  p=45418  c=208   
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud          7.9s  p=47707  c=1223  
+      LLM round=1 lane=0 model=glm-5.3-flash:cloud          5.2s  p=39317  c=584   
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud          3.9s  p=42085  c=515   
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud          3.2s  p=45414  c=316   
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud          2.4s  p=46992  c=24    
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud          2.3s  p=30654  c=64    
+      LLM round=1 lane=0 model=glm-5.3-flash:cloud          1.8s  p=27886  c=17    
+      LLM round=1 lane=0 model=glm-5.3-flash:cloud          1.5s  p=42464  c=50    
+      LLM round=1 lane=0 model=glm-5.3-flash:cloud          1.3s  p=18426  c=31    
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud          1.3s  p=42580  c=67    
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud          1.3s  p=16846  c=47    
+      LLM round=1 lane=1 model=glm-5.3-flash:cloud          1.0s  p=18344  c=45    
+      LLM round=1 lane=0 model=glm-5.3-flash:cloud         892ms  p=16928  c=43    
+      tool grep               x12     94ms chars=22850
+      tool read_file          x13      4ms chars=188223
+      tool survey_project     x2       0ms chars=7566
+      tool list_files         x4       0ms chars=598
+
+  critic        node=30.5s   (entries) llm=5x=30.4s   tool=13x=148ms   tok=p41207/c6126
+      LLM round=2 model=glm-5.3-flash:cloud          9.0s  p=4031   c=1868  
+      LLM round=2 model=glm-5.3-flash:cloud          6.0s  p=13564  c=1353  
+      LLM round=2 model=glm-5.3-flash:cloud          5.6s  p=8169   c=1021  
+      LLM round=2 model=glm-5.3-flash:cloud          5.4s  p=5217   c=1099  
+      LLM round=2 model=glm-5.3-flash:cloud          4.4s  p=10226  c=785   
+      tool grep               x1     148ms chars=10523
+      tool read_file          x12      0ms chars=23937
+
+  synthesizer   node=6.9s    (entries) llm=1x=6.9s    tool=0x=0ms     tok=p5721/c1851
+      LLM round=1 model=glm-5.3-flash:cloud          6.9s  p=5721   c=1851  
+
+totals
+  wall                  116.6s
+  sum of node spans     2.7m
+  sum of LLM call time  2.7m  (139.4% of wall)
+  sum of tool call time 380ms
+  total prompt tokens   686872
+  total completion tok  20886

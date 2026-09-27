@@ -64,6 +64,30 @@ class LockTests(unittest.TestCase):
             # _pid_running on our own pid returns True.
             self.assertFalse(claudemem_reindex._acquire_lock(root))
 
+    @unittest.skipIf(os.name == "nt", "POSIX zombie semantics")
+    def test_an_exited_child_of_this_process_does_not_hold_the_lock(self):
+        """The hooks daemon spawns the reindex and never waits for it:
+        once it exits it is a zombie, which kill(pid, 0) reports alive."""
+        import subprocess
+        pid = subprocess.Popen(["true"], stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL,
+                               start_new_session=True).pid
+        time.sleep(0.5)  # exited, not waited for
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / claudemem_reindex._LOCK_FILENAME).write_text(f"{pid}\n0")
+            self.assertTrue(claudemem_reindex._acquire_lock(root, 0))
+
+    def test_a_pid_recorded_hours_ago_is_not_trusted(self):
+        """A PID reused after a reboot must not hold the lock forever."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = int(time.time()) - claudemem_reindex._LOCK_PID_MAX_AGE_SECONDS - 60
+            (root / claudemem_reindex._LOCK_FILENAME).write_text(
+                f"{os.getpid()}\n{old}")
+            self.assertTrue(claudemem_reindex._acquire_lock(root))
+
     def test_dead_pid_with_old_timestamp_allows(self):
         """Lock left by a crashed-or-completed reindex must NOT
         permanently wedge the cooldown. PID is gone + timestamp is

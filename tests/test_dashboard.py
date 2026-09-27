@@ -256,16 +256,24 @@ class TestEndpoints:
         ctx = next(r for r in rows if r["token"] == "context-management-2025-06-27")
         assert ctx["requests"] == 2
 
-    def test_ratelimit_endpoint(self, running_dashboard):
-        status, _, body = _get(running_dashboard + "/api/ratelimit.json")
+    def test_summary_carries_ratelimit_and_burn(self, running_dashboard):
+        status, _, body = _get(running_dashboard + "/api/summary.json")
         assert status == 200
         j = json.loads(body)
-        assert j["state"]["five_hour_utilization"] == 0.5
+        assert j["ratelimit"]["five_hour_utilization"] == 0.5
         # Burn has both windows computed.
         assert j["burn"]["five_hour"]["utilization"] == 0.5
         assert j["burn"]["seven_day"]["utilization"] == 0.8
         # ETA fields populated (non-negative).
         assert j["burn"]["five_hour"]["reset_in_s"] >= 0
+
+    def test_ratelimit_endpoint_is_gone(self, running_dashboard):
+        """It existed only for the proxy-backed status line; the status
+        line now reads Claude Code's own rate_limits."""
+        import urllib.error
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _get(running_dashboard + "/api/ratelimit.json")
+        assert exc.value.code == 404
 
     def test_not_found_returns_404(self, running_dashboard):
         import urllib.error

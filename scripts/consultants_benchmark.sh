@@ -104,6 +104,16 @@ else
     git -C "${REPO}" worktree add --detach "${WORKTREE}" "${BASELINE_TAG}" \
         >/dev/null
     CWD="${WORKTREE}"
+    # The audited tree must not contain the answers. The baseline tag
+    # carries the rubric (EVALUATION.md lists the Q1 roles and the Q2
+    # ground-truth sites), every earlier label's transcripts and
+    # answers, and the query-set doc that restates the Q2 sites. On
+    # 2026-09-23 two labels found and used them. Only files the queries
+    # never audit are removed; the code under test is untouched.
+    ANSWER_KEY_PATHS=(docs/benchmarks docs/consultants-benchmarks.md)
+    for rel in "${ANSWER_KEY_PATHS[@]}"; do
+        rm -rf "${WORKTREE:?}/${rel}"
+    done
     echo "::: subject codebase: worktree at tag '${BASELINE_TAG}' "
     echo "    commit=$(git -C "${WORKTREE}" rev-parse --short HEAD)"
     echo "    path=${WORKTREE}"
@@ -251,6 +261,7 @@ write_results_md() {
             local cwd_commit
             cwd_commit="$(git -C "${CWD}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
             echo "Subject baseline: \`${BASELINE_TAG}\` (commit \`${cwd_commit}\`) — frozen worktree at \`${CWD}\`"
+            [[ -n "${ANSWER_KEY_PATHS+x}" ]] && echo "Answer key removed from the worktree: \`${ANSWER_KEY_PATHS[*]}\`"
         else
             echo "Subject baseline: live HEAD (screening run, NOT comparable across labels)"
         fi
@@ -336,8 +347,12 @@ main() {
     }
 
     # Health check before we burn cloud tokens.
-    if ! curl -fsS http://127.0.0.1:38095/v1/health >/dev/null 2>&1; then
-        echo "!!! consultants engine not responding on :38095" >&2
+    # CONSULTANTS_URL points the whole run (health check + every CLI call,
+    # which honours the same variable) at a non-default engine, e.g. a
+    # bench instance with its own HOME and upstream.
+    local engine="${CONSULTANTS_URL:-http://127.0.0.1:38095}"
+    if ! curl -fsS "${engine}/v1/health" >/dev/null 2>&1; then
+        echo "!!! consultants engine not responding at ${engine}" >&2
         echo "    start it with: systemctl --user start claude-hooks-consultants" >&2
         exit 1
     fi

@@ -277,7 +277,8 @@
       "maintenance_interval_seconds": 3600,
       "maintenance_limit": 1000,
       "registry_days": 30,
-      "archive_cap_bytes": 10737418240
+      "archive_cap_bytes": 10737418240,
+      "stop_nudge": true
     },
     "claudemem_reindex": {
       "enabled": true,
@@ -368,7 +369,8 @@
     "server_host": "0.0.0.0",
     "server_port": 11435,
     "binary": "episodic-memory",
-    "timeout": 10.0
+    "timeout": 10.0,
+    "compress_after_days": 7
   },
   "proxy": {
     "enabled": false,
@@ -401,5 +403,17 @@
     "max_bytes": 2097152,
     "backup_count": 3
   },
-  "disable_marker_filename": ".claude-hooks-disable"
+  "disable_marker_filename": ".claude-hooks-disable",
+  "ollama_slots": {
+    "_comment": "Connection slots per HTTP attempt, shared by every process on this host (claude_hooks/ollama_slots.py, docs/ollama-slots.md). cloud_limit null = plan connections (ollama.com/api/me) minus reserve_for_hooks; set it when another host shares the Ollama account.",
+    "enabled": true,
+    "cloud_limit": null,
+    "reserve_for_hooks": 1,
+    "local_limit": 2,
+    "max_wait_s": 1800
+  },
+  "model_sampling": {
+    "_comment": "Your overrides for the shipped sampling templates in config/model-sampling.json. Same pattern keys merge field by field; a new pattern adds a template; null on a field drops it (provider default), null on a pattern disables it. Example: {\"glm-5.3*\": {\"top_p\": 0.95}, \"gemma4*\": null}",
+    "templates": {}
+  }
 }

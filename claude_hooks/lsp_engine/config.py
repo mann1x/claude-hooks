@@ -32,6 +32,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from .package_exports import symbol_is_package_private
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:  # pragma: no cover — exercised only on 3.9 / 3.10
@@ -428,7 +430,8 @@ ROOT_SENTINEL = Path(".claude-hooks") / "lsp-root"
 _OUTER_MARKERS = (".git", ROOT_SENTINEL)
 
 
-def describe_scope(root: Path) -> Optional[str]:
+def describe_scope(root: Path, *, declared_in: Optional[Path] = None,
+                   symbol: Optional[str] = None) -> Optional[str]:
     """Say when ``root`` is a package inside a bigger tree.
 
     ``find_project_root`` stops at the nearest marker, and in a monorepo
@@ -450,6 +453,15 @@ def describe_scope(root: Path) -> Optional[str]:
     real remedy is at the language level — a tsconfig spanning the
     packages, or project references — plus ``.claude-hooks/lsp-root``
     for a repo where one wide engine is actually viable.
+
+    ``declared_in`` and ``symbol`` narrow the warning to the cases where
+    it can be true. A warning that fires on answers that are in fact
+    complete is one a caller learns to skip on the answers that are not,
+    so when the symbol is package-private — provably unreachable from the
+    package's published entry points, see
+    ``package_exports.symbol_is_package_private`` — the boundary did not
+    cut anything off and nothing is said. Omit them, or pass a symbol
+    this cannot decide, and the warning stands.
     """
     try:
         if (root / ROOT_SENTINEL).exists():
@@ -458,6 +470,9 @@ def describe_scope(root: Path) -> Optional[str]:
             return None
         for parent in root.parents:
             if (parent / ".git").is_dir():
+                if declared_in is not None and symbol_is_package_private(
+                        root, declared_in, symbol, boundary=parent):
+                    return None
                 return (f"{root.name} — a package inside {parent}. "
                         f"Sibling packages were not searched: the server "
                         f"is rooted here, so its program does not contain "

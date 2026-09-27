@@ -34,6 +34,7 @@ researcher round counts live in the state dict.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -845,15 +846,37 @@ def parse_plan_items(plan_text: str) -> list[str]:
 # outweighs the parallelism win for a single lane.
 FANOUT_MIN_ITEMS = 2
 
-# Maximum number of parallel lanes. The cloud upstream
-# (kimi-k2.6:cloud through the 192.168.178.2:11433 proxy)
-# serializes concurrent calls to ~2-3 slots, so fan-out beyond 3
-# lanes pays redundant per-lane work without true parallelism. The
-# 2026-05-07 audit v4 trace measured 6 lanes at 19.7 min cumulative
-# LLM time / 2.5x effective parallelism = 9.6 min researcher wall —
-# WORSE than the un-fanned 3.1 min baseline. Capped to 3 lanes,
-# items beyond the first are folded back into earlier lanes.
-FANOUT_MAX_LANES = 3
+# Maximum number of parallel lanes. Lanes run concurrently, one cloud
+# connection each, and an Ollama Pro account allows 3 connections in
+# total, of which the claude-hooks hooks already hold one. So the default
+# is 2: a third lane does not add parallelism, it queues on the account,
+# and a queued call is a slow call and eventually a timeout. (It was 3
+# until 2026-09-23. Already then the 2026-05-07 audit v4 trace had shown
+# that more lanes than the upstream can serve are a net loss: 6 lanes
+# came to 9.6 min of researcher wall against 3.1 min un-fanned.) Items
+# beyond the cap are folded back into the earlier lanes.
+#
+# ``CONSULTANTS_FANOUT_MAX_LANES`` overrides it for one engine process,
+# for an account with more connections, or 1 to serialize a benchmark.
+# Read once at import: it is a property of the process, not of a consult.
+FANOUT_DEFAULT_MAX_LANES = 2
+
+
+def _fanout_max_lanes() -> int:
+    raw = os.environ.get("CONSULTANTS_FANOUT_MAX_LANES", "").strip()
+    if not raw:
+        return FANOUT_DEFAULT_MAX_LANES
+    try:
+        value = int(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "CONSULTANTS_FANOUT_MAX_LANES=%r is not an integer; using %d",
+            raw, FANOUT_DEFAULT_MAX_LANES)
+        return FANOUT_DEFAULT_MAX_LANES
+    return max(1, value)
+
+
+FANOUT_MAX_LANES = _fanout_max_lanes()
 
 
 def group_items_into_lanes(items: list[str], max_lanes: int) -> list[list[str]]:
