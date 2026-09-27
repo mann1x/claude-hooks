@@ -16,6 +16,119 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [1.18.0] — 2026-09-27
+
+Four themes. **episodic-memory is vendored** into this repository and
+repaired: the server stopped reporting a dead CLI as healthy, the index
+shrank from 8.0 GB to 1.8 GB, and the conversation archive is stored
+zstd-compressed (5.06 GB → 0.71 GB) while every command still reads it.
+The **mailbox** stops duplicating mail and starts making the session read
+it. The **benchmark and model stack** moves to measured sampling,
+account-wide Ollama connection slots and a cheaper judge panel. And the
+**status line** drops the proxy: it reads usage limits from Claude Code
+itself and shows unread mail while the session is idle.
+
+### Added
+
+- **Vendored episodic-memory** (`episodic-memory/`, git subtree of
+  obra/episodic-memory@7e06519). As an out-of-tree checkout that nothing
+  deployed, it went 79 commits stale and spent 12 days unable to load.
+  `scripts/deploy.py` now builds, links and verifies it (step 4/6, only in
+  `episodic.mode == "server"`), and `scripts/episodic_doctor.py` rebuilds
+  `better-sqlite3` for the running Node ABI with a C++20 compiler. Upstream
+  updates: `git subtree pull --prefix=episodic-memory episodic-upstream main`.
+
+- **`episodic-memory compact`**. `tool_calls.tool_input` held the full
+  JSON of every tool call and nothing read it; on solidpc it was 6.5 GB of
+  an 8.0 GB `db.sqlite`. New rows store `NULL`
+  (`EPISODIC_MEMORY_TOOL_INPUT_CHARS`, default 0), and `compact` trims
+  existing rows and rebuilds the file via `VACUUM INTO` + atomic rename.
+
+- **zstd-compressed archive**. Transcripts idle for
+  `episodic.compress_after_days` (default 7, 0 = never) are stored as
+  `<name>.jsonl.zst`. The canonical name stays `.jsonl` everywhere, and
+  only opening a file resolves the `.zst` sibling. Each file is verified
+  by hash before its original is removed, and it keeps its mtime. A resumed
+  session is re-copied plain. `episodic-memory compress-archive` does a
+  one-shot pass.
+
+- **The Stop hook tells the session to read new mail, once.** Mail that
+  arrived during a turn was announced only as a `systemMessage`, which the
+  operator sees and the model does not. Stop now blocks once per batch of
+  unread messages, listing ids, subjects and senders but no bodies. It
+  never blocks a continuation, and message ids are tracked per session, so
+  it cannot loop.
+
+- **A disable marker can keep memory and the mailbox**
+  (`.claude-hooks-disable` containing `keep: memory, mailbox`). The marker
+  was all-or-nothing, so sessions in a marked repo never registered and
+  their mail queued unread.
+
+- **Per-model sampling templates** (`config/model-sampling.json`), sent
+  with every request. Cloud tags carry no parameters, so every call ran at
+  the provider default. `glm-5.3*` and `deepseek-v4.1-flash*` now run at
+  temperature 0.7. See `docs/model-sampling.md`.
+
+- **Cross-process Ollama connection slots**, sized from the account's
+  plan. Ollama Cloud caps concurrent connections per account; the lane
+  cap and the bench convention could not see each other.
+
+- **Council fan-out defaults to 2 researcher lanes**, and
+  `CONSULTANTS_FANOUT_MAX_LANES` lowers the cap per process. A third lane
+  on a 3-connection account queued instead of adding parallelism.
+
+- **Benchmarks:** a glm-5.3-flash + deepseek-v4.1-flash judge panel for
+  coder_bench; `judge_eval` scores a candidate judge against the oracle;
+  every LLM call's tokens are recorded by role, judges included, and each
+  run is priced in dollars at a dated Ollama snapshot, with cost/quality
+  ladders heading `costs.md`. Runs now wait out WAN outages and then repair
+  what they still broke (`fill_judge`).
+
+- **A status line with usage limits and unread mail, no proxy needed**
+  (`scripts/statusline_compose.py`, `docs/statusline.md`). The 5h / 7d
+  segment reads the `rate_limits` block Claude Code passes the status
+  line, and a `📬 N` badge shows this session's unread mail, cached per
+  session for 20 s. With `"refreshInterval": 30` on the `statusLine`
+  setting, mail that arrives while the session is idle appears within
+  half a minute at no token cost. Asking the model to check spends a turn.
+
+### Changed
+
+- **Shipped coder routes** move to `deepseek-v4.1-flash` /
+  `glm-5.3-flash`. `deepseek-v4-flash` retired on 2026-09-25.
+- **The LSP boundary note** fires only for searches a package boundary
+  actually cut, not for symbols nothing outside the package can reach.
+
+### Removed
+
+- **The status line no longer reads the proxy.** It read
+  `ratelimit-state.json`, or the dashboard's `/api/ratelimit.json` from
+  another host, and went blank whenever a session's traffic did not pass
+  through the proxy (on solidpc the state was 10 hours stale while the
+  session's own `rate_limits` was current). The file reader, the remote
+  fetch, the `blk=N` Warmup counter and `/api/ratelimit.json` are gone.
+  The old flags are accepted and ignored, so existing `statusLine`
+  commands keep working. The proxy still writes the state file for the
+  dashboard and the reporting scripts.
+
+### Fixed
+
+- **A dead episodic-memory CLI no longer reports healthy.** From 09-14 to
+  09-26 every call threw with a Node ABI mismatch, while `/health` checked
+  only the archive directory and `/stats`, `/search` and `/sync` returned
+  200 with an empty body. `/health` now probes the CLI and returns 503 with
+  `index_age_hours`, and failures return 502 with the error.
+- **Mailbox:** one `send` was delivered eleven times, once per stale
+  registration. Delivery is now deduplicated to `(alias, host)`, and the
+  rows already duplicated are repaired. Registrations refresh by alias,
+  because an MCP child has no session id. A message the destination
+  already holds is refused.
+- **gitnexus / claudemem reindex locks** are liveness-aware: a zombie or a
+  reused PID no longer holds them, and full rebuilds can no longer overlap.
+- `config show` carries the coder's per-language routes; the council bench
+  runner honours `CONSULTANTS_URL`; a judge call that times out is counted
+  as unknown spend instead of vanishing.
+
 ## [1.17.0] — 2026-09-18
 
 Two themes. The `lsp` MCP surface stops being a third-party binary and
@@ -9586,7 +9699,9 @@ prior tag. From any unreleased checkout, just `git pull` on `main`
 once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
-[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.16.0...HEAD
+[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.18.0...HEAD
+[1.18.0]: https://github.com/mann1x/claude-hooks/compare/v1.17.0...v1.18.0
+[1.17.0]: https://github.com/mann1x/claude-hooks/compare/v1.16.0...v1.17.0
 [1.16.0]: https://github.com/mann1x/claude-hooks/compare/v1.15.0...v1.16.0
 [1.15.0]: https://github.com/mann1x/claude-hooks/compare/v1.14.0...v1.15.0
 [1.14.0]: https://github.com/mann1x/claude-hooks/compare/v1.13.0...v1.14.0

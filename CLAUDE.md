@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.17.0** — ~6.4k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.18.0** — ~6.5k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -362,6 +362,28 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > kept serving the old indefinitely. See
 > [`docs/lsp-engine.md`](docs/lsp-engine.md) and
 > [`docs/lsp-mcp.md`](docs/lsp-mcp.md).
+>
+> v1.18 **vendors episodic-memory** (`episodic-memory/`, a git subtree of
+> obra/episodic-memory) and repairs it: a dead CLI no longer reports
+> healthy (`/health` probes it, failures return 502/503), `compact` drops
+> the unread tool inputs that were 6.5 GB of an 8.0 GB index, and
+> transcripts idle for `episodic.compress_after_days` (default 7) are
+> stored as `.jsonl.zst`, read transparently (5.06 → 0.71 GB).
+> `scripts/deploy.py` builds, links and verifies it;
+> `scripts/episodic_doctor.py` rebuilds the native module for the running
+> Node. The **mailbox** stops fanning one send out per stale registration
+> and refuses duplicates, and **Stop nudges the session to read new mail
+> once** (block once per batch, never on a continuation, ids tracked per
+> session). The **status line** (`scripts/statusline_compose.py`) reads
+> usage from Claude Code's own `rate_limits` and shows a `📬 N` unread
+> badge that refreshes while idle; its proxy path and
+> `/api/ratelimit.json` are removed. Also: per-model sampling templates
+> (`config/model-sampling.json`), account-wide Ollama connection slots, a
+> 2-lane council default, coder routes on deepseek-v4.1-flash /
+> glm-5.3-flash, and liveness-aware reindex locks. See
+> [`docs/episodic-server.md`](docs/episodic-server.md),
+> [`docs/mailbox.md`](docs/mailbox.md) and
+> [`docs/statusline.md`](docs/statusline.md).
 
 ---
 
