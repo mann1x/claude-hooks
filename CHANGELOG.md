@@ -18,6 +18,17 @@ release with the auto-generated source archive
 
 ### Fixed
 
+- **`claude-consultants follow-up` accepts `--wait`** (with
+  `--poll-interval` / `--wait-timeout`). The consultants skill has told
+  sessions since 2026-08-02 that "`consult` and `follow-up` both accept
+  `--wait`" and made `follow-up --wait` the default way to wait on a
+  follow-up, but only `consult` had the flag, so every documented
+  follow-up exited on an argparse error before the council started. The
+  flags now come from one helper shared by both verbs. A cap refusal
+  (`followup_limit_reached`) starts no run and is printed, not waited
+  on. `tests/test_consultants_cli_wait.py` also checks every
+  `<verb> --flag` the skill mentions against the real parser.
+
 - **A session's mailbox alias no longer comes from its current
   directory.** A session id's first registration (also after `/clear`)
   took the default alias from the event's `cwd`, wherever the session had
