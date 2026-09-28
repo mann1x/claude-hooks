@@ -19,6 +19,7 @@ registry upsert happens at ``SessionStart`` only — not per turn.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -39,14 +40,34 @@ def _enabled(config: dict) -> bool:
     return not is_headless(config)
 
 
+def project_dir(event: Optional[dict]) -> Optional[str]:
+    """The *fallback* for a session's alias, and nothing more.
+
+    A session's identity is its session id; its alias is whatever it
+    registered under (an explicit rename in ``.claude-hooks/mailbox.toml``
+    or, failing that, this default) and every later lookup goes through
+    ``registered_alias(session_id)``. The default is only computed when
+    a session id registers for the first time — which also happens after
+    ``/clear``, with the session sitting wherever it last cd'd. It used
+    to come from ``event["cwd"]``, so xollama registered as
+    ``v0.34.4-xollama.1`` and opencoti as ``llamafile``. It now comes
+    from ``CLAUDE_PROJECT_DIR`` (where the session was started; ``run.py``
+    copies it into the event because the daemon cannot see the caller's
+    env), and ``cwd`` only when that is missing.
+    """
+    ev = event or {}
+    return (ev.get("claude_project_dir") or os.environ.get("CLAUDE_PROJECT_DIR")
+            or ev.get("cwd") or None)
+
+
 def _tools(config: dict, providers, event: Optional[dict] = None):
     """Bind the mailbox to the first provider that can carry it."""
     from claude_hooks.mailbox.integration import tools_for_provider
     sid = (event or {}).get("session_id") or ""
-    cwd = (event or {}).get("cwd") or None
+    root = project_dir(event)
     for provider in providers or []:
         try:
-            tools = tools_for_provider(provider, cwd=cwd, session_id=sid)
+            tools = tools_for_provider(provider, cwd=root, session_id=sid)
         except Exception:
             log.debug("mailbox: provider %s unusable",
                       getattr(provider, "name", "?"), exc_info=True)
@@ -85,7 +106,7 @@ def announce_block(*, event: dict, config: dict, providers,
                 # its life.
                 tools.store.touch(
                     tools.session_id, alias=tools.alias, host=tools.host,
-                    cwd=(event.get("cwd") or "") if event else "")
+                    cwd=project_dir(event) or "")
             except Exception:
                 log.debug("mailbox: touch failed", exc_info=True)
         # One page, not the backlog: a session holding hundreds of
@@ -141,7 +162,7 @@ def register_session(*, event: dict, config: dict, providers) -> str:
         if tools is None or not tools.session_id:
             return ""
         others = tools.store.register(
-            tools.session_id, tools.alias, cwd=(event.get("cwd") or ""),
+            tools.session_id, tools.alias, cwd=project_dir(event) or "",
             host=tools.host)
         from claude_hooks.mailbox.announce import collision_note
         return collision_note(others, tools.alias)

@@ -491,7 +491,13 @@ def _ollama_slots_off(monkeypatch):
 # scripted check), and it would then inherit CLAUDE_CODE_ENTRYPOINT=sdk-cli
 # and SESSION_ATTENDED=0 and silently switch off what the tests exercise.
 # Tests of the gate set the variables themselves.
+#
+# The session identity Claude Code exports (CLAUDE_CODE_SESSION_ID,
+# CLAUDE_PROJECT_DIR) is cleared too: a test run from a session shell would
+# otherwise bind the mailbox to that live session's id and project.
 @pytest.fixture(autouse=True)
 def _interactive_session(monkeypatch):
-    monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
-    monkeypatch.delenv("CLAUDE_CODE_SESSION_ATTENDED", raising=False)
+    for name in ("CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ATTENDED",
+                 "CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID",
+                 "CLAUDE_PROJECT_DIR"):
+        monkeypatch.delenv(name, raising=False)

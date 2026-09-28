@@ -81,6 +81,24 @@ withdrawing, and consuming your own read receipts — is scoped on both.
 Scoping on the alias alone gave one host authority over another's mail;
 see `bug-871`.
 
+### A session's alias belongs to its session id
+
+The alias is decided once, when a session id first registers: the
+rename in `.claude-hooks/mailbox.toml` if there is one, otherwise the
+name of the **project root** (`CLAUDE_PROJECT_DIR`, the directory the
+session was started in — `run.py` copies it into the event), and the
+event's `cwd` only if even that is missing. After that every lookup —
+announcements, the Stop nudge, the status-line badge, the MCP tools — goes
+through `registered_alias(session_id)`, never a directory.
+
+The default used to come from `cwd`, which is wherever the session last
+cd'd to, and a session id registers afresh after `/clear`. So xollama
+registered as `v0.34.4-xollama.1` and opencoti as `llamafile`, and their
+badges and nudges counted an inbox nobody writes to. The MCP tools read
+`CLAUDE_SESSION_ID`, which Claude Code never sets; they now read
+`CLAUDE_CODE_SESSION_ID`, which it exports to MCP children, and so bind
+to the session's registration too.
+
 ### An identical message is refused, not delivered twice
 
 `send()` will not write a message that the destination already holds:

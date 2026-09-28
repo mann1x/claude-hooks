@@ -18,6 +18,17 @@ release with the auto-generated source archive
 
 ### Fixed
 
+- **A session's mailbox alias no longer comes from its current
+  directory.** A session id's first registration (also after `/clear`)
+  took the default alias from the event's `cwd`, wherever the session had
+  cd'd to: xollama registered as `v0.34.4-xollama.1`, opencoti as
+  `llamafile`, and their status-line badges and Stop nudges counted an
+  inbox nobody writes to. The default is now the explicit rename, else the
+  project root (`CLAUDE_PROJECT_DIR`, copied into the event by `run.py`),
+  else `cwd`; every later lookup is by session id. The MCP tools read
+  `CLAUDE_SESSION_ID`, which Claude Code never sets, and so had no session
+  id at all; they now read `CLAUDE_CODE_SESSION_ID`.
+
 - **Hooks no longer run in spawned `claude -p` / SDK runs.** Caliber's
   pre-commit refresh runs `claude -p` in the repo on every commit (294 of
   the last 300 transcripts on solidpc). With the hooks on there, those

@@ -93,15 +93,22 @@ def tools_for_provider(provider, *, cwd: Optional[str] = None,
     if store is None:
         return None
     from claude_hooks.mailbox.tools import MailboxTools
-    sid = session_id or os.environ.get("CLAUDE_SESSION_ID", "")
-    # A registered session keeps the name it registered with. Deriving
-    # it from cwd every time renamed any session that changed directory
-    # — see ``MailboxStore.registered_alias``.
+    # Claude Code exports CLAUDE_CODE_SESSION_ID (and CLAUDE_PROJECT_DIR)
+    # to hooks and MCP children alike (measured on 2.1.280). The old
+    # CLAUDE_SESSION_ID is never set, so the MCP tools had no session id
+    # and always derived their alias from a directory.
+    sid = (session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
+           or os.environ.get("CLAUDE_SESSION_ID", ""))
+    # Identity is the session id: it keeps the alias it registered with
+    # (an explicit rename, or the default it was given then). A directory
+    # is only the fallback for a session that has no registration yet,
+    # and then the project root, not wherever the session cd'd to.
     alias = None
     try:
         alias = store.registered_alias(sid)
     except Exception:
         log.debug("mailbox: could not read the registered alias",
                   exc_info=True)
-    return MailboxTools(store, alias=alias or alias_for(cwd),
+    fallback = cwd or os.environ.get("CLAUDE_PROJECT_DIR") or None
+    return MailboxTools(store, alias=alias or alias_for(fallback),
                         session_id=sid, host=host_name())

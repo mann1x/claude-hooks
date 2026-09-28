@@ -125,6 +125,8 @@ def lookup_unread(session_id: str, cwd: str,
             continue
         if tools is None:
             continue
+        # tools.alias is the session id's registered alias; the project
+        # dir is only the fallback for a session that has none.
         return tools.store.inbox_count(alias=tools.alias,
                                        session_id=tools.session_id or None,
                                        host=tools.host)

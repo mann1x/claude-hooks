@@ -47,6 +47,13 @@ def main() -> int:
 
     event = read_event_from_stdin()
 
+    # The project root, which the event does not carry: its ``cwd`` is
+    # wherever the session last cd'd to. Taken from this process's env
+    # because the daemon below has its own, not the caller's.
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if project_dir and isinstance(event, dict):
+        event.setdefault("claude_project_dir", project_dir)
+
     # Tier 3.8: try the long-lived daemon first if it's running. The
     # client returns None on any failure (no secret, refused connect,
     # timeout, bad response) and we fall back to in-process dispatch.
