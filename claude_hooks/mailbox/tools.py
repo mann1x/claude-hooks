@@ -215,7 +215,24 @@ class MailboxTools:
     def handles(self, name: str) -> bool:
         return name in TOOL_NAMES
 
+    #: What a headless run may still do: send (a script asking ``claude -p``
+    #: to mail someone is legitimate) and look. Reading marks mail read and
+    #: acking answers it — both belong to the session the mail is for.
+    HEADLESS_REFUSED = frozenset({"mailbox-read", "mailbox-ack"})
+
     def call(self, name: str, args: dict) -> str:
+        from claude_hooks.mailbox.integration import is_headless
+        if is_headless():
+            if name in self.HEADLESS_REFUSED:
+                return (f"{name} is not available in a non-interactive run "
+                        "(claude -p / SDK): reading would mark "
+                        f"{self.alias}@{self.host}'s mail read for a session "
+                        "nobody is watching. The interactive session for "
+                        "this project reads its own mail.")
+            try:
+                return getattr(self, "_" + name.replace("-", "_"))(args)
+            except (MailboxError, AddressError) as e:
+                return str(e)
         self._mark_active()
         try:
             return getattr(self, "_" + name.replace("-", "_"))(args)

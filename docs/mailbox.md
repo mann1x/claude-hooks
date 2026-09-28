@@ -376,6 +376,18 @@ hourly "nothing to do" line is how a log stops being read.
 
 ---
 
+## Spawned runs never touch the mailbox
+
+A `claude -p` / SDK run started in a project directory would take the
+project's alias. Caliber's pre-commit refresh does exactly that, and
+until 2026-09-28 those runs registered as the project (evicting the real
+session, then deleting the row at exit), got its announcements and Stop
+nudge, and **read its mail** — `read_by` empty, the real session never
+told. Now the hooks do not run at all in such a run
+(`claude_hooks/session_kind.py`, checked in `run.py`), and in an MCP
+child of one `mailbox-read` / `mailbox-ack` refuse and nothing is
+registered; `mailbox-send` and the listings still work.
+
 ## Troubleshooting
 
 **"No sessions registered."** Nothing has run `SessionStart` against

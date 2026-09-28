@@ -30,6 +30,19 @@ def main() -> int:
 
     event_name = sys.argv[1]
 
+    # Only the session someone is working in gets the hooks — never a
+    # `claude -p` / SDK run it (or a tool like Caliber) spawned. Checked
+    # here, in the process Claude Code started, because the daemon that
+    # may serve the event below has its own environment, not the
+    # caller's. See claude_hooks/session_kind.py.
+    from claude_hooks.session_kind import hooks_allowed
+    if not hooks_allowed():
+        try:
+            sys.stdin.read()          # drain, so the writer never sees EPIPE
+        except Exception:
+            pass
+        return 0
+
     from claude_hooks.dispatcher import dispatch, read_event_from_stdin
 
     event = read_event_from_stdin()

@@ -193,6 +193,7 @@
     "nice": -5
   },
   "hooks": {
+    "run_in_subprocesses": false,
     "user_prompt_submit": {
       "enabled": true,
       "min_prompt_chars": 30,

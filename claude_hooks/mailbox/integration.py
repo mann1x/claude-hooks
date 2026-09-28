@@ -22,6 +22,15 @@ log = logging.getLogger("claude_hooks.mailbox.integration")
 _ALIAS_FILE = Path(".claude-hooks") / "mailbox.toml"
 
 
+def is_headless(config: Optional[dict] = None, env=None) -> bool:
+    """A spawned ``claude -p`` / SDK run, not the session the mailbox is
+    for (``claude_hooks.session_kind``). The hooks never run there at
+    all; this is the same rule for the MCP tools and in-process callers,
+    which reach the mailbox without going through ``run.py``."""
+    from claude_hooks.session_kind import hooks_allowed
+    return not hooks_allowed(config, env)
+
+
 def alias_for(cwd: Optional[str] = None) -> str:
     """Default alias: the project directory name.
 

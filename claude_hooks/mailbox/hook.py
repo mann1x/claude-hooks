@@ -30,8 +30,13 @@ QUERY_TIMEOUT_SECONDS = 1.5
 
 
 def _enabled(config: dict) -> bool:
-    return bool((config.get("hooks", {})
-                 .get("mailbox", {}) or {}).get("enabled", False))
+    """On in config, and this is a session someone is working in — never
+    a ``claude -p`` / SDK run (see ``integration.is_headless``)."""
+    if not bool((config.get("hooks", {})
+                 .get("mailbox", {}) or {}).get("enabled", False)):
+        return False
+    from claude_hooks.mailbox.integration import is_headless
+    return not is_headless(config)
 
 
 def _tools(config: dict, providers, event: Optional[dict] = None):

@@ -16,6 +16,22 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed
+
+- **Hooks no longer run in spawned `claude -p` / SDK runs.** Caliber's
+  pre-commit refresh runs `claude -p` in the repo on every commit (294 of
+  the last 300 transcripts on solidpc). With the hooks on there, those
+  runs recalled memory into prompts nobody reads, stored their turns as
+  the operator's, registered under the project's mailbox alias (evicting
+  the real session and deleting the row at exit) and, nudged by Stop,
+  **read the project's mail** — xollama lost #442–#519 to them. `run.py`
+  now exits first when `CLAUDE_CODE_SESSION_ATTENDED=0` or
+  `CLAUDE_CODE_ENTRYPOINT` is an SDK one (measured: interactive `cli`/`1`,
+  `claude -p` `sdk-cli`/`0`); it is checked there because the daemon that
+  may serve the event has its own environment. In an MCP child of such a
+  run `mailbox-read` / `mailbox-ack` refuse and nothing registers.
+  `hooks.run_in_subprocesses: true` opts out.
+
 ### Added
 
 - **Mailbox listings are pages.** A session that had used the mailbox for

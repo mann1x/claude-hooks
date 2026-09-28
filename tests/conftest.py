@@ -481,3 +481,17 @@ def _reset_token_calibration():
 @pytest.fixture(autouse=True)
 def _ollama_slots_off(monkeypatch):
     monkeypatch.setenv("CLAUDE_HOOKS_OLLAMA_SLOTS_DISABLE", "1")
+
+
+# --------------------------------------------------------------------------- #
+# Tests run as the interactive session
+# --------------------------------------------------------------------------- #
+# claude_hooks.session_kind turns every hook off in a spawned `claude -p` /
+# SDK run. Pytest itself is often launched from one (a Caliber refresh, a
+# scripted check), and it would then inherit CLAUDE_CODE_ENTRYPOINT=sdk-cli
+# and SESSION_ATTENDED=0 and silently switch off what the tests exercise.
+# Tests of the gate set the variables themselves.
+@pytest.fixture(autouse=True)
+def _interactive_session(monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ATTENDED", raising=False)
