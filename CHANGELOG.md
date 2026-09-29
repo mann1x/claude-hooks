@@ -16,6 +16,8 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [1.19.0] — 2026-09-29
+
 ### Added
 
 - **Process guard** (PreToolUse, on by default): denies a command that
@@ -37,6 +39,24 @@ release with the auto-generated source archive
   every false positive found there is a regression test
   (`tests/test_process_guard.py`). `.claude-hooks-disable` gains a
   `guards` part. See `docs/process-guard.md`.
+
+- **Mailbox listings are pages.** A session that had used the mailbox for
+  weeks got its whole history back from `mailbox-list`. `mailbox-list`
+  and `mailbox-sent` now return one page (20 by default, `limit` up to
+  100) with the total and the exact call for the next page. They filter
+  by `query` (keywords, all must match subject, body or sender;
+  `"phrases"`), `from` / `to`, and `since` / `until` (`3d`, `12h`,
+  `2026-09-27`, `2026-09-27T14:30`), and take `order`. Filtering and
+  paging run in SQL on both Postgres and SQLite. See `docs/mailbox.md`
+  "Listings are pages".
+
+### Changed
+
+- **Mailbox announcements are capped at 10 messages.** The `## Messages`
+  block, its receipts and the Stop nudge list the first 10 and give the
+  rest as a count pointing at `mailbox-list`; a backlog was otherwise
+  injected into every prompt in full. The status-line badge counts with
+  `COUNT(*)` instead of fetching every unread row.
 
 ### Fixed
 
@@ -75,26 +95,6 @@ release with the auto-generated source archive
   may serve the event has its own environment. In an MCP child of such a
   run `mailbox-read` / `mailbox-ack` refuse and nothing registers.
   `hooks.run_in_subprocesses: true` opts out.
-
-### Added
-
-- **Mailbox listings are pages.** A session that had used the mailbox for
-  weeks got its whole history back from `mailbox-list`. `mailbox-list`
-  and `mailbox-sent` now return one page (20 by default, `limit` up to
-  100) with the total and the exact call for the next page. They filter
-  by `query` (keywords, all must match subject, body or sender;
-  `"phrases"`), `from` / `to`, and `since` / `until` (`3d`, `12h`,
-  `2026-09-27`, `2026-09-27T14:30`), and take `order`. Filtering and
-  paging run in SQL on both Postgres and SQLite. See `docs/mailbox.md`
-  "Listings are pages".
-
-### Changed
-
-- **Mailbox announcements are capped at 10 messages.** The `## Messages`
-  block, its receipts and the Stop nudge list the first 10 and give the
-  rest as a count pointing at `mailbox-list`; a backlog was otherwise
-  injected into every prompt in full. The status-line badge counts with
-  `COUNT(*)` instead of fetching every unread row.
 
 ## [1.18.0] — 2026-09-27
 
@@ -9779,7 +9779,8 @@ prior tag. From any unreleased checkout, just `git pull` on `main`
 once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
-[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.18.0...HEAD
+[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.19.0...HEAD
+[1.19.0]: https://github.com/mann1x/claude-hooks/compare/v1.18.0...v1.19.0
 [1.18.0]: https://github.com/mann1x/claude-hooks/compare/v1.17.0...v1.18.0
 [1.17.0]: https://github.com/mann1x/claude-hooks/compare/v1.16.0...v1.17.0
 [1.16.0]: https://github.com/mann1x/claude-hooks/compare/v1.15.0...v1.16.0

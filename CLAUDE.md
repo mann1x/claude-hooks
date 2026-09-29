@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.18.0** — ~6.5k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.19.0** — ~6.8k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -384,6 +384,20 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > [`docs/episodic-server.md`](docs/episodic-server.md),
 > [`docs/mailbox.md`](docs/mailbox.md) and
 > [`docs/statusline.md`](docs/statusline.md).
+>
+> v1.19 adds the **process guard**, a PreToolUse check on by default:
+> it denies a command that would kill or wait on itself — `pkill -f` /
+> `pgrep -f` patterns that match the Bash tool's own `bash -c` or the
+> remote `bash -c` of an `ssh` — and a background waiter or Monitor
+> filter that can only notice success. It parses the command
+> (`claude_hooks/shell_ast.py`), follows every `ssh` / `bash -c` /
+> heredoc it spawns, and knows which command lines are alive, from rules
+> measured on bs2; the denial says what and how to fix and never asks
+> the user. Calibrated on 22k recorded commands. Also: mailbox listings
+> are pages with keyword / sender / date filters, hooks no longer run in
+> spawned `claude -p` runs, a session's mailbox alias belongs to its
+> session id, and `claude-consultants follow-up --wait`. See
+> [`docs/process-guard.md`](docs/process-guard.md).
 
 ---
 
