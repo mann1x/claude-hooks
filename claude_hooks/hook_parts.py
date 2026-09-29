@@ -34,7 +34,8 @@ log = logging.getLogger("claude_hooks.hook_parts")
 
 #: What a marker can keep. ``memory`` is recall and the per-turn store;
 #: ``mailbox`` is registration, announcements and the during-turn notice.
-PARTS = frozenset({"memory", "mailbox"})
+#: ``guards`` is the PreToolUse process guard (self-kill / blind waiters).
+PARTS = frozenset({"memory", "mailbox", "guards"})
 
 _KEEP_WORD = re.compile(r"^\s*keep\s*[:=]?\s*", re.IGNORECASE)
 
@@ -190,7 +191,15 @@ def _session_end(event, config, providers, keep):
     return None
 
 
+def _pre_tool_use(event, config, providers, keep):
+    if "guards" not in keep:
+        return None
+    from claude_hooks.hooks.pre_tool_use import process_guard_response
+    return process_guard_response(event, config)
+
+
 _EVENTS = {
+    "PreToolUse": _pre_tool_use,
     "SessionStart": _session_start,
     "UserPromptSubmit": _user_prompt_submit,
     "Stop": _stop,

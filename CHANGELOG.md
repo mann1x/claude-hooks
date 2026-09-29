@@ -16,6 +16,86 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added
+
+- **Process guard** (PreToolUse, on by default): denies a command that
+  would kill or wait on itself, and a background waiter that cannot
+  notice a failure — with the reason and the fix, so the session rewrites
+  it and carries on (it never asks the user). `pkill -f PAT` / `pgrep -f
+  PAT` match the command line of the shell running them: the Bash tool's
+  own `bash -c` locally (exit 144), the remote `bash -c` of an `ssh`
+  (exit 255), so the kill takes out its carrier and `while pgrep -f PAT`
+  never ends. The guard parses the command (`claude_hooks/shell_ast.py`),
+  follows it into every `ssh` / `bash -c` / heredoc it spawns, and knows
+  which command lines are alive — measured on bs2: `bash -c` execs its
+  last simple command in place, a script on stdin is in no argv. A
+  background `until`/`while` poll that exits only on success, or a
+  Monitor whose filter can only say "success", is denied too; a
+  CronCreate / ScheduleWakeup status check gets a note to report failure
+  as an outcome. Calibrated against 22 000 recorded commands: it flags
+  385 of the 398 exit-144 kills and 335 of the 374 exit-255 ones, and
+  every false positive found there is a regression test
+  (`tests/test_process_guard.py`). `.claude-hooks-disable` gains a
+  `guards` part. See `docs/process-guard.md`.
+
+### Fixed
+
+- **`claude-consultants follow-up` accepts `--wait`** (with
+  `--poll-interval` / `--wait-timeout`). The consultants skill has told
+  sessions since 2026-08-02 that "`consult` and `follow-up` both accept
+  `--wait`" and made `follow-up --wait` the default way to wait on a
+  follow-up, but only `consult` had the flag, so every documented
+  follow-up exited on an argparse error before the council started. The
+  flags now come from one helper shared by both verbs. A cap refusal
+  (`followup_limit_reached`) starts no run and is printed, not waited
+  on. `tests/test_consultants_cli_wait.py` also checks every
+  `<verb> --flag` the skill mentions against the real parser.
+
+- **A session's mailbox alias no longer comes from its current
+  directory.** A session id's first registration (also after `/clear`)
+  took the default alias from the event's `cwd`, wherever the session had
+  cd'd to: xollama registered as `v0.34.4-xollama.1`, opencoti as
+  `llamafile`, and their status-line badges and Stop nudges counted an
+  inbox nobody writes to. The default is now the explicit rename, else the
+  project root (`CLAUDE_PROJECT_DIR`, copied into the event by `run.py`),
+  else `cwd`; every later lookup is by session id. The MCP tools read
+  `CLAUDE_SESSION_ID`, which Claude Code never sets, and so had no session
+  id at all; they now read `CLAUDE_CODE_SESSION_ID`.
+
+- **Hooks no longer run in spawned `claude -p` / SDK runs.** Caliber's
+  pre-commit refresh runs `claude -p` in the repo on every commit (294 of
+  the last 300 transcripts on solidpc). With the hooks on there, those
+  runs recalled memory into prompts nobody reads, stored their turns as
+  the operator's, registered under the project's mailbox alias (evicting
+  the real session and deleting the row at exit) and, nudged by Stop,
+  **read the project's mail** — xollama lost #442–#519 to them. `run.py`
+  now exits first when `CLAUDE_CODE_SESSION_ATTENDED=0` or
+  `CLAUDE_CODE_ENTRYPOINT` is an SDK one (measured: interactive `cli`/`1`,
+  `claude -p` `sdk-cli`/`0`); it is checked there because the daemon that
+  may serve the event has its own environment. In an MCP child of such a
+  run `mailbox-read` / `mailbox-ack` refuse and nothing registers.
+  `hooks.run_in_subprocesses: true` opts out.
+
+### Added
+
+- **Mailbox listings are pages.** A session that had used the mailbox for
+  weeks got its whole history back from `mailbox-list`. `mailbox-list`
+  and `mailbox-sent` now return one page (20 by default, `limit` up to
+  100) with the total and the exact call for the next page. They filter
+  by `query` (keywords, all must match subject, body or sender;
+  `"phrases"`), `from` / `to`, and `since` / `until` (`3d`, `12h`,
+  `2026-09-27`, `2026-09-27T14:30`), and take `order`. Filtering and
+  paging run in SQL on both Postgres and SQLite. See `docs/mailbox.md`
+  "Listings are pages".
+
+### Changed
+
+- **Mailbox announcements are capped at 10 messages.** The `## Messages`
+  block, its receipts and the Stop nudge list the first 10 and give the
+  rest as a count pointing at `mailbox-list`; a backlog was otherwise
+  injected into every prompt in full. The status-line badge counts with
+  `COUNT(*)` instead of fetching every unread row.
+
 ## [1.18.0] — 2026-09-27
 
 Four themes. **episodic-memory is vendored** into this repository and

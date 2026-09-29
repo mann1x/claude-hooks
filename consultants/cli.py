@@ -293,7 +293,10 @@ def cmd_follow_up(args, base: str) -> int:
                 body=body)
     # The engine returns ``ok: false`` + ``reason: followup_limit_reached``
     # (HTTP 200) when the cap is hit without an override — pass that
-    # structured refusal through verbatim so the skill keys on it.
+    # structured refusal through verbatim so the skill keys on it. A
+    # refusal starts no run, so there is nothing for --wait to wait on.
+    if getattr(args, "wait", False) and out.get("ok") is not False:
+        return _consult_wait(args, base, out)
     print(json.dumps({"ok": True, **out}, indent=2))
     return 0
 
@@ -1735,6 +1738,37 @@ def cmd_skill_eval_tool_executor(args, base: str) -> int:
 
 # ----------------------- argparse wiring ------------------------- #
 
+def _add_wait_args(parser) -> None:
+    """``--wait`` / ``--poll-interval`` / ``--wait-timeout``, shared by
+    ``consult`` and ``follow-up`` so the two verbs cannot drift: the
+    skill waits on both, and ``follow-up`` once rejected ``--wait``."""
+    # M5: --wait turns the otherwise-async consult into a blocking call —
+    # POST, then poll until terminal, then print the RESULT (same shape
+    # as `result`) instead of the initial run record. Removes the
+    # Workflow-authoring footgun of hand-rolling a poll loop. The bare
+    # (no --wait) path is byte-identical to before.
+    parser.add_argument(
+        "--wait", action="store_true", default=False,
+        help="Block until the consultation finishes, then print the "
+             "final result (poll loop). Without it, returns the run "
+             "record immediately and you poll `status`/`result`.",
+    )
+    parser.add_argument(
+        "--poll-interval", dest="poll_interval", type=float, default=2.0,
+        metavar="SECONDS",
+        help="Seconds between status polls when --wait is set "
+             "(default 2.0; floored at 0.2).",
+    )
+    parser.add_argument(
+        "--wait-timeout", dest="wait_timeout", type=float, default=0.0,
+        metavar="SECONDS",
+        help="Client-side ceiling for --wait, in seconds. 0 (default) "
+             "waits indefinitely — the engine has its own deadline. A "
+             "positive value aborts the wait (the run keeps going "
+             "server-side; poll it later).",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="claude-consultants",
@@ -1785,31 +1819,7 @@ def build_parser() -> argparse.ArgumentParser:
             "are right."
         ),
     )
-    # M5: --wait turns the otherwise-async consult into a blocking call —
-    # POST, then poll until terminal, then print the RESULT (same shape
-    # as `result`) instead of the initial run record. Removes the
-    # Workflow-authoring footgun of hand-rolling a poll loop. The bare
-    # (no --wait) path is byte-identical to before.
-    c.add_argument(
-        "--wait", action="store_true", default=False,
-        help="Block until the consultation finishes, then print the "
-             "final result (poll loop). Without it, returns the run "
-             "record immediately and you poll `status`/`result`.",
-    )
-    c.add_argument(
-        "--poll-interval", dest="poll_interval", type=float, default=2.0,
-        metavar="SECONDS",
-        help="Seconds between status polls when --wait is set "
-             "(default 2.0; floored at 0.2).",
-    )
-    c.add_argument(
-        "--wait-timeout", dest="wait_timeout", type=float, default=0.0,
-        metavar="SECONDS",
-        help="Client-side ceiling for --wait, in seconds. 0 (default) "
-             "waits indefinitely — the engine has its own deadline. A "
-             "positive value aborts the wait (the run keeps going "
-             "server-side; poll it later).",
-    )
+    _add_wait_args(c)
     c.set_defaults(fn=cmd_consult)
 
     # status
@@ -1884,6 +1894,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Alias for a bare --allow-extra (grant the configured "
              "default number of extra rounds for this consultancy).",
     )
+    _add_wait_args(fu)
     fu.set_defaults(fn=cmd_follow_up)
 
     # accept — consultancy review loop: mark the consultancy ACCEPTED.

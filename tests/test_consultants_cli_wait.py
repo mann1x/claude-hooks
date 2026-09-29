@@ -34,6 +34,7 @@ from consultants.cli import (  # noqa: E402
     _wait_for_terminal,
     build_parser,
     cmd_consult,
+    cmd_follow_up,
 )
 
 
@@ -220,6 +221,111 @@ class TestCmdConsultWait(unittest.TestCase):
         doc = json.loads(buf.getvalue())
         self.assertTrue(doc["ok"])
         self.assertEqual(doc["status"], "running")     # not awaited
+
+
+# ----------------------- cmd_follow_up --wait -------------------- #
+
+def _follow_ns(**kw):
+    defaults = {
+        "parent_sid": "csl-0", "message": "and the sunset?",
+        "cwd": None, "effort": None, "add_dir": [], "trace": None,
+        "skip_preflight": False, "allow_extra": None, "force": False,
+        "wait": False, "poll_interval": 2.0, "wait_timeout": 0.0,
+    }
+    defaults.update(kw)
+    return SimpleNamespace(**defaults)
+
+
+class TestCmdFollowUpWait(unittest.TestCase):
+    """The skill waits on follow-ups with ``follow-up --wait``; the
+    parser once accepted the flag only on ``consult``, so every
+    documented follow-up failed before it started."""
+
+    def _run(self, post, statuses=(), result=None, ns=None):
+        q = list(statuses)
+        calls = []
+
+        def _fake_http(method, url, *, body=None, timeout=600.0):
+            calls.append((method, url))
+            if method == "POST" and url.endswith("/follow-up"):
+                return post
+            if method == "GET" and url.endswith("/v1/consult/csl-2"):
+                return q.pop(0)
+            if url.endswith("/v1/consult/csl-2/result"):
+                return result or {}
+            raise AssertionError(f"unexpected {method} {url}")
+
+        ns = ns or _follow_ns(wait=True, poll_interval=0.01)
+        with mock.patch("consultants.cli._http", side_effect=_fake_http), \
+                mock.patch("consultants.cli.time.sleep"):
+            from io import StringIO
+            buf = StringIO()
+            with mock.patch("sys.stdout", buf):
+                rc = cmd_follow_up(ns, "http://b")
+        return rc, json.loads(buf.getvalue()), calls
+
+    def test_parser_accepts_wait_on_follow_up(self):
+        args = build_parser().parse_args([
+            "follow-up", "csl-0", "--message", "q?",
+            "--wait", "--poll-interval", "0.5", "--wait-timeout", "60"])
+        self.assertTrue(args.wait)
+        self.assertEqual((args.poll_interval, args.wait_timeout), (0.5, 60.0))
+
+    def test_waits_on_the_new_sid_and_prints_its_result(self):
+        rc, doc, _ = self._run(
+            {"sid": "csl-2", "status": "running", "parent_sid": "csl-0"},
+            [{"sid": "csl-2", "status": "running"},
+             {"sid": "csl-2", "status": "completed"}],
+            result={"sid": "csl-2", "summary_markdown": "FOLLOW ANSWER"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(doc["summary_markdown"], "FOLLOW ANSWER")
+
+    def test_cap_refusal_is_passed_through_not_waited_on(self):
+        rc, doc, calls = self._run(
+            {"ok": False, "reason": "followup_limit_reached",
+             "sid": None, "parent_sid": "csl-0"})
+        self.assertFalse(doc["ok"])
+        self.assertEqual(doc["reason"], "followup_limit_reached")
+        self.assertEqual([m for m, _ in calls], ["POST"], "never polled")
+
+
+def _options_under(parser) -> set:
+    """Every option string ``parser`` or any nested subcommand accepts
+    (``config set-store --enabled`` counts as a ``config`` flag)."""
+    out = set()
+    for a in parser._actions:
+        out.update(a.option_strings)
+        choices = getattr(a, "choices", None)
+        for sub in (choices.values() if isinstance(choices, dict) else ()):
+            if hasattr(sub, "_actions"):
+                out |= _options_under(sub)
+    return out
+
+
+class TestSkillFlagsExist(unittest.TestCase):
+    """Every ``<verb> --flag`` the consultants skill tells a session to
+    run must be a flag that verb's parser accepts. A documented flag
+    the CLI rejects fails the call before the council starts."""
+
+    def test_documented_flags_parse(self):
+        import re
+        skill = (Path(__file__).resolve().parent.parent / ".claude" /
+                 "skills" / "consultants" / "SKILL.md").read_text(
+                     encoding="utf-8")
+        parser = build_parser()
+        subs = next(a for a in parser._actions
+                    if a.__class__.__name__ == "_SubParsersAction")
+        verbs = subs.choices
+        missing = []
+        for m in re.finditer(
+                r"(?<![\w-])(" + "|".join(map(re.escape, verbs)) +
+                r")((?:[ \t]+(?:\S+))*)", skill):
+            verb, rest = m.group(1), m.group(2)
+            known = _options_under(verbs[verb])
+            for flag in re.findall(r"(?<!\S)(--[a-z][a-z-]*)", rest):
+                if flag not in known:
+                    missing.append(f"{verb} {flag}")
+        self.assertEqual(sorted(set(missing)), [])
 
 
 if __name__ == "__main__":

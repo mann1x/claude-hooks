@@ -5,7 +5,7 @@ on every prompt and stores noteworthy turns back.
 
 ## Architecture
 
-- **Entry**: `bin/claude-hook` (POSIX) / `bin/claude-hook.cmd` (Windows) reads event JSON from stdin
+- **Entry**: `bin/claude-hook` (POSIX) / `bin/claude-hook.cmd` (Windows) reads event JSON from stdin; `run.py` exits first when the run is a spawned session (`CLAUDE_CODE_SESSION_ATTENDED=0` or an SDK `CLAUDE_CODE_ENTRYPOINT` such as `sdk-cli` = `claude -p`), see `claude_hooks/session_kind.py`; opt out with `hooks.run_in_subprocesses: true`. For `Bash` / `Monitor` `PreToolUse` events `run.py` also adds the session's `/proc` ancestors (`process_ancestors`, via `ancestors_from_proc()` in `claude_hooks/process_guard.py`) — a daemon serving the event has other parents
 - **Dispatcher**: `claude_hooks/dispatcher.py` routes events to handler modules
 - **Handlers**: `claude_hooks/hooks/` — one per event (user_prompt_submit, session_start, stop, etc.)
 - **Providers**: `claude_hooks/providers/` — memory backends (qdrant, memory_kg, pgvector, sqlite_vec)
@@ -38,7 +38,7 @@ LSP engine (v0.7+, opt-in; v1.17+ daemon keyed on the repository boundary):
 - `lsp_engine/package_exports.py` — suppresses the package-boundary note on `find_references` / `find_implementation` for a symbol unreachable from the package's published entry points; unsure keeps the warning
 - `lsp_engine_manager.py` — host-level supervision of the per-repository daemons (`lsp list|reload|stop|reap`)
 - `lsp_mcp/` — `lsp` MCP server (`bin/claude-hook-lsp-mcp`) replacing cclsp; same twelve-tool catalog
-- `mailbox/` — session mailbox (inter-session messaging MCP tools + daemon-owned sweep); on unread mail, Stop blocks once per message per session to nudge a `mailbox-read` (`hooks.mailbox.stop_nudge`, nudged ids in `~/.claude/claude-hooks-mailbox/nudged-<session>.json`)
+- `mailbox/` — session mailbox (inter-session messaging MCP tools + daemon-owned sweep); on unread mail, Stop blocks once per message per session to nudge a `mailbox-read` (`hooks.mailbox.stop_nudge`, nudged ids in `~/.claude/claude-hooks-mailbox/nudged-<session>.json`). `mailbox-list` / `mailbox-sent` return one page (20 by default, `limit` up to 100) plus the next-page call, filtered by `query` / `from` / `to` / `since` / `until` (`mailbox/filters.py`, run in SQL); the `## Messages` block and the Stop nudge list the first 10 and count the rest (see `docs/mailbox.md`). A session's alias belongs to its session id: the default at first registration is the explicit rename, else the project root (`CLAUDE_PROJECT_DIR`, copied into the event by `run.py`), else `cwd`, and every later lookup is by session id; the MCP tools read `CLAUDE_CODE_SESSION_ID` (Claude Code never sets `CLAUDE_SESSION_ID`)
 
 Concurrency / utility:
 - `_parallel.py` (provider fan-out), `mcp_client.py`, `embedders.py`
@@ -57,6 +57,8 @@ Companion integrations (opt-in):
 - `rtk_rewrite.py` — shells out to `rtk` (>=0.23.0) to rewrite verbose `find`/`grep`/`git log` commands; safety scan runs on the rewritten command
 
 All three default to `enabled: false` and no-op silently when their binary or pattern is missing.
+
+- `process_guard.py` + `shell_ast.py` — **on by default** (`hooks.pre_tool_use.process_guard`: `enabled` / `waiters` / `prompts`). Parses the command, follows it into every `ssh` / `bash -c` / heredoc it spawns, and denies `pkill -f` / `pgrep -f` / `killall` / `ps … | grep … | kill` whose pattern matches a live carrier command line, plus background polls or Monitor filters with no failure, liveness or deadline exit; appends a failure-check note to `CronCreate` / `ScheduleWakeup` prompts. The denial says to rewrite and rerun, never to wait for the user. `.claude-hooks-disable` can `keep: guards` (`claude_hooks/hook_parts.py`). See `docs/process-guard.md`; tests `tests/test_process_guard.py`, `tests/test_shell_ast.py`
 
 ## Proxy / Stats
 

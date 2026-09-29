@@ -42,6 +42,13 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     tool_name = event.get("tool_name", "")
     tool_input = event.get("tool_input") or {}
 
+    # Stage -1: the process guard (on by default). A command that would
+    # kill or wait on itself, or a waiter that cannot see a failure, is
+    # denied with the reason and the fix, before anything else runs.
+    guarded = process_guard_response(event, config)
+    if guarded is not None:
+        return guarded
+
     # Stage 0: code_graph symbol lookup on Grep. Cheap when the pattern
     # isn't symbol-shaped (early reject); when it is, a single dict
     # lookup against an mtime-cached index emits a one-line "X is at
@@ -178,6 +185,60 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
             ),
         }
     }
+
+
+def process_guard_response(event: dict, config: dict) -> Optional[dict]:
+    """The guard's PreToolUse answer for this event, or None.
+
+    Denies (``permissionDecision: "deny"``) a Bash / Monitor command that
+    :mod:`claude_hooks.process_guard` finds would kill or match itself,
+    or a background waiter with no way to notice a failure. The reason
+    goes to the model, which rewrites the command and carries on — it
+    never waits for the user. For CronCreate / ScheduleWakeup it rewrites
+    the prompt (``updatedInput``, no decision, so permissions apply as
+    usual) to check for failure as well as success.
+    """
+    cfg = ((config.get("hooks") or {}).get("pre_tool_use") or {}).get("process_guard")
+    if cfg is None:
+        cfg = {}
+    if not cfg.get("enabled", True):
+        return None
+    tool_name = event.get("tool_name", "")
+    tool_input = event.get("tool_input") or {}
+    try:
+        from claude_hooks import process_guard as pg
+        findings = []
+        if tool_name == "Bash":
+            findings = pg.check_bash(
+                tool_input.get("command", "") or "",
+                background=bool(tool_input.get("run_in_background")),
+                ancestors=event.get("process_ancestors"))
+        elif tool_name == "Monitor":
+            findings = pg.check_monitor(tool_input.get("command", "") or "",
+                                        ancestors=event.get("process_ancestors"))
+        elif tool_name in ("CronCreate", "ScheduleWakeup") and cfg.get("prompts", True):
+            new = pg.augment_prompt(tool_input.get("prompt", "") or "")
+            if new is not None:
+                updated = dict(tool_input)
+                updated["prompt"] = new
+                return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                               "updatedInput": updated}}
+            return None
+        if not cfg.get("waiters", True):
+            findings = [f for f in findings if f.rule != "blind-waiter"]
+        if not findings:
+            return None
+        log.info("process_guard denied %s: %s", tool_name,
+                 "; ".join(f"{f.rule} {f.where}" for f in findings))
+        return {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": pg.render(findings),
+        }}
+    except Exception:
+        # never block a command because the guard itself broke
+        log.warning("process_guard failed", exc_info=True)
+        return None
 
 
 def _run_rtk_rewrite_raw(cmd: str, hook_cfg: dict) -> Optional[str]:

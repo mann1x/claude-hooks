@@ -799,6 +799,18 @@ The 4 methods a provider must implement (`detect`, `verify`, `recall`,
    `hooks.pre_tool_use.enabled: true` in config. Ships disabled so
    first-run latency stays predictable.
 
+6. **Hooks run only in the interactive session.** `run.py` exits before
+   anything else when Claude Code marks the run as spawned —
+   `CLAUDE_CODE_SESSION_ATTENDED=0` or an SDK `CLAUDE_CODE_ENTRYPOINT`
+   (`sdk-cli` = `claude -p`) — see `claude_hooks/session_kind.py`. Tools
+   such as Caliber's pre-commit refresh run `claude -p` in the repo; with
+   the hooks on there they recalled into prompts nobody reads, stored
+   their turns as the operator's, took the project's mailbox alias and
+   read its mail. The check lives in `run.py`, not the dispatcher,
+   because the daemon that may serve an event has its own environment.
+   `CLAUDE_CODE_CHILD_SESSION` is not a signal (the parent exports it to
+   its own tool shells). Opt out with `hooks.run_in_subprocesses: true`.
+
 5. **Experimental DB-backed scaffolds**: `pgvector` and `sqlite_vec`
    providers exist as scaffolds (registered in REGISTRY but disabled
    by default). They depend on optional packages (`psycopg`, `sqlite_vec`)

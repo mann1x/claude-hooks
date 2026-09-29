@@ -110,6 +110,9 @@ def _mailbox_nudge_reason(event: dict, config: dict, providers) -> str:
         msgs = [m for m in msgs if m.get("id") in fresh]
         if not msgs:
             return ""
+        from claude_hooks.mailbox.filters import ANNOUNCE_MAX
+        total = len(msgs)
+        msgs = msgs[:ANNOUNCE_MAX]
         lines = []
         for m in msgs:
             sender = m.get("from_alias") or "?"
@@ -117,9 +120,12 @@ def _mailbox_nudge_reason(event: dict, config: dict, providers) -> str:
                 sender += f"@{m['from_host']}"
             lines.append(f"- #{m['id']} `{m.get('subject') or '(no subject)'}` "
                          f"— from `{sender}`, {ago(m.get('created_at'))}")
+        if total > len(msgs):
+            lines.append(f"- …and {total - len(msgs)} more — mailbox-list "
+                         "pages through them (page, query, from, since).")
         ids = ", ".join(str(m["id"]) for m in msgs)
         return (
-            f"[claude-hooks] You have {len(msgs)} unread mailbox message(s) "
+            f"[claude-hooks] You have {total} unread mailbox message(s) "
             f"you have not read yet:\n" + "\n".join(lines) + "\n\n"
             f"Read them now with the mailbox-read tool (ids: [{ids}]). If one "
             "asks something of you or changes what you just did, act on it or "

@@ -30,9 +30,41 @@ def main() -> int:
 
     event_name = sys.argv[1]
 
+    # Only the session someone is working in gets the hooks — never a
+    # `claude -p` / SDK run it (or a tool like Caliber) spawned. Checked
+    # here, in the process Claude Code started, because the daemon that
+    # may serve the event below has its own environment, not the
+    # caller's. See claude_hooks/session_kind.py.
+    from claude_hooks.session_kind import hooks_allowed
+    if not hooks_allowed():
+        try:
+            sys.stdin.read()          # drain, so the writer never sees EPIPE
+        except Exception:
+            pass
+        return 0
+
     from claude_hooks.dispatcher import dispatch, read_event_from_stdin
 
     event = read_event_from_stdin()
+
+    # The project root, which the event does not carry: its ``cwd`` is
+    # wherever the session last cd'd to. Taken from this process's env
+    # because the daemon below has its own, not the caller's.
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if project_dir and isinstance(event, dict):
+        event.setdefault("claude_project_dir", project_dir)
+
+    # The process guard needs the processes a command will run under (this
+    # Claude Code session, the tmux or sshd it sits in), and only this
+    # process can see them: a daemon serving the event has other parents.
+    if (event_name == "PreToolUse" and isinstance(event, dict)
+            and event.get("tool_name") in ("Bash", "Monitor")
+            and os.path.exists("/proc/self/stat")):
+        try:
+            from claude_hooks.process_guard import ancestors_from_proc
+            event.setdefault("process_ancestors", ancestors_from_proc())
+        except Exception:
+            pass
 
     # Tier 3.8: try the long-lived daemon first if it's running. The
     # client returns None on any failure (no secret, refused connect,

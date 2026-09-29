@@ -12,11 +12,16 @@ is which connection the store borrows.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Optional, Sequence
 
 from claude_hooks.mailbox.addressing import AddressError, describe_recipients
 from claude_hooks.mailbox.announce import ago
+from claude_hooks.mailbox.filters import (
+    DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, ORDERS, FilterError, ListFilter,
+    page_number, page_size, parse_when,
+)
 from claude_hooks.mailbox.store import (
     MailboxError, MailboxStore, describe_skipped, host_name,
 )
@@ -27,6 +32,30 @@ TOOL_NAMES = (
     "mailbox-send", "mailbox-list", "mailbox-read", "mailbox-ack",
     "mailbox-edit", "mailbox-cancel", "mailbox-sent", "mailbox-sessions",
 )
+
+
+def _listing_properties(party: str, party_desc: str, *,
+                        include_read: bool = True) -> dict:
+    props: dict = {
+        "page": {"type": "integer", "default": 1,
+                 "description": "1-based page number"},
+        "limit": {"type": "integer", "default": DEFAULT_PAGE_SIZE,
+                  "description": f"messages per page, at most {MAX_PAGE_SIZE}"},
+        "query": {"type": "string",
+                  "description": "keywords; every one must match"},
+        party: {"type": "string", "description": party_desc},
+        "since": {"type": "string",
+                  "description": "newer than: 3d / 12h / 30m / 2w, "
+                                 "2026-09-27 or 2026-09-27T14:30"},
+        "until": {"type": "string",
+                  "description": "older than, same forms; a bare date "
+                                 "includes that day"},
+        "order": {"type": "string", "enum": list(ORDERS)},
+    }
+    if include_read:
+        props = {"include_read": {"type": "boolean", "default": False},
+                 **props}
+    return props
 
 
 def tool_catalog() -> list[dict]:
@@ -62,13 +91,17 @@ def tool_catalog() -> list[dict]:
         {
             "name": "mailbox-list",
             "description": (
-                "Unread messages addressed to this session — subject, sender, "
-                "time and priority only. Use mailbox-read for bodies."),
+                "Messages addressed to this session — subject, sender, time "
+                "and priority only, one page at a time (20 by default). "
+                "Unread only unless include_read; unread comes most urgent "
+                "then oldest first, a listing with read mail newest first. "
+                "Narrow it with query (keywords, all must match subject, "
+                "body or sender; \"quotes\" keep a phrase), from, since and "
+                "until. The page says how many matched and how to get the "
+                "next one. Use mailbox-read for bodies."),
             "inputSchema": {
                 "type": "object",
-                "properties": {
-                    "include_read": {"type": "boolean", "default": False},
-                },
+                "properties": _listing_properties("from", "sender alias"),
             },
         },
         {
@@ -133,13 +166,14 @@ def tool_catalog() -> list[dict]:
         {
             "name": "mailbox-sent",
             "description": (
-                "Messages you sent, with whether and when each was read, and "
-                "any note the recipient attached."),
+                "Messages you sent, newest first, one page at a time (20 by "
+                "default), with whether and when each was read and any note "
+                "the recipient attached. Narrow it with query, to, since and "
+                "until, as for mailbox-list."),
             "inputSchema": {
                 "type": "object",
-                "properties": {
-                    "limit": {"type": "integer", "default": 20},
-                },
+                "properties": _listing_properties("to", "recipient alias",
+                                                  include_read=False),
             },
         },
         {
@@ -181,7 +215,24 @@ class MailboxTools:
     def handles(self, name: str) -> bool:
         return name in TOOL_NAMES
 
+    #: What a headless run may still do: send (a script asking ``claude -p``
+    #: to mail someone is legitimate) and look. Reading marks mail read and
+    #: acking answers it — both belong to the session the mail is for.
+    HEADLESS_REFUSED = frozenset({"mailbox-read", "mailbox-ack"})
+
     def call(self, name: str, args: dict) -> str:
+        from claude_hooks.mailbox.integration import is_headless
+        if is_headless():
+            if name in self.HEADLESS_REFUSED:
+                return (f"{name} is not available in a non-interactive run "
+                        "(claude -p / SDK): reading would mark "
+                        f"{self.alias}@{self.host}'s mail read for a session "
+                        "nobody is watching. The interactive session for "
+                        "this project reads its own mail.")
+            try:
+                return getattr(self, "_" + name.replace("-", "_"))(args)
+            except (MailboxError, AddressError) as e:
+                return str(e)
         self._mark_active()
         try:
             return getattr(self, "_" + name.replace("-", "_"))(args)
@@ -267,13 +318,25 @@ class MailboxTools:
         return out
 
     def _mailbox_list(self, args: dict) -> str:
-        rows = self.store.inbox(
+        try:
+            f, when, size, page = _listing_args(args, party_key="from")
+        except FilterError as e:
+            return str(e)
+        pg = self.store.inbox_page(
             alias=self.alias, session_id=self.session_id or None,
-            host=self.host, include_read=bool(args.get("include_read")))
-        if not rows:
-            return "No messages."
-        out = [f"{len(rows)} message(s) for {self.alias}@{self.host}:"]
-        for m in rows:
+            host=self.host, include_read=f.include_read,
+            since=when[0], until=when[1], query=f.query, sender=f.party,
+            page=page, page_size=size, order=f.order or None)
+        what = "message(s)" if f.include_read else "unread message(s)"
+        scope = f.describe("from")
+        if not pg.total:
+            return (f"No messages for {self.alias}@{self.host}"
+                    + ("" if f.include_read else " (unread)")
+                    + (f" {scope}" if scope else "") + ".")
+        out = [_page_header(pg, what, f"{self.alias}@{self.host}", scope)]
+        if not pg.rows:
+            return _past_the_end(pg, out[0])
+        for m in pg.rows:
             state = "read" if m["read_at"] else "unread"
             pri = f" [priority {m['priority']}]" if m["priority"] else ""
             out.append(
@@ -283,6 +346,7 @@ class MailboxTools:
                 + f", {ago(m['created_at'])}")
         out.append("")
         out.append("Use mailbox-read with the ids to see the bodies.")
+        out += _page_footer(pg, "mailbox-list", f)
         return "\n".join(out)
 
     def _mailbox_read(self, args: dict) -> str:
@@ -340,13 +404,25 @@ class MailboxTools:
                 else "Nothing withdrawn — it may have just been read.")
 
     def _mailbox_sent(self, args: dict) -> str:
-        rows = self.store.sent(from_alias=self.alias, from_host=self.host,
-                               limit=int(args.get("limit") or 20))
-        if not rows:
-            return "You have not sent any messages."
-        out = [f"Last {len(rows)} message(s) you sent:"]
+        try:
+            f, when, size, page = _listing_args(args, party_key="to",
+                                                include_read=False)
+        except FilterError as e:
+            return str(e)
+        pg = self.store.sent_page(
+            from_alias=self.alias, from_host=self.host, since=when[0],
+            until=when[1], query=f.query, to=f.party, page=page,
+            page_size=size, order=f.order or None)
+        scope = f.describe("to")
+        if not pg.total:
+            return ("You have not sent any messages"
+                    + (f" {scope}" if scope else "") + ".")
+        head = _page_header(pg, "message(s) you sent", "", scope)
+        if not pg.rows:
+            return _past_the_end(pg, head)
+        out = [head]
         pending: list[int] = []
-        for m in rows:
+        for m in pg.rows:
             to = m["to_alias"] or m["to_session"] or "?"
             if m["to_host"]:
                 to = f"{to}@{m['to_host']}"
@@ -356,7 +432,8 @@ class MailboxTools:
                 state = f"read by {m['read_by'] or '?'} {ago(m['read_at'])}"
             else:
                 state = "unread"
-            line = f"  #{m['id']} → {to}: {m['subject']!r} — {state}"
+            line = (f"  #{m['id']} → {to}: {m['subject']!r} — {state}, "
+                    f"sent {ago(m['created_at'])}")
             if m["ack_body"]:
                 line += f"\n      note: \"{m['ack_body'].strip()}\""
                 if not m["receipt_read_at"]:
@@ -365,6 +442,7 @@ class MailboxTools:
         if pending:
             self.store.mark_receipts_seen(pending, from_alias=self.alias,
                                           from_host=self.host)
+        out += _page_footer(pg, "mailbox-sent", f, leading_blank=True)
         return "\n".join(out)
 
     def _mailbox_sessions(self, args: dict) -> str:
@@ -387,6 +465,56 @@ class MailboxTools:
                 out.append(f"  `{a}` spans {len(hosts)} hosts — a bare "
                            f"`{a}` will be refused; use {a}@<host> or {a}*.")
         return "\n".join(out)
+
+
+def _listing_args(args: dict, *, party_key: str, include_read: bool = True):
+    """Validate a listing call; FilterError carries a fixable message."""
+    order = (args.get("order") or "").strip().lower()
+    if order and order not in ORDERS:
+        raise FilterError(f"order must be one of {', '.join(ORDERS)}.")
+    f = ListFilter(
+        query=(args.get("query") or "").strip(),
+        since=str(args.get("since") or "").strip(),
+        until=str(args.get("until") or "").strip(),
+        party=(args.get(party_key) or "").strip(),
+        include_read=bool(args.get("include_read")) if include_read else False,
+        order=order)
+    if f.party:
+        f.extra[party_key] = f.party
+    size = page_size(args.get("limit"))
+    if args.get("limit") is not None and size != DEFAULT_PAGE_SIZE:
+        f.extra["limit"] = size
+    when = (parse_when(f.since), parse_when(f.until, end=True))
+    if when[0] and when[1] and when[0] >= when[1]:
+        raise FilterError(f"since ({f.since}) is not before until ({f.until}).")
+    return f, when, size, page_number(args.get("page"))
+
+
+def _page_header(pg, what: str, owner: str, scope: str) -> str:
+    rng = (f"{pg.first}–{pg.last} of {pg.total}" if pg.pages > 1
+           else f"{pg.total}")
+    head = f"{rng} {what}" + (f" for {owner}" if owner else "")
+    if scope:
+        head += f" ({scope})"
+    if pg.pages > 1:
+        head += f" — page {pg.page} of {pg.pages}"
+    return head + ":"
+
+
+def _past_the_end(pg, head: str) -> str:
+    return (f"Page {pg.page} is past the end — {pg.total} match(es) make "
+            f"{pg.pages} page(s) of {pg.page_size}.")
+
+
+def _page_footer(pg, tool: str, f: ListFilter, *,
+                 leading_blank: bool = False) -> list[str]:
+    if not pg.has_more:
+        return []
+    nxt = json.dumps(f.args(page=pg.page + 1), ensure_ascii=False)
+    out = [""] if leading_blank else []
+    out.append(f"More: {tool} {nxt} for the next page, or narrow it with "
+               "query / since / until.")
+    return out
 
 
 def _int_list(value: Any) -> list[int]:

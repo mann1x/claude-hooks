@@ -267,6 +267,8 @@ def test_install_skips_npm_when_the_stamp_matches_and_modules_load(vendored, mon
     assert run.call_count == 0
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the static C++ runtime is a GCC link "
+                    "flag; install_vendored only picks a compiler off Windows")
 def test_install_rebuilds_with_the_static_runtime_when_the_stamp_is_stale(vendored, monkeypatch):
     monkeypatch.setattr(doctor, "load_error", lambda m: None)
     with mock.patch.object(doctor.subprocess, "run",
@@ -276,6 +278,17 @@ def test_install_rebuilds_with_the_static_runtime_when_the_stamp_is_stale(vendor
     env = run.call_args_list[0].kwargs["env"]
     assert doctor.STATIC_RUNTIME in env["LDFLAGS"] and env["CXX"] == "c++"
     assert (vendored / "node_modules" / doctor.STAMP_NAME).read_text().strip() == "tree=abc abi=147"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows builds with the toolchain npm finds")
+def test_install_on_windows_leaves_the_toolchain_to_npm(vendored, monkeypatch):
+    monkeypatch.setattr(doctor, "load_error", lambda m: None)
+    with mock.patch.object(doctor.subprocess, "run",
+                           return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
+        assert doctor.install_vendored(vendored, note=lambda m: None)
+    assert _npm_calls(run) == ["install"]
+    env = run.call_args_list[0].kwargs["env"]
+    assert doctor.STATIC_RUNTIME not in env.get("LDFLAGS", "")
 
 
 def test_an_install_that_does_not_load_fails_and_writes_no_stamp(vendored, monkeypatch):

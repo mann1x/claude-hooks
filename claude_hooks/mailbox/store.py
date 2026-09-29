@@ -798,43 +798,150 @@ class MailboxStore:
 
     # ─── reading ─────────────────────────────────────────────────────
 
-    def inbox(self, *, alias: str, session_id: Optional[str] = None,
-              host: Optional[str] = None, include_read: bool = False,
-              since: Optional[datetime] = None) -> list[dict]:
-        """Messages for this session.
+    def _inbox_where(self, *, alias: str, session_id: Optional[str],
+                     host: Optional[str], include_read: bool,
+                     since: Optional[datetime], until: Optional[datetime],
+                     query: str, sender: str) -> tuple[str, list]:
+        """The WHERE clause every inbox read shares.
 
         A message addressed to ``alias@host`` is only for that host;
         one addressed to a bare alias is for whoever picks it up. Both
-        are matched here so a session sees its mail regardless of which
-        form the sender used.
+        are matched so a session sees its mail regardless of which form
+        the sender used.
         """
-        self.ensure_schema()
         h = host or host_name()
-        sql = ("SELECT " + ", ".join(schema.MESSAGE_COLUMNS) +
-               " FROM session_messages WHERE cancelled_at IS NULL AND (")
-        clauses = ["(to_alias = ? AND (to_host IS NULL OR to_host = ?))"]
+        where = ("cancelled_at IS NULL AND ("
+                 "(to_alias = ? AND (to_host IS NULL OR to_host = ?))")
         params: list[Any] = [alias, h]
         if session_id:
-            clauses.append("to_session = ?")
+            where += " OR to_session = ?"
             params.append(session_id)
-        sql += " OR ".join(clauses) + ")"
+        where += ")"
         if not include_read:
-            sql += " AND read_at IS NULL"
+            where += " AND read_at IS NULL"
+        where += self._narrow(params, since=since, until=until, query=query,
+                              party_col="from_alias", party=sender,
+                              text_cols=("subject", "body", "from_alias"))
+        return where, params
+
+    def _narrow(self, params: list, *, since, until, query, party_col,
+                party, text_cols) -> str:
+        """Date, keyword and party filters, appended to ``params``.
+
+        Keywords are ANDed, each matched case-insensitively against any
+        of ``text_cols`` — portable ``LOWER() LIKE`` rather than
+        Postgres' ``ILIKE``, so SQLite answers the same question.
+        """
+        from claude_hooks.mailbox.filters import like_pattern, split_terms
+        sql = ""
         if since is not None:
             sql += " AND created_at > ?"
             params.append(self._at(since))
-        sql += " ORDER BY priority DESC, created_at ASC"
+        if until is not None:
+            sql += " AND created_at < ?"
+            params.append(self._at(until))
+        if party:
+            sql += f" AND LOWER({party_col}) = ?"
+            params.append(str(party).split("@", 1)[0].strip().lower())
+        for term in split_terms(query):
+            sql += " AND (" + " OR ".join(
+                f"LOWER(COALESCE({c}, '')) LIKE ? ESCAPE '\\'"
+                for c in text_cols) + ")"
+            params.extend([like_pattern(term)] * len(text_cols))
+        return sql
+
+    def _select(self, where: str, params: Sequence, *, order: str,
+                limit: Optional[int] = None, offset: int = 0) -> list[dict]:
+        sql = ("SELECT " + ", ".join(schema.MESSAGE_COLUMNS) +
+               " FROM session_messages WHERE " + where + " ORDER BY " + order)
+        args = list(params)
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            args += [int(limit), int(offset)]
         with self._lock:
             conn = self._connect()
             try:
                 with _cursor(conn) as cur:
-                    cur.execute(self._q(sql), tuple(params))
+                    cur.execute(self._q(sql), tuple(args))
                     rows = self._rows(cur, schema.MESSAGE_COLUMNS)
                 conn.commit()
             except Exception:
                 self._rollback(conn)
                 raise
         return rows
+
+    def _count(self, where: str, params: Sequence) -> int:
+        with self._lock:
+            conn = self._connect()
+            try:
+                with _cursor(conn) as cur:
+                    cur.execute(self._q(
+                        "SELECT COUNT(*) FROM session_messages WHERE " + where),
+                        tuple(params))
+                    n = cur.fetchone()[0]
+                conn.commit()
+            except Exception:
+                self._rollback(conn)
+                raise
+        return int(n or 0)
+
+    @staticmethod
+    def _inbox_order(order: Optional[str], include_read: bool) -> str:
+        """Unread mail is a queue — most urgent, then oldest, first. A
+        listing that includes read mail is history, newest first. ``id``
+        breaks ties so pages never overlap or skip."""
+        if order == "newest" or (not order and include_read):
+            return "created_at DESC, id DESC"
+        if order == "oldest":
+            return "created_at ASC, id ASC"
+        return "priority DESC, created_at ASC, id ASC"
+
+    def inbox(self, *, alias: str, session_id: Optional[str] = None,
+              host: Optional[str] = None, include_read: bool = False,
+              since: Optional[datetime] = None,
+              until: Optional[datetime] = None, query: str = "",
+              sender: str = "") -> list[dict]:
+        """Every message for this session that matches — unpaged. The
+        tools and the hooks use :meth:`inbox_page`; this stays for
+        callers that genuinely need the whole set."""
+        self.ensure_schema()
+        where, params = self._inbox_where(
+            alias=alias, session_id=session_id, host=host,
+            include_read=include_read, since=since, until=until,
+            query=query, sender=sender)
+        return self._select(where, params,
+                            order=self._inbox_order(None, include_read))
+
+    def inbox_page(self, *, alias: str, session_id: Optional[str] = None,
+                   host: Optional[str] = None, include_read: bool = False,
+                   since: Optional[datetime] = None,
+                   until: Optional[datetime] = None, query: str = "",
+                   sender: str = "", page: int = 1,
+                   page_size: int = 20, order: Optional[str] = None):
+        """One page of the inbox and the total it was cut from."""
+        from claude_hooks.mailbox.filters import Page
+        self.ensure_schema()
+        where, params = self._inbox_where(
+            alias=alias, session_id=session_id, host=host,
+            include_read=include_read, since=since, until=until,
+            query=query, sender=sender)
+        total = self._count(where, params)
+        page = max(1, int(page))
+        rows = self._select(where, params,
+                            order=self._inbox_order(order, include_read),
+                            limit=page_size, offset=(page - 1) * page_size)
+        return Page(rows=rows, total=total, page=page, page_size=page_size)
+
+    def inbox_count(self, *, alias: str, session_id: Optional[str] = None,
+                    host: Optional[str] = None,
+                    since: Optional[datetime] = None) -> int:
+        """Unread messages for this session, without fetching them — the
+        status line asks this every refresh."""
+        self.ensure_schema()
+        where, params = self._inbox_where(
+            alias=alias, session_id=session_id, host=host,
+            include_read=False, since=since, until=None, query="", sender="")
+        return self._count(where, params)
 
     def read(self, ids: Sequence[int], *, reader_session: str,
              alias: str, host: Optional[str] = None) -> list[dict]:
@@ -895,26 +1002,46 @@ class MailboxStore:
     # ``edit`` and ``cancel`` were the same hole pointed at a message
     # body, with ``_own_message`` approving the rewrite.
 
+    def _sent_where(self, *, from_alias: str, from_host: Optional[str],
+                    since, until, query: str, to: str) -> tuple[str, list]:
+        host = from_host if from_host is not None else host_name()
+        params: list[Any] = [from_alias, host]
+        where = "from_alias = ? AND from_host = ?" + self._narrow(
+            params, since=since, until=until, query=query,
+            party_col="to_alias", party=to,
+            text_cols=("subject", "body", "to_alias"))
+        return where, params
+
     def sent(self, *, from_alias: str, from_host: Optional[str] = None,
              limit: int = 50) -> list[dict]:
         self.ensure_schema()
-        host = from_host if from_host is not None else host_name()
-        with self._lock:
-            conn = self._connect()
-            try:
-                with _cursor(conn) as cur:
-                    cur.execute(self._q(
-                        "SELECT " + ", ".join(schema.MESSAGE_COLUMNS) +
-                        " FROM session_messages WHERE from_alias = ? "
-                        "AND from_host = ? "
-                        "ORDER BY created_at DESC LIMIT ?"),
-                        (from_alias, host, int(limit)))
-                    rows = self._rows(cur, schema.MESSAGE_COLUMNS)
-                conn.commit()
-            except Exception:
-                self._rollback(conn)
-                raise
-        return rows
+        where, params = self._sent_where(from_alias=from_alias,
+                                         from_host=from_host, since=None,
+                                         until=None, query="", to="")
+        # Unpaged callers keep the original order; only pages need the
+        # ``id`` tie-break (broadcast copies share a timestamp).
+        return self._select(where, params, order="created_at DESC",
+                            limit=int(limit))
+
+    def sent_page(self, *, from_alias: str, from_host: Optional[str] = None,
+                  since: Optional[datetime] = None,
+                  until: Optional[datetime] = None, query: str = "",
+                  to: str = "", page: int = 1, page_size: int = 20,
+                  order: Optional[str] = None):
+        """One page of what this alias sent, newest first by default."""
+        from claude_hooks.mailbox.filters import Page
+        self.ensure_schema()
+        where, params = self._sent_where(from_alias=from_alias,
+                                         from_host=from_host, since=since,
+                                         until=until, query=query, to=to)
+        total = self._count(where, params)
+        page = max(1, int(page))
+        rows = self._select(
+            where, params,
+            order=("created_at ASC, id ASC" if order == "oldest"
+                   else "created_at DESC, id DESC"),
+            limit=page_size, offset=(page - 1) * page_size)
+        return Page(rows=rows, total=total, page=page, page_size=page_size)
 
     def pending_receipts(self, *, from_alias: str,
                          from_host: Optional[str] = None) -> list[dict]:

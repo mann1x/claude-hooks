@@ -193,6 +193,7 @@
     "nice": -5
   },
   "hooks": {
+    "run_in_subprocesses": false,
     "user_prompt_submit": {
       "enabled": true,
       "min_prompt_chars": 30,
@@ -290,6 +291,11 @@
       "lock_min_age_seconds": 60
     },
     "pre_tool_use": {
+      "process_guard": {
+        "enabled": true,
+        "waiters": true,
+        "prompts": true
+      },
       "enabled": false,
       "warn_on_tools": [
         "Bash",
