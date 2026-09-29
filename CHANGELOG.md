@@ -16,6 +16,28 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added
+
+- **Process guard** (PreToolUse, on by default): denies a command that
+  would kill or wait on itself, and a background waiter that cannot
+  notice a failure — with the reason and the fix, so the session rewrites
+  it and carries on (it never asks the user). `pkill -f PAT` / `pgrep -f
+  PAT` match the command line of the shell running them: the Bash tool's
+  own `bash -c` locally (exit 144), the remote `bash -c` of an `ssh`
+  (exit 255), so the kill takes out its carrier and `while pgrep -f PAT`
+  never ends. The guard parses the command (`claude_hooks/shell_ast.py`),
+  follows it into every `ssh` / `bash -c` / heredoc it spawns, and knows
+  which command lines are alive — measured on bs2: `bash -c` execs its
+  last simple command in place, a script on stdin is in no argv. A
+  background `until`/`while` poll that exits only on success, or a
+  Monitor whose filter can only say "success", is denied too; a
+  CronCreate / ScheduleWakeup status check gets a note to report failure
+  as an outcome. Calibrated against 22 000 recorded commands: it flags
+  385 of the 398 exit-144 kills and 335 of the 374 exit-255 ones, and
+  every false positive found there is a regression test
+  (`tests/test_process_guard.py`). `.claude-hooks-disable` gains a
+  `guards` part. See `docs/process-guard.md`.
+
 ### Fixed
 
 - **`claude-consultants follow-up` accepts `--wait`** (with

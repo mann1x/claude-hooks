@@ -54,6 +54,18 @@ def main() -> int:
     if project_dir and isinstance(event, dict):
         event.setdefault("claude_project_dir", project_dir)
 
+    # The process guard needs the processes a command will run under (this
+    # Claude Code session, the tmux or sshd it sits in), and only this
+    # process can see them: a daemon serving the event has other parents.
+    if (event_name == "PreToolUse" and isinstance(event, dict)
+            and event.get("tool_name") in ("Bash", "Monitor")
+            and os.path.exists("/proc/self/stat")):
+        try:
+            from claude_hooks.process_guard import ancestors_from_proc
+            event.setdefault("process_ancestors", ancestors_from_proc())
+        except Exception:
+            pass
+
     # Tier 3.8: try the long-lived daemon first if it's running. The
     # client returns None on any failure (no secret, refused connect,
     # timeout, bad response) and we fall back to in-process dispatch.

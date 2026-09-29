@@ -825,6 +825,7 @@ echo 'keep: memory, mailbox' > your-project/.claude-hooks-disable
 |---|---|
 | `memory` | recall on every prompt, recall after a compaction, and the per-turn store at Stop |
 | `mailbox` | registration (on every SessionStart, resume and compaction included), mail announcements, the during-turn notice, and unregistering at SessionEnd |
+| `guards` | the PreToolUse process guard — denies commands that would kill or wait on themselves, and waiters that cannot notice a failure ([docs/process-guard.md](docs/process-guard.md)) |
 
 Everything else stays off, and that is guaranteed by construction rather
 than by switches: a project with a marker never runs the normal hook
