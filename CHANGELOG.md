@@ -16,6 +16,18 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added
+
+- **`claude-consultants grant <sid> [N]`** (`POST /v1/consult/{sid}/grant`)
+  raises a consultancy's follow-up cap by N when the user asks for more
+  rounds, without sending a follow-up. Before this the only carrier for
+  an approval was the next follow-up's `--allow-extra`, so a session
+  told "add another 6" had to hold the grant in its own memory until
+  then. The grant is banked on the chain root and persisted, lifts an
+  `awaiting_approval` consultancy back to `ready_to_review`, and
+  defaults to the configured `allow_extra`. The skill gains a `grant`
+  verb and runs it as soon as the user raises the limit.
+
 ## [1.19.0] — 2026-09-29
 
 ### Added

@@ -1,6 +1,6 @@
 ---
 name: consultants
-description: "Multi-agent council engine (v2: planner → researcher → critic → synthesizer, plus opt-in tool_executor + coder; CitationLinter verifies every path:line). Default verb is `ask <question>` (also implicit — `/consultants <question>` works). Subcommands — `ask` runs a fresh council on a question; `followup [sid] <question>` iterates on a prior consult (warm reuse of plan/research/critic); `list` shows past sessions; `show <sid>` re-reads a stored summary; `accept <sid>` marks a consultancy reviewed/done; `config [args...]` walks the role/model/effort/service-mode/followup-limit dialog. After every council answer Claude runs a review loop (mirroring /get-advice): it critiques the result and either accepts it or auto-issues a bounded follow-up (capped by `max_followups`, default 4; asks you to allow more past the cap). Use when a question benefits from independent specialist agents working in parallel — design audits, release-notes validation, complex bug triage, refactor risk analysis. For single-shot questions use /get-advice instead."
+description: "Multi-agent council engine (v2: planner → researcher → critic → synthesizer, plus opt-in tool_executor + coder; CitationLinter verifies every path:line). Default verb is `ask <question>` (also implicit — `/consultants <question>` works). Subcommands — `ask` runs a fresh council on a question; `followup [sid] <question>` iterates on a prior consult (warm reuse of plan/research/critic); `list` shows past sessions; `show <sid>` re-reads a stored summary; `accept <sid>` marks a consultancy reviewed/done; `grant [sid] <N>` raises a consultancy's follow-up cap by N now; `config [args...]` walks the role/model/effort/service-mode/followup-limit dialog. After every council answer Claude runs a review loop (mirroring /get-advice): it critiques the result and either accepts it or auto-issues a bounded follow-up (capped by `max_followups`, default 4; asks you to allow more past the cap). Use when a question benefits from independent specialist agents working in parallel — design audits, release-notes validation, complex bug triage, refactor risk analysis. For single-shot questions use /get-advice instead."
 ---
 
 # /consultants — multi-agent council dispatcher
@@ -67,6 +67,7 @@ after `/consultants`:
 | `list`       | list       | Run **list** flow.                                             |
 | `show`       | show       | Drop the verb; the rest is the sid.                            |
 | `accept`     | accept     | Drop the verb; mark the consultancy (rest = sid) ACCEPTED.     |
+| `grant`      | grant      | Drop the verb; rest = `[sid] [N]`; raise that consultancy's cap by N now. |
 | `config`     | config     | Drop the verb; run **config** flow with the rest as sub-args.  |
 | anything else (incl. empty) | ask | Implicit ask: treat the **entire** arg as the question. |
 
@@ -117,7 +118,10 @@ loop](#review-loop--mirror-get-advices-discuss-until-satisfied-flow):
 critique → `accept` (terminal) **or** auto-`follow-up`. At the cap
 (`awaiting_approval`) stop and ask the user; on "yes" re-issue the same
 follow-up with `--allow-extra 1` (the user never types the flag, the
-skill carries their approval). The lifecycle survives compaction —
+skill carries their approval). When the user raises the limit at any
+other time ("allow 6 more", "raise the follow-up limit") run
+`claude-consultants grant <root_sid> <N>` **right away** — the grant is
+banked on the consultancy, so don't defer it to the next follow-up. The lifecycle survives compaction —
 trust `consultancy.status` over your own memory of where you were.
 
 ---
@@ -545,6 +549,20 @@ config change. Bare `--allow-extra` / `--force` uses the configured
 `allow_extra` default.) Then continue the loop. If the user declines,
 `accept` the best answer so far and report.
 
+**The user raises the limit unprompted** ("you can raise the follow-up
+limit, add another 6") — before or after the cap is hit, with or
+without a follow-up to send — grant it immediately:
+
+```
+claude-consultants grant <root_sid> 6 --cwd "$(pwd)"
+```
+
+Confirm from the returned `consultancy.effective_cap`. Later follow-ups
+in the chain need no `--allow-extra`; the grant is already banked on the
+consultancy (and persisted, so it survives compaction). Never tell the
+user the cap "can only be raised on the next follow-up" — that is what
+`grant` is for.
+
 ### 3. Stop conditions (mirror /get-advice)
 
 Stop the loop when **any** of:
@@ -628,6 +646,22 @@ claude-consultants accept <sid> [--note "..."] --cwd "$(pwd)"
 Sets the consultancy (resolved to its root) to the terminal `accepted`
 state. Normally the Review loop calls this for you; a user can also
 invoke it directly to close out a consultancy. Idempotent.
+
+---
+
+## grant — raise a consultancy's follow-up cap now
+
+```
+claude-consultants grant <sid> [N] --cwd "$(pwd)"
+```
+
+Adds N extra follow-ups (default: the configured `allow_extra`) to the
+consultancy the sid belongs to, resolved to its root — for this
+consultancy only, no config change. An `awaiting_approval` consultancy
+that is back under the cap returns to `ready_to_review`. Returns the
+`consultancy` block with the new `extra_granted` / `effective_cap`.
+`/consultants grant 6` with no sid means the consultancy you are working
+on in this session; ask only if there is none.
 
 ---
 

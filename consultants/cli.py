@@ -335,6 +335,19 @@ def cmd_accept(args, base: str) -> int:
     return 0
 
 
+def cmd_grant(args, base: str) -> int:
+    """Consultancy review loop: raise a consultancy's followup cap by N
+    now, without sending a followup (the user's "allow 6 more"). Resolves
+    any sid to its consultancy root; no config change. Without N the
+    configured ``allow_extra`` is granted."""
+    body = {"cwd": str(Path(args.cwd or os.getcwd()).resolve())}
+    if args.n is not None:
+        body["allow_extra"] = args.n
+    out = _http("POST", f"{base}/v1/consult/{args.sid}/grant", body=body)
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
+
+
 def cmd_reopen(args, base: str) -> int:
     """Restore a closed / evicted session to the in-memory pool.
 
@@ -1908,6 +1921,19 @@ def build_parser() -> argparse.ArgumentParser:
     ac.add_argument("--note", help="Optional note recorded with the "
                                    "acceptance.")
     ac.set_defaults(fn=cmd_accept)
+
+    # grant — consultancy review loop: raise the followup cap now.
+    gr = sub.add_parser(
+        "grant",
+        help="Raise a consultancy's followup cap by N (default: the "
+             "configured allow_extra) without sending a followup. For "
+             "THIS consultancy only; no config change. Accepts any sid "
+             "in the chain; resolves to the consultancy root.")
+    gr.add_argument("sid")
+    gr.add_argument("n", nargs="?", type=int,
+                    help="Extra followups to allow (>= 1).")
+    gr.add_argument("--cwd", help="Project root (default: cwd).")
+    gr.set_defaults(fn=cmd_grant)
 
     # reopen — disk-fallback to restore a closed / evicted session.
     ro = sub.add_parser(

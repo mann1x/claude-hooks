@@ -1046,6 +1046,49 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             "consultancy": _consultancy_dict(root),
         }
 
+    # ----------------------- grant ------------------------------ #
+    # Consultancy review loop: bank extra followups on the consultancy
+    # when the user raises the cap ("add another 6"), without issuing a
+    # followup. The grant is the same one-off, never-persisted-to-config
+    # allowance a follow-up's ``allow_extra`` carries; it lands on the
+    # chain root so every later follow-up in the chain sees it. An
+    # ``awaiting_approval`` consultancy the grant lifts back under the
+    # cap returns to ``ready_to_review``.
+    @app.post("/v1/consult/{sid}/grant")
+    def grant(sid: str, body: Optional[dict] = None) -> dict:
+        body = body or {}
+        cwd_hint = body.get("cwd")
+        root = _resolve_consultancy_root(app, sid, cwd_hint)
+        if root is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"consultancy not found for sid {sid}; provide "
+                       "cwd to load it from disk artifacts.",
+            )
+        raw = body.get("allow_extra")
+        if raw is None:
+            raw = cc.load_config(Path(root.cwd)).allow_extra
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+            raise HTTPException(
+                status_code=400,
+                detail="allow_extra must be an integer >= 1",
+            )
+        if storage.read_consultancy(Path(root.cwd), root.sid) is None:
+            root.max_followups = cc.load_config(Path(root.cwd)).max_followups
+        root.extra_granted += raw
+        if root.consultancy_status == CONSULTANCY_AWAITING and \
+                root.followup_count < root.max_followups + root.extra_granted:
+            root.consultancy_status = CONSULTANCY_READY
+        root.bump_activity()
+        _persist_consultancy(root)
+        return {
+            "ok": True,
+            "sid": sid,
+            "root_sid": root.sid,
+            "granted": raw,
+            "consultancy": _consultancy_dict(root),
+        }
+
     # ----------------------- close ------------------------------- #
     @app.post("/v1/consult/{sid}/close")
     def close(sid: str) -> dict:
