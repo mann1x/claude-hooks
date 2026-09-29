@@ -28,6 +28,17 @@ release with the auto-generated source archive
   defaults to the configured `allow_extra`. The skill gains a `grant`
   verb and runs it as soon as the user raises the limit.
 
+### Fixed
+
+- **`scripts/deploy.py` no longer kills running councils.** Restarting
+  the consultants engine killed any council in flight, leaving no result
+  and nothing `reopen` could rebuild; on 2026-09-29 it cost another
+  session's xhigh consultancy. With a council running, deploy now leaves
+  the engine on the old code and fails, naming the runs.
+  `--wait-for-councils SECONDS` waits for them (re-asking every 30 s),
+  `--kill-councils` restarts anyway, and `--dry-run` shows what would
+  block.
+
 ## [1.19.0] — 2026-09-29
 
 ### Added

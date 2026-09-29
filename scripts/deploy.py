@@ -45,7 +45,11 @@ What it does, in order:
    then re-ensure the daemon-managed embedder, which the daemon restart
    takes down with it and nothing brings back until the next local
    embedding request (a LAN client cannot make one — it does not
-   supervise the process).
+   supervise the process). The consultants engine is not restarted
+   while a council is running on it: a restart kills the run with
+   nothing left to resume from. The deploy waits for it
+   (``--wait-for-councils``), or leaves the engine on the old code and
+   fails, or kills the run only when told to (``--kill-councils``).
 6. **Verify** — run ``verify_deploy.py`` and adopt its exit code.
 
 Usage::
@@ -53,6 +57,7 @@ Usage::
     scripts/deploy.py                # full deploy
     scripts/deploy.py --dry-run      # show every action, change nothing
     scripts/deploy.py --skip-restart # everything except service restarts
+    scripts/deploy.py --wait-for-councils 3600  # let running councils finish
 
 Exit code: 0 only if every step succeeded and verification passed.
 """
@@ -64,6 +69,8 @@ import os
 import shutil
 import subprocess
 import sys
+import time
+import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -358,7 +365,93 @@ def _repo_units() -> list[tuple[str, str]]:
     return out
 
 
-def step_services(dry: bool, skip: bool) -> Step:
+def _is_consultants_unit(unit: str, scope: str) -> bool:
+    """Whether the unit runs the consultants engine (``consultants.server``)."""
+    d = (Path("/etc/systemd/system") if scope == "system"
+         else Path(os.path.expanduser("~/.config/systemd/user")))
+    try:
+        body = (d / unit).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "consultants" in unit
+    return "consultants.server" in body
+
+
+def _consultants_endpoint() -> str:
+    """The engine's own address — never the smart-start forwarder, which
+    would answer for an engine it may have to spawn."""
+    port = 38095
+    try:
+        sys.path.insert(0, str(REPO))
+        from consultants import config as cc
+        port = int(cc.load_config(Path.home()).service.http_port)
+    except Exception:
+        pass
+    return f"http://127.0.0.1:{port}"
+
+
+def _running_councils(endpoint: str) -> list[dict] | None:
+    """Councils in flight on the engine, or ``None`` when it does not
+    answer. A paused or tool-waiting council is still ``running``."""
+    try:
+        with urllib.request.urlopen(f"{endpoint}/v1/sessions/open",
+                                    timeout=5) as r:
+            body = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+    return [e for e in body.get("open_sessions") or []
+            if e.get("status") == "running"]
+
+
+def _describe(councils: list[dict]) -> str:
+    now = time.time()
+    out = []
+    for c in councils:
+        mins = (now - float(c.get("started_at") or now)) / 60
+        q = " ".join(str(c.get("question") or "").split())[:60]
+        out.append(f"{c.get('sid')} ({c.get('effort')}, {mins:.0f} min): {q}")
+    return "; ".join(out)
+
+
+def _councils_clear(s: Step, unit: str, scope: str, wait: float,
+                    kill: bool, poll: float = 30.0) -> bool:
+    """Whether the consultants engine may be restarted now.
+
+    Re-asks the engine on every poll: a council that finishes, and one
+    that starts while we wait, both change the answer.
+    """
+    endpoint = _consultants_endpoint()
+    deadline = time.monotonic() + max(0.0, wait)
+    announced = False
+    while True:
+        running = _running_councils(endpoint)
+        if running is None:
+            # An engine that cannot answer cannot be serving a run
+            # anyone can collect; restarting it is the repair.
+            s.note(f"{unit} ({scope}) — engine at {endpoint} did not "
+                   "answer; restarting it")
+            return True
+        if not running:
+            return True
+        if kill:
+            s.note(f"{unit} ({scope}) — --kill-councils: killing "
+                   f"{len(running)} running council(s): {_describe(running)}")
+            return True
+        left = deadline - time.monotonic()
+        if left <= 0:
+            s.fail(f"{unit} ({scope}) NOT restarted, still on the old code: "
+                   f"{len(running)} council(s) running — {_describe(running)}. "
+                   "Re-run with --wait-for-councils SECONDS once they are "
+                   "near done, or --kill-councils to lose them.")
+            return False
+        if not announced:
+            s.note(f"{unit} ({scope}) — waiting up to {wait:.0f} s for "
+                   f"{len(running)} council(s): {_describe(running)}")
+            announced = True
+        time.sleep(min(poll, left))
+
+
+def step_services(dry: bool, skip: bool, council_wait: float = 0.0,
+                  kill_councils: bool = False) -> Step:
     s = Step("services")
     print("\n[5/6] services")
     if skip:
@@ -383,6 +476,21 @@ def step_services(dry: bool, skip: bool) -> Step:
         if not active:
             s.note(f"{unit} ({scope}) — not running, skipped")
             continue
+        if _is_consultants_unit(unit, scope):
+            if dry:
+                running = _running_councils(_consultants_endpoint())
+                if running and not kill_councils:
+                    what = (f"would wait up to {council_wait:.0f} s, then "
+                            "leave it on the old code and fail"
+                            if council_wait > 0 else
+                            "would NOT restart it and would fail")
+                    s.note(f"[dry-run] {unit} ({scope}) — "
+                           f"{len(running)} council(s) running "
+                           f"({_describe(running)}): {what}")
+                    continue
+            elif not _councils_clear(s, unit, scope, council_wait,
+                                     kill_councils):
+                continue
         if dry:
             s.note(f"[dry-run] would restart {unit} ({scope})")
             continue
@@ -540,6 +648,15 @@ def main() -> int:
                     help="print every action, change nothing")
     ap.add_argument("--skip-restart", action="store_true",
                     help="everything except service restarts")
+    ap.add_argument("--wait-for-councils", type=float, default=0.0,
+                    metavar="SECONDS",
+                    help="wait this long for running consultants councils "
+                         "to finish before restarting the engine (default: "
+                         "don't wait; leave the engine on the old code and "
+                         "fail)")
+    ap.add_argument("--kill-councils", action="store_true",
+                    help="restart the consultants engine even though "
+                         "councils are running on it (they are lost)")
     ap.add_argument("--env", default=None,
                     help="limit the pip refresh to envs matching this string")
     a = ap.parse_args()
@@ -552,7 +669,8 @@ def main() -> int:
         step_packages(a.dry_run, a.env),
         step_skills(a.dry_run),
         step_episodic(a.dry_run),
-        step_services(a.dry_run, a.skip_restart),
+        step_services(a.dry_run, a.skip_restart, a.wait_for_councils,
+                      a.kill_councils),
     ]
     # Verification only means something once the rest actually ran.
     if all(s.ok for s in steps):

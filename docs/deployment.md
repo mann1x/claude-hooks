@@ -138,6 +138,23 @@ Code reads it at session start), so it drifted for ten weeks without a
 single error. **Restart the Claude Code session after a skill change**;
 a running session keeps the copy it loaded at start.
 
+**Running councils hold the consultants engine.** A restart kills a
+council mid-run with nothing left to resume from — status 404, a
+`transcript.db` and no result — and the session waiting on it learns
+nothing. So when the engine has a council running, `deploy.py` does not
+restart it: it names the runs, leaves the engine on the old code, and
+fails the deploy. The other units are restarted as usual.
+
+```bash
+python scripts/deploy.py --wait-for-councils 3600  # re-ask every 30 s, restart once none run
+python scripts/deploy.py --kill-councils           # restart anyway; the runs are lost
+```
+
+`--dry-run` shows which councils would block. An engine that does not
+answer is restarted, since it cannot be serving anyone. Hosts without a
+consultants unit (pandorum runs the smart-start forwarder) are not
+affected.
+
 ### Verify
 
 Run the post-deploy check on **every** host you deployed to (`deploy.py`

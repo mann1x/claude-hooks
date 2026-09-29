@@ -536,3 +536,85 @@ class TestSkillsInRepoAreWellFormed(unittest.TestCase):
                 m.group(1).strip('"\''), src.parent.name,
                 f"{src.parent.name}: frontmatter name is {m.group(1)!r}",
             )
+
+
+class TestRunningCouncilGate(unittest.TestCase):
+    """A deploy must not restart the consultants engine under a running
+    council. On 2026-09-29 one did: an xhigh council another session
+    was waiting on died mid-run, leaving no result and nothing ``reopen``
+    could rebuild — status 404, a transcript.db and nothing else."""
+
+    RUN = [{"sid": "csl-x", "status": "running", "effort": "xhigh",
+            "started_at": 0, "question": "q"}]
+
+    def _mod(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_deploy_gate", DEPLOY)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _clear(self, answers, *, wait=0.0, kill=False):
+        mod = self._mod()
+        s = mod.Step("services")
+        seq = iter(answers)
+        with patch.object(mod, "_running_councils",
+                          side_effect=lambda _e: next(seq)), \
+             patch.object(mod, "_consultants_endpoint", return_value="e"), \
+             patch.object(mod.time, "sleep"):
+            ok = mod._councils_clear(s, "u", "user", wait, kill, poll=0)
+        return ok, s
+
+    def test_the_restart_loop_goes_through_the_gate(self):
+        src = _src(DEPLOY)
+        body = src[src.index("def step_services"):]
+        self.assertLess(body.index("_councils_clear("),
+                        body.index('["restart", unit]'))
+        self.assertIn("--wait-for-councils", src)
+        self.assertIn("--kill-councils", src)
+
+    def test_no_council_running_restarts(self):
+        ok, s = self._clear([[]])
+        self.assertTrue(ok)
+        self.assertTrue(s.ok)
+
+    def test_an_engine_that_does_not_answer_is_restarted(self):
+        ok, s = self._clear([None])
+        self.assertTrue(ok)
+        self.assertTrue(s.ok)
+
+    def test_a_running_council_is_not_killed_and_the_deploy_fails(self):
+        ok, s = self._clear([self.RUN])
+        self.assertFalse(ok)
+        self.assertFalse(s.ok, "an engine left on old code is not a clean deploy")
+        self.assertTrue(any("csl-x" in n for n in s.notes))
+
+    def test_waiting_re_asks_until_the_council_finishes(self):
+        ok, s = self._clear([self.RUN, self.RUN, []], wait=3600)
+        self.assertTrue(ok)
+        self.assertTrue(s.ok)
+
+    def test_kill_councils_restarts_and_says_what_it_killed(self):
+        ok, s = self._clear([self.RUN], kill=True)
+        self.assertTrue(ok)
+        self.assertTrue(any("csl-x" in n for n in s.notes))
+
+    def test_only_running_sessions_count(self):
+        mod = self._mod()
+
+        class R:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                import json
+                return json.dumps({"open_sessions": [
+                    {"sid": "a", "status": "completed"},
+                    {"sid": "b", "status": "running"}]}).encode()
+
+        with patch.object(mod.urllib.request, "urlopen", return_value=R()):
+            self.assertEqual([c["sid"] for c in mod._running_councils("e")],
+                             ["b"])
