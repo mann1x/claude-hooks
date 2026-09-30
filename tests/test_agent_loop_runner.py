@@ -490,3 +490,45 @@ class TestCallbacks:
         # error column populated, output empty
         assert "network error" in events[0][4]
         assert events[0][2] == ""
+
+
+class TestPreparePayload:
+    """``prepare_payload`` runs before every call and sees the history as
+    it is at that call, not as it was when the loop started."""
+
+    def _run(self, prepare, responses):
+        sent: list[dict] = []
+
+        def chat(p):
+            sent.append({"n_messages": len(p["messages"]),
+                         "options": dict(p.get("options") or {})})
+            return responses.pop(0)
+
+        runner.run_loop(
+            {"model": "m", "messages": [{"role": "user", "content": "go"}]},
+            cwd="/tmp",
+            config=runner.LoopConfig(force_first_tool_call=False,
+                                     prepare_payload=prepare),
+            tool_specs=TOOL_SPECS,
+            chat_fn=chat,
+            tool_executor=lambda n, a, c: "tool-output",
+        )
+        return sent
+
+    def test_runs_before_every_call_on_the_current_history(self):
+        seen: list[int] = []
+
+        def prepare(p):
+            seen.append(len(p["messages"]))
+            p["options"] = {"num_predict": 100 + len(seen)}
+
+        sent = self._run(prepare, [_tool("echo"), _stop("done")])
+        assert seen == [1, 3], "question; then + the call and its result"
+        assert [s["options"]["num_predict"] for s in sent] == [101, 102]
+
+    def test_a_failing_preparer_does_not_stop_the_call(self):
+        def prepare(p):
+            raise RuntimeError("probe exploded")
+
+        sent = self._run(prepare, [_stop("done")])
+        assert len(sent) == 1

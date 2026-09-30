@@ -137,6 +137,11 @@ class CouncilState(TypedDict, total=False):
     # so partial updates (e.g. ``{"max_rounds": 5}``) don't clobber
     # the rest. Same reducer as state_v2.merge_runtime_control.
     runtime_control: Annotated[dict, "merge_runtime_control"]
+    # M7: critic / meta-critic / self-critic scores, append-only; the
+    # xauto escalator reads the latest. Declared 2026-09-30 — it had
+    # lived in CouncilStateV2 only, so every score a node returned was
+    # stripped here and the low_confidence signal could never fire.
+    confidence: Annotated[list, operator.add]
     # M5: append-only injected context, hash-deduped by reducer.
     additional_context: Annotated[list["Doc"], "append_doc"]
     # M6: append-only across re-routes / parallel researcher lanes.

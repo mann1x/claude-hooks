@@ -86,6 +86,14 @@ class LoopConfig:
     # guard, which is the correct handling for half-written arguments.
     max_answer_continuations: int = 2
 
+    # Called with the payload before every chat_fn call in the loop, and
+    # may rewrite it in place (compact ``messages``, size
+    # ``options.num_predict``). The history grows by a tool result per
+    # iteration, so a budget computed once before the loop is wrong by
+    # the second call. Exceptions are logged and the call goes ahead
+    # unprepared. None = no preparation (caliber / advisor behavior).
+    prepare_payload: Optional[Callable[[dict], None]] = None
+
 
 # Type aliases.
 ToolExecutor = Callable[[str, str, str], str]
@@ -456,6 +464,12 @@ def run_loop(
                 payload["tool_choice"] = "required"
             else:
                 payload["tool_choice"] = "auto"
+        if config.prepare_payload is not None:
+            try:
+                config.prepare_payload(payload)
+            except Exception:
+                log.exception("prepare_payload raised on iter %d; sending "
+                              "the payload unprepared", i)
         t_iter = time.monotonic()
         final = chat_fn(payload)
         iter_ms = int((time.monotonic() - t_iter) * 1000)

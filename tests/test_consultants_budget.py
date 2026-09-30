@@ -1,6 +1,7 @@
 """Output budget + context-window planning — consultants/engine/budget.py."""
 
 import unittest
+import unittest.mock
 
 from consultants.engine import budget
 
@@ -148,6 +149,29 @@ class TestCompaction(unittest.TestCase):
         self.assertEqual(out[0]["content"], "rule one")
         self.assertEqual(out[1]["content"], "rule two")
 
+    def test_a_tool_result_never_outlives_its_call(self):
+        """An odd ``keep_recent`` over call/result pairs used to open the
+        tail on a ``tool`` message whose assistant ``tool_calls`` had been
+        elided — a reply to nothing, which OpenAI-compatible backends
+        reject."""
+        msgs = [{"role": "system", "content": "you are a researcher"},
+                {"role": "user", "content": "the original question"}]
+        for i in range(10):
+            msgs.append({"role": "assistant", "content": "",
+                         "tool_calls": [{"id": f"c{i}", "type": "function",
+                                         "function": {"name": "read_file",
+                                                      "arguments": "{}"}}]})
+            msgs.append({"role": "tool", "tool_call_id": f"c{i}",
+                         "content": f"line {i} " * 6000})
+        out, changed = budget.compact_messages(msgs, keep_tokens=20000,
+                                               keep_recent=3)
+        self.assertTrue(changed)
+        for prev, cur in zip(out, out[1:]):
+            if cur.get("role") == "tool":
+                self.assertIn(prev.get("role"), ("assistant", "tool"))
+                if prev.get("role") == "assistant":
+                    self.assertTrue(prev.get("tool_calls"))
+
     def test_nothing_to_drop_returns_unchanged(self):
         """Head plus tail already covers the whole list — there is no
         middle to elide, and inventing one would delete live state."""
@@ -167,3 +191,52 @@ class TestCompaction(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestToolLoopBudget(unittest.TestCase):
+    """The tool loops size every call, as the single-shot path does."""
+
+    def test_budgeter_sets_num_predict_and_keeps_options(self):
+        from consultants.engine import council
+        prepare = council._loop_payload_budgeter(_Client(262144), "m",
+                                                 role="researcher")
+        payload = {"messages": [{"role": "user", "content": "q"}],
+                   "options": {"num_ctx": 8192}}
+        prepare(payload)
+        self.assertEqual(payload["options"]["num_ctx"], 8192)
+        self.assertGreater(payload["options"]["num_predict"], 0)
+
+    def test_budgeter_compacts_a_history_that_outgrew_the_window(self):
+        from consultants.engine import council
+        prepare = council._loop_payload_budgeter(_Client(32768), "m")
+        msgs = [{"role": "system", "content": "s"},
+                {"role": "user", "content": "q"}]
+        msgs += [{"role": "assistant", "content": f"n{i} " * 4000}
+                 for i in range(20)]
+        payload = {"messages": list(msgs)}
+        with unittest.mock.patch(
+                "consultants.engine.retrospective.write",
+                side_effect=RuntimeError("no digest in tests")):
+            prepare(payload)
+        self.assertLess(len(payload["messages"]), len(msgs))
+
+    def test_role_tool_loop_is_handed_the_budgeter(self):
+        from consultants.engine import council
+        seen = {}
+
+        def fake_loop(payload, cwd, *, config, **kw):
+            seen["prepare"] = config.prepare_payload
+            return {"choices": [{"message": {"role": "assistant",
+                                             "content": "verdict"},
+                                 "finish_reason": "stop"}]}
+
+        class _ChatClient(_Client):
+            def chat(self, payload):  # pragma: no cover — loop is faked
+                raise AssertionError("the fake loop never calls chat")
+
+        council._role_turn(
+            _ChatClient(), "m", [{"role": "user", "content": "q"}],
+            role="critic", tool_specs=[{"type": "function",
+                                        "function": {"name": "read_file"}}],
+            tool_executor=lambda *a: "", loop_runner=fake_loop)
+        self.assertTrue(callable(seen["prepare"]))

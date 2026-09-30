@@ -75,6 +75,14 @@ DEFAULT_TOPOLOGY = "council"
 VALID_TOPOLOGIES: tuple[str, ...] = ("council",)  # roundtable / freeform later
 
 DEFAULT_EFFORT = "medium"
+# The registry of valid effort tiers (its keys drive every --effort
+# choice list and the HTTP validation). The VALUES are display-only:
+# they surface as ``effort_budget`` in ``config show`` and nothing
+# enforces them. The follow-up cap is the flat ``max_followups``
+# (v1.12, default 4) and round / reroute caps come from
+# ``council.EFFORT_CAPS`` + ``control.EFFORT_ROUND_CAPS``. Comments
+# below that call a value a "follow-up budget" describe the pre-v1.12
+# design.
 EFFORT_BUDGETS: dict[str, int] = {
     "low": 1,
     "medium": 3,

@@ -17,37 +17,48 @@ from consultants.engine.council import route_after_critic
 
 
 class TestTimeTargetFor(unittest.TestCase):
+    """Re-calibrated 2026-09-30 against 279 completed consultations: the
+    hard deadline sits above what a healthy council takes (it only
+    refuses further research rounds)."""
 
     def test_low_no_fanout(self):
         soft, hard = control.time_target_for("low", 0)
-        self.assertEqual(soft, 60.0)
-        self.assertEqual(hard, 180.0)   # × 3.0
+        self.assertEqual(soft, 400.0)
+        self.assertEqual(hard, 1200.0)   # × 3.0 = 20 min
 
     def test_medium_no_fanout(self):
         soft, hard = control.time_target_for("medium", 0)
-        self.assertEqual(soft, 180.0)
-        self.assertEqual(hard, 540.0)
+        self.assertEqual(soft, 400.0)
+        self.assertEqual(hard, 1200.0)
 
     def test_xhigh_with_two_extras(self):
-        # 600 + 2 × 180 = 960 soft, × 3 = 2880 hard.
+        # 1200 + 2 × 200 = 1600 soft, × 3 = 4800 hard.
         soft, hard = control.time_target_for("xhigh", 2)
-        self.assertEqual(soft, 960.0)
-        self.assertEqual(hard, 2880.0)
+        self.assertEqual(soft, 1600.0)
+        self.assertEqual(hard, 4800.0)
 
     def test_xauto_uses_wider_hard_multiplier(self):
         soft, hard = control.time_target_for("xauto", 0)
-        self.assertEqual(soft, 720.0)
-        self.assertEqual(hard, 720.0 * 4.0)   # 4× not 3×
+        self.assertEqual(soft, 900.0)
+        self.assertEqual(hard, 900.0 * 4.0)   # 4× not 3×
 
     def test_unknown_effort_falls_back_to_medium(self):
         soft, hard = control.time_target_for("bogus", 0)
-        self.assertEqual(soft, 180.0)
-        self.assertEqual(hard, 540.0)
+        self.assertEqual(soft, 400.0)
+        self.assertEqual(hard, 1200.0)
 
     def test_negative_extras_clamped_to_zero(self):
         soft, hard = control.time_target_for("xhigh", -5)
-        # 600 + 0 × 180 = 600.
-        self.assertEqual(soft, 600.0)
+        self.assertEqual(soft, 1200.0)
+
+    def test_hard_deadlines_clear_measured_p90(self):
+        """Measured p90 of completed consultations (2026-09-30): medium
+        9.3 min, high 32.2, xhigh 41.6. A deadline below that cuts
+        healthy councils short."""
+        for effort, p90_s in (("medium", 9.3 * 60), ("high", 32.2 * 60),
+                              ("xhigh", 41.6 * 60)):
+            _soft, hard = control.time_target_for(effort, 0)
+            self.assertGreater(hard, p90_s * 1.2, effort)
 
 
 class TestRuntimeControlDefaults(unittest.TestCase):
@@ -59,14 +70,16 @@ class TestRuntimeControlDefaults(unittest.TestCase):
         rc = control.runtime_control_defaults(
             self._cfg(), effort="medium", now_ts=1000.0,
         )
-        self.assertEqual(rc["soft_target_ts"], 1180.0)   # +180
-        self.assertEqual(rc["deadline_ts"], 1540.0)      # +540
-        self.assertEqual(rc["per_lane_hard_s"], 3600.0)
+        self.assertEqual(rc["soft_target_ts"], 1400.0)   # +400
+        self.assertEqual(rc["deadline_ts"], 2200.0)      # +1200
+        # Resolved per model by the researcher; present only as an
+        # operator override (POST /control).
+        self.assertNotIn("per_lane_hard_s", rc)
+        self.assertNotIn("stall_threshold_s", rc)
         self.assertEqual(rc["max_rounds"], 1)
         self.assertEqual(rc["max_reroutes"], 1)
         self.assertEqual(rc["confidence_target"], 0.7)
         self.assertEqual(rc["critic_strictness"], "normal")
-        self.assertEqual(rc["stall_threshold_s"], 300.0)
         self.assertEqual(rc["stall_retries"], 1)
         self.assertEqual(rc["tool_permissions"], {})
         self.assertEqual(rc["xauto_escalations"], 0)
@@ -76,8 +89,8 @@ class TestRuntimeControlDefaults(unittest.TestCase):
             self._cfg(), effort="xauto", now_ts=1000.0,
         )
         self.assertEqual(rc["xauto_tier"], "xmedium")
-        # xauto uses the wider 4× multiplier:  720 × 4 = 2880.
-        self.assertEqual(rc["deadline_ts"], 1000.0 + 2880.0)
+        # xauto uses the wider 4× multiplier:  900 × 4 = 3600.
+        self.assertEqual(rc["deadline_ts"], 1000.0 + 3600.0)
         # Starts modest — escalator advances.
         self.assertEqual(rc["max_rounds"], 1)
         self.assertEqual(rc["max_reroutes"], 1)
@@ -87,9 +100,9 @@ class TestRuntimeControlDefaults(unittest.TestCase):
             self._cfg(), effort="xhigh",
             n_fanout_extras=2, now_ts=0.0,
         )
-        # 600 + 2 × 180 = 960 soft; × 3 = 2880 hard.
-        self.assertEqual(rc["soft_target_ts"], 960.0)
-        self.assertEqual(rc["deadline_ts"], 2880.0)
+        # 1200 + 2 × 200 = 1600 soft; × 3 = 4800 hard.
+        self.assertEqual(rc["soft_target_ts"], 1600.0)
+        self.assertEqual(rc["deadline_ts"], 4800.0)
         self.assertEqual(rc["xauto_tier"], "xhigh")
         self.assertEqual(rc["max_rounds"], 3)
         self.assertEqual(rc["max_reroutes"], 2)

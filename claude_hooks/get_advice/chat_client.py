@@ -183,6 +183,10 @@ def _context_length_from_show(data: dict) -> Optional[int]:
 
 
 #: Where a model's thinking-budget message can be declared. Ollama
+#: Message fields a streamed response carries reasoning under. Each chunk
+#: holds a delta, so these are concatenated rather than overwritten.
+_STREAMED_REASONING_KEYS = ("thinking", "reasoning", "reasoning_content")
+
 #: surfaces a Modelfile's parameters under several shapes depending on
 #: build, so all of them are checked rather than guessed between.
 _BUDGET_MESSAGE_KEYS = (
@@ -799,19 +803,32 @@ class ChatClient:
                 delta = msg.get("content") or ""
                 if delta:
                     content_parts.append(delta)
-                    if on_token is not None:
-                        try:
-                            on_token(delta)
-                        except Exception:  # pragma: no cover
-                            log.exception("on_token raised; ignored")
                 tcs = msg.get("tool_calls")
                 if tcs:
                     tool_calls.extend(tcs)
-                # Carry forward any extra fields the model emitted
-                # (e.g. thinking content).
+                # Reasoning streams in deltas exactly like content, so it
+                # is accumulated the same way; other extra fields keep
+                # their last value.
+                reasoned = False
                 for k, v in msg.items():
-                    if k not in ("role", "content", "tool_calls"):
+                    if k in ("role", "content", "tool_calls"):
+                        continue
+                    if k in _STREAMED_REASONING_KEYS and isinstance(v, str):
+                        if v:
+                            last_msg_extra[k] = last_msg_extra.get(k, "") + v
+                            reasoned = True
+                    else:
                         last_msg_extra[k] = v
+                # ``on_token`` is the caller's liveness signal (the stall
+                # monitor's only one). A reasoning model can think for
+                # minutes before its first content token, and a tool-call
+                # turn may carry no content at all — both are a working
+                # model, not a silent one.
+                if on_token is not None and (delta or tcs or reasoned):
+                    try:
+                        on_token(delta)
+                    except Exception:  # pragma: no cover
+                        log.exception("on_token raised; ignored")
             # Final record fields land on done=true.
             if obj.get("done"):
                 for k in ("prompt_eval_count", "eval_count",

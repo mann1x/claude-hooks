@@ -27,8 +27,53 @@ release with the auto-generated source archive
   `awaiting_approval` consultancy back to `ready_to_review`, and
   defaults to the configured `allow_extra`. The skill gains a `grant`
   verb and runs it as soon as the user raises the limit.
+- **Consultants shared read cache.** Within one run, results of
+  `survey_project` / `list_files` / `read_file` / `glob` / `grep` are
+  shared across fan-out lanes:
+  - identical concurrent calls execute once;
+  - `read_file` is keyed on size + mtime;
+  - an effectful tool clears the cache;
+  - errors are not kept.
+
+  Code: `consultants/server/tool_cache.py`.
 
 ### Fixed
+
+- **The consultants run-time safeguards were never switched on.** The
+  stall monitor, the deadline, the live round / reroute caps and the
+  xauto escalator all read `state["runtime_control"]`. Nothing seeded
+  that record, and every reader treats it as "not configured". Both
+  runners now seed it. Before seeding, the values were rechecked
+  against production data:
+  - The hard deadlines sat at or below p90 of 279 completed councils,
+    so they are now 20 / 60 / 90 min for medium / high / max, plus
+    extra time per fan-out model.
+  - The stall thresholds were benchmarked on toy questions and are too
+    tight for real calls. They now come from 6,055 production calls
+    (`stall_defaults.runtime_stall_thresholds`); `POST /control` still
+    overrides them.
+- **Reasoning counts as progress in `chat_streamed`.** Minutes of
+  thinking before the first content token no longer read as a stall.
+  Reasoning deltas are also concatenated; previously only the last
+  chunk was kept.
+- **xauto can escalate.** The runners dropped its critic, because xauto
+  starts on the medium base, and the escalator is wired only when a
+  critic is present. The production `CouncilState` also never declared
+  `confidence`, so every critic and synthesizer score was stripped.
+  Both are fixed.
+- **Tool loops size every call.** The researcher and tooled-role loops
+  sent no `num_predict` and never compacted a growing history.
+  `LoopConfig.prepare_payload` now re-plans each iteration, the same
+  way single-shot calls are planned.
+- **Compaction keeps each tool result with its call.** Previously the
+  kept tail could open on a `tool` message whose assistant `tool_calls`
+  had been elided, and OpenAI-compatible backends reject that.
+- Docs:
+  - `docs/consultants-roles.md` said the critic runs at medium effort
+    and that a self-critic replaces it at low / medium. Neither is true.
+  - It also said the stall detector truncates tool-spin, which it
+    cannot do.
+  - `EFFORT_BUDGETS` values are now documented as display-only.
 
 - **`scripts/deploy.py` no longer kills running councils.** Restarting
   the consultants engine killed any council in flight, leaving no result

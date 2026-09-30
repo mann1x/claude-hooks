@@ -208,6 +208,42 @@ class TestStallThresholdsDataclass(unittest.TestCase):
         self.assertEqual(a, b)
 
 
+class TestRuntimeStallThresholds(unittest.TestCase):
+    """What the engine applies: the bench table is a record of small-
+    prompt calls, so its stall threshold is floored for large prompts
+    and the hard cap comes from production latency."""
+
+    def test_fast_bench_model_gets_the_floor_and_production_cap(self):
+        t = sd.runtime_stall_thresholds("gemma4:31b-cloud")
+        self.assertEqual(t.stall_threshold_s, sd.PRODUCTION_STALL_FLOOR_S)
+        self.assertEqual(t.hard_cap_s, 780.0)
+
+    def test_bench_threshold_above_the_floor_is_kept(self):
+        self.assertEqual(
+            sd.runtime_stall_thresholds("kimi-k2.6:cloud").stall_threshold_s,
+            390.0)
+
+    def test_no_production_data_keeps_the_global_hard_cap(self):
+        """kimi's bench cap (540 s) came from 4 toy questions; applied
+        per call it would kill real long researcher calls."""
+        self.assertEqual(
+            sd.runtime_stall_thresholds("kimi-k2.6:cloud").hard_cap_s,
+            sd.RECOMMENDED_DEFAULT_STALL.hard_cap_s)
+
+    def test_unknown_model(self):
+        t = sd.runtime_stall_thresholds("no-such-model:cloud")
+        self.assertEqual((t.stall_threshold_s, t.hard_cap_s),
+                         (300.0, 3600.0))
+        self.assertEqual(sd.runtime_stall_thresholds(None), t)
+
+    def test_production_caps_never_tighten_the_bench(self):
+        for model, cap in sd.PRODUCTION_HARD_CAPS_BY_MODEL.items():
+            bench = sd.RECOMMENDED_STALL_THRESHOLDS_BY_MODEL.get(model)
+            if bench is not None:
+                self.assertGreaterEqual(cap, bench.hard_cap_s, model)
+            self.assertGreaterEqual(cap, 300.0, model)
+
+
 class TestStallDefaultsPublicSurface(unittest.TestCase):
     """``__all__`` is the documented contract — drift on either
     side is a behavior change.
@@ -223,6 +259,9 @@ class TestStallDefaultsPublicSurface(unittest.TestCase):
             "RECOMMENDED_DEFAULT_STALL",
             "RECOMMENDED_STALL_THRESHOLDS_BY_MODEL",
             "resolve_stall_thresholds",
+            "PRODUCTION_HARD_CAPS_BY_MODEL",
+            "PRODUCTION_STALL_FLOOR_S",
+            "runtime_stall_thresholds",
         }
         self.assertEqual(set(sd.__all__), expected)
 

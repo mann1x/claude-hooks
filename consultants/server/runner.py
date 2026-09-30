@@ -113,7 +113,13 @@ def make_runner(*, ollama_base_url: str):
         # max / xhigh / xmax keep it. cc.base_effort strips the
         # x-prefix so we make one decision per base tier and let
         # x-tiers inherit.
+        # xauto is the exception: it starts on the medium base, but
+        # its escalator is wired only when a critic is (graph.py
+        # ``use_escalator``) and three of its four signals are the
+        # critic's. Dropping the critic there made xauto a plain
+        # xmedium run that could never grow.
         if cc.base_effort(cfg.effort) in ("low", "medium") \
+                and cfg.effort != "xauto" \
                 and "critic" in enabled:
             enabled = tuple(r for r in enabled if r != "critic")
             log.info(
@@ -404,6 +410,9 @@ def make_runner(*, ollama_base_url: str):
         # alone when this key is absent.
         if extra_roots:
             initial["extra_roots"] = list(extra_roots)
+        initial["runtime_control"] = _seed_runtime_control(
+            cfg, enabled,
+            n_fanout_extras=len(extra_models_by_role.get("researcher", [])))
         if enabled:
             state.progress[enabled[0]] = "in_progress"
 
@@ -627,7 +636,10 @@ def make_follow_up_runner(*, ollama_base_url: str):
         # included critic but the follow-up topology decides
         # independently based on this follow-up's effort.
         enabled = ["researcher", "synthesizer"]
-        if cc.base_effort(cfg.effort) in ("high", "max") \
+        # xauto keeps it too: its escalator exists only when a critic
+        # does (see the main runner).
+        if (cc.base_effort(cfg.effort) in ("high", "max")
+                or cfg.effort == "xauto") \
                 and "critic" in cc.enabled_roles(cfg):
             enabled = ["researcher", "critic", "synthesizer"]
         enabled_t = tuple(enabled)
@@ -927,6 +939,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
         # merged parent+followup allowed-roots set.
         if extra_roots:
             initial["extra_roots"] = list(extra_roots)
+        initial["runtime_control"] = _seed_runtime_control(cfg, enabled_t)
         initial["plan"] = (
             parent_state.plan
             if parent_state is not None and parent_state.plan
@@ -1412,6 +1425,24 @@ def _await_adversary_checkpoint(*, state, final_state, recorder, timeout_s,
     log.info("%s: adversary checkpoint closed (sid=%s acked=%s)",
              log_label, state.sid, acked)
     return acked
+
+
+def _seed_runtime_control(cfg, enabled, *, n_fanout_extras: int = 0) -> dict:
+    """The run's boot-time ``runtime_control``.
+
+    Until 2026-09-30 nothing seeded it, and every consumer treats an
+    absent record as "not configured": the researcher's stall monitor
+    never wrapped a call, the deadline never fired and POST /control
+    mutated caps no node had been started with. ``enabled_roles`` is the
+    roles this run actually has — the runner drops the critic below high
+    effort, and the config-derived default would quietly put it back for
+    any reader that consults the live record.
+    """
+    from consultants.engine.control import runtime_control_defaults
+    rc = runtime_control_defaults(cfg, effort=cfg.effort,
+                                  n_fanout_extras=n_fanout_extras)
+    rc["enabled_roles"] = list(enabled)
+    return dict(rc)
 
 
 def _drive_council_stream(compiled, initial, thread_config, *,

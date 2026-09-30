@@ -195,6 +195,55 @@ class TestChatStreamedHappyPath(unittest.TestCase):
         self.assertEqual(out["choices"][0]["message"]["content"], "x")
 
 
+class TestChatStreamedReasoning(unittest.TestCase):
+    """A reasoning model thinks for minutes before its first content
+    token. ``on_token`` is the stall monitor's only liveness signal, so
+    reasoning must count as progress, and its deltas must be kept whole
+    rather than reduced to the last chunk."""
+
+    def _thinking_stream(self, parts, *, tool_calls=None):
+        lines = [_ndjson_line(message={"role": "assistant", "content": "",
+                                       "thinking": p}, done=False)
+                 for p in parts]
+        final = {"role": "assistant", "content": ""}
+        if tool_calls:
+            final["tool_calls"] = tool_calls
+        lines.append(_ndjson_line(message=final, done=True,
+                                  prompt_eval_count=3, eval_count=9))
+        return lines
+
+    def test_reasoning_deltas_are_concatenated(self):
+        client = _make_client()
+        with _patched_urlopen([_FakeResponse(
+                self._thinking_stream(["first ", "second ", "third"]))]):
+            out = client.chat_streamed({"model": "stub", "messages": []})
+        self.assertEqual(out["choices"][0]["message"].get("thinking"),
+                         "first second third")
+
+    def test_reasoning_and_tool_calls_count_as_progress(self):
+        client = _make_client()
+        tcs = [{"id": "t", "type": "function",
+                "function": {"name": "read_file", "arguments": {"path": "a"}}}]
+        beats: list[str] = []
+        with _patched_urlopen([_FakeResponse(
+                self._thinking_stream(["x", "y"], tool_calls=tcs))]):
+            client.chat_streamed({"model": "stub", "messages": []},
+                                 on_token=beats.append)
+        self.assertEqual(len(beats), 3, "two reasoning chunks + the tool call")
+
+    def test_an_empty_chunk_is_not_progress(self):
+        client = _make_client()
+        lines = [_ndjson_line(message={"role": "assistant", "content": ""},
+                              done=False),
+                 _ndjson_line(message={"role": "assistant", "content": "ok"},
+                              done=True, prompt_eval_count=1, eval_count=1)]
+        beats: list[str] = []
+        with _patched_urlopen([_FakeResponse(lines)]):
+            client.chat_streamed({"model": "stub", "messages": []},
+                                 on_token=beats.append)
+        self.assertEqual(beats, ["ok"])
+
+
 class TestChatStreamedCancellation(unittest.TestCase):
 
     def test_cancel_check_raises_cancelled(self):
