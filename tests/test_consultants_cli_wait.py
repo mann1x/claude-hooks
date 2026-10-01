@@ -125,6 +125,52 @@ class TestWaitForTerminal(unittest.TestCase):
         self.assertIn("still running", str(ctx.exception))
 
 
+class TestWaitAcrossEngineRestart(unittest.TestCase):
+    """The engine suspends running councils on shutdown and the next one
+    resumes them, so a wait must ride out the gap instead of failing on
+    the first refused connection."""
+
+    def _down(self):
+        return CLIError("Could not reach http://b", unreachable=True)
+
+    def test_an_outage_is_retried_and_the_run_collected(self):
+        seq = [{"status": "running"}, self._down(), self._down(),
+               {"status": "suspended"}, {"status": "completed"}]
+
+        def _fake_http(method, url, *, body=None, timeout=600.0):
+            item = seq.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        with mock.patch("consultants.cli._http", side_effect=_fake_http):
+            rec = _wait_for_terminal("http://b", "csl-1", interval=1.0,
+                                     timeout=0.0, sleep_fn=lambda s: None)
+        self.assertEqual(rec["status"], "completed")
+        self.assertEqual(seq, [])
+
+    def test_an_engine_that_stays_down_still_fails(self):
+        clock = {"t": 0.0}
+
+        def _sleep(s):
+            clock["t"] += s
+
+        with mock.patch("consultants.cli._http", side_effect=self._down()):
+            with self.assertRaises(CLIError) as ctx:
+                _wait_for_terminal("http://b", "csl-1", interval=30.0,
+                                   timeout=0.0, sleep_fn=_sleep,
+                                   now_fn=lambda: clock["t"])
+        self.assertTrue(ctx.exception.unreachable)
+        self.assertGreaterEqual(clock["t"], 300.0)
+
+    def test_an_http_error_is_not_retried(self):
+        with mock.patch("consultants.cli._http",
+                        side_effect=CLIError("HTTP 404 from x")):
+            with self.assertRaises(CLIError):
+                _wait_for_terminal("http://b", "csl-1", interval=1.0,
+                                   timeout=0.0, sleep_fn=lambda s: None)
+
+
 # ----------------------- _fetch_result --------------------------- #
 
 class TestFetchResult(unittest.TestCase):

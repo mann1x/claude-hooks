@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 from consultants import config as cc
@@ -54,12 +55,25 @@ def main(argv: list[str] | None = None) -> int:
     # store reaper when ``cfg.store.enabled`` and TTL / distillation
     # are configured. Older callers that don't pass these continue
     # to work — the reaper is opt-in.
+    # ``resume_inflight``: councils the previous engine left unfinished
+    # (suspended at shutdown, or killed) resume under their own sids.
     app = create_app(
         run_council=runner, run_follow_up=follow_up_runner,
         cfg=cfg, ollama_base_url=base_url,
+        resume_inflight=True,
     )
 
-    uvicorn.run(app, host=args.host, port=port, log_config=None)
+    # Open SSE streams must not hold the shutdown; the councils behind
+    # them are suspended by the app's shutdown hook either way.
+    uvicorn.run(app, host=args.host, port=port, log_config=None,
+                timeout_graceful_shutdown=5)
+    if getattr(app.state, "shutdown_unfinished", 0):
+        # Runner threads still inside an LLM call past the grace.
+        # Joining them (the executor's atexit hook would) holds the
+        # process until systemd kills it; their work since the last
+        # checkpoint is re-run on resume anyway.
+        logging.shutdown()
+        os._exit(0)
     return 0
 
 

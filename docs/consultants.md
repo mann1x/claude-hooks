@@ -442,6 +442,45 @@ session start (`runner._seed_runtime_control`).
 
   A follow-up starts with an empty cache.
 
+### Engine restarts — councils are suspended and resumed
+
+Since 2026-10-01 an engine restart (deploy, `systemctl restart`, crash)
+no longer loses the councils in flight.
+
+- **Durable checkpoint.** Every run checkpoints to
+  `<cwd>/.claude-hooks/consultants/<sid>/checkpoints.db`. The default
+  `[checkpointer] backend = "sqlite"` does this; `postgres` is used with
+  a `url`. If the durable saver can't be opened, the run falls back to
+  the in-memory one and logs that it won't survive a restart.
+- **In-flight index.** Each run is recorded in
+  `~/.claude/consultants-inflight.json` when it is submitted. The record
+  is the request that started it, so a runner can be rebuilt from it.
+  The record is dropped when the run finishes, and a finished run's
+  checkpoint is deleted with it. A run parked for human review keeps its
+  checkpoint, because `/resume` continues from it.
+- **Shutdown.** On SIGTERM every running council is asked to suspend.
+  Nodes that haven't started stop at the gate (`RunSuspended`). A node
+  that is mid-LLM-call finishes it first. The engine waits up to
+  `CONSULTANTS_SHUTDOWN_GRACE_S` seconds (default 60). This must stay
+  below systemd's `TimeoutStopSec`, which defaults to 90 s. A run still
+  inside a node after the grace is marked `interrupted`, and the process
+  exits without joining it.
+- **Startup.** Every record left in the index is resumed under its own
+  sid. Parallel lanes that had finished are saved in the checkpoint and
+  are not run again; only the unfinished ones re-run. A crash (no
+  graceful shutdown) resumes the same way, from the last completed step.
+  A follow-up is resumed with its parent loaded from disk. A council
+  already resumed `MAX_RESUMES` (3) times is given up and marked
+  `failed`, so a run that crashes the engine can't put it into a crash
+  loop.
+- **Clients.** `claude-consultants … --wait` rides out an unreachable
+  engine for up to 5 min and keeps polling. `suspended` is not a
+  terminal status.
+
+The adversary checkpoint and pauses don't hold a shutdown. A council
+parked at the adversary checkpoint gets its window again after the
+resume.
+
 ## Running a consultation
 
 In a Claude Code prompt:

@@ -554,13 +554,14 @@ class TestRunningCouncilGate(unittest.TestCase):
         spec.loader.exec_module(mod)
         return mod
 
-    def _clear(self, answers, *, wait=0.0, kill=False):
+    def _clear(self, answers, *, wait=0.0, kill=False, suspends=False):
         mod = self._mod()
         s = mod.Step("services")
         seq = iter(answers)
         with patch.object(mod, "_running_councils",
                           side_effect=lambda _e: next(seq)), \
              patch.object(mod, "_consultants_endpoint", return_value="e"), \
+             patch.object(mod, "_engine_suspends", return_value=suspends), \
              patch.object(mod.time, "sleep"):
             ok = mod._councils_clear(s, "u", "user", wait, kill, poll=0)
         return ok, s
@@ -593,6 +594,20 @@ class TestRunningCouncilGate(unittest.TestCase):
         ok, s = self._clear([self.RUN, self.RUN, []], wait=3600)
         self.assertTrue(ok)
         self.assertTrue(s.ok)
+
+    def test_an_engine_that_suspends_is_restarted_under_a_council(self):
+        """Since 2026-10-01 the engine suspends running councils on
+        shutdown and the new one resumes them, so the restart loses
+        nothing and the deploy goes through."""
+        ok, s = self._clear([self.RUN], suspends=True)
+        self.assertTrue(ok)
+        self.assertTrue(s.ok)
+        self.assertTrue(any("resumed" in n and "csl-x" in n for n in s.notes))
+
+    def test_waiting_still_waits_on_a_suspending_engine(self):
+        ok, s = self._clear([self.RUN, []], wait=3600, suspends=True)
+        self.assertTrue(ok)
+        self.assertFalse(any("resumed" in n for n in s.notes))
 
     def test_kill_councils_restarts_and_says_what_it_killed(self):
         ok, s = self._clear([self.RUN], kill=True)

@@ -138,16 +138,27 @@ Code reads it at session start), so it drifted for ten weeks without a
 single error. **Restart the Claude Code session after a skill change**;
 a running session keeps the copy it loaded at start.
 
-**Running councils hold the consultants engine.** A restart kills a
-council mid-run with nothing left to resume from — status 404, a
-`transcript.db` and no result — and the session waiting on it learns
-nothing. So when the engine has a council running, `deploy.py` does not
-restart it: it names the runs, leaves the engine on the old code, and
-fails the deploy. The other units are restarted as usual.
+**Running councils survive a restart.** Since 2026-10-01 the engine
+suspends every running council at its next node boundary when it shuts
+down. Each council's checkpoint is kept in its session dir. The next
+engine resumes it under the same sid (see `docs/consultants.md`
+"Engine restarts").
+
+`deploy.py` reads `suspends_on_shutdown` from the engine's
+`/v1/health`:
+
+- If the engine reports it, the restart goes ahead and the deploy names
+  the councils that will be resumed.
+- An older engine doesn't report it. Restarting one would kill its
+  councils mid-run: status 404, a `transcript.db` and no result. So
+  deploy leaves that engine on the old code, names the runs and fails.
+  Only the first deploy onto the suspending engine can hit this.
+
+The other units restart as usual.
 
 ```bash
-python scripts/deploy.py --wait-for-councils 3600  # re-ask every 30 s, restart once none run
-python scripts/deploy.py --kill-councils           # restart anyway; the runs are lost
+python scripts/deploy.py --wait-for-councils 3600  # let them finish on the old code first
+python scripts/deploy.py --kill-councils           # restart without waiting (an older engine loses them)
 ```
 
 `--dry-run` shows which councils would block. An engine that does not

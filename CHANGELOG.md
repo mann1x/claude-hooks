@@ -37,6 +37,24 @@ release with the auto-generated source archive
 
   Code: `consultants/server/tool_cache.py`.
 
+- **Councils survive an engine restart.** Each run checkpoints to
+  `checkpoints.db` in its session dir; this is the default
+  `[checkpointer] backend = "sqlite"`, previously unused because
+  production ran `MemorySaver`. Each run is recorded in
+  `~/.claude/consultants-inflight.json`.
+  - **Shutdown.** Running councils are suspended at their next node
+    boundary (`RunControl.request_suspend` → `RunSuspended`). The
+    engine waits up to `CONSULTANTS_SHUTDOWN_GRACE_S` (60 s) for nodes
+    that are mid-call.
+  - **Startup.** Every recorded run is resumed under its own sid.
+    Parallel lanes that had finished are not re-run, and a crash
+    resumes from the last completed step. Follow-ups resume with their
+    parent loaded from disk. A run is resumed at most 3 times.
+  - **Clients.** `--wait` rides out an engine outage of up to 5 min.
+  - **Deploy.** `scripts/deploy.py` restarts an engine that reports
+    `suspends_on_shutdown` even with councils running, instead of
+    failing.
+
 ### Fixed
 
 - **The consultants run-time safeguards were never switched on.** The

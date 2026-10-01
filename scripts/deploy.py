@@ -402,6 +402,19 @@ def _running_councils(endpoint: str) -> list[dict] | None:
             if e.get("status") == "running"]
 
 
+def _engine_suspends(endpoint: str) -> bool:
+    """Whether the engine suspends running councils on shutdown and
+    resumes them on start (``/v1/health.suspends_on_shutdown``). An
+    engine from before that answers without the key, and restarting it
+    still loses whatever it is running."""
+    try:
+        with urllib.request.urlopen(f"{endpoint}/v1/health", timeout=5) as r:
+            body = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return False
+    return bool(body.get("suspends_on_shutdown"))
+
+
 def _describe(councils: list[dict]) -> str:
     now = time.time()
     out = []
@@ -437,6 +450,14 @@ def _councils_clear(s: Step, unit: str, scope: str, wait: float,
                    f"{len(running)} running council(s): {_describe(running)}")
             return True
         left = deadline - time.monotonic()
+        if left <= 0 and _engine_suspends(endpoint):
+            # The engine suspends them at a node boundary and the new
+            # one resumes them under the same sids; the cost is the
+            # nodes that were mid-call, which run again.
+            s.note(f"{unit} ({scope}) — {len(running)} council(s) will be "
+                   f"suspended and resumed by the restarted engine: "
+                   f"{_describe(running)}")
+            return True
         if left <= 0:
             s.fail(f"{unit} ({scope}) NOT restarted, still on the old code: "
                    f"{len(running)} council(s) running — {_describe(running)}. "
