@@ -34,6 +34,38 @@ Ollama keep-alive.
 
 So HyDE is opt-in *and* short-circuits when it can't help.
 
+### Prompts the user didn't write
+
+`UserPromptSubmit` fires for every turn, including turns the harness
+starts. `claude_hooks/prompt_origin.py` classifies each prompt before
+recall runs:
+
+| kind | what it is | default `synthetic_recall` |
+|---|---|---|
+| `task-notification` | a background job / subagent / Monitor finished (`<task-notification>…`) | `off`: no recall |
+| `scheduled` | a `ScheduleWakeup` / `/loop` firing or a cron tick | `plain`: recall on the raw text, no HyDE |
+
+The hook payload doesn't say where a prompt came from. Claude Code
+2.1.284 compiles its `promptSource` out of the hook input. So the
+classifier works through these checks in order:
+
+1. The notification text itself.
+2. The transcript row carrying this prompt, using its `origin.kind` and
+   `promptSource`.
+3. A wakeup's `(When this fires:` suffix.
+4. Otherwise the prompt counts as typed by the user, which is today's
+   behaviour.
+
+Override the defaults per kind with `off` / `plain` / `full`:
+
+```json
+"user_prompt_submit": {"synthetic_recall": {"task-notification": "off", "scheduled": "plain"}}
+```
+
+The mailbox announcement, the `## Now` block and the wrap-up recovery
+pointer are injected for every kind. Each classification is logged at
+debug level as `prompt origin: <kind> (decided by <how>)`.
+
 ## Two modes: grounded vs plain
 
 `hyde_grounded` (default `true`) selects between them. Both are

@@ -57,6 +57,26 @@ release with the auto-generated source archive
 
 ### Fixed
 
+- **Harness-started turns are no longer treated as user prompts.**
+  Background task notifications and scheduled wake-ups / cron ticks fire
+  `UserPromptSubmit` like typed prompts. In recent transcripts
+  notifications outnumber typed prompts two to one.
+  - **What went wrong.** Each one got a full recall with a HyDE
+    expansion: over notification XML, or the same memories again on
+    every tick. The Stop hook stored the turn under `## Prompt
+    <task-notification>…`, which later recalls surfaced as something
+    the user asked. The stop guard read a notification as the user's
+    last word.
+  - **What changed.** `claude_hooks/prompt_origin.py` classifies each
+    prompt from its text, then the transcript row's `origin.kind` /
+    `promptSource`, then the wakeup suffix. The hook payload carries no
+    source field, because Claude Code 2.1.284 compiles it out.
+  - **Notifications:** no recall.
+  - **Scheduled prompts:** plain recall without HyDE. Both are
+    configurable under `hooks.user_prompt_submit.synthetic_recall`.
+  - **Stored turns:** labelled `[not a user message: …]`; a notification
+    keeps only its `<summary>`.
+  - **Stop guard:** reads the last prompt the user wrote.
 - **gitnexus rebuilds are supervised, and a broken index is repaired.**
   - **What happened.** The Stop hook spawned `gitnexus analyze` detached
     and discarded its output, so a cut-off rebuild went unnoticed. That

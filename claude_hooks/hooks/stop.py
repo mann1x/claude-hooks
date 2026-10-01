@@ -522,6 +522,24 @@ def _is_real_user_prompt(msg: dict) -> bool:
     return False
 
 
+def _label_synthetic_prompt(row: dict, text: str) -> str:
+    """Prefix a harness-started turn's prompt with what started it; for
+    a task notification keep only its ``<summary>``."""
+    import re
+    from claude_hooks.prompt_origin import (
+        SCHEDULED, TASK_NOTIFICATION, classify_text, row_kind,
+    )
+    kind = row_kind(row) or classify_text(text)
+    if kind == TASK_NOTIFICATION:
+        m = re.search(r"<summary>(.*?)</summary>", text, re.S)
+        what = (m.group(1).strip() if m else "").strip()
+        return ("[not a user message: background task notification] "
+                + (what or "(no summary)"))
+    if kind == SCHEDULED:
+        return "[not a user message: scheduled wake-up / cron tick] " + text
+    return text
+
+
 def _find_last_user_idx(transcript: list[dict]) -> int:
     """Return the index of the last *real* user prompt, or -1 if none.
 
@@ -810,6 +828,7 @@ def _build_summary(
     files_read: set[str] = set()
     commands: list[str] = []
 
+    last_user_idx = -1
     if transcript:
         last_user_idx = _find_last_user_idx(transcript)
         if last_user_idx >= 0:
@@ -852,6 +871,12 @@ def _build_summary(
     )
     if user_text and any(m in user_text[:500] for m in _meta_markers):
         user_text = ""
+    # A turn started by the harness is stored as such. Its raw text under
+    # "## Prompt" (notification XML, a cron instruction) reads to a later
+    # recall as something the user asked.
+    if transcript and last_user_idx >= 0 and user_text:
+        user_text = _label_synthetic_prompt(transcript[last_user_idx],
+                                            user_text)
 
     if fmt == "xml":
         return _build_summary_xml(
@@ -1227,13 +1252,11 @@ def _run_stop_guard(
         return None
     # Find the last user message text (excluding tool_result blocks) so
     # the guard can honour explicit user wrap-up requests.
-    last_user_text = ""
-    for msg in reversed(transcript):
-        if isinstance(msg, dict) and _msg_role(msg) == "user":
-            t = _extract_text(msg)
-            if t:
-                last_user_text = t
-                break
+    # The user's own last word: a notification or a scheduled tick that
+    # started this turn is not a user wrap-up request, and reading it as
+    # the "last user message" hid the one the user actually wrote.
+    from claude_hooks.prompt_origin import last_human_text
+    last_user_text = last_human_text(transcript)
 
     try:
         from claude_hooks.stop_guard import (
