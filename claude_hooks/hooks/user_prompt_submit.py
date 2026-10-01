@@ -43,11 +43,16 @@ def _without_hyde(config: dict) -> dict:
     return out
 
 
-def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[dict]:
+def recall_block(*, event: dict, config: dict, providers) -> str:
+    """The recalled-memory block for this prompt, or "".
+
+    Shared by :func:`handle` and the partial-disable path in
+    :mod:`claude_hooks.hook_parts` — a copy of this decision there kept
+    running HyDE on notifications after the handler stopped (2026-10-01).
+    """
     hook_cfg = (config.get("hooks") or {}).get("user_prompt_submit") or {}
     if not hook_cfg.get("enabled", True):
-        return None
-
+        return ""
     prompt = (event.get("prompt") or "").strip()
     min_chars = int(hook_cfg.get("min_prompt_chars", 30))
     skip_recall = len(prompt) < min_chars
@@ -85,6 +90,17 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
         ) or ""
     else:
         log.debug("prompt too short (%d < %d) — skipping recall", len(prompt), min_chars)
+
+    return additional_context
+
+
+def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[dict]:
+    hook_cfg = (config.get("hooks") or {}).get("user_prompt_submit") or {}
+    if not hook_cfg.get("enabled", True):
+        return None
+
+    additional_context = recall_block(event=event, config=config,
+                                      providers=providers)
 
     # Prepend a pointer to any recent pre-compact wrap-up file, so
     # the post-compaction assistant reliably picks up the saved

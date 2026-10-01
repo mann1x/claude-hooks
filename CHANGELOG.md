@@ -77,6 +77,10 @@ release with the auto-generated source archive
   - **Stored turns:** labelled `[not a user message: …]`; a notification
     keeps only its `<summary>`.
   - **Stop guard:** reads the last prompt the user wrote.
+  - **Partially disabled projects too.** A `.claude-hooks-disable`
+    marker with `keep: memory` routes through `hook_parts`, which had
+    its own copy of the recall decision and kept HyDE-expanding
+    notifications. Both paths now call `user_prompt_submit.recall_block()`.
 - **gitnexus rebuilds are supervised, and a broken index is repaired.**
   - **What happened.** The Stop hook spawned `gitnexus analyze` detached
     and discarded its output, so a cut-off rebuild went unnoticed. That

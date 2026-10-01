@@ -19,6 +19,7 @@ Recall (UserPromptSubmit) pipeline:
 - `hyde.py`, `hyde_cache.py` — query expansion via local Ollama (default `gemma4:e2b`) with disk cache
 - `decay.py` — attention decay scoring for recalled memories
 - `dedup.py` — near-duplicate detection before store
+- `prompt_origin.py` — classifies a prompt as `human` / `task-notification` / `scheduled` (the hook payload has no source field: prompt text, then the transcript row's `origin.kind` / `promptSource`, then a wakeup's `(When this fires:` suffix); `hooks.user_prompt_submit.synthetic_recall` sets recall per kind (`off` / `plain` / `full`; defaults `task-notification`: `off`, `scheduled`: `plain` = no HyDE); `claude_hooks/hooks/stop.py` labels such stored turns `[not a user message: ...]` and the stop guard reads the last prompt the user wrote (`last_human_text()`) (see `docs/hyde.md`; tests `tests/test_prompt_origin.py`)
 
 Stop pipeline:
 - `instincts.py` — auto-extracts bug-fix patterns as reusable instinct files

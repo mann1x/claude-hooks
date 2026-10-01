@@ -147,16 +147,11 @@ def _session_start(event, config, providers, keep):
 def _user_prompt_submit(event, config, providers, keep):
     parts: list[str] = []
     if "memory" in keep:
-        hook_cfg = (config.get("hooks") or {}).get("user_prompt_submit") or {}
-        prompt = (event.get("prompt") or "").strip()
-        if (hook_cfg.get("enabled", True)
-                and len(prompt) >= int(hook_cfg.get("min_prompt_chars", 30))):
-            from claude_hooks.recall import run_recall
-            parts.append(run_recall(
-                prompt, config=config, providers=providers,
-                hook_name="user_prompt_submit", cwd=event.get("cwd", ""),
-                max_total_chars=int(hook_cfg.get("max_total_chars", 4000)),
-                progressive=bool(hook_cfg.get("progressive"))) or "")
+        # The same decision the full handler makes, notifications and
+        # scheduled prompts included — not a copy of it.
+        from claude_hooks.hooks.user_prompt_submit import recall_block
+        parts.append(recall_block(event=event, config=config,
+                                  providers=providers))
     if "mailbox" in keep:
         from claude_hooks.mailbox import hook as mailbox
         parts.append(mailbox.announce_block(
