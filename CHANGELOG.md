@@ -57,6 +57,24 @@ release with the auto-generated source archive
 
 ### Fixed
 
+- **gitnexus rebuilds are supervised, and a broken index is repaired.**
+  - **What happened.** The Stop hook spawned `gitnexus analyze` detached
+    and discarded its output, so a cut-off rebuild went unnoticed. That
+    rebuild left the graph database mid-write
+    (`lbug.shadow.dirty-recovery` newer than `lbug`), and every reader
+    then segfaulted. In opencoti, on 2026-10-01, the pre-commit
+    `detect-changes` check crashed six times over two hours.
+  - **Supervisor.** The rebuild now runs under a Python supervisor
+    (`--supervise`). It records the exit code and dirty state in
+    `.gitnexus/claude-hooks-reindex.json` and retries twice.
+  - **Broken index.** A broken index is rebuilt on the next turn even
+    when nothing was edited, with a 15-min backoff after a run that
+    fails every attempt. The SessionStart hint warns that the index is
+    broken.
+  - **Docs no longer edited.** The hook now runs `analyze --index-only`.
+    A bare `analyze` also wrote a GitNexus section into `AGENTS.md` /
+    `CLAUDE.md` and installed six skill dirs in every indexed repo it
+    rebuilt.
 - **The consultants run-time safeguards were never switched on.** The
   stall monitor, the deadline, the live round / reroute caps and the
   xauto escalator all read `state["runtime_control"]`. Nothing seeded

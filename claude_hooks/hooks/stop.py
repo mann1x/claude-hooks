@@ -203,19 +203,21 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
 
     # Companion engines (axon, gitnexus): when the project has been
     # indexed by either and the turn modified files, spawn that engine's
-    # reindex. Silent no-op when neither tool is installed or the
-    # project hasn't been initialised.
+    # reindex. Called on unmodified turns too: gitnexus also rebuilds an
+    # index it finds broken (a failed rebuild, or a graph database left
+    # mid-write, which crashes every reader), and each engine decides for
+    # itself. Silent no-op when neither tool is installed or the project
+    # hasn't been initialised.
     comp_cfg = (config.get("hooks") or {}).get("companions") or {}
     if (
         comp_cfg.get("enabled", True)
         and comp_cfg.get("reindex_on_stop", True)
-        and turn_modified
     ):
         try:
             from claude_hooks.companion_integration import reindex_if_dirty_async
             reindex_if_dirty_async(
                 cwd=event.get("cwd", ""),
-                turn_modified=True,
+                turn_modified=bool(turn_modified),
                 lock_min_age_seconds=int(comp_cfg.get("lock_min_age_seconds", 60)),
             )
         except Exception as e:

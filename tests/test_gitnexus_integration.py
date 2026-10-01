@@ -155,7 +155,10 @@ class TestReindex:
 
         assert len(spawned) == 1
         args, _ = spawned[0]
-        assert args == [bin_path, "analyze"]
+        # Supervised: the analyze runs under a Python supervisor that
+        # records its outcome and retries a failed rebuild.
+        assert args[1:3] == ["-m", "claude_hooks.gitnexus_integration"]
+        assert args[3:] == ["--supervise", str(tmp_path.resolve()), bin_path]
 
     def test_lock_blocks_rapid_respawn(self, monkeypatch, tmp_path):
         monkeypatch.setattr(gn.shutil, "which",
@@ -283,3 +286,155 @@ class TestCompanionsCli:
         report = json.loads(out.stdout)
         assert "code_graph" in report
         assert "gitnexus" in report
+
+
+# ---------------------------------------------------------------------------
+# Broken-index recovery (opencoti, 2026-10-01)
+# ---------------------------------------------------------------------------
+
+import os as _os
+import time as _time
+
+
+def _indexed_repo(tmp_path, *, db_mtime=None, recovery_mtime=None):
+    (tmp_path / ".git").mkdir()
+    idx = tmp_path / ".gitnexus"
+    idx.mkdir()
+    db = idx / "lbug"
+    db.write_bytes(b"db")
+    if db_mtime is not None:
+        _os.utime(db, (db_mtime, db_mtime))
+    if recovery_mtime is not None:
+        rec = idx / "lbug.shadow.dirty-recovery"
+        rec.write_bytes(b"r")
+        _os.utime(rec, (recovery_mtime, recovery_mtime))
+    return tmp_path
+
+
+class TestIndexDirty:
+    def test_a_recovery_file_newer_than_the_database_is_dirty(self, tmp_path):
+        now = _time.time()
+        root = _indexed_repo(tmp_path, db_mtime=now - 100,
+                             recovery_mtime=now - 10)
+        assert gn.index_dirty(root)
+
+    def test_a_stale_recovery_file_is_not(self, tmp_path):
+        """A later successful analyze rewrites lbug but leaves the old
+        recovery file in place — opencoti had one from 09:49 beside an
+        lbug rewritten at 12:26."""
+        now = _time.time()
+        root = _indexed_repo(tmp_path, db_mtime=now - 10,
+                             recovery_mtime=now - 100)
+        assert not gn.index_dirty(root)
+
+    def test_no_recovery_file_is_clean(self, tmp_path):
+        assert not gn.index_dirty(_indexed_repo(tmp_path))
+
+
+class TestSupervise:
+    def test_success_records_ok(self, tmp_path):
+        root = _indexed_repo(tmp_path)
+        st = gn.supervise_analyze("gn", root, run_fn=lambda b, r, o: 0,
+                                  sleep_fn=lambda s: None)
+        assert st["ok"] and st["attempts"] == 1
+        assert gn.read_reindex_status(root)["ok"] is True
+        assert not gn.index_broken(root)
+
+    def test_a_failure_is_retried_then_recorded(self, tmp_path):
+        root = _indexed_repo(tmp_path)
+        rcs = iter([139, 139, 0])
+        st = gn.supervise_analyze("gn", root,
+                                  run_fn=lambda b, r, o: next(rcs),
+                                  sleep_fn=lambda s: None)
+        assert st["ok"] and st["attempts"] == 3
+
+    def test_all_attempts_failing_marks_the_index_broken(self, tmp_path):
+        root = _indexed_repo(tmp_path)
+
+        def crash(b, r, out):
+            out.write(b"Segmentation fault")
+            return 139
+
+        st = gn.supervise_analyze("gn", root, run_fn=crash,
+                                  sleep_fn=lambda s: None)
+        assert not st["ok"] and st["returncode"] == 139
+        assert st["consecutive_failures"] == 3
+        assert "Segmentation fault" in st["log_tail"]
+        assert gn.index_broken(root)
+
+    def test_exit_zero_with_a_dirty_database_is_a_failure(self, tmp_path):
+        root = _indexed_repo(tmp_path)
+        rec = root / ".gitnexus" / "lbug.shadow.dirty-recovery"
+
+        def leaves_dirty(b, r, out):
+            rec.write_bytes(b"r")
+            future = _time.time() + 60
+            _os.utime(rec, (future, future))
+            return 0
+
+        st = gn.supervise_analyze("gn", root, run_fn=leaves_dirty,
+                                  attempts=1, sleep_fn=lambda s: None)
+        assert not st["ok"] and st["dirty"]
+
+
+class TestBrokenIndexRebuild:
+    def _spawn_counter(self, monkeypatch):
+        monkeypatch.setattr(gn.shutil, "which",
+                            lambda n: "/usr/bin/gitnexus" if n == "gitnexus" else None)
+        spawned = []
+        monkeypatch.setattr(gn.subprocess, "Popen",
+                            lambda *a, **kw: spawned.append(a))
+        return spawned
+
+    def test_a_dirty_index_is_rebuilt_without_an_edit(self, monkeypatch, tmp_path):
+        spawned = self._spawn_counter(monkeypatch)
+        now = _time.time()
+        root = _indexed_repo(tmp_path, db_mtime=now - 100,
+                             recovery_mtime=now - 10)
+        gn.reindex_if_dirty_async(cwd=str(root), turn_modified=False)
+        assert len(spawned) == 1
+
+    def test_a_clean_index_is_left_alone_without_an_edit(self, monkeypatch, tmp_path):
+        spawned = self._spawn_counter(monkeypatch)
+        gn.reindex_if_dirty_async(cwd=str(_indexed_repo(tmp_path)),
+                                  turn_modified=False)
+        assert spawned == []
+
+    def test_a_deterministic_failure_backs_off(self, monkeypatch, tmp_path):
+        spawned = self._spawn_counter(monkeypatch)
+        root = _indexed_repo(tmp_path)
+        gn._write_reindex_status(root, {"ok": False, "returncode": 1,
+                                        "finished_at": _time.time()})
+        gn.reindex_if_dirty_async(cwd=str(root), turn_modified=True)
+        assert spawned == []
+        gn._write_reindex_status(root, {"ok": False, "returncode": 1,
+                                        "finished_at": _time.time() - 3600})
+        gn.reindex_if_dirty_async(cwd=str(root), turn_modified=True)
+        assert len(spawned) == 1
+
+    def test_the_hint_says_the_index_is_broken(self, tmp_path):
+        root = _indexed_repo(tmp_path)
+        gn._write_reindex_status(root, {"ok": False, "returncode": 139,
+                                        "finished_at": _time.time()})
+        hint = gn.session_start_hint(root)
+        assert "broken" in hint and "rc=139" in hint
+        assert "not run" in hint
+
+
+class TestAnalyzeArgv:
+    def test_a_background_rebuild_never_edits_docs_or_skills(self):
+        """A bare analyze writes into AGENTS.md / CLAUDE.md and installs
+        skills; the hook's rebuild must only refresh the index."""
+        assert gn._analyze_argv("gn") == ["gn", "analyze", "--index-only"]
+
+    def test_the_supervisor_runs_that_argv(self, monkeypatch, tmp_path):
+        root = _indexed_repo(tmp_path)
+        seen = []
+
+        class _CP:
+            returncode = 0
+
+        monkeypatch.setattr(gn.subprocess, "run",
+                            lambda argv, **kw: seen.append(argv) or _CP())
+        assert gn.supervise_analyze("gn", root, sleep_fn=lambda s: None)["ok"]
+        assert seen == [["gn", "analyze", "--index-only"]]
