@@ -41,6 +41,11 @@ release with the auto-generated source archive
     cloud session's guide, installed into the folder by `install.py`
     and kept current by `scripts/deploy.py`; `verify_deploy.py` fails
     on a stale copy.
+  - **Sandbox grant.** The daemon unit runs with `ProtectSystem=strict`;
+    deploy writes `claude-hooks-daemon.service.d/mailbox-relay.conf`
+    granting the folder as spelled and resolved (`/shared/dev` is a
+    symlink), `verify_deploy.py` fails without it, and the relay probes
+    the folder at start and refuses to run with the fix in its log.
   - `python -m claude_hooks.mailbox.relay status` reports the folder,
     the instructions and every session in it.
 

@@ -456,7 +456,14 @@ folders idle for `archive_days` (30) move to `archive/`.
 ```
 
 `install.py` asks for this and installs `MAILBOX.md`; `scripts/deploy.py`
-keeps it current, and `verify_deploy.py` fails on a stale copy. Config
+keeps it current, and `verify_deploy.py` fails on a stale copy. The
+daemon's systemd unit is sandboxed (`ProtectSystem=strict`, write access
+to `~/.claude` only), so deploy and install also write
+`/etc/systemd/system/claude-hooks-daemon.service.d/mailbox-relay.conf`
+granting the folder — as spelled *and* resolved, because the mount
+namespace is built from the literal path and `/shared/dev` is a symlink.
+Without it the relay reads requests and can never answer; it probes the
+folder at start and refuses to run, logging this fix. Config
 is read when the daemon starts — restart it (deploy does) to apply a
 change. Run the relay on **one** host per folder.
 
