@@ -87,9 +87,12 @@ def resolve_endpoint(*, override: Optional[str] = None) -> str:
 
 class CLIError(Exception):
     """Raised for any user-visible failure. Carries an exit code."""
-    def __init__(self, msg: str, *, exit_code: int = 1):
+    def __init__(self, msg: str, *, exit_code: int = 1,
+                 unreachable: bool = False):
         super().__init__(msg)
         self.exit_code = exit_code
+        #: The engine did not answer at all (vs answered with an error).
+        self.unreachable = unreachable
 
 
 _TRACE_DEPRECATION_LOGGED = False
@@ -141,7 +144,7 @@ def _http(method: str, url: str, *, body: Optional[dict] = None,
             f"Could not reach {url}: {e.reason}. Is the consultants "
             f"service running? Try `systemctl --user status "
             f"claude-hooks-consultants` or `python install.py`.",
-            exit_code=1,
+            exit_code=1, unreachable=True,
         ) from e
     return json.loads(payload) if payload else {}
 
@@ -179,6 +182,13 @@ def cmd_consult(args, base: str) -> int:
 # M5: per-run terminal statuses. Anything that is NOT "running" ends
 # the poll loop; "completed" is the only one that yields a result.
 _RUN_TERMINAL_OK = "completed"
+#: Not terminal: the engine is shutting down and the next one resumes
+#: the run under the same sid.
+_RUN_STILL_GOING = ("running", "suspended")
+#: How long a wait rides out an engine that does not answer. A restart
+#: suspends running councils and resumes them in the new process; this
+#: covers the gap (shutdown grace + restart), not a dead engine.
+ENGINE_RESTART_TOLERANCE_S = 300.0
 
 
 def _wait_for_terminal(base: str, sid: str, *,
@@ -193,9 +203,25 @@ def _wait_for_terminal(base: str, sid: str, *,
     are injectable for deterministic tests.
     """
     deadline = (now_fn() + timeout) if timeout and timeout > 0 else None
+    down_since: Optional[float] = None
     while True:
-        rec = _http("GET", f"{base}/v1/consult/{sid}")
-        if str(rec.get("status") or "") != "running":
+        try:
+            rec = _http("GET", f"{base}/v1/consult/{sid}")
+        except CLIError as e:
+            if not e.unreachable:
+                raise
+            now = now_fn()
+            if down_since is None:
+                down_since = now
+                print(f"engine unreachable while waiting on {sid}; "
+                      f"retrying for up to {ENGINE_RESTART_TOLERANCE_S:.0f}s "
+                      f"(a restart resumes the run)", file=sys.stderr)
+            if now - down_since >= ENGINE_RESTART_TOLERANCE_S:
+                raise
+            sleep_fn(interval)
+            continue
+        down_since = None
+        if str(rec.get("status") or "") not in _RUN_STILL_GOING:
             return rec
         if deadline is not None and now_fn() >= deadline:
             raise CLIError(
@@ -331,6 +357,19 @@ def cmd_accept(args, base: str) -> int:
     if getattr(args, "note", None):
         body["note"] = args.note
     out = _http("POST", f"{base}/v1/consult/{args.sid}/accept", body=body)
+    print(json.dumps({"ok": True, **out}, indent=2))
+    return 0
+
+
+def cmd_grant(args, base: str) -> int:
+    """Consultancy review loop: raise a consultancy's followup cap by N
+    now, without sending a followup (the user's "allow 6 more"). Resolves
+    any sid to its consultancy root; no config change. Without N the
+    configured ``allow_extra`` is granted."""
+    body = {"cwd": str(Path(args.cwd or os.getcwd()).resolve())}
+    if args.n is not None:
+        body["allow_extra"] = args.n
+    out = _http("POST", f"{base}/v1/consult/{args.sid}/grant", body=body)
     print(json.dumps({"ok": True, **out}, indent=2))
     return 0
 
@@ -1908,6 +1947,19 @@ def build_parser() -> argparse.ArgumentParser:
     ac.add_argument("--note", help="Optional note recorded with the "
                                    "acceptance.")
     ac.set_defaults(fn=cmd_accept)
+
+    # grant — consultancy review loop: raise the followup cap now.
+    gr = sub.add_parser(
+        "grant",
+        help="Raise a consultancy's followup cap by N (default: the "
+             "configured allow_extra) without sending a followup. For "
+             "THIS consultancy only; no config change. Accepts any sid "
+             "in the chain; resolves to the consultancy root.")
+    gr.add_argument("sid")
+    gr.add_argument("n", nargs="?", type=int,
+                    help="Extra followups to allow (>= 1).")
+    gr.add_argument("--cwd", help="Project root (default: cwd).")
+    gr.set_defaults(fn=cmd_grant)
 
     # reopen — disk-fallback to restore a closed / evicted session.
     ro = sub.add_parser(

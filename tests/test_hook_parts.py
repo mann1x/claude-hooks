@@ -142,6 +142,34 @@ class RestrictedHandlersTests(unittest.TestCase):
         recall.assert_called_once()
         announce.assert_not_called()
 
+    def test_memory_does_not_recall_on_a_task_notification(self):
+        # The restricted path once ran its own copy of the recall
+        # decision, so notifications still got a HyDE recall here after
+        # the full handler had stopped doing it.
+        event = {**self.event, "prompt": (
+            "<task-notification>\n<task-id>b07amae2u</task-id>\n"
+            "<status>completed</status>\n</task-notification>")}
+        with patch("claude_hooks.recall.run_recall",
+                   return_value="## Recalled memory") as recall:
+            out = hook_parts.run("UserPromptSubmit", event=event,
+                                 config=self.cfg, providers=[],
+                                 keep=frozenset({"memory"}))
+        recall.assert_not_called()
+        self.assertIsNone(out)
+
+    def test_memory_recalls_a_scheduled_prompt_without_hyde(self):
+        event = {**self.event, "prompt": (
+            "continue: check the suite result\n\n(When this fires: "
+            "resume the task)")}
+        with patch("claude_hooks.recall.run_recall",
+                   return_value="## Recalled memory") as recall:
+            hook_parts.run("UserPromptSubmit", event=event, config=self.cfg,
+                           providers=[], keep=frozenset({"memory"}))
+        recall.assert_called_once()
+        cfg = recall.call_args.kwargs["config"]
+        self.assertFalse(cfg["hooks"]["user_prompt_submit"].get(
+            "hyde_enabled", False))
+
     def test_a_resumed_session_re_registers(self):
         with patch("claude_hooks.mailbox.hook.register_session",
                    return_value="") as register, \

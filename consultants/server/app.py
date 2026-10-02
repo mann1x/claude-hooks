@@ -42,6 +42,7 @@ if TYPE_CHECKING:  # pragma: no cover — the runtime import is lazy, in
 
 from consultants import config as cc
 from consultants.engine import sessions_index, storage
+from consultants.server import inflight
 
 log = logging.getLogger("consultants.server")
 
@@ -529,7 +530,9 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
                run_follow_up: Optional[Callable[..., None]] = None,
                start_reaper: bool = True,
                cfg: Optional["cc.ConsultantsConfig"] = None,
-               ollama_base_url: Optional[str] = None) -> "FastAPI":
+               ollama_base_url: Optional[str] = None,
+               resume_inflight: bool = False,
+               shutdown_grace_s: Optional[float] = None) -> "FastAPI":
     """Build a FastAPI app. ``run_council`` is the in-process
     council executor; if None, the app comes up but ``/v1/consult``
     returns 503 (useful for tests that only exercise the read-side
@@ -560,6 +563,12 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         thread_name_prefix="consultants-runner",
     )
     app.state.sessions_lock = threading.Lock()
+    # sid -> Future of the runner thread, so shutdown can wait for them.
+    app.state.runner_futures = {}
+    app.state.shutdown_grace_s = (
+        float(shutdown_grace_s) if shutdown_grace_s is not None
+        else _default_shutdown_grace_s())
+    app.state.shutdown_unfinished = 0
     app.state.idle_timeout_s = idle_timeout_s
     app.state.reaper_interval_s = reaper_interval_s
     app.state.reaper_stop = threading.Event()
@@ -585,6 +594,11 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
     # Idle-reaper shutdown is already handled via reaper_stop.
     @app.on_event("shutdown")
     async def _shutdown_store_reaper() -> None:  # pragma: no cover
+        # Councils first: they are what a restart would otherwise lose.
+        try:
+            suspend_running_councils(app)
+        except Exception:
+            log.exception("suspending running councils failed")
         reaper = getattr(app.state, "store_reaper", None)
         if reaper is not None:
             try:
@@ -620,6 +634,10 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         return {
             "status": "ok",
             "runner_available": app.state.run_council is not None,
+            # Running councils are suspended on shutdown and resumed by
+            # the next engine (scripts/deploy.py reads this to decide
+            # whether a restart under a running council loses it).
+            "suspends_on_shutdown": True,
             "active_sessions": len([
                 s for s in app.state.sessions.values()
                 if s.status == "running"
@@ -763,14 +781,20 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             "skip_preflight": bool(body.get("skip_preflight")),
         }
 
+        inflight.register({
+            "sid": sid, "kind": "consult",
+            "cwd": str(cwd_path), "cwd_display": discovered_display[0],
+            "question": question, "effort": cfg.effort,
+            "trace": trace_flag,
+            "extra_roots": session_extra_roots,
+            "extra_roots_display": session_extra_roots_display,
+            "skip_preflight": bool(body.get("skip_preflight")),
+            "root_sid": sid, "parent_sid": None,
+            "started_at": state.started_at,
+        })
         # Hand off to the executor. The runner mutates ``state`` and
         # writes the on-disk artifacts; we just track completion.
-        future = app.state.executor.submit(
-            _run_with_state, app, app.state.run_council, state,
-            runner_input,
-        )
-        # Don't block on future; CLI polls.
-        del future
+        _submit_run(app, app.state.run_council, state, runner_input)
 
         return {
             "sid": sid,
@@ -998,11 +1022,19 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             # tool sandbox still confines every read to the roots.
             "skip_preflight": bool(body.get("skip_preflight")),
         }
-        future = app.state.executor.submit(
-            _run_with_state, app, app.state.run_follow_up, child,
-            runner_input,
-        )
-        del future
+        inflight.register({
+            "sid": child_sid, "kind": "follow-up",
+            "cwd": parent.cwd,
+            "cwd_display": parent.cwd_display or parent.cwd,
+            "question": message, "effort": cfg.effort,
+            "trace": trace_flag,
+            "extra_roots": list(followup_body_extras),
+            "extra_roots_display": list(followup_body_extras),
+            "skip_preflight": bool(body.get("skip_preflight")),
+            "root_sid": croot.sid, "parent_sid": sid,
+            "started_at": child.started_at,
+        })
+        _submit_run(app, app.state.run_follow_up, child, runner_input)
 
         return {
             "ok": True,
@@ -1043,6 +1075,49 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
             "sid": sid,
             "root_sid": root.sid,
             "already_accepted": already,
+            "consultancy": _consultancy_dict(root),
+        }
+
+    # ----------------------- grant ------------------------------ #
+    # Consultancy review loop: bank extra followups on the consultancy
+    # when the user raises the cap ("add another 6"), without issuing a
+    # followup. The grant is the same one-off, never-persisted-to-config
+    # allowance a follow-up's ``allow_extra`` carries; it lands on the
+    # chain root so every later follow-up in the chain sees it. An
+    # ``awaiting_approval`` consultancy the grant lifts back under the
+    # cap returns to ``ready_to_review``.
+    @app.post("/v1/consult/{sid}/grant")
+    def grant(sid: str, body: Optional[dict] = None) -> dict:
+        body = body or {}
+        cwd_hint = body.get("cwd")
+        root = _resolve_consultancy_root(app, sid, cwd_hint)
+        if root is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"consultancy not found for sid {sid}; provide "
+                       "cwd to load it from disk artifacts.",
+            )
+        raw = body.get("allow_extra")
+        if raw is None:
+            raw = cc.load_config(Path(root.cwd)).allow_extra
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+            raise HTTPException(
+                status_code=400,
+                detail="allow_extra must be an integer >= 1",
+            )
+        if storage.read_consultancy(Path(root.cwd), root.sid) is None:
+            root.max_followups = cc.load_config(Path(root.cwd)).max_followups
+        root.extra_granted += raw
+        if root.consultancy_status == CONSULTANCY_AWAITING and \
+                root.followup_count < root.max_followups + root.extra_granted:
+            root.consultancy_status = CONSULTANCY_READY
+        root.bump_activity()
+        _persist_consultancy(root)
+        return {
+            "ok": True,
+            "sid": sid,
+            "root_sid": root.sid,
+            "granted": raw,
             "consultancy": _consultancy_dict(root),
         }
 
@@ -1233,7 +1308,253 @@ def create_app(*, run_council: Optional[RunCouncilFn] = None,
         cfg = cc.load_config(cwd_path)
         return _config_snapshot(cfg)
 
+    if resume_inflight:
+        try:
+            resume_inflight_councils(app)
+        except Exception:  # pragma: no cover — defensive
+            log.exception("resuming in-flight councils failed")
     return app
+
+
+# ----------------------- durable runs ---------------------------- #
+#
+# A council outlives the engine process that started it. Each run is
+# recorded in the in-flight index (``inflight``) before it is submitted
+# and dropped when it reaches a terminal status. On shutdown the running
+# ones are suspended at their next node boundary, and their checkpoints
+# stay; on startup everything still in the index is resumed under the
+# same sid. See docs/consultants.md "Engine restarts".
+
+#: Default seconds the shutdown hook waits for suspended councils to
+#: reach a node boundary. A node mid-LLM-call finishes it first; past
+#: the grace the process exits anyway and that node re-runs on resume.
+DEFAULT_SHUTDOWN_GRACE_S = 60.0
+
+
+def _default_shutdown_grace_s() -> float:
+    import os
+    raw = os.environ.get("CONSULTANTS_SHUTDOWN_GRACE_S")
+    try:
+        return max(0.0, float(raw)) if raw else DEFAULT_SHUTDOWN_GRACE_S
+    except ValueError:
+        return DEFAULT_SHUTDOWN_GRACE_S
+
+
+def _submit_run(app, runner, state: "SessionState", runner_input: dict):
+    future = app.state.executor.submit(
+        _run_with_state, app, runner, state, runner_input,
+    )
+    app.state.runner_futures[state.sid] = future
+    future.add_done_callback(
+        lambda _f, sid=state.sid: app.state.runner_futures.pop(sid, None))
+    return future
+
+
+def _settle_inflight(state: "SessionState") -> None:
+    """Drop a finished run from the in-flight index, or mark a suspended
+    one so the next engine resumes it.
+
+    A finished run's checkpoint is discarded with it — several copies of
+    state the transcript already records. The exception is a run parked
+    for human review (``review_before_synthesis``): its graph is waiting
+    for ``/resume`` and the checkpoint is what that resumes from.
+    """
+    if state.status == "suspended":
+        inflight.update(state.sid, state="suspended",
+                        suspended_at=time.time())
+        return
+    inflight.remove(state.sid)
+    compiled = getattr(state, "_compiled", None)
+    parked = False
+    if compiled is not None:
+        try:
+            snap = compiled.get_state(state._thread_config)
+            parked = bool(getattr(snap, "next", None))
+        except Exception:
+            parked = False
+    if parked:
+        return
+    handle = getattr(state, "_checkpointer_handle", None)
+    if handle is None:
+        return
+    try:
+        handle.close()
+    except Exception:  # pragma: no cover — defensive
+        log.exception("checkpointer close failed for %s", state.sid)
+    # The live graph's saver is closed; later /state reads fall back to
+    # the static snapshot instead of a closed connection.
+    state._compiled = None
+    if getattr(handle, "backend", "") == "sqlite":
+        from consultants.engine.checkpointer import discard_sqlite_checkpoint
+        discard_sqlite_checkpoint(Path(state.cwd), state.sid)
+
+
+def suspend_running_councils(app, grace_s: Optional[float] = None) -> int:
+    """Ask every running council to stop at its next node boundary, then
+    wait up to ``grace_s`` for their runner threads. Returns how many
+    were still running when the grace ran out (``main`` exits hard
+    rather than joining them — their work since the last checkpoint is
+    re-run on resume, and the record is already in the index).
+    """
+    grace = app.state.shutdown_grace_s if grace_s is None else grace_s
+    with app.state.sessions_lock:
+        running = [s for s in app.state.sessions.values()
+                   if s.status == "running"]
+    if not running:
+        app.state.shutdown_unfinished = 0
+        return 0
+    for s in running:
+        s.run_control.request_suspend("engine-shutdown")
+    log.warning("engine shutdown: suspending %d running council(s): %s "
+                "(grace %.0fs)", len(running),
+                ", ".join(s.sid for s in running), grace)
+    deadline = time.time() + grace
+    futures = dict(app.state.runner_futures)
+    for sid, fut in futures.items():
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        try:
+            fut.result(timeout=remaining)
+        except Exception:
+            pass
+    left = [sid for sid, fut in futures.items() if not fut.done()]
+    for sid in left:
+        # Never reached a boundary; the record says running, which the
+        # next engine treats exactly like suspended.
+        inflight.update(sid, state="interrupted",
+                        suspended_at=time.time())
+    if left:
+        log.warning("engine shutdown: %d council(s) still inside a node "
+                    "after %.0fs (%s); they resume from their last "
+                    "checkpoint", len(left), grace, ", ".join(left))
+    app.state.shutdown_unfinished = len(left)
+    return len(left)
+
+
+def _session_from_record(rec: dict, cfg) -> "SessionState":
+    if rec.get("kind") == "follow-up":
+        progress = {"researcher": "pending", "synthesizer": "pending"}
+        if (cc.base_effort(cfg.effort) in ("high", "max")
+                or cfg.effort == "xauto") \
+                and "critic" in cc.enabled_roles(cfg):
+            progress["critic"] = "pending"
+    else:
+        progress = {r: "pending" for r in cc.enabled_roles(cfg)}
+    state = SessionState(
+        sid=rec["sid"],
+        cwd=rec["cwd"],
+        cwd_display=rec.get("cwd_display") or rec["cwd"],
+        question=rec.get("question") or "",
+        effort=cfg.effort,
+        topology=cfg.topology,
+        started_at=float(rec.get("started_at") or time.time()),
+        progress=progress,
+        parent_sid=rec.get("parent_sid"),
+        root_sid=rec.get("root_sid") or rec["sid"],
+        extra_roots=list(rec.get("extra_roots") or []),
+        extra_roots_display=list(rec.get("extra_roots_display") or []),
+    )
+    if state.root_sid == state.sid:
+        state.max_followups = cfg.max_followups
+        _hydrate_consultancy(state)
+    return state
+
+
+def _ensure_loaded(app, sid: Optional[str], cwd: Path):
+    if not sid:
+        return None
+    s = app.state.sessions.get(sid)
+    if s is not None:
+        return s
+    s = _load_session_from_artifacts(sid, cwd)
+    if s is not None:
+        with app.state.sessions_lock:
+            app.state.sessions.setdefault(sid, s)
+    return s
+
+
+def resume_inflight_councils(app) -> list[str]:
+    """Resume every council the last engine left unfinished. Returns the
+    sids that were resumed."""
+    resumed: list[str] = []
+    for rec in inflight.load():
+        sid = rec.get("sid") or ""
+        try:
+            if _resume_one(app, rec):
+                resumed.append(sid)
+        except Exception:
+            log.exception("could not resume %s; dropping its record", sid)
+            inflight.remove(sid)
+    if resumed:
+        log.warning("resumed %d council(s) left by the previous engine: %s",
+                    len(resumed), ", ".join(resumed))
+    return resumed
+
+
+def _resume_one(app, rec: dict) -> bool:
+    sid = rec.get("sid")
+    cwd = Path(rec.get("cwd") or "")
+    kind = rec.get("kind")
+    runner = (app.state.run_follow_up if kind == "follow-up"
+              else app.state.run_council)
+    if not sid or runner is None or not cwd.is_dir():
+        log.warning("in-flight record %s cannot be resumed (cwd=%s, "
+                    "runner=%s); dropping it", sid, cwd, runner is not None)
+        inflight.remove(sid or "")
+        return False
+    if sid in app.state.sessions:
+        return False
+    if int(rec.get("resumes") or 0) >= inflight.MAX_RESUMES:
+        log.error("council %s was already resumed %d times; giving up on "
+                  "it", sid, rec.get("resumes"))
+        inflight.remove(sid)
+        from consultants.engine.checkpointer import discard_sqlite_checkpoint
+        discard_sqlite_checkpoint(cwd, sid)
+        try:
+            sessions_index.append(cwd, sessions_index.SessionEntry(
+                session_id=sid,
+                created=time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(
+                    float(rec.get("started_at") or time.time()))),
+                question=rec.get("question") or "",
+                topology="council", effort=rec.get("effort") or "",
+                status="failed", duration_seconds=0.0))
+        except Exception:  # pragma: no cover
+            pass
+        return False
+
+    cfg = cc.load_config(cwd)
+    if rec.get("effort"):
+        cfg.effort = rec["effort"]
+    state = _session_from_record(rec, cfg)
+    runner_input = {
+        "config": cfg,
+        "cwd": str(cwd),
+        "cwd_display": rec.get("cwd_display") or str(cwd),
+        "question": state.question,
+        "trace": rec.get("trace"),
+        "extra_roots": list(rec.get("extra_roots") or []),
+        "extra_roots_display": list(rec.get("extra_roots_display") or []),
+        "skip_preflight": bool(rec.get("skip_preflight")),
+        "resume": True,
+    }
+    if kind == "follow-up":
+        parent = _ensure_loaded(app, rec.get("parent_sid"), cwd)
+        runner_input["parent_state"] = parent
+        if parent is not None and sid not in parent.follow_up_sids:
+            parent.follow_up_sids.append(sid)
+        # The ready-to-review flip on completion looks the root up in
+        # memory; load it now so a resumed follow-up still makes it.
+        _ensure_loaded(app, rec.get("root_sid"), cwd)
+    with app.state.sessions_lock:
+        app.state.sessions[sid] = state
+    inflight.update(sid, state="running",
+                    resumes=int(rec.get("resumes") or 0) + 1,
+                    resumed_at=time.time())
+    log.warning("resuming council %s (%s, %s) after an engine restart",
+                sid, kind or "consult", cfg.effort)
+    _submit_run(app, runner, state, runner_input)
+    return True
 
 
 # ----------------------- helpers --------------------------------- #
@@ -1269,6 +1590,7 @@ def _run_with_state(app,
                     "consultancy ready-flip failed for sid=%s", state.sid,
                 )
     finally:
+        _settle_inflight(state)
         # Best-effort: refresh the index entry's status + duration so
         # /v1/sessions reflects terminal state without re-reading the
         # full metadata.json.

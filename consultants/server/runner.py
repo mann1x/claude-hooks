@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -17,6 +18,7 @@ from typing import Any, Optional
 from consultants import config as cc
 from consultants.engine import council as council_mod
 from consultants.engine import storage
+from consultants.engine.run_control import RunSuspended
 
 log = logging.getLogger("consultants.server.runner")
 
@@ -92,7 +94,8 @@ def make_runner(*, ollama_base_url: str):
             cwd_display=cwd_display,
             extra_roots_display=extra_roots_display,
             label="council",
-            skip=bool(runner_input.get("skip_preflight")),
+            skip=bool(runner_input.get("skip_preflight")
+                      or runner_input.get("resume")),
         ):
             return
 
@@ -113,7 +116,13 @@ def make_runner(*, ollama_base_url: str):
         # max / xhigh / xmax keep it. cc.base_effort strips the
         # x-prefix so we make one decision per base tier and let
         # x-tiers inherit.
+        # xauto is the exception: it starts on the medium base, but
+        # its escalator is wired only when a critic is (graph.py
+        # ``use_escalator``) and three of its four signals are the
+        # critic's. Dropping the critic there made xauto a plain
+        # xmedium run that could never grow.
         if cc.base_effort(cfg.effort) in ("low", "medium") \
+                and cfg.effort != "xauto" \
                 and "critic" in enabled:
             enabled = tuple(r for r in enabled if r != "critic")
             log.info(
@@ -369,11 +378,8 @@ def make_runner(*, ollama_base_url: str):
         # instead of silently degrading to dicts under LangGraph's
         # coming strict-msgpack mode. See
         # state_v2.make_checkpointer_serde.
-        from consultants.engine.state_v2 import make_checkpointer_serde
-        checkpointer = (
-            MemorySaver(serde=make_checkpointer_serde())
-            if MemorySaver is not None else None
-        )
+        checkpointer = _open_checkpointer(
+            state, cfg, cwd, memory_saver_cls=MemorySaver)
         compiled = build_council_graph(
             deps, tracer=tracer,
             interrupt_before=interrupt_before,
@@ -404,6 +410,9 @@ def make_runner(*, ollama_base_url: str):
         # alone when this key is absent.
         if extra_roots:
             initial["extra_roots"] = list(extra_roots)
+        initial["runtime_control"] = _seed_runtime_control(
+            cfg, enabled,
+            n_fanout_extras=len(extra_models_by_role.get("researcher", [])))
         if enabled:
             state.progress[enabled[0]] = "in_progress"
 
@@ -428,7 +437,11 @@ def make_runner(*, ollama_base_url: str):
                 recorder=recorder, log_label="council",
                 adversary_checkpoint=adv_checkpoint,
                 adversary_checkpoint_timeout_s=adv_timeout_s,
+                resume=bool(runner_input.get("resume")),
             )
+        except RunSuspended as e:
+            _mark_suspended(state, recorder, e, log_label="council")
+            return
         except Exception as e:
             log.exception("council graph invocation failed: %s", e)
             state.status = "failed"
@@ -616,7 +629,8 @@ def make_follow_up_runner(*, ollama_base_url: str):
             state, question, cwd=cwd, extra_roots=extra_roots,
             cwd_display=cwd, extra_roots_display=extra_roots,
             label="council follow-up",
-            skip=bool(runner_input.get("skip_preflight")),
+            skip=bool(runner_input.get("skip_preflight")
+                      or runner_input.get("resume")),
         ):
             return
 
@@ -627,7 +641,10 @@ def make_follow_up_runner(*, ollama_base_url: str):
         # included critic but the follow-up topology decides
         # independently based on this follow-up's effort.
         enabled = ["researcher", "synthesizer"]
-        if cc.base_effort(cfg.effort) in ("high", "max") \
+        # xauto keeps it too: its escalator exists only when a critic
+        # does (see the main runner).
+        if (cc.base_effort(cfg.effort) in ("high", "max")
+                or cfg.effort == "xauto") \
                 and "critic" in cc.enabled_roles(cfg):
             enabled = ["researcher", "critic", "synthesizer"]
         enabled_t = tuple(enabled)
@@ -878,11 +895,8 @@ def make_follow_up_runner(*, ollama_base_url: str):
                 _MemSaver = None  # type: ignore[assignment]
         # Same custom-type serde allowlist as run_council so follow-up
         # checkpoint round-trips don't degrade Doc/ToolResult/… to dicts.
-        from consultants.engine.state_v2 import make_checkpointer_serde
-        fu_checkpointer = (
-            _MemSaver(serde=make_checkpointer_serde())
-            if _MemSaver is not None else None
-        )
+        fu_checkpointer = _open_checkpointer(
+            state, cfg, cwd, memory_saver_cls=_MemSaver)
         # #314: same always-on synthesizer interrupt as the council so
         # a mid-flight follow-up inject can rewind to a researcher round.
         compiled = build_follow_up_graph(
@@ -927,6 +941,7 @@ def make_follow_up_runner(*, ollama_base_url: str):
         # merged parent+followup allowed-roots set.
         if extra_roots:
             initial["extra_roots"] = list(extra_roots)
+        initial["runtime_control"] = _seed_runtime_control(cfg, enabled_t)
         initial["plan"] = (
             parent_state.plan
             if parent_state is not None and parent_state.plan
@@ -962,7 +977,11 @@ def make_follow_up_runner(*, ollama_base_url: str):
                 recorder=recorder, log_label="follow-up",
                 adversary_checkpoint=fu_adv_checkpoint,
                 adversary_checkpoint_timeout_s=fu_adv_timeout_s,
+                resume=bool(runner_input.get("resume")),
             )
+        except RunSuspended as e:
+            _mark_suspended(state, recorder, e, log_label="follow-up")
+            return
         except Exception as e:
             log.exception("follow-up graph invocation failed: %s", e)
             state.status = "failed"
@@ -1403,6 +1422,11 @@ def _await_adversary_checkpoint(*, state, final_state, recorder, timeout_s,
         # not bump activity, so a long pause is itself idle-reapable.
         if getattr(state, "closed", False):
             break
+        # An engine shutdown ends the park; the resumed run opens the
+        # checkpoint again, so the consumer still gets its window.
+        rc = getattr(state, "_run_control", None)
+        if rc is not None and rc.suspended:
+            break
         remaining = deadline - now_fn()
         if remaining <= 0:
             break
@@ -1414,11 +1438,107 @@ def _await_adversary_checkpoint(*, state, final_state, recorder, timeout_s,
     return acked
 
 
+def _open_checkpointer(state, cfg, cwd: str, *, memory_saver_cls):
+    """The run's checkpointer: durable (``[checkpointer]`` config, SQLite
+    per session by default) so an engine restart can resume it, falling
+    back to the in-memory saver when the durable one cannot be opened —
+    a council that cannot be resumed is still better than no council.
+
+    The handle is kept on ``state`` so the session can release it.
+    """
+    from consultants.engine.state_v2 import make_checkpointer_serde
+    serde = make_checkpointer_serde()
+    try:
+        from consultants.engine.checkpointer import (
+            CheckpointerConfig as _EngineCfg, make_checkpointer,
+        )
+        ck = getattr(cfg, "checkpointer", None)
+        engine_cfg = _EngineCfg(
+            backend=getattr(ck, "backend", "sqlite") or "sqlite",
+            url=getattr(ck, "url", None),
+        )
+        pool = None
+        if engine_cfg.backend == "postgres":
+            pool = _postgres_pool(engine_cfg, ck)
+        handle = make_checkpointer(engine_cfg, Path(cwd), state.sid,
+                                   postgres_pool=pool, serde=serde)
+        state._checkpointer_handle = handle
+        return handle.saver
+    except Exception:
+        log.exception("sid=%s: durable checkpointer unavailable; using the "
+                      "in-memory one (this run will not survive an engine "
+                      "restart)", state.sid)
+    if memory_saver_cls is None:
+        return None
+    return memory_saver_cls(serde=serde)
+
+
+_PG_POOL = None
+_PG_POOL_LOCK = threading.Lock()
+
+
+def _postgres_pool(engine_cfg, ck):
+    """One pool per engine process, built on first use."""
+    global _PG_POOL
+    with _PG_POOL_LOCK:
+        if _PG_POOL is None:
+            from consultants.engine.checkpointer import make_postgres_pool
+            engine_cfg.postgres_pool_min = getattr(ck, "postgres_pool_min", 1)
+            engine_cfg.postgres_pool_max = getattr(ck, "postgres_pool_max", 10)
+            engine_cfg.postgres_pool_timeout_s = getattr(
+                ck, "postgres_pool_timeout_s", 30.0)
+            _PG_POOL = make_postgres_pool(engine_cfg)
+        return _PG_POOL
+
+
+def _has_checkpoint(compiled, thread_config) -> bool:
+    try:
+        snap = compiled.get_state(thread_config)
+    except Exception:
+        return False
+    return bool(getattr(snap, "values", None)) or bool(
+        getattr(snap, "next", None))
+
+
+def _mark_suspended(state, recorder, exc, *, log_label: str) -> None:
+    """The run stopped for an engine shutdown. Nothing is finalized: the
+    transcript stays open-ended and the checkpoint stays, so the next
+    engine resumes the same sid where this one stopped."""
+    log.warning("%s: sid=%s suspended (%s); it resumes when the engine "
+                "restarts", log_label, state.sid, exc)
+    state.status = "suspended"
+    state.error = None
+    if recorder is not None:
+        try:
+            recorder.close()
+        except Exception:  # pragma: no cover — defensive
+            log.exception("recorder.close raised on suspend")
+
+
+def _seed_runtime_control(cfg, enabled, *, n_fanout_extras: int = 0) -> dict:
+    """The run's boot-time ``runtime_control``.
+
+    Until 2026-09-30 nothing seeded it, and every consumer treats an
+    absent record as "not configured": the researcher's stall monitor
+    never wrapped a call, the deadline never fired and POST /control
+    mutated caps no node had been started with. ``enabled_roles`` is the
+    roles this run actually has — the runner drops the critic below high
+    effort, and the config-derived default would quietly put it back for
+    any reader that consults the live record.
+    """
+    from consultants.engine.control import runtime_control_defaults
+    rc = runtime_control_defaults(cfg, effort=cfg.effort,
+                                  n_fanout_extras=n_fanout_extras)
+    rc["enabled_roles"] = list(enabled)
+    return dict(rc)
+
+
 def _drive_council_stream(compiled, initial, thread_config, *,
                           state, enabled, review_before_synthesis: bool,
                           recorder, log_label: str,
                           adversary_checkpoint: bool = False,
                           adversary_checkpoint_timeout_s: float = 600.0,
+                          resume: bool = False,
                           now_fn=time.time, sleep_fn=time.sleep) -> dict:
     """Stream the compiled graph to completion through the always-on
     ``interrupt_before=["synthesizer"]`` pause (#314).
@@ -1456,10 +1576,27 @@ def _drive_council_stream(compiled, initial, thread_config, *,
     """
     final_state: dict = dict(initial)
     stream_input: Any = initial
+    if resume and _has_checkpoint(compiled, thread_config):
+        # Continue from the last saved superstep. Tasks of the
+        # interrupted superstep that had finished are pending writes in
+        # the checkpoint and are not re-run; only the rest are.
+        log.warning("%s: resuming sid=%s from its checkpoint",
+                    log_label, state.sid)
+        stream_input = None
+    elif resume:
+        log.warning("%s: sid=%s has no checkpoint to resume from; "
+                    "starting it again", log_label, state.sid)
+    rc = getattr(state, "run_control", None)
+
+    def _check_suspend() -> None:
+        if rc is not None and getattr(rc, "suspended", False):
+            raise RunSuspended("suspended at a stream boundary")
+
     checkpoint_fired = False  # M2: fire the adversary checkpoint once
     MAX_RESUMES = 64  # safety bound vs. a pathological rewind loop
     try:
         for _ in range(MAX_RESUMES):
+            _check_suspend()
             for mode, payload in compiled.stream(
                     stream_input, config=thread_config,
                     stream_mode=["updates", "values"]):
@@ -1519,6 +1656,7 @@ def _drive_council_stream(compiled, initial, thread_config, *,
                         timeout_s=adversary_checkpoint_timeout_s,
                         log_label=log_label, now_fn=now_fn, sleep_fn=sleep_fn,
                     )
+                    _check_suspend()
                     if getattr(state, "closed", False):
                         # /cancel --discard or the idle reaper closed the
                         # session during the park — don't re-stream a

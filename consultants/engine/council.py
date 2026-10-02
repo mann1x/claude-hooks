@@ -1125,6 +1125,30 @@ def _plan_and_compact(chat_client, model: str, messages: list[dict], *,
     return messages, plan
 
 
+def _loop_payload_budgeter(chat_client, model: str, *,
+                           role: Optional[str] = None):
+    """``LoopConfig.prepare_payload`` for a role's tool loop: re-plan the
+    output budget, compacting first when the history has outgrown the
+    window, before every iteration.
+
+    The single-shot path always did this; the tool loops did not, so a
+    researcher that read a few large files sent an uncapped request
+    whose history had grown past what the window could hold alongside
+    an answer. Each iteration adds a tool result, so the plan has to be
+    made per call, not once before the loop.
+    """
+    def _prepare(payload: dict) -> None:
+        messages, plan = _plan_and_compact(
+            chat_client, model, list(payload.get("messages") or []),
+            role=role)
+        payload["messages"] = messages
+        if plan.output_tokens:
+            opts = dict(payload.get("options") or {})
+            opts["num_predict"] = plan.output_tokens
+            payload["options"] = opts
+    return _prepare
+
+
 def _single_shot(chat_client, model: str, messages: list[dict],
                  *, think: Any = True,
                  recorder=None, role: Optional[str] = None,
@@ -1590,6 +1614,8 @@ def _role_turn(chat_client, model: str, messages: list[dict],
             # answer immediately. Forcing a first tool call would make
             # a critic that has nothing to verify burn a call proving it.
             force_first_tool_call=False,
+            prepare_payload=_loop_payload_budgeter(
+                chat_client, model, role=role),
         )
         loop_kwargs = dict(config=cfg, tool_specs=tool_specs,
                            chat_fn=chat_client.chat,
@@ -2383,6 +2409,8 @@ def researcher_node(state: dict, *,
             tools_available=True,
             think=think,
             force_first_tool_call=False,
+            prepare_payload=_loop_payload_budgeter(
+                chat_client, model, role="researcher"),
         )
 
     # Bind recorder callbacks to the loop_runner so per-iteration LLM
@@ -2446,12 +2474,20 @@ def researcher_node(state: dict, *,
                     except Exception:  # pragma: no cover
                         log.exception(
                             "recorder.record_event raised; ignored")
+            # Per-model thresholds (production latency, see
+            # stall_defaults.runtime_stall_thresholds); a value set on
+            # runtime_control is an operator override and wins.
+            from consultants.engine.stall_defaults import (
+                runtime_stall_thresholds,
+            )
+            tuned = runtime_stall_thresholds(model)
             chat_fn = stall_protected_chat_fn_for(
                 chat_client,
                 stall_threshold_s=float(
-                    rc.get("stall_threshold_s") or 300.0),
+                    rc.get("stall_threshold_s")
+                    or tuned.stall_threshold_s),
                 hard_cap_s=float(
-                    rc.get("per_lane_hard_s") or 3600.0),
+                    rc.get("per_lane_hard_s") or tuned.hard_cap_s),
                 retries=int(rc.get("stall_retries") or 1),
                 on_event=stall_event_sink,
             )

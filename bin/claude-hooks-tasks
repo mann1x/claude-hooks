@@ -1,0 +1,18 @@
+#!/usr/bin/env sh
+# claude-hooks-tasks — POSIX entry point for the persistent task list.
+# Works on the project the current directory belongs to, so it keeps the
+# caller's cwd (the shared resolver puts the repo on PYTHONPATH).
+#
+# See docs/tasks.md for the full reference.
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+
+. "$HERE/_resolve_python.sh"
+
+if [ -z "$PY" ]; then
+    echo "claude-hooks-tasks: no python found" >&2
+    exit 1
+fi
+
+exec "$PY" -m claude_hooks.tasks.cli "$@"

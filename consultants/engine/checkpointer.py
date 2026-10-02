@@ -104,7 +104,34 @@ class CheckpointerHandle:
 
 # ----------------------- SQLite path ----------------------------- #
 
-def _make_sqlite_handle(*, cwd: Path, sid: str) -> CheckpointerHandle:
+def sqlite_checkpoint_path(cwd: Path, sid: str) -> Path:
+    return Path(cwd) / ".claude-hooks" / "consultants" / sid / "checkpoints.db"
+
+
+def discard_sqlite_checkpoint(cwd: Path, sid: str) -> bool:
+    """Delete a session's SQLite checkpoint (and its WAL / SHM).
+
+    A checkpoint is only worth keeping while the run can still be
+    resumed; a finished council's is several copies of state its
+    transcript already records. Best-effort: on Windows an open handle
+    makes the unlink fail, and the file is simply left behind.
+    """
+    db = sqlite_checkpoint_path(cwd, sid)
+    removed = False
+    for p in (db, db.with_name(db.name + "-wal"),
+              db.with_name(db.name + "-shm")):
+        try:
+            p.unlink()
+            removed = removed or p == db
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log.debug("could not remove %s: %s", p, exc)
+    return removed
+
+
+def _make_sqlite_handle(*, cwd: Path, sid: str,
+                        serde: Any = None) -> CheckpointerHandle:
     """Open a per-session SQLite checkpoint DB under
     ``<cwd>/.claude-hooks/consultants/<sid>/checkpoints.db``.
 
@@ -114,14 +141,15 @@ def _make_sqlite_handle(*, cwd: Path, sid: str) -> CheckpointerHandle:
     """
     from langgraph.checkpoint.sqlite import SqliteSaver
 
-    db_path = cwd / ".claude-hooks" / "consultants" / sid / "checkpoints.db"
+    db_path = sqlite_checkpoint_path(cwd, sid)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     # WAL + busy_timeout: better concurrency for the stream-while-
     # writing pattern. Same setup the recorder uses.
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
-    saver = SqliteSaver(conn)
+    saver = SqliteSaver(conn, serde=serde) if serde is not None \
+        else SqliteSaver(conn)
     saver.setup()
     return CheckpointerHandle(
         saver, conn.close,
@@ -180,7 +208,8 @@ def make_postgres_pool(cfg: CheckpointerConfig):
 
 
 def _make_postgres_handle(*, cfg: CheckpointerConfig,
-                          postgres_pool: Any) -> CheckpointerHandle:
+                          postgres_pool: Any,
+                          serde: Any = None) -> CheckpointerHandle:
     """Wrap a PostgresSaver around a shared pool. The pool's
     lifecycle is owned by the app; the handle's close() is a no-op
     so the pool survives across sessions."""
@@ -197,7 +226,8 @@ def _make_postgres_handle(*, cfg: CheckpointerConfig,
             "through."
         )
 
-    saver = PostgresSaver(postgres_pool)
+    saver = PostgresSaver(postgres_pool, serde=serde) if serde is not None \
+        else PostgresSaver(postgres_pool)
     # setup() is idempotent; safe to call every session start.
     saver.setup()
     return CheckpointerHandle(
@@ -211,6 +241,7 @@ def _make_postgres_handle(*, cfg: CheckpointerConfig,
 
 def make_checkpointer(cfg: CheckpointerConfig, cwd: Path, sid: str,
                       *, postgres_pool: Optional[Any] = None,
+                      serde: Any = None,
                       ) -> CheckpointerHandle:
     """Return a ``CheckpointerHandle`` for the session.
 
@@ -241,9 +272,10 @@ def make_checkpointer(cfg: CheckpointerConfig, cwd: Path, sid: str,
     """
     backend = (cfg.backend or "sqlite").lower()
     if backend == "sqlite":
-        return _make_sqlite_handle(cwd=Path(cwd), sid=sid)
+        return _make_sqlite_handle(cwd=Path(cwd), sid=sid, serde=serde)
     if backend == "postgres":
-        return _make_postgres_handle(cfg=cfg, postgres_pool=postgres_pool)
+        return _make_postgres_handle(cfg=cfg, postgres_pool=postgres_pool,
+                                     serde=serde)
     raise ValueError(
         f"unknown checkpointer backend: {backend!r}. "
         f"Valid: 'sqlite' | 'postgres'"

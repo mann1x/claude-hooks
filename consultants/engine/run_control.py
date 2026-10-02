@@ -38,6 +38,15 @@ checkpoint plus a re-invoke, and re-invoking while the runner still owns
 the stream is the double-resume bug ``/resume`` already guards against
 for the adversary checkpoint.
 
+**Suspend raises, on purpose.** It is the engine-shutdown verb: the run
+must stop where it is and continue in the next process. Raising
+``RunSuspended`` at a node gate aborts the superstep, and with a durable
+checkpointer LangGraph keeps every task of that superstep that already
+finished as a pending write — a resumed ``stream(None)`` re-runs only
+the tasks that had not (measured 2026-10-01: a 3-lane fan-out where one
+lane raised resumed with that lane alone). Skipping, as cancel does,
+would drain the graph to END and leave nothing to resume.
+
 **Pause resumes on timeout; cancel denies on timeout.** They are
 opposites on purpose. An unanswered spend approval must not authorize
 spend, so it denies. An unanswered pause has already spent everything up
@@ -53,6 +62,13 @@ import time
 from typing import Any, Callable, Optional
 
 log = logging.getLogger("consultants.engine.run_control")
+
+
+class RunSuspended(Exception):
+    """Raised by the node gate once a suspend was requested (engine
+    shutdown). Propagates out of ``compiled.stream``; the runner turns
+    it into ``status = "suspended"`` and leaves the checkpoint for the
+    next process to resume."""
 
 #: How long a paused node waits before giving up on the pause and
 #: continuing. Deliberately generous: the run is already paid for, and
@@ -87,6 +103,8 @@ class RunControl:
         # never touches the wait path at all.
         self._resume_evt = threading.Event()
         self._resume_evt.set()
+        self._suspended = False
+        self._suspend_reason = ""
         #: Roles observed skipping / parking, for the status payload and
         #: for tests that need to prove the gate actually fired.
         self.skipped: list[str] = []
@@ -113,6 +131,28 @@ class RunControl:
         if first:
             log.warning("run %s: cancel requested (%s)", self.sid, reason)
         return first
+
+    def request_suspend(self, reason: str = "engine-shutdown") -> bool:
+        """Stop at the next node boundary so the run can be resumed by
+        another process. Returns True the first time only. Ignored on a
+        cancelled run (it is draining to END already). Wakes a parked
+        node: a pause must not hold a shutdown."""
+        with self._lock:
+            if self._cancelled:
+                return False
+            first = not self._suspended
+            self._suspended = True
+            if first:
+                self._suspend_reason = reason or "engine-shutdown"
+            self._resume_evt.set()
+        if first:
+            log.warning("run %s: suspend requested (%s)", self.sid, reason)
+        return first
+
+    @property
+    def suspended(self) -> bool:
+        with self._lock:
+            return self._suspended
 
     def request_pause(self, reason: str = "user-pause",
                       now: Optional[float] = None) -> bool:
@@ -206,6 +246,8 @@ class RunControl:
         if self.cancelled:
             self._note_skipped(role)
             return "cancel"
+        if self.suspended:
+            return "suspend"
         if not self.paused:
             return "run"
 
@@ -239,7 +281,7 @@ class RunControl:
 
         waiter = wait_fn or self._resume_evt.wait
         while now_fn() < deadline:
-            if self.cancelled:
+            if self.cancelled or self.suspended:
                 break
             if is_closed is not None and is_closed():
                 break
@@ -274,6 +316,8 @@ class RunControl:
         if self.cancelled:
             self._note_skipped(role)
             return "cancel"
+        if self.suspended:
+            return "suspend"
         return "run"
 
     def _note_skipped(self, role: str) -> None:
@@ -317,6 +361,9 @@ def gate_node(fn: Callable, *, role: str,
         verdict = run_control.check(
             role, emit=emit, is_closed=is_closed,
         )
+        if verdict == "suspend":
+            raise RunSuspended(f"node {role} not started: "
+                               f"{run_control._suspend_reason}")
         if verdict == "cancel":
             log.info("node %s skipped: run cancelled", role)
             if emit is not None:
@@ -341,5 +388,6 @@ def gate_node(fn: Callable, *, role: str,
 __all__ = [
     "DEFAULT_PAUSE_TIMEOUT_S",
     "RunControl",
+    "RunSuspended",
     "gate_node",
 ]

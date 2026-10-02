@@ -1,4 +1,4 @@
-"""Status-line segments: usage limits and unread mail.
+"""Status-line segments: usage limits and waiting mail.
 
 The status line is the one surface Claude Code refreshes while a session
 sits idle (``"refreshInterval"`` in the ``statusLine`` setting), and it
@@ -12,8 +12,8 @@ to the status line; :func:`native_state` puts the latter in the proxy
 state's shape, so ``scripts/statusline_compose.py`` renders both through
 the same formatter and the line looks the same whichever source answered.
 
-**Mail** is this session's unread count, cached per session for
-:data:`MAIL_CACHE_SECONDS`: the status line re-runs on every assistant
+**Mail** is this session's unread count plus the ack notes waiting on
+messages it sent, cached per session for :data:`MAIL_CACHE_SECONDS`: the status line re-runs on every assistant
 message, and a database round-trip per message is not free. Everything
 here returns ``None`` / ``""`` on failure — a status line must never
 break.
@@ -101,7 +101,18 @@ def _default_cache_dir() -> Path:
 
 def lookup_unread(session_id: str, cwd: str,
                   config: Optional[dict] = None) -> Optional[int]:
-    """Unread messages for this session, straight from the store.
+    """Unread messages for this session, straight from the store."""
+    counts = lookup_mail(session_id, cwd, config)
+    return None if counts is None else counts[0]
+
+
+def lookup_mail(session_id: str, cwd: str,
+                config: Optional[dict] = None) -> Optional[tuple[int, int]]:
+    """``(unread, acks)`` for this session, straight from the store.
+
+    ``acks`` are notes left on messages this session sent and has not
+    been shown yet. Hooks deliver them at the next prompt, so without
+    this an idle session never learns that an answer came back.
 
     None when the mailbox is off here — disabled in config, or a disable
     marker that does not keep ``mailbox`` — or unreachable.
@@ -127,20 +138,42 @@ def lookup_unread(session_id: str, cwd: str,
             continue
         # tools.alias is the session id's registered alias; the project
         # dir is only the fallback for a session that has none.
-        return tools.store.inbox_count(alias=tools.alias,
-                                       session_id=tools.session_id or None,
-                                       host=tools.host)
+        unread = tools.store.inbox_count(alias=tools.alias,
+                                         session_id=tools.session_id or None,
+                                         host=tools.host)
+        try:
+            acks = tools.store.receipt_count(from_alias=tools.alias,
+                                             from_host=tools.host)
+        except Exception:
+            # The unread count is the half that must not be lost.
+            log.debug("statusline: ack lookup failed", exc_info=True)
+            acks = 0
+        return unread, acks
     return None
 
 
-def unread_count(payload: dict, *, cache_dir: Optional[Path] = None,
-                 ttl: float = MAIL_CACHE_SECONDS,
-                 lookup: Callable[[str, str], Optional[int]] = lookup_unread,
-                 now: Optional[float] = None) -> Optional[int]:
-    """This session's unread count, reused for ``ttl`` seconds.
+def _pair(value) -> Optional[tuple[int, int]]:
+    """A lookup result as ``(unread, acks)``; a bare int has no acks."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value, 0
+    if (isinstance(value, (tuple, list)) and len(value) == 2
+            and all(isinstance(v, int) and not isinstance(v, bool)
+                    for v in value)):
+        return value[0], value[1]
+    return None
+
+
+def mail_counts(payload: dict, *, cache_dir: Optional[Path] = None,
+                ttl: float = MAIL_CACHE_SECONDS,
+                lookup: Callable[[str, str], object] = lookup_mail,
+                now: Optional[float] = None) -> Optional[tuple[int, int]]:
+    """This session's ``(unread, acks)``, reused for ``ttl`` seconds.
 
     A failed lookup is cached too (as None), so a store that is down
     costs one timeout per ``ttl``, not one per assistant message.
+    ``lookup`` may return a bare unread count.
     """
     session_id, cwd = _session_and_cwd(payload)
     if not session_id:
@@ -154,18 +187,26 @@ def unread_count(payload: dict, *, cache_dir: Optional[Path] = None,
         cached = json.loads(path.read_text(encoding="utf-8"))
         if 0 <= now - float(cached["at"]) < ttl:
             n = cached.get("count")
-            return n if isinstance(n, int) else None
+            if not isinstance(n, int) or isinstance(n, bool):
+                return None
+            # Files written before acks were counted have no "acks".
+            acks = cached.get("acks")
+            return n, acks if isinstance(acks, int) else 0
     except (OSError, ValueError, KeyError, TypeError):
         pass
     try:
-        count = lookup(session_id, cwd)
+        counts = _pair(lookup(session_id, cwd))
     except Exception:
-        log.debug("statusline: unread lookup failed", exc_info=True)
-        count = None
+        log.debug("statusline: mail lookup failed", exc_info=True)
+        counts = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps({"at": now, "count": count}), encoding="utf-8")
+        tmp.write_text(json.dumps({
+            "at": now,
+            "count": counts[0] if counts else None,
+            "acks": counts[1] if counts else None,
+        }), encoding="utf-8")
         tmp.replace(path)
         for old in path.parent.glob("statusline-*.json"):
             try:
@@ -175,16 +216,40 @@ def unread_count(payload: dict, *, cache_dir: Optional[Path] = None,
                 pass
     except OSError:
         pass
-    return count
+    return counts
 
 
-def mail_segment(count: Optional[int], *, fmt: str) -> str:
-    """``📬 2`` / ``mail:2`` — nothing when there is no unread mail.
+def unread_count(payload: dict, *, cache_dir: Optional[Path] = None,
+                 ttl: float = MAIL_CACHE_SECONDS,
+                 lookup: Callable[[str, str], object] = lookup_mail,
+                 now: Optional[float] = None) -> Optional[int]:
+    """The unread half of :func:`mail_counts`."""
+    counts = mail_counts(payload, cache_dir=cache_dir, ttl=ttl,
+                         lookup=lookup, now=now)
+    return None if counts is None else counts[0]
+
+
+def mail_segment(count: Optional[int], *, fmt: str, acks: int = 0) -> str:
+    """``📬 2 ↩1`` / ``mail:2 ack:1`` — nothing when nothing is waiting.
+
+    The second number is ack notes on messages this session sent. Either
+    half is left out when it is zero (``📬 2``, ``📬 ↩1``).
 
     ``fmt`` is the already-effective glyph style (emoji / ascii / plain).
     """
-    if not count:
+    count, acks = count or 0, acks or 0
+    if not count and not acks:
         return ""
     if fmt == "emoji":
-        return f"📬 {count}"
-    return f"mail:{count}"
+        parts = ["📬"]
+        if count:
+            parts.append(str(count))
+        if acks:
+            parts.append(f"↩{acks}")
+        return " ".join(parts)
+    parts = []
+    if count:
+        parts.append(f"mail:{count}")
+    if acks:
+        parts.append(f"ack:{acks}")
+    return " ".join(parts)

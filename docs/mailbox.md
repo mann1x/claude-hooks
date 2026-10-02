@@ -406,6 +406,101 @@ told. Now the hooks do not run at all in such a run
 child of one `mailbox-read` / `mailbox-ack` refuse and nothing is
 registered; `mailbox-send` and the listings still work.
 
+## Cloud sessions
+
+A Claude cloud session cannot reach the pgvector MCP. In the desktop app
+it can read and write a linked local folder, and the **relay** turns that
+folder into a mailbox client: the session writes requests as files, the
+daemon runs them through the same `MailboxTools` dispatch the MCP uses,
+and writes the answers back. Code: `claude_hooks/mailbox/relay.py` and
+`watch.py`. The session's own guide is
+[`claude_hooks/mailbox/cloud/MAILBOX.md`](../claude_hooks/mailbox/cloud/MAILBOX.md),
+installed into the folder as `MAILBOX.md`.
+
+**Addressing.** Tell the cloud session which alias to take ("take the
+mailbox alias osync"). It sends a `mailbox-alias` request and is then
+**`osync@cloud`** to every other session. The registry key behind it is
+`cloud-osync`; nobody needs it. A later cloud session that takes the same
+alias takes the address over, mail included.
+
+**The semaphore rule.** Nothing a remote session writes is read until
+its semaphore says so. Each request is `requests/<id>.json` plus
+`requests/<id>.sem` (`{"op", "status", "bytes"?}`), written semaphore
+`writing` → payload → semaphore `ready`. The daemon ignores a payload
+with no semaphore, an unparseable semaphore, `writing`, and a `ready`
+whose optional `bytes` does not match the file on disk (still syncing).
+It reads a request only when all of that holds, then deletes payload and
+semaphore and runs it. `cancelled` deletes both and does nothing. A
+request stuck past `writing_timeout_seconds` (1 h) goes to `rejected/`
+with a reason. The daemon's own files — `replies/<id>.md`, `INBOX.md`,
+`status.json` — are written the same way, semaphore last.
+
+**Cost.** The thread is blocked in the kernel on file events while idle:
+inotify on Linux (which also sees Samba writes, since `smbd` writes the
+local file), `ReadDirectoryChangesW` on Windows, and a 30 s mtime poll
+only where neither works. It watches only the folders a session writes
+to, so its own writes don't wake it. A request is handled after a 1 s
+settle (so the three-file write lands in one pass). Only past `burst`
+(5) passes that handled requests within one `interval_seconds` (30,
+also the floor) does the relay batch what arrives into one pass — so a
+session working step by step is answered at once, and a flood is
+capped. The inbox refresh and a pass that found only a `writing`
+semaphore don't count. The database is opened
+on first use and queried — one inbox page per session, `INBOX.md`
+rewritten only when it changes — every interval only while a cloud
+session has made a request in the last `live_hours` (12). Session
+folders idle for `archive_days` (30) move to `archive/`.
+
+**Setup.** None needed: the relay is part of the mailbox. Wherever
+`hooks.mailbox.enabled` is true — Linux, Windows or macOS — the relay is
+on and its folder is **`~/claude-mailbox`** (`C:\Users\<you>\claude-mailbox`
+on Windows). Link that folder in the desktop app. It has to be a local
+folder: the app cannot link a network share. To move it or turn it off:
+
+```json
+"hooks": {"mailbox": {"enabled": true, "cloud_relay": {
+  "root": "/shared/dev/mailbox"
+}}}
+```
+
+(`"enabled": false` in `cloud_relay` turns the relay off on that host.)
+Each host relays its own folder, and every relay registers its sessions
+as `<alias>@cloud`, so a cloud session is reachable at the same address
+whichever machine's desktop app it runs in.
+
+`install.py` creates the folder and installs `MAILBOX.md` (also in
+non-interactive runs); `scripts/deploy.py` keeps both current, and `verify_deploy.py` fails on a stale copy. The
+daemon's systemd unit is sandboxed (`ProtectSystem=strict`, write access
+to `~/.claude` only), so deploy and install also write
+`/etc/systemd/system/claude-hooks-daemon.service.d/mailbox-relay.conf`
+granting the folder — as spelled *and* resolved, because the mount
+namespace is built from the literal path and `/shared/dev` is a symlink.
+Without it the relay reads requests and can never answer; it probes the
+folder at start and refuses to run, logging this fix. Config
+is read when the daemon starts — restart it (deploy does) to apply a
+change. Run the relay on **one** host per folder.
+
+| key | default | |
+|---|---|---|
+| `root` | `~/claude-mailbox` | the folder; must be local |
+| `host` | `cloud` | the host part of every cloud address |
+| `interval_seconds` | 30 | batching window + inbox refresh; floor 30 |
+| `burst` | 5 | passes per window before batching starts; floor 1 |
+| `writing_timeout_seconds` | 3600 | stuck requests → `rejected/` |
+| `live_hours` | 12 | inbox kept current this long after a request |
+| `archive_days` | 30 | idle session folders → `archive/` |
+| `aliases` | any | optional allow-list |
+| `watcher` | `auto` | `inotify` / `windows` / `poll` |
+
+```bash
+python -m claude_hooks.mailbox.relay status                # folder, instructions, sessions
+python -m claude_hooks.mailbox.relay install-instructions  # copy MAILBOX.md by hand
+```
+
+**Limits.** A cloud session runs no hooks: it gets no mail notice, no
+Stop nudge and no badge, and learns about mail only by reading
+`INBOX.md`. Answers take up to about 30 s.
+
 ## Troubleshooting
 
 **"No sessions registered."** Nothing has run `SessionStart` against

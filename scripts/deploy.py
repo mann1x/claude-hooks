@@ -35,7 +35,10 @@ What it does, in order:
    forgets).
 3. **Skills** — sync ``.claude/skills/*/SKILL.md`` into
    ``~/.claude/skills/``. Only ones already installed: skills are opt-in
-   per host and ``install.py`` is the thing that offers new ones.
+   per host and ``install.py`` is the thing that offers new ones. Same
+   step, same class (read at session start, loaded by no service): the
+   cloud mailbox instructions, PATH wrappers for every ``bin/*`` CLI,
+   and the matchers of the installed hook blocks in settings.json.
 4. **episodic-memory** — on the episodic server host, make the vendored
    ``episodic-memory/`` the working CLI: ``npm install`` with a C++20
    toolchain when its tree or the Node ABI changed, a load check of the
@@ -45,7 +48,11 @@ What it does, in order:
    then re-ensure the daemon-managed embedder, which the daemon restart
    takes down with it and nothing brings back until the next local
    embedding request (a LAN client cannot make one — it does not
-   supervise the process).
+   supervise the process). The consultants engine is not restarted
+   while a council is running on it: a restart kills the run with
+   nothing left to resume from. The deploy waits for it
+   (``--wait-for-councils``), or leaves the engine on the old code and
+   fails, or kills the run only when told to (``--kill-councils``).
 6. **Verify** — run ``verify_deploy.py`` and adopt its exit code.
 
 Usage::
@@ -53,6 +60,7 @@ Usage::
     scripts/deploy.py                # full deploy
     scripts/deploy.py --dry-run      # show every action, change nothing
     scripts/deploy.py --skip-restart # everything except service restarts
+    scripts/deploy.py --wait-for-councils 3600  # let running councils finish
 
 Exit code: 0 only if every step succeeded and verification passed.
 """
@@ -64,6 +72,8 @@ import os
 import shutil
 import subprocess
 import sys
+import time
+import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -290,7 +300,127 @@ def step_skills(dry: bool) -> Step:
         s.note(f"not installed on this host (opt-in): {', '.join(absent)}")
     if not synced and not dry:
         s.note("no skill needed updating")
+    _sync_relay_instructions(s, dry)
+    _sync_cli_and_hook_entries(s, dry)
     return s
+
+
+def _import_install():
+    sys.path.insert(0, str(REPO))
+    try:
+        import install  # noqa: PLC0415 — the installer is the source
+        return install
+    finally:
+        sys.path.pop(0)
+
+
+def _sync_cli_and_hook_entries(s: Step, dry: bool) -> None:
+    """The two install.py artifacts that drift with no error.
+
+    - **PATH wrappers for ``bin/*``.** A new CLI (``claude-hooks-tasks``)
+      exists in the repo and nowhere on PATH until install.py runs again.
+    - **Hook matchers in settings.json.** Claude Code reads them at
+      session start; a block still on an old matcher never fires for the
+      tools added since (the built-in task mirror needs ``TaskCreate``).
+      Only the matchers of already-installed blocks are reconciled —
+      which events a host has stays the installer's decision.
+    """
+    try:
+        install = _import_install()
+    except Exception as e:      # pragma: no cover — import-time breakage
+        s.fail(f"install.py not importable ({e})")
+        return
+    names = install._shim_names_to_install(REPO)
+    wdir = install._shim_wrapper_dir()
+    missing = [n for n in names if not (wdir / n).exists()]
+    if missing and dry:
+        s.note(f"[dry-run] would add PATH wrappers: {', '.join(missing)}")
+    elif missing:
+        try:
+            install._install_bin_shim_wrappers(REPO, dry_run=False)
+            s.note(f"PATH wrappers added: {', '.join(missing)}")
+        except OSError as e:
+            s.fail(f"PATH wrappers: {e}")
+    try:
+        notes = install.sync_managed_hooks(install.user_settings_path(),
+                                           dry_run=dry)
+    except Exception as e:
+        s.fail(f"settings.json hook matchers: {e}")
+        return
+    for n in notes:
+        s.note(("[dry-run] would set " if dry else "settings.json: ") + n)
+    if notes and not dry:
+        s.note("hook matchers take effect in new Claude Code sessions")
+
+
+def _load_cfg() -> dict:
+    try:
+        return json.loads((REPO / "config" / "claude-hooks.json")
+                          .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _sync_relay_instructions(s: Step, dry: bool) -> None:
+    """The cloud-session instructions (``MAILBOX.md``) in the relay
+    folder. Same class as a skill: read by a session, loaded by no
+    service, and silently wrong when stale — a cloud session following
+    an old copy speaks a protocol the relay no longer does."""
+    # The same resolution the daemon uses: on wherever the mailbox is,
+    # default folder ~/claude-mailbox. A host that installs the mailbox
+    # gets a folder to link, whatever its OS.
+    try:
+        sys.path.insert(0, str(REPO))
+        from claude_hooks.mailbox.relay import settings as relay_settings
+    finally:
+        sys.path.pop(0)
+    opts = relay_settings(_load_cfg())
+    if not opts["enabled"]:
+        return
+    root = opts["root"]
+    # The daemon unit is sandboxed (ProtectSystem=strict): without a
+    # grant for the folder the relay can read requests and never answer.
+    # Before step_services, so the restart there applies the drop-in.
+    try:
+        sys.path.insert(0, str(REPO))
+        from claude_hooks.mailbox.relay import ensure_unit_grant
+        for note in ensure_unit_grant(root, dry_run=dry):
+            s.note(f"mailbox relay: {note}")
+    except OSError as e:
+        s.fail(f"mailbox relay: cannot grant the daemon write access to "
+               f"{root} ({e})")
+    finally:
+        sys.path.pop(0)
+    src = REPO / "claude_hooks" / "mailbox" / "cloud" / "MAILBOX.md"
+    dst = Path(os.path.expanduser(str(root))) / "MAILBOX.md"
+    if not dry:
+        try:
+            (dst.parent / "sessions").mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            s.fail(f"cloud mailbox folder: cannot create {dst.parent} ({e})")
+            return
+    elif not dst.parent.is_dir():
+        s.note(f"[dry-run] would create {dst.parent}")
+    try:
+        want = src.read_bytes()
+        have = dst.read_bytes() if dst.is_file() else None
+    except OSError as e:
+        s.fail(f"cloud mailbox instructions: unreadable ({e})")
+        return
+    if have == want:
+        s.note(f"cloud mailbox instructions current ({dst})")
+        return
+    verb = "installed" if have is None else "updated"
+    if dry:
+        s.note(f"[dry-run] would have {verb} {dst}")
+        return
+    try:
+        (dst.parent / "sessions").mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(want)
+    except OSError as e:
+        s.fail(f"cloud mailbox instructions: cannot write {dst} ({e})")
+        return
+    s.note(f"cloud mailbox instructions {verb} ({dst})")
 
 
 # --------------------------------------------------------------------- #
@@ -358,7 +488,114 @@ def _repo_units() -> list[tuple[str, str]]:
     return out
 
 
-def step_services(dry: bool, skip: bool) -> Step:
+def _is_consultants_unit(unit: str, scope: str) -> bool:
+    """Whether the unit runs the consultants engine (``consultants.server``)."""
+    d = (Path("/etc/systemd/system") if scope == "system"
+         else Path(os.path.expanduser("~/.config/systemd/user")))
+    try:
+        body = (d / unit).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "consultants" in unit
+    return "consultants.server" in body
+
+
+def _consultants_endpoint() -> str:
+    """The engine's own address — never the smart-start forwarder, which
+    would answer for an engine it may have to spawn."""
+    port = 38095
+    try:
+        sys.path.insert(0, str(REPO))
+        from consultants import config as cc
+        port = int(cc.load_config(Path.home()).service.http_port)
+    except Exception:
+        pass
+    return f"http://127.0.0.1:{port}"
+
+
+def _running_councils(endpoint: str) -> list[dict] | None:
+    """Councils in flight on the engine, or ``None`` when it does not
+    answer. A paused or tool-waiting council is still ``running``."""
+    try:
+        with urllib.request.urlopen(f"{endpoint}/v1/sessions/open",
+                                    timeout=5) as r:
+            body = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+    return [e for e in body.get("open_sessions") or []
+            if e.get("status") == "running"]
+
+
+def _engine_suspends(endpoint: str) -> bool:
+    """Whether the engine suspends running councils on shutdown and
+    resumes them on start (``/v1/health.suspends_on_shutdown``). An
+    engine from before that answers without the key, and restarting it
+    still loses whatever it is running."""
+    try:
+        with urllib.request.urlopen(f"{endpoint}/v1/health", timeout=5) as r:
+            body = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return False
+    return bool(body.get("suspends_on_shutdown"))
+
+
+def _describe(councils: list[dict]) -> str:
+    now = time.time()
+    out = []
+    for c in councils:
+        mins = (now - float(c.get("started_at") or now)) / 60
+        q = " ".join(str(c.get("question") or "").split())[:60]
+        out.append(f"{c.get('sid')} ({c.get('effort')}, {mins:.0f} min): {q}")
+    return "; ".join(out)
+
+
+def _councils_clear(s: Step, unit: str, scope: str, wait: float,
+                    kill: bool, poll: float = 30.0) -> bool:
+    """Whether the consultants engine may be restarted now.
+
+    Re-asks the engine on every poll: a council that finishes, and one
+    that starts while we wait, both change the answer.
+    """
+    endpoint = _consultants_endpoint()
+    deadline = time.monotonic() + max(0.0, wait)
+    announced = False
+    while True:
+        running = _running_councils(endpoint)
+        if running is None:
+            # An engine that cannot answer cannot be serving a run
+            # anyone can collect; restarting it is the repair.
+            s.note(f"{unit} ({scope}) — engine at {endpoint} did not "
+                   "answer; restarting it")
+            return True
+        if not running:
+            return True
+        if kill:
+            s.note(f"{unit} ({scope}) — --kill-councils: killing "
+                   f"{len(running)} running council(s): {_describe(running)}")
+            return True
+        left = deadline - time.monotonic()
+        if left <= 0 and _engine_suspends(endpoint):
+            # The engine suspends them at a node boundary and the new
+            # one resumes them under the same sids; the cost is the
+            # nodes that were mid-call, which run again.
+            s.note(f"{unit} ({scope}) — {len(running)} council(s) will be "
+                   f"suspended and resumed by the restarted engine: "
+                   f"{_describe(running)}")
+            return True
+        if left <= 0:
+            s.fail(f"{unit} ({scope}) NOT restarted, still on the old code: "
+                   f"{len(running)} council(s) running — {_describe(running)}. "
+                   "Re-run with --wait-for-councils SECONDS once they are "
+                   "near done, or --kill-councils to lose them.")
+            return False
+        if not announced:
+            s.note(f"{unit} ({scope}) — waiting up to {wait:.0f} s for "
+                   f"{len(running)} council(s): {_describe(running)}")
+            announced = True
+        time.sleep(min(poll, left))
+
+
+def step_services(dry: bool, skip: bool, council_wait: float = 0.0,
+                  kill_councils: bool = False) -> Step:
     s = Step("services")
     print("\n[5/6] services")
     if skip:
@@ -374,6 +611,10 @@ def step_services(dry: bool, skip: bool) -> Step:
     else:
         _stop_lsp_daemons(s)
     units = _repo_units()
+    # Before the early return below, for the same reason as the lsp
+    # daemons: on Windows the daemon is a scheduled task, and a host with
+    # no systemd units returned here without ever restarting it.
+    _restart_unmanaged_daemon(s, dry, units)
     if not units:
         s.note("no systemd unit references this repo")
         return s
@@ -383,6 +624,21 @@ def step_services(dry: bool, skip: bool) -> Step:
         if not active:
             s.note(f"{unit} ({scope}) — not running, skipped")
             continue
+        if _is_consultants_unit(unit, scope):
+            if dry:
+                running = _running_councils(_consultants_endpoint())
+                if running and not kill_councils:
+                    what = (f"would wait up to {council_wait:.0f} s, then "
+                            "leave it on the old code and fail"
+                            if council_wait > 0 else
+                            "would NOT restart it and would fail")
+                    s.note(f"[dry-run] {unit} ({scope}) — "
+                           f"{len(running)} council(s) running "
+                           f"({_describe(running)}): {what}")
+                    continue
+            elif not _councils_clear(s, unit, scope, council_wait,
+                                     kill_councils):
+                continue
         if dry:
             s.note(f"[dry-run] would restart {unit} ({scope})")
             continue
@@ -400,6 +656,41 @@ def step_services(dry: bool, skip: bool) -> Step:
     else:
         _respawn_embedder(s)
     return s
+
+
+def _restart_unmanaged_daemon(s: Step, dry: bool,
+                              units: list) -> None:
+    """Restart claude-hooks-daemon where systemd does not manage it (a
+    Windows scheduled task, a launchd agent, an ad-hoc process). The
+    daemon is long-lived and loads the package once; until it restarts
+    it serves the old code — every hook it executes, the mailbox
+    maintenance, the cloud relay."""
+    if any(u.startswith("claude-hooks-daemon") for u, _ in units):
+        return                          # the unit loop restarts it
+    try:
+        sys.path.insert(0, str(REPO))
+        from claude_hooks import daemon_client
+        alive = daemon_client.ping()
+    except Exception:
+        alive = False
+    finally:
+        sys.path.pop(0)
+    if not alive:
+        s.note("claude-hooks-daemon — not running, skipped")
+        return
+    if dry:
+        s.note("[dry-run] would restart claude-hooks-daemon "
+               "(daemon_ctl restart)")
+        return
+    r = _run([sys.executable, "-m", "claude_hooks.daemon_ctl", "restart"],
+             cwd=str(REPO))
+    if r.returncode != 0:
+        s.fail("claude-hooks-daemon restart failed: "
+               + (r.stdout + r.stderr).strip()[-300:])
+        return
+    s.note("claude-hooks-daemon — restarted (daemon_ctl)")
+    # The restart takes a daemon-managed embedder down with it.
+    _respawn_embedder(s)
 
 
 def _respawn_embedder(s: Step) -> None:
@@ -540,6 +831,15 @@ def main() -> int:
                     help="print every action, change nothing")
     ap.add_argument("--skip-restart", action="store_true",
                     help="everything except service restarts")
+    ap.add_argument("--wait-for-councils", type=float, default=0.0,
+                    metavar="SECONDS",
+                    help="wait this long for running consultants councils "
+                         "to finish before restarting the engine (default: "
+                         "don't wait; leave the engine on the old code and "
+                         "fail)")
+    ap.add_argument("--kill-councils", action="store_true",
+                    help="restart the consultants engine even though "
+                         "councils are running on it (they are lost)")
     ap.add_argument("--env", default=None,
                     help="limit the pip refresh to envs matching this string")
     a = ap.parse_args()
@@ -552,7 +852,8 @@ def main() -> int:
         step_packages(a.dry_run, a.env),
         step_skills(a.dry_run),
         step_episodic(a.dry_run),
-        step_services(a.dry_run, a.skip_restart),
+        step_services(a.dry_run, a.skip_restart, a.wait_for_councils,
+                      a.kill_councils),
     ]
     # Verification only means something once the rest actually ran.
     if all(s.ok for s in steps):

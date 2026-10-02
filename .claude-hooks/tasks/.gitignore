@@ -1,0 +1,4 @@
+.index-state.json
+.*.lock
+.nudge-*.json
+.cc-*.json

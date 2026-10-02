@@ -402,6 +402,85 @@ after changing it.
 
 ---
 
+### Run-time limits — deadline, stall detection, tool budget
+
+Until 2026-09-30 none of these was active. Each one read
+`state["runtime_control"]`, nothing seeded that record, and every
+reader treats "absent" as "not configured". Both runners now seed it at
+session start (`runner._seed_runtime_control`).
+
+- **Deadline.** Hard deadline = the per-effort soft target × 3 (× 4 for
+  xauto), plus a term for each extra fan-out model
+  (`control.TIMING_BUDGETS`). That gives 20 min at low / medium, 60 min
+  at high / xhigh and 90 min at max / xmax. The values are set above
+  the p90 of 279 completed councils: medium p90 9.3 min, high 32.2,
+  xhigh 41.6. Passing the deadline aborts nothing. It refuses further
+  research rounds (`route_after_critic`), so the run goes straight to
+  the synthesizer.
+- **Stall detection** (researcher calls). If no token, reasoning chunk
+  or tool call arrives within the stall threshold, the call is retried
+  once. The threshold is the benchmark's per-model value, floored at
+  120 s, or 300 s for a model that was never measured. A per-call hard
+  cap comes from production latency (`stall_defaults.
+  PRODUCTION_HARD_CAPS_BY_MODEL`: 3 × the p99 of 6,055 successful
+  calls, clamped to 5–60 min). The bench's caps were sized on toy
+  questions and sat below real councils' slow tail. Setting `stall_threshold_s` or
+  `per_lane_hard_s` through `POST /control` overrides both.
+- **Tool-loop budget.** Every iteration of a researcher or tooled-role
+  loop is re-planned before it is sent. `num_predict` is sized from
+  the history as it stands, and a history that has outgrown the window
+  is compacted first, the same way a single-shot call is. Compaction
+  never keeps a `tool` result whose calling assistant message it
+  dropped.
+- **Shared read cache.** Within one run, `survey_project`, `list_files`,
+  `read_file`, `glob` and `grep` results are shared across lanes
+  (`consultants/server/tool_cache.py`):
+  - identical concurrent calls run once;
+  - `read_file` is keyed on the file's size and mtime;
+  - any effectful tool clears the cache;
+  - errors are never kept.
+
+  A follow-up starts with an empty cache.
+
+### Engine restarts — councils are suspended and resumed
+
+Since 2026-10-01 an engine restart (deploy, `systemctl restart`, crash)
+no longer loses the councils in flight.
+
+- **Durable checkpoint.** Every run checkpoints to
+  `<cwd>/.claude-hooks/consultants/<sid>/checkpoints.db`. The default
+  `[checkpointer] backend = "sqlite"` does this; `postgres` is used with
+  a `url`. If the durable saver can't be opened, the run falls back to
+  the in-memory one and logs that it won't survive a restart.
+- **In-flight index.** Each run is recorded in
+  `~/.claude/consultants-inflight.json` when it is submitted. The record
+  is the request that started it, so a runner can be rebuilt from it.
+  The record is dropped when the run finishes, and a finished run's
+  checkpoint is deleted with it. A run parked for human review keeps its
+  checkpoint, because `/resume` continues from it.
+- **Shutdown.** On SIGTERM every running council is asked to suspend.
+  Nodes that haven't started stop at the gate (`RunSuspended`). A node
+  that is mid-LLM-call finishes it first. The engine waits up to
+  `CONSULTANTS_SHUTDOWN_GRACE_S` seconds (default 60). This must stay
+  below systemd's `TimeoutStopSec`, which defaults to 90 s. A run still
+  inside a node after the grace is marked `interrupted`, and the process
+  exits without joining it.
+- **Startup.** Every record left in the index is resumed under its own
+  sid. Parallel lanes that had finished are saved in the checkpoint and
+  are not run again; only the unfinished ones re-run. A crash (no
+  graceful shutdown) resumes the same way, from the last completed step.
+  A follow-up is resumed with its parent loaded from disk. A council
+  already resumed `MAX_RESUMES` (3) times is given up and marked
+  `failed`, so a run that crashes the engine can't put it into a crash
+  loop.
+- **Clients.** `claude-consultants … --wait` rides out an unreachable
+  engine for up to 5 min and keeps polling. `suspended` is not a
+  terminal status.
+
+The adversary checkpoint and pauses don't hold a shutdown. A council
+parked at the adversary checkpoint gets its window again after the
+resume.
+
 ## Running a consultation
 
 In a Claude Code prompt:

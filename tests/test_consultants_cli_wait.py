@@ -35,6 +35,7 @@ from consultants.cli import (  # noqa: E402
     build_parser,
     cmd_consult,
     cmd_follow_up,
+    cmd_grant,
 )
 
 
@@ -122,6 +123,52 @@ class TestWaitForTerminal(unittest.TestCase):
                     sleep_fn=_sleep, now_fn=_now)
         self.assertEqual(ctx.exception.exit_code, 1)
         self.assertIn("still running", str(ctx.exception))
+
+
+class TestWaitAcrossEngineRestart(unittest.TestCase):
+    """The engine suspends running councils on shutdown and the next one
+    resumes them, so a wait must ride out the gap instead of failing on
+    the first refused connection."""
+
+    def _down(self):
+        return CLIError("Could not reach http://b", unreachable=True)
+
+    def test_an_outage_is_retried_and_the_run_collected(self):
+        seq = [{"status": "running"}, self._down(), self._down(),
+               {"status": "suspended"}, {"status": "completed"}]
+
+        def _fake_http(method, url, *, body=None, timeout=600.0):
+            item = seq.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        with mock.patch("consultants.cli._http", side_effect=_fake_http):
+            rec = _wait_for_terminal("http://b", "csl-1", interval=1.0,
+                                     timeout=0.0, sleep_fn=lambda s: None)
+        self.assertEqual(rec["status"], "completed")
+        self.assertEqual(seq, [])
+
+    def test_an_engine_that_stays_down_still_fails(self):
+        clock = {"t": 0.0}
+
+        def _sleep(s):
+            clock["t"] += s
+
+        with mock.patch("consultants.cli._http", side_effect=self._down()):
+            with self.assertRaises(CLIError) as ctx:
+                _wait_for_terminal("http://b", "csl-1", interval=30.0,
+                                   timeout=0.0, sleep_fn=_sleep,
+                                   now_fn=lambda: clock["t"])
+        self.assertTrue(ctx.exception.unreachable)
+        self.assertGreaterEqual(clock["t"], 300.0)
+
+    def test_an_http_error_is_not_retried(self):
+        with mock.patch("consultants.cli._http",
+                        side_effect=CLIError("HTTP 404 from x")):
+            with self.assertRaises(CLIError):
+                _wait_for_terminal("http://b", "csl-1", interval=1.0,
+                                   timeout=0.0, sleep_fn=lambda s: None)
 
 
 # ----------------------- _fetch_result --------------------------- #
@@ -287,6 +334,35 @@ class TestCmdFollowUpWait(unittest.TestCase):
         self.assertFalse(doc["ok"])
         self.assertEqual(doc["reason"], "followup_limit_reached")
         self.assertEqual([m for m, _ in calls], ["POST"], "never polled")
+
+
+class TestCmdGrant(unittest.TestCase):
+    """``grant <sid> [N]`` raises the cap now, without a followup."""
+
+    def _run(self, argv):
+        calls = []
+
+        def _fake_http(method, url, *, body=None, timeout=600.0):
+            calls.append((method, url, body))
+            return {"ok": True, "granted": (body or {}).get("allow_extra")}
+
+        args = build_parser().parse_args(argv)
+        self.assertIs(args.fn, cmd_grant)
+        with mock.patch("consultants.cli._http", side_effect=_fake_http), \
+                mock.patch("sys.stdout"):
+            self.assertEqual(args.fn(args, "http://x"), 0)
+        return calls
+
+    def test_posts_n_to_the_grant_route(self):
+        (method, url, body), = self._run(
+            ["grant", "csl-1", "6", "--cwd", "/proj"])
+        self.assertEqual((method, url), ("POST",
+                                         "http://x/v1/consult/csl-1/grant"))
+        self.assertEqual(body["allow_extra"], 6)
+
+    def test_bare_grant_leaves_the_size_to_the_engine(self):
+        (_, _, body), = self._run(["grant", "csl-1", "--cwd", "/proj"])
+        self.assertNotIn("allow_extra", body)
 
 
 def _options_under(parser) -> set:

@@ -35,7 +35,9 @@ log = logging.getLogger("claude_hooks.hook_parts")
 #: What a marker can keep. ``memory`` is recall and the per-turn store;
 #: ``mailbox`` is registration, announcements and the during-turn notice.
 #: ``guards`` is the PreToolUse process guard (self-kill / blind waiters).
-PARTS = frozenset({"memory", "mailbox", "guards"})
+#: ``tasks`` is the persistent task list: the SessionStart block, prompt
+#: mentions and recall, the Stop nudge and the built-in task mirror.
+PARTS = frozenset({"memory", "mailbox", "guards", "tasks"})
 
 _KEEP_WORD = re.compile(r"^\s*keep\s*[:=]?\s*", re.IGNORECASE)
 
@@ -141,26 +143,32 @@ def _session_start(event, config, providers, keep):
             event=event, config=config, providers=providers))
         parts.append(mailbox.announce_block(
             event=event, config=config, providers=providers))
+    if "tasks" in keep:
+        from claude_hooks.tasks import hook as tasks
+        parts.append(tasks.session_block(
+            event=event, config=config, providers=providers))
     return _context("SessionStart", parts)
 
 
 def _user_prompt_submit(event, config, providers, keep):
     parts: list[str] = []
+    task_recall = None
+    if "tasks" in keep:
+        from claude_hooks.tasks.hook import PromptRecall
+        task_recall = PromptRecall(event=event, config=config,
+                                   providers=providers).start()
     if "memory" in keep:
-        hook_cfg = (config.get("hooks") or {}).get("user_prompt_submit") or {}
-        prompt = (event.get("prompt") or "").strip()
-        if (hook_cfg.get("enabled", True)
-                and len(prompt) >= int(hook_cfg.get("min_prompt_chars", 30))):
-            from claude_hooks.recall import run_recall
-            parts.append(run_recall(
-                prompt, config=config, providers=providers,
-                hook_name="user_prompt_submit", cwd=event.get("cwd", ""),
-                max_total_chars=int(hook_cfg.get("max_total_chars", 4000)),
-                progressive=bool(hook_cfg.get("progressive"))) or "")
+        # The same decision the full handler makes, notifications and
+        # scheduled prompts included — not a copy of it.
+        from claude_hooks.hooks.user_prompt_submit import recall_block
+        parts.append(recall_block(event=event, config=config,
+                                  providers=providers))
     if "mailbox" in keep:
         from claude_hooks.mailbox import hook as mailbox
         parts.append(mailbox.announce_block(
             event=event, config=config, providers=providers))
+    if task_recall is not None:
+        parts.append(task_recall.join())
     return _context("UserPromptSubmit", parts)
 
 
@@ -180,6 +188,8 @@ def _stop(event, config, providers, keep):
     result = {"systemMessage": message} if message else None
     if "mailbox" in keep:
         result = stop._with_mailbox_nudge(result, event, config, providers)
+    if "tasks" in keep:
+        result = stop._with_task_nudge(result, event, config, providers)
     return result
 
 
@@ -198,8 +208,17 @@ def _pre_tool_use(event, config, providers, keep):
     return process_guard_response(event, config)
 
 
+def _post_tool_use(event, config, providers, keep):
+    if "tasks" in keep and event.get("tool_name") in ("TaskCreate",
+                                                      "TaskUpdate"):
+        from claude_hooks.tasks.hook import mirror_builtin
+        mirror_builtin(event=event, config=config, providers=providers)
+    return None
+
+
 _EVENTS = {
     "PreToolUse": _pre_tool_use,
+    "PostToolUse": _post_tool_use,
     "SessionStart": _session_start,
     "UserPromptSubmit": _user_prompt_submit,
     "Stop": _stop,

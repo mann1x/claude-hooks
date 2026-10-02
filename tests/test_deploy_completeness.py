@@ -96,6 +96,37 @@ class TestEveryArtifactClassIsDeployed(unittest.TestCase):
         self.assertIn("def step_services", src)
         self.assertIn("systemctl", src)
 
+    def test_the_cloud_mailbox_instructions(self):
+        """``MAILBOX.md`` in the relay folder is read by cloud sessions,
+        not by any service — the same class as a skill, and it drifts the
+        same way: a stale copy instructs a protocol the relay no longer
+        speaks, and nothing errors."""
+        src = _src(DEPLOY)
+        self.assertIn("def _sync_relay_instructions", src)
+        self.assertIn("MAILBOX.md", src)
+        # Resolved the way the daemon resolves it (default folder on every
+        # OS), not by reading cloud_relay.root directly.
+        self.assertIn("from claude_hooks.mailbox.relay import settings", src)
+        body = src[src.index("def step_skills"):src.index("def _episodic_mode")]
+        self.assertIn("_sync_relay_instructions(", body)
+        verify = _src(VERIFY)
+        self.assertIn("def check_mailbox_relay", verify)
+        main = verify[verify.index("def main"):]
+        self.assertIn("check_mailbox_relay(r)", main)
+
+    def test_a_daemon_outside_systemd_is_restarted_too(self):
+        """On Windows the daemon is a scheduled task, not a systemd unit,
+        and step_services returned at "no systemd unit" — so a deploy on
+        pandorum never restarted it. The daemon kept serving the code it
+        started with (the cloud-mailbox relay never started there). The
+        restart has to come before that early return."""
+        src = _src(DEPLOY)
+        self.assertIn("def _restart_unmanaged_daemon", src)
+        self.assertIn("daemon_ctl", src)
+        body = src[src.index("def step_services"):]
+        self.assertLess(body.index("_restart_unmanaged_daemon("),
+                        body.index("if not units:"))
+
     def test_verification_is_a_step_not_a_suggestion(self):
         src = _src(DEPLOY)
         self.assertIn("def step_verify", src)
@@ -536,3 +567,343 @@ class TestSkillsInRepoAreWellFormed(unittest.TestCase):
                 m.group(1).strip('"\''), src.parent.name,
                 f"{src.parent.name}: frontmatter name is {m.group(1)!r}",
             )
+
+
+class TestRunningCouncilGate(unittest.TestCase):
+    """A deploy must not restart the consultants engine under a running
+    council. On 2026-09-29 one did: an xhigh council another session
+    was waiting on died mid-run, leaving no result and nothing ``reopen``
+    could rebuild — status 404, a transcript.db and nothing else."""
+
+    RUN = [{"sid": "csl-x", "status": "running", "effort": "xhigh",
+            "started_at": 0, "question": "q"}]
+
+    def _mod(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_deploy_gate", DEPLOY)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _clear(self, answers, *, wait=0.0, kill=False, suspends=False):
+        mod = self._mod()
+        s = mod.Step("services")
+        seq = iter(answers)
+        with patch.object(mod, "_running_councils",
+                          side_effect=lambda _e: next(seq)), \
+             patch.object(mod, "_consultants_endpoint", return_value="e"), \
+             patch.object(mod, "_engine_suspends", return_value=suspends), \
+             patch.object(mod.time, "sleep"):
+            ok = mod._councils_clear(s, "u", "user", wait, kill, poll=0)
+        return ok, s
+
+    def test_the_restart_loop_goes_through_the_gate(self):
+        src = _src(DEPLOY)
+        body = src[src.index("def step_services"):]
+        self.assertLess(body.index("_councils_clear("),
+                        body.index('["restart", unit]'))
+        self.assertIn("--wait-for-councils", src)
+        self.assertIn("--kill-councils", src)
+
+    def test_no_council_running_restarts(self):
+        ok, s = self._clear([[]])
+        self.assertTrue(ok)
+        self.assertTrue(s.ok)
+
+    def test_an_engine_that_does_not_answer_is_restarted(self):
+        ok, s = self._clear([None])
+        self.assertTrue(ok)
+        self.assertTrue(s.ok)
+
+    def test_a_running_council_is_not_killed_and_the_deploy_fails(self):
+        ok, s = self._clear([self.RUN])
+        self.assertFalse(ok)
+        self.assertFalse(s.ok, "an engine left on old code is not a clean deploy")
+        self.assertTrue(any("csl-x" in n for n in s.notes))
+
+    def test_waiting_re_asks_until_the_council_finishes(self):
+        ok, s = self._clear([self.RUN, self.RUN, []], wait=3600)
+        self.assertTrue(ok)
+        self.assertTrue(s.ok)
+
+    def test_an_engine_that_suspends_is_restarted_under_a_council(self):
+        """Since 2026-10-01 the engine suspends running councils on
+        shutdown and the new one resumes them, so the restart loses
+        nothing and the deploy goes through."""
+        ok, s = self._clear([self.RUN], suspends=True)
+        self.assertTrue(ok)
+        self.assertTrue(s.ok)
+        self.assertTrue(any("resumed" in n and "csl-x" in n for n in s.notes))
+
+    def test_waiting_still_waits_on_a_suspending_engine(self):
+        ok, s = self._clear([self.RUN, []], wait=3600, suspends=True)
+        self.assertTrue(ok)
+        self.assertFalse(any("resumed" in n for n in s.notes))
+
+    def test_kill_councils_restarts_and_says_what_it_killed(self):
+        ok, s = self._clear([self.RUN], kill=True)
+        self.assertTrue(ok)
+        self.assertTrue(any("csl-x" in n for n in s.notes))
+
+    def test_only_running_sessions_count(self):
+        mod = self._mod()
+
+        class R:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                import json
+                return json.dumps({"open_sessions": [
+                    {"sid": "a", "status": "completed"},
+                    {"sid": "b", "status": "running"}]}).encode()
+
+        with patch.object(mod.urllib.request, "urlopen", return_value=R()):
+            self.assertEqual([c["sid"] for c in mod._running_councils("e")],
+                             ["b"])
+
+
+class TestRelayInstructionsSync(unittest.TestCase):
+    """The deploy copies the repo's MAILBOX.md over a stale one, leaves a
+    current one alone, and does nothing on a host without a relay."""
+
+    def _mod(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_deploy_mod", DEPLOY)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _run(self, cfg, dry=False):
+        mod = self._mod()
+        s = mod.Step("skills")
+        # Never touch this host's real daemon unit from a test.
+        with patch.object(mod, "_load_cfg", return_value=cfg), \
+             patch("claude_hooks.mailbox.relay.daemon_unit_paths",
+                   return_value=[]):
+            mod._sync_relay_instructions(s, dry)
+        return s
+
+    def test_no_mailbox_is_not_a_failure(self):
+        s = self._run({"hooks": {"mailbox": {"enabled": False}}})
+        self.assertTrue(s.ok)
+
+    def test_the_mailbox_alone_gets_the_default_folder(self):
+        """The relay is part of the mailbox on every OS: no cloud_relay
+        section, and deploy still creates the default folder."""
+        from claude_hooks.mailbox import relay
+        s = self._run({"hooks": {"mailbox": {"enabled": True}}})
+        self.assertTrue(s.ok)
+        root = pathlib.Path(relay.default_root())
+        self.assertTrue((root / "sessions").is_dir())
+        self.assertTrue((root / "MAILBOX.md").is_file())
+
+    def test_stale_is_updated_and_current_is_left(self):
+        import tempfile
+        src = REPO / "claude_hooks" / "mailbox" / "cloud" / "MAILBOX.md"
+        with tempfile.TemporaryDirectory() as d:
+            cfg = {"hooks": {"mailbox": {"enabled": True, "cloud_relay": {
+                "enabled": True, "root": d}}}}
+            target = pathlib.Path(d) / "MAILBOX.md"
+            target.write_text("old protocol", encoding="utf-8")
+            s = self._run(cfg, dry=True)
+            self.assertEqual(target.read_text(encoding="utf-8"), "old protocol")
+            s = self._run(cfg)
+            self.assertTrue(s.ok)
+            self.assertEqual(target.read_bytes(), src.read_bytes())
+            mtime = target.stat().st_mtime_ns
+            self._run(cfg)
+            self.assertEqual(target.stat().st_mtime_ns, mtime)
+
+    def test_an_unwritable_root_fails_the_deploy(self):
+        # A folder under a regular file cannot be created on any OS.
+        # (``/proc/...`` was used here once; on Windows that is just a
+        # writable C:\\proc, and the test created it.)
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            blocker = pathlib.Path(d) / "a-file"
+            blocker.write_text("x", encoding="utf-8")
+            cfg = {"hooks": {"mailbox": {"enabled": True, "cloud_relay": {
+                "enabled": True, "root": str(blocker / "relay")}}}}
+            self.assertFalse(self._run(cfg).ok)
+
+
+class TestUnmanagedDaemonRestart(unittest.TestCase):
+
+    def _mod(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_deploy_mod", DEPLOY)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_a_systemd_daemon_is_left_to_the_unit_loop(self):
+        mod = self._mod()
+        s = mod.Step("services")
+        with patch.object(mod, "_run") as run:
+            mod._restart_unmanaged_daemon(
+                s, False, [("claude-hooks-daemon.service", "system")])
+        run.assert_not_called()
+
+    def test_a_daemon_that_is_not_running_is_skipped(self):
+        mod = self._mod()
+        s = mod.Step("services")
+        with patch("claude_hooks.daemon_client.ping", return_value=False), \
+             patch.object(mod, "_run") as run:
+            mod._restart_unmanaged_daemon(s, False, [])
+        run.assert_not_called()
+        self.assertTrue(s.ok)
+
+    def test_a_scheduled_task_daemon_is_restarted(self):
+        import subprocess
+        mod = self._mod()
+        s = mod.Step("services")
+        done = subprocess.CompletedProcess([], 0, "", "")
+        with patch("claude_hooks.daemon_client.ping", return_value=True), \
+             patch.object(mod, "_run", return_value=done) as run, \
+             patch.object(mod, "_respawn_embedder") as respawn:
+            mod._restart_unmanaged_daemon(s, False, [])
+        self.assertIn("claude_hooks.daemon_ctl", run.call_args[0][0])
+        self.assertIn("restart", run.call_args[0][0])
+        respawn.assert_called_once()
+        self.assertTrue(s.ok)
+
+    def test_a_failed_restart_fails_the_deploy(self):
+        import subprocess
+        mod = self._mod()
+        s = mod.Step("services")
+        bad = subprocess.CompletedProcess([], 1, "", "task not found")
+        with patch("claude_hooks.daemon_client.ping", return_value=True), \
+             patch.object(mod, "_run", return_value=bad):
+            mod._restart_unmanaged_daemon(s, False, [])
+        self.assertFalse(s.ok)
+
+
+class TestCliWrappersAndHookMatchers(unittest.TestCase):
+    """PATH wrappers for bin/* and the matchers of installed hook blocks
+    are deployable artifacts: read at session start, silently stale.
+    ``claude-hooks-tasks`` existed in the repo and nowhere on PATH, and a
+    PostToolUse block on the old matcher never fires for TaskCreate."""
+
+    def _deploy(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_deploy_mod", DEPLOY)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_deploy_handles_both(self):
+        src = _src(DEPLOY)
+        self.assertIn("_sync_cli_and_hook_entries(s, dry)", src)
+        self.assertIn("sync_managed_hooks(", src)
+        self.assertIn("_install_bin_shim_wrappers(", src)
+
+    def test_verifier_checks_both(self):
+        src = _src(VERIFY)
+        self.assertIn("def check_cli_and_hooks", src)
+        self.assertIn("check_cli_and_hooks(r)", src)
+        self.assertIn("def check_tasks", src)
+
+    def test_stale_matcher_is_reconciled_and_others_left(self):
+        sys.path.insert(0, str(REPO))
+        try:
+            import install
+        finally:
+            sys.path.pop(0)
+        ours = {"type": "command", "command": "/x/bin/claude-hook PostToolUse",
+                "_managedBy": install.MANAGED_BY}
+        theirs = {"type": "command", "command": "other-tool"}
+        settings = {"hooks": {
+            "PostToolUse": [
+                {"matcher": "Edit|Write|MultiEdit", "hooks": [ours]},
+                {"matcher": "Bash", "hooks": [theirs]},
+            ]}}
+        changes = install.reconcile_hook_matchers(settings)
+        want = install.POST_TOOL_USE_TEMPLATE["PostToolUse"][0]["matcher"]
+        self.assertIn("TaskCreate", want)
+        self.assertEqual(changes, [("PostToolUse", "Edit|Write|MultiEdit",
+                                    want)])
+        blocks = settings["hooks"]["PostToolUse"]
+        self.assertEqual(blocks[0]["matcher"], want)
+        self.assertEqual(blocks[1]["matcher"], "Bash")
+        # Events the host never installed stay uninstalled.
+        self.assertNotIn("PreToolUse", settings["hooks"])
+        self.assertEqual(install.reconcile_hook_matchers(settings), [])
+
+    def test_deploy_dry_run_writes_nothing(self):
+        mod = self._deploy()
+        sys.path.insert(0, str(REPO))
+        try:
+            import install
+        finally:
+            sys.path.pop(0)
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            sp = pathlib.Path(td) / "settings.json"
+            ours = {"type": "command", "command": "/x/bin/claude-hook X",
+                    "_managedBy": install.MANAGED_BY}
+            import json as _json
+            body = _json.dumps({"hooks": {"PostToolUse": [
+                {"matcher": "Edit", "hooks": [ours]}]}})
+            sp.write_text(body, encoding="utf-8")
+            s = mod.Step("skills")
+            with patch.object(install, "user_settings_path", return_value=sp), \
+                 patch.object(install, "_shim_wrapper_dir",
+                              return_value=pathlib.Path(td) / "bin"), \
+                 patch.object(mod, "_import_install", return_value=install):
+                mod._sync_cli_and_hook_entries(s, True)
+            self.assertTrue(s.ok)
+            self.assertEqual(sp.read_text(encoding="utf-8"), body)
+            self.assertFalse((pathlib.Path(td) / "bin").exists())
+            self.assertTrue(any("would set PostToolUse" in n for n in s.notes))
+            self.assertTrue(any("would add PATH wrappers" in n
+                                for n in s.notes))
+
+
+class TestReconcileOnlyWidens(unittest.TestCase):
+    """The first deploy with reconciliation cut solidpc's match-all
+    PreToolUse block to Bash|Edit|Write|MultiEdit, which stops the
+    process guard from seeing Monitor calls. A matcher that already
+    covers the template is never touched."""
+
+    def _install(self):
+        sys.path.insert(0, str(REPO))
+        try:
+            import install
+        finally:
+            sys.path.pop(0)
+        return install
+
+    def _settings(self, install, event, matcher):
+        h = {"type": "command", "command": f"/x/bin/claude-hook {event}",
+             "_managedBy": install.MANAGED_BY}
+        blk = {"hooks": [h]} if matcher is None else {"matcher": matcher,
+                                                     "hooks": [h]}
+        return {"hooks": {event: [blk]}}
+
+    def test_match_all_is_left_alone(self):
+        install = self._install()
+        for m in ("", None):
+            s = self._settings(install, "PreToolUse", m)
+            self.assertEqual(install.reconcile_hook_matchers(s), [])
+
+    def test_a_superset_is_left_alone(self):
+        install = self._install()
+        want = install.PRE_TOOL_USE_TEMPLATE["PreToolUse"][0]["matcher"]
+        s = self._settings(install, "PreToolUse", want + "|Read")
+        self.assertEqual(install.reconcile_hook_matchers(s), [])
+
+    def test_a_narrower_one_is_widened(self):
+        install = self._install()
+        s = self._settings(install, "PreToolUse", "Bash|Edit|Write|MultiEdit")
+        (ev, old, new), = install.reconcile_hook_matchers(s)
+        self.assertIn("Monitor", new)
+        self.assertIn("Grep", new)
+
+    def test_template_covers_what_the_guard_checks(self):
+        install = self._install()
+        want = install.PRE_TOOL_USE_TEMPLATE["PreToolUse"][0]["matcher"]
+        self.assertTrue({"Bash", "Monitor"} <= set(want.split("|")))

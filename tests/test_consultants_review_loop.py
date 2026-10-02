@@ -19,6 +19,7 @@ Covers:
 - follow-up at cap, no override → refused (followup_limit_reached) +
   awaiting_approval, no child created.
 - follow-up at cap, --allow-extra 1 → proceeds, extra_granted=1.
+- grant N → cap raised now, awaiting lifted, banked for later followups.
 - cold reopen → consultancy status/count restored from consultancy.json.
 """
 
@@ -269,6 +270,81 @@ class TestFollowupAtCap:
             assert r["consultancy"]["extra_granted"] == 1
             assert r["consultancy"]["effective_cap"] == 1
             assert r["consultancy"]["followup_count"] == 1
+
+
+# ----------------------- grant ----------------------------------- #
+
+class TestGrant:
+    """The user raises the cap ("add another 6") without a followup."""
+
+    def test_grant_lifts_awaiting_and_banks_for_later_followups(
+            self, isolated_home, project_dir):
+        cc.set_max_followups(0)
+        app = _make_app()
+        with TestClient(app) as client:
+            root = _ask(client, project_dir)
+            _wait_completed(client, root)
+            assert client.post(f"/v1/consult/{root}/follow-up", json={
+                "message": "more", "cwd": str(project_dir),
+            }).json()["ok"] is False
+            g = client.post(f"/v1/consult/{root}/grant", json={
+                "allow_extra": 6, "cwd": str(project_dir)}).json()
+            assert g["ok"] is True and g["granted"] == 6
+            assert g["consultancy"]["effective_cap"] == 6
+            assert g["consultancy"]["status"] == "ready_to_review"
+            assert storage.read_consultancy(
+                project_dir, root)["extra_granted"] == 6
+            # Later followups need no allow_extra and add nothing more.
+            r = client.post(f"/v1/consult/{root}/follow-up", json={
+                "message": "more", "cwd": str(project_dir)}).json()
+            assert r["ok"] is True
+            assert r["consultancy"]["extra_granted"] == 6
+            assert r["consultancy"]["followup_count"] == 1
+
+    def test_grant_before_the_cap_and_via_a_child_sid(
+            self, isolated_home, project_dir):
+        app = _make_app()
+        with TestClient(app) as client:
+            root = _ask(client, project_dir)
+            _wait_completed(client, root)
+            child = client.post(f"/v1/consult/{root}/follow-up", json={
+                "message": "more", "cwd": str(project_dir)}).json()["sid"]
+            _wait_completed(client, child)
+            g = client.post(f"/v1/consult/{child}/grant", json={
+                "allow_extra": 2, "cwd": str(project_dir)}).json()
+            assert g["root_sid"] == root
+            c = g["consultancy"]
+            assert c["effective_cap"] == c["max_followups"] + 2
+            assert c["status"] == "ready_to_review"
+
+    def test_grant_defaults_to_configured_allow_extra(
+            self, isolated_home, project_dir):
+        cc.set_allow_extra(3)
+        app = _make_app()
+        with TestClient(app) as client:
+            root = _ask(client, project_dir)
+            _wait_completed(client, root)
+            g = client.post(f"/v1/consult/{root}/grant",
+                            json={"cwd": str(project_dir)}).json()
+            assert g["granted"] == 3
+
+    @pytest.mark.parametrize("bad", [0, -1, "6", True, 1.5])
+    def test_grant_rejects_non_positive_or_non_int(
+            self, isolated_home, project_dir, bad):
+        app = _make_app()
+        with TestClient(app) as client:
+            root = _ask(client, project_dir)
+            _wait_completed(client, root)
+            r = client.post(f"/v1/consult/{root}/grant", json={
+                "allow_extra": bad, "cwd": str(project_dir)})
+            assert r.status_code == 400
+
+    def test_grant_unknown_sid_is_404(self, isolated_home, project_dir):
+        app = _make_app()
+        with TestClient(app) as client:
+            r = client.post("/v1/consult/csl-nope/grant", json={
+                "allow_extra": 1, "cwd": str(project_dir)})
+            assert r.status_code == 404
 
 
 # ----------------------- cold reopen ----------------------------- #

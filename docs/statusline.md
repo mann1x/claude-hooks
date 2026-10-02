@@ -13,7 +13,7 @@ every host:
 | segment | source |
 |---|---|
 | `5h 19% · 7d 90% 🔴` | the `rate_limits` block Claude Code passes the status line on stdin — the same numbers Anthropic's `anthropic-ratelimit-unified-*` headers carry, fresh on every refresh |
-| `📬 2` | this session's unread mailbox count (`docs/mailbox.md`), shown only when there is some |
+| `📬 2 ↩1` | this session's unread mailbox count, then the ack notes waiting on messages it sent (`docs/mailbox.md`). Either half is left out at zero (`📬 2`, `📬 ↩1`), and the segment is hidden when nothing is waiting. ASCII: `mail:2 ack:1` |
 
 ## Wiring
 

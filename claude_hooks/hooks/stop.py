@@ -149,6 +149,31 @@ def _with_mailbox_nudge(result: Optional[dict], event: dict, config: dict,
     return out
 
 
+def _with_task_nudge(result: Optional[dict], event: dict, config: dict,
+                     providers) -> Optional[dict]:
+    """Add the once-per-change task reminder to a Stop result.
+
+    Joins an existing block (mail) rather than replacing it, so a turn
+    that ends with both unread mail and an un-updated active task asks
+    about both in one continuation instead of two.
+    """
+    try:
+        from claude_hooks.tasks.hook import stop_nudge
+        reason = stop_nudge(event=event, config=config, providers=providers)
+    except Exception as e:
+        log.debug("task stop nudge skipped: %s", e)
+        reason = None
+    if not reason:
+        return result
+    out = dict(result or {})
+    if out.get("decision") == "block" and out.get("reason"):
+        out["reason"] = f"{out['reason']}\n\n{reason}"
+    else:
+        out["decision"] = "block"
+        out["reason"] = reason
+    return out
+
+
 def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[dict]:
     hook_cfg = (config.get("hooks") or {}).get("stop") or {}
     if not hook_cfg.get("enabled", True):
@@ -203,19 +228,21 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
 
     # Companion engines (axon, gitnexus): when the project has been
     # indexed by either and the turn modified files, spawn that engine's
-    # reindex. Silent no-op when neither tool is installed or the
-    # project hasn't been initialised.
+    # reindex. Called on unmodified turns too: gitnexus also rebuilds an
+    # index it finds broken (a failed rebuild, or a graph database left
+    # mid-write, which crashes every reader), and each engine decides for
+    # itself. Silent no-op when neither tool is installed or the project
+    # hasn't been initialised.
     comp_cfg = (config.get("hooks") or {}).get("companions") or {}
     if (
         comp_cfg.get("enabled", True)
         and comp_cfg.get("reindex_on_stop", True)
-        and turn_modified
     ):
         try:
             from claude_hooks.companion_integration import reindex_if_dirty_async
             reindex_if_dirty_async(
                 cwd=event.get("cwd", ""),
-                turn_modified=True,
+                turn_modified=bool(turn_modified),
                 lock_min_age_seconds=int(comp_cfg.get("lock_min_age_seconds", 60)),
             )
         except Exception as e:
@@ -461,9 +488,10 @@ def _finish(status: str, event: dict, config: dict, providers) -> Optional[dict]
     """
     mailbox_notice = _mailbox_notice(event, config, providers)
     message = "\n".join(m for m in (status, mailbox_notice) if m)
-    return _with_mailbox_nudge(_with_update_notice(
+    return _with_task_nudge(
+        _with_mailbox_nudge(_with_update_notice(
         {"systemMessage": message} if message else None, config),
-        event, config, providers)
+        event, config, providers), event, config, providers)
 
 
 # ---------------------------------------------------------------------- #
@@ -518,6 +546,24 @@ def _is_real_user_prompt(msg: dict) -> bool:
         if block.get("type") != "tool_result":
             return True
     return False
+
+
+def _label_synthetic_prompt(row: dict, text: str) -> str:
+    """Prefix a harness-started turn's prompt with what started it; for
+    a task notification keep only its ``<summary>``."""
+    import re
+    from claude_hooks.prompt_origin import (
+        SCHEDULED, TASK_NOTIFICATION, classify_text, row_kind,
+    )
+    kind = row_kind(row) or classify_text(text)
+    if kind == TASK_NOTIFICATION:
+        m = re.search(r"<summary>(.*?)</summary>", text, re.S)
+        what = (m.group(1).strip() if m else "").strip()
+        return ("[not a user message: background task notification] "
+                + (what or "(no summary)"))
+    if kind == SCHEDULED:
+        return "[not a user message: scheduled wake-up / cron tick] " + text
+    return text
 
 
 def _find_last_user_idx(transcript: list[dict]) -> int:
@@ -808,6 +854,7 @@ def _build_summary(
     files_read: set[str] = set()
     commands: list[str] = []
 
+    last_user_idx = -1
     if transcript:
         last_user_idx = _find_last_user_idx(transcript)
         if last_user_idx >= 0:
@@ -850,6 +897,12 @@ def _build_summary(
     )
     if user_text and any(m in user_text[:500] for m in _meta_markers):
         user_text = ""
+    # A turn started by the harness is stored as such. Its raw text under
+    # "## Prompt" (notification XML, a cron instruction) reads to a later
+    # recall as something the user asked.
+    if transcript and last_user_idx >= 0 and user_text:
+        user_text = _label_synthetic_prompt(transcript[last_user_idx],
+                                            user_text)
 
     if fmt == "xml":
         return _build_summary_xml(
@@ -1225,13 +1278,11 @@ def _run_stop_guard(
         return None
     # Find the last user message text (excluding tool_result blocks) so
     # the guard can honour explicit user wrap-up requests.
-    last_user_text = ""
-    for msg in reversed(transcript):
-        if isinstance(msg, dict) and _msg_role(msg) == "user":
-            t = _extract_text(msg)
-            if t:
-                last_user_text = t
-                break
+    # The user's own last word: a notification or a scheduled tick that
+    # started this turn is not a user wrap-up request, and reading it as
+    # the "last user message" hid the one the user actually wrote.
+    from claude_hooks.prompt_origin import last_human_text
+    last_user_text = last_human_text(transcript)
 
     try:
         from claude_hooks.stop_guard import (

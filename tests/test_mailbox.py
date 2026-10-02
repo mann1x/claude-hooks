@@ -187,6 +187,15 @@ class StoreHarness(unittest.TestCase):
                                     lambda: self.HOST)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Other modules bind ``host_name`` at import (``from store import
+        # host_name``), so patching the store's attribute reaches them
+        # only if they are first imported while the patch is on — which
+        # depends on test order. On pandorum's full run the status line
+        # counted mail for "pandorum" and found none. The function reads
+        # this variable first, so every binding agrees.
+        env = mock.patch.dict("os.environ", {"CLAUDE_HOOKS_HOST": self.HOST})
+        env.start()
+        self.addCleanup(env.stop)
 
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -482,6 +491,20 @@ class AckTests(StoreHarness):
         pend = self.store.pending_receipts(from_alias="them")
         self.assertEqual(len(pend), 1)
         self.assertEqual(pend[0]["ack_body"], "confirmed, ~2h")
+
+    def test_receipt_count_tracks_the_pending_receipts(self):
+        """The status-line badge counts what the announcement will show:
+        nothing for a bare read, one for a note, none once it is seen."""
+        count = lambda: self.store.receipt_count(from_alias="them")  # noqa: E731
+        self.read_it()
+        self.assertEqual(count(), 0)
+        self.store.ack(self.mid, "confirmed", session_id="mine",
+                       alias="me", host="solidpc")
+        self.assertEqual(count(), 1)
+        self.assertEqual(self.store.receipt_count(from_alias="them",
+                                                  from_host="pandorum"), 0)
+        self.store.mark_receipts_seen([self.mid], from_alias="them")
+        self.assertEqual(count(), 0)
 
     def test_ack_before_reading_is_refused(self):
         """A receipt for something nobody received."""

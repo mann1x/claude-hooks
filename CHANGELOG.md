@@ -16,6 +16,212 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Added
+
+- **Ack notes in the status-line mail badge.** The badge counted only
+  unread inbox messages, so a note left on a message the session had
+  sent stayed invisible until the next prompt: `📬 2 ↩1` now shows both
+  (`mail:2 ack:1` in ASCII), from `MailboxStore.receipt_count()`, the
+  same predicate the announcement uses.
+- **Persistent task tracking** (`claude_hooks/tasks/`, `docs/tasks.md`).
+  Claude Code's own task list is not a record: the tools are not
+  offered to current models unless `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`,
+  completed tasks are garbage-collected, and backup_models' 849 tasks
+  had survived only in one 4.2 GB transcript. Now, on every OS by
+  default:
+  - **Files are the record.** One Markdown file per task under
+    `<project>/.claude-hooks/tasks/` (front matter + Description /
+    Acceptance / append-only Log), closed ones in `archive/`, and a
+    generated `TASKS.md` board. Hand edits win.
+  - **Ids carry the project's prefix** (`bm-42`), derived once and kept
+    in `config.toml`; allocated by exclusive create, so concurrent
+    sessions never collide.
+  - **Indexed in the store the host runs** (pgvector or sqlite_vec, a
+    borrowed connection like the mailbox's) for cross-project listing
+    and semantic recall; files alone still work without one.
+  - **11 MCP tools** on both memory servers (`task-create`, `-ready`,
+    `-list`, `-show`, `-start`, `-done`, `-wait`, `-cancel`, `-note`,
+    `-update`, `-link`) and a `claude-hooks-tasks` CLI.
+  - **Hooks:** open tasks at every SessionStart (compaction included),
+    named and similar tasks on each prompt, a once-per-change Stop nudge
+    while a task is active, and a mirror of Claude Code's own
+    `TaskCreate` / `TaskUpdate`. `keep: tasks` in a disable marker.
+  - **Importer** for task history in transcripts: ids kept with the
+    prefix, superseded descriptions preserved with their times.
+    backup_models imported: 849 tasks, 101 open.
+- **Deploy covers PATH wrappers and hook matchers.** A new `bin/*` CLI
+  reached PATH only when `install.py` ran again, and a hook block on an
+  old matcher silently never fires. `deploy.py` now adds missing
+  wrappers and reconciles the matchers of installed blocks
+  (`install.reconcile_hook_matchers`); `verify_deploy.py` fails on
+  either being behind.
+- **Mailbox relay for cloud sessions.** A Claude cloud session cannot
+  reach the pgvector MCP, but in the desktop app it can use a linked
+  local folder. `hooks.mailbox.cloud_relay` turns that folder into a
+  full mailbox client, run by the daemon (`claude_hooks/mailbox/relay.py`).
+  It is part of the mailbox on every OS: on wherever `hooks.mailbox` is,
+  with a local folder at `~/claude-mailbox` (the desktop app cannot link
+  a network share) that `install.py` and `deploy.py` create.
+  - **Addressing.** A session takes an alias with a `mailbox-alias`
+    request and is `<alias>@cloud` to everyone else (`osync@cloud`).
+    A new cloud session for the same alias takes the address over,
+    with the mail waiting for it.
+  - **All eight tools**, executed through the same `MailboxTools`
+    dispatch the MCP uses, so ownership rules are identical.
+  - **Semaphore protocol.** Nothing a remote session writes is read
+    until its `<id>.sem` says `ready` (and, when given, `bytes` matches
+    the payload on disk). The payload and semaphore are deleted when
+    taken. The daemon writes its replies, `INBOX.md` and `status.json`
+    the same way, semaphore last.
+  - **Cost.** Blocked on inotify (Linux) or `ReadDirectoryChangesW`
+    (Windows) while idle; a 30 s mtime poll only where neither works.
+    A request is answered within about a second; only past five passes
+    in 30 s (`burst`) does the relay batch. The database is queried only while a cloud session
+    has been active in the last 12 h.
+  - **Instructions.** `claude_hooks/mailbox/cloud/MAILBOX.md` is the
+    cloud session's guide, installed into the folder by `install.py`
+    and kept current by `scripts/deploy.py`; `verify_deploy.py` fails
+    on a stale copy.
+  - **Sandbox grant.** The daemon unit runs with `ProtectSystem=strict`;
+    deploy writes `claude-hooks-daemon.service.d/mailbox-relay.conf`
+    granting the folder as spelled and resolved (`/shared/dev` is a
+    symlink), `verify_deploy.py` fails without it, and the relay probes
+    the folder at start and refuses to run with the fix in its log.
+  - `python -m claude_hooks.mailbox.relay status` reports the folder,
+    the instructions and every session in it.
+
+- **`claude-consultants grant <sid> [N]`** (`POST /v1/consult/{sid}/grant`)
+  raises a consultancy's follow-up cap by N when the user asks for more
+  rounds, without sending a follow-up. Before this the only carrier for
+  an approval was the next follow-up's `--allow-extra`, so a session
+  told "add another 6" had to hold the grant in its own memory until
+  then. The grant is banked on the chain root and persisted, lifts an
+  `awaiting_approval` consultancy back to `ready_to_review`, and
+  defaults to the configured `allow_extra`. The skill gains a `grant`
+  verb and runs it as soon as the user raises the limit.
+- **Consultants shared read cache.** Within one run, results of
+  `survey_project` / `list_files` / `read_file` / `glob` / `grep` are
+  shared across fan-out lanes:
+  - identical concurrent calls execute once;
+  - `read_file` is keyed on size + mtime;
+  - an effectful tool clears the cache;
+  - errors are not kept.
+
+  Code: `consultants/server/tool_cache.py`.
+
+- **Councils survive an engine restart.** Each run checkpoints to
+  `checkpoints.db` in its session dir; this is the default
+  `[checkpointer] backend = "sqlite"`, previously unused because
+  production ran `MemorySaver`. Each run is recorded in
+  `~/.claude/consultants-inflight.json`.
+  - **Shutdown.** Running councils are suspended at their next node
+    boundary (`RunControl.request_suspend` → `RunSuspended`). The
+    engine waits up to `CONSULTANTS_SHUTDOWN_GRACE_S` (60 s) for nodes
+    that are mid-call.
+  - **Startup.** Every recorded run is resumed under its own sid.
+    Parallel lanes that had finished are not re-run, and a crash
+    resumes from the last completed step. Follow-ups resume with their
+    parent loaded from disk. A run is resumed at most 3 times.
+  - **Clients.** `--wait` rides out an engine outage of up to 5 min.
+  - **Deploy.** `scripts/deploy.py` restarts an engine that reports
+    `suspends_on_shutdown` even with councils running, instead of
+    failing.
+
+### Fixed
+
+- **`send()` stamped the process's host on the sender.** `from_host`
+  came from `host_name()` rather than the caller's identity, so mail
+  sent for another identity was filed under the wrong outbox — invisible
+  to its own `mailbox-sent`, `-edit` and `-cancel`. `send()` takes
+  `from_host`, and `MailboxTools` passes its own.
+
+- **Harness-started turns are no longer treated as user prompts.**
+  Background task notifications and scheduled wake-ups / cron ticks fire
+  `UserPromptSubmit` like typed prompts. In recent transcripts
+  notifications outnumber typed prompts two to one.
+  - **What went wrong.** Each one got a full recall with a HyDE
+    expansion: over notification XML, or the same memories again on
+    every tick. The Stop hook stored the turn under `## Prompt
+    <task-notification>…`, which later recalls surfaced as something
+    the user asked. The stop guard read a notification as the user's
+    last word.
+  - **What changed.** `claude_hooks/prompt_origin.py` classifies each
+    prompt from its text, then the transcript row's `origin.kind` /
+    `promptSource`, then the wakeup suffix. The hook payload carries no
+    source field, because Claude Code 2.1.284 compiles it out.
+  - **Notifications:** no recall.
+  - **Scheduled prompts:** plain recall without HyDE. Both are
+    configurable under `hooks.user_prompt_submit.synthetic_recall`.
+  - **Stored turns:** labelled `[not a user message: …]`; a notification
+    keeps only its `<summary>`.
+  - **Stop guard:** reads the last prompt the user wrote.
+  - **Partially disabled projects too.** A `.claude-hooks-disable`
+    marker with `keep: memory` routes through `hook_parts`, which had
+    its own copy of the recall decision and kept HyDE-expanding
+    notifications. Both paths now call `user_prompt_submit.recall_block()`.
+- **gitnexus rebuilds are supervised, and a broken index is repaired.**
+  - **What happened.** The Stop hook spawned `gitnexus analyze` detached
+    and discarded its output, so a cut-off rebuild went unnoticed. That
+    rebuild left the graph database mid-write
+    (`lbug.shadow.dirty-recovery` newer than `lbug`), and every reader
+    then segfaulted. In opencoti, on 2026-10-01, the pre-commit
+    `detect-changes` check crashed six times over two hours.
+  - **Supervisor.** The rebuild now runs under a Python supervisor
+    (`--supervise`). It records the exit code and dirty state in
+    `.gitnexus/claude-hooks-reindex.json` and retries twice.
+  - **Broken index.** A broken index is rebuilt on the next turn even
+    when nothing was edited, with a 15-min backoff after a run that
+    fails every attempt. The SessionStart hint warns that the index is
+    broken.
+  - **Docs no longer edited.** The hook now runs `analyze --index-only`.
+    A bare `analyze` also wrote a GitNexus section into `AGENTS.md` /
+    `CLAUDE.md` and installed six skill dirs in every indexed repo it
+    rebuilt.
+- **The consultants run-time safeguards were never switched on.** The
+  stall monitor, the deadline, the live round / reroute caps and the
+  xauto escalator all read `state["runtime_control"]`. Nothing seeded
+  that record, and every reader treats it as "not configured". Both
+  runners now seed it. Before seeding, the values were rechecked
+  against production data:
+  - The hard deadlines sat at or below p90 of 279 completed councils,
+    so they are now 20 / 60 / 90 min for medium / high / max, plus
+    extra time per fan-out model.
+  - The stall thresholds were benchmarked on toy questions and are too
+    tight for real calls. They now come from 6,055 production calls
+    (`stall_defaults.runtime_stall_thresholds`); `POST /control` still
+    overrides them.
+- **Reasoning counts as progress in `chat_streamed`.** Minutes of
+  thinking before the first content token no longer read as a stall.
+  Reasoning deltas are also concatenated; previously only the last
+  chunk was kept.
+- **xauto can escalate.** The runners dropped its critic, because xauto
+  starts on the medium base, and the escalator is wired only when a
+  critic is present. The production `CouncilState` also never declared
+  `confidence`, so every critic and synthesizer score was stripped.
+  Both are fixed.
+- **Tool loops size every call.** The researcher and tooled-role loops
+  sent no `num_predict` and never compacted a growing history.
+  `LoopConfig.prepare_payload` now re-plans each iteration, the same
+  way single-shot calls are planned.
+- **Compaction keeps each tool result with its call.** Previously the
+  kept tail could open on a `tool` message whose assistant `tool_calls`
+  had been elided, and OpenAI-compatible backends reject that.
+- Docs:
+  - `docs/consultants-roles.md` said the critic runs at medium effort
+    and that a self-critic replaces it at low / medium. Neither is true.
+  - It also said the stall detector truncates tool-spin, which it
+    cannot do.
+  - `EFFORT_BUDGETS` values are now documented as display-only.
+
+- **`scripts/deploy.py` no longer kills running councils.** Restarting
+  the consultants engine killed any council in flight, leaving no result
+  and nothing `reopen` could rebuild; on 2026-09-29 it cost another
+  session's xhigh consultancy. With a council running, deploy now leaves
+  the engine on the old code and fails, naming the runs.
+  `--wait-for-councils SECONDS` waits for them (re-asking every 30 s),
+  `--kill-councils` restarts anyway, and `--dry-run` shows what would
+  block.
+
 ## [1.19.0] — 2026-09-29
 
 ### Added

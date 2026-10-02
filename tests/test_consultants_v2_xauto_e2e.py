@@ -126,6 +126,50 @@ class TestXautoEscalationE2E(unittest.TestCase):
         # Final answer composed by synthesizer.
         self.assertIn("FINAL ANSWER", out["final_answer"])
 
+    def test_low_confidence_alone_escalates(self):
+        """A critic that says ``ready`` but rates itself low must still
+        grow the topology. The score used to be stripped by the
+        production state schema (``confidence`` was declared only in
+        CouncilStateV2), so this signal never reached the escalator."""
+        from consultants.engine.graph import (
+            GraphDeps, build_council_graph,
+        )
+
+        class _Stub:
+            def __init__(self, content="ok"):
+                self.content = content
+
+            def chat(self, payload, *, think=True):
+                return _resp(self.content)
+
+        deps = GraphDeps(
+            chat_clients={
+                "planner": _Stub("1. investigate auth"),
+                "researcher": _Stub("research findings"),
+                "critic": _Stub("DECISION: ready\nCONFIDENCE: 0.3"),
+                "synthesizer": _Stub("FINAL ANSWER: audited."),
+            },
+            models={r: "m" for r in (
+                "planner", "researcher", "critic", "synthesizer")},
+            enabled_roles=("planner", "researcher", "critic",
+                            "synthesizer"),
+            cwd="/tmp",
+            tool_executor=lambda *a, **kw: "",
+            tool_specs=[], grounding_msgs=[], disable_cache=True,
+        )
+        graph = build_council_graph(deps, checkpointer=InMemorySaver())
+        out = graph.invoke(
+            {"question": "audit auth", "cwd": "/tmp",
+             "models": deps.models, "topology": "council",
+             "effort": "xauto",
+             "runtime_control": {"xauto_tier": "xmedium"}},
+            config={"configurable": {"thread_id": "csl-xauto-conf"}},
+        )
+        self.assertTrue(out.get("confidence"), "the score reached state")
+        self.assertAlmostEqual(out["confidence"][0], 0.3)
+        rc = out.get("runtime_control") or {}
+        self.assertGreaterEqual(rc.get("xauto_escalations") or 0, 1)
+
     def test_non_xauto_run_skips_escalator(self):
         """Regression guard: a plain medium-effort run never escalates,
         even when critic returns needs_more_research."""

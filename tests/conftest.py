@@ -452,6 +452,29 @@ def tmp_claude_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_mailbox_folder(tmp_path, monkeypatch):
+    """The cloud-session relay is on wherever the mailbox is, with its
+    folder defaulting to ``~/claude-mailbox``. A test whose config turns
+    the mailbox on must not create that folder in the real home."""
+    from claude_hooks.mailbox import relay
+    monkeypatch.setattr(relay, "default_root",
+                        lambda: str(tmp_path / "claude-mailbox"))
+
+
+@pytest.fixture(autouse=True)
+def _isolated_inflight_index(tmp_path, monkeypatch):
+    """Every test gets its own consultants in-flight index.
+
+    Autouse because the consult and follow-up routes register every run
+    there, and the real file is what the live engine resumes from at
+    its next start: a test writing to it would leave councils behind for
+    production to "resume" against a temp cwd.
+    """
+    monkeypatch.setenv("CONSULTANTS_INFLIGHT_PATH",
+                       str(tmp_path / "consultants-inflight.json"))
+
+
+@pytest.fixture(autouse=True)
 def _reset_token_calibration():
     """Clear measured chars-per-token ratios between tests.
 

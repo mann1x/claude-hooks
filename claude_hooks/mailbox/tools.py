@@ -220,9 +220,15 @@ class MailboxTools:
     #: acking answers it — both belong to the session the mail is for.
     HEADLESS_REFUSED = frozenset({"mailbox-read", "mailbox-ack"})
 
-    def call(self, name: str, args: dict) -> str:
+    def call(self, name: str, args: dict, *,
+             headless: Optional[bool] = None) -> str:
+        """``headless`` defaults to this process's own kind. The cloud
+        relay passes False: it runs inside the daemon, whose environment
+        says nothing about the session the request came from."""
         from claude_hooks.mailbox.integration import is_headless
-        if is_headless():
+        if headless is None:
+            headless = is_headless()
+        if headless:
             if name in self.HEADLESS_REFUSED:
                 return (f"{name} is not available in a non-interactive run "
                         "(claude -p / SDK): reading would mark "
@@ -305,6 +311,7 @@ class MailboxTools:
             str(args.get("body") or ""),
             from_alias=self.alias,
             from_session=self.session_id or None,
+            from_host=self.host,
             priority=int(args.get("priority") or 0),
         )
         ids = ", ".join(str(i) for i in res["ids"])

@@ -11,7 +11,7 @@ opt-in roles — when flipping the default-off bit is worth it.
 |----------------|--------:|-----------------------------------|-------------------------------------|-----------------------------|
 | `planner`      |    on   | global `DEFAULT_MODEL`            | all tiers                           | [planner](#planner)         |
 | `researcher`   |    on   | global `DEFAULT_MODEL`            | all tiers (×N fan-out at xtier)     | [researcher](#researcher)   |
-| `critic`       |    on   | global `DEFAULT_MODEL`            | medium / high / max / x* tiers      | [critic](#critic)           |
+| `critic`       |    on   | global `DEFAULT_MODEL`            | high / max / xhigh / xmax / xauto   | [critic](#critic)           |
 | `synthesizer`  |    on   | global `DEFAULT_MODEL`            | all tiers                           | [synthesizer](#synthesizer) |
 | **`tool_executor`** | **off** (2026-05-18) | `gemma4:31b-cloud` (M11c-2 bench) | opt-in, all tiers      | [tool_executor](#tool_executor) |
 | **`coder`**         | **off** | `glm-5.1:cloud` (M11b bench)      | opt-in, all tiers                   | [coder](#coder)             |
@@ -158,8 +158,11 @@ advantage** — never compromise it for other features.
 - **Wrong-line drift**: cite to line N±2 of a real symbol. The
   text-at-cited-line linter (#205) marks these inline.
 - **Tool-spin** at high effort: researcher keeps requesting more
-  tools without writing the REPORT. Truncated by the stall
-  detector (M11a) when present.
+  tools without writing the REPORT. Bounded by the loop caps
+  (`researcher_loop_iters`, and `researcher_force_answer_after`,
+  which strips the tools and forces the answer). The stall detector
+  does **not** catch it: it watches for a silent *call*, and a
+  spinning researcher streams tokens on every call.
 
 **When to swap the model:** model diversity is the point at
 xtier. Pick 2–3 cloud models with different training distributions
@@ -222,9 +225,12 @@ caught tooled vs **0%** untooled (n=72), 100% precision, zero silent
 corrections. See
 [`benchmarks/consultants/results/2026-08-01/`](../benchmarks/consultants/results/2026-08-01/).
 
-**When it's enabled:** medium / high / max / xmedium / xhigh /
-xmax. Skipped at `low` effort (a `synthesizer_self_critic`
-variant takes over inside the synthesizer to save the round).
+**When it's enabled:** high / max / xhigh / xmax, and xauto (whose
+escalator is driven by the critic's verdict and confidence, so it
+keeps the critic although it starts on the medium base). Dropped at
+low / medium / xmedium by the runner (`cost > value at this tier`).
+Nothing replaces it there: the `synthesizer_self_critic` variant
+exists but is off at every tier.
 
 **Meta-critic at xmax:** at the `xmax` tier the role fans out
 across multiple critic models and a `meta_critic` consolidates
@@ -277,10 +283,12 @@ planner's plan, researcher's reports, and critic's verdict.
   yes/no → one decisive sentence + one paragraph; walk-me-through →
   numbered code path + edge cases.
 
-**At low / medium effort:** a `synthesizer_self_critic` prompt
-variant runs instead of the dedicated critic. The synthesizer
-identifies the weakest claim in the research and either bolsters
-or downgrades it before answering.
+**Self-critic (off):** a `synthesizer_self_critic` prompt variant
+exists (`SYNTHESIZER_SELF_CRITIC_SYSTEM`) in which the synthesizer
+identifies the weakest claim in the research and either bolsters or
+downgrades it before answering. The runner disables it at every tier
+(the 2026-05-07 audit measured ~3.5 min per run for diminishing
+returns), so low / medium runs have no critique step at all.
 
 **Failure modes:**
 - **Fabrication relay**: the synthesizer can faithfully relay a

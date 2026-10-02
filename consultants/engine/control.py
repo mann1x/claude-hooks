@@ -43,16 +43,26 @@ from consultants.engine.state_v2 import RuntimeControl
 #   n_extras == 0. per_extra_s covers the additional cost per extra
 #   model in fanout.
 
+#
+# 2026-09-30 re-calibration. The 2026-05-16 numbers were never applied
+# (nothing seeded runtime_control) and, measured against the 279
+# completed consultations on solidpc, their hard deadlines sat at or
+# below p90: medium 9 min vs p90 9.3 / max 14.0; high 24 min vs p90 32.2
+# / max 40.0; xhigh 30-39 min vs p90 41.6 / max 126.7. Passing the
+# deadline only refuses further research rounds (route_after_critic),
+# so it is set above what a healthy council takes: hard = base × 3 =
+# 20 min (low / medium / xmedium), 60 min (high / xhigh), 90 min
+# (max / xmax), plus per extra fan-out model.
 TIMING_BUDGETS: dict[str, tuple[int, int]] = {
     # base, per_extra
-    "low":     (60,    0),
-    "medium":  (180,   0),
-    "high":    (480,   0),
-    "max":     (900,   0),
-    "xmedium": (240,  90),
-    "xhigh":   (600, 180),
-    "xmax":    (1080, 300),
-    "xauto":   (720, 180),
+    "low":     (400,   0),
+    "medium":  (400,   0),
+    "high":    (1200,  0),
+    "max":     (1800,  0),
+    "xmedium": (400,  100),
+    "xhigh":   (1200, 200),
+    "xmax":    (1800, 300),
+    "xauto":   (900,  150),   # × 4 (HARD_MULTIPLIER_XAUTO) = 60 min
 }
 
 HARD_MULTIPLIER: float = 3.0
@@ -174,13 +184,15 @@ def runtime_control_defaults(
     rc: RuntimeControl = {
         "deadline_ts": now_ts + hard,
         "soft_target_ts": now_ts + soft,
-        "per_lane_hard_s": PER_LANE_HARD_S_DEFAULT,
         "max_rounds": max_rounds,
         "max_reroutes": max_reroutes,
         "enabled_roles": enabled,
         "confidence_target": DEFAULT_CONFIDENCE_TARGET,
         "critic_strictness": seed_strictness,
-        "stall_threshold_s": DEFAULT_STALL_THRESHOLD_S,
+        # ``stall_threshold_s`` / ``per_lane_hard_s`` are NOT seeded:
+        # the researcher resolves them per model
+        # (stall_defaults.runtime_stall_thresholds), and a value here
+        # means an operator override from POST /control, which wins.
         "stall_retries": DEFAULT_STALL_RETRIES,
         "tool_permissions": {},
         "xauto_tier": starting_tier,  # type: ignore[typeddict-item]

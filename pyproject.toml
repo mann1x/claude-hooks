@@ -66,6 +66,11 @@ mcp-server = ["mcp[cli]>=1.0"]
 [tool.setuptools.packages.find]
 include = ["claude_hooks*", "consultants*"]
 
+# The cloud-session mailbox instructions are copied into the relay folder
+# by install.py and scripts/deploy.py, so they must ship with the package.
+[tool.setuptools.package-data]
+"claude_hooks.mailbox" = ["cloud/*.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

@@ -216,7 +216,75 @@ def resolve_stall_thresholds(model: Optional[str]) -> StallThresholds:
     )
 
 
+# ====================================================================== #
+# Runtime policy (what the engine actually applies)
+# ====================================================================== #
+#
+# The table above is the record of one bench run: 4 standalone questions
+# per model, small prompts. Two of its numbers do not survive contact
+# with real councils, so the engine does not apply it verbatim:
+#
+# * ``hard_cap_s`` was 3 × the p99 wall of those toy calls. Real council
+#   calls run longer — glm-5.1 production p99 is 282 s against a bench
+#   cap of 300 s, with successful calls up to 538 s. The per-call hard
+#   cap comes from production latency instead (below).
+# * ``stall_threshold_s`` floors at 30 s for fast models, measured on
+#   small prompts. A researcher prompt can be 50k tokens, and its prefill
+#   is silent time before the first token. It is floored at
+#   :data:`PRODUCTION_STALL_FLOOR_S` here.
+
+#: Silence (no content, reasoning or tool-call chunk) that counts as a
+#: stall, at minimum. See the note above.
+PRODUCTION_STALL_FLOOR_S: float = 120.0
+
+#: Stall threshold for a model the bench never measured.
+PRODUCTION_STALL_DEFAULT_S: float = 300.0
+
+#: Where the production hard caps come from.
+PRODUCTION_AS_OF: str = "2026-09-30"
+PRODUCTION_SOURCE: str = (
+    "successful llm_call rows in every consultants transcript.db on "
+    "solidpc, 2026-05-07..2026-09-29 (6,055 calls)"
+)
+
+#: Per-call hard cap, seconds. Rule: ``3 × p99(wall)``, rounded up to the
+#: minute, clamped to [300, 3600]; raised to cover the longest successful
+#: call (+10 %) when that call is within 4 × p99 — beyond that it reads as
+#: a stall, not a slow answer (gemini-3-flash's 1,868 s call is 7 × p99).
+#: Models with no production data keep :data:`RECOMMENDED_DEFAULT_STALL`'s
+#: 3,600 s rather than the bench's toy-question cap.
+PRODUCTION_HARD_CAPS_BY_MODEL: dict[str, float] = {
+    # model:                          cap     n     p99     max
+    "deepseek-v4-flash:cloud":       780.0,  # 1649  240.9   520.0
+    "gemma4:31b-cloud":              780.0,  # 1549  215.7   671.6
+    "glm-5.1:cloud":                 900.0,  #  944  282.0   538.3
+    "minimax-m3:cloud":              540.0,  #  797  178.0   485.7
+    "glm-5.2:cloud":                 900.0,  #  653  259.9   797.0
+    "gemini-3-flash-preview:cloud":  840.0,  #  362  262.1  1868.3
+    "deepseek-v4.1-flash:cloud":     300.0,  #  101   75.0   106.4
+}
+
+
+def runtime_stall_thresholds(model: Optional[str]) -> StallThresholds:
+    """The thresholds the engine applies to one chat call on ``model``.
+
+    Stall threshold: the bench's, floored at
+    :data:`PRODUCTION_STALL_FLOOR_S`; :data:`PRODUCTION_STALL_DEFAULT_S`
+    for a model the bench did not measure. Hard cap: production latency
+    (:data:`PRODUCTION_HARD_CAPS_BY_MODEL`), else the global default.
+    """
+    bench = RECOMMENDED_STALL_THRESHOLDS_BY_MODEL.get(model or "")
+    stall = (max(bench.stall_threshold_s, PRODUCTION_STALL_FLOOR_S)
+             if bench is not None else PRODUCTION_STALL_DEFAULT_S)
+    hard = PRODUCTION_HARD_CAPS_BY_MODEL.get(
+        model or "", RECOMMENDED_DEFAULT_STALL.hard_cap_s)
+    return StallThresholds(stall_threshold_s=stall, hard_cap_s=hard)
+
+
 __all__ = [
+    "PRODUCTION_HARD_CAPS_BY_MODEL",
+    "PRODUCTION_STALL_FLOOR_S",
+    "runtime_stall_thresholds",
     "StallThresholds",
     "RECOMMENDED_AS_OF",
     "RECOMMENDED_SUITE_VERSION",

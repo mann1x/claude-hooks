@@ -208,9 +208,11 @@ class TestReindex:
         spawned: list[tuple[str, tuple]] = []
 
         def fake_popen(args, *_, **__):
-            argv0 = args[0] if args else ""
-            tag = "axon" if "axon" in argv0 else (
-                "gitnexus" if "gitnexus" in argv0 else "other")
+            # The whole command line, not argv[0]: gitnexus's analyze
+            # runs under a Python supervisor, so argv[0] is python.
+            line = " ".join(str(a) for a in args)
+            tag = "axon" if "axon" in line else (
+                "gitnexus" if "gitnexus" in line else "other")
             spawned.append((tag, tuple(args)))
 
         # Both ax.subprocess and gn.subprocess are the same stdlib module,

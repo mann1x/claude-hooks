@@ -442,6 +442,13 @@ def compact_messages(messages: list[dict], *, keep_tokens: int,
         spent += cost
     if len(tail) < keep_recent:
         tail = messages[max(i, len(messages) - keep_recent):]
+    # A ``tool`` message answers the assistant ``tool_calls`` before it.
+    # Cut between the two and the tail opens with a reply to a call that
+    # no longer exists, which OpenAI-compatible backends reject outright
+    # and Ollama passes to a model that cannot tell what it answers. The
+    # results go with their call.
+    while tail and tail[0].get("role") == "tool":
+        tail = tail[1:]
 
     middle_start, middle_end = i, len(messages) - len(tail)
     if middle_end <= middle_start:

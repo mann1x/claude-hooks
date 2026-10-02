@@ -42,6 +42,9 @@ def _cfg(lsp_engine: dict | None = None) -> dict:
             # in every test.
             "code_graph": {"enabled": False},
             "claudemem_reindex": {"enabled": False},
+            # Task tracking is on by default and hints even in a project
+            # without a list; covered by tests/test_tasks_hooks.py.
+            "tasks": {"enabled": False},
             "lsp_engine": lsp_engine or {"enabled": False},
         },
     }

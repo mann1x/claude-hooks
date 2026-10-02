@@ -605,6 +605,7 @@ class MailboxStore:
 
     def send(self, to: str, subject: str, body: str, *,
              from_alias: str, from_session: Optional[str] = None,
+             from_host: Optional[str] = None,
              priority: int = 0,
              expires_days: Optional[int] = None) -> dict:
         """Resolve, then insert one row per recipient.
@@ -647,7 +648,11 @@ class MailboxStore:
             days=expires_days if expires_days is not None
             else self._expiry_days))
         now = self._now()
-        host = host_name()
+        # The sender's host is part of its identity (``alias@host``), and
+        # every outbox query matches on it. Defaulting to this process's
+        # host was right while every sender ran on the machine it sent
+        # from; the cloud relay sends for ``alias@cloud`` from solidpc.
+        host = from_host or host_name()
 
         # (target, row) pairs, so a target that already holds this exact
         # message can be dropped before anything is written.
@@ -1069,6 +1074,18 @@ class MailboxStore:
                 self._rollback(conn)
                 raise
         return rows
+
+    def receipt_count(self, *, from_alias: str,
+                      from_host: Optional[str] = None) -> int:
+        """How many acks :meth:`pending_receipts` would return, without
+        fetching them — the status line asks this every refresh. Same
+        predicate, so the badge and the announcement cannot disagree."""
+        self.ensure_schema()
+        host = from_host if from_host is not None else host_name()
+        return self._count(
+            "from_alias = ? AND from_host = ? "
+            "AND ack_body IS NOT NULL AND receipt_read_at IS NULL",
+            [from_alias, host])
 
     def mark_receipts_seen(self, ids: Sequence[int], *,
                            from_alias: str,

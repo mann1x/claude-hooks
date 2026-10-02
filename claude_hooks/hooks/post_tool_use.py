@@ -87,6 +87,10 @@ def handle(*, event: dict, config: dict,
         return None
 
     tool_name = event.get("tool_name", "")
+    if tool_name in ("TaskCreate", "TaskUpdate"):
+        from claude_hooks.tasks.hook import mirror_builtin
+        mirror_builtin(event=event, config=config, providers=providers)
+        return None
     if tool_name not in _FILE_EDITING_TOOLS:
         return None
 

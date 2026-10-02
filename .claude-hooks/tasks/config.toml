@@ -1,0 +1,5 @@
+# Task tracking for this project (claude-hooks).
+# The prefix is fixed once tasks exist: ids like ch-42 are
+# referenced from notes, mail and commits.
+project = "claude-hooks"
+prefix = "ch"

@@ -279,7 +279,30 @@
       "maintenance_limit": 1000,
       "registry_days": 30,
       "archive_cap_bytes": 10737418240,
-      "stop_nudge": true
+      "stop_nudge": true,
+      "cloud_relay": {
+        "enabled": true,
+        "root": "",
+        "host": "cloud",
+        "interval_seconds": 30,
+        "writing_timeout_seconds": 3600,
+        "live_hours": 12,
+        "archive_days": 30,
+        "aliases": null,
+        "watcher": "auto",
+        "burst": 5
+      }
+    },
+    "tasks": {
+      "enabled": true,
+      "session_start": true,
+      "session_ready": 5,
+      "prompt_mentions": true,
+      "prompt_recall": true,
+      "recall_k": 3,
+      "recall_min_score": 0.62,
+      "stop_nudge": true,
+      "mirror_builtin": true
     },
     "claudemem_reindex": {
       "enabled": true,

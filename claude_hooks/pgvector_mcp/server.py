@@ -417,6 +417,7 @@ class McpServer:
         self.provider = provider
         self._initialized = False
         self._mailbox_tools: Any = _UNSET
+        self._task_tools: Any = _UNSET
 
     def handle(self, msg: dict) -> Optional[dict]:
         method = msg.get("method")
@@ -463,6 +464,9 @@ class McpServer:
         if self._mailbox() is not None:
             from claude_hooks.mailbox.tools import tool_catalog
             tools = tools + tool_catalog()
+        if self._tasks() is not None:
+            from claude_hooks.tasks.tools import tool_catalog as task_catalog
+            tools = tools + task_catalog()
         return tools
 
     def _mailbox(self):
@@ -491,7 +495,27 @@ class McpServer:
             out["result"] = result or {}
         return out
 
+    def _tasks(self):
+        """The task tools, bound lazily. They work on files alone, so
+        they are offered even where the index cannot be built; only
+        ``hooks.tasks.enabled: false`` turns them off."""
+        if self._task_tools is _UNSET:
+            try:
+                from claude_hooks.tasks import tasks_enabled
+                from claude_hooks.tasks.tools import tools_for_provider
+                self._task_tools = (tools_for_provider(self.provider)
+                                    if tasks_enabled() else None)
+            except Exception:
+                log.warning("tasks unavailable", exc_info=True)
+                self._task_tools = None
+        return self._task_tools
+
     def _dispatch_tool(self, name: str, args: dict) -> str:
+        if name.startswith("task-"):
+            tt = self._tasks()
+            if tt is None:
+                return "Task tracking is turned off on this host."
+            return tt.call(name, args)
         if name.startswith("mailbox-"):
             mb = self._mailbox()
             if mb is None:

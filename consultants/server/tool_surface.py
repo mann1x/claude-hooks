@@ -19,6 +19,14 @@ from typing import Any, Callable, Optional
 log = logging.getLogger("consultants.tool_surface")
 
 
+def _shared(executor, read_only=frozenset()):
+    """Put the run's read cache in front of ``executor`` — one per
+    ``build_tool_surface`` call, i.e. one per council run, shared by
+    all of its lanes (see ``tool_cache``)."""
+    from consultants.server.tool_cache import SharedReadCache
+    return SharedReadCache(executor, read_only=frozenset(read_only))
+
+
 def build_tool_surface(cfg: Any, *, extra_roots: tuple[str, ...] = (),
                        approval_fn: Optional[Callable] = None):
     """Build ``(tool_specs, tool_executor, registry)`` for one session.
@@ -38,7 +46,7 @@ def build_tool_surface(cfg: Any, *, extra_roots: tuple[str, ...] = (),
     tools_cfg = getattr(cfg, "tools", None)
     if tools_cfg is not None and not getattr(tools_cfg, "enabled", True):
         log.info("tool registry disabled by config; using the builtin surface")
-        return openai_tool_specs(), make_executor(extra_roots), None
+        return openai_tool_specs(), _shared(make_executor(extra_roots)), None
 
     try:
         from claude_hooks.tool_registry import (
@@ -89,12 +97,13 @@ def build_tool_surface(cfg: Any, *, extra_roots: tuple[str, ...] = (),
         log.info("tool surface: %d tools from %d provider(s): %s",
                  len(registry.tool_names()), len(providers),
                  ", ".join(p.name for p in providers))
-        return registry.specs(), registry.as_executor(), registry
+        return registry.specs(), _shared(registry.as_executor(),
+                                          registry.gate.read_only_tools), registry
     except Exception:
         log.exception(
             "tool registry construction failed; falling back to the "
             "builtin surface")
-        return openai_tool_specs(), make_executor(extra_roots), None
+        return openai_tool_specs(), _shared(make_executor(extra_roots)), None
 
 
 __all__ = ["build_tool_surface"]

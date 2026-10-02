@@ -309,10 +309,13 @@ HOOK_TEMPLATE = {
 }
 
 # PreToolUse is opt-in -- added only if the user enabled it in config.
+# Monitor is checked by the process guard (blind waiters) and Grep by the
+# opt-in code-graph symbol lookup; without them in the matcher both are
+# silently never consulted.
 PRE_TOOL_USE_TEMPLATE = {
     "PreToolUse": [
         {
-            "matcher": "Bash|Edit|Write|MultiEdit",
+            "matcher": "Bash|Edit|Write|MultiEdit|Monitor|Grep",
             "hooks": [
                 {
                     "type": "command",
@@ -329,11 +332,13 @@ PRE_TOOL_USE_TEMPLATE = {
 # MultiEdit. Matches only file-editing tools so we don't pay the
 # subprocess cost on Read/Bash/Grep. Enabled by default — the hook
 # itself early-exits on non-Python files (no ruff invocation), so
-# the cost when nothing applies is sub-millisecond.
+# the cost when nothing applies is sub-millisecond. TaskCreate /
+# TaskUpdate are Claude Code's own task tools, mirrored into the
+# persistent task list (claude_hooks/tasks/hook.py); rare, so free.
 POST_TOOL_USE_TEMPLATE = {
     "PostToolUse": [
         {
-            "matcher": "Edit|Write|MultiEdit",
+            "matcher": "Edit|Write|MultiEdit|TaskCreate|TaskUpdate",
             "hooks": [
                 {
                     "type": "command",
@@ -664,6 +669,64 @@ def _setup_update_check(cfg: dict, *, non_interactive: bool) -> None:
             )
     else:
         print("  Update check disabled.")
+
+
+def _setup_mailbox_cloud_relay(cfg: dict, *, non_interactive: bool,
+                               dry_run: bool) -> None:
+    """Set up the cloud-session mailbox folder wherever the mailbox is on.
+
+    The relay is part of the mailbox, on every OS: a cloud session in the
+    desktop app can only link a *local* folder, so every host that runs
+    the mailbox gets one — ``~/claude-mailbox`` unless the config names
+    another — with ``MAILBOX.md`` in it, interactive or not. The prompts
+    only let the operator move the folder or turn the relay off, and
+    default to what the config already says.
+    """
+    from claude_hooks.mailbox.relay import (
+        default_root, ensure_unit_grant, install_instructions, settings)
+
+    mailbox = cfg.setdefault("hooks", {}).setdefault("mailbox", {})
+    if not mailbox.get("enabled"):
+        return
+    relay = mailbox.setdefault("cloud_relay", {})
+    current_on = bool(relay.get("enabled", True))
+    current_root = relay.get("root") or default_root()
+
+    if not non_interactive:
+        print("\n==> Mailbox folder for cloud sessions")
+        print("  Claude cloud sessions in the desktop app reach the mailbox "
+              "through a local\n  folder you link in the app; the daemon "
+              "relays it.")
+        changed, value = _ask_optional_bool(
+            "Enable the cloud-session mailbox folder?", default=current_on)
+        relay["enabled"] = value if changed else current_on
+        if relay["enabled"]:
+            raw = input(f"  Mailbox folder [{current_root}]: ").strip()
+            if raw:
+                relay["root"] = raw
+    else:
+        relay.setdefault("enabled", current_on)
+
+    opts = settings(cfg)
+    if not opts["enabled"]:
+        return
+    root = Path(opts["root"])
+    try:
+        verdict = install_instructions(root, dry_run=dry_run)
+    except OSError as e:
+        print(f"  [warn] could not set up the mailbox folder {root}: {e}")
+        return
+    prefix = "[dry-run] " if dry_run else ""
+    print(f"  {prefix}Cloud-session mailbox folder: {root} "
+          f"(MAILBOX.md {verdict})")
+    print(f"  Link this folder in the desktop app; cloud sessions are "
+          f"<alias>@{opts['host']}.")
+    try:
+        for note in ensure_unit_grant(root, dry_run=dry_run):
+            print(f"  {note}")
+    except OSError as e:
+        print(f"  [warn] the daemon unit is sandboxed and could not be "
+              f"granted {root}: {e}")
 
 
 def _setup_proxy_orchestrator(
@@ -8294,6 +8357,11 @@ def main() -> int:
     # blocks on network I/O.
     _setup_update_check(cfg, non_interactive=args.non_interactive)
 
+    # Cloud-session mailbox relay: opt-in, on the host whose folder the
+    # desktop app links. Installs the cloud sessions' MAILBOX.md.
+    _setup_mailbox_cloud_relay(
+        cfg, non_interactive=args.non_interactive, dry_run=args.dry_run)
+
     # Save config.
     if args.dry_run:
         print(f"\n[dry-run] Would write config to {cfg_path}:")
@@ -8718,6 +8786,80 @@ def install_hooks(
     if bak is not None:
         print(f"  Backup written: {bak}")
     print(f"  Settings updated: {settings_path}")
+
+
+def _managed_templates() -> dict:
+    """Every hook block install.py can write, by event."""
+    out: dict = {}
+    for t in (HOOK_TEMPLATE, PRE_TOOL_USE_TEMPLATE, POST_TOOL_USE_TEMPLATE,
+              PRE_COMPACT_TEMPLATE):
+        out.update(deepcopy(t))
+    return out
+
+
+def _matcher_covers(have: Optional[str], want: Optional[str]) -> bool:
+    """True when ``have`` already matches every tool ``want`` does.
+
+    Reconciliation only ever widens. An empty matcher matches every tool,
+    and narrowing one to the template is a regression, not a repair: on
+    solidpc a match-all PreToolUse block was what let the process guard
+    see Monitor calls, and the first deploy with reconciliation cut it to
+    ``Bash|Edit|Write|MultiEdit``.
+    """
+    if not have:
+        return True
+    if not want:
+        return False
+    names = {t.strip() for t in have.split("|")}
+    if any(not n.replace("_", "").isalnum() for n in names):
+        return have == want       # a regex we cannot reason about
+    return {t.strip() for t in want.split("|")} <= names
+
+
+def reconcile_hook_matchers(settings: dict) -> list[tuple[str, str, str]]:
+    """Widen the matcher of every *installed* managed hook block to cover
+    the template; returns ``[(event, old, new)]`` for what changed.
+
+    Only matchers, only blocks that hold one of our hooks, only events
+    already installed: which events a host has (PreToolUse is opt-in) is
+    the installer's decision, but a matcher that drifted from the
+    template is just stale. A PostToolUse block still on
+    ``Edit|Write|MultiEdit`` never sees ``TaskCreate``, and nothing
+    errors — the task mirror simply never runs.
+    """
+    changes: list[tuple[str, str, str]] = []
+    hooks = settings.get("hooks") or {}
+    for event, blocks in _managed_templates().items():
+        want = (blocks[0] or {}).get("matcher")
+        for blk in hooks.get(event) or []:
+            if not isinstance(blk, dict):
+                continue
+            if not any(_is_our_hook(h) for h in blk.get("hooks") or []
+                       if isinstance(h, dict)):
+                continue
+            have = blk.get("matcher")
+            if _matcher_covers(have, want):
+                continue
+            # Only reached when `want` matches something `have` does not:
+            # an empty `want` widens the block to every tool, anything
+            # else adds tools. Nothing here ever narrows a block.
+            blk["matcher"] = want
+            changes.append((event, have or "", want or ""))
+    return changes
+
+
+def sync_managed_hooks(settings_path: Path, *, dry_run: bool) -> list[str]:
+    """Deploy's half of the installer: reconcile matchers in place."""
+    if not settings_path.exists():
+        return []
+    settings = _load_json(settings_path)
+    changes = reconcile_hook_matchers(settings)
+    notes = [f"{ev} matcher {old or '(all)'} -> {new or '(all)'}"
+             for ev, old, new in changes]
+    if changes and not dry_run:
+        _backed_up_save_json(settings_path, settings, reason="hook-matchers",
+                             dry_run=False)
+    return notes
 
 
 def uninstall(*, dry_run: bool) -> int:
