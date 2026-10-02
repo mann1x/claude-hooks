@@ -279,7 +279,18 @@
       "maintenance_limit": 1000,
       "registry_days": 30,
       "archive_cap_bytes": 10737418240,
-      "stop_nudge": true
+      "stop_nudge": true,
+      "cloud_relay": {
+        "enabled": false,
+        "root": "",
+        "host": "cloud",
+        "interval_seconds": 30,
+        "writing_timeout_seconds": 3600,
+        "live_hours": 12,
+        "archive_days": 30,
+        "aliases": null,
+        "watcher": "auto"
+      }
     },
     "claudemem_reindex": {
       "enabled": true,

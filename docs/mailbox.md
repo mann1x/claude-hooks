@@ -406,6 +406,80 @@ told. Now the hooks do not run at all in such a run
 child of one `mailbox-read` / `mailbox-ack` refuse and nothing is
 registered; `mailbox-send` and the listings still work.
 
+## Cloud sessions
+
+A Claude cloud session cannot reach the pgvector MCP. In the desktop app
+it can read and write a linked local folder, and the **relay** turns that
+folder into a mailbox client: the session writes requests as files, the
+daemon runs them through the same `MailboxTools` dispatch the MCP uses,
+and writes the answers back. Code: `claude_hooks/mailbox/relay.py` and
+`watch.py`. The session's own guide is
+[`claude_hooks/mailbox/cloud/MAILBOX.md`](../claude_hooks/mailbox/cloud/MAILBOX.md),
+installed into the folder as `MAILBOX.md`.
+
+**Addressing.** Tell the cloud session which alias to take ("take the
+mailbox alias osync"). It sends a `mailbox-alias` request and is then
+**`osync@cloud`** to every other session. The registry key behind it is
+`cloud-osync`; nobody needs it. A later cloud session that takes the same
+alias takes the address over, mail included.
+
+**The semaphore rule.** Nothing a remote session writes is read until
+its semaphore says so. Each request is `requests/<id>.json` plus
+`requests/<id>.sem` (`{"op", "status", "bytes"?}`), written semaphore
+`writing` → payload → semaphore `ready`. The daemon ignores a payload
+with no semaphore, an unparseable semaphore, `writing`, and a `ready`
+whose optional `bytes` does not match the file on disk (still syncing).
+It reads a request only when all of that holds, then deletes payload and
+semaphore and runs it. `cancelled` deletes both and does nothing. A
+request stuck past `writing_timeout_seconds` (1 h) goes to `rejected/`
+with a reason. The daemon's own files — `replies/<id>.md`, `INBOX.md`,
+`status.json` — are written the same way, semaphore last.
+
+**Cost.** The thread is blocked in the kernel on file events while idle:
+inotify on Linux (which also sees Samba writes, since `smbd` writes the
+local file), `ReadDirectoryChangesW` on Windows, and a 30 s mtime poll
+only where neither works. It watches only the folders a session writes
+to, so its own writes don't wake it. Events are batched into at most one
+pass per `interval_seconds` (30, also the floor). The database is opened
+on first use and queried — one inbox page per session, `INBOX.md`
+rewritten only when it changes — every interval only while a cloud
+session has made a request in the last `live_hours` (12). Session
+folders idle for `archive_days` (30) move to `archive/`.
+
+**Setup** (on the host whose folder the desktop app links — solidpc for
+`/shared/dev/mailbox`, which pandorum's desktop app reaches over SMB):
+
+```json
+"hooks": {"mailbox": {"enabled": true, "cloud_relay": {
+  "enabled": true, "root": "/shared/dev/mailbox"
+}}}
+```
+
+`install.py` asks for this and installs `MAILBOX.md`; `scripts/deploy.py`
+keeps it current, and `verify_deploy.py` fails on a stale copy. Config
+is read when the daemon starts — restart it (deploy does) to apply a
+change. Run the relay on **one** host per folder.
+
+| key | default | |
+|---|---|---|
+| `root` | — | the folder |
+| `host` | `cloud` | the host part of every cloud address |
+| `interval_seconds` | 30 | batching + inbox refresh; floor 30 |
+| `writing_timeout_seconds` | 3600 | stuck requests → `rejected/` |
+| `live_hours` | 12 | inbox kept current this long after a request |
+| `archive_days` | 30 | idle session folders → `archive/` |
+| `aliases` | any | optional allow-list |
+| `watcher` | `auto` | `inotify` / `windows` / `poll` |
+
+```bash
+python -m claude_hooks.mailbox.relay status                # folder, instructions, sessions
+python -m claude_hooks.mailbox.relay install-instructions  # copy MAILBOX.md by hand
+```
+
+**Limits.** A cloud session runs no hooks: it gets no mail notice, no
+Stop nudge and no badge, and learns about mail only by reading
+`INBOX.md`. Answers take up to about 30 s.
+
 ## Troubleshooting
 
 **"No sessions registered."** Nothing has run `SessionStart` against

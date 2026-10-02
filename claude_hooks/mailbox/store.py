@@ -605,6 +605,7 @@ class MailboxStore:
 
     def send(self, to: str, subject: str, body: str, *,
              from_alias: str, from_session: Optional[str] = None,
+             from_host: Optional[str] = None,
              priority: int = 0,
              expires_days: Optional[int] = None) -> dict:
         """Resolve, then insert one row per recipient.
@@ -647,7 +648,11 @@ class MailboxStore:
             days=expires_days if expires_days is not None
             else self._expiry_days))
         now = self._now()
-        host = host_name()
+        # The sender's host is part of its identity (``alias@host``), and
+        # every outbox query matches on it. Defaulting to this process's
+        # host was right while every sender ran on the machine it sent
+        # from; the cloud relay sends for ``alias@cloud`` from solidpc.
+        host = from_host or host_name()
 
         # (target, row) pairs, so a target that already holds this exact
         # message can be dropped before anything is written.

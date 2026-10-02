@@ -666,6 +666,57 @@ def _setup_update_check(cfg: dict, *, non_interactive: bool) -> None:
         print("  Update check disabled.")
 
 
+def _setup_mailbox_cloud_relay(cfg: dict, *, non_interactive: bool,
+                               dry_run: bool) -> None:
+    """Offer the cloud-session mailbox relay and install its instructions.
+
+    Every prompt defaults to what the config already says, so re-running
+    the installer never flips the relay or moves its folder by accident.
+    The instructions file (``MAILBOX.md``) is installed into the folder
+    whenever the relay is on — interactive or not — because a relay
+    without it is a folder nobody knows how to use.
+    """
+    from claude_hooks.mailbox.relay import install_instructions, settings
+
+    mailbox = cfg.setdefault("hooks", {}).setdefault("mailbox", {})
+    relay = mailbox.setdefault("cloud_relay", {})
+    current_on = bool(relay.get("enabled", False))
+    current_root = relay.get("root") or ""
+
+    if not non_interactive:
+        print("\n==> Mailbox relay for cloud sessions")
+        print("  Lets Claude cloud sessions (desktop app, linked local "
+              "folder) use the session\n  mailbox through files. Turn it "
+              "on only on the host whose folder you link.")
+        changed, value = _ask_optional_bool(
+            "Enable the cloud-session mailbox relay on this host?",
+            default=current_on)
+        enabled = value if changed else current_on
+        if enabled:
+            suggested = current_root or os.path.expanduser(
+                os.path.join("~", "claude-mailbox"))
+            raw = input(f"  Relay folder [{suggested}]: ").strip()
+            relay["root"] = raw or suggested
+        relay["enabled"] = bool(enabled)
+        if enabled and not mailbox.get("enabled"):
+            print("  NOTE: hooks.mailbox.enabled is off — the relay only "
+                  "runs when the mailbox itself is on.")
+
+    opts = settings(cfg)
+    if not (relay.get("enabled") and relay.get("root")):
+        return
+    root = Path(opts["root"])
+    try:
+        verdict = install_instructions(root, dry_run=dry_run)
+    except OSError as e:
+        print(f"  [warn] could not install {root / 'MAILBOX.md'}: {e}")
+        return
+    prefix = "[dry-run] " if dry_run else ""
+    print(f"  {prefix}{root / 'MAILBOX.md'}: {verdict}")
+    print(f"  Cloud sessions reach the mailbox as <alias>@{opts['host']}; "
+          "restart the daemon to start the relay.")
+
+
 def _setup_proxy_orchestrator(
     cfg: dict, settings_path: Path, *,
     non_interactive: bool, dry_run: bool,
@@ -8293,6 +8344,11 @@ def main() -> int:
     # long-lived claude-hooks-daemon thread, so the Stop hook never
     # blocks on network I/O.
     _setup_update_check(cfg, non_interactive=args.non_interactive)
+
+    # Cloud-session mailbox relay: opt-in, on the host whose folder the
+    # desktop app links. Installs the cloud sessions' MAILBOX.md.
+    _setup_mailbox_cloud_relay(
+        cfg, non_interactive=args.non_interactive, dry_run=args.dry_run)
 
     # Save config.
     if args.dry_run:

@@ -701,6 +701,19 @@ def serve(
     except Exception as e:
         log.debug("mailbox maintenance thread not started: %s", e)
 
+    # Cloud-session relay: a folder a cloud session can write to, turned
+    # into a mailbox client. Only on the host whose folder it is
+    # (hooks.mailbox.cloud_relay); blocked on file events, so it costs
+    # nothing while nobody uses it.
+    relay_thread = None
+    try:
+        from claude_hooks.config import load_config
+        from claude_hooks.mailbox.relay import start_relay_thread
+
+        relay_thread = start_relay_thread(load_config(), server.stop_event)
+    except Exception as e:
+        log.warning("mailbox relay not started: %s", e)
+
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
@@ -724,6 +737,10 @@ def serve(
             update_thread.join(timeout=2.0)
         if mailbox_thread is not None:
             mailbox_thread.join(timeout=2.0)
+        if relay_thread is not None:
+            # Blocked in the kernel on file events: wake it explicitly.
+            relay_thread.stop()
+            relay_thread.join(timeout=2.0)
     return 0
 
 

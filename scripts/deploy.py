@@ -297,7 +297,50 @@ def step_skills(dry: bool) -> Step:
         s.note(f"not installed on this host (opt-in): {', '.join(absent)}")
     if not synced and not dry:
         s.note("no skill needed updating")
+    _sync_relay_instructions(s, dry)
     return s
+
+
+def _load_cfg() -> dict:
+    try:
+        return json.loads((REPO / "config" / "claude-hooks.json")
+                          .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _sync_relay_instructions(s: Step, dry: bool) -> None:
+    """The cloud-session instructions (``MAILBOX.md``) in the relay
+    folder. Same class as a skill: read by a session, loaded by no
+    service, and silently wrong when stale — a cloud session following
+    an old copy speaks a protocol the relay no longer does."""
+    relay = (((_load_cfg().get("hooks") or {}).get("mailbox") or {})
+             .get("cloud_relay") or {})
+    root = relay.get("root")
+    if not (relay.get("enabled") and root):
+        return
+    src = REPO / "claude_hooks" / "mailbox" / "cloud" / "MAILBOX.md"
+    dst = Path(os.path.expanduser(str(root))) / "MAILBOX.md"
+    try:
+        want = src.read_bytes()
+        have = dst.read_bytes() if dst.is_file() else None
+    except OSError as e:
+        s.fail(f"cloud mailbox instructions: unreadable ({e})")
+        return
+    if have == want:
+        s.note(f"cloud mailbox instructions current ({dst})")
+        return
+    verb = "install" if have is None else "update"
+    if dry:
+        s.note(f"[dry-run] would {verb} {dst}")
+        return
+    try:
+        (dst.parent / "sessions").mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(want)
+    except OSError as e:
+        s.fail(f"cloud mailbox instructions: cannot write {dst} ({e})")
+        return
+    s.note(f"cloud mailbox instructions {verb}d ({dst})")
 
 
 # --------------------------------------------------------------------- #

@@ -96,6 +96,22 @@ class TestEveryArtifactClassIsDeployed(unittest.TestCase):
         self.assertIn("def step_services", src)
         self.assertIn("systemctl", src)
 
+    def test_the_cloud_mailbox_instructions(self):
+        """``MAILBOX.md`` in the relay folder is read by cloud sessions,
+        not by any service — the same class as a skill, and it drifts the
+        same way: a stale copy instructs a protocol the relay no longer
+        speaks, and nothing errors."""
+        src = _src(DEPLOY)
+        self.assertIn("def _sync_relay_instructions", src)
+        self.assertIn("MAILBOX.md", src)
+        self.assertIn("cloud_relay", src)
+        body = src[src.index("def step_skills"):src.index("def _episodic_mode")]
+        self.assertIn("_sync_relay_instructions(", body)
+        verify = _src(VERIFY)
+        self.assertIn("def check_mailbox_relay", verify)
+        main = verify[verify.index("def main"):]
+        self.assertIn("check_mailbox_relay(r)", main)
+
     def test_verification_is_a_step_not_a_suggestion(self):
         src = _src(DEPLOY)
         self.assertIn("def step_verify", src)
@@ -633,3 +649,48 @@ class TestRunningCouncilGate(unittest.TestCase):
         with patch.object(mod.urllib.request, "urlopen", return_value=R()):
             self.assertEqual([c["sid"] for c in mod._running_councils("e")],
                              ["b"])
+
+
+class TestRelayInstructionsSync(unittest.TestCase):
+    """The deploy copies the repo's MAILBOX.md over a stale one, leaves a
+    current one alone, and does nothing on a host without a relay."""
+
+    def _mod(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_deploy_mod", DEPLOY)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _run(self, cfg, dry=False):
+        mod = self._mod()
+        s = mod.Step("skills")
+        with patch.object(mod, "_load_cfg", return_value=cfg):
+            mod._sync_relay_instructions(s, dry)
+        return s
+
+    def test_no_relay_is_not_a_failure(self):
+        s = self._run({"hooks": {"mailbox": {"enabled": True}}})
+        self.assertTrue(s.ok)
+
+    def test_stale_is_updated_and_current_is_left(self):
+        import tempfile
+        src = REPO / "claude_hooks" / "mailbox" / "cloud" / "MAILBOX.md"
+        with tempfile.TemporaryDirectory() as d:
+            cfg = {"hooks": {"mailbox": {"enabled": True, "cloud_relay": {
+                "enabled": True, "root": d}}}}
+            target = pathlib.Path(d) / "MAILBOX.md"
+            target.write_text("old protocol")
+            s = self._run(cfg, dry=True)
+            self.assertEqual(target.read_text(), "old protocol")
+            s = self._run(cfg)
+            self.assertTrue(s.ok)
+            self.assertEqual(target.read_bytes(), src.read_bytes())
+            mtime = target.stat().st_mtime_ns
+            self._run(cfg)
+            self.assertEqual(target.stat().st_mtime_ns, mtime)
+
+    def test_an_unwritable_root_fails_the_deploy(self):
+        cfg = {"hooks": {"mailbox": {"enabled": True, "cloud_relay": {
+            "enabled": True, "root": "/proc/no-such-relay-root"}}}}
+        self.assertFalse(self._run(cfg).ok)

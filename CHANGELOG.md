@@ -18,6 +18,32 @@ release with the auto-generated source archive
 
 ### Added
 
+- **Mailbox relay for cloud sessions.** A Claude cloud session cannot
+  reach the pgvector MCP, but in the desktop app it can use a linked
+  local folder. `hooks.mailbox.cloud_relay` turns that folder into a
+  full mailbox client, run by the daemon (`claude_hooks/mailbox/relay.py`).
+  - **Addressing.** A session takes an alias with a `mailbox-alias`
+    request and is `<alias>@cloud` to everyone else (`osync@cloud`).
+    A new cloud session for the same alias takes the address over,
+    with the mail waiting for it.
+  - **All eight tools**, executed through the same `MailboxTools`
+    dispatch the MCP uses, so ownership rules are identical.
+  - **Semaphore protocol.** Nothing a remote session writes is read
+    until its `<id>.sem` says `ready` (and, when given, `bytes` matches
+    the payload on disk). The payload and semaphore are deleted when
+    taken. The daemon writes its replies, `INBOX.md` and `status.json`
+    the same way, semaphore last.
+  - **Cost.** Blocked on inotify (Linux) or `ReadDirectoryChangesW`
+    (Windows) while idle; a 30 s mtime poll only where neither works.
+    At most one pass per 30 s. The database is queried only while a
+    cloud session has been active in the last 12 h.
+  - **Instructions.** `claude_hooks/mailbox/cloud/MAILBOX.md` is the
+    cloud session's guide, installed into the folder by `install.py`
+    and kept current by `scripts/deploy.py`; `verify_deploy.py` fails
+    on a stale copy.
+  - `python -m claude_hooks.mailbox.relay status` reports the folder,
+    the instructions and every session in it.
+
 - **`claude-consultants grant <sid> [N]`** (`POST /v1/consult/{sid}/grant`)
   raises a consultancy's follow-up cap by N when the user asks for more
   rounds, without sending a follow-up. Before this the only carrier for
@@ -56,6 +82,12 @@ release with the auto-generated source archive
     failing.
 
 ### Fixed
+
+- **`send()` stamped the process's host on the sender.** `from_host`
+  came from `host_name()` rather than the caller's identity, so mail
+  sent for another identity was filed under the wrong outbox — invisible
+  to its own `mailbox-sent`, `-edit` and `-cancel`. `send()` takes
+  `from_host`, and `MailboxTools` passes its own.
 
 - **Harness-started turns are no longer treated as user prompts.**
   Background task notifications and scheduled wake-ups / cron ticks fire

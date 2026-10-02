@@ -544,6 +544,36 @@ def check_skills(r: Results) -> None:
               "; ".join(stale) + " — run `python3 install.py` to sync")
 
 
+def check_mailbox_relay(r: Results) -> None:
+    """The cloud-session relay, on the host configured to run it: the
+    folder is there and ``MAILBOX.md`` in it matches the repo. A stale
+    copy instructs cloud sessions in a protocol the relay no longer
+    speaks, and nothing errors — so it FAILs, like a stale skill."""
+    try:
+        from claude_hooks.config import load_config as load_hooks_config
+        from claude_hooks.mailbox.relay import (
+            INSTRUCTIONS_NAME, RelayCore, settings)
+        opts = settings(load_hooks_config())
+    except Exception as e:
+        r.add(WARN, "mailbox relay", f"config unavailable: {type(e).__name__}")
+        return
+    if not opts["enabled"]:
+        return
+    print("mailbox relay")
+    root = Path(opts["root"])
+    if not (root / "sessions").is_dir():
+        r.add(FAIL, "mailbox relay", f"{root}/sessions missing — run "
+              "scripts/deploy.py or install.py")
+        return
+    core = RelayCore(root, opts, store_factory=lambda: None)
+    state = core.check_instructions()
+    if state == "current":
+        r.add(PASS, "mailbox relay", f"{root / INSTRUCTIONS_NAME} current")
+    else:
+        r.add(FAIL, "mailbox relay instructions",
+              f"{root / INSTRUCTIONS_NAME} is {state} — run scripts/deploy.py")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--store", action="store_true", help="store checks only")
@@ -563,6 +593,7 @@ def main() -> int:
         check_lsp_daemons(r)
         check_episodic(r)
         check_skills(r)
+        check_mailbox_relay(r)
         check_store(r)
 
     failed = r.failed
