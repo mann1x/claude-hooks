@@ -2,13 +2,10 @@
 
 # Tasks — claude-hooks
 
-1 active · prefix `ch`
+nothing open · prefix `ch`
 
-## Active (1)
+## Recently closed (3 of 3)
 
-- [ch-2](.claude-hooks/tasks/ch-2.md) `release` Cut the release that ships task tracking and the cloud mailbox relay — 1m
-
-## Recently closed (2 of 2)
-
-- [ch-3](.claude-hooks/tasks/archive/ch-3.md) `mailbox.statusline` Status-line mail badge: count waiting ack notes — 1m
-- [ch-1](.claude-hooks/tasks/archive/ch-1.md) **H** `tasks` Verify task tracking live in a restarted session — 1h
+- [ch-2](.claude-hooks/tasks/archive/ch-2.md) `release` Cut the release that ships task tracking and the cloud mailbox relay — 1m
+- [ch-3](.claude-hooks/tasks/archive/ch-3.md) `mailbox.statusline` Status-line mail badge: count waiting ack notes — 24m
+- [ch-1](.claude-hooks/tasks/archive/ch-1.md) **H** `tasks` Verify task tracking live in a restarted session — 2h
