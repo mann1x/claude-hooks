@@ -683,9 +683,9 @@ class TestRelayInstructionsSync(unittest.TestCase):
             cfg = {"hooks": {"mailbox": {"enabled": True, "cloud_relay": {
                 "enabled": True, "root": d}}}}
             target = pathlib.Path(d) / "MAILBOX.md"
-            target.write_text("old protocol")
+            target.write_text("old protocol", encoding="utf-8")
             s = self._run(cfg, dry=True)
-            self.assertEqual(target.read_text(), "old protocol")
+            self.assertEqual(target.read_text(encoding="utf-8"), "old protocol")
             s = self._run(cfg)
             self.assertTrue(s.ok)
             self.assertEqual(target.read_bytes(), src.read_bytes())
@@ -694,6 +694,13 @@ class TestRelayInstructionsSync(unittest.TestCase):
             self.assertEqual(target.stat().st_mtime_ns, mtime)
 
     def test_an_unwritable_root_fails_the_deploy(self):
-        cfg = {"hooks": {"mailbox": {"enabled": True, "cloud_relay": {
-            "enabled": True, "root": "/proc/no-such-relay-root"}}}}
-        self.assertFalse(self._run(cfg).ok)
+        # A folder under a regular file cannot be created on any OS.
+        # (``/proc/...`` was used here once; on Windows that is just a
+        # writable C:\\proc, and the test created it.)
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            blocker = pathlib.Path(d) / "a-file"
+            blocker.write_text("x", encoding="utf-8")
+            cfg = {"hooks": {"mailbox": {"enabled": True, "cloud_relay": {
+                "enabled": True, "root": str(blocker / "relay")}}}}
+            self.assertFalse(self._run(cfg).ok)

@@ -93,20 +93,20 @@ class RelayHarness(unittest.TestCase):
         d = self.req_dir(alias)
         op = tool if op is None else op
         (d / f"{rid}.sem").write_text(json.dumps(
-            {"op": op, "status": "writing"}))
+            {"op": op, "status": "writing"}), encoding="utf-8")
         body = json.dumps({"tool": tool, "args": args or {}})
-        (d / f"{rid}.json").write_text(body)
+        (d / f"{rid}.json").write_text(body, encoding="utf-8")
         sem = {"op": op, "status": status}
         if with_bytes:
             sem["bytes"] = len(body.encode())
-        (d / f"{rid}.sem").write_text(json.dumps(sem))
+        (d / f"{rid}.sem").write_text(json.dumps(sem), encoding="utf-8")
 
     def reply(self, rid, alias="osync") -> str:
         d = self.root / "sessions" / alias / "replies"
         sem = read_semaphore(d / f"{rid}.sem")
         self.assertIsNotNone(sem, f"no reply semaphore for {rid}")
         self.assertEqual(sem.status, "ready")
-        text = (d / f"{rid}.md").read_text()
+        text = (d / f"{rid}.md").read_text(encoding="utf-8")
         self.assertEqual(sem.bytes, len(text.encode()))
         return text
 
@@ -127,7 +127,7 @@ class SemaphoreProtocolTests(RelayHarness):
         self.take_alias()
         d = self.req_dir()
         (d / "x1.json").write_text(json.dumps(
-            {"tool": "mailbox-list", "args": {}}))
+            {"tool": "mailbox-list", "args": {}}), encoding="utf-8")
         self.core.process_alias("osync")
         self.assertTrue((d / "x1.json").exists())
         self.assertFalse((self.root / "sessions/osync/replies/x1.md").exists())
@@ -141,7 +141,7 @@ class SemaphoreProtocolTests(RelayHarness):
         self.assertTrue((d / "x2.sem").exists())
         self.assertIn(("osync", "x2"), self.core._pending)
         (d / "x2.sem").write_text(json.dumps(
-            {"op": "mailbox-list", "status": "ready"}))
+            {"op": "mailbox-list", "status": "ready"}), encoding="utf-8")
         self.core.process_alias("osync", {"x2"})
         self.assertFalse((d / "x2.json").exists())
         self.assertFalse((d / "x2.sem").exists())
@@ -152,7 +152,7 @@ class SemaphoreProtocolTests(RelayHarness):
         d = self.req_dir()
         self.write_request("x3", "mailbox-list")
         (d / "x3.sem").write_text(json.dumps(
-            {"op": "mailbox-list", "status": "ready", "bytes": 9999}))
+            {"op": "mailbox-list", "status": "ready", "bytes": 9999}), encoding="utf-8")
         self.core.process_alias("osync")
         self.assertTrue((d / "x3.json").exists())
         self.assertIn(("osync", "x3"), self.core._pending)
@@ -185,7 +185,7 @@ class SemaphoreProtocolTests(RelayHarness):
         rej = self.root / "sessions/osync/rejected"
         self.assertTrue((rej / "x6.json").exists())
         self.assertIn("still `writing`",
-                      (rej / "x6.reason.txt").read_text())
+                      (rej / "x6.reason.txt").read_text(encoding="utf-8"))
         self.assertIn("REJECTED", self.reply("x6"))
         self.assertNotIn(("osync", "x6"), self.core._pending)
 
@@ -193,8 +193,8 @@ class SemaphoreProtocolTests(RelayHarness):
         self.take_alias()
         d = self.req_dir()
         (d / "x7.json").write_text(json.dumps(
-            {"tool": "mailbox-list", "args": {}}))
-        (d / "x7.sem").write_text('{"op": "mailbox-list", "stat')
+            {"tool": "mailbox-list", "args": {}}), encoding="utf-8")
+        (d / "x7.sem").write_text('{"op": "mailbox-list", "stat', encoding="utf-8")
         self.core.process_alias("osync")
         self.assertTrue((d / "x7.json").exists())
         self.clock.t += 3601
@@ -245,7 +245,7 @@ class AliasTests(RelayHarness):
                 for s in self.store.sessions()]
         self.assertIn(("osync", "cloud", "cloud-osync"), rows)
         status = json.loads(
-            (self.root / "sessions/osync/status.json").read_text())
+            (self.root / "sessions/osync/status.json").read_text(encoding="utf-8"))
         self.assertEqual(status["address"], "osync@cloud")
 
     def test_the_alias_must_match_the_folder(self):
@@ -301,7 +301,7 @@ class RoundTripTests(RelayHarness):
             "to": "osync@cloud", "subject": "hello cloud",
             "body": "the body"}, headless=False)
         self.core.tick()
-        inbox = (self.root / "sessions/osync/INBOX.md").read_text()
+        inbox = (self.root / "sessions/osync/INBOX.md").read_text(encoding="utf-8")
         self.assertIn("hello cloud", inbox)
         self.assertIn("Unread: 1", inbox)
         self.assertEqual(read_semaphore(
@@ -311,7 +311,7 @@ class RoundTripTests(RelayHarness):
                                                {"ids": [mid]}))
         self.core.tick()
         self.assertIn("Unread: 0", (self.root
-                                    / "sessions/osync/INBOX.md").read_text())
+                                    / "sessions/osync/INBOX.md").read_text(encoding="utf-8"))
 
     def test_cloud_to_local_is_from_alias_at_cloud(self):
         self.run_req("s1", "mailbox-send", {
@@ -510,7 +510,7 @@ class WatcherTests(unittest.TestCase):
             req = root / "sessions" / "osync" / "requests"
             req.mkdir(parents=True)
             w = watch.PollWatcher(root, interval=1)
-            (req / "a.sem").write_text("{}")
+            (req / "a.sem").write_text("{}", encoding="utf-8")
             self.assertIn(("sessions", "osync", "requests", "a.sem"),
                           w.wait(0.01))
 
@@ -530,7 +530,7 @@ class WatcherTests(unittest.TestCase):
             w = watch.make_watcher(root)
             self.assertEqual(w.kind, "inotify")
             try:
-                (req / "a.sem").write_text("{}")
+                (req / "a.sem").write_text("{}", encoding="utf-8")
                 target = ("sessions", "osync", "requests", "a.sem")
                 self.assertIn(target, self._wait_for(w, target))
                 # The daemon's own writes: a replies/ dir and a file in
@@ -538,9 +538,9 @@ class WatcherTests(unittest.TestCase):
                 # a change the relay acts on.
                 (root / "sessions" / "osync" / "replies").mkdir()
                 (root / "sessions" / "osync" / "replies" / "x.md"
-                 ).write_text("x")
-                (root / "sessions" / "osync" / "INBOX.md").write_text("x")
-                (root / "sessions" / "osync" / "INBOX.md").write_text("y")
+                 ).write_text("x", encoding="utf-8")
+                (root / "sessions" / "osync" / "INBOX.md").write_text("x", encoding="utf-8")
+                (root / "sessions" / "osync" / "INBOX.md").write_text("y", encoding="utf-8")
                 self.assertEqual(w.wait(0.2), set())
             finally:
                 w.close()
@@ -561,7 +561,7 @@ class WatcherTests(unittest.TestCase):
                 self.assertIn(watch.RESCAN, seen)
                 # Drain whatever else the mkdir -p produced.
                 w.wait(0.2)
-                (req / "b.sem").write_text("{}")
+                (req / "b.sem").write_text("{}", encoding="utf-8")
                 target = ("sessions", "osync", "requests", "b.sem")
                 self.assertIn(target, self._wait_for(w, target))
             finally:
@@ -576,7 +576,7 @@ class WatcherTests(unittest.TestCase):
             w = watch.make_watcher(root)
             self.assertEqual(w.kind, "windows")
             try:
-                (req / "a.sem").write_text("{}")
+                (req / "a.sem").write_text("{}", encoding="utf-8")
                 seen = set()
                 deadline = time.monotonic() + 5
                 target = ("sessions", "osync", "requests", "a.sem")
@@ -594,7 +594,7 @@ class InstructionsTests(unittest.TestCase):
             root = Path(d)
             self.assertEqual(install_instructions(root), "installed")
             self.assertEqual(install_instructions(root), "current")
-            (root / "MAILBOX.md").write_text("old")
+            (root / "MAILBOX.md").write_text("old", encoding="utf-8")
             self.assertEqual(install_instructions(root), "updated")
             self.assertTrue((root / "sessions").is_dir())
 
@@ -602,7 +602,7 @@ class InstructionsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             core = RelayCore(Path(d), opts(), store_factory=lambda: None)
             self.assertEqual(core.check_instructions(), "missing")
-            (Path(d) / "MAILBOX.md").write_text("old")
+            (Path(d) / "MAILBOX.md").write_text("old", encoding="utf-8")
             self.assertEqual(core.check_instructions(), "stale")
             install_instructions(Path(d))
             self.assertEqual(core.check_instructions(), "current")
@@ -681,7 +681,7 @@ class SandboxGrantTests(unittest.TestCase):
         self.tmp = Path(tmp.name)
         self.unit = self.tmp / "claude-hooks-daemon.service"
         self.unit.write_text("[Service]\nProtectSystem=strict\n"
-                             "ReadWritePaths=/root/.claude\n")
+                             "ReadWritePaths=/root/.claude\n", encoding="utf-8")
         self.real = self.tmp / "real-mailbox"
         self.real.mkdir()
         self.link = self.tmp / "mailbox"
@@ -694,7 +694,7 @@ class SandboxGrantTests(unittest.TestCase):
                          [str(self.link), str(self.real.resolve())])
 
     def test_an_unsandboxed_unit_needs_nothing(self):
-        self.unit.write_text("[Service]\nExecStart=/bin/true\n")
+        self.unit.write_text("[Service]\nExecStart=/bin/true\n", encoding="utf-8")
         self.assertEqual(relay.missing_grants(self.unit, self.link), [])
 
     def test_the_dropin_grants_and_a_parent_grant_counts(self):
@@ -706,8 +706,8 @@ class SandboxGrantTests(unittest.TestCase):
         run.assert_called_once()
         self.assertEqual(relay.missing_grants(self.unit, self.link), [])
         dropin = Path(f"{self.unit}.d") / relay.GRANT_DROPIN
-        self.assertIn(f"-{self.link}", dropin.read_text())
-        dropin.write_text(f"[Service]\nReadWritePaths={self.tmp}\n")
+        self.assertIn(f"-{self.link}", dropin.read_text(encoding="utf-8"))
+        dropin.write_text(f"[Service]\nReadWritePaths={self.tmp}\n", encoding="utf-8")
         self.assertEqual(relay.missing_grants(self.unit, self.link), [])
         # Already granted: nothing written, nothing reloaded.
         with mock.patch.object(relay, "daemon_unit_paths",
@@ -721,7 +721,7 @@ class SandboxGrantTests(unittest.TestCase):
         self.assertIsNone(relay.writable_problem(self.real))
         broken = self.tmp / "broken"
         broken.mkdir()
-        (broken / "sessions").write_text("not a directory")
+        (broken / "sessions").write_text("not a directory", encoding="utf-8")
         with mock.patch.object(relay, "daemon_unit_paths", return_value=[]):
             self.assertIn("cannot write", relay.writable_problem(broken))
 
