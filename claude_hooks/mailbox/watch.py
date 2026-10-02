@@ -316,6 +316,11 @@ class WindowsWatcher(Watcher):
         self._ov = _OVERLAPPED()
         self._ov.hEvent = self._event
         self._pending = False
+        # Arm now, not on the first wait(): Windows records nothing for a
+        # handle until ReadDirectoryChangesW has been called on it once
+        # (after that it buffers between calls). Arming late lost every
+        # request written between start-up and the first wait.
+        self._arm()
 
     def _arm(self) -> None:
         if self._pending:

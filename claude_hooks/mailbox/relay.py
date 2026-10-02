@@ -773,8 +773,9 @@ def missing_grants(unit: Path, root) -> list[str]:
                                for x in line.split("=", 1)[1].split())
     need = relay_rw_paths(root)
     # A grant of a parent covers the child.
+    granted_paths = [Path(g) for g in granted if g]
     return [p for p in need if not any(
-        p == g or p.startswith(g.rstrip("/") + "/") for g in granted)]
+        Path(p) == g or g in Path(p).parents for g in granted_paths)]
 
 
 def ensure_unit_grant(root, *, dry_run: bool = False) -> list[str]:
