@@ -494,15 +494,37 @@ class LoopBatchingTests(RelayHarness):
                                    (0.3, [self.ev("a")])])
         self.assertEqual(len(passes), 1)
 
-    def test_requests_behind_handled_work_are_batched(self):
-        passes, _ = self.run_loop([
-            (40, [self.ev("a")]),      # first after idle: ~1 s
-            (2, [self.ev("b")]),       # behind real work: waits...
-            (3, [self.ev("c")]),       # ...and joins the same pass
-        ])
-        self.assertEqual(len(passes), 2)
-        self.assertEqual(passes[1][1], {self.ev("b"), self.ev("c")})
-        self.assertGreaterEqual(passes[1][0] - passes[0][0], 30)
+    def test_a_session_working_step_by_step_is_answered_at_once(self):
+        # Five requests a few seconds apart: alias, list, read, ack, send.
+        script = [(40, [self.ev("r0")])] + [
+            (3, [self.ev(f"r{i}")]) for i in range(1, 5)]
+        passes, _ = self.run_loop(script)
+        self.assertEqual(len(passes), 5)
+        gaps = [b[0] - a[0] for a, b in zip(passes, passes[1:])]
+        self.assertTrue(all(g < 5 for g in gaps), gaps)
+
+    def test_past_the_burst_requests_are_batched(self):
+        script = [(40, [self.ev("r0")])] + [
+            (2, [self.ev(f"r{i}")]) for i in range(1, 8)]
+        passes, _ = self.run_loop(script)
+        burst = relay.DEFAULT_BURST
+        # The first `burst` passes run at once ...
+        self.assertTrue(all(b[0] - a[0] < 5 for a, b in
+                            zip(passes[:burst], passes[1:burst])))
+        # ... the rest wait for the window and share one pass.
+        self.assertEqual(len(passes), burst + 1)
+        self.assertEqual(passes[-1][1], {self.ev(f"r{i}")
+                                         for i in range(burst, 8)})
+        self.assertGreaterEqual(passes[-1][0] - passes[0][0], 30)
+
+    def test_the_burst_is_configurable_with_a_floor_of_one(self):
+        base = {"enabled": True, "root": "/x"}
+        o = settings({"hooks": {"mailbox": {"enabled": True,
+                                            "cloud_relay": base}}})
+        self.assertEqual(o["burst"], relay.DEFAULT_BURST)
+        o = settings({"hooks": {"mailbox": {"enabled": True, "cloud_relay": {
+            **base, "burst": 0}}}})
+        self.assertEqual(o["burst"], 1)
 
     def test_a_pass_that_found_only_a_writing_semaphore_does_not_throttle(self):
         """The bug a real cloud session hit: its `writing` semaphore woke

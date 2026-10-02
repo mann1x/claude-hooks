@@ -289,7 +289,8 @@
         "live_hours": 12,
         "archive_days": 30,
         "aliases": null,
-        "watcher": "auto"
+        "watcher": "auto",
+        "burst": 5
       }
     },
     "claudemem_reindex": {

@@ -219,8 +219,9 @@ Every registered session: alias, host, OS, last seen. Optional `args`:
   `replies/<id>.md` (with `replies/<id>.sem`). Read it once the `.sem`
   says `"ready"`, then delete both files — that keeps the folder tidy.
 - **Timing.** A request usually gets its reply within a few seconds.
-  When you send several requests in a row, the ones behind the first
-  are batched and can take up to **30 seconds**. Not seeing a reply yet
+  Only if you send many in quick succession (more than five within half
+  a minute) are the later ones batched, and those can take up to
+  **30 seconds**. Not seeing a reply yet
   is normal: look again after a few seconds, and give it a full minute
   before deciding something is wrong. Do not resend the request: as long
   as your `requests/<id>.*` files are still there, it has not been taken
