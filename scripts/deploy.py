@@ -314,11 +314,18 @@ def _sync_relay_instructions(s: Step, dry: bool) -> None:
     folder. Same class as a skill: read by a session, loaded by no
     service, and silently wrong when stale — a cloud session following
     an old copy speaks a protocol the relay no longer does."""
-    relay = (((_load_cfg().get("hooks") or {}).get("mailbox") or {})
-             .get("cloud_relay") or {})
-    root = relay.get("root")
-    if not (relay.get("enabled") and root):
+    # The same resolution the daemon uses: on wherever the mailbox is,
+    # default folder ~/claude-mailbox. A host that installs the mailbox
+    # gets a folder to link, whatever its OS.
+    try:
+        sys.path.insert(0, str(REPO))
+        from claude_hooks.mailbox.relay import settings as relay_settings
+    finally:
+        sys.path.pop(0)
+    opts = relay_settings(_load_cfg())
+    if not opts["enabled"]:
         return
+    root = opts["root"]
     # The daemon unit is sandboxed (ProtectSystem=strict): without a
     # grant for the folder the relay can read requests and never answer.
     # Before step_services, so the restart there applies the drop-in.
@@ -334,6 +341,14 @@ def _sync_relay_instructions(s: Step, dry: bool) -> None:
         sys.path.pop(0)
     src = REPO / "claude_hooks" / "mailbox" / "cloud" / "MAILBOX.md"
     dst = Path(os.path.expanduser(str(root))) / "MAILBOX.md"
+    if not dry:
+        try:
+            (dst.parent / "sessions").mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            s.fail(f"cloud mailbox folder: cannot create {dst.parent} ({e})")
+            return
+    elif not dst.parent.is_dir():
+        s.note(f"[dry-run] would create {dst.parent}")
     try:
         want = src.read_bytes()
         have = dst.read_bytes() if dst.is_file() else None
@@ -544,6 +559,10 @@ def step_services(dry: bool, skip: bool, council_wait: float = 0.0,
     else:
         _stop_lsp_daemons(s)
     units = _repo_units()
+    # Before the early return below, for the same reason as the lsp
+    # daemons: on Windows the daemon is a scheduled task, and a host with
+    # no systemd units returned here without ever restarting it.
+    _restart_unmanaged_daemon(s, dry, units)
     if not units:
         s.note("no systemd unit references this repo")
         return s
@@ -585,6 +604,41 @@ def step_services(dry: bool, skip: bool, council_wait: float = 0.0,
     else:
         _respawn_embedder(s)
     return s
+
+
+def _restart_unmanaged_daemon(s: Step, dry: bool,
+                              units: list) -> None:
+    """Restart claude-hooks-daemon where systemd does not manage it (a
+    Windows scheduled task, a launchd agent, an ad-hoc process). The
+    daemon is long-lived and loads the package once; until it restarts
+    it serves the old code — every hook it executes, the mailbox
+    maintenance, the cloud relay."""
+    if any(u.startswith("claude-hooks-daemon") for u, _ in units):
+        return                          # the unit loop restarts it
+    try:
+        sys.path.insert(0, str(REPO))
+        from claude_hooks import daemon_client
+        alive = daemon_client.ping()
+    except Exception:
+        alive = False
+    finally:
+        sys.path.pop(0)
+    if not alive:
+        s.note("claude-hooks-daemon — not running, skipped")
+        return
+    if dry:
+        s.note("[dry-run] would restart claude-hooks-daemon "
+               "(daemon_ctl restart)")
+        return
+    r = _run([sys.executable, "-m", "claude_hooks.daemon_ctl", "restart"],
+             cwd=str(REPO))
+    if r.returncode != 0:
+        s.fail("claude-hooks-daemon restart failed: "
+               + (r.stdout + r.stderr).strip()[-300:])
+        return
+    s.note("claude-hooks-daemon — restarted (daemon_ctl)")
+    # The restart takes a daemon-managed embedder down with it.
+    _respawn_embedder(s)
 
 
 def _respawn_embedder(s: Step) -> None:

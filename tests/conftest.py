@@ -452,6 +452,16 @@ def tmp_claude_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_mailbox_folder(tmp_path, monkeypatch):
+    """The cloud-session relay is on wherever the mailbox is, with its
+    folder defaulting to ``~/claude-mailbox``. A test whose config turns
+    the mailbox on must not create that folder in the real home."""
+    from claude_hooks.mailbox import relay
+    monkeypatch.setattr(relay, "default_root",
+                        lambda: str(tmp_path / "claude-mailbox"))
+
+
+@pytest.fixture(autouse=True)
 def _isolated_inflight_index(tmp_path, monkeypatch):
     """Every test gets its own consultants in-flight index.
 

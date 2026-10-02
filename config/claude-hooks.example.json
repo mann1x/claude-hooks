@@ -281,7 +281,7 @@
       "archive_cap_bytes": 10737418240,
       "stop_nudge": true,
       "cloud_relay": {
-        "enabled": false,
+        "enabled": true,
         "root": "",
         "host": "cloud",
         "interval_seconds": 30,

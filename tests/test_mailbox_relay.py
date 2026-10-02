@@ -384,13 +384,20 @@ class CostTests(RelayHarness):
             "enabled": True, "root": "/x", "interval_seconds": 1}}}})
         self.assertEqual(o["interval"], 30.0)
 
-    def test_disabled_unless_the_mailbox_and_a_root_are_set(self):
+    def test_on_wherever_the_mailbox_is_with_a_local_default_folder(self):
+        """Part of the mailbox on every OS: no section needed, and the
+        folder defaults to a local one (the desktop app cannot link a
+        network share)."""
+        o = settings({"hooks": {"mailbox": {"enabled": True}}})
+        self.assertTrue(o["enabled"])
+        self.assertEqual(o["root"], relay.default_root())
         self.assertFalse(settings({"hooks": {"mailbox": {
             "enabled": False, "cloud_relay": {"enabled": True,
                                               "root": "/x"}}}})["enabled"])
         self.assertFalse(settings({"hooks": {"mailbox": {
-            "enabled": True, "cloud_relay": {"enabled": True}}}})["enabled"])
+            "enabled": True, "cloud_relay": {"enabled": False}}}})["enabled"])
         self.assertIsNone(relay.start_relay_thread({}, threading.Event()))
+
 
     def test_idle_session_folders_are_archived_not_deleted(self):
         self.take_alias()
@@ -663,6 +670,21 @@ class InstallerTests(unittest.TestCase):
         section = cfg["hooks"]["mailbox"]["cloud_relay"]
         self.assertTrue(section["enabled"])
         self.assertEqual(section["root"], str(self.root))
+
+    def test_installing_the_mailbox_creates_the_default_folder(self):
+        cfg = {"hooks": {"mailbox": {"enabled": True}}}
+        self.install._setup_mailbox_cloud_relay(
+            cfg, non_interactive=True, dry_run=False)
+        root = Path(relay.default_root())
+        self.assertTrue((root / "sessions").is_dir())
+        self.assertEqual((root / "MAILBOX.md").read_bytes(),
+                         relay.instructions_source().read_bytes())
+
+    def test_no_mailbox_no_folder(self):
+        cfg = {"hooks": {"mailbox": {"enabled": False}}}
+        self.install._setup_mailbox_cloud_relay(
+            cfg, non_interactive=True, dry_run=False)
+        self.assertFalse(Path(relay.default_root()).exists())
 
     def test_off_stays_off_and_installs_nothing(self):
         cfg = self.cfg(enabled=False)

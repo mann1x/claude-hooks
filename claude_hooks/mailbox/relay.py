@@ -94,10 +94,24 @@ def instructions_source() -> Path:
 
 # ─── settings ───────────────────────────────────────────────────────────
 
+#: Where the relay folder lives when the config names none — a plain
+#: local folder on every OS, because the desktop app can only link a
+#: local folder (not a network share).
+DEFAULT_ROOT_NAME = "claude-mailbox"
+
+
+def default_root() -> str:
+    return str(Path.home() / DEFAULT_ROOT_NAME)
+
+
 def settings(cfg: Optional[dict]) -> dict:
-    """``hooks.mailbox.cloud_relay``, clamped. ``enabled`` also needs the
-    mailbox itself on — relaying for a mailbox nobody may use is work
-    for its own sake."""
+    """``hooks.mailbox.cloud_relay``, clamped.
+
+    The relay is part of the mailbox: it is on wherever the mailbox is,
+    unless ``cloud_relay.enabled`` is explicitly false, and its folder
+    defaults to :func:`default_root`. It costs nothing while idle, so
+    there is no reason for a host to be without it — a Windows user who
+    installs the mailbox gets a folder to link like anyone else."""
     mailbox = {}
     if isinstance(cfg, dict):
         mailbox = (cfg.get("hooks") or {}).get("mailbox") or {}
@@ -113,11 +127,11 @@ def settings(cfg: Optional[dict]) -> dict:
     aliases = section.get("aliases")
     if aliases is not None and not isinstance(aliases, list):
         aliases = None
-    root = section.get("root") or ""
+    root = section.get("root") or default_root()
     return {
-        "enabled": bool(mailbox.get("enabled") and section.get("enabled")
-                        and root),
-        "root": os.path.expanduser(str(root)) if root else "",
+        "enabled": bool(mailbox.get("enabled")
+                        and section.get("enabled", True)),
+        "root": os.path.expanduser(str(root)),
         "host": str(section.get("host") or DEFAULT_HOST),
         "interval": num("interval_seconds", MIN_INTERVAL_SECONDS,
                         MIN_INTERVAL_SECONDS),
@@ -937,9 +951,6 @@ def start_relay_thread(cfg: dict, stop_event: threading.Event
 
 def status_report(cfg: dict) -> str:
     opts = settings(cfg)
-    if not opts["root"]:
-        return ("cloud relay: not configured "
-                "(hooks.mailbox.cloud_relay.root is empty)")
     root = Path(opts["root"])
     core = RelayCore(root, opts, store_factory=lambda: None)
     core.check_instructions()
@@ -992,9 +1003,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(status_report(cfg))
         return 0
     root = args.root or settings(cfg)["root"]
-    if not root:
-        print("no root given and hooks.mailbox.cloud_relay.root is empty")
-        return 2
     print(f"{INSTRUCTIONS_NAME}: {install_instructions(Path(root))}")
     return 0
 

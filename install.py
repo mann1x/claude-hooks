@@ -668,60 +668,60 @@ def _setup_update_check(cfg: dict, *, non_interactive: bool) -> None:
 
 def _setup_mailbox_cloud_relay(cfg: dict, *, non_interactive: bool,
                                dry_run: bool) -> None:
-    """Offer the cloud-session mailbox relay and install its instructions.
+    """Set up the cloud-session mailbox folder wherever the mailbox is on.
 
-    Every prompt defaults to what the config already says, so re-running
-    the installer never flips the relay or moves its folder by accident.
-    The instructions file (``MAILBOX.md``) is installed into the folder
-    whenever the relay is on — interactive or not — because a relay
-    without it is a folder nobody knows how to use.
+    The relay is part of the mailbox, on every OS: a cloud session in the
+    desktop app can only link a *local* folder, so every host that runs
+    the mailbox gets one — ``~/claude-mailbox`` unless the config names
+    another — with ``MAILBOX.md`` in it, interactive or not. The prompts
+    only let the operator move the folder or turn the relay off, and
+    default to what the config already says.
     """
-    from claude_hooks.mailbox.relay import install_instructions, settings
+    from claude_hooks.mailbox.relay import (
+        default_root, ensure_unit_grant, install_instructions, settings)
 
     mailbox = cfg.setdefault("hooks", {}).setdefault("mailbox", {})
+    if not mailbox.get("enabled"):
+        return
     relay = mailbox.setdefault("cloud_relay", {})
-    current_on = bool(relay.get("enabled", False))
-    current_root = relay.get("root") or ""
+    current_on = bool(relay.get("enabled", True))
+    current_root = relay.get("root") or default_root()
 
     if not non_interactive:
-        print("\n==> Mailbox relay for cloud sessions")
-        print("  Lets Claude cloud sessions (desktop app, linked local "
-              "folder) use the session\n  mailbox through files. Turn it "
-              "on only on the host whose folder you link.")
+        print("\n==> Mailbox folder for cloud sessions")
+        print("  Claude cloud sessions in the desktop app reach the mailbox "
+              "through a local\n  folder you link in the app; the daemon "
+              "relays it.")
         changed, value = _ask_optional_bool(
-            "Enable the cloud-session mailbox relay on this host?",
-            default=current_on)
-        enabled = value if changed else current_on
-        if enabled:
-            suggested = current_root or os.path.expanduser(
-                os.path.join("~", "claude-mailbox"))
-            raw = input(f"  Relay folder [{suggested}]: ").strip()
-            relay["root"] = raw or suggested
-        relay["enabled"] = bool(enabled)
-        if enabled and not mailbox.get("enabled"):
-            print("  NOTE: hooks.mailbox.enabled is off — the relay only "
-                  "runs when the mailbox itself is on.")
+            "Enable the cloud-session mailbox folder?", default=current_on)
+        relay["enabled"] = value if changed else current_on
+        if relay["enabled"]:
+            raw = input(f"  Mailbox folder [{current_root}]: ").strip()
+            if raw:
+                relay["root"] = raw
+    else:
+        relay.setdefault("enabled", current_on)
 
     opts = settings(cfg)
-    if not (relay.get("enabled") and relay.get("root")):
+    if not opts["enabled"]:
         return
     root = Path(opts["root"])
     try:
         verdict = install_instructions(root, dry_run=dry_run)
     except OSError as e:
-        print(f"  [warn] could not install {root / 'MAILBOX.md'}: {e}")
+        print(f"  [warn] could not set up the mailbox folder {root}: {e}")
         return
     prefix = "[dry-run] " if dry_run else ""
-    print(f"  {prefix}{root / 'MAILBOX.md'}: {verdict}")
+    print(f"  {prefix}Cloud-session mailbox folder: {root} "
+          f"(MAILBOX.md {verdict})")
+    print(f"  Link this folder in the desktop app; cloud sessions are "
+          f"<alias>@{opts['host']}.")
     try:
-        from claude_hooks.mailbox.relay import ensure_unit_grant
         for note in ensure_unit_grant(root, dry_run=dry_run):
             print(f"  {note}")
     except OSError as e:
         print(f"  [warn] the daemon unit is sandboxed and could not be "
               f"granted {root}: {e}")
-    print(f"  Cloud sessions reach the mailbox as <alias>@{opts['host']}; "
-          "restart the daemon to start the relay.")
 
 
 def _setup_proxy_orchestrator(

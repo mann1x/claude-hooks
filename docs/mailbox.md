@@ -446,17 +446,25 @@ rewritten only when it changes — every interval only while a cloud
 session has made a request in the last `live_hours` (12). Session
 folders idle for `archive_days` (30) move to `archive/`.
 
-**Setup** (on the host whose folder the desktop app links — solidpc for
-`/shared/dev/mailbox`, which pandorum's desktop app reaches over SMB):
+**Setup.** None needed: the relay is part of the mailbox. Wherever
+`hooks.mailbox.enabled` is true — Linux, Windows or macOS — the relay is
+on and its folder is **`~/claude-mailbox`** (`C:\Users\<you>\claude-mailbox`
+on Windows). Link that folder in the desktop app. It has to be a local
+folder: the app cannot link a network share. To move it or turn it off:
 
 ```json
 "hooks": {"mailbox": {"enabled": true, "cloud_relay": {
-  "enabled": true, "root": "/shared/dev/mailbox"
+  "root": "/shared/dev/mailbox"
 }}}
 ```
 
-`install.py` asks for this and installs `MAILBOX.md`; `scripts/deploy.py`
-keeps it current, and `verify_deploy.py` fails on a stale copy. The
+(`"enabled": false` in `cloud_relay` turns the relay off on that host.)
+Each host relays its own folder, and every relay registers its sessions
+as `<alias>@cloud`, so a cloud session is reachable at the same address
+whichever machine's desktop app it runs in.
+
+`install.py` creates the folder and installs `MAILBOX.md` (also in
+non-interactive runs); `scripts/deploy.py` keeps both current, and `verify_deploy.py` fails on a stale copy. The
 daemon's systemd unit is sandboxed (`ProtectSystem=strict`, write access
 to `~/.claude` only), so deploy and install also write
 `/etc/systemd/system/claude-hooks-daemon.service.d/mailbox-relay.conf`
@@ -469,7 +477,7 @@ change. Run the relay on **one** host per folder.
 
 | key | default | |
 |---|---|---|
-| `root` | — | the folder |
+| `root` | `~/claude-mailbox` | the folder; must be local |
 | `host` | `cloud` | the host part of every cloud address |
 | `interval_seconds` | 30 | batching + inbox refresh; floor 30 |
 | `writing_timeout_seconds` | 3600 | stuck requests → `rejected/` |

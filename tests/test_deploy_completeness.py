@@ -104,13 +104,28 @@ class TestEveryArtifactClassIsDeployed(unittest.TestCase):
         src = _src(DEPLOY)
         self.assertIn("def _sync_relay_instructions", src)
         self.assertIn("MAILBOX.md", src)
-        self.assertIn("cloud_relay", src)
+        # Resolved the way the daemon resolves it (default folder on every
+        # OS), not by reading cloud_relay.root directly.
+        self.assertIn("from claude_hooks.mailbox.relay import settings", src)
         body = src[src.index("def step_skills"):src.index("def _episodic_mode")]
         self.assertIn("_sync_relay_instructions(", body)
         verify = _src(VERIFY)
         self.assertIn("def check_mailbox_relay", verify)
         main = verify[verify.index("def main"):]
         self.assertIn("check_mailbox_relay(r)", main)
+
+    def test_a_daemon_outside_systemd_is_restarted_too(self):
+        """On Windows the daemon is a scheduled task, not a systemd unit,
+        and step_services returned at "no systemd unit" — so a deploy on
+        pandorum never restarted it. The daemon kept serving the code it
+        started with (the cloud-mailbox relay never started there). The
+        restart has to come before that early return."""
+        src = _src(DEPLOY)
+        self.assertIn("def _restart_unmanaged_daemon", src)
+        self.assertIn("daemon_ctl", src)
+        body = src[src.index("def step_services"):]
+        self.assertLess(body.index("_restart_unmanaged_daemon("),
+                        body.index("if not units:"))
 
     def test_verification_is_a_step_not_a_suggestion(self):
         src = _src(DEPLOY)
@@ -672,9 +687,19 @@ class TestRelayInstructionsSync(unittest.TestCase):
             mod._sync_relay_instructions(s, dry)
         return s
 
-    def test_no_relay_is_not_a_failure(self):
+    def test_no_mailbox_is_not_a_failure(self):
+        s = self._run({"hooks": {"mailbox": {"enabled": False}}})
+        self.assertTrue(s.ok)
+
+    def test_the_mailbox_alone_gets_the_default_folder(self):
+        """The relay is part of the mailbox on every OS: no cloud_relay
+        section, and deploy still creates the default folder."""
+        from claude_hooks.mailbox import relay
         s = self._run({"hooks": {"mailbox": {"enabled": True}}})
         self.assertTrue(s.ok)
+        root = pathlib.Path(relay.default_root())
+        self.assertTrue((root / "sessions").is_dir())
+        self.assertTrue((root / "MAILBOX.md").is_file())
 
     def test_stale_is_updated_and_current_is_left(self):
         import tempfile
@@ -704,3 +729,54 @@ class TestRelayInstructionsSync(unittest.TestCase):
             cfg = {"hooks": {"mailbox": {"enabled": True, "cloud_relay": {
                 "enabled": True, "root": str(blocker / "relay")}}}}
             self.assertFalse(self._run(cfg).ok)
+
+
+class TestUnmanagedDaemonRestart(unittest.TestCase):
+
+    def _mod(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_deploy_mod", DEPLOY)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_a_systemd_daemon_is_left_to_the_unit_loop(self):
+        mod = self._mod()
+        s = mod.Step("services")
+        with patch.object(mod, "_run") as run:
+            mod._restart_unmanaged_daemon(
+                s, False, [("claude-hooks-daemon.service", "system")])
+        run.assert_not_called()
+
+    def test_a_daemon_that_is_not_running_is_skipped(self):
+        mod = self._mod()
+        s = mod.Step("services")
+        with patch("claude_hooks.daemon_client.ping", return_value=False), \
+             patch.object(mod, "_run") as run:
+            mod._restart_unmanaged_daemon(s, False, [])
+        run.assert_not_called()
+        self.assertTrue(s.ok)
+
+    def test_a_scheduled_task_daemon_is_restarted(self):
+        import subprocess
+        mod = self._mod()
+        s = mod.Step("services")
+        done = subprocess.CompletedProcess([], 0, "", "")
+        with patch("claude_hooks.daemon_client.ping", return_value=True), \
+             patch.object(mod, "_run", return_value=done) as run, \
+             patch.object(mod, "_respawn_embedder") as respawn:
+            mod._restart_unmanaged_daemon(s, False, [])
+        self.assertIn("claude_hooks.daemon_ctl", run.call_args[0][0])
+        self.assertIn("restart", run.call_args[0][0])
+        respawn.assert_called_once()
+        self.assertTrue(s.ok)
+
+    def test_a_failed_restart_fails_the_deploy(self):
+        import subprocess
+        mod = self._mod()
+        s = mod.Step("services")
+        bad = subprocess.CompletedProcess([], 1, "", "task not found")
+        with patch("claude_hooks.daemon_client.ping", return_value=True), \
+             patch.object(mod, "_run", return_value=bad):
+            mod._restart_unmanaged_daemon(s, False, [])
+        self.assertFalse(s.ok)

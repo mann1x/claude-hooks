@@ -22,6 +22,9 @@ release with the auto-generated source archive
   reach the pgvector MCP, but in the desktop app it can use a linked
   local folder. `hooks.mailbox.cloud_relay` turns that folder into a
   full mailbox client, run by the daemon (`claude_hooks/mailbox/relay.py`).
+  It is part of the mailbox on every OS: on wherever `hooks.mailbox` is,
+  with a local folder at `~/claude-mailbox` (the desktop app cannot link
+  a network share) that `install.py` and `deploy.py` create.
   - **Addressing.** A session takes an alias with a `mailbox-alias`
     request and is `<alias>@cloud` to everyone else (`osync@cloud`).
     A new cloud session for the same alias takes the address over,
