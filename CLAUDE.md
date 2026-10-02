@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.19.0** — ~6.8k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.20.0** — ~7.1k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -398,6 +398,25 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > spawned `claude -p` runs, a session's mailbox alias belongs to its
 > session id, and `claude-consultants follow-up --wait`. See
 > [`docs/process-guard.md`](docs/process-guard.md).
+>
+> v1.20 adds **persistent task tracking**, on by default on every OS:
+> one Markdown file per task under `<project>/.claude-hooks/tasks/` is
+> the record (project-prefixed ids such as `bm-42`, closed tasks in
+> `archive/`, a generated `TASKS.md` board), indexed on the host's store
+> for cross-project listing and recall. Eleven `task-*` MCP tools on both
+> memory servers and a `claude-hooks-tasks` CLI write it; the hooks show
+> open tasks at every SessionStart (compaction included), inject named
+> and similar tasks on each prompt, and nudge once at Stop when a turn
+> edits files with an active task untouched. An importer replays Claude
+> Code's own `TaskCreate` / `TaskUpdate` history from a transcript — that
+> list is off by default on current models and garbage-collected. Also:
+> the **cloud mailbox relay** (a cloud session uses the mailbox through a
+> linked local folder as `<alias>@cloud`, behind a semaphore protocol),
+> councils that survive an engine restart, harness-started turns no
+> longer recalled as user prompts, ack notes in the status-line mail
+> badge, and a deploy that covers PATH wrappers and hook matchers (which
+> it only ever widens). See [`docs/tasks.md`](docs/tasks.md) and
+> [`docs/mailbox.md`](docs/mailbox.md) "Cloud sessions".
 
 ---
 

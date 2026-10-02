@@ -16,6 +16,8 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [1.20.0] — 2026-10-02
+
 ### Added
 
 - **Ack notes in the status-line mail badge.** The badge counted only
@@ -9985,7 +9987,8 @@ prior tag. From any unreleased checkout, just `git pull` on `main`
 once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
-[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.19.0...HEAD
+[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.20.0...HEAD
+[1.20.0]: https://github.com/mann1x/claude-hooks/compare/v1.19.0...v1.20.0
 [1.19.0]: https://github.com/mann1x/claude-hooks/compare/v1.18.0...v1.19.0
 [1.18.0]: https://github.com/mann1x/claude-hooks/compare/v1.17.0...v1.18.0
 [1.17.0]: https://github.com/mann1x/claude-hooks/compare/v1.16.0...v1.17.0
