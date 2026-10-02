@@ -7,7 +7,8 @@ Reads Claude Code's status JSON on stdin and prints one line of the form:
 
 The usage segment is Claude Code's own ``rate_limits`` block (see
 ``scripts/statusline_usage.py``); the mail segment is this session's
-unread mailbox count, shown only when there is some. Set
+unread mailbox count and waiting ack notes, shown only when there are
+some. Set
 ``"refreshInterval"`` on the ``statusLine`` setting so mail that arrives
 while the session is idle shows up without a prompt — the status line
 costs no tokens, asking the model does.
@@ -58,8 +59,9 @@ def compose(payload: dict, *, usage: str = "", mail: str = "") -> str:
 def _mail(payload: dict, args) -> str:
     if args.no_mail:
         return ""
-    from claude_hooks.statusline import mail_segment, unread_count
-    return mail_segment(unread_count(payload, ttl=args.mail_ttl),
+    from claude_hooks.statusline import mail_counts, mail_segment
+    unread, acks = mail_counts(payload, ttl=args.mail_ttl) or (0, 0)
+    return mail_segment(unread, acks=acks,
                         fmt=_effective_format(args.format))
 
 

@@ -18,6 +18,11 @@ release with the auto-generated source archive
 
 ### Added
 
+- **Ack notes in the status-line mail badge.** The badge counted only
+  unread inbox messages, so a note left on a message the session had
+  sent stayed invisible until the next prompt: `📬 2 ↩1` now shows both
+  (`mail:2 ack:1` in ASCII), from `MailboxStore.receipt_count()`, the
+  same predicate the announcement uses.
 - **Persistent task tracking** (`claude_hooks/tasks/`, `docs/tasks.md`).
   Claude Code's own task list is not a record: the tools are not
   offered to current models unless `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`,

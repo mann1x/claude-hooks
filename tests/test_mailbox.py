@@ -483,6 +483,20 @@ class AckTests(StoreHarness):
         self.assertEqual(len(pend), 1)
         self.assertEqual(pend[0]["ack_body"], "confirmed, ~2h")
 
+    def test_receipt_count_tracks_the_pending_receipts(self):
+        """The status-line badge counts what the announcement will show:
+        nothing for a bare read, one for a note, none once it is seen."""
+        count = lambda: self.store.receipt_count(from_alias="them")  # noqa: E731
+        self.read_it()
+        self.assertEqual(count(), 0)
+        self.store.ack(self.mid, "confirmed", session_id="mine",
+                       alias="me", host="solidpc")
+        self.assertEqual(count(), 1)
+        self.assertEqual(self.store.receipt_count(from_alias="them",
+                                                  from_host="pandorum"), 0)
+        self.store.mark_receipts_seen([self.mid], from_alias="them")
+        self.assertEqual(count(), 0)
+
     def test_ack_before_reading_is_refused(self):
         """A receipt for something nobody received."""
         with self.assertRaises(MailboxError) as cm:

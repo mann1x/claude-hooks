@@ -1075,6 +1075,18 @@ class MailboxStore:
                 raise
         return rows
 
+    def receipt_count(self, *, from_alias: str,
+                      from_host: Optional[str] = None) -> int:
+        """How many acks :meth:`pending_receipts` would return, without
+        fetching them — the status line asks this every refresh. Same
+        predicate, so the badge and the announcement cannot disagree."""
+        self.ensure_schema()
+        host = from_host if from_host is not None else host_name()
+        return self._count(
+            "from_alias = ? AND from_host = ? "
+            "AND ack_body IS NOT NULL AND receipt_read_at IS NULL",
+            [from_alias, host])
+
     def mark_receipts_seen(self, ids: Sequence[int], *,
                            from_alias: str,
                            from_host: Optional[str] = None) -> int:

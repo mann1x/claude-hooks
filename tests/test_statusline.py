@@ -176,3 +176,50 @@ class TestCompose:
                              encoding="utf-8", timeout=10)
         assert out.returncode == 0
         assert out.stdout == "/"
+
+
+class TestAckNotes:
+    """An ack note on a message this session sent is delivered by the
+    hooks at the next prompt, so an idle session saw nothing: the badge
+    counted only the inbox."""
+
+    PAYLOAD = {"session_id": "s-ack", "workspace": {"project_dir": "/p"}}
+
+    def test_segment_shows_both_halves(self):
+        assert sl.mail_segment(2, acks=1, fmt="emoji") == "📬 2 ↩1"
+        assert sl.mail_segment(0, acks=3, fmt="emoji") == "📬 ↩3"
+        assert sl.mail_segment(2, acks=1, fmt="ascii") == "mail:2 ack:1"
+        assert sl.mail_segment(0, acks=1, fmt="plain") == "ack:1"
+        assert sl.mail_segment(None, acks=0, fmt="emoji") == ""
+
+    def test_counts_are_cached_as_a_pair(self, tmp_path):
+        calls = []
+
+        def lookup(s, c):
+            calls.append(s)
+            return (1, 2)
+        for t in (1000.0, 1010.0):
+            assert sl.mail_counts(self.PAYLOAD, cache_dir=tmp_path, ttl=20,
+                                  lookup=lookup, now=t) == (1, 2)
+        assert len(calls) == 1
+        assert sl.unread_count(self.PAYLOAD, cache_dir=tmp_path, ttl=20,
+                               lookup=lookup, now=1011.0) == 1
+
+    def test_a_bare_count_lookup_has_no_acks(self, tmp_path):
+        assert sl.mail_counts(self.PAYLOAD, cache_dir=tmp_path,
+                              lookup=lambda s, c: 4) == (4, 0)
+
+    def test_a_cache_file_from_before_acks_still_reads(self, tmp_path):
+        import json
+        path = sl._cache_path(tmp_path, "s-ack")
+        path.write_text(json.dumps({"at": 1000.0, "count": 3}),
+                        encoding="utf-8")
+        assert sl.mail_counts(
+            self.PAYLOAD, cache_dir=tmp_path, ttl=20, now=1005.0,
+            lookup=lambda s, c: pytest.fail("looked up")) == (3, 0)
+
+    def test_a_failed_lookup_is_none_not_zero(self, tmp_path):
+        def boom(s, c):
+            raise RuntimeError("store down")
+        assert sl.mail_counts(self.PAYLOAD, cache_dir=tmp_path,
+                              lookup=boom) is None
