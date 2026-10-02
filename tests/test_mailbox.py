@@ -187,6 +187,15 @@ class StoreHarness(unittest.TestCase):
                                     lambda: self.HOST)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Other modules bind ``host_name`` at import (``from store import
+        # host_name``), so patching the store's attribute reaches them
+        # only if they are first imported while the patch is on — which
+        # depends on test order. On pandorum's full run the status line
+        # counted mail for "pandorum" and found none. The function reads
+        # this variable first, so every binding agrees.
+        env = mock.patch.dict("os.environ", {"CLAUDE_HOOKS_HOST": self.HOST})
+        env.start()
+        self.addCleanup(env.stop)
 
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)

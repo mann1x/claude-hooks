@@ -2,11 +2,11 @@
 
 # Tasks — claude-hooks
 
-1 waiting · prefix `ch`
+1 active · prefix `ch`
 
-## Waiting (1)
+## Active (1)
 
-- [ch-2](.claude-hooks/tasks/ch-2.md) `release` Cut the release that ships task tracking and the cloud mailbox relay — 1h
+- [ch-2](.claude-hooks/tasks/ch-2.md) `release` Cut the release that ships task tracking and the cloud mailbox relay — 1m
 
 ## Recently closed (2 of 2)
 
