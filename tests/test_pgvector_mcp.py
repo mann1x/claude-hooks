@@ -160,6 +160,10 @@ class TestToolsList:
             "pgvector-kg-observe",
             "pgvector-kg-relate",
         }
+        # The task tools ride on both servers and need no SQL store
+        # (files are the record), so they are always in the catalog.
+        from claude_hooks.tasks.tools import TOOL_NAMES
+        expected |= set(TOOL_NAMES)
         assert names == expected
 
     def test_each_tool_has_required_fields(self, server):

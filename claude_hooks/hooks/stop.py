@@ -149,6 +149,31 @@ def _with_mailbox_nudge(result: Optional[dict], event: dict, config: dict,
     return out
 
 
+def _with_task_nudge(result: Optional[dict], event: dict, config: dict,
+                     providers) -> Optional[dict]:
+    """Add the once-per-change task reminder to a Stop result.
+
+    Joins an existing block (mail) rather than replacing it, so a turn
+    that ends with both unread mail and an un-updated active task asks
+    about both in one continuation instead of two.
+    """
+    try:
+        from claude_hooks.tasks.hook import stop_nudge
+        reason = stop_nudge(event=event, config=config, providers=providers)
+    except Exception as e:
+        log.debug("task stop nudge skipped: %s", e)
+        reason = None
+    if not reason:
+        return result
+    out = dict(result or {})
+    if out.get("decision") == "block" and out.get("reason"):
+        out["reason"] = f"{out['reason']}\n\n{reason}"
+    else:
+        out["decision"] = "block"
+        out["reason"] = reason
+    return out
+
+
 def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[dict]:
     hook_cfg = (config.get("hooks") or {}).get("stop") or {}
     if not hook_cfg.get("enabled", True):
@@ -463,9 +488,10 @@ def _finish(status: str, event: dict, config: dict, providers) -> Optional[dict]
     """
     mailbox_notice = _mailbox_notice(event, config, providers)
     message = "\n".join(m for m in (status, mailbox_notice) if m)
-    return _with_mailbox_nudge(_with_update_notice(
+    return _with_task_nudge(
+        _with_mailbox_nudge(_with_update_notice(
         {"systemMessage": message} if message else None, config),
-        event, config, providers)
+        event, config, providers), event, config, providers)
 
 
 # ---------------------------------------------------------------------- #

@@ -1,6 +1,6 @@
 # Plan: persistent task tracking
 
-Status: **approved 2026-10-02**, decisions below. Being built.
+Status: **built 2026-10-02** (milestones 1–6). Runbook: [`tasks.md`](tasks.md).
 
 ## The problem, measured
 
@@ -246,3 +246,31 @@ For backup_models: 849 tasks, of which 101 are open.
 4. **Stop nudge: on** by default.
 5. **No stopgap.** The built-in task tools stay off; backup_models'
    tasks come over through the importer.
+
+## As built (2026-10-02)
+
+Where the build departs from the design above:
+
+- **PreCompact is not used.** SessionStart runs after a compaction
+  (`source: compact`) and injects the open tasks then, which is the
+  moment the compacted context needs them. Writing them into the
+  wrap-up as well would duplicate the block.
+- **Closed tasks move to `archive/` at once**, not after
+  `archive_days`. The board's "Recently closed" reads them from there.
+- **Embeddings are a base64 float32 TEXT column**, not `vector(n)`. Its
+  dimension follows the host's embedder, and a typed column would need
+  a migration per model change. Similarity is computed in Python over
+  one project's rows. Vectors are tagged with the provider's table
+  (`memories_qwen3`), so a model change re-embeds them.
+- **The embedded text is capped at 800 characters**, which costs about
+  2.5 s a task on the CPU embedder (the full description measured
+  about 6 s).
+- **The import kept the full history.** Superseded descriptions sit
+  under `## Earlier descriptions` with the time each was replaced. The
+  session used descriptions as its running log of pivots and results,
+  so these are history, not noise.
+- **Deploy gained two artifact classes:** PATH wrappers for `bin/*` and
+  the matchers of the installed hook blocks. The built-in task mirror
+  needs `TaskCreate|TaskUpdate` in the PostToolUse matcher, and a stale
+  matcher fails silently.
+

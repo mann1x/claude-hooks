@@ -175,6 +175,13 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
                     event=event, config=config, providers=providers)
                 if _mb_block:
                     parts.append(_mb_block)
+                # The task list too: after a compaction this is what
+                # brings the session's open work back.
+                from claude_hooks.tasks import hook as _tasks
+                _t_block = _tasks.session_block(
+                    event=event, config=config, providers=providers)
+                if _t_block:
+                    parts.append(_t_block)
                 return {
                     "hookSpecificOutput": {
                         "hookEventName": "SessionStart",
@@ -210,6 +217,14 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
         parts.append(collision)
     if mailbox_block:
         parts.append(mailbox_block)
+    # Open tasks, on every source (startup, resume, /clear, compact): a
+    # list the model has to remember to look at is the failure this
+    # exists to fix.
+    from claude_hooks.tasks import hook as _tasks
+    tasks_block = _tasks.session_block(
+        event=event, config=config, providers=providers)
+    if tasks_block:
+        parts.append(tasks_block)
     if not parts:
         return None
 

@@ -293,6 +293,17 @@
         "burst": 5
       }
     },
+    "tasks": {
+      "enabled": true,
+      "session_start": true,
+      "session_ready": 5,
+      "prompt_mentions": true,
+      "prompt_recall": true,
+      "recall_k": 3,
+      "recall_min_score": 0.62,
+      "stop_nudge": true,
+      "mirror_builtin": true
+    },
     "claudemem_reindex": {
       "enabled": true,
       "check_on_stop": true,

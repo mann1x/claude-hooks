@@ -35,7 +35,10 @@ What it does, in order:
    forgets).
 3. **Skills** — sync ``.claude/skills/*/SKILL.md`` into
    ``~/.claude/skills/``. Only ones already installed: skills are opt-in
-   per host and ``install.py`` is the thing that offers new ones.
+   per host and ``install.py`` is the thing that offers new ones. Same
+   step, same class (read at session start, loaded by no service): the
+   cloud mailbox instructions, PATH wrappers for every ``bin/*`` CLI,
+   and the matchers of the installed hook blocks in settings.json.
 4. **episodic-memory** — on the episodic server host, make the vendored
    ``episodic-memory/`` the working CLI: ``npm install`` with a C++20
    toolchain when its tree or the Node ABI changed, a load check of the
@@ -298,7 +301,56 @@ def step_skills(dry: bool) -> Step:
     if not synced and not dry:
         s.note("no skill needed updating")
     _sync_relay_instructions(s, dry)
+    _sync_cli_and_hook_entries(s, dry)
     return s
+
+
+def _import_install():
+    sys.path.insert(0, str(REPO))
+    try:
+        import install  # noqa: PLC0415 — the installer is the source
+        return install
+    finally:
+        sys.path.pop(0)
+
+
+def _sync_cli_and_hook_entries(s: Step, dry: bool) -> None:
+    """The two install.py artifacts that drift with no error.
+
+    - **PATH wrappers for ``bin/*``.** A new CLI (``claude-hooks-tasks``)
+      exists in the repo and nowhere on PATH until install.py runs again.
+    - **Hook matchers in settings.json.** Claude Code reads them at
+      session start; a block still on an old matcher never fires for the
+      tools added since (the built-in task mirror needs ``TaskCreate``).
+      Only the matchers of already-installed blocks are reconciled —
+      which events a host has stays the installer's decision.
+    """
+    try:
+        install = _import_install()
+    except Exception as e:      # pragma: no cover — import-time breakage
+        s.fail(f"install.py not importable ({e})")
+        return
+    names = install._shim_names_to_install(REPO)
+    wdir = install._shim_wrapper_dir()
+    missing = [n for n in names if not (wdir / n).exists()]
+    if missing and dry:
+        s.note(f"[dry-run] would add PATH wrappers: {', '.join(missing)}")
+    elif missing:
+        try:
+            install._install_bin_shim_wrappers(REPO, dry_run=False)
+            s.note(f"PATH wrappers added: {', '.join(missing)}")
+        except OSError as e:
+            s.fail(f"PATH wrappers: {e}")
+    try:
+        notes = install.sync_managed_hooks(install.user_settings_path(),
+                                           dry_run=dry)
+    except Exception as e:
+        s.fail(f"settings.json hook matchers: {e}")
+        return
+    for n in notes:
+        s.note(("[dry-run] would set " if dry else "settings.json: ") + n)
+    if notes and not dry:
+        s.note("hook matchers take effect in new Claude Code sessions")
 
 
 def _load_cfg() -> dict:

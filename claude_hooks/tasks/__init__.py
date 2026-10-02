@@ -34,21 +34,55 @@ def index_for_provider(provider):
 def embedder_for_provider(provider):
     """``(embed(text) -> vec | None, model name)``, or ``(None, "")``.
 
+    Calls the provider's embedder directly rather than through
+    ``embed_for_store``, which holds the provider lock for the whole
+    round-trip: on the prompt path that would serialise the task lookup
+    behind memory recall instead of overlapping it. The embedders are
+    stateless HTTP clients, so calling one outside the lock is safe.
+
     The model name tags each vector, so a host that switches embedders
     re-embeds its tasks instead of comparing vectors across spaces.
     """
-    embed = getattr(provider, "embed_for_store", None)
-    if embed is None:
+    if getattr(provider, "embed_for_store", None) is None:
         return None, ""
-    model = ""
-    opts = getattr(provider, "options", None) or {}
-    for key in ("embedder_model", "model", "embed_model"):
-        if opts.get(key):
-            model = str(opts[key])
-            break
-    if not model:
+
+    def _embedder():
         emb = getattr(provider, "_embedder", None)
-        model = str(getattr(emb, "model", "") or "")
+        if emb is None:
+            lock = getattr(provider, "_lock", None)
+            if lock is not None:
+                with lock:
+                    provider._ensure_ready()
+            else:
+                provider._ensure_ready()
+            emb = getattr(provider, "_embedder", None)
+        return emb
+
+    def embed(text: str):
+        if not str(text or "").strip():
+            return None
+        try:
+            emb = _embedder()
+            if emb is None:
+                return provider.embed_for_store(text)
+            return emb.embed(text)
+        except Exception as e:
+            log.debug("tasks: embed failed: %s", e)
+            return None
+
+    # The vector space is named the way the provider names it: by its
+    # table (memories_qwen3), which changes exactly when the embedding
+    # model does. Some embedders (llamafile) carry no model name at all.
+    opts = getattr(provider, "options", None) or {}
+    model = str(opts.get("embedder_model") or opts.get("model") or "")
+    if not model:
+        try:
+            model = str(getattr(_embedder(), "model", "") or "")
+        except Exception:
+            model = ""
+    space = str(opts.get("table") or opts.get("collection") or "")
+    if space:
+        model = f"{model}@{space}" if model else space
     return embed, (model or getattr(provider, "name", "embedder"))
 
 
@@ -75,3 +109,26 @@ def service_for(provider=None, *, cwd: Optional[str] = None,
     return TaskService(project_root(cwd), index, host=host_name(),
                        session_id=session_id, embedder=embedder,
                        embed_model=model)
+
+
+def tasks_enabled(config: Optional[dict] = None) -> bool:
+    """On unless ``hooks.tasks.enabled`` is false. Default-on on every OS:
+    a task list that has to be switched on per host is one the sessions
+    that need it never get."""
+    if config is None:
+        try:
+            from claude_hooks.config import load_config
+            config = load_config()
+        except Exception:
+            return True
+    section = ((config or {}).get("hooks") or {}).get("tasks") or {}
+    return bool(section.get("enabled", True))
+
+
+def sql_provider(providers):
+    """The first provider whose connection can carry the index, or None."""
+    from claude_hooks.mailbox.integration import _dialect
+    for p in providers or []:
+        if _dialect(p) is not None and getattr(p, "_lock", None) is not None:
+            return p
+    return None

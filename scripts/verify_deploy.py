@@ -582,6 +582,69 @@ def check_mailbox_relay(r: Results) -> None:
               f"{root / INSTRUCTIONS_NAME} is {state} — run scripts/deploy.py")
 
 
+def check_cli_and_hooks(r: Results) -> None:
+    """PATH wrappers for every ``bin/*`` CLI and the matchers of the
+    installed hook blocks: both read at session start, both silently
+    wrong when behind (a block on an old matcher just never fires)."""
+    try:
+        import install
+    except Exception as e:
+        r.add(WARN, "install.py", f"not importable: {type(e).__name__}")
+        return
+    print("CLIs and hook entries")
+    wdir = install._shim_wrapper_dir()
+    names = install._shim_names_to_install(REPO)
+    missing = [n for n in names if not (wdir / n).exists()]
+    if missing:
+        r.add(FAIL, "PATH wrappers", f"missing in {wdir}: "
+              f"{', '.join(missing)} — run scripts/deploy.py")
+    else:
+        r.add(PASS, "PATH wrappers", f"{len(names)} in {wdir}")
+    path = install.user_settings_path()
+    if not path.exists():
+        r.add(WARN, "hook entries", f"{path} missing — run install.py")
+        return
+    settings = install._load_json(path)
+    stale = install.reconcile_hook_matchers(settings)
+    if stale:
+        r.add(FAIL, "hook matchers", "; ".join(
+            f"{ev} has {old or '(all)'}, want {new}" for ev, old, new in stale)
+            + " — run scripts/deploy.py")
+    else:
+        r.add(PASS, "hook matchers", "match install.py")
+
+
+def check_tasks(r: Results) -> None:
+    """The task index answers a real query on the store the hooks use.
+    Files alone still work, so no SQL store is a WARN, not a FAIL."""
+    try:
+        from claude_hooks.config import load_config as load_hooks_config
+        from claude_hooks.dispatcher import build_providers
+        from claude_hooks.tasks import index_for_provider, sql_provider, \
+            tasks_enabled
+        cfg = load_hooks_config()
+    except Exception as e:
+        r.add(WARN, "tasks", f"config unavailable: {type(e).__name__}")
+        return
+    if not tasks_enabled(cfg):
+        return
+    print("tasks")
+    provider = sql_provider(build_providers(cfg))
+    if provider is None:
+        r.add(WARN, "tasks index", "no SQL store: task files only, no "
+              "cross-project listing or recall")
+        return
+    try:
+        index = index_for_provider(provider)
+        projects = index.projects()
+        page = index.find(limit=1)
+    except Exception as e:
+        r.add(FAIL, "tasks index", f"{type(e).__name__}: {e}")
+        return
+    r.add(PASS, "tasks index", f"{page.total} task(s) in "
+          f"{len(projects)} project(s)")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--store", action="store_true", help="store checks only")
@@ -602,6 +665,8 @@ def main() -> int:
         check_episodic(r)
         check_skills(r)
         check_mailbox_relay(r)
+        check_cli_and_hooks(r)
+        check_tasks(r)
         check_store(r)
 
     failed = r.failed

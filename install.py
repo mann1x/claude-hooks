@@ -329,11 +329,13 @@ PRE_TOOL_USE_TEMPLATE = {
 # MultiEdit. Matches only file-editing tools so we don't pay the
 # subprocess cost on Read/Bash/Grep. Enabled by default — the hook
 # itself early-exits on non-Python files (no ruff invocation), so
-# the cost when nothing applies is sub-millisecond.
+# the cost when nothing applies is sub-millisecond. TaskCreate /
+# TaskUpdate are Claude Code's own task tools, mirrored into the
+# persistent task list (claude_hooks/tasks/hook.py); rare, so free.
 POST_TOOL_USE_TEMPLATE = {
     "PostToolUse": [
         {
-            "matcher": "Edit|Write|MultiEdit",
+            "matcher": "Edit|Write|MultiEdit|TaskCreate|TaskUpdate",
             "hooks": [
                 {
                     "type": "command",
@@ -8781,6 +8783,60 @@ def install_hooks(
     if bak is not None:
         print(f"  Backup written: {bak}")
     print(f"  Settings updated: {settings_path}")
+
+
+def _managed_templates() -> dict:
+    """Every hook block install.py can write, by event."""
+    out: dict = {}
+    for t in (HOOK_TEMPLATE, PRE_TOOL_USE_TEMPLATE, POST_TOOL_USE_TEMPLATE,
+              PRE_COMPACT_TEMPLATE):
+        out.update(deepcopy(t))
+    return out
+
+
+def reconcile_hook_matchers(settings: dict) -> list[tuple[str, str, str]]:
+    """Bring the matcher of every *installed* managed hook block up to the
+    template; returns ``[(event, old, new)]`` for what changed.
+
+    Only matchers, only blocks that hold one of our hooks, only events
+    already installed: which events a host has (PreToolUse is opt-in) is
+    the installer's decision, but a matcher that drifted from the
+    template is just stale. A PostToolUse block still on
+    ``Edit|Write|MultiEdit`` never sees ``TaskCreate``, and nothing
+    errors — the task mirror simply never runs.
+    """
+    changes: list[tuple[str, str, str]] = []
+    hooks = settings.get("hooks") or {}
+    for event, blocks in _managed_templates().items():
+        want = (blocks[0] or {}).get("matcher")
+        for blk in hooks.get(event) or []:
+            if not isinstance(blk, dict):
+                continue
+            if not any(_is_our_hook(h) for h in blk.get("hooks") or []
+                       if isinstance(h, dict)):
+                continue
+            have = blk.get("matcher")
+            if (have or None) != (want or None):
+                if want:
+                    blk["matcher"] = want
+                else:
+                    blk.pop("matcher", None)
+                changes.append((event, have or "", want or ""))
+    return changes
+
+
+def sync_managed_hooks(settings_path: Path, *, dry_run: bool) -> list[str]:
+    """Deploy's half of the installer: reconcile matchers in place."""
+    if not settings_path.exists():
+        return []
+    settings = _load_json(settings_path)
+    changes = reconcile_hook_matchers(settings)
+    notes = [f"{ev} matcher {old or '(all)'} -> {new or '(all)'}"
+             for ev, old, new in changes]
+    if changes and not dry_run:
+        _backed_up_save_json(settings_path, settings, reason="hook-matchers",
+                             dry_run=False)
+    return notes
 
 
 def uninstall(*, dry_run: bool) -> int:

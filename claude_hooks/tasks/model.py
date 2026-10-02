@@ -251,7 +251,10 @@ class Task:
         return ""
 
     def set_section(self, name: str, text: str) -> None:
-        text = (text or "").strip("\n")
+        # A "## " line inside the text would read back as a new section;
+        # one level down keeps it a heading without splitting the task.
+        text = "\n".join("#" + ln if _HEADING.match(ln) else ln
+                         for ln in (text or "").strip("\n").split("\n"))
         for i, (h, _) in enumerate(self.sections):
             if h.lower() == name.lower():
                 self.sections[i] = (h, text)

@@ -18,6 +18,38 @@ release with the auto-generated source archive
 
 ### Added
 
+- **Persistent task tracking** (`claude_hooks/tasks/`, `docs/tasks.md`).
+  Claude Code's own task list is not a record: the tools are not
+  offered to current models unless `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`,
+  completed tasks are garbage-collected, and backup_models' 849 tasks
+  had survived only in one 4.2 GB transcript. Now, on every OS by
+  default:
+  - **Files are the record.** One Markdown file per task under
+    `<project>/.claude-hooks/tasks/` (front matter + Description /
+    Acceptance / append-only Log), closed ones in `archive/`, and a
+    generated `TASKS.md` board. Hand edits win.
+  - **Ids carry the project's prefix** (`bm-42`), derived once and kept
+    in `config.toml`; allocated by exclusive create, so concurrent
+    sessions never collide.
+  - **Indexed in the store the host runs** (pgvector or sqlite_vec, a
+    borrowed connection like the mailbox's) for cross-project listing
+    and semantic recall; files alone still work without one.
+  - **11 MCP tools** on both memory servers (`task-create`, `-ready`,
+    `-list`, `-show`, `-start`, `-done`, `-wait`, `-cancel`, `-note`,
+    `-update`, `-link`) and a `claude-hooks-tasks` CLI.
+  - **Hooks:** open tasks at every SessionStart (compaction included),
+    named and similar tasks on each prompt, a once-per-change Stop nudge
+    while a task is active, and a mirror of Claude Code's own
+    `TaskCreate` / `TaskUpdate`. `keep: tasks` in a disable marker.
+  - **Importer** for task history in transcripts: ids kept with the
+    prefix, superseded descriptions preserved with their times.
+    backup_models imported: 849 tasks, 101 open.
+- **Deploy covers PATH wrappers and hook matchers.** A new `bin/*` CLI
+  reached PATH only when `install.py` ran again, and a hook block on an
+  old matcher silently never fires. `deploy.py` now adds missing
+  wrappers and reconciles the matchers of installed blocks
+  (`install.reconcile_hook_matchers`); `verify_deploy.py` fails on
+  either being behind.
 - **Mailbox relay for cloud sessions.** A Claude cloud session cannot
   reach the pgvector MCP, but in the desktop app it can use a linked
   local folder. `hooks.mailbox.cloud_relay` turns that folder into a

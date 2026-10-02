@@ -28,8 +28,13 @@ _TEXT_COLUMNS = ("id", "title", "area", "description", "log", "tags")
 
 #: How much of the log goes into the embedding. The latest lines say what
 #: the task is *now*; the first ones are mostly "created".
-_EMBED_LOG_LINES = 3
-_EMBED_MAX_CHARS = 2000
+_EMBED_LOG_LINES = 2
+#: The embedder runs on CPU at ~80 tok/s, so payload size is the cost:
+#: 2,000 chars measured ~6 s a task (85 min for backup_models' 849),
+#: 800 is ~2.5 s. Title, area and the head of the description are what a
+#: prompt matches a task on; the rest stays readable in the file.
+_EMBED_MAX_CHARS = 800
+_EMBED_DESC_CHARS = 500
 
 
 def embed_text(task: Task) -> str:
@@ -37,8 +42,8 @@ def embed_text(task: Task) -> str:
     if task.area:
         parts.append(f"area: {task.area}")
     if task.description:
-        parts.append(task.description)
-    logs = task.log_lines[:_EMBED_LOG_LINES]
+        parts.append(" ".join(task.description.split())[:_EMBED_DESC_CHARS])
+    logs = [ln[2:] for ln in task.log_lines[:_EMBED_LOG_LINES]]
     if logs:
         parts.append("\n".join(logs))
     return "\n".join(parts)[:_EMBED_MAX_CHARS]

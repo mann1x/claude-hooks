@@ -780,3 +780,84 @@ class TestUnmanagedDaemonRestart(unittest.TestCase):
              patch.object(mod, "_run", return_value=bad):
             mod._restart_unmanaged_daemon(s, False, [])
         self.assertFalse(s.ok)
+
+
+class TestCliWrappersAndHookMatchers(unittest.TestCase):
+    """PATH wrappers for bin/* and the matchers of installed hook blocks
+    are deployable artifacts: read at session start, silently stale.
+    ``claude-hooks-tasks`` existed in the repo and nowhere on PATH, and a
+    PostToolUse block on the old matcher never fires for TaskCreate."""
+
+    def _deploy(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_deploy_mod", DEPLOY)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_deploy_handles_both(self):
+        src = _src(DEPLOY)
+        self.assertIn("_sync_cli_and_hook_entries(s, dry)", src)
+        self.assertIn("sync_managed_hooks(", src)
+        self.assertIn("_install_bin_shim_wrappers(", src)
+
+    def test_verifier_checks_both(self):
+        src = _src(VERIFY)
+        self.assertIn("def check_cli_and_hooks", src)
+        self.assertIn("check_cli_and_hooks(r)", src)
+        self.assertIn("def check_tasks", src)
+
+    def test_stale_matcher_is_reconciled_and_others_left(self):
+        sys.path.insert(0, str(REPO))
+        try:
+            import install
+        finally:
+            sys.path.pop(0)
+        ours = {"type": "command", "command": "/x/bin/claude-hook PostToolUse",
+                "_managedBy": install.MANAGED_BY}
+        theirs = {"type": "command", "command": "other-tool"}
+        settings = {"hooks": {
+            "PostToolUse": [
+                {"matcher": "Edit|Write|MultiEdit", "hooks": [ours]},
+                {"matcher": "Bash", "hooks": [theirs]},
+            ]}}
+        changes = install.reconcile_hook_matchers(settings)
+        want = install.POST_TOOL_USE_TEMPLATE["PostToolUse"][0]["matcher"]
+        self.assertIn("TaskCreate", want)
+        self.assertEqual(changes, [("PostToolUse", "Edit|Write|MultiEdit",
+                                    want)])
+        blocks = settings["hooks"]["PostToolUse"]
+        self.assertEqual(blocks[0]["matcher"], want)
+        self.assertEqual(blocks[1]["matcher"], "Bash")
+        # Events the host never installed stay uninstalled.
+        self.assertNotIn("PreToolUse", settings["hooks"])
+        self.assertEqual(install.reconcile_hook_matchers(settings), [])
+
+    def test_deploy_dry_run_writes_nothing(self):
+        mod = self._deploy()
+        sys.path.insert(0, str(REPO))
+        try:
+            import install
+        finally:
+            sys.path.pop(0)
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            sp = pathlib.Path(td) / "settings.json"
+            ours = {"type": "command", "command": "/x/bin/claude-hook X",
+                    "_managedBy": install.MANAGED_BY}
+            import json as _json
+            body = _json.dumps({"hooks": {"PostToolUse": [
+                {"matcher": "Edit", "hooks": [ours]}]}})
+            sp.write_text(body, encoding="utf-8")
+            s = mod.Step("skills")
+            with patch.object(install, "user_settings_path", return_value=sp), \
+                 patch.object(install, "_shim_wrapper_dir",
+                              return_value=pathlib.Path(td) / "bin"), \
+                 patch.object(mod, "_import_install", return_value=install):
+                mod._sync_cli_and_hook_entries(s, True)
+            self.assertTrue(s.ok)
+            self.assertEqual(sp.read_text(encoding="utf-8"), body)
+            self.assertFalse((pathlib.Path(td) / "bin").exists())
+            self.assertTrue(any("would set PostToolUse" in n for n in s.notes))
+            self.assertTrue(any("would add PATH wrappers" in n
+                                for n in s.notes))

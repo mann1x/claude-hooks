@@ -99,8 +99,18 @@ def handle(*, event: dict, config: dict, providers: list[Provider]) -> Optional[
     if not hook_cfg.get("enabled", True):
         return None
 
+    # Tasks the prompt names or resembles. Started first and joined after
+    # memory recall, so its embedding overlaps recall's instead of adding.
+    from claude_hooks.tasks.hook import PromptRecall
+    task_recall = PromptRecall(event=event, config=config,
+                               providers=providers).start()
+
     additional_context = recall_block(event=event, config=config,
                                       providers=providers)
+    task_block = task_recall.join()
+    if task_block:
+        additional_context = (f"{additional_context}\n\n{task_block}"
+                              if additional_context else task_block)
 
     # Prepend a pointer to any recent pre-compact wrap-up file, so
     # the post-compaction assistant reliably picks up the saved

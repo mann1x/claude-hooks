@@ -32,6 +32,12 @@ from claude_hooks.tasks.store import TaskIndex, embed_text
 log = logging.getLogger("claude_hooks.tasks")
 
 STATE_FILE = ".index-state.json"
+#: Per-host and per-session state in the task folder; none of it is a
+#: task, so none of it belongs in a commit.
+GITIGNORE = (f"{STATE_FILE}\n"
+             ".*.lock\n"          # in-flight writes
+             ".nudge-*.json\n"    # Stop-nudge memory, per session
+             ".cc-*.json\n")      # Claude Code task-id mapping, per session
 _LOCK_WAIT_S = 3.0
 _LOCK_STALE_S = 30.0
 
@@ -107,13 +113,19 @@ class TaskService:
     def __init__(self, root, index: Optional[TaskIndex] = None, *,
                  host: str = "", session_id: str = "",
                  embedder: Optional[Callable[[str], Optional[list]]] = None,
-                 embed_model: str = ""):
+                 embed_model: str = "", embed_on_write: bool = True):
         self.dir = TaskDir(Path(root))
         self.index = index
         self.host = host
         self.session_id = session_id or ""
         self.embedder = embedder
         self.embed_model = embed_model
+        #: False keeps writes free of the embedder round-trip (seconds on
+        #: a CPU embedder); the caller runs :meth:`embed_pending` later.
+        self.embed_on_write = embed_on_write
+        #: Regenerate TASKS.md after each write. Bulk callers (the
+        #: importer) turn it off and write the board once at the end.
+        self.board_on_write = True
 
     # ─── setup ───────────────────────────────────────────────────────
 
@@ -139,8 +151,7 @@ class TaskService:
                             exc_info=True)
         cfg = self.dir.init(prefix=prefix, project=project, taken=taken)
         # Per-host state and in-flight locks never belong in a commit.
-        write_text_atomic(self.dir.dir / ".gitignore",
-                          f"{STATE_FILE}\n.*.lock\n")
+        write_text_atomic(self.dir.dir / ".gitignore", GITIGNORE)
         self._register()
         return cfg
 
@@ -201,7 +212,8 @@ class TaskService:
         self._embed_one(task, file_hash(text))
 
     def _embed_one(self, task: Task, fhash: str) -> None:
-        if self.embedder is None or not self.embed_model:
+        if (self.embedder is None or not self.embed_model
+                or not self.embed_on_write):
             return
         try:
             vec = self.embedder(embed_text(task))
@@ -329,6 +341,7 @@ class TaskService:
 
         task, path, text = self.dir.create(make)
         self._index_one(task, path, text)
+        self._refresh_board()
         return task
 
     def _modify(self, task_id: str, change: Callable[[Task], None]) -> Task:
@@ -339,7 +352,17 @@ class TaskService:
             task.touch(self.session_id)
             path, text = self.dir.write(task)
         self._index_one(task, path, text)
+        self._refresh_board()
         return task
+
+    def _refresh_board(self) -> None:
+        if not self.board_on_write:
+            return
+        try:
+            from claude_hooks.tasks.board import write_board
+            write_board(self)
+        except Exception:
+            log.warning("tasks: TASKS.md not regenerated", exc_info=True)
 
     def set_status(self, task_id: str, status: str, note: str = "") -> Task:
         status = normalise_status(status)
