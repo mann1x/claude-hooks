@@ -439,8 +439,12 @@ with a reason. The daemon's own files — `replies/<id>.md`, `INBOX.md`,
 inotify on Linux (which also sees Samba writes, since `smbd` writes the
 local file), `ReadDirectoryChangesW` on Windows, and a 30 s mtime poll
 only where neither works. It watches only the folders a session writes
-to, so its own writes don't wake it. Events are batched into at most one
-pass per `interval_seconds` (30, also the floor). The database is opened
+to, so its own writes don't wake it. The first request after a quiet
+spell is handled after a 1 s settle (so the three-file write lands in
+one pass); requests right behind one that was handled are batched into
+at most one pass per `interval_seconds` (30, also the floor). Only a
+pass that handled a request starts that throttle — not the inbox
+refresh, and not a pass that found only a `writing` semaphore. The database is opened
 on first use and queried — one inbox page per session, `INBOX.md`
 rewritten only when it changes — every interval only while a cloud
 session has made a request in the last `live_hours` (12). Session

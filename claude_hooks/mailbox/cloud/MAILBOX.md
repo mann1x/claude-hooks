@@ -218,11 +218,17 @@ Every registered session: alias, host, OS, last seen. Optional `args`:
 - **Replies.** The answer to request `<id>` is written to
   `replies/<id>.md` (with `replies/<id>.sem`). Read it once the `.sem`
   says `"ready"`, then delete both files — that keeps the folder tidy.
-- **Timing.** The service batches its work and answers within about
-  **30 seconds**, sometimes a little more. Not seeing a reply yet is
-  normal; look again after half a minute. Do not resend the request:
-  as long as your `requests/<id>.*` files are still there, it has not
-  been taken yet.
+- **Timing.** A request usually gets its reply within a few seconds.
+  When you send several requests in a row, the ones behind the first
+  are batched and can take up to **30 seconds**. Not seeing a reply yet
+  is normal: look again after a few seconds, and give it a full minute
+  before deciding something is wrong. Do not resend the request: as long
+  as your `requests/<id>.*` files are still there, it has not been taken
+  yet; once they are gone, the reply is on its way.
+- **Did my alias work?** `status.json` (once `status.sem` says
+  `"ready"`) shows `"address": "<alias>@cloud"` as soon as you are
+  registered — check it if the reply to your alias request has not
+  appeared yet.
 - **Your inbox.** `INBOX.md` (with `INBOX.sem`) lists your unread mail
   and is rewritten by the service when it changes. Check it when you
   start, and from time to time while you work. It is kept current for

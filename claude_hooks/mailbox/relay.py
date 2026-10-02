@@ -26,8 +26,10 @@ The protocol the session follows is ``claude_hooks/mailbox/cloud/MAILBOX.md``
 
 Cost: while idle the relay thread is blocked in the kernel waiting for a
 file event (see :mod:`claude_hooks.mailbox.watch`) — no timer, no disk
-access, no database connection. Bursts of events are batched into at
-most one pass per ``interval_seconds`` (30 s, the floor). The inbox
+access, no database connection. The first request after a quiet spell
+is handled within about a second; requests right behind one that was
+handled are batched into at most one pass per ``interval_seconds``
+(30 s, the floor). The inbox
 summary needs the database, because new mail arrives there and not in
 the folder; that check runs every interval only while some cloud session
 has been active within the live window, and never otherwise.
@@ -73,6 +75,10 @@ DEFAULT_LIVE_HOURS = 12.0
 #: Session folders idle this long are moved to ``archive/``. Matches the
 #: registry's own retention, so the folder outlives the registration.
 DEFAULT_ARCHIVE_DAYS = 30.0
+
+#: How long the first request after a quiet spell waits for the rest of
+#: its write (semaphore, payload, semaphore) before it is handled.
+SETTLE_SECONDS = 1.0
 
 MAX_PAYLOAD_BYTES = 256 * 1024
 MAX_REQUESTS_PER_PASS = 50
@@ -905,7 +911,15 @@ class MailboxRelayThread(threading.Thread):
             core.full_scan()
         except Exception:
             log.warning("relay: startup scan failed", exc_info=True)
-        last_pass = time.monotonic()
+        # When a pass last *handled a request*. Only that starts the
+        # throttle: the first request after a quiet spell is answered
+        # after a short settle, and only a burst behind it waits for the
+        # interval. Counting every pass made a session's first request
+        # wait up to 30 s twice over — behind the inbox refresh that runs
+        # every interval while a session is live, and behind the pass
+        # its own `writing` semaphore triggered, which found nothing
+        # ready — and the session concluded it was stuck.
+        last_work = float("-inf")
         while not self._stop_event.is_set():
             timeout = core.next_wakeup()
             started = time.monotonic()
@@ -919,22 +933,29 @@ class MailboxRelayThread(threading.Thread):
                 # own writes into a watched folder, a wake() — so there
                 # is nothing to do and no timer has elapsed.
                 continue
-            # Batch: at most one pass per interval. Events arriving in
-            # the meantime join this pass instead of starting another.
-            remaining = last_pass + interval - time.monotonic()
-            while remaining > 0 and not self._stop_event.is_set():
-                changes |= watcher.wait(remaining)
-                remaining = last_pass + interval - time.monotonic()
+            if changes:
+                # Settle briefly so a three-file write lands in one pass;
+                # after real work, batch until the interval has passed.
+                wait = max(SETTLE_SECONDS,
+                           last_work + interval - time.monotonic())
+                deadline = time.monotonic() + wait
+                while not self._stop_event.is_set():
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        break
+                    changes |= watcher.wait(left)
             if self._stop_event.is_set():
                 break
+            done = 0
             try:
                 if changes:
-                    core.handle_changes(changes)
-                if core.next_wakeup() is not None:
-                    core.tick()
+                    done += core.handle_changes(changes)
+                if timed_out:
+                    done += core.tick()
             except Exception:
                 log.warning("relay: pass failed", exc_info=True)
-            last_pass = time.monotonic()
+            if done:
+                last_work = time.monotonic()
 
 
 def start_relay_thread(cfg: dict, stop_event: threading.Event

@@ -423,12 +423,23 @@ class _ScriptedWatcher:
     def wait(self, timeout):
         self.waits.append(timeout)
         if self.script:
-            delay, changes = self.script.pop(0)
+            delay, changes = self.script[0]
+            if timeout is not None and delay > timeout:
+                # The next event comes after this wait would time out.
+                self.script[0] = (delay - timeout, changes)
+                self.clock.t += timeout
+                return set()
+            self.script.pop(0)
             self.clock.t += delay
             return set(changes)
         if timeout is None:
             self.stop.set()
             return set()
+        # A live session never blocks forever; end the run after a few
+        # empty ticks once the script is spent.
+        self.idle_ticks = getattr(self, "idle_ticks", 0) + 1
+        if self.idle_ticks > 3:
+            self.stop.set()
         self.clock.t += timeout
         return set()
 
@@ -440,8 +451,10 @@ class _ScriptedWatcher:
 
 
 class LoopBatchingTests(RelayHarness):
+    """Pass timing, on a fake clock. ``work`` says how many requests each
+    pass handled: only a pass that handled one starts the throttle."""
 
-    def run_loop(self, script):
+    def run_loop(self, script, work=lambda changes: 1):
         mono = Clock(1000.0)
         stop = threading.Event()
         thread = MailboxRelayThread(
@@ -451,32 +464,70 @@ class LoopBatchingTests(RelayHarness):
         thread.core = self.core
         thread.watcher = _ScriptedWatcher(mono, script, stop)
         passes = []
-        real = self.core.handle_changes
 
         def counted(changes):
             passes.append((mono.t, set(changes)))
-            return real(changes)
+            return work(set(changes))
 
         with mock.patch.object(self.core, "handle_changes", counted), \
              mock.patch.object(relay.time, "monotonic", mono):
             thread.loop()
         return passes, thread.watcher
 
+    @staticmethod
+    def ev(rid):
+        return ("sessions", "osync", "requests", f"{rid}.sem")
+
     def test_idle_blocks_forever_with_no_timer(self):
         passes, w = self.run_loop([])
         self.assertEqual(passes, [])
         self.assertEqual(w.waits, [None])
 
-    def test_events_within_the_interval_are_batched_into_one_pass(self):
-        ev = lambda rid: ("sessions", "osync", "requests", f"{rid}.sem")
+    def test_the_first_request_after_idle_is_answered_after_a_settle(self):
+        passes, _ = self.run_loop([(500, [self.ev("a")])])
+        self.assertEqual(len(passes), 1)
+        self.assertAlmostEqual(passes[0][0], 1000 + 500
+                               + relay.SETTLE_SECONDS)
+
+    def test_the_settle_gathers_the_rest_of_a_three_file_write(self):
+        passes, _ = self.run_loop([(500, [self.ev("a")]),
+                                   (0.3, [self.ev("a")])])
+        self.assertEqual(len(passes), 1)
+
+    def test_requests_behind_handled_work_are_batched(self):
         passes, _ = self.run_loop([
-            (40, [ev("a")]),      # first event after idle: immediate pass
-            (1, [ev("b")]),       # 1 s later: waits for the interval...
-            (2, [ev("c")]),       # ...and this joins the same pass
+            (40, [self.ev("a")]),      # first after idle: ~1 s
+            (2, [self.ev("b")]),       # behind real work: waits...
+            (3, [self.ev("c")]),       # ...and joins the same pass
         ])
         self.assertEqual(len(passes), 2)
-        self.assertEqual(passes[1][1], {ev("b"), ev("c")})
+        self.assertEqual(passes[1][1], {self.ev("b"), self.ev("c")})
         self.assertGreaterEqual(passes[1][0] - passes[0][0], 30)
+
+    def test_a_pass_that_found_only_a_writing_semaphore_does_not_throttle(self):
+        """The bug a real cloud session hit: its `writing` semaphore woke
+        a pass that found nothing ready, and its `ready` then waited out
+        the interval — so registering looked stuck."""
+        calls = []
+
+        def work(changes):
+            calls.append(changes)
+            return 0 if len(calls) == 1 else 1     # writing, then ready
+
+        passes, _ = self.run_loop(
+            [(40, [self.ev("alias")]),            # writing: nothing done
+             (8, [self.ev("alias")])],            # ready, 8 s later
+            work=work)
+        self.assertEqual(len(passes), 2)
+        self.assertLess(passes[1][0] - passes[0][0], 10)
+
+    def test_the_live_inbox_refresh_does_not_throttle_requests(self):
+        self.take_alias()                         # a live session: ticks
+        with mock.patch.object(self.core, "tick", return_value=0):
+            passes, _ = self.run_loop([(65, [self.ev("x")])])
+        self.assertEqual(len(passes), 1)
+        # Arrived at 1065 (two ticks went by); handled after the settle.
+        self.assertAlmostEqual(passes[0][0], 1065 + relay.SETTLE_SECONDS)
 
 
 class WatcherTests(unittest.TestCase):

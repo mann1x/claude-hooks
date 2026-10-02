@@ -38,8 +38,10 @@ release with the auto-generated source archive
     the same way, semaphore last.
   - **Cost.** Blocked on inotify (Linux) or `ReadDirectoryChangesW`
     (Windows) while idle; a 30 s mtime poll only where neither works.
-    At most one pass per 30 s. The database is queried only while a
-    cloud session has been active in the last 12 h.
+    The first request after a quiet spell is answered within about a
+    second; only requests right behind handled work are batched (one
+    pass per 30 s). The database is queried only while a cloud session
+    has been active in the last 12 h.
   - **Instructions.** `claude_hooks/mailbox/cloud/MAILBOX.md` is the
     cloud session's guide, installed into the folder by `install.py`
     and kept current by `scripts/deploy.py`; `verify_deploy.py` fails
