@@ -319,6 +319,19 @@ def _sync_relay_instructions(s: Step, dry: bool) -> None:
     root = relay.get("root")
     if not (relay.get("enabled") and root):
         return
+    # The daemon unit is sandboxed (ProtectSystem=strict): without a
+    # grant for the folder the relay can read requests and never answer.
+    # Before step_services, so the restart there applies the drop-in.
+    try:
+        sys.path.insert(0, str(REPO))
+        from claude_hooks.mailbox.relay import ensure_unit_grant
+        for note in ensure_unit_grant(root, dry_run=dry):
+            s.note(f"mailbox relay: {note}")
+    except OSError as e:
+        s.fail(f"mailbox relay: cannot grant the daemon write access to "
+               f"{root} ({e})")
+    finally:
+        sys.path.pop(0)
     src = REPO / "claude_hooks" / "mailbox" / "cloud" / "MAILBOX.md"
     dst = Path(os.path.expanduser(str(root))) / "MAILBOX.md"
     try:
@@ -330,9 +343,9 @@ def _sync_relay_instructions(s: Step, dry: bool) -> None:
     if have == want:
         s.note(f"cloud mailbox instructions current ({dst})")
         return
-    verb = "install" if have is None else "update"
+    verb = "installed" if have is None else "updated"
     if dry:
-        s.note(f"[dry-run] would {verb} {dst}")
+        s.note(f"[dry-run] would have {verb} {dst}")
         return
     try:
         (dst.parent / "sessions").mkdir(parents=True, exist_ok=True)
@@ -340,7 +353,7 @@ def _sync_relay_instructions(s: Step, dry: bool) -> None:
     except OSError as e:
         s.fail(f"cloud mailbox instructions: cannot write {dst} ({e})")
         return
-    s.note(f"cloud mailbox instructions {verb}d ({dst})")
+    s.note(f"cloud mailbox instructions {verb} ({dst})")
 
 
 # --------------------------------------------------------------------- #

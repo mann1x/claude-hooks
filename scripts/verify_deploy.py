@@ -565,6 +565,14 @@ def check_mailbox_relay(r: Results) -> None:
         r.add(FAIL, "mailbox relay", f"{root}/sessions missing — run "
               "scripts/deploy.py or install.py")
         return
+    from claude_hooks.mailbox.relay import daemon_unit_paths, missing_grants
+    for unit, _scope in daemon_unit_paths():
+        missing = missing_grants(unit, root)
+        if missing:
+            r.add(FAIL, "mailbox relay grant",
+                  f"{unit} is sandboxed and does not grant "
+                  f"{' '.join(missing)} — the relay cannot answer; run "
+                  "scripts/deploy.py")
     core = RelayCore(root, opts, store_factory=lambda: None)
     state = core.check_instructions()
     if state == "current":

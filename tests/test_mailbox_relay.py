@@ -630,6 +630,10 @@ class InstallerTests(unittest.TestCase):
             sys.path.insert(0, str(repo))
         import install
         self.install = install
+        # Never touch this host's real daemon unit from a test.
+        p = mock.patch.object(relay, "daemon_unit_paths", return_value=[])
+        p.start()
+        self.addCleanup(p.stop)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name) / "mailbox"
@@ -667,3 +671,94 @@ class InstallerTests(unittest.TestCase):
                 cfg, non_interactive=False, dry_run=False)
         self.assertFalse(cfg["hooks"]["mailbox"]["cloud_relay"]["enabled"])
         self.assertFalse((self.root / "MAILBOX.md").exists())
+
+
+class SandboxGrantTests(unittest.TestCase):
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.unit = self.tmp / "claude-hooks-daemon.service"
+        self.unit.write_text("[Service]\nProtectSystem=strict\n"
+                             "ReadWritePaths=/root/.claude\n")
+        self.real = self.tmp / "real-mailbox"
+        self.real.mkdir()
+        self.link = self.tmp / "mailbox"
+        self.link.symlink_to(self.real)
+
+    def test_both_spellings_of_a_symlinked_folder_are_needed(self):
+        self.assertEqual(relay.relay_rw_paths(self.link),
+                         [str(self.link), str(self.real.resolve())])
+        self.assertEqual(relay.missing_grants(self.unit, self.link),
+                         [str(self.link), str(self.real.resolve())])
+
+    def test_an_unsandboxed_unit_needs_nothing(self):
+        self.unit.write_text("[Service]\nExecStart=/bin/true\n")
+        self.assertEqual(relay.missing_grants(self.unit, self.link), [])
+
+    def test_the_dropin_grants_and_a_parent_grant_counts(self):
+        with mock.patch.object(relay, "daemon_unit_paths",
+                               return_value=[(self.unit, "system")]), \
+             mock.patch("subprocess.run") as run:
+            notes = relay.ensure_unit_grant(self.link)
+        self.assertEqual(len(notes), 1)
+        run.assert_called_once()
+        self.assertEqual(relay.missing_grants(self.unit, self.link), [])
+        dropin = Path(f"{self.unit}.d") / relay.GRANT_DROPIN
+        self.assertIn(f"-{self.link}", dropin.read_text())
+        dropin.write_text(f"[Service]\nReadWritePaths={self.tmp}\n")
+        self.assertEqual(relay.missing_grants(self.unit, self.link), [])
+        # Already granted: nothing written, nothing reloaded.
+        with mock.patch.object(relay, "daemon_unit_paths",
+                               return_value=[(self.unit, "system")]), \
+             mock.patch("subprocess.run") as run:
+            self.assertEqual(relay.ensure_unit_grant(self.link), [])
+        run.assert_not_called()
+
+    def test_the_write_probe(self):
+        (self.real / "sessions").mkdir()
+        self.assertIsNone(relay.writable_problem(self.real))
+        broken = self.tmp / "broken"
+        broken.mkdir()
+        (broken / "sessions").write_text("not a directory")
+        with mock.patch.object(relay, "daemon_unit_paths", return_value=[]):
+            self.assertIn("cannot write", relay.writable_problem(broken))
+
+
+class UndeletableRequestTests(RelayHarness):
+
+    def test_a_request_that_cannot_be_removed_is_not_run(self):
+        self.take_alias()
+        self.write_request("u1", "mailbox-send", {
+            "to": "osync@cloud", "subject": "once", "body": "only once"})
+        real = relay._unlink
+
+        def refuse(path):
+            if Path(path).name.startswith("u1."):
+                raise OSError(30, "Read-only file system")
+            return real(path)
+
+        with mock.patch.object(relay, "_unlink", refuse):
+            self.core.process_alias("osync")
+        self.assertEqual(self.store.sent(from_alias="osync",
+                                         from_host="cloud"), [])
+        self.assertIn(("osync", "u1"), self.core._pending)
+        self.core.process_alias("osync")          # now removable
+        self.assertEqual(len(self.store.sent(from_alias="osync",
+                                             from_host="cloud")), 1)
+
+    def test_one_failing_request_does_not_stop_the_others(self):
+        self.take_alias()
+        self.write_request("f1", "mailbox-sessions")
+        self.write_request("f2", "mailbox-sessions")
+        real = self.core._process_request
+
+        def flaky(alias, rid):
+            if rid == "f1":
+                raise OSError(5, "I/O error")
+            return real(alias, rid)
+
+        with mock.patch.object(self.core, "_process_request", flaky):
+            self.core.process_alias("osync")
+        self.assertIn("osync", self.reply("f2"))

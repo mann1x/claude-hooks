@@ -665,7 +665,10 @@ class TestRelayInstructionsSync(unittest.TestCase):
     def _run(self, cfg, dry=False):
         mod = self._mod()
         s = mod.Step("skills")
-        with patch.object(mod, "_load_cfg", return_value=cfg):
+        # Never touch this host's real daemon unit from a test.
+        with patch.object(mod, "_load_cfg", return_value=cfg), \
+             patch("claude_hooks.mailbox.relay.daemon_unit_paths",
+                   return_value=[]):
             mod._sync_relay_instructions(s, dry)
         return s
 

@@ -396,7 +396,11 @@ class RelayCore:
             if n >= MAX_REQUESTS_PER_PASS:
                 self._pending.add((alias, rid))
                 continue
-            outcome = self._process_request(alias, rid)
+            try:
+                outcome = self._process_request(alias, rid)
+            except OSError as e:
+                log.warning("relay: %s/%s: %s", alias, rid, e)
+                outcome = "pending"
             if outcome == "pending":
                 self._pending.add((alias, rid))
             else:
@@ -468,9 +472,16 @@ class RelayCore:
         if problem:
             self.reject(alias, rid, problem)
             return "done"
-        # Read, then delete both — only now is the request ours.
-        _unlink(payload)
-        _unlink(sem_path)
+        # Read, then delete both — only now is the request ours. A
+        # request that cannot be removed is not run: it would still be
+        # there next pass and run again, and a send would go out twice.
+        try:
+            _unlink(payload)
+            _unlink(sem_path)
+        except OSError as e:
+            log.warning("relay: cannot remove %s/%s, not running it: %s",
+                        alias, rid, e)
+            return "pending"
         tool = data["tool"]
         args = data.get("args") or {}
         try:
@@ -694,6 +705,119 @@ def install_instructions(root: Path, *, dry_run: bool = False) -> str:
     return "installed" if have is None else "updated"
 
 
+# ─── systemd sandbox ────────────────────────────────────────────────────
+
+DAEMON_UNIT = "claude-hooks-daemon.service"
+GRANT_DROPIN = "mailbox-relay.conf"
+
+
+def relay_rw_paths(root) -> list[str]:
+    """The relay folder as spelled and, when a symlink is involved, as
+    resolved. ``ProtectSystem=strict`` builds the service's mount
+    namespace from the literal ``ReadWritePaths``, so granting only the
+    symlinked spelling (``/shared/dev/mailbox``) leaves the real
+    directory read-only."""
+    spelled = Path(os.path.expanduser(str(root)))
+    out: list[str] = []
+    for q in (spelled, spelled.resolve()):
+        if str(q) not in out:
+            out.append(str(q))
+    return out
+
+
+def grant_dropin_text(root) -> str:
+    # "-": a missing path must not stop the daemon from starting.
+    paths = " ".join("-" + p for p in relay_rw_paths(root))
+    return ("# Written by claude-hooks: the cloud-session mailbox relay\n"
+            "# writes replies into this folder (hooks.mailbox.cloud_relay).\n"
+            f"[Service]\nReadWritePaths={paths}\n")
+
+
+def daemon_unit_paths() -> list[tuple[Path, str]]:
+    """``(unit file, scope)`` for every installed daemon unit."""
+    found = []
+    for base, scope in ((Path("/etc/systemd/system"), "system"),
+                        (Path(os.path.expanduser("~/.config/systemd/user")),
+                         "user")):
+        unit = base / DAEMON_UNIT
+        if unit.is_file():
+            found.append((unit, scope))
+    return found
+
+
+def unit_sandboxed(unit: Path) -> bool:
+    try:
+        text = unit.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return any(line.strip().startswith(("ProtectSystem=strict",
+                                         "ProtectHome="))
+               for line in text.splitlines())
+
+
+def missing_grants(unit: Path, root) -> list[str]:
+    """Relay paths a sandboxed daemon unit (or its drop-ins) does not
+    grant. Empty when the unit is not sandboxed."""
+    if not unit_sandboxed(unit):
+        return []
+    granted: set[str] = set()
+    for f in [unit] + sorted(Path(f"{unit}.d").glob("*.conf")):
+        try:
+            text = f.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("ReadWritePaths="):
+                granted.update(x.lstrip("-+")
+                               for x in line.split("=", 1)[1].split())
+    need = relay_rw_paths(root)
+    # A grant of a parent covers the child.
+    return [p for p in need if not any(
+        p == g or p.startswith(g.rstrip("/") + "/") for g in granted)]
+
+
+def ensure_unit_grant(root, *, dry_run: bool = False) -> list[str]:
+    """Write the drop-in that lets a sandboxed daemon write the relay
+    folder, and reload systemd. Returns what it did, for the caller to
+    print; raises OSError when the drop-in cannot be written."""
+    import subprocess
+    notes = []
+    for unit, scope in daemon_unit_paths():
+        if not missing_grants(unit, root):
+            continue
+        dropin = Path(f"{unit}.d") / GRANT_DROPIN
+        if dry_run:
+            notes.append(f"[dry-run] would write {dropin}")
+            continue
+        dropin.parent.mkdir(parents=True, exist_ok=True)
+        dropin.write_text(grant_dropin_text(root), encoding="utf-8")
+        cmd = ["systemctl"] + (["--user"] if scope == "user" else []) + [
+            "daemon-reload"]
+        subprocess.run(cmd, capture_output=True, timeout=30)
+        notes.append(f"wrote {dropin} (daemon restart applies it)")
+    return notes
+
+
+def writable_problem(root: Path) -> Optional[str]:
+    """None when the relay can write the folder; otherwise what to do."""
+    probe = Path(root) / "sessions" / ".relay-write-probe"
+    try:
+        probe.write_text("x", encoding="utf-8")
+        probe.unlink()
+        return None
+    except OSError as e:
+        units = daemon_unit_paths()
+        hint = ""
+        if units and any(missing_grants(u, root) for u, _ in units):
+            hint = (" The daemon's systemd unit is sandboxed and does not "
+                    "grant this folder: run scripts/deploy.py (it writes "
+                    f"{DAEMON_UNIT}.d/{GRANT_DROPIN}), or add "
+                    "ReadWritePaths=" + " ".join(relay_rw_paths(root))
+                    + " to a drop-in.")
+        return f"cannot write {root}: {e}.{hint}"
+
+
 # ─── the daemon thread ──────────────────────────────────────────────────
 
 def _store_from_config(cfg: dict):
@@ -738,7 +862,15 @@ class MailboxRelayThread(threading.Thread):
         try:
             (root / "sessions").mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            log.warning("relay: root %s unusable: %s", root, e)
+            log.error("relay: not started — %s",
+                      writable_problem(root) or f"{root} unusable: {e}")
+            return
+        problem = writable_problem(root)
+        if problem:
+            # Refuse to start rather than fail every pass: a relay that
+            # can read requests but not answer them looks alive to the
+            # session and never replies.
+            log.error("relay: not started — %s", problem)
             return
         self.core = RelayCore(root, self.opts,
                               store_factory=lambda: _store_from_config(

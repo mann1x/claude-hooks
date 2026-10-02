@@ -713,6 +713,13 @@ def _setup_mailbox_cloud_relay(cfg: dict, *, non_interactive: bool,
         return
     prefix = "[dry-run] " if dry_run else ""
     print(f"  {prefix}{root / 'MAILBOX.md'}: {verdict}")
+    try:
+        from claude_hooks.mailbox.relay import ensure_unit_grant
+        for note in ensure_unit_grant(root, dry_run=dry_run):
+            print(f"  {note}")
+    except OSError as e:
+        print(f"  [warn] the daemon unit is sandboxed and could not be "
+              f"granted {root}: {e}")
     print(f"  Cloud sessions reach the mailbox as <alias>@{opts['host']}; "
           "restart the daemon to start the relay.")
 
