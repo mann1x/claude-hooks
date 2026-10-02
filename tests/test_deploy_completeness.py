@@ -861,3 +861,49 @@ class TestCliWrappersAndHookMatchers(unittest.TestCase):
             self.assertTrue(any("would set PostToolUse" in n for n in s.notes))
             self.assertTrue(any("would add PATH wrappers" in n
                                 for n in s.notes))
+
+
+class TestReconcileOnlyWidens(unittest.TestCase):
+    """The first deploy with reconciliation cut solidpc's match-all
+    PreToolUse block to Bash|Edit|Write|MultiEdit, which stops the
+    process guard from seeing Monitor calls. A matcher that already
+    covers the template is never touched."""
+
+    def _install(self):
+        sys.path.insert(0, str(REPO))
+        try:
+            import install
+        finally:
+            sys.path.pop(0)
+        return install
+
+    def _settings(self, install, event, matcher):
+        h = {"type": "command", "command": f"/x/bin/claude-hook {event}",
+             "_managedBy": install.MANAGED_BY}
+        blk = {"hooks": [h]} if matcher is None else {"matcher": matcher,
+                                                     "hooks": [h]}
+        return {"hooks": {event: [blk]}}
+
+    def test_match_all_is_left_alone(self):
+        install = self._install()
+        for m in ("", None):
+            s = self._settings(install, "PreToolUse", m)
+            self.assertEqual(install.reconcile_hook_matchers(s), [])
+
+    def test_a_superset_is_left_alone(self):
+        install = self._install()
+        want = install.PRE_TOOL_USE_TEMPLATE["PreToolUse"][0]["matcher"]
+        s = self._settings(install, "PreToolUse", want + "|Read")
+        self.assertEqual(install.reconcile_hook_matchers(s), [])
+
+    def test_a_narrower_one_is_widened(self):
+        install = self._install()
+        s = self._settings(install, "PreToolUse", "Bash|Edit|Write|MultiEdit")
+        (ev, old, new), = install.reconcile_hook_matchers(s)
+        self.assertIn("Monitor", new)
+        self.assertIn("Grep", new)
+
+    def test_template_covers_what_the_guard_checks(self):
+        install = self._install()
+        want = install.PRE_TOOL_USE_TEMPLATE["PreToolUse"][0]["matcher"]
+        self.assertTrue({"Bash", "Monitor"} <= set(want.split("|")))

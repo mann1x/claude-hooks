@@ -1,6 +1,6 @@
 ---
 description: Persistent task tracking — task files are the record, the store's tasks table is a derived index
-globs: claude_hooks/tasks/**,tests/test_tasks.py,docs/PLAN-task-tracking.md
+globs: claude_hooks/tasks/**,tests/test_tasks.py,tests/test_tasks_tools.py,tests/test_tasks_hooks.py,docs/tasks.md,docs/PLAN-task-tracking.md
 ---
 
 - One Markdown file per task under `<project>/.claude-hooks/tasks/` is the record. The `tasks` table on the host's store (pgvector or sqlite_vec) only indexes the files, for listing, cross-project views and recall. A host without a store still has working tasks: build the service with `service_for(provider=None)` from `claude_hooks/tasks/__init__.py`.
@@ -13,4 +13,11 @@ globs: claude_hooks/tasks/**,tests/test_tasks.py,docs/PLAN-task-tracking.md
 - `TaskIndex` (`claude_hooks/tasks/store.py`) borrows the provider's connection and its lock, the same rule as `claude_hooks/mailbox/store.py`. It never opens a second connection, and every failure path rolls back.
 - `claude_hooks/tasks/schema.py` serves both dialects with one set of queries: times are ISO-8601 UTC text, list and map fields are JSON text. The embedding is a base64 float32 blob in a TEXT column, not `vector(n)`, and similarity is computed in Python. `embed_model` tags each vector, and rows from another model are re-embedded (`embed_pending()`), never compared across spaces.
 - `service_for(..., embed=False)` keeps the write path free of embedder round-trips; `embed_pending()` catches up later.
-- Tests: `tests/test_tasks.py`. Plan: `docs/PLAN-task-tracking.md`.
+- `tool_catalog()` and `TaskTools` in `claude_hooks/tasks/tools.py` are the 11 `task-*` MCP tools (`task-create`, `-ready`, `-list`, `-show`, `-start`, `-done`, `-wait`, `-cancel`, `-note`, `-update`, `-link`), served by both `claude_hooks/pgvector_mcp/server.py` and `claude_hooks/sqlite_vec_mcp/server.py` through `tools_for_provider()`. A tool added to one server goes on the other too.
+- `claude_hooks/tasks/cli.py` is the `claude-hooks-tasks` CLI (`bin/claude-hooks-tasks`, `bin/claude-hooks-tasks.cmd`). It works from the directory you are in, so its Windows shim does not `cd` into the repo.
+- `write_board()` in `claude_hooks/tasks/board.py` regenerates `<project>/TASKS.md` on every change; `claude_hooks/tasks/render.py` holds the shared row and board text.
+- Hooks live in `claude_hooks/tasks/hook.py`, each with a switch under `hooks.tasks` in `config/claude-hooks.json`: `session_block()` (SessionStart, `session_start` / `session_ready`), `prompt_block()` and `PromptRecall` (UserPromptSubmit, `prompt_mentions` / `prompt_recall` / `recall_k` / `recall_min_score`), `stop_nudge()` (Stop, once per change, never on a continuation) and `mirror_builtin()` (PostToolUse, `mirror_builtin`). `hooks.tasks.enabled: false` turns off the hooks and the MCP tools (`tasks_enabled()`).
+- The mirror needs the PostToolUse matcher to include `TaskCreate|TaskUpdate`. `install.py` writes it and `scripts/deploy.py` reconciles an older one.
+- In a project with a `.claude-hooks-disable` marker the task hooks run only with `keep: tasks`, routed through `claude_hooks/hook_parts.py`. That is a second path: test it in `tests/test_tasks_hooks.py`.
+- `claude_hooks/tasks/importer.py` replays `TaskCreate` / `TaskUpdate` calls from a transcript (`claude-hooks-tasks import --transcript <session.jsonl> [--dry-run]`). Ids keep their number with the prefix, replaced descriptions are kept under `## Earlier descriptions`, and a re-run skips ids that already have a file.
+- Tests: `tests/test_tasks.py` (format, folder, index), `tests/test_tasks_tools.py` (tools, CLI, board, importer), `tests/test_tasks_hooks.py` (hooks and the marker route). Reference: `docs/tasks.md`. Plan: `docs/PLAN-task-tracking.md`.

@@ -309,10 +309,13 @@ HOOK_TEMPLATE = {
 }
 
 # PreToolUse is opt-in -- added only if the user enabled it in config.
+# Monitor is checked by the process guard (blind waiters) and Grep by the
+# opt-in code-graph symbol lookup; without them in the matcher both are
+# silently never consulted.
 PRE_TOOL_USE_TEMPLATE = {
     "PreToolUse": [
         {
-            "matcher": "Bash|Edit|Write|MultiEdit",
+            "matcher": "Bash|Edit|Write|MultiEdit|Monitor|Grep",
             "hooks": [
                 {
                     "type": "command",
@@ -8794,9 +8797,28 @@ def _managed_templates() -> dict:
     return out
 
 
+def _matcher_covers(have: Optional[str], want: Optional[str]) -> bool:
+    """True when ``have`` already matches every tool ``want`` does.
+
+    Reconciliation only ever widens. An empty matcher matches every tool,
+    and narrowing one to the template is a regression, not a repair: on
+    solidpc a match-all PreToolUse block was what let the process guard
+    see Monitor calls, and the first deploy with reconciliation cut it to
+    ``Bash|Edit|Write|MultiEdit``.
+    """
+    if not have:
+        return True
+    if not want:
+        return False
+    names = {t.strip() for t in have.split("|")}
+    if any(not n.replace("_", "").isalnum() for n in names):
+        return have == want       # a regex we cannot reason about
+    return {t.strip() for t in want.split("|")} <= names
+
+
 def reconcile_hook_matchers(settings: dict) -> list[tuple[str, str, str]]:
-    """Bring the matcher of every *installed* managed hook block up to the
-    template; returns ``[(event, old, new)]`` for what changed.
+    """Widen the matcher of every *installed* managed hook block to cover
+    the template; returns ``[(event, old, new)]`` for what changed.
 
     Only matchers, only blocks that hold one of our hooks, only events
     already installed: which events a host has (PreToolUse is opt-in) is
@@ -8816,12 +8838,13 @@ def reconcile_hook_matchers(settings: dict) -> list[tuple[str, str, str]]:
                        if isinstance(h, dict)):
                 continue
             have = blk.get("matcher")
-            if (have or None) != (want or None):
-                if want:
-                    blk["matcher"] = want
-                else:
-                    blk.pop("matcher", None)
-                changes.append((event, have or "", want or ""))
+            if _matcher_covers(have, want):
+                continue
+            # Only reached when `want` matches something `have` does not:
+            # an empty `want` widens the block to every tool, anything
+            # else adds tools. Nothing here ever narrows a block.
+            blk["matcher"] = want
+            changes.append((event, have or "", want or ""))
     return changes
 
 
