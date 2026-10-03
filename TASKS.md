@@ -2,14 +2,11 @@
 
 # Tasks — claude-hooks
 
-1 active · prefix `ch`
+nothing open · prefix `ch`
 
-## Active (1)
+## Recently closed (4 of 4)
 
-- [ch-4](.claude-hooks/tasks/ch-4.md) **H** `mailbox.identity` Mailbox alias follows the session name (/rename); a second live session in a folder gets <alias>-N — 1m
-
-## Recently closed (3 of 3)
-
-- [ch-2](.claude-hooks/tasks/archive/ch-2.md) `release` Cut the release that ships task tracking and the cloud mailbox relay — 14h
+- [ch-4](.claude-hooks/tasks/archive/ch-4.md) **H** `mailbox.identity` Mailbox alias follows the session name (/rename); a second live session in a folder gets <alias>-N — 1m
+- [ch-2](.claude-hooks/tasks/archive/ch-2.md) `release` Cut the release that ships task tracking and the cloud mailbox relay — 15h
 - [ch-3](.claude-hooks/tasks/archive/ch-3.md) `mailbox.statusline` Status-line mail badge: count waiting ack notes — 15h
 - [ch-1](.claude-hooks/tasks/archive/ch-1.md) **H** `tasks` Verify task tracking live in a restarted session — 17h

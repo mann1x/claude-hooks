@@ -1,12 +1,12 @@
 ---
 id: ch-4
 title: "Mailbox alias follows the session name (/rename); a second live session in a folder gets <alias>-N"
-status: active
+status: done
 priority: H
 area: mailbox.identity
 tags: [mailbox, alias, rename]
 created: 2026-10-03T09:44:22Z
-updated: 2026-10-03T09:44:22Z
+updated: 2026-10-03T10:05:38Z
 sessions: [0a7a5bf4]
 ---
 
@@ -23,4 +23,5 @@ A new opencoti session (/rename opencoti-mac) registered as `opencoti` (folder n
 - [ ] deployed on both hosts
 
 ## Log
+- 2026-10-03 10:05Z [0a7a5bf4] active → done: 61ef9a5 on dev, pushed; deployed solidpc + pandorum (DEPLOY OK both). Full suite: solidpc 6961 passed, pandorum 6830 passed; Postgres claim/migration test passed in a throwaway schema. Windows Toolhelp walk verified live (claude.exe 41168 found). Filed anthropics/claude-code#99200 for the /rename stall. Running sessions' MCP servers keep old code until those sessions restart; hooks are on the new code now.
 - 2026-10-03 09:44Z [0a7a5bf4] created
