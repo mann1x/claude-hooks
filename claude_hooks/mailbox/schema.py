@@ -63,7 +63,9 @@ _PG = [
         os         TEXT NOT NULL DEFAULT '',
         cwd        TEXT NOT NULL DEFAULT '',
         started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        last_seen  TIMESTAMPTZ NOT NULL DEFAULT now()
+        last_seen  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        client_pid     BIGINT,
+        client_started DOUBLE PRECISION
     )
     """,
     "CREATE INDEX IF NOT EXISTS session_registry_alias_idx "
@@ -123,7 +125,9 @@ _SQLITE = [
         os         TEXT NOT NULL DEFAULT '',
         cwd        TEXT NOT NULL DEFAULT '',
         started_at TEXT NOT NULL,
-        last_seen  TEXT NOT NULL
+        last_seen  TEXT NOT NULL,
+        client_pid     INTEGER,
+        client_started REAL
     )
     """,
     "CREATE INDEX IF NOT EXISTS session_registry_alias_idx "
@@ -178,7 +182,45 @@ MESSAGE_COLUMNS = (
 
 SESSION_COLUMNS = (
     "session_id", "alias", "host", "os", "cwd", "started_at", "last_seen",
+    "client_pid", "client_started",
 )
+
+#: Columns added after the table first shipped: ``(name, postgres type,
+#: sqlite type)``. ``client_pid`` + ``client_started`` are the Claude Code
+#: process behind a registration, which is what tells a live holder of
+#: an alias from a dead one (``claude_hooks/mailbox/identity.py``).
+#: Added by :func:`missing_columns` + :func:`add_column`, never by an
+#: unconditional ``ALTER``: every hook process runs the schema path, and
+#: on Postgres an ``ALTER TABLE`` takes an exclusive lock even when the
+#: column is already there.
+ADDED_REGISTRY_COLUMNS = (
+    ("client_pid", "BIGINT", "INTEGER"),
+    ("client_started", "DOUBLE PRECISION", "REAL"),
+)
+
+
+def missing_columns(cur, dialect: str) -> list[tuple[str, str]]:
+    """``(column, type)`` pairs the registry table still lacks."""
+    if dialect == "postgres":
+        cur.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'session_registry' "
+            "AND table_schema = current_schema()")
+        have = {r[0] for r in cur.fetchall()}
+        return [(c, pg) for c, pg, _ in ADDED_REGISTRY_COLUMNS
+                if c not in have]
+    cur.execute("PRAGMA table_info(session_registry)")
+    have = {r[1] for r in cur.fetchall()}
+    return [(c, lite) for c, _, lite in ADDED_REGISTRY_COLUMNS
+            if c not in have]
+
+
+def add_column(column: str, coltype: str, dialect: str) -> str:
+    # IF NOT EXISTS where the dialect has it: two processes can both see
+    # the column missing, and the loser must not fail its schema pass.
+    guard = "IF NOT EXISTS " if dialect == "postgres" else ""
+    return (f"ALTER TABLE session_registry ADD COLUMN {guard}"
+            f"{column} {coltype}")
 
 
 def statements(dialect: str) -> list[str]:

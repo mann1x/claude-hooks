@@ -16,6 +16,34 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed
+
+- **A session's mailbox alias is its name, and a second session in a
+  folder no longer takes the first one's.** A new opencoti session,
+  renamed `opencoti-mac` with `/rename`, registered as `opencoti` (the
+  folder name), evicted the session already running there and showed its
+  mail in its own badge. Nothing read Claude Code's session name, and
+  registering replaced any other row for `alias@host`.
+  - The alias is now the session's name (the transcript's `custom-title`,
+    or its last `/rename` in `history.jsonl` when that was never
+    persisted, anthropics/claude-code#99200), then the alias the session
+    already holds, then `mailbox.toml`, then the folder. It is re-checked
+    on every mailbox operation (hook turns, every `mailbox-*` tool call,
+    the status line), so a `/rename` takes effect at the next one. A
+    rename moves the unread mail received under the old alias.
+  - `MailboxStore.claim()` takes an alias only from a session that has
+    ended, or from the same Claude Code process (`/clear`); a live
+    holder keeps it and the newcomer gets `opencoti-2`, `-3`, …, and is
+    told so at `SessionStart`. Liveness is the Claude Code process
+    (pid + start time, new `client_pid` / `client_started` registry
+    columns, added in place on both dialects), found by `run.py` from
+    `/proc` on Linux and a Toolhelp snapshot on Windows.
+  - After `/clear` the MCP tools adopt the new session id of the same
+    process instead of the stale one in their environment.
+  - New `claude_hooks/mailbox/identity.py`; tests in
+    `tests/test_mailbox_identity.py` (Postgres half with
+    `CLAUDE_HOOKS_TEST_PG_DSN`).
+
 ## [1.20.0] — 2026-10-02
 
 ### Added

@@ -211,6 +211,13 @@ class MailboxTools:
         self.session_id = session_id or ""
         self.host = host or host_name()
         self._registered = False
+        #: Re-derives ``(alias, session_id, note)`` before every call, so
+        #: a ``/rename`` reaches the tools without restarting the server.
+        #: Set by ``integration.tools_for_provider``; None keeps the
+        #: identity this object was built with.
+        self.resolver = None
+        #: A one-line identity note not yet shown to the session.
+        self.identity_note = ""
 
     def handles(self, name: str) -> bool:
         return name in TOOL_NAMES
@@ -228,6 +235,33 @@ class MailboxTools:
         from claude_hooks.mailbox.integration import is_headless
         if headless is None:
             headless = is_headless()
+        note = self.refresh_identity()
+        out = self._call(name, args, headless=headless)
+        return f"{note}\n\n{out}" if note else out
+
+    def refresh_identity(self) -> str:
+        """Re-resolve who this session is; return a note to show, or "".
+
+        Every operation checks the session's name, so a ``/rename``
+        takes effect at the next one. A resolver that fails keeps the
+        identity already held: a mailbox that stops working because a
+        transcript was unreadable would be the worse failure.
+        """
+        note, self.identity_note = self.identity_note, ""
+        if self.resolver is None:
+            return note
+        try:
+            alias, sid, fresh = self.resolver()
+        except Exception:
+            log.debug("mailbox: identity refresh failed", exc_info=True)
+            return note
+        if alias:
+            self.alias = alias
+        if sid:
+            self.session_id = sid
+        return " ".join(n for n in (note, fresh) if n)
+
+    def _call(self, name: str, args: dict, *, headless: bool) -> str:
         if headless:
             if name in self.HEADLESS_REFUSED:
                 return (f"{name} is not available in a non-interactive run "
@@ -283,7 +317,10 @@ class MailboxTools:
                 log.debug("mailbox: could not refresh %s@%s by alias",
                           self.alias, self.host, exc_info=True)
             return
-        if not self._registered:
+        if not self._registered and self.resolver is None:
+            # With a resolver the registration is already made, by
+            # ``MailboxStore.claim`` — which, unlike ``register``, never
+            # takes an alias from a live session.
             self._registered = True
             try:
                 self.store.register(self.session_id, self.alias,
