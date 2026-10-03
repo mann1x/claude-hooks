@@ -38,23 +38,38 @@ same `pgvector` instance see one mailbox; two hosts on local
 
 ## Addressing
 
-The default alias is **the project directory name**, so messaging works
-with nothing registered by hand. Override per project in
-`.claude-hooks/mailbox.toml`:
+A session's alias is, in order:
 
-```toml
-alias = "osync"
-```
+1. **its name** — what `/rename` set in Claude Code;
+2. otherwise the alias the session id already holds;
+3. otherwise `.claude-hooks/mailbox.toml` for the project:
 
-The directory name is only the **default**, applied when a session
-registers. After that the session keeps the name it registered with:
-the alias is read back from the registry, not re-derived. Deriving it
-every time meant a session that changed directory quietly changed its name
-— it registered again under the new one, and everything addressed to the
-name it started with parked on an alias nobody was listening to. A
-rename in `mailbox.toml` therefore takes effect at that session's next
-`SessionStart`, which is the right way round: a rename that took effect
-mid-session would strand the mail already addressed to the old name.
+   ```toml
+   alias = "osync"
+   ```
+
+4. otherwise the name of the project directory.
+
+So messaging works with nothing set up, and `/rename opencoti-mac` is all
+it takes to give a session its own address.
+
+**The name is checked on every mailbox operation** — each hook turn, each
+`mailbox-*` tool call and the status-line badge — so a `/rename` takes
+effect at the next one, without a restart. Claude Code sends no hook
+event for `/rename`; it records the name in the transcript as a
+`custom-title` record, which is read from the transcript's tail. When
+there is none — the transcript does not exist until the first message,
+and on 2.1.278–2.1.280 xollama's three `/rename` were never persisted
+([anthropics/claude-code#99200](https://github.com/anthropics/claude-code/issues/99200))
+— the last `/rename <name>` for the session in `~/.claude/history.jsonl`
+is used. The `agent-name` record is ignored: without a rename it carries
+the *generated* title.
+
+A rename moves the session's unread mail with it, but only mail that
+arrived while the session held the old alias; older mail there was
+someone else's. The session is told in one line:
+`Mailbox: renamed opencoti@solidpc → opencoti-mac@solidpc; 1 unread
+message moved with it.`
 
 | form | means |
 |---|---|
@@ -83,71 +98,56 @@ see `bug-871`.
 
 ### A session's alias belongs to its session id
 
-The alias is decided once, when a session id first registers: the
-rename in `.claude-hooks/mailbox.toml` if there is one, otherwise the
-name of the **project root** (`CLAUDE_PROJECT_DIR`, the directory the
-session was started in — `run.py` copies it into the event), and the
-event's `cwd` only if even that is missing. After that every lookup —
-announcements, the Stop nudge, the status-line badge, the MCP tools — goes
-through `registered_alias(session_id)`, never a directory.
+Without a name, the alias is decided once, when a session id first
+registers: `.claude-hooks/mailbox.toml`, otherwise the name of the
+**project root** (`CLAUDE_PROJECT_DIR`, the directory the session was
+started in — `run.py` copies it into the event), and the event's `cwd`
+only if even that is missing. After that every lookup goes through the
+session id's registration, never a directory.
 
 The default used to come from `cwd`, which is wherever the session last
 cd'd to, and a session id registers afresh after `/clear`. So xollama
 registered as `v0.34.4-xollama.1` and opencoti as `llamafile`, and their
-badges and nudges counted an inbox nobody writes to. The MCP tools read
-`CLAUDE_SESSION_ID`, which Claude Code never sets; they now read
-`CLAUDE_CODE_SESSION_ID`, which it exports to MCP children, and so bind
-to the session's registration too.
+badges and nudges counted an inbox nobody writes to.
 
-### An identical message is refused, not delivered twice
+The MCP tools take the session id from `CLAUDE_CODE_SESSION_ID`, which
+Claude Code exports to MCP children. After `/clear` that variable still
+names the old session, because the MCP child outlives it; when that id
+has no registration, the tools adopt the newest registration of the same
+Claude Code process, which is the current session.
 
-`send()` will not write a message that the destination already holds:
-same sender, same destination, same subject, same body. The repeat is
-refused, naming what it duplicates —
+### Two sessions in one directory
 
-```
-Not sent. This is identical to #185, already sent to xollama@solidpc.
-It is in their mailbox — nothing more is needed. If this is a genuine
-follow-up rather than a repeat, change the subject or body; to replace
-what you sent, edit or withdraw it instead.
-```
+A name is **never taken from a session that is still running.** The
+second live session started in `opencoti` registers as `opencoti-2`, the
+third as `opencoti-3`, and the first keeps `opencoti`, so mail sent to
+`opencoti` keeps reaching the session that was there first. The new one
+is told at `SessionStart`: `Mailbox: you are opencoti-2@solidpc —
+opencoti belongs to another live session on solidpc.` The same holds for
+names: two sessions both renamed `opencoti-mac` get `opencoti-mac` and
+`opencoti-mac-2`.
 
-— and nothing is written. The wording matters: the likeliest reader is a
-caller retrying because it never saw the first confirmation, so
-"rejected" has to arrive together with "the message is already there", or
-the refusal reads as a failure and invites a third attempt.
+Whether the holder is running is decided by its **Claude Code process**,
+recorded in the registry as pid + start time (a pid alone is reused; the
+start time proves it is the same process). `run.py` finds it by walking
+up from the hook to the nearest `claude` / `claude.exe` (or the node
+process running `@anthropic-ai/claude-code`), via `/proc` on Linux and a
+Toolhelp snapshot on Windows. The holder's alias is taken over only when:
 
-Two conditions count, answering different questions. **Still unread**, at
-any age: a second copy cannot tell the recipient anything the first,
-sitting there unread, will not. **Sent within `DEFAULT_DEDUP_WINDOW_SECONDS`**
-(10 minutes), read or not: a retry, a double tool call, or a sender
-repeating itself. A withdrawn message never blocks — withdrawing is a
-statement that it should not have been sent — and neither does an expired
-one.
+- its process has ended — a crash, or a session closed without
+  `SessionEnd`;
+- it is this same process — `/clear` starts a new session id in the same
+  Claude Code, which inherits its alias;
+- it is an older row with no process recorded and was last seen more than
+  two hours ago.
 
-A broadcast is checked per recipient: the hosts that already have it are
-skipped and the rest are delivered, with the confirmation saying so
-(`Sent (id 193) — … Skipped osync@solidpc (identical to #185).`). If every
-recipient already has it, nothing is written. One surviving row is not a
-broadcast, so `broadcast_group` is cleared — the same rule that set it.
+Before this, registering simply replaced the other row for `alias@host`:
+a second session in the same directory evicted the first one, showed its
+mail in its own badge, and the two took the row in turns.
 
-**Why the check is at the destination rather than in the sender.**
-Reported 2026-09-22: `#185`–`#189`, identical bodies, one minute apart,
-read five times. Not a sender sending five times — a single `send()` in
-an MCP server process started 2026-09-17, writing one row per
-*registration* as the code did before the fan-out fix landed on
-2026-09-19. The repository was two days ahead of the process serving it,
-and nothing about a long-lived child process makes that visible. A guard
-that only holds while every process is current is a guard that holds
-until it matters.
-
-That also bounds what this fixes: a stale process runs the stale
-`send()`, guard included, so the guard reaches a duplicating sender only
-after its session restarts. The layer that catches it regardless is
-`dedupe_messages()` in the maintenance sweep, which is what collapsed
-`#186`–`#189` on its own — rows from one `INSERT` loop share `created_at`
-to the microsecond, which is exactly how it tells them from two
-deliberate sends.
+`CLAUDE_HOOKS_CLIENT_PID` overrides the process walk (`0` = unknown).
+The cloud relay is unchanged: a cloud session asks for an alias by name
+and gets it.
 
 ### One registration per `alias@host`
 
@@ -157,7 +157,8 @@ id used to leave the old row behind — observed live as five
 `xollama@solidpc` rows in one directory, four of them an hour stale
 behind the one doing the work.
 
-Registering **replaces** any other row for the same `alias@host`, and
+Registering replaces a row for the same `alias@host` whose session has
+ended, and
 the schema step deduplicates what an upgrade finds, keeping the most
 recently seen row. Delivery already collapses to distinct
 `(alias, host)` pairs, so duplicates had stopped double-sending; what
@@ -167,13 +168,8 @@ warning about peers that are the same session, and every liveness
 decision answered from whichever row was found first, usually a dead
 one.
 
-The consequence worth knowing: two genuinely concurrent sessions in the
-same directory on the same host take turns owning the row, each
-reclaiming it on its next action. Their mail is unaffected — an inbox is
-read by alias — but only one appears in `mailbox-sessions`, and a
-message addressed to the evicted `session_id` has nowhere to resolve.
-Give them distinct aliases in `.claude-hooks/mailbox.toml` if both need
-to be addressable at once.
+Two sessions running at once never share a row: the second gets a
+numbered alias (see "Two sessions in one directory").
 
 ---
 
@@ -266,7 +262,7 @@ Three points, all soft-fail — a mailbox problem never blocks a turn.
 
 | hook | does |
 |---|---|
-| `SessionStart` | registers this session; announces unread mail; warns if the alias collides with another host |
+| `SessionStart` | registers this session and says which alias it has; announces unread mail; warns if the alias collides with another host |
 | `UserPromptSubmit` | announces mail that arrived since the last turn |
 | `Stop` | announces mail that arrived *during* the turn |
 

@@ -193,12 +193,20 @@ class StoreHarness(unittest.TestCase):
         # depends on test order. On pandorum's full run the status line
         # counted mail for "pandorum" and found none. The function reads
         # this variable first, so every binding agrees.
-        env = mock.patch.dict("os.environ", {"CLAUDE_HOOKS_HOST": self.HOST})
-        env.start()
-        self.addCleanup(env.stop)
-
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        # Identity reads Claude Code's transcripts and walks up to the
+        # Claude Code process — under pytest that is the real session
+        # running the tests. Pin both: no client process, and a config
+        # dir with no transcripts in it.
+        self.claude_dir = Path(self._tmp.name) / "claude-config"
+        (self.claude_dir / "projects").mkdir(parents=True)
+        env = mock.patch.dict("os.environ", {
+            "CLAUDE_HOOKS_HOST": self.HOST,
+            "CLAUDE_HOOKS_CLIENT_PID": "0",
+            "CLAUDE_CONFIG_DIR": str(self.claude_dir)})
+        env.start()
+        self.addCleanup(env.stop)
         self.db = _SqliteConn(Path(self._tmp.name) / "m.db")
         # Registered *after* the tempdir cleanup so it runs *before* it:
         # addCleanup is LIFO, and Windows refuses to delete a file that

@@ -63,11 +63,19 @@ def project_dir(event: Optional[dict]) -> Optional[str]:
 def _tools(config: dict, providers, event: Optional[dict] = None):
     """Bind the mailbox to the first provider that can carry it."""
     from claude_hooks.mailbox.integration import tools_for_provider
-    sid = (event or {}).get("session_id") or ""
+    ev = event or {}
+    sid = ev.get("session_id") or ""
     root = project_dir(event)
+    client = ev.get("claude_client")
     for provider in providers or []:
         try:
-            tools = tools_for_provider(provider, cwd=root, session_id=sid)
+            tools = tools_for_provider(
+                provider, cwd=root, session_id=sid,
+                transcript_path=ev.get("transcript_path") or None,
+                # [] = "looked, found none"; None = "not looked" (the
+                # event came from an older run.py), so look here.
+                client=(tuple(client) if client else
+                        ([] if "claude_client" in ev else None)))
         except Exception:
             log.debug("mailbox: provider %s unusable",
                       getattr(provider, "name", "?"), exc_info=True)
@@ -104,9 +112,11 @@ def announce_block(*, event: dict, config: dict, providers,
                 # being quiet, the touch re-creates it rather than
                 # leaving a live session unaddressable for the rest of
                 # its life.
+                client = (event or {}).get("claude_client")
                 tools.store.touch(
                     tools.session_id, alias=tools.alias, host=tools.host,
-                    cwd=project_dir(event) or "")
+                    cwd=project_dir(event) or "",
+                    client=tuple(client) if client else None)
             except Exception:
                 log.debug("mailbox: touch failed", exc_info=True)
         # One page, not the backlog: a session holding hundreds of
@@ -123,10 +133,13 @@ def announce_block(*, event: dict, config: dict, providers,
         # Receipts are marked seen once announced, so capping them just
         # spreads a pile of them over the next few turns.
         receipts = list(receipts)[:ANNOUNCE_MAX]
+        note = tools.identity_note
         if not messages and not receipts:
-            return ""
+            return note
         block = render(messages, receipts, alias=tools.alias,
                        host=tools.host, total=page.total)
+        if note:
+            block = f"{note}\n\n{block}"
         if receipts:
             # Announcing a receipt *is* delivering it — the note is
             # already shown in full, so a tool call to mark it read
@@ -161,11 +174,17 @@ def register_session(*, event: dict, config: dict, providers) -> str:
         tools = _tools(config, providers, event)
         if tools is None or not tools.session_id:
             return ""
-        others = tools.store.register(
-            tools.session_id, tools.alias, cwd=project_dir(event) or "",
-            host=tools.host)
+        # ``_tools`` has already claimed the alias (``MailboxStore.claim``:
+        # the session's name, never taken from a live session), so this
+        # only reports. ``register`` would take the alias outright.
+        others = [s for s in tools.store.sessions(alias=tools.alias)
+                  if s.host != tools.host]
         from claude_hooks.mailbox.announce import collision_note
-        return collision_note(others, tools.alias)
+        lines = [tools.identity_note
+                 or f"Mailbox: you are `{tools.alias}@{tools.host}`.",
+                 collision_note(others, tools.alias)]
+        tools.identity_note = ""
+        return "\n".join(line for line in lines if line)
     except Exception:
         log.debug("mailbox registration failed", exc_info=True)
         return ""

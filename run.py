@@ -54,6 +54,21 @@ def main() -> int:
     if project_dir and isinstance(event, dict):
         event.setdefault("claude_project_dir", project_dir)
 
+    # The Claude Code process this session runs in, as (pid, start time):
+    # what tells the mailbox a live holder of an alias from a dead one.
+    # Only this process can find it; a daemon serving the event has
+    # other parents.
+    if (isinstance(event, dict) and "claude_client" not in event
+            and event_name in ("SessionStart", "UserPromptSubmit", "Stop")):
+        try:
+            from claude_hooks.mailbox.identity import client_process
+            client = client_process()
+            # [] still says "looked": the daemon must not walk its own
+            # ancestry, which is not this session's.
+            event["claude_client"] = list(client) if client else []
+        except Exception:
+            pass
+
     # The process guard needs the processes a command will run under (this
     # Claude Code session, the tmux or sshd it sits in), and only this
     # process can see them: a daemon serving the event has other parents.

@@ -160,6 +160,16 @@ class MailboxStore:
                 with _cursor(conn) as cur:
                     for stmt in schema.statements(self.dialect):
                         cur.execute(stmt)
+                    for col, coltype in schema.missing_columns(
+                            cur, self.dialect):
+                        try:
+                            cur.execute(schema.add_column(
+                                col, coltype, self.dialect))
+                        except Exception:
+                            # SQLite has no IF NOT EXISTS here: a
+                            # concurrent process added it first.
+                            if self.dialect != "sqlite":
+                                raise
                 conn.commit()
                 self._ready = True
             except Exception:
@@ -207,7 +217,8 @@ class MailboxStore:
         return cur.rowcount or 0
 
     def register(self, session_id: str, alias: str, *, cwd: str = "",
-                 host: Optional[str] = None) -> list[Session]:
+                 host: Optional[str] = None,
+                 client: Optional[tuple] = None) -> list[Session]:
         """Record this session and return the *other* live sessions that
         share its alias.
 
@@ -226,11 +237,8 @@ class MailboxStore:
                         (session_id,))
                     evicted = self._claim_alias_host(cur, alias, h,
                                                      session_id)
-                    cur.execute(self._q(
-                        "INSERT INTO session_registry "
-                        "(session_id, alias, host, os, cwd, started_at, "
-                        " last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)"),
-                        (session_id, alias, h, os_name(), cwd, now, now))
+                    self._insert_row(cur, session_id, alias, h, cwd, now,
+                                     client)
                     # Same-host duplicates are gone by construction now,
                     # so this only ever returns *other hosts* — which is
                     # the collision actually worth warning about, since
@@ -249,6 +257,168 @@ class MailboxStore:
                 self._rollback(conn)
                 raise
         return [_as_session(r) for r in others]
+
+    def _insert_row(self, cur, session_id: str, alias: str, host: str,
+                    cwd: str, now, client: Optional[tuple]) -> None:
+        pid, started = client or (None, None)
+        cur.execute(self._q(
+            "INSERT INTO session_registry "
+            "(session_id, alias, host, os, cwd, started_at, last_seen, "
+            " client_pid, client_started) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"),
+            (session_id, alias, host, os_name(), cwd, now, now, pid,
+             started))
+
+    def _row(self, cur, where: str, params: Sequence) -> Optional[dict]:
+        cur.execute(self._q(
+            "SELECT " + ", ".join(schema.SESSION_COLUMNS) +
+            " FROM session_registry WHERE " + where), tuple(params))
+        rows = self._rows(cur, schema.SESSION_COLUMNS)
+        return rows[0] if rows else None
+
+    def registration(self, session_id: str) -> Optional[dict]:
+        """This session id's registry row, or None."""
+        if not session_id:
+            return None
+        return self._read(lambda cur: self._row(
+            cur, "session_id = ?", (session_id,)))
+
+    def registration_for_client(self, client: Optional[tuple],
+                                host: Optional[str] = None
+                                ) -> Optional[dict]:
+        """The newest row written by this Claude Code process.
+
+        What the MCP server needs after ``/clear``: Claude Code starts a
+        new session id but keeps the MCP child, whose environment still
+        names the old one. The process is the same, so its newest row is
+        the current session.
+        """
+        if not client:
+            return None
+        from claude_hooks.mailbox.identity import same_process
+        pid, started = client
+        h = host or host_name()
+
+        def q(cur):
+            cur.execute(self._q(
+                "SELECT " + ", ".join(schema.SESSION_COLUMNS) +
+                " FROM session_registry WHERE host = ? AND client_pid = ? "
+                "ORDER BY started_at DESC"), (h, pid))
+            for r in self._rows(cur, schema.SESSION_COLUMNS):
+                if same_process(r["client_pid"], r["client_started"],
+                                pid, started):
+                    return r
+            return None
+        return self._read(q)
+
+    def _read(self, fn):
+        self.ensure_schema()
+        with self._lock:
+            conn = self._connect()
+            try:
+                with _cursor(conn) as cur:
+                    out = fn(cur)
+                conn.commit()
+            except Exception:
+                self._rollback(conn)
+                raise
+        return out
+
+    #: How far the numbered suffix goes before giving up on a name.
+    MAX_SUFFIX = 99
+
+    def claim(self, session_id: str, wanted: str, *,
+              host: Optional[str] = None, cwd: str = "",
+              client: Optional[tuple] = None,
+              is_alive=None) -> dict:
+        """Register ``session_id`` under ``wanted``, or the first free
+        ``wanted-2``, ``wanted-3``, … on this host.
+
+        ``(alias, host)`` holds one row, and :meth:`register` simply
+        takes it — right for a restarted client, whose old row is a dead
+        claim, and wrong for a second session running in the same
+        directory: the second one evicted the first and its badge counted
+        the first one's mail. Here the slot is taken only from a holder
+        that is gone (``is_alive`` says no), or that is this same Claude
+        Code process (``/clear`` starts a new session id in the same
+        process). A live holder keeps its name and this session gets the
+        next number.
+
+        When this session already held another alias (it was renamed),
+        unread mail sent to the old alias *while this session held it*
+        moves with it; older mail there was someone else's.
+
+        Returns ``{"alias", "previous", "moved", "wanted"}``.
+        """
+        from claude_hooks.mailbox.identity import holder_alive, same_process
+        self.ensure_schema()
+        h = host or host_name()
+        if is_alive is None:
+            now_ts = utcnow().timestamp()
+
+            def is_alive(row):
+                return holder_alive(row, host=h, now_ts=now_ts)
+        pid, started = client or (None, None)
+        now = self._now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                with _cursor(conn) as cur:
+                    mine = self._row(cur, "session_id = ?", (session_id,))
+                    chosen = None
+                    for n in range(1, self.MAX_SUFFIX + 1):
+                        cand = wanted if n == 1 else f"{wanted}-{n}"
+                        holder = self._row(cur, "alias = ? AND host = ?",
+                                           (cand, h))
+                        if (holder is None
+                                or holder["session_id"] == session_id
+                                or same_process(holder["client_pid"],
+                                                holder["client_started"],
+                                                pid, started)
+                                or not is_alive(holder)):
+                            chosen = cand
+                            break
+                    if chosen is None:
+                        raise MailboxError(
+                            f"every alias from {wanted} to "
+                            f"{wanted}-{self.MAX_SUFFIX} is held by a live "
+                            f"session on {h}")
+                    moved = 0
+                    if mine is not None and mine["alias"] == chosen:
+                        cur.execute(self._q(
+                            "UPDATE session_registry SET last_seen = ?, "
+                            "client_pid = COALESCE(?, client_pid), "
+                            "client_started = COALESCE(?, client_started) "
+                            "WHERE session_id = ?"),
+                            (now, pid, started, session_id))
+                    else:
+                        cur.execute(self._q(
+                            "DELETE FROM session_registry "
+                            "WHERE session_id = ?"), (session_id,))
+                        evicted = self._claim_alias_host(cur, chosen, h,
+                                                         session_id)
+                        self._insert_row(cur, session_id, chosen, h,
+                                         cwd or (mine or {}).get("cwd") or "",
+                                         now, client)
+                        if mine is not None and mine["host"] == h:
+                            cur.execute(self._q(
+                                "UPDATE session_messages SET to_alias = ? "
+                                "WHERE to_alias = ? AND read_at IS NULL "
+                                "AND cancelled_at IS NULL "
+                                "AND created_at >= ? "
+                                "AND (to_host IS NULL OR to_host = ?)"),
+                                (chosen, mine["alias"], mine["started_at"],
+                                 h))
+                            moved = cur.rowcount or 0
+                        if evicted:
+                            log.info("mailbox: %s@%s taken over from %d "
+                                     "ended session(s)", chosen, h, evicted)
+                conn.commit()
+            except Exception:
+                self._rollback(conn)
+                raise
+        return {"alias": chosen, "wanted": wanted, "moved": moved,
+                "previous": (mine or {}).get("alias")}
 
     def registered_alias(self, session_id: str) -> Optional[str]:
         """The alias this session registered under, if it has one.
@@ -320,7 +490,8 @@ class MailboxStore:
         return gone > 0
 
     def touch(self, session_id: str, *, alias: Optional[str] = None,
-              host: Optional[str] = None, cwd: str = "") -> None:
+              host: Optional[str] = None, cwd: str = "",
+              client: Optional[tuple] = None) -> None:
         """Refresh ``last_seen``, re-registering if the row is gone.
 
         Called once per turn off the hook path. The re-registration is
@@ -335,9 +506,13 @@ class MailboxStore:
             conn = self._connect()
             try:
                 with _cursor(conn) as cur:
+                    pid, started = client or (None, None)
                     cur.execute(self._q(
-                        "UPDATE session_registry SET last_seen = ? "
-                        "WHERE session_id = ?"), (self._now(), session_id))
+                        "UPDATE session_registry SET last_seen = ?, "
+                        "client_pid = COALESCE(?, client_pid), "
+                        "client_started = COALESCE(?, client_started) "
+                        "WHERE session_id = ?"),
+                        (self._now(), pid, started, session_id))
                     missing = (cur.rowcount or 0) == 0
                     if missing and alias:
                         now = self._now()
@@ -349,11 +524,8 @@ class MailboxStore:
                         # does: the row was evicted, by the sweep or by a
                         # newer session, while this one was quiet.
                         self._claim_alias_host(cur, alias, h, session_id)
-                        cur.execute(self._q(
-                            "INSERT INTO session_registry "
-                            "(session_id, alias, host, os, cwd, started_at, "
-                            " last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)"),
-                            (session_id, alias, h, os_name(), cwd, now, now))
+                        self._insert_row(cur, session_id, alias, h, cwd,
+                                         now, client)
                 conn.commit()
             except Exception:
                 self._rollback(conn)
