@@ -16,6 +16,8 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+## [1.20.1] — 2026-10-03
+
 ### Fixed
 
 - **A session's mailbox alias is its name, and a second session in a
@@ -10015,7 +10017,8 @@ prior tag. From any unreleased checkout, just `git pull` on `main`
 once `v1.0.0` is published. The on-disk config schema
 (`config/claude-hooks.json` version 2) is unchanged from late-v0.7.
 
-[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.20.0...HEAD
+[Unreleased]: https://github.com/mann1x/claude-hooks/compare/v1.20.1...HEAD
+[1.20.1]: https://github.com/mann1x/claude-hooks/compare/v1.20.0...v1.20.1
 [1.20.0]: https://github.com/mann1x/claude-hooks/compare/v1.19.0...v1.20.0
 [1.19.0]: https://github.com/mann1x/claude-hooks/compare/v1.18.0...v1.19.0
 [1.18.0]: https://github.com/mann1x/claude-hooks/compare/v1.17.0...v1.18.0

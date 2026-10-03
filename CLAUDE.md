@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.20.0** — ~7.1k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.20.1** — ~7.1k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -417,6 +417,15 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > badge, and a deploy that covers PATH wrappers and hook matchers (which
 > it only ever widens). See [`docs/tasks.md`](docs/tasks.md) and
 > [`docs/mailbox.md`](docs/mailbox.md) "Cloud sessions".
+> v1.20.1 makes a session's **mailbox alias its name**: the `/rename`
+> title (or the last `/rename` in `history.jsonl` when Claude Code never
+> saved it), re-checked on every mailbox operation, so a rename takes
+> effect at the next one and moves the mail received under the old
+> alias. A name is never taken from a live session — liveness is the
+> Claude Code process, pid + start time — so a second session in the
+> same folder becomes `<alias>-2` instead of evicting the first and
+> reading its mail. See [`docs/mailbox.md`](docs/mailbox.md) "Two
+> sessions in one directory".
 
 ---
 
