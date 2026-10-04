@@ -221,21 +221,28 @@ def prompt_block(*, event: dict, config: dict, providers) -> str:
 # ─── Stop nudge ──────────────────────────────────────────────────────
 
 
+def _is_turn_start(row: dict) -> bool:
+    """A user record carrying text: the prompt that opened a turn."""
+    content = (row.get("message") or {}).get("content")
+    return row.get("type") == "user" and (
+        isinstance(content, str) or any(
+            isinstance(b, dict) and b.get("type") == "text"
+            for b in content or []))
+
+
 def _turn_tools(transcript_path: str) -> list[dict]:
     """tool_use blocks of the last turn (since the last real user text)."""
     if not transcript_path:
         return []
-    try:
-        lines = Path(transcript_path).read_text(
-            encoding="utf-8", errors="replace").splitlines()[-400:]
-    except OSError:
+    from claude_hooks.transcript_tail import read_tail
+    # The tail up to the turn's opening prompt, never the whole file: a
+    # read_text() of a 5 GB transcript on every Stop is what held the
+    # daemon at a 20.9 GB high-water mark.
+    rows = read_tail(transcript_path, stop_at=_is_turn_start)
+    if not rows:
         return []
     uses: list[dict] = []
-    for raw in reversed(lines):
-        try:
-            row = json.loads(raw)
-        except ValueError:
-            continue
+    for row in reversed(rows):
         msg = row.get("message") or {}
         content = msg.get("content")
         if row.get("type") == "user" and (

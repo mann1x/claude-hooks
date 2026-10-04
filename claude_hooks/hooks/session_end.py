@@ -124,15 +124,19 @@ def _push_transcript(event: dict, ep_cfg: dict) -> Optional[dict]:
         log.debug("transcript not found: %s", tp)
         return None
 
-    # Read the transcript.
+    # Streamed from the file, not read into memory: transcripts of
+    # long-lived sessions are gigabytes, and the process this runs in
+    # (often the daemon) would keep the pages after freeing them.
     try:
-        data = tp.read_bytes()
+        size = tp.stat().st_size
+        data = open(tp, "rb")
     except OSError as e:
         log.warning("failed to read transcript %s: %s", tp, e)
         return None
 
-    if len(data) < 100:
-        log.debug("transcript too small (%d bytes), skipping", len(data))
+    if size < 100:
+        data.close()
+        log.debug("transcript too small (%d bytes), skipping", size)
         return None
 
     # Derive project and session info from the event.
@@ -144,6 +148,7 @@ def _push_transcript(event: dict, ep_cfg: dict) -> Optional[dict]:
 
     headers = {
         "Content-Type": "application/x-ndjson",
+        "Content-Length": str(size),
         "X-Project": cwd,
         "X-Session-Id": session_id,
         "X-Source-Host": source_host,
@@ -160,11 +165,13 @@ def _push_transcript(event: dict, ep_cfg: dict) -> Optional[dict]:
             result = json.loads(resp.read().decode("utf-8"))
             log.info(
                 "transcript pushed to %s: %d bytes, project=%s",
-                server_url, len(data), result.get("project", "?"),
+                server_url, size, result.get("project", "?"),
             )
     except (urllib.error.URLError, socket.timeout, OSError) as e:
         log.warning("episodic push failed: %s", e)
         return None
+    finally:
+        data.close()
 
     return None
 

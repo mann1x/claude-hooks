@@ -16,6 +16,19 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed
+
+- **The hook daemon held 20.9 GB (plus 4.3 GB of swap) on solidpc.** The
+  Stop hook parsed the whole transcript into memory on every turn, and
+  the task nudge read it whole as one string, to look at the last turn.
+  Long-lived sessions' transcripts are gigabytes (opencoti 5.2 GB,
+  backup_models 4.5 GB). Python freed it, but glibc kept the pages, so
+  the daemon stayed at its largest turn: `malloc_trim(0)` took it to
+  312 MB. New `claude_hooks/transcript_tail.py` reads backwards in
+  growing windows until the turn's opening prompt (128 MB cap); on the
+  5.2 GB transcript a Stop read is 43 ms and 41 MB. SessionEnd's
+  episodic push streams the file instead of reading it into memory.
+
 ## [1.20.1] — 2026-10-03
 
 ### Fixed
