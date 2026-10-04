@@ -462,6 +462,14 @@ def _isolated_mailbox_folder(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_task_state(tmp_path, monkeypatch):
+    """Per-host task state lives under ``~/.claude/claude-hooks-tasks``;
+    a test must not write the real one."""
+    monkeypatch.setenv("CLAUDE_HOOKS_TASKS_STATE_DIR",
+                       str(tmp_path / "claude-hooks-tasks"))
+
+
+@pytest.fixture(autouse=True)
 def _isolated_inflight_index(tmp_path, monkeypatch):
     """Every test gets its own consultants in-flight index.
 

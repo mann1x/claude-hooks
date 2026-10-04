@@ -18,9 +18,22 @@ and the 849 tasks survived only in a 4.2 GB transcript.
   config.toml        project = "backup_models", prefix = "bm"
   bm-42.md           open tasks (pending / active / waiting)
   archive/bm-7.md    done and cancelled ones
-  .gitignore         per-host state, locks, per-session files
+  .gitignore         in-flight write locks, and state files' old names
 <project>/TASKS.md   the board, regenerated on every change
+~/.claude/claude-hooks-tasks/<project>-<hash>/
+  .index-state.json  reconcile cache: (mtime, size) per task file
+  .nudge-<sid>.json  which Stop nudges a session has had
+  .cc-<sid>.json     Claude Code task ids → ours, for the mirror
 ```
+
+**Per-host state lives under `~/.claude`, not in the task folder.** None
+of it is a task, and the hook daemon cannot write project folders: its
+unit runs with `ProtectSystem=strict` and only `~/.claude` writable, so
+the reconcile cache failed with `Read-only file system` on every write
+there. The directory is keyed on the task folder's resolved path, so two
+checkouts with the same name never share it. State left in a task folder
+from before the move is read once and removed where that is allowed.
+`CLAUDE_HOOKS_TASKS_STATE_DIR` overrides the root.
 
 - **The files are the record.** Edit them by hand if you like. A hand
   edit wins: the next tool call or session start re-indexes any file

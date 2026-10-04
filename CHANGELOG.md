@@ -16,6 +16,27 @@ release with the auto-generated source archive
 
 ## [Unreleased]
 
+### Fixed
+
+- **The hook daemon held 20.9 GB (plus 4.3 GB of swap) on solidpc.** The
+  Stop hook parsed the whole transcript into memory on every turn, and
+  the task nudge read it whole as one string, to look at the last turn.
+  Long-lived sessions' transcripts are gigabytes (opencoti 5.2 GB,
+  backup_models 4.5 GB). Python freed it, but glibc kept the pages, so
+  the daemon stayed at its largest turn: `malloc_trim(0)` took it to
+  312 MB. New `claude_hooks/transcript_tail.py` reads backwards in
+  growing windows until the turn's opening prompt (128 MB cap); on the
+  5.2 GB transcript a Stop read is 43 ms and 41 MB. SessionEnd's
+  episodic push streams the file instead of reading it into memory.
+- **Task state no longer lives in the project's task folder.** The hook
+  daemon runs with `ProtectSystem=strict` and only `~/.claude` writable,
+  so the reconcile cache (`.index-state.json`) failed with
+  `Read-only file system` on every write there, and the Stop-nudge memory
+  and the built-in-task map would have failed the same way. All three
+  now live in `~/.claude/claude-hooks-tasks/<project>-<hash>/`
+  (`CLAUDE_HOOKS_TASKS_STATE_DIR` overrides it); a copy left in a task
+  folder is read once and removed.
+
 ## [1.20.1] — 2026-10-03
 
 ### Fixed

@@ -24,7 +24,6 @@ import logging
 import os
 import re
 import threading
-from pathlib import Path
 from typing import Optional
 
 from claude_hooks.tasks.model import OPEN_STATUSES
@@ -221,21 +220,28 @@ def prompt_block(*, event: dict, config: dict, providers) -> str:
 # ─── Stop nudge ──────────────────────────────────────────────────────
 
 
+def _is_turn_start(row: dict) -> bool:
+    """A user record carrying text: the prompt that opened a turn."""
+    content = (row.get("message") or {}).get("content")
+    return row.get("type") == "user" and (
+        isinstance(content, str) or any(
+            isinstance(b, dict) and b.get("type") == "text"
+            for b in content or []))
+
+
 def _turn_tools(transcript_path: str) -> list[dict]:
     """tool_use blocks of the last turn (since the last real user text)."""
     if not transcript_path:
         return []
-    try:
-        lines = Path(transcript_path).read_text(
-            encoding="utf-8", errors="replace").splitlines()[-400:]
-    except OSError:
+    from claude_hooks.transcript_tail import read_tail
+    # The tail up to the turn's opening prompt, never the whole file: a
+    # read_text() of a 5 GB transcript on every Stop is what held the
+    # daemon at a 20.9 GB high-water mark.
+    rows = read_tail(transcript_path, stop_at=_is_turn_start)
+    if not rows:
         return []
     uses: list[dict] = []
-    for raw in reversed(lines):
-        try:
-            row = json.loads(raw)
-        except ValueError:
-            continue
+    for row in reversed(rows):
         msg = row.get("message") or {}
         content = msg.get("content")
         if row.get("type") == "user" and (
@@ -292,17 +298,16 @@ def stop_nudge(*, event: dict, config: dict, providers) -> Optional[str]:
 
 
 def _first_time(svc, session_id: str, key: str) -> bool:
-    path = svc.dir.dir / f".nudge-{(session_id or 'none')[:8]}.json"
-    try:
-        seen = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    from claude_hooks.tasks.files import read_state, write_state
+    name = f".nudge-{(session_id or 'none')[:8]}.json"
+    seen = read_state(svc.dir.dir, name)
+    if not isinstance(seen, list):
         seen = []
     if key in seen:
         return False
     seen = (seen + [key])[-50:]
     try:
-        from claude_hooks._atomic import write_text_atomic
-        write_text_atomic(path, json.dumps(seen))
+        write_state(svc.dir.dir, name, seen)
     except OSError:
         return False        # cannot remember it: do not risk nagging
     return True
@@ -328,10 +333,10 @@ def mirror_builtin(*, event: dict, config: dict, providers) -> None:
     try:
         svc = _service(event, config, providers)
         sid = str(event.get("session_id") or "")
-        mpath = svc.dir.dir / f".cc-{sid[:8] or 'none'}.json"
-        try:
-            mapping = json.loads(mpath.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        from claude_hooks.tasks.files import read_state, write_state
+        mname = f".cc-{sid[:8] or 'none'}.json"
+        mapping = read_state(svc.dir.dir, mname)
+        if not isinstance(mapping, dict):
             mapping = {}
         if name == "TaskCreate":
             resp = event.get("tool_response")
@@ -360,8 +365,7 @@ def mirror_builtin(*, event: dict, config: dict, providers) -> None:
                 fields["description"] = str(inp["description"])
             if fields:
                 svc.update(ours, **fields)
-        from claude_hooks._atomic import write_text_atomic
-        write_text_atomic(mpath, json.dumps(mapping))
+        write_state(svc.dir.dir, mname, mapping)
     except Exception:
         log.info("tasks: built-in task mirror failed", exc_info=True)
 

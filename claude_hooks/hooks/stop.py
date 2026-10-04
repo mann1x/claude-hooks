@@ -498,24 +498,22 @@ def _finish(status: str, event: dict, config: dict, providers) -> Optional[dict]
 # Helpers
 # ---------------------------------------------------------------------- #
 def _read_transcript(path: str) -> Optional[list[dict]]:
-    """Load a JSONL transcript file. Returns None on any error."""
+    """The transcript's last turn, at least: the records from the last
+    real user prompt on. Returns None on any error.
+
+    Not the whole file. Everything here works on the last turn, and the
+    whole file of a long-lived session is gigabytes — parsing it on every
+    Stop held the daemon at a 20.9 GB high-water mark
+    (``claude_hooks/transcript_tail.py``).
+    """
     try:
         p = Path(os.path.expanduser(path))
         if not p.exists():
             return None
-        out: list[dict] = []
-        with open(p, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    out.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-        return out
     except OSError:
         return None
+    from claude_hooks.transcript_tail import read_tail
+    return read_tail(str(p), stop_at=_is_real_user_prompt)
 
 
 def _msg_role(msg: dict) -> str:
