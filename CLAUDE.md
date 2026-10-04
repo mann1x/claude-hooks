@@ -15,7 +15,7 @@ The hooks are pluggable: each memory backend is a *provider*, so adding a new
 store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 `claude_hooks/providers/`, no changes elsewhere.
 
-> Status: **v1.20.1** — ~7.1k tests pass (run `pytest --collect-only -q | tail -1`
+> Status: **v1.20.2** — ~7.1k tests pass (run `pytest --collect-only -q | tail -1`
 > for the current count). Installer is functional and idempotent. v0.5+ ships
 > a transparent `api.anthropic.com` proxy with SQLite rollups, a read-only
 > dashboard (port 38081), and the in-stream `stop_phrase_guard` behavior canary.
@@ -426,6 +426,13 @@ store (Postgres pgvector, Weaviate, sqlite-vec, …) is one file under
 > same folder becomes `<alias>-2` instead of evicting the first and
 > reading its mail. See [`docs/mailbox.md`](docs/mailbox.md) "Two
 > sessions in one directory".
+> v1.20.2 stops per-turn hooks reading **whole transcripts**: the Stop
+> hook and the task nudge parsed a 5 GB transcript on every turn, which
+> held the hook daemon at a 20.9 GB high-water mark (glibc keeps freed
+> pages); `claude_hooks/transcript_tail.py` reads back only to the turn's
+> opening prompt (43 ms, 41 MB). Per-host task state moves to
+> `~/.claude/claude-hooks-tasks/`, the only place the sandboxed daemon
+> may write.
 
 ---
 
