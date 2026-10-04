@@ -21,20 +21,24 @@ every host:
 "statusLine": {
   "type": "command",
   "command": "/path/to/python /path/to/claude-hooks/scripts/statusline_compose.py",
-  "refreshInterval": 30
+  "refreshInterval": 10
 }
 ```
 
 `refreshInterval` is what makes the mail badge useful: without it the
 status line re-runs only on conversation events, so mail that arrives
 while the session sits idle would wait for your next prompt. With it the
-badge appears within about half a minute, and the status line costs no
-tokens — asking the model "did I get mail?" costs a turn.
+badge appears within about 15 seconds (a 10 s refresh plus the 5 s
+count cache), and the status line costs no tokens — asking the model
+"did I get mail?" costs a turn. Keep both short: a session that is
+working reads its own mail within a turn or two, so the badge is only
+visible for the time between arrival and that read. With 30 s and 20 s
+it took up to ~50 s to appear, and opencoti had read #763 after 66.
 
 Options: `--format {emoji,ascii,plain}` (default emoji on Linux/macOS,
 ascii on Windows consoles; `CLAUDE_HOOKS_STATUSLINE_FORMAT` overrides,
 `CLAUDE_HOOKS_STATUSLINE_FORCE_EMOJI=1` keeps emoji on Windows Terminal),
-`--no-mail`, `--mail-ttl SECONDS` (default 20).
+`--no-mail`, `--mail-ttl SECONDS` (default 5).
 
 `scripts/statusline_usage.py` prints just the usage segment, for an
 existing status-line script: pipe it the same stdin.
