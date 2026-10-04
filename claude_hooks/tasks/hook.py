@@ -24,7 +24,6 @@ import logging
 import os
 import re
 import threading
-from pathlib import Path
 from typing import Optional
 
 from claude_hooks.tasks.model import OPEN_STATUSES
@@ -299,17 +298,16 @@ def stop_nudge(*, event: dict, config: dict, providers) -> Optional[str]:
 
 
 def _first_time(svc, session_id: str, key: str) -> bool:
-    path = svc.dir.dir / f".nudge-{(session_id or 'none')[:8]}.json"
-    try:
-        seen = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    from claude_hooks.tasks.files import read_state, write_state
+    name = f".nudge-{(session_id or 'none')[:8]}.json"
+    seen = read_state(svc.dir.dir, name)
+    if not isinstance(seen, list):
         seen = []
     if key in seen:
         return False
     seen = (seen + [key])[-50:]
     try:
-        from claude_hooks._atomic import write_text_atomic
-        write_text_atomic(path, json.dumps(seen))
+        write_state(svc.dir.dir, name, seen)
     except OSError:
         return False        # cannot remember it: do not risk nagging
     return True
@@ -335,10 +333,10 @@ def mirror_builtin(*, event: dict, config: dict, providers) -> None:
     try:
         svc = _service(event, config, providers)
         sid = str(event.get("session_id") or "")
-        mpath = svc.dir.dir / f".cc-{sid[:8] or 'none'}.json"
-        try:
-            mapping = json.loads(mpath.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        from claude_hooks.tasks.files import read_state, write_state
+        mname = f".cc-{sid[:8] or 'none'}.json"
+        mapping = read_state(svc.dir.dir, mname)
+        if not isinstance(mapping, dict):
             mapping = {}
         if name == "TaskCreate":
             resp = event.get("tool_response")
@@ -367,8 +365,7 @@ def mirror_builtin(*, event: dict, config: dict, providers) -> None:
                 fields["description"] = str(inp["description"])
             if fields:
                 svc.update(ours, **fields)
-        from claude_hooks._atomic import write_text_atomic
-        write_text_atomic(mpath, json.dumps(mapping))
+        write_state(svc.dir.dir, mname, mapping)
     except Exception:
         log.info("tasks: built-in task mirror failed", exc_info=True)
 

@@ -11,7 +11,6 @@ across projects and semantic recall need the index.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import time
@@ -32,8 +31,9 @@ from claude_hooks.tasks.store import TaskIndex, embed_text
 log = logging.getLogger("claude_hooks.tasks")
 
 STATE_FILE = ".index-state.json"
-#: Per-host and per-session state in the task folder; none of it is a
-#: task, so none of it belongs in a commit.
+#: What may appear in the task folder that is not a task. Per-host state
+#: now lives under ``~/.claude`` (``files.state_dir_for``); its old names
+#: stay listed for folders that still hold a copy from before the move.
 GITIGNORE = (f"{STATE_FILE}\n"
              ".*.lock\n"          # in-flight writes
              ".nudge-*.json\n"    # Stop-nudge memory, per session
@@ -224,14 +224,10 @@ class TaskService:
         except Exception:
             log.info("tasks: embedding %s deferred", task.id, exc_info=True)
 
-    def _state_path(self) -> Path:
-        return self.dir.dir / STATE_FILE
-
     def _load_state(self) -> dict:
-        try:
-            return json.loads(self._state_path().read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
+        from claude_hooks.tasks.files import read_state
+        state = read_state(self.dir.dir, STATE_FILE)
+        return state if isinstance(state, dict) else {}
 
     def reconcile(self) -> ReconcileStats:
         """Bring the index in line with the files; the files win.
@@ -283,7 +279,8 @@ class TaskService:
             self.index.delete(self.project, gone)
             stats.removed += 1
         try:
-            write_text_atomic(self._state_path(), json.dumps(new_state))
+            from claude_hooks.tasks.files import write_state
+            write_state(self.dir.dir, STATE_FILE, new_state)
         except OSError:
             log.debug("tasks: state file not written", exc_info=True)
         return stats

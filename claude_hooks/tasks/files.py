@@ -40,6 +40,65 @@ _KV = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$')
 _ALLOCATE_ATTEMPTS = 50
 
 
+
+#: Per-host state about a task folder — the reconcile cache, which nudges
+#: a session has had, the map from Claude Code's task ids to ours — lives
+#: under ``~/.claude``, not in the folder. None of it is a task, and the
+#: hook daemon cannot write project folders: its unit runs with
+#: ``ProtectSystem=strict`` and only ``~/.claude`` writable, so the cache
+#: write failed on every reconcile there. ``CLAUDE_HOOKS_TASKS_STATE_DIR``
+#: overrides the root.
+STATE_ROOT_ENV = "CLAUDE_HOOKS_TASKS_STATE_DIR"
+
+
+def state_dir_for(task_dir: Path) -> Path:
+    """``~/.claude/claude-hooks-tasks/<project>-<hash>`` for a task folder.
+
+    Keyed on the folder's resolved path, so two checkouts with the same
+    name never share state; the project name is only there to make the
+    directory recognisable.
+    """
+    override = os.environ.get(STATE_ROOT_ENV)
+    root = (Path(override) if override
+            else Path.home() / ".claude" / "claude-hooks-tasks")
+    try:
+        resolved = str(Path(task_dir).resolve())
+    except OSError:
+        resolved = str(task_dir)
+    project = Path(task_dir).parent.parent.name or "root"
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in project)
+    digest = hashlib.sha1(resolved.encode("utf-8")).hexdigest()[:12]
+    return root / f"{safe}-{digest}"
+
+
+def read_state(task_dir: Path, name: str):
+    """JSON state ``name`` for a task folder, or None.
+
+    Falls back to the file's old place inside the task folder, so state
+    written before it moved is not lost.
+    """
+    import json
+    for path in (state_dir_for(task_dir) / name, Path(task_dir) / name):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def write_state(task_dir: Path, name: str, value) -> None:
+    """Write JSON state ``name`` for a task folder under ``~/.claude``,
+    then drop the copy at its old place in the folder where that is
+    allowed (it is not, from the daemon; the fallback read covers it)."""
+    import json
+    d = state_dir_for(task_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(d / name, json.dumps(value))
+    try:
+        (Path(task_dir) / name).unlink()
+    except OSError:
+        pass
+
 class TaskNotFound(LookupError):
     pass
 

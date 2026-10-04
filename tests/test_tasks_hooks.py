@@ -239,3 +239,75 @@ class HookPartsTests(_Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StateLivesUnderClaudeDirTests(_Base):
+    """Per-host state is not in the task folder.
+
+    The hook daemon runs with ``ProtectSystem=strict`` and only
+    ``~/.claude`` writable, so every reconcile cache write into a project
+    failed there (``Read-only file system``, 11 times in 16 h on solidpc).
+    """
+
+    def state_root(self):
+        import os
+        return Path(os.environ["CLAUDE_HOOKS_TASKS_STATE_DIR"])
+
+    def test_reconcile_nudge_and_mirror_write_no_state_in_the_folder(self):
+        a = self.svc.create("job")
+        self.svc.set_status(a.id, "active")
+        self._fresh().reconcile()
+        ev = dict(self.event, transcript_path=_transcript(
+            self.tmp / "t.jsonl", [{"name": "Edit",
+                                    "input": {"file_path": "/x/a.py"}}]))
+        self.assertIsNotNone(th.stop_nudge(event=ev, config=self.config,
+                                           providers=[]))
+        th.mirror_builtin(event=dict(
+            self.event, tool_name="TaskCreate",
+            tool_input={"subject": "Built-in"},
+            tool_response={"content": "Task #7 created successfully"}),
+            config=self.config, providers=[])
+        folder = sorted(p.name for p in self.svc.dir.dir.iterdir()
+                        if p.name.startswith("."))
+        self.assertEqual(folder, [".gitignore"])
+        from claude_hooks.tasks.files import state_dir_for
+        here = sorted(p.name for p in state_dir_for(self.svc.dir.dir).iterdir())
+        self.assertEqual(here, [".cc-sess1234.json", ".index-state.json",
+                                ".nudge-sess1234.json"])
+        self.assertTrue(str(state_dir_for(self.svc.dir.dir)).startswith(
+            str(self.state_root())))
+
+    def test_old_state_in_the_folder_is_read_then_removed(self):
+        import json
+        self.svc.create("job")
+        legacy = self.svc.dir.dir / ".cc-sess1234.json"
+        legacy.write_text(json.dumps({"7": "bm-1"}))
+        th.mirror_builtin(event=dict(
+            self.event, tool_name="TaskUpdate",
+            tool_input={"taskId": "7", "status": "completed"}),
+            config=self.config, providers=[])
+        self.assertEqual(self.svc.show("bm-1")[0].status, "done")
+        self.assertFalse(legacy.exists())
+
+    def test_two_checkouts_with_one_name_do_not_share_state(self):
+        from claude_hooks.tasks.files import state_dir_for
+        a = self.tmp / "x" / "repo" / ".claude-hooks" / "tasks"
+        b = self.tmp / "y" / "repo" / ".claude-hooks" / "tasks"
+        self.assertNotEqual(state_dir_for(a), state_dir_for(b))
+        self.assertTrue(state_dir_for(a).name.startswith("repo-"))
+
+    def test_a_read_only_project_still_reconciles(self):
+        """What the daemon sees: the folder cannot be written."""
+        self.svc.create("job")
+        from claude_hooks._atomic import write_text_atomic as real
+        folder = str(self.svc.dir.dir)
+
+        def guarded(path, text, *a, **k):
+            if str(path).startswith(folder):
+                raise OSError(30, "Read-only file system")
+            return real(path, text, *a, **k)
+
+        with mock.patch("claude_hooks.tasks.files.write_text_atomic",
+                        side_effect=guarded):
+            stats = self._fresh().reconcile()
+        self.assertIsNotNone(stats)
