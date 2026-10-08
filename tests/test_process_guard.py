@@ -232,6 +232,19 @@ class Prompts(unittest.TestCase):
 
 class Message(unittest.TestCase):
 
+    def test_self_match_explains_the_negated_crash_check(self):
+        """opencoti's Monitor: `until [ -f out ] || ! pgrep -f "gate.sh kld …"`
+        over ssh. The negated test is the crash check, and the message
+        must say that is what never fires, not only that a `while` loops."""
+        cmd = ("ssh bs2 'until [ -s kld-0909.out ] || ! pgrep -f \"gate.sh kld "
+               "2610080909001\" >/dev/null; do sleep 20; done; tail -5 kld-0909.out'")
+        findings = pg.check_monitor(cmd, ancestors=ANCESTORS)
+        self.assertEqual(sorted({f.rule for f in findings}), ["self-match"])
+        text = pg.render(findings)
+        self.assertIn("`! pgrep` always false", text)
+        self.assertIn("crash check) never fires", text)
+        self.assertIn("[x]yz", text)
+
     def test_says_what_and_how_and_never_asks_the_user(self):
         text = pg.render(pg.check_bash("pkill -f run-baseline.sh; echo x",
                                        ancestors=ANCESTORS))
