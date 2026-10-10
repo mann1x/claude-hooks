@@ -102,6 +102,21 @@ class ToolTests(_Base):
                       self.call("task-link", id="bm-1", kind="commit",
                                 value="abc"))
 
+    def test_link_accepts_every_advertised_kind(self):
+        # The schema's enum is what a model sends; each value must link.
+        # "mail" and "consultancy" were refused for every value because
+        # the service pluralised by appending an s.
+        self.call("task-create", title="x")
+        self.call("task-create", title="y")
+        spec = next(t for t in tool_catalog() if t["name"] == "task-link")
+        kinds = spec["inputSchema"]["properties"]["kind"]["enum"]
+        values = {"task": "bm-2", "mail": "939"}
+        for kind in kinds:
+            out = self.call("task-link", id="bm-1", kind=kind,
+                            value=values.get(kind, f"v-{kind}"))
+            self.assertIn(f"linked {kind} ", out, kind)
+        self.assertIn("linked mail 939", self.call("task-show", id="bm-1"))
+
     def test_all_projects(self):
         self.call("task-create", title="here")
         other = TaskService(self.tmp / "opencoti", self.index, host="h")

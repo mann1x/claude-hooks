@@ -55,6 +55,19 @@ URGENCY = {
 LINK_KINDS = ("commits", "files", "mail", "consultancies", "plans", "urls",
               "tasks")
 
+#: What a link kind is called in one entry, and every spelling accepted
+#: for it. The tool schema advertises the singular names, so each of
+#: them must land here; "mail" has no plural and "consultancy" is not
+#: pluralised by adding an s.
+_LINK_SINGULAR = {
+    "commits": "commit", "files": "file", "mail": "mail",
+    "consultancies": "consultancy", "plans": "plan", "urls": "url",
+    "tasks": "task",
+}
+_LINK_ALIASES = {**{k: k for k in LINK_KINDS},
+                 **{v: k for k, v in _LINK_SINGULAR.items()},
+                 "mails": "mail"}
+
 
 @dataclass
 class ReconcileStats:
@@ -456,13 +469,10 @@ class TaskService:
         return self._modify(task_id, change)
 
     def link(self, task_id: str, kind: str, value: str, note: str = "") -> Task:
-        kind = kind.strip().lower()
-        if not kind.endswith("s"):
-            kind += "s"
-        if kind == "commitss":
-            kind = "commits"
-        if kind not in LINK_KINDS:
-            raise ValueError(f"link kind is one of {', '.join(LINK_KINDS)}")
+        kind = _LINK_ALIASES.get(kind.strip().lower(), "")
+        if not kind:
+            raise ValueError("link kind is one of "
+                             + ", ".join(_LINK_SINGULAR.values()))
         value = str(value).strip()
         if not value:
             raise ValueError("a link needs a value")
@@ -476,7 +486,8 @@ class TaskService:
                     return
                 items.append(value)
                 t.links[kind] = items
-            t.add_log(f"linked {kind[:-1]} {value}" + (f": {note}" if note
+            t.add_log(f"linked {_LINK_SINGULAR[kind]} {value}"
+                      + (f": {note}" if note
                                                         else ""),
                       session=self.session_id)
         return self._modify(task_id, change)
