@@ -51,7 +51,13 @@ and xOllama's server-side council chat.
    - The council runs **unattended** from submission until it has an answer, or until the adversary or an approval checkpoint asks for input.
    - So every inherited guard is adapted to an unattended action (nudge, condense, re-ask, stop the lane with a named reason, escalate the model, tombstone), or dropped when no adaptation works. Nothing that waits on a human is ported.
    - **Stricter guards** are a toggle, as in Cerebriline: `[guards] profile = "standard" | "strict"`, default `standard`, for users running the council on small models. Configurable from both the menu and the CLI, per project and per run.
+     - Model: Cerebriline's **"Strong coding nudges"** (`strongNudgesEnabled`, `completionPolicy.strongNudges`, `agent-runtime.ts:~1380-1430`).
+       - On: any turn without a tool call is asked to continue.
+       - Off: a nudge needs evidence first — the host knows of unstarted work, the run has already called a tool, or the turn ends on a promise (`announcedIntentWithoutActing`).
+     - The fork defaults it **on**; ours defaults **off** (owner).
+     - In the council a lane's final report is a legitimate turn with no tool call, so "strong" needs a per-role meaning. The critic and synthesizer are presumably exempt; report 08 settles it.
    - The guard-by-guard mapping is in report 08 and will replace §4's table.
+   - **Loop guards are not part of any profile (owner, 2026-10-10).** Reasoning-collapse / repetition (D1), cycle detection (D10), the duplicate-call guard and any other loop detector are always on and always enforced, on every backend including cloud. Cloud models loop too, especially when the sampling parameters are wrong. Each trip records the realized sampler (A5), so loops can be traced back to sampling. The strict profile covers the nudges only.
 
 ---
 
@@ -238,11 +244,11 @@ lanes:
 
 | Flow | Calls | Default for |
 |---|---|---|
-| **reduced** | 1. present-tense **replay writer** → 2. **retrospective** → 3. **reviewer/synthesizer** of the whole replay | cloud models (cheaper, and works well there) |
-| **full (5-step)** | 1. replay writer with `<<<HALFWAY>>>` marker → 2. retrospective → 3. critic, first half → 4. critic, second half → 5. synthesizer (joins halves, sole reviser of the retrospective) | small / local models: **required**, and they don't pay per token |
+| **reduced** (replay) | 1. present-tense **replay writer** → 2. **retrospective** → 3. **reviewer/synthesizer** of the whole replay | **every role, every model** — the shipped default |
+| **full (5-step agentic)** | 1. replay writer with `<<<HALFWAY>>>` marker → 2. retrospective → 3. critic, first half → 4. critic, second half → 5. synthesizer (joins halves, sole reviser of the retrospective) | opt-in **per role** by the user; small models need it, so it must work as well as the fork's |
 
-- `compaction.flow = "auto" | "reduced" | "full"`, per model.
-- `auto` = `full` for any non-cloud backend (local Ollama, xOllama, opencoti, llamafile), `reduced` for cloud. See the open decision in §11.
+- `roles.<role>.compaction.flow = "reduced" | "full"`, default `reduced` (owner, 2026-10-10). The per-(role, model) layer of §0.2 applies like any other knob.
+- **No automatic detection** of small or local models, and **no link to the guards profile**: the full flow is on only where the user turned it on for that role.
 - Note from 02 §0: Cerebriline itself has no reduced flow; every model there gets all five calls. The reduced flow is our default by the owner's design. The one-call fold is xOllama's and is **not** adopted.
 - **Writer:**
   - The prompt is the fork's present-tense replay, quoted in 02 §5.3. It uses positive exemplars and present-tense section labels. The rationale is kept in the prompt docs: written in the past tense the replay reads as history, which the model feels entitled to doubt.
@@ -593,9 +599,7 @@ model), calibration in full, the compaction rules, sampling on every role,
 PolyKV last and complete, the sandbox requirements, atomic tasks excluded).
 What's left:
 
-1. **What counts as a "small model" for the full 5-step flow?**
-   - Proposed: `flow = auto`, meaning full for every non-cloud backend and reduced for cloud, overridable per model.
-   - Alternatives: a parameter-count or window threshold instead.
+1. ~~What counts as a "small model" for the full 5-step flow?~~ **Decided (2026-10-10):** nothing is detected. The reduced replay flow is the default everywhere; the user enables the full flow per role (§3 C2).
 2. **Compaction message role.**
    - Proposed: A/B `user` (fork order) against `system` (ours) on the C bench, then fix the winner as default.
 3. **PolyKV role-instruction placement.** Move the role text out of the system turn on PolyKV backends (needed for shared prefixes) behind an A/B? Proposed: yes.
