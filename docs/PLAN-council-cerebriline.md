@@ -1,8 +1,8 @@
 # PLAN — Consultants council: inheriting Cerebriline (and the PolyKV API)
 
-Status: **DRAFT, 2026-10-10.** Nothing here is implemented. Still open: the
-owner's sign-off on §11, the guard re-scoping for unattended runs (§0.7, report
-08), and the xOllama council mechanisms (report 07).
+Status: **DRAFT, 2026-10-10.** Nothing here is implemented. Reports 07
+(Milestone G) and 08 (§0.7, §4) are folded in. Still open: the owner's
+sign-off on §11 items 2–5 and on Milestone G.
 
 The consultants council is the **reference implementation**: other projects
 (giano first) inherit it, and there opencoti and xOllama with PolyKV are
@@ -23,6 +23,8 @@ our code with file:line on both sides:
 | 04 | [`research/cerebriline-map/04-sandbox-shell.md`](research/cerebriline-map/04-sandbox-shell.md) | the fork's launcher, measured gaps, our sandbox and shell design |
 | 05 | [`research/cerebriline-map/05-agents-orchestration.md`](research/cerebriline-map/05-agents-orchestration.md) | resilience, guards, struggle, escalation, reports, timings (23-row gap table) |
 | 06 | [`research/cerebriline-map/06-sweep.md`](research/cerebriline-map/06-sweep.md) | everything else, plus the area index of all commits |
+| 07 | [`research/cerebriline-map/07-xollama-council.md`](research/cerebriline-map/07-xollama-council.md) | xOllama's council: the JSON protocol between roles, and 24 other mechanisms |
+| 08 | [`research/cerebriline-map/08-guards-unattended.md`](research/cerebriline-map/08-guards-unattended.md) | every Cerebriline guard: trip action, human involvement, toggle; scoped for unattended runs |
 
 Excluded by the owner: the fork's atomic-task / change protocol (early phase),
 and xOllama's server-side council chat.
@@ -42,8 +44,10 @@ and xOllama's server-side council chat.
 3. **Unsupported means byte-identical to today.**
    - Each milestone adds an M12 cohort-2 parity test proving that a backend without the capability (or the feature off) sends exactly what it sends now.
 4. **Every guard emits a `nudge` event carrying the number it fired on.**
+   - The events are stored per lane in `transcript.db`, not only on SSE, because nobody watches a council live; they also feed the replay fitting.
    - Thresholds are fitted by replaying archived transcripts (`transcript.db`), not by argument.
-   - A guard nudges before it kills, and kills only on the narrowest signal (05 §5).
+   - A guard nudges before it acts, and acts only on the narrowest signal (05 §5).
+   - **The terminal action is always named and unattended.** It is either a forced tool-less summary with `stop_reason` + `failure_class`, or a tombstone. Never a pause, a question, or a wait for a lead (report 08 §5).
 5. **x-tier diversity is preserved end to end** (`feedback_xtier_diversity_priority`). There is one exception: compaction, §3.1.
 6. **Cross-OS by default.** Windows parity is in scope for every milestone. The sandbox states honestly where a platform is weaker (§6.6).
 7. **Inherit means scope, not copy (owner, 2026-10-10).**
@@ -56,7 +60,16 @@ and xOllama's server-side council chat.
        - Off: a nudge needs evidence first — the host knows of unstarted work, the run has already called a tool, or the turn ends on a promise (`announcedIntentWithoutActing`).
      - The fork defaults it **on**; ours defaults **off** (owner).
      - In the council a lane's final report is a legitimate turn with no tool call, so "strong" needs a per-role meaning. The critic and synthesizer are presumably exempt; report 08 settles it.
-   - The guard-by-guard mapping is in report 08 and will replace §4's table.
+   - The guard-by-guard mapping is in report 08 (§6 table). §4 below applies it.
+   - Cerebriline's Strong coding nudges reach only its lead. Its workers get no no-tool-call nudge at all, because a worker's silent turn is its report (`delegated-agent.ts:502-511`). Our lanes are workers, so the strict profile is new per-role design, not a port. Cerebriline has no small-model switch.
+   - **What `strict` changes** (report 08 §3–4; per role and per run, from both the menu and the CLI):
+     - researcher, tool_executor and coder: the first call must be a tool call, and a report that arrives after zero tool calls is re-asked once;
+     - planner: re-asked once when the reply doesn't parse as a plan (or G2 record);
+     - thinking-only re-asks go from 2 to 3, unparsable-call re-asks from 1 to 2;
+     - the wrap-up warning before the iteration cap comes at least 2 turns early.
+   - Critic, meta-critic, adversary, refuter and synthesizer are never nudged under either profile.
+   - The re-ask of a turn that announces work without doing it stays in `standard`, once per lane. Cerebriline's `ask_question` clause is never ported.
+   - Naming: the existing `adversary_strictness = "strict"` tunes the critic's judgement, not lane behaviour; docs and menu say so side by side.
    - **Loop guards are not part of any profile (owner, 2026-10-10).** Reasoning-collapse / repetition (D1), cycle detection (D10), the duplicate-call guard and any other loop detector are always on and always enforced, on every backend including cloud. Cloud models loop too, especially when the sampling parameters are wrong. Each trip records the realized sampler (A5), so loops can be traced back to sampling. The strict profile covers the nudges only.
 
 ---
@@ -316,24 +329,34 @@ close gaps in ours. Order: the money leaks first.
 
 | # | What | Why | Ref |
 |---|---|---|---|
-| D1 | **Reasoning-collapse / repetition guard** in `chat_streamed`: low-uniqueness, line-cycle and phrase-cycle detectors with the fork's thresholds; on a trip, abort, keep the text, condense, continue; end the lane after 3 trips | Reasoning chunks count as liveness, so a looping thought stream defeats the stall monitor and runs to the 5–60 min cap. Ollama cloud has no thinking budget to stop it | 05 #1, 06 §2.4 |
-| D2 | **Struggle supervisor**: 3 budget-exhausted turns in 6 → nudge; +2 after a 2-turn grace → forced summary | Replay: 0 false stops in 121 answering workers | 05 #3 |
-| D3 | **"No tool call" is not "done"**: re-ask a plan-announcing turn, a turn with unparsed `<tool_call>` text, a thinking-only turn (≤3) and a call written inside the reasoning, each with its own reminder | 13 of 15 fork agents ended with the call stuck inside their thinking | 05 #6, #7; 06 §2.3 |
+| D1 | **Reasoning-collapse / repetition guard** in `chat_streamed`: low-uniqueness, line-cycle and phrase-cycle detectors with the fork's thresholds; on a trip, cut the stream, keep the text, condense, continue. After 3 trips, a forced summary from the pre-cut transcript with `stop_reason=reasoning_loop`, recording the realized sampler. Plus the repetition nudge (1 per lane) and non-convergence (streak 2). **Always on, every backend** | Reasoning chunks count as liveness, so a looping thought stream defeats the stall monitor and runs to the 5–60 min cap. Ollama cloud has no thinking budget to stop it | 05 #1, 06 §2.4 |
+| D2 | **Struggle supervisor** (the fork's worker one): 3 budget-exhausted turns in 6 → nudge; +2 after a 2-turn grace → forced summary `stop_reason=struggle`. Never suspends; the fork's `awaiting_lead` has no analogue. Its non-progress threshold (20 iterations) is refitted for our 4–25-iteration lanes. **Always on** | Replay: 0 false stops in 121 answering workers | 05 #3, 08 §2.12 |
+| D3 | **"No tool call" is not always "done"**, split by profile because a lane's final report is a legitimate turn without a tool call. **Standard:** re-ask a thinking-only turn (≤2), a call written inside the reasoning, unparsed `<tool_call>` text, and a turn announcing work it didn't do (1 per lane). **Strict:** the §0.7 additions. Each case has its own reminder | 13 of 15 fork agents ended with the call stuck inside their thinking | 05 #6, #7; 06 §2.3; 08 §2.4–2.5 |
 | D4 | **Unparsable tool-call re-ask** naming the swallowed key; never repair the payload. **Argument coercion** only where exactly one reading exists | | 05 #6, 06 §2.6 |
 | D5 | **`read_file` honesty**: a read cut at the cap reports the range actually returned and where to resume; `grep` gains context lines | Lanes cited lines they never saw, poisoning the CitationLinter's input | 06 §2.7 |
 | D6 | Wrap-up warning K turns before the iteration cap; a final tool-less report turn | | 05 #9 |
 | D7 | `stop_reason` + `failure_class` on `NodeFinished`, lane rows, `show` | | 05 #12 |
 | D8 | Synthesizer/critic input = index of every lane first, whole reports while they fit (28k-char budget), then named-only with a pager tool | | 05 #8 |
-| D9 | `retry-lanes` for tombstoned lanes; graceful cancel giving each lane one report turn; infra-wait event after 10 min | | 05 #10, #11 |
-| D10 | Cycle-aware loop guard (A→B→A), exempting polling tools | | 05 #13 |
+| D9 | `retry-lanes` for tombstoned lanes (operator verb, after the run; under xauto, optionally one automatic retry of `infra` tombstones before synthesis); graceful cancel giving each lane one report turn; an infra-wait event after 10 min that is **informational only**: the run deadline (A2) decides, then the lane is tombstoned with `failure_class=infra` | Cerebriline's 10-min nudge asks its lead to decide; nobody decides mid-council | 05 #10, #11; 08 §5 |
+| D10 | Cycle-aware loop guard (A→B→A) plus the duplicate-call guard, exempting polling tools. Soft warnings, a last warning, then on the second hit a forced summary `stop_reason=loop_guard` naming the call. **Always on, every backend** | Cerebriline's limit hands off to the user or the lead | 05 #13, 08 §2.9 |
 | D11 | Peer-findings recall gets a relevance floor and per-session "already given" dedup; optional auto-recall at lane start with the fork's gate (`isAboutTheSearch`) | Our `recall_research(limit=5)` has no floor | 06 §2.1 |
 | D12 | Per-role tool surface minimization measured from recorder data (fork: 17 → 4 tools, −72% schema) | | 05 #19 |
 | D13 | Engine-authored messages carry one tag (`[SYSTEM MESSAGE]`), terse, never shown as the user's | | 05 #18 |
+| D14 | **Mistake limit**: 6 consecutive tool errors → forced summary `stop_reason=mistake_limit`. **Always on** | The plan had no consecutive-error limit; Cerebriline's (`maxConsecutiveMistakes` 6) stops for the user | 08 §2.10 |
+| D15 | **Empty-turn reminder** and the context-overflow terminal: an empty turn joins A2's empty retry; overflow goes to C5's forced compaction plus 1 retry, then the lane is tombstoned `context_overflow` (Cerebriline tells the user to shorten the input) | | 08 §2.7, §6 |
 
 Later, once D1/D2 emit signals: **per-lane model escalation** (05 #4). A
 struggling or tombstoning lane reruns its plan item once on a configured expert
 model, given a brief instead of the transcript, at most 2 per council. This is
-not compaction, so cross-model is fine here.
+not compaction, so cross-model is fine here. The harness decides. Cerebriline's
+`escalate` tool, the forced one-turn offer, `requireApproval` and the expert-guard
+notes are not ported, because they all assume a model or a user making the
+decision (08 §2.13).
+
+**Dropped, with reason (08 §6):**
+- Cerebriline's lead struggle detector and escalation offer: its hedging-decay signal is kept only as an xauto escalation candidate.
+- Checklist close-out, team obligations and the rounds guard: the graph's fan-back already covers them.
+- Edit verification and check-on-failure, until Milestone E gives the coder a checker. They come back then with their own mode knob (default nudge).
 
 Candidates, evaluated after D: semantic code search as a `tool_registry`
 provider where an index exists (06 §2.8), an external confidence scorer (Jev)
@@ -530,6 +553,97 @@ Cerebriline's. xOllama council chat is out of scope.
 
 ---
 
+## 6b. Milestone G — Typed messages between roles (from xOllama's council)
+
+Source: report 07. The owner reports that xOllama's council became much more efficient when its roles started passing JSON to each other. Only the synthesizer still writes prose, for the final answer. The report confirms the design, but xOllama measured it only as part of a bundle of about ten changes (cost went from 13× plain to 1.25×, on a different model). There is no isolated A/B, so we run one (G6).
+
+Ours today is prose read back by regex:
+- the plan as numbered items (`_PLAN_ITEM_RX`);
+- the critic's `DECISION:` and `CONFIDENCE:` lines, where a missing decision means ready;
+- the xauto escalator's phrase matching;
+- the adversary's `REFUTATION:`.
+
+`_to_ollama` drops `format`, and the OpenAI path sends no `response_format` (`chat_client.py:851-876`, `:1131-1158`).
+
+### G1. Carrier and plumbing
+
+- **Typed results are tool calls the engine answers itself**, as in xOllama's `council_report` / `council_verdict` / `council_done` (`internal/council/report.go`, `3864cf345`).
+  - Tool-call arguments work on every backend. Upstream docs say Ollama Cloud does not support structured outputs (unverified; the A1 probe answers it per model).
+  - A result call counts only when it is the turn's **only** call, so a report is never written before the reads it rests on.
+- **Format passthrough**: native `format` and OpenAI `response_format`, used where the probe says the backend supports them (route, plan). One-shot retries:
+  - format refused → ask once without it;
+  - empty record because thinking ate the reply → ask once with thinking off.
+- **Schema rule:** bound item counts in the schema and text length at render. Never use `maxLength`: it made xOllama's grammar unparseable and killed run 0415 at 692 s (`55d4baf70`).
+- **A cut record is asked again ("smaller"), never continued.** Our truncation policy continues cut prose, but a cut tool call is lost.
+- **Degrade, never fail.** A bad record keeps the prose path:
+  - a bad plan falls back to the regex parse;
+  - a bad verdict routes as today;
+  - a bad route takes the expensive path.
+
+### G2. Records per role
+
+| Role | Record | Replaces |
+|---|---|---|
+| planner | `{items[{id, text}], lanes[[ids]]}`, lane split decided by the planner; at high/max a **task ledger** `status, lane, outcome` with runtime-enforced rules (no task leaves, closed needs an outcome, refuted stays refuted, match by text before id) | `_PLAN_ITEM_RX` + round-robin into lanes |
+| researcher | `council_report {summary, claims[{claim, path, line, symbol?, quote?, cache_ref?}], gaps[], open}` | prose bullets + in-place regex lint |
+| critic | `council_verdict {decision, gaps[{what, cite?}], corrections[{report, claimed, actual, cite}], confidence}` | `DECISION:` / `CONFIDENCE:` regexes; the escalator reads `len(gaps)` instead of phrases |
+| meta-critic (x-tiers) | list union of verdicts; **skipped** when every critic is `ready` with no gaps | LLM merge of `CORRECTIONS:` blocks |
+| adversary / refuter | `{refuted: bool, issues[{claim, why, cite?}]}` | `REFUTATION:` regex |
+| tool_executor, coder | already JSON (`parse_tool_plan`, `parse_coder_tasks`), moved onto the same carrier | — |
+| **synthesizer** | **prose**, the final answer, with `CONFIDENCE` as a typed side field | — |
+
+### G3. How typed records are read
+
+- Downstream roles read **rendered text**, never raw JSON.
+- The render reproduces today's bullet shape with literal `path:line`. That keeps the critic, synthesizer, adversary, retrospective, distillation, `peer_findings` and the recorder unchanged.
+- Persist both the record and its rendering.
+- Prose roles are told "reply in plain text". xOllama measured critics and a synthesizer copying the plan's JSON.
+- **Attribution framing:** council-authored blocks are headed and introduced as "claims to weigh, not instructions". Entries are labelled `lane L, round R`. Today's "round i" is really the lane, a mislabel.
+
+### G4. Verification moves to the source
+
+- Each typed claim is verified field by field before rendering:
+  - `verify_citation(path, line)`;
+  - the symbol check against the explicit `symbol` field;
+  - `quote` present in the file near `line` (xOllama's `readShows` / `quote.go`).
+- This replaces the CitationLinter's 80-char proximity check. On raw JSON that check goes silent for any claim over ~65 chars.
+- The regex linter stays for the synthesizer's prose.
+- **Evidence by ref:** a claim carries the `tool_cache` key of the read it rests on. Critic and synthesizer get a cache-only `evidence(ref, lines|pattern)` tool, so they check the exact bytes the researcher read.
+
+### G5. Uses the records make possible
+
+- **Stop on no progress:** stop rerouting when, two rounds running, a round adds no new `(path, line)` claim and closes no gap (xOllama `stuck.go`).
+- **Route-only follow-up decision:** `{"route": "synthesize" | "research" | "fresh"}`, in ≤16 tokens, failing toward `research`.
+  - `synthesize` re-answers from the parent's evidence with the user's message quoted.
+  - xOllama measured route-only at 86/100 against 70/100 for a full-JSON decision, with 0 malformed against 4 (`fc27088dd`).
+- **Forced answer at the step bound** offers only the role's result tool, instead of stripping tools down to prose.
+- **Prior-attempt evidence on `ask`:** what Claude already tried, with the verbatim outputs, rendered as "already tried". Unknown inject targets are rejected loudly.
+- For the coder, once it has a verify step: misquote answered in place, loop strikes, the inferred check, and `stuckNote` with the refute-and-add rule.
+
+### G6. Measure before switching the default
+
+- Paired bench on the planted-false-claims set: prose against typed, same models, same questions.
+- Per role, record:
+  - output tokens per call;
+  - critic input tokens per call (xOllama's motivating number was ~44k);
+  - wall time;
+  - caught-false-claim rate (ours is 100% today, n=72);
+  - CitationLinter fabrication count.
+- The typed path ships behind `[protocol] typed = false` (M12 parity) until the bench decides.
+
+Already covered elsewhere in this plan, not duplicated here:
+- seeds and jitter (B4, every role, as the owner ruled; xOllama jitters only researchers and critics);
+- the Output Budget note (B1).
+
+Not taken: the builder role, broadcast notes, the async review desk, and client-held sealed state (our checkpoints are at parity).
+
+**Exit G:**
+- the bench is recorded;
+- the typed path passes the parity cohort when off;
+- every record degrades to the prose path under fault injection (bad JSON, cut call, refused format, thinking-ate-it).
+
+---
+
 ## 7. Order and effort
 
 | Milestone | Effort | Depends on |
@@ -540,6 +654,7 @@ Cerebriline's. xOllama council chat is out of scope.
 | D — lane robustness | M (D1–D5 first) | A2, B3 |
 | E — sandbox + shell | L (E1 S, E2–E4 L, E7 L) | E1 only; can run in parallel with C/D |
 | F — PolyKV | L | A, B, C |
+| G — typed role messages | M (G1–G3 first; the default flips only after G6) | A1 (format probe); independent of C–F, can run beside D |
 
 Releases can cut between milestones; the owner said no release before this
 work starts landing. Each milestone ships with:
@@ -568,10 +683,11 @@ is listed here so it isn't forgotten:
 ## 9. Not inherited (with reason)
 
 - **Atomic-task / change protocol:** excluded by the owner (early phase).
-- **xOllama council chat:** out of scope.
+- **xOllama council chat:** out of scope as a backend. Its mechanisms are taken as ideas in G.
 - **Swarm agent nodes and priority tiers:** `ollama_slots` already covers account limits. PolyKV pools and `boot_id` generations **are** inherited (F), contrary to 05's "do not port".
 - **The one-call fold as default:** xOllama's choice, not ours.
 - **Shrink-on-retry, and global (non-keyed) calibration.**
+- **Anything that waits on a human mid-run** (§0.7). Our own unwired `consultants/engine/interrupt_policy.py` (`review_before_synthesis`, the low-confidence pause, `POST /interrupt`) points the wrong way: delete it, or keep it strictly opt-in and never default. Cancel, inject, tool approval and the adversary checkpoint stay; they are the human surfaces, not guards.
 
 ---
 
