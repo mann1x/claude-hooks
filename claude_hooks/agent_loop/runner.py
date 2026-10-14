@@ -27,6 +27,7 @@ from claude_hooks import capped_thinking, reasoning_replay, truncation
 from claude_hooks import reasoning_loop_guard as rlg
 from claude_hooks import reasoning_repetition
 from claude_hooks import loop_detection
+from claude_hooks import struggle_supervisor
 
 log = logging.getLogger("claude_hooks.agent_loop")
 
@@ -201,6 +202,27 @@ class _ChatFnClient:
         return self._chat_fn(payload)
 
 
+def _detect_capped(msg: dict, response: dict, payload: dict,
+                   config: "LoopConfig"):
+    """``(capped, stand_down, budget)`` for one turn: did its thinking run
+    to the allowance? The real allowance first (plan B3): what the server
+    says it enforced, or the budget the request stated. Only without either
+    is the whole output cap the bound — thinking counts toward it."""
+    timings = response.get("timings") or {}
+    budget = timings.get("think_budget_tokens")
+    if not (isinstance(budget, int) and budget > 0):
+        budget = (payload.get("options") or {}).get("num_predict")
+    completion_tokens = int(
+        (response.get("usage") or {}).get("completion_tokens") or 0)
+    capped, stand_down = capped_thinking.detect(
+        msg,
+        budget_tokens=budget or getattr(config, "thinking_budget_tokens", None),
+        budget_message=getattr(config, "thinking_budget_message", None),
+        completion_tokens=completion_tokens,
+    )
+    return capped, stand_down, budget
+
+
 def _capped_thinking_note(msg: dict, response: dict, payload: dict,
                           config: "LoopConfig", chat_fn: "ChatFn", *,
                           iteration: int) -> Optional[str]:
@@ -219,21 +241,7 @@ def _capped_thinking_note(msg: dict, response: dict, payload: dict,
     """
     if getattr(config, "capped_thinking_enabled", True) is not True:
         return None
-    # The real thinking allowance first (plan B3): what the server says it
-    # enforced, or the budget the request stated. Only without either is
-    # the whole output cap the bound — thinking counts toward it.
-    timings = response.get("timings") or {}
-    budget = timings.get("think_budget_tokens")
-    if not (isinstance(budget, int) and budget > 0):
-        budget = (payload.get("options") or {}).get("num_predict")
-    completion_tokens = int(
-        (response.get("usage") or {}).get("completion_tokens") or 0)
-    capped, stand_down = capped_thinking.detect(
-        msg,
-        budget_tokens=budget or getattr(config, "thinking_budget_tokens", None),
-        budget_message=getattr(config, "thinking_budget_message", None),
-        completion_tokens=completion_tokens,
-    )
+    capped, stand_down, budget = _detect_capped(msg, response, payload, config)
     if capped is None:
         if stand_down not in ("turn-did-not-reason", "reasoning-within-budget"):
             log.debug("capped-thinking stood down on iter %d: %s",
@@ -774,6 +782,7 @@ def run_loop(
     loop_trips = 0
     nudger = reasoning_repetition.RepetitionNudger()
     guards = ToolGuards(config)
+    supervisor = struggle_supervisor.StruggleSupervisor(config.max_iterations)
 
     if config.tools_available and preseed_builder is not None:
         preseed = preseed_builder(cwd)
@@ -1000,12 +1009,11 @@ def run_loop(
         payload["messages"] = list(payload["messages"]) + [clean_msg]
         runnable = [tc for tc in tool_calls if tc not in results_called]
         guards.iteration = i
-        payload["messages"].extend(
-            execute_tool_calls(
-                runnable, cwd, seen_calls, tool_executor,
-                on_tool=on_tool, repeats=repeats, guards=guards,
-            )
+        batch = execute_tool_calls(
+            runnable, cwd, seen_calls, tool_executor,
+            on_tool=on_tool, repeats=repeats, guards=guards,
         )
+        payload["messages"].extend(batch)
         for tc in results_called:
             name = (tc.get("function") or {}).get("name") or ""
             payload["messages"].append({
@@ -1028,6 +1036,33 @@ def run_loop(
             if stop.get("call"):
                 final["_loop_call"] = stop["call"]
             break
+        # Plan D2: the struggle supervisor. Its nudge rides on the turn's
+        # last tool result, which is what the model reads next.
+        spent = _detect_capped(msg, final, payload, config)[0] is not None
+        move = supervisor.close_iteration(
+            i, budget_spent=spent,
+            failures=[loop_detection.is_failed_output(m.get("content") or "")
+                      for m in batch])
+        if move is not None:
+            action, why = move
+            _emit_guard(config, {"guard": "struggle", "action": action,
+                                 "reason": why, "iteration": i,
+                                 "budget_turns": len(supervisor.spent)})
+            if action == "stop":
+                payload, final = _forced_report(
+                    payload, payload["messages"], LOOP_GUARD_FINAL.format(
+                        why=struggle_supervisor.describe_stop(
+                            why, supervisor.spent_after_nudge())),
+                    "struggle", chat_fn, config, on_iter, i)
+                break
+            tool_msgs = [m for m in payload["messages"] if m.get("role") == "tool"]
+            text = struggle_supervisor.describe_nudge(why)
+            if tool_msgs:
+                tool_msgs[-1]["content"] = (
+                    f"{tool_msgs[-1].get('content') or ''}\n\n{text}")
+            else:
+                payload["messages"].append(
+                    {"role": "user", "content": text, "_harness": True})
         nudge = nudger.inspect(capped_thinking.thinking_text(msg), i)
         if nudge:
             payload["messages"].append(
