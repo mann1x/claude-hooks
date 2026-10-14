@@ -2,11 +2,25 @@
 
 # Tasks — claude-hooks
 
-nothing open · prefix `ch`
+7 ready · prefix `ch`
+
+## Ready (7)
+
+- [ch-5](.claude-hooks/tasks/ch-5.md) **H** `consultants.providers` Council A — providers, capability probe, Ollama account, calibration, timings — 1m
+- [ch-6](.claude-hooks/tasks/ch-6.md) **H** `consultants.budgets` Council B — output cap, context-window knob, thinking per backend, sampling diversity — 1m
+- [ch-7](.claude-hooks/tasks/ch-7.md) **H** `consultants.compaction` Council C — compaction: reduced replay default, full 5-step per role, condensation, overflow — 1m
+- [ch-8](.claude-hooks/tasks/ch-8.md) `consultants.guards` Council D — lane robustness: always-on loop guards, strict nudge profile, named terminal actions — 1m
+- [ch-9](.claude-hooks/tasks/ch-9.md) `consultants.sandbox` Council E — sandbox launcher, lane worktrees/snapshots, shell tool (off by default) — 1m
+- [ch-10](.claude-hooks/tasks/ch-10.md) `consultants.polykv` Council F — PolyKV, complete (opencoti + xOllama), last — 1m
+- [ch-11](.claude-hooks/tasks/ch-11.md) `consultants.protocol` Council G — typed role messages (xOllama result tools), behind a flag until benched — 1m
+
+## By plan
+
+- `docs/PLAN-council-cerebriline.md`: [ch-5](.claude-hooks/tasks/ch-5.md), [ch-6](.claude-hooks/tasks/ch-6.md), [ch-7](.claude-hooks/tasks/ch-7.md), [ch-8](.claude-hooks/tasks/ch-8.md), [ch-9](.claude-hooks/tasks/ch-9.md), [ch-10](.claude-hooks/tasks/ch-10.md), [ch-11](.claude-hooks/tasks/ch-11.md)
 
 ## Recently closed (4 of 4)
 
-- [ch-4](.claude-hooks/tasks/archive/ch-4.md) **H** `mailbox.identity` Mailbox alias follows the session name (/rename); a second live session in a folder gets <alias>-N — 1m
-- [ch-2](.claude-hooks/tasks/archive/ch-2.md) `release` Cut the release that ships task tracking and the cloud mailbox relay — 15h
-- [ch-3](.claude-hooks/tasks/archive/ch-3.md) `mailbox.statusline` Status-line mail badge: count waiting ack notes — 15h
-- [ch-1](.claude-hooks/tasks/archive/ch-1.md) **H** `tasks` Verify task tracking live in a restarted session — 17h
+- [ch-4](.claude-hooks/tasks/archive/ch-4.md) **H** `mailbox.identity` Mailbox alias follows the session name (/rename); a second live session in a folder gets <alias>-N — 11d
+- [ch-2](.claude-hooks/tasks/archive/ch-2.md) `release` Cut the release that ships task tracking and the cloud mailbox relay — 11d
+- [ch-3](.claude-hooks/tasks/archive/ch-3.md) `mailbox.statusline` Status-line mail badge: count waiting ack notes — 11d
+- [ch-1](.claude-hooks/tasks/archive/ch-1.md) **H** `tasks` Verify task tracking live in a restarted session — 11d
